@@ -114,6 +114,34 @@ def simd_expected_result(entry):
     return values[0] if len(values) == 1 else {'allowed_results': values}
 
 
+def _p128_scalar_row(entry, n, stage, mode, batch):
+    """Validate an admitted fixed P128 row and adapt it to the scalar driver API."""
+    import scalar_p128_workloads as model
+    expected = next((row for row in model.entries() if row['id'] == entry.get('id')), None)
+    need(expected is not None, 'unknown P128 scalar workload: '+str(entry.get('id')))
+    # The model owns all workload semantics. Registry-only driver metadata is
+    # accepted only when it names the existing plain/MVP production driver.
+    for key in ('id', 'family', 'source', 'params', 'result', 'oracle',
+                'oracle_arguments', 'required_features', 'profile', 'work_units',
+                'work_opportunities_per_loop', 'source_event_model',
+                'reset_policy', 'stages', 'modes', 'expected_i32',
+                'validation_role'):
+        need(entry.get(key) == expected.get(key),
+             f'P128 registry row differs from admitted model: {entry.get("id")}/{key}')
+    need(entry.get('oracle', {}).get('module') == 'scalar_p128_workloads.py',
+         'P128 scalar row has the wrong oracle module')
+    n_expected = expected['oracle_arguments']['n']
+    need(type(n) is int and n == n_expected, 'P128 scalar input differs from admitted fixed input')
+    need(stage in model.STAGES, 'unsupported P128 scalar stage: '+str(stage))
+    need(mode in model.MODES, 'unsupported P128 scalar mode: '+str(mode))
+    need(type(batch) is int and 1 <= batch <= 100000, 'invalid P128 scalar batch')
+    need(stage == 'warm_call' or batch == 1, 'P128 cold stages require batch one')
+    driver = entry.get('driver', {'kind': 'plain', 'profile': model.PROFILE})
+    need(driver == {'kind': 'plain', 'profile': model.PROFILE},
+         'unsupported P128 scalar driver/profile')
+    return {'id': entry['id'], 'driver': driver}, model.oracle(entry['id'], n)
+
+
 def products(entries, declaration, settings):
     """Declare fresh preparation setup independently of call input/expected result.
 
@@ -246,6 +274,11 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         import scalar_workloads as model
         return compare.scalar_observation(executable, wasm, entry, n, model.oracle(entry['id'], n),
             stage, batch, mode, cpu, **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
+    if module == 'scalar_p128_workloads.py':
+        need(fuel_setting is None, 'explicit source fuel is unsupported for P128 scalar rows')
+        driver_entry, expected = _p128_scalar_row(entry, n, stage, mode, batch)
+        return compare.scalar_observation(executable, wasm, driver_entry, n, expected,
+            stage, batch, mode, cpu)
     if module == 'memory_workloads.py':
         import memory_workloads as model
         return compare.memory_observation(executable, wasm, entry, n, model.expected_memory(entry['id'], n),

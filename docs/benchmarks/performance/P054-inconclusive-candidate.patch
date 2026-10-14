@@ -1,0 +1,397 @@
+diff --git a/crates/wtime-runtime/src/execution/compact/fuse.rs b/crates/wtime-runtime/src/execution/compact/fuse.rs
+index 80deda7..101a87b 100644
+--- a/crates/wtime-runtime/src/execution/compact/fuse.rs
++++ b/crates/wtime-runtime/src/execution/compact/fuse.rs
+@@ -1,20 +1,39 @@
+-//! Two verified i32 expansions. Every original accounting boundary remains.
++//! Bounded verified i32 expansions. Every original accounting boundary remains.
+ use super::*;
+ use super::source_map::SourceMap;
+ use crate::execution::{Frame, accounting};
+ use crate::continuation::Prompt;
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum LiteralOp { Add, And, Or, Xor }
++impl LiteralOp {
++    fn opcode(self) -> u16 {
++        match self { Self::Add => 0x6a, Self::And => 0x71, Self::Or => 0x72, Self::Xor => 0x73 }
++    }
++    fn fold(self, left: i32, right: i32) -> i32 {
++        match self { Self::Add => left.wrapping_add(right), Self::And => left & right,
++            Self::Or => left | right, Self::Xor => left ^ right }
++    }
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(crate) enum Pattern {
+     AddLocals { first: usize, left: u32, right: u32 },
+     AddConstantSet { first: usize, input: u32, constant: i32, output: u32 },
++    LiteralBinary { first: usize, left: i32, right: i32, operator: LiteralOp, result: i32 },
++    IdentityLocal { first: usize, index: u32 },
+ }
+ impl Pattern {
+     fn first(self) -> usize {
+-        match self { Self::AddLocals { first, .. } | Self::AddConstantSet { first, .. } => first }
++        match self { Self::AddLocals { first, .. } | Self::AddConstantSet { first, .. }
++            | Self::LiteralBinary { first, .. } | Self::IdentityLocal { first, .. } => first }
+     }
+     fn len(self) -> usize {
+-        match self { Self::AddLocals { .. } => 3, Self::AddConstantSet { .. } => 4 }
++        match self { Self::AddLocals { .. } | Self::LiteralBinary { .. } => 3,
++            Self::AddConstantSet { .. } => 4, Self::IdentityLocal { .. } => 2 }
++    }
++    fn peak(self) -> usize {
++        if matches!(self, Self::IdentityLocal { .. }) { 1 } else { 2 }
+     }
+     fn op(self, stage: usize) -> CompactOp {
+         let (opcode, form, aux, payload) = match (self, stage) {
+@@ -22,7 +41,12 @@ impl Pattern {
+             (Self::AddConstantSet { input, .. }, 0) => (0x20, INDEX, input, 0),
+             (Self::AddLocals { right, .. }, 1) => (0x20, INDEX, right, 0),
+             (Self::AddConstantSet { constant, .. }, 1) => (0x41, I32_BITS, 0, u64::from(constant as u32)),
+-            (_, 2) => (0x6a, NONE, 0, 0),
++            (Self::LiteralBinary { left, .. }, 0) => (0x41, I32_BITS, 0, u64::from(left as u32)),
++            (Self::LiteralBinary { right, .. }, 1) => (0x41, I32_BITS, 0, u64::from(right as u32)),
++            (Self::LiteralBinary { operator, .. }, 2) => (operator.opcode(), NONE, 0, 0),
++            (Self::IdentityLocal { index, .. }, 0) => (0x20, INDEX, index, 0),
++            (Self::IdentityLocal { index, .. }, 1) => (0x21, INDEX, index, 0),
++            (Self::AddLocals { .. } | Self::AddConstantSet { .. }, 2) => (0x6a, NONE, 0, 0),
+             (Self::AddConstantSet { output, .. }, 3) => (0x21, INDEX, output, 0),
+             _ => unreachable!("sealed fusion stage"),
+         };
+@@ -32,7 +56,7 @@ impl Pattern {
+         // The shared loop has already charged source 0. Short fuel and a
+         // potentially failing logical peak take the original per-op route.
+         if fuel.is_some_and(|remaining| remaining < (self.len()-1) as u64)
+-            || stack.len().checked_add(2).is_none_or(|peak|
++            || stack.len().checked_add(self.peak()).is_none_or(|peak|
+                 peak > store.engine.config.limits.max_stack_height) { return false; }
+         #[cfg(feature = "execution-reference")]
+         if store.materialization_request.is_some_and(|(instance, body, pc)|
+@@ -65,7 +89,28 @@ fn recognize(ops: &[CompactOp], pc: usize, params: &[ValType], locals: &[ValType
+         else { locals.get(index.checked_sub(params.len())?) }
+     };
+     let first = *ops.get(pc)?;
++    if first.opcode != 0x20 && first.opcode != 0x41 { return None; }
+     let second = *ops.get(pc.checked_add(1)?)?;
++    if *entries.get(pc+1)? { return None; }
++    if first.opcode == 0x41 {
++        let literal = |op: CompactOp| op.opcode == 0x41 && op.form == I32_BITS
++            && op.aux == 0 && op.payload <= u64::from(u32::MAX);
++        if !literal(first) || !literal(second) { return None; }
++        let third = *ops.get(pc.checked_add(2)?)?;
++        if third.form != NONE || third.aux != 0 || third.payload != 0 || *entries.get(pc+2)? { return None; }
++        let operator = match third.opcode {
++            0x6a => LiteralOp::Add, 0x71 => LiteralOp::And,
++            0x72 => LiteralOp::Or, 0x73 => LiteralOp::Xor, _ => return None,
++        };
++        let left = first.payload as u32 as i32;
++        let right = second.payload as u32 as i32;
++        return Some(Pattern::LiteralBinary { first: pc, left, right, operator,
++            result: operator.fold(left, right) });
++    }
++    if first.form != INDEX || local(first.aux) != Some(&ValType::I32) { return None; }
++    if second == (CompactOp { opcode: 0x21, form: INDEX, aux: first.aux, payload: 0 }) {
++        return Some(Pattern::IdentityLocal { first: pc, index: first.aux });
++    }
+     let third = *ops.get(pc.checked_add(2)?)?;
+     if first.opcode != 0x20 || first.form != INDEX || local(first.aux) != Some(&ValType::I32)
+         || third != (CompactOp { opcode: 0x6a, form: NONE, aux: 0, payload: 0 })
+@@ -179,10 +224,12 @@ pub(crate) fn execute(pattern: Pattern, frame: &mut Frame, stack: &mut Vec<Value
+             _ => Err(trap("unverified fusion local type")),
+         }
+     };
+-    let left = local_i32(frame, match pattern {
+-        Pattern::AddLocals { left, .. } => left,
+-        Pattern::AddConstantSet { input, .. } => input,
+-    })?;
++    let left = match pattern {
++        Pattern::AddLocals { left, .. } => local_i32(frame, left)?,
++        Pattern::AddConstantSet { input, .. } => local_i32(frame, input)?,
++        Pattern::IdentityLocal { index, .. } => local_i32(frame, index)?,
++        Pattern::LiteralBinary { left, .. } => left,
++    };
+     let mut pending = [Value::I32(left), Value::I32(0)];
+     let mut height = 1;
+     for stage in 1..pattern.len() {
+@@ -199,19 +246,27 @@ pub(crate) fn execute(pattern: Pattern, frame: &mut Frame, stack: &mut Vec<Value
+         #[cfg(feature = "execution-reference")]
+         { store.compact_dispatches = store.compact_dispatches.saturating_add(1); }
+         frame.pc += 1;
+-        match stage {
+-            1 => {
++        match (pattern, stage) {
++            // The original get/set of the same numeric local leaves no value
++            // and cannot change that local. Both source events still execute.
++            (Pattern::IdentityLocal { .. }, 1) => { height = 0; }
++            (_, 1) => {
+                 let right = match pattern {
+                     Pattern::AddLocals { right, .. } => local_i32(frame, right)?,
+                     Pattern::AddConstantSet { constant, .. } => constant,
++                    Pattern::LiteralBinary { right, .. } => right,
++                    Pattern::IdentityLocal { .. } => unreachable!(),
+                 };
+                 pending[1] = Value::I32(right); height = 2;
+             }
+-            2 => {
++            (Pattern::LiteralBinary { result, .. }, 2) => {
++                pending[0] = Value::I32(result); height = 1;
++            }
++            (_, 2) => {
+                 let Value::I32(right) = pending[1] else { unreachable!() };
+                 pending[0] = Value::I32(left.wrapping_add(right)); height = 1;
+             }
+-            3 => {
++            (_, 3) => {
+                 let Pattern::AddConstantSet { output, .. } = pattern else { unreachable!() };
+                 *frame.locals.get_mut(output as usize).ok_or_else(|| trap("fusion output local index"))? = pending[0];
+                 height = 0;
+@@ -296,4 +351,120 @@ mod tests {
+             assert_eq!(frame.locals[1], Value::I32(0));
+         }
+     }
++
++
++    fn p054_admitted(body: usize) -> (Engine, Module, CompactFunction, SourceMap) {
++        let engine = Engine::with_execution_policy(Config::default(), ExecutionPolicy::Compact).unwrap();
++        let module = engine.compile(include_bytes!("../../../tests/fixtures/performance/p054/regions.wasm")).unwrap();
++        let function = CompactFunction::from_module(&module, body, MAX_WORK, MAX_BYTES).unwrap();
++        let map = SourceMap::bounded(&function, &module, MAX_WORK, MAX_BYTES).unwrap();
++        (engine, module, function, map)
++    }
++    #[test]
++    fn p054_cancellation_reconstructs_pending_values() {
++        for (body, name, left, right) in [
++            (0, "0wrap", i32::MAX, 1), (1, "1and", 324508639, -1),
++            (2, "2or", i32::MIN, 7), (3, "3xor", -1, 324508639),
++            (4, "4copy", -37, 0),
++        ] {
++            let (engine, module, function, map) = p054_admitted(body);
++            let fusions = Fusions::prepare(&function, &module, &map, MAX_WORK, MAX_BYTES).unwrap().unwrap();
++            let pattern = fusions.get(0).unwrap();
++            for stage in 1..pattern.len() {
++                let mut store = Store::new(&engine);
++                let instance = Linker::new(&engine).instantiate(&mut store, &module).unwrap();
++                let External::Func(func) = instance.export(&store, name).unwrap() else { panic!() };
++                let args = if body == 4 { vec![Value::I32(left)] } else { vec![] };
++                let mut frame = store.frame(func, args, 0).unwrap();
++                let locals = frame.locals.clone();
++                frame.pc = 1;
++                let mut stack = vec![Value::I32(91)];
++                let mut fuel = Some(10);
++                let mut prompts = vec![];
++                CANCEL_AT.with(|slot| slot.set(Some(stage)));
++                let error = execute(pattern, &mut frame, &mut stack, &mut store, &mut fuel, 1, &mut prompts).unwrap_err();
++                assert_eq!((error.kind, error.message.as_str()), (ErrorKind::ResourceLimit, "execution cancelled"));
++                assert_eq!(frame.pc, stage);
++                assert_eq!(fuel, Some(11-stage as u64));
++                assert_eq!(stack, if stage == 1 { vec![Value::I32(91), Value::I32(left)] }
++                    else { vec![Value::I32(91), Value::I32(left), Value::I32(right)] });
++                assert_eq!(frame.locals, locals);
++                assert_eq!(store.compact_fused_groups, 1);
++            }
++        }
++    }
++    #[test]
++    fn p054_budget_corruption_and_unsupported_shapes_decline() {
++        for body in 0..5 {
++            let (_, module, function, map) = p054_admitted(body);
++            for case in 0..6 {
++                let mut fusions = Fusions::prepare(&function, &module, &map, MAX_WORK, MAX_BYTES).unwrap().unwrap();
++                assert!(fusions.verify(&function, &module, &map, MAX_WORK, MAX_BYTES));
++                match case {
++                    0 => fusions.starts[0] = 0,
++                    1 => fusions.starts[1] = 1,
++                    2 => fusions.work += 1,
++                    3 => fusions.bytes += 1,
++                    4 => fusions.patterns[0] = match fusions.patterns[0] {
++                        Pattern::LiteralBinary { first, left, right, operator, result } =>
++                            Pattern::LiteralBinary { first, left, right, operator, result: result ^ 1 },
++                        Pattern::IdentityLocal { first, index } => Pattern::IdentityLocal { first, index: index+1 },
++                        _ => panic!("new P054 shape required"),
++                    },
++                    5 => fusions.patterns[0] = Pattern::LiteralBinary { first: 0, left: 1, right: 2,
++                        operator: LiteralOp::Or, result: 3 },
++                    _ => unreachable!(),
++                }
++                assert!(!fusions.verify(&function, &module, &map, MAX_WORK, MAX_BYTES), "body {body}, corruption {case}");
++            }
++            assert!(matches!(Fusions::prepare(&function, &module, &map, 0, MAX_BYTES), Err(Declined::Budget)));
++            assert!(matches!(Fusions::prepare(&function, &module, &map, MAX_WORK, 1), Err(Declined::Budget)));
++            let pattern = Fusions::prepare(&function, &module, &map, MAX_WORK, MAX_BYTES).unwrap().unwrap().get(0).unwrap();
++            // Runtime limits include values retained below this frame; validation
++            // sees only the function's own stack. Lower the private Store limit
++            // after admission to exercise exactly that guard without changing
++            // the production API or rejecting the module during validation.
++            for remaining in [1u64,2] {
++                let engine = Engine::with_execution_policy(Config::default(),ExecutionPolicy::Compact).unwrap();
++                let module = engine.compile(include_bytes!("../../../tests/fixtures/performance/p054/regions.wasm")).unwrap();
++                let mut store = Store::new(&engine);
++                let instance = Linker::new(&engine).instantiate(&mut store,&module).unwrap();
++                let name = ["0wrap","1and","2or","3xor","4copy"][body];
++                let External::Func(func) = instance.export(&store,name).unwrap() else { panic!() };
++                let mut frame = store.frame(func,if body == 4 { vec![Value::I32(-37)] } else { vec![] },1).unwrap();
++                frame.pc = 1;
++                store.engine.config.limits.max_stack_height = 2;
++                let mut stack = vec![Value::I32(91)];
++                let mut fuel = Some(remaining);
++                let mut prompts = vec![];
++                execute(pattern,&mut frame,&mut stack,&mut store,&mut fuel,1,&mut prompts).unwrap();
++                if body == 4 {
++                    assert_eq!(stack,vec![Value::I32(91)]);
++                    assert_eq!(frame.locals,vec![Value::I32(-37)]);
++                    assert_eq!(store.compact_fused_groups,1);
++                    assert_eq!(fuel,Some(remaining-1));
++                } else {
++                    assert_eq!(store.compact_fused_groups,0);
++                    assert_eq!(stack.len(),2);
++                    accounting::next_source(&mut store,&mut fuel,1,stack.len(),&mut prompts).unwrap();
++                    super::super::execute::execute(pattern.op(1),&mut frame.locals,&mut stack,&mut store).unwrap();
++                    assert_eq!(stack.len(),3);
++                    let error = accounting::next_source(&mut store,&mut fuel,1,stack.len(),&mut prompts).unwrap_err();
++                    assert_eq!(error.message,if remaining == 1 { "fuel exhausted" } else { "operand stack limit" });
++                    assert_eq!(fuel,Some(0));
++                }
++            }
++            let (params, locals) = local_types(&function, &module).unwrap();
++            let mut block_entries = vec![false; function.ops.len()+1];
++            for pc in 1..pattern.len() {
++                block_entries[pc] = true;
++                assert!(recognize(&function.ops, 0, params, locals, &block_entries).is_none());
++                block_entries[pc] = false;
++            }
++        }
++        for body in [5,6] {
++            let (_, module, function, map) = p054_admitted(body);
++            assert!(Fusions::prepare(&function, &module, &map, MAX_WORK, MAX_BYTES).unwrap().is_none());
++        }
++    }
+ }
+diff --git a/crates/wtime-runtime/tests/performance.rs b/crates/wtime-runtime/tests/performance.rs
+index 6d0dd92..8f63d10 100644
+--- a/crates/wtime-runtime/tests/performance.rs
++++ b/crates/wtime-runtime/tests/performance.rs
+@@ -90,3 +90,6 @@ mod p047;
+ 
+ #[path = "performance/p050.rs"]
+ mod p050;
++
++#[path = "performance/p054.rs"]
++mod p054;
+diff --git a/crates/wtime-runtime/tests/performance/p054.rs b/crates/wtime-runtime/tests/performance/p054.rs
+new file mode 100644
+index 0000000..4b3510e
+--- /dev/null
++++ b/crates/wtime-runtime/tests/performance/p054.rs
+@@ -0,0 +1,111 @@
++#![cfg(all(feature = "compact-executor", feature = "execution-reference"))]
++use wtime_runtime::*;
++const REGIONS: &[u8] = include_bytes!("../fixtures/performance/p054/regions.wasm");
++const POLICIES: [ExecutionPolicy; 3] = [ExecutionPolicy::Decoded, ExecutionPolicy::Reference, ExecutionPolicy::Compact];
++fn loaded(policy: ExecutionPolicy, config: Config, bytes: &[u8], name: &str) -> (Store, Func) {
++    let engine = Engine::with_execution_policy(config, policy).unwrap();
++    let module = engine.compile(bytes).unwrap();
++    let mut store = Store::new(&engine);
++    let instance = Linker::new(&engine).instantiate(&mut store, &module).unwrap();
++    let External::Func(function) = instance.export(&store, name).unwrap() else { panic!() };
++    (store, function)
++}
++fn view(result: Result<RunOutcome>) -> std::result::Result<RunOutcome, (ErrorKind, String)> {
++    result.map_err(|error| (error.kind, error.message))
++}
++fn regions() -> [(&'static str, Vec<Value>, i32, Vec<Vec<i32>>); 5] {
++    [
++        ("0wrap", vec![], i32::MIN, vec![vec![],vec![i32::MAX],vec![i32::MAX,1],vec![i32::MIN]]),
++        ("1and", vec![], 324508639, vec![vec![],vec![324508639],vec![324508639,-1],vec![324508639]]),
++        ("2or", vec![], -2147483641, vec![vec![],vec![i32::MIN],vec![i32::MIN,7],vec![-2147483641]]),
++        ("3xor", vec![], -324508640, vec![vec![],vec![-1],vec![-1,324508639],vec![-324508640]]),
++        ("4copy", vec![Value::I32(-37)], -37, vec![vec![],vec![-37],vec![],vec![-37]]),
++    ]
++}
++
++#[test]
++fn p054_literal_and_identity_results_use_verified_fusions() {
++    for policy in POLICIES {
++        for (name, args, expected, _) in regions() {
++            let (mut store, run) = loaded(policy, Config::default(), REGIONS, name);
++            assert_eq!(store.invoke(run, &args).unwrap(), RunOutcome::Returned(vec![Value::I32(expected)]));
++            assert_eq!(store.compact_fused_groups(), u64::from(policy == ExecutionPolicy::Compact));
++            assert_eq!(store.compact_dispatches(), if policy == ExecutionPolicy::Compact { 4 } else { 0 });
++        }
++        let (mut store, copy) = loaded(policy, Config::default(), REGIONS, "4copy");
++        for input in [i32::MIN,i32::MAX,-1,0,1,0x2468ace] {
++            let before = store.compact_fused_groups();
++            assert_eq!(store.invoke(copy, &[Value::I32(input)]).unwrap(), RunOutcome::Returned(vec![Value::I32(input)]));
++            assert_eq!(store.compact_fused_groups()-before, u64::from(policy == ExecutionPolicy::Compact));
++        }
++        let (mut store, div) = loaded(policy, Config::default(), REGIONS, "5div");
++        let error = store.invoke(div, &[]).unwrap_err();
++        assert_eq!(error.kind, ErrorKind::Trap);
++        assert!(error.message.contains("divide by zero"), "{}",error.message);
++        assert_eq!(store.compact_fused_groups(), 0);
++        let (mut store, float) = loaded(policy, Config::default(), REGIONS, "6float");
++        assert_eq!(store.invoke(float, &[]).unwrap(), RunOutcome::Returned(vec![Value::F32(3.0f32.to_bits())]));
++        assert_eq!(store.compact_fused_groups(), 0);
++        for (bytes, shape) in [
++            (include_bytes!("../../../../tools/verification/tests/data/admitted_wasm/p128_identity_copy.wasm").as_slice(), 0),
++            (include_bytes!("../../../../tools/verification/tests/data/admitted_wasm/p128_literal_wrap_add.wasm").as_slice(), 1),
++            (include_bytes!("../../../../tools/verification/tests/data/admitted_wasm/p128_literal_bitwise.wasm").as_slice(), 2),
++        ] {
++            for n in [0i32,1,17,32,1024,10000] {
++                let events = 9+14*n as u64;
++                let expected = match shape { 0 => n, 1 => i32::MIN.wrapping_mul(n),
++                    2 => 324508639i32.wrapping_mul(n), _ => unreachable!() };
++                for fuel in [None,Some(events),Some(events-1)] {
++                    let mut config = Config::default(); config.limits.fuel = fuel;
++                    let (mut store, run) = loaded(policy, config, bytes, "run");
++                    let result = view(store.invoke(run, &[Value::I32(n)]));
++                    assert_eq!(result, if fuel == Some(events-1) {
++                        Err((ErrorKind::ResourceLimit,"fuel exhausted".into()))
++                    } else { Ok(RunOutcome::Returned(vec![Value::I32(expected)])) });
++                    assert_eq!(store.compact_fused_groups(), if policy == ExecutionPolicy::Compact { n as u64 } else { 0 });
++                }
++            }
++        }
++    }
++}
++
++#[test]
++fn p054_every_source_prefix_and_materialization_matches_decoded() {
++    for (name, args, expected, states) in regions() {
++        for fuel in 0..=5 {
++            for policy in POLICIES {
++                let mut config = Config::default(); config.limits.fuel = Some(fuel);
++                let (mut store, run) = loaded(policy, config, REGIONS, name);
++                assert_eq!(view(store.invoke(run,&args)), if fuel < 4 {
++                    Err((ErrorKind::ResourceLimit,"fuel exhausted".into()))
++                } else { Ok(RunOutcome::Returned(vec![Value::I32(expected)])) });
++                assert_eq!(store.compact_dispatches(), if policy == ExecutionPolicy::Compact { fuel.min(4) } else { 0 });
++                let fused_len = if name == "4copy" { 2 } else { 3 };
++                assert_eq!(store.compact_fused_groups(), u64::from(policy == ExecutionPolicy::Compact && fuel >= fused_len));
++            }
++        }
++        for fuel in [None,Some(4)] {
++            for (pc, state) in states.iter().enumerate() {
++                let mut snapshots = vec![];
++                for policy in [ExecutionPolicy::Decoded,ExecutionPolicy::Compact] {
++                    let mut config = Config::default(); config.limits.fuel = fuel;
++                    let (mut store, run) = loaded(policy, config, REGIONS, name);
++                    store.request_materialization_roundtrip(run,pc).unwrap();
++                    assert_eq!(store.invoke(run,&args).unwrap(),RunOutcome::Returned(vec![Value::I32(expected)]));
++                    let snapshot = store.execution_snapshot().unwrap().clone();
++                    assert_eq!(snapshot.cursor.source_pc, pc);
++                    assert_eq!(snapshot.operands,state.iter().map(|v|DiagnosticValue::I32(*v)).collect::<Vec<_>>());
++                    assert_eq!(snapshot.frames[0].locals,if name == "4copy" { vec![DiagnosticValue::I32(-37)] } else { vec![] });
++                    assert_eq!(snapshot.remaining_fuel,fuel.map(|_|3-pc as u64));
++                    assert!(snapshot.pending_boundary_charged && !snapshot.truncated);
++                    assert_eq!(store.materialization_roundtrips(),1);
++                    let fused_len = if name == "4copy" { 2 } else { 3 };
++                    if pc > 0 && pc < fused_len { assert_eq!(store.compact_fused_groups(),0); }
++                    snapshots.push(snapshot);
++                }
++                assert_eq!(snapshots[0],snapshots[1],"{name} boundary {pc}, fuel {fuel:?}");
++            }
++        }
++
++    }
++}

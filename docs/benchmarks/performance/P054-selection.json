@@ -1,0 +1,241 @@
+{
+  "fixture_models": [
+    {
+      "name": "p128_scalar",
+      "source_sha256": "a1b308d0ec22676979f6baf3171dfefe2fd5c30d2b9bc2d84857f9efcc55f08a"
+    }
+  ],
+  "lane": "candidate",
+  "rationale": "Bounded i32 constant add/bitwise and same-local identity fusions: target the three admitted P128 shapes at32/10000; hold out17; protect0, existing accumulator/dependent32 and mandatory call/preparation cold controls. Retain every source boundary, interruption state and optimizer bound; Compact stays opt-in.",
+  "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+  "rows": [
+    {
+      "family": "scalar",
+      "id": "p128_identity_copy_n32",
+      "role": "targeted",
+      "row_sha256": "7126244bc080852a78a926097a791dad25597e86df8d1bfdc915e8adaef73942",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_identity_copy_n10000",
+      "role": "targeted",
+      "row_sha256": "442e3a0e132a7737d9e3abf206d6480d1937638b7f80f10cf2da9ca8ebeb67c0",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_identity_copy_n17",
+      "role": "held_out",
+      "row_sha256": "489cb7c4d49f290e5ff4c2513c50ec465f25e54171044e414d560b49001d6ab9",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_identity_copy_n0",
+      "role": "protected",
+      "row_sha256": "cf51691f6117a810bdf029205f94996bd3349eee7dac48ddafd0bd037c601547",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_wrap_add_n32",
+      "role": "targeted",
+      "row_sha256": "6a9004b0b3ab58ea42f5d3f68dcc44a830852d76c5c08a677a9fb10c4635e746",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_wrap_add_n10000",
+      "role": "targeted",
+      "row_sha256": "8d1c65317cd83d2fde021b75dd06b836795ee8a8c4daead0f9a4beb0c6a2f6cf",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_wrap_add_n17",
+      "role": "held_out",
+      "row_sha256": "1acf3f78b7c594ebb42845a51831ae596aaa963bcf43f195a080d1fe95b9f8e7",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_wrap_add_n0",
+      "role": "protected",
+      "row_sha256": "9bc2870b2d4efc05cf40d232be07e8bfbbda9f520e2c974020ffeee3fa2eae6c",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_bitwise_n32",
+      "role": "targeted",
+      "row_sha256": "cb5c7d8f932532893794694746caba23f5b17faae9d45e2680d59f9316cfead8",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_bitwise_n10000",
+      "role": "targeted",
+      "row_sha256": "5434b3892a52d1f799388ed2ce155f2985b6cd7662bbbe99fd32e12609f405bf",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_bitwise_n17",
+      "role": "held_out",
+      "row_sha256": "efd54b5403389945134d86a0bbf11c696180398b4d42fb8425c7887b0dfae902",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "p128_literal_bitwise_n0",
+      "role": "protected",
+      "row_sha256": "9574c0716a440eaac3fc2f70977b87b12810962d78a8ee9721e812d76f2b53ed",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_accumulator_n32",
+      "role": "protected",
+      "row_sha256": "e170921225c53db35a5c2e059c80583aa0871c5ffd816ea6b85d89c5be58118e",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_dependent_n32",
+      "role": "protected",
+      "row_sha256": "c547abec2e465bf2fa624ce5310c96a4db24407dbaeffe8b02e8f0faf3a8a59d",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ]
+    }
+  ],
+  "schema": "wtime-candidate-selection-v1",
+  "semantic_cases": [
+    "p054_literal_and_identity_results_use_verified_fusions",
+    "p054_every_source_prefix_and_materialization_matches_decoded",
+    "p054_cancellation_reconstructs_pending_values",
+    "p054_budget_corruption_and_unsupported_shapes_decline"
+  ],
+  "task": "P054"
+}

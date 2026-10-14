@@ -1,0 +1,60 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 49837,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P054-verification.json",
+    "sha256": "a2bc3de0d470c68e42bbc2d47c13bc7c59aa5ead4b98149aa9347250b37eac4b"
+  },
+  "decision": "inconclusive",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "P053 rejected accounting code is removed; predecessor retains P047/P050 in opt-in Compact.",
+    "Bounded whitelisted i32 fusions only; references, floats, trapping arithmetic and side effects keep their paths.",
+    "This frozen candidate selection is not milestone/P001 portfolio evidence."
+  ],
+  "outcome": "inconclusive",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 244642,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/80/80de7ce5e6571316e4fe992032771a4f3bcf1e5ff69b683d6a7c5834e98e17d2",
+      "sha256": "80de7ce5e6571316e4fe992032771a4f3bcf1e5ff69b683d6a7c5834e98e17d2",
+      "stored_bytes": 244642,
+      "stored_sha256": "80de7ce5e6571316e4fe992032771a4f3bcf1e5ff69b683d6a7c5834e98e17d2"
+    },
+    "freeze": {
+      "bytes": 219995,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/aa/aae87abb738e3ab32d3713c56c160b0334e3e243ad7378fdeb3e45d7527d7922",
+      "sha256": "aae87abb738e3ab32d3713c56c160b0334e3e243ad7378fdeb3e45d7527d7922",
+      "stored_bytes": 219995,
+      "stored_sha256": "aae87abb738e3ab32d3713c56c160b0334e3e243ad7378fdeb3e45d7527d7922"
+    },
+    "measure": {
+      "bytes": 595263,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/7d/7d105d6b5911abfdb61e71e26eca2825651a7b3f9dbed51c0fc6a8fa670e24d4",
+      "sha256": "7d105d6b5911abfdb61e71e26eca2825651a7b3f9dbed51c0fc6a8fa670e24d4",
+      "stored_bytes": 595263,
+      "stored_sha256": "7d105d6b5911abfdb61e71e26eca2825651a7b3f9dbed51c0fc6a8fa670e24d4"
+    },
+    "verify": {
+      "bytes": 746428,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/9b/9b65d8b7333654b35c65dddaf1211b1e0bae713883ec1ef644d7f9067e18d03d",
+      "sha256": "9b65d8b7333654b35c65dddaf1211b1e0bae713883ec1ef644d7f9067e18d03d",
+      "stored_bytes": 746428,
+      "stored_sha256": "9b65d8b7333654b35c65dddaf1211b1e0bae713883ec1ef644d7f9067e18d03d"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P054"
+}

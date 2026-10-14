@@ -81230,8 +81230,8 @@
       "key": "effect-preserving-peepholes",
       "title": "Fold pure integer work while preserving source events",
       "group": "04-specialization-and-fusion",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "inconclusive",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -81247,22 +81247,29 @@
         "P128"
       ],
       "owned_paths": [
-        "crates/wtime-runtime/src/execution/compact/peephole.rs",
-        "crates/wtime-runtime/tests/performance/p054.rs"
+        "crates/wtime-runtime/src/execution/compact/fuse.rs",
+        "crates/wtime-runtime/tests/performance/p054.rs",
+        "crates/wtime-runtime/tests/performance.rs",
+        "crates/wtime-runtime/tests/fixtures/performance/p054/regions.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/p054/regions.wasm",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/tests/test_p054_scalar_route.py",
+        "tools/wtime-bench/tests/test_p054_selection_model.py"
       ],
-      "input_output_contract": "Bounded constant propagation/identity elimination applies only to validated nontrapping integer regions and retains ordered source events, transient peaks and materialization recipes for eliminated work.",
+      "input_output_contract": "Extend the existing verified fusion path with a fixed whitelist of straight-line i32 literal and identity patterns inside one basic block. Preserve the 1:1 source map, source targets and guards, source-fuel/cancellation events, and canonical pending-value materialization; unsupported shapes use the original compact path.",
       "implementation_steps": [
-        "Before runtime edits, create docs/benchmarks/performance/P054-selection.json and docs/benchmarks/performance/P054-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
-        "Start with constant integer add/bitwise and identity local copies inside one basic block; exclude floats/division/memory/calls/ref effects.",
-        "Keep eliminated source operations in the accounting map and reconstruct intermediate stack/local values if interrupted before the optimized region ends.",
-        "Use bounded work and expansion caps, rejecting any transformation whose source/trap/materialization proof is missing.",
-        "Measure preparation-large, integer and held-out identity patterns, ensuring apparent speed does not come from skipping meter/cancel events.",
-        "Forward the explicit `compact` setting through the harness/policy integrator and record actual optimized/fallback counts. Persistent research selectors are nondefault; reversible changes to an existing tier use before/after artifacts and are selected only by their gate."
+        "Before runtime edits, archive the compact production predecessor and freeze the candidate selection using P128 admitted scalar fixtures. Build the predecessor with `--mode compact`; pass the freeze output positionally.",
+        "Extend the existing verified Pattern, Fusions, recognize, and execute machinery in crates/wtime-runtime/src/execution/compact/fuse.rs with a fixed whitelist of straight-line i32 literal and same-local identity patterns inside one basic block: literal const/const i32.add, i32.and, i32.or, i32.xor, and local.get/local.set identity.",
+        "Keep the 1:1 source map, target/guard checks, and verification path unchanged. Charge each original source event and materialize canonical pending stack/local values at every fuel stop, cancellation, and fallback boundary.",
+        "Bind the P054 selection to the allowlisted `p128_scalar` fixture model by its source SHA256 in fixture_models. Add P054-owned admitted regions.wat/.wasm and test the model binding in a fresh temporary root; do not edit the P128 model, P128 fixture sources, global 459-row registry, or shared selection membership.",
+        "The full close ran all four P054 semantic cases (358 Rust checks including the restored predecessor), five selection-model tests, 15 legacy fast-selection tests, four compact-route tests, nine P128 model tests, and 15 fast-candidate tests (48 Python checks); all passed. Neither run met the required 5% improvement threshold, so publish inconclusive, restore the core, and make no promotion claim."
       ],
       "fixture_cases": [
-        "Every fuel stop in a folded sequence matches intermediate original state.",
-        "Wrapping constants fold correctly and trapping/float operations remain untouched.",
-        "Optimizer work exhaustion keeps the original compact/decoded program usable."
+        "p054_literal_and_identity_results_use_verified_fusions: public literal and local-copy fixtures route through verified fusions and match independent scalar results.",
+        "p054_every_source_prefix_and_materialization_matches_decoded: public fuel-prefix probes compare each intermediate stack/local state with decoded execution.",
+        "p054_cancellation_reconstructs_pending_values: private cancellation checks reconstruct canonical pending values at each optimized source boundary.",
+        "p054_budget_corruption_and_unsupported_shapes_decline: private verification rejects corrupt/budget-exhausted descriptors and unsupported or externally-entered shapes."
       ],
       "measurement_selection": "scalar",
       "execution_mode": "compact",
@@ -81281,6 +81288,11 @@
       },
       "test_commands": [
         "cargo test --locked -p wtime-runtime --features compact-executor,execution-reference p054_ -- --nocapture",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_p054_selection_model.py -v -b",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_fast_selection.py -v -b",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_p054_scalar_route.py -v -b",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_p128_scalar_workloads.py -v -b",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_fast_candidate.py -v -b",
         "cargo build --locked --release --manifest-path tools/wtime-bench/Cargo.toml --features compact-executor -j 4",
         "python3 tools/checks/build_budget.py --output target/performance/P054/build.json",
         "python3 tools/checks/build_budget.py --features wtime-runtime/compact-executor --output target/performance/P054/optional-build.json",
@@ -81288,12 +81300,18 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P054-verification.json --output target/performance/P054/complete --execute"
       ],
       "path": "04-specialization-and-fusion/P054-effect-preserving-peepholes.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P054/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "99cdd6d0b72520f79c6235e36684594a71c85ec1f9b80903f529a84b2c150695",
+          "bytes": 2471
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
-      "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.",
-      "minimum_focused_cases": 3,
+      "integration_owner": "The P054 integrator owns tests/performance.rs, P054 compact-route integration in focused_compare.py, and selection_manifest.py fixed fixture_models binding plus unit tests; the fusion, admitted region fixtures, and semantic test files are P054-owned.",
+      "minimum_focused_cases": 4,
       "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.",
       "external_constraints": [
         "original pinned core/proposal snapshot and exclusions",
@@ -81301,9 +81319,93 @@
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
       "before_edit_commands": [
-        "python3 tools/wtime-bench/baseline.py --output target/performance/P054-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P054-selection.json target/performance/P054-before/manifest.json --output target/performance/P054/selection-freeze.json"
-      ]
+        "python3 tools/wtime-bench/baseline.py --mode compact --output target/performance/P054-before",
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P054-selection.json target/performance/P054-before/manifest.json target/performance/P054/selection-freeze.json"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P054/shared-finalization/attempt-0002/evidence.json": "99cdd6d0b72520f79c6235e36684594a71c85ec1f9b80903f529a84b2c150695"
+        },
+        "evidence": [
+          {
+            "bytes": 2471,
+            "path": "/workspace/wtime/target/performance/P054/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "99cdd6d0b72520f79c6235e36684594a71c85ec1f9b80903f529a84b2c150695"
+          }
+        ],
+        "outcome": "inconclusive",
+        "status": "done",
+        "task": "P054"
+      },
+      "completion_notes": {
+        "canonical_completion": "/workspace/wtime/target/performance/P054/shared-finalization/attempt-0002/completion.json",
+        "evidence_sha256": "99cdd6d0b72520f79c6235e36684594a71c85ec1f9b80903f529a84b2c150695",
+        "historical_candidate_checks": {
+          "rust": 358,
+          "python_tooling": 48,
+          "failed": 0,
+          "ignored": 0,
+          "rust_p054_named_cases": 4,
+          "tooling_breakdown": {
+            "selection_model": 5,
+            "legacy_fast_selection": 15,
+            "compact_route": 4,
+            "p128_model": 9,
+            "fast_candidate": 15
+          }
+        },
+        "paired_measurement": {
+          "physical_groups": 67,
+          "logical_groups": 76,
+          "unique_pairs": 4020,
+          "logical_pair_references": 4560,
+          "statistics_computations": 1,
+          "supported_regressions": 0,
+          "decision_reasons": 58,
+          "inconclusive_control_reasons": 56,
+          "primary_runs": [
+            {
+              "run": 1,
+              "median_ratio": 0.9590705373001746,
+              "ci95": [
+                0.9468033479591415,
+                0.9691445512333159
+              ]
+            },
+            {
+              "run": 2,
+              "median_ratio": 0.9536466227154456,
+              "ci95": [
+                0.94111404935326,
+                0.966551255356909
+              ]
+            }
+          ],
+          "adoption_threshold": "Neither run supported the required 5% improvement; outcome inconclusive, candidate not promoted."
+        },
+        "candidate_patch": "/workspace/wtime/docs/benchmarks/performance/P054-inconclusive-candidate.patch",
+        "rollback": {
+          "report": "/workspace/wtime/target/performance/P054/rollback/attempt-0001/report.json",
+          "restored_verification": "/workspace/wtime/target/performance/P054/restored-verification/attempt-0001/report.json",
+          "restored_core_files": 113,
+          "matches_frozen_predecessor": true,
+          "live_restored_tests": {
+            "passed": 354,
+            "failed": 0,
+            "ignored": 0
+          },
+          "p054_fusion_implementation_live": false,
+          "p054_rust_test_file_live": false,
+          "p054_fusion_changes_live": false,
+          "retained_existing_fusions": [
+            "P047",
+            "P050"
+          ]
+        },
+        "retained_tooling": "The fixed P128 fixture-model binding and P054 compact-route tooling remain available; they do not promote candidate runtime code.",
+        "selection_limit": "16 rows and 76 logical groups from the fixed P128 model plus declared controls; global registry remained at 459 rows. Not P001 portfolio evidence.",
+        "publisher_record_preserved": true
+      }
     },
     {
       "id": "P055",

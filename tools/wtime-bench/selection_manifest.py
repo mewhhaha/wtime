@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ SCHEMA = "wtime-candidate-selection-v1"
 FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads"}
 ROW_FIELDS = {"family", "id", "role", "scale", "stages", "row_sha256"}
 MANIFEST_FIELDS = {"schema", "task", "lane", "rationale", "registry_sha256", "rows", "semantic_cases"}
+OPTIONAL_MANIFEST_FIELDS = {"fixture_models"}
 _TASK = re.compile(r"P\d{3}\Z")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _CORE_CRATES = ("wtime-runtime", "wtime-types", "wtime-decode", "wtime-validate")
@@ -61,9 +63,10 @@ def load(path: str | Path, registry_path: str | Path = DEFAULT_REGISTRY) -> dict
 
 def rows(manifest: dict[str, Any], family: str | None = None,
          registry_path: str | Path = DEFAULT_REGISTRY) -> list[dict[str, Any]]:
-    """Return original full registry rows in declaration order."""
+    """Return selected global or explicitly bound fixed-model rows."""
     validated = load_data(manifest, registry_path)
     _, _, by_id = _registry(registry_path)
+    by_id.update(_fixture_model_rows(validated, by_id))
     return [by_id[item["id"]] for item in validated["rows"] if family is None or item["family"] == family]
 
 
@@ -74,8 +77,9 @@ def load_data(manifest: dict[str, Any], registry_path: str | Path = DEFAULT_REGI
 
 def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dict[str, Any]:
     """Validate a decoded manifest object."""
-    if not isinstance(manifest, dict) or set(manifest) != MANIFEST_FIELDS:
-        raise ValueError(f"manifest fields must be exactly {sorted(MANIFEST_FIELDS)}")
+    if (not isinstance(manifest, dict) or not MANIFEST_FIELDS.issubset(manifest)
+            or set(manifest) - MANIFEST_FIELDS - OPTIONAL_MANIFEST_FIELDS):
+        raise ValueError(f"manifest fields must be {sorted(MANIFEST_FIELDS)} with optional fixture_models")
     if manifest["schema"] != SCHEMA or not isinstance(manifest["task"], str) or not _TASK.fullmatch(manifest["task"]):
         raise ValueError("invalid schema or task")
     if manifest["lane"] != "candidate" or not isinstance(manifest["rationale"], str) or not manifest["rationale"].strip():
@@ -83,6 +87,8 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
     registry, registry_hash, by_id = _registry(registry_path)
     if manifest["registry_sha256"] != registry_hash:
         raise ValueError("manifest registry_sha256 does not match registry bytes")
+    model_rows = _fixture_model_rows(manifest, by_id)
+    by_id.update(model_rows)
     cases, declared = manifest["semantic_cases"], manifest["rows"]
     if (not isinstance(cases, list) or not cases or any(not isinstance(x, str) or not x.strip() for x in cases)
             or len(cases) != len(set(cases))):
@@ -99,9 +105,13 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
         if wid in seen:
             raise ValueError(f"duplicate selected workload id: {wid}")
         seen.add(wid)
-        selection = registry["selections"].get(fam)
-        if not isinstance(selection, dict) or wid not in selection.get("workloads", []):
-            raise ValueError(f"{wid} is not in registry selection {fam}")
+        if wid in model_rows:
+            if fam != "scalar":
+                raise ValueError(f"fixed model workload {wid} must use virtual scalar family")
+        else:
+            selection = registry["selections"].get(fam)
+            if not isinstance(selection, dict) or wid not in selection.get("workloads", []):
+                raise ValueError(f"{wid} is not in registry selection {fam}")
         if (not isinstance(item["role"], str) or item["role"] not in {"targeted", "held_out", "protected"}
                 or not isinstance(item["scale"], str) or item["scale"] not in {"small", "large", "other"}):
             raise ValueError(f"invalid role or scale for {wid}")
@@ -127,9 +137,58 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
     return manifest
 
 
-def groups(manifest: dict[str, Any]) -> set[tuple[str, str, str]]:
+def groups(manifest: dict[str, Any], registry_path: str | Path = DEFAULT_REGISTRY) -> set[tuple[str, str, str]]:
+    _, registry_hash, by_id = _registry(registry_path)
+    if "fixture_models" in manifest or manifest.get("registry_sha256") == registry_hash:
+        validated = load_data(manifest, registry_path)
+        by_id.update(_fixture_model_rows(validated, by_id))
+    else:
+        # Historically groups() accepted already-decoded synthetic manifests
+        # without consulting the global registry. Keep that API for legacy data.
+        validated = manifest
     return {(item["family"], item["id"], stage)
-            for item in manifest["rows"] for stage in item["stages"]}
+            for item in validated["rows"] for stage in item["stages"]}
+
+
+def _fixture_model_rows(manifest: dict[str, Any], global_rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Load only the allowlisted, source-bound fixed model named by a manifest."""
+    if "fixture_models" not in manifest:
+        return {}
+    bindings = manifest["fixture_models"]
+    if not isinstance(bindings, list) or not bindings:
+        raise ValueError("fixture_models must be a nonempty list")
+    seen: set[str] = set()
+    combined: dict[str, dict[str, Any]] = {}
+    for binding in bindings:
+        if not isinstance(binding, dict) or set(binding) != {"name", "source_sha256"}:
+            raise ValueError("fixture model binding must contain exactly name and source_sha256")
+        name, digest = binding["name"], binding["source_sha256"]
+        if not isinstance(name, str) or name != "p128_scalar" or name in seen:
+            raise ValueError(f"unknown or duplicate fixture model: {name!r}")
+        if not isinstance(digest, str) or not _SHA.fullmatch(digest):
+            raise ValueError("fixture model source_sha256 must be lowercase SHA-256")
+        seen.add(name)
+        bench_root = HERE.resolve()
+        source = (bench_root / "scalar_p128_workloads.py").resolve(strict=True)
+        if not source.is_relative_to(bench_root) or not source.is_file():
+            raise ValueError("fixed P128 model source escapes benchmark root")
+        if _sha(source.read_bytes()) != digest:
+            raise ValueError("fixed P128 model source hash mismatch")
+        spec = importlib.util.spec_from_file_location("_wtime_selection_p128_scalar_model", source)
+        if spec is None or spec.loader is None:
+            raise ValueError("cannot load fixed P128 scalar model")
+        model = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(model)
+        model_rows = model.entries()
+        ids = [row.get("id") for row in model_rows if isinstance(row, dict)]
+        if len(model_rows) != 18 or len(ids) != 18 or len(set(ids)) != 18:
+            raise ValueError("fixed P128 scalar model must yield 18 unique aliases")
+        for row in model_rows:
+            wid = row["id"]
+            if wid in global_rows or wid in combined:
+                raise ValueError(f"fixed model workload collides with global registry id: {wid}")
+            combined[wid] = row
+    return combined
 
 
 def _repository_root(registry_path: str | Path) -> Path:
@@ -240,7 +299,7 @@ def freeze(manifest_path: str | Path, predecessor_path: str | Path, output_path:
         "predecessor_sha256": predecessor,
         "runtime_sources": archived_runtime,
         "frozen_at_utc": datetime.now(timezone.utc).isoformat(),
-        "selection_groups": [list(item) for item in sorted(groups(manifest))],
+        "selection_groups": [list(item) for item in sorted(groups(manifest, registry_path))],
         "selection_count": len(manifest["rows"]),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,7 +322,7 @@ def verify_frozen(manifest_path: str | Path, freeze_path: str | Path,
         "manifest_sha256": _sha(manifest_path.read_bytes()),
         "registry_path": str(Path(registry_path).resolve()),
         "registry_sha256": _registry(registry_path)[1],
-        "selection_groups": [list(item) for item in sorted(groups(manifest))],
+        "selection_groups": [list(item) for item in sorted(groups(manifest, registry_path))],
         "selection_count": len(manifest["rows"]),
     }
     for key, expected in checks.items():
