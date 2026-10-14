@@ -404,8 +404,12 @@ def validate_observation(data, case, stage, input_value, expected, batch, mode):
     ns = data.get('ns_per_operation'); count=data.get('batch')
     if isinstance(ns,bool) or not isinstance(ns,(int,float)) or not math.isfinite(ns) or ns <= 0:
         raise ComparisonError('invalid timing')
-    if isinstance(count,bool) or not isinstance(count,int) or count < 1 or count > 100000:
-        raise ComparisonError('invalid batch')
+    if isinstance(count,bool) or not isinstance(count,int) or count < 1 or count > 1_000_000:
+        total = (count * float(ns) if isinstance(count, int) and not isinstance(count, bool)
+                 and isinstance(ns, (int, float)) and not isinstance(ns, bool)
+                 and math.isfinite(ns) else 'unavailable')
+        raise ComparisonError(f'{case}/{stage}: single-case batch {count!r} outside 1..1000000; '
+                              f'observed side total {total} ns')
     if batch > 0 and count != batch: raise ComparisonError('batch mismatch')
     oracle = None if case == 'prepare_large' else expected
     if 'result' not in data or data['result'] != oracle: raise ComparisonError('oracle mismatch')

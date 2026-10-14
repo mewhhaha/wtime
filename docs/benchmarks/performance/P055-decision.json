@@ -1,0 +1,774 @@
+{
+  "additional_statistics_computations": 0,
+  "aggregate_statistics_computations": 0,
+  "decision": {
+    "decision": "inconclusive",
+    "policy": "select split if accepted; otherwise select handlers if accepted; otherwise propagate inconclusive; prefer split when both are accepted",
+    "selected_variant": null
+  },
+  "schema": "wtime-p055-dispatch-decision-v1",
+  "selected_variant": null,
+  "source_stable": true,
+  "statistics_computations": 2,
+  "status": "passed",
+  "task": "P055",
+  "timing_evidence": true,
+  "variants": [
+    {
+      "baseline_manifest": {
+        "path": "/workspace/wtime/target/performance/P055-before-adapter/manifest.json",
+        "sha256": "3cf7eaf03c5fac69efe6cb30d0e44c223bed5c50d134d52655b6d549a72f9ff7"
+      },
+      "candidate_binary": {
+        "path": "/workspace/wtime/target/verification/runs/P055/verify/attempt-0002/production-compact/bin/wtime-bench",
+        "sha256": "d72f6073da21a26848f3d6c5475275aaab4b344a148d0da5d9a10235bdb8e2d4"
+      },
+      "candidate_source": {
+        "path": "/workspace/wtime/target/verification/runs/P055/verify/attempt-0002/production-compact/source/crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+        "selected_shape": "Split",
+        "sha256": "845c9076a27248e6c0d9c1f154a449e9e010d3775161b478ededac1138cdb78a"
+      },
+      "comparison": {
+        "path": "/workspace/wtime/target/verification/runs/P055/measure/attempt-0002/comparison-split/report.json",
+        "sha256": "2f26a234de6b411c0fe908b99db503d499c3771464318502a51531d488bf0ad3"
+      },
+      "declaration": {
+        "lane": "candidate",
+        "rationale": "Target accumulator, dependent, and branch-entropy scalar loops at n32/n10000; hold out n17 for each; protect direct-call and host-call controls plus call_overhead and prepare_large. Each verification contract measures one isolated Compact source variant, split or handlers, with identical workload selection and no protocol or feature change.",
+        "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+        "rows": [
+          {
+            "family": "scalar",
+            "id": "scalar_accumulator_n32",
+            "role": "targeted",
+            "row_sha256": "e170921225c53db35a5c2e059c80583aa0871c5ffd816ea6b85d89c5be58118e",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_accumulator_n10000",
+            "role": "targeted",
+            "row_sha256": "f054339b75a92f5b463d4b1aac1180624c6997bd6cfc11b5eecf7919d633630e",
+            "scale": "large",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_dependent_n32",
+            "role": "targeted",
+            "row_sha256": "c547abec2e465bf2fa624ce5310c96a4db24407dbaeffe8b02e8f0faf3a8a59d",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_dependent_n10000",
+            "role": "targeted",
+            "row_sha256": "df4e9eca14831c4e91e9c9750998debd6b13e0ccec45a0d2192b9281a5b5ab3d",
+            "scale": "large",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_branch_entropy_n32",
+            "role": "targeted",
+            "row_sha256": "22f214cf8311bb7c4c4c758db9fff08890dd907337cabf46cf7be3045eefca71",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_branch_entropy_n10000",
+            "role": "targeted",
+            "row_sha256": "c0891675621c1dd1fac3a4f734377f11c8f701237eb4f42c3c472288baff8683",
+            "scale": "large",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_accumulator_n17",
+            "role": "held_out",
+            "row_sha256": "0458b3b8adf3a40910d3d77cf9dad653dd5eaabdf39fed193677b58e43a294d3",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_dependent_n17",
+            "role": "held_out",
+            "row_sha256": "4ed53fb153ab6d2d3de076a960dcfbe69d85654ad937b139d598b637930186a1",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_branch_entropy_n17",
+            "role": "held_out",
+            "row_sha256": "d86c59cf60aa886ab66e9d038f7bb588eb0294923492e5e637bb433c80c06023",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_direct_calls_n32",
+            "role": "protected",
+            "row_sha256": "6051db22ca4b03eaf4fc101b5c0d7127678aa7c9bba0f62be79b7465dcd91d66",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_host_call_n32",
+            "role": "protected",
+            "row_sha256": "fdb0d2c8bbb5f570dc86a846a835705d87cab131471cdb4d73f863f3cbd35b22",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "original-mvp",
+            "id": "call_overhead",
+            "role": "protected",
+            "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "original-mvp",
+            "id": "prepare_large",
+            "role": "protected",
+            "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab",
+            "scale": "large",
+            "stages": [
+              "prepare"
+            ]
+          }
+        ],
+        "schema": "wtime-candidate-selection-v1",
+        "semantic_cases": [
+          "p055_dispatch_shapes_match_original_scalar_operations_and_selected_path",
+          "p055_numeric_locals_and_iterative_loops_preserve_source_counts",
+          "p055_every_fuel_prefix_barrier_and_materialization_remains_canonical"
+        ],
+        "task": "P055"
+      },
+      "gate_decision": "inconclusive",
+      "selection_freeze": {
+        "path": "/workspace/wtime/target/verification/runs/P055/freeze/attempt-0002/selection.json",
+        "sha256": "fc6cde1ed553e23cf266174bade1402480620bf465f9ee863f60c09786d09244"
+      },
+      "selection_manifest": {
+        "path": "/workspace/wtime/docs/benchmarks/performance/P055-selection.json",
+        "sha256": "8c154651a5b2652a5143eb67f0f35a0dd31e900a0f06fa44424e1556a1215b69"
+      },
+      "source_binding": {
+        "scope": "frozen candidate declaration"
+      },
+      "statistics": {
+        "path": "/workspace/wtime/target/verification/runs/P055/analyze/attempt-0001/statistics-split.json",
+        "sha256": "6e7800d125e1a1b0629e2174552a81ee13d0ccf177dc4963cb62407e98a17c79"
+      },
+      "variant": "split",
+      "verification_input_key": "caf8bdcc7b559e0033cb0b220713f8490ba72774a7d7d03f762931243af0c569",
+      "verification_output_sha256": {
+        "compact_build": "6834a3e4d35ebda0501619eb972ce1919b66073bcc99b4227b9bc2b21d2f9382",
+        "default_build": "48d25a63e471ce6ac2b13420067015bd8bef9311ac4012006ebfba4173946583",
+        "production_record": "72091f694438096aa5c27b05985d251b8d8e7068d80c9220b6be6c109304c9df"
+      },
+      "verification_receipt": {
+        "path": "/workspace/wtime/target/verification/runs/P055/verify/attempt-0002/receipt.json",
+        "sha256": "01902cf4452191b640f9e0761d66756a4effca365fa90ba1fff8b9556f21d6ff"
+      },
+      "verification_source_delta": {
+        "baseline_sha256": "fc6cde1ed553e23cf266174bade1402480620bf465f9ee863f60c09786d09244",
+        "declaration": {
+          "allowed_additions": [
+            "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+            "crates/wtime-runtime/tests/performance/p055.rs"
+          ],
+          "allowed_changes": [
+            "crates/wtime-runtime/src/execution/compact/ir.rs",
+            "crates/wtime-runtime/src/execution/compact/execute.rs",
+            "crates/wtime-runtime/tests/performance.rs"
+          ],
+          "baseline": "{freeze_dir}/selection.json",
+          "identity": "runtime",
+          "pointer": "/runtime_sources"
+        },
+        "delta": {
+          "added": [
+            "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+            "crates/wtime-runtime/tests/performance/p055.rs"
+          ],
+          "changed": [
+            "crates/wtime-runtime/src/execution/compact/execute.rs",
+            "crates/wtime-runtime/src/execution/compact/ir.rs",
+            "crates/wtime-runtime/tests/performance.rs"
+          ],
+          "unchanged": [
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/wtime-decode/Cargo.toml",
+            "crates/wtime-decode/src/instructions.rs",
+            "crates/wtime-decode/src/lib.rs",
+            "crates/wtime-decode/src/metadata.rs",
+            "crates/wtime-decode/src/module.rs",
+            "crates/wtime-decode/src/reader.rs",
+            "crates/wtime-runtime/Cargo.toml",
+            "crates/wtime-runtime/examples/embedding.rs",
+            "crates/wtime-runtime/examples/suspension.rs",
+            "crates/wtime-runtime/src/arena.rs",
+            "crates/wtime-runtime/src/canonical.rs",
+            "crates/wtime-runtime/src/continuation.rs",
+            "crates/wtime-runtime/src/coverage.rs",
+            "crates/wtime-runtime/src/exceptions.rs",
+            "crates/wtime-runtime/src/execution.rs",
+            "crates/wtime-runtime/src/execution/accounting.rs",
+            "crates/wtime-runtime/src/execution/compact/calls.rs",
+            "crates/wtime-runtime/src/execution/compact/fuse.rs",
+            "crates/wtime-runtime/src/execution/compact/indirect.rs",
+            "crates/wtime-runtime/src/execution/compact/inline.rs",
+            "crates/wtime-runtime/src/execution/compact/lower_control.rs",
+            "crates/wtime-runtime/src/execution/compact/lower_numeric.rs",
+            "crates/wtime-runtime/src/execution/compact/lower_scalar.rs",
+            "crates/wtime-runtime/src/execution/compact/memory.rs",
+            "crates/wtime-runtime/src/execution/compact/mod.rs",
+            "crates/wtime-runtime/src/execution/compact/prefix.rs",
+            "crates/wtime-runtime/src/execution/compact/source_map.rs",
+            "crates/wtime-runtime/src/execution/compact/verify.rs",
+            "crates/wtime-runtime/src/execution/cursor.rs",
+            "crates/wtime-runtime/src/execution/effects.rs",
+            "crates/wtime-runtime/src/execution/plan.rs",
+            "crates/wtime-runtime/src/gc.rs",
+            "crates/wtime-runtime/src/gc_exec.rs",
+            "crates/wtime-runtime/src/lib.rs",
+            "crates/wtime-runtime/src/linker.rs",
+            "crates/wtime-runtime/src/numeric.rs",
+            "crates/wtime-runtime/src/perf.rs",
+            "crates/wtime-runtime/src/reference.rs",
+            "crates/wtime-runtime/src/shared_memory.rs",
+            "crates/wtime-runtime/src/simd.rs",
+            "crates/wtime-runtime/src/wide.rs",
+            "crates/wtime-runtime/tests/core.rs",
+            "crates/wtime-runtime/tests/exception_root_safety.rs",
+            "crates/wtime-runtime/tests/exceptions.rs",
+            "crates/wtime-runtime/tests/feature_profiles.rs",
+            "crates/wtime-runtime/tests/performance/p016.rs",
+            "crates/wtime-runtime/tests/performance/p017.rs",
+            "crates/wtime-runtime/tests/performance/p018.rs",
+            "crates/wtime-runtime/tests/performance/p019.rs",
+            "crates/wtime-runtime/tests/performance/p020.rs",
+            "crates/wtime-runtime/tests/performance/p021.rs",
+            "crates/wtime-runtime/tests/performance/p022.rs",
+            "crates/wtime-runtime/tests/performance/p023.rs",
+            "crates/wtime-runtime/tests/performance/p024.rs",
+            "crates/wtime-runtime/tests/performance/p025.rs",
+            "crates/wtime-runtime/tests/performance/p026.rs",
+            "crates/wtime-runtime/tests/performance/p027.rs",
+            "crates/wtime-runtime/tests/performance/p028.rs",
+            "crates/wtime-runtime/tests/performance/p029.rs",
+            "crates/wtime-runtime/tests/performance/p030.rs",
+            "crates/wtime-runtime/tests/performance/p031.rs",
+            "crates/wtime-runtime/tests/performance/p032.rs",
+            "crates/wtime-runtime/tests/performance/p033.rs",
+            "crates/wtime-runtime/tests/performance/p034.rs",
+            "crates/wtime-runtime/tests/performance/p036.rs",
+            "crates/wtime-runtime/tests/performance/p036_private.rs",
+            "crates/wtime-runtime/tests/performance/p037.rs",
+            "crates/wtime-runtime/tests/performance/p037_private.rs",
+            "crates/wtime-runtime/tests/performance/p038.rs",
+            "crates/wtime-runtime/tests/performance/p039.rs",
+            "crates/wtime-runtime/tests/performance/p040.rs",
+            "crates/wtime-runtime/tests/performance/p040_private.rs",
+            "crates/wtime-runtime/tests/performance/p041.rs",
+            "crates/wtime-runtime/tests/performance/p041_private.rs",
+            "crates/wtime-runtime/tests/performance/p042.rs",
+            "crates/wtime-runtime/tests/performance/p042_private.rs",
+            "crates/wtime-runtime/tests/performance/p043.rs",
+            "crates/wtime-runtime/tests/performance/p043_private.rs",
+            "crates/wtime-runtime/tests/performance/p045.rs",
+            "crates/wtime-runtime/tests/performance/p045_private.rs",
+            "crates/wtime-runtime/tests/performance/p047.rs",
+            "crates/wtime-runtime/tests/performance/p050.rs",
+            "crates/wtime-runtime/tests/performance/p114_private.rs",
+            "crates/wtime-runtime/tests/performance/p115.rs",
+            "crates/wtime-runtime/tests/performance/p116.rs",
+            "crates/wtime-runtime/tests/performance/p117.rs",
+            "crates/wtime-runtime/tests/performance/p118.rs",
+            "crates/wtime-runtime/tests/performance/p119.rs",
+            "crates/wtime-runtime/tests/performance/p120.rs",
+            "crates/wtime-runtime/tests/performance/p121.rs",
+            "crates/wtime-runtime/tests/proposals.rs",
+            "crates/wtime-types/Cargo.toml",
+            "crates/wtime-types/src/error.rs",
+            "crates/wtime-types/src/features.rs",
+            "crates/wtime-types/src/indices.rs",
+            "crates/wtime-types/src/lib.rs",
+            "crates/wtime-types/src/types.rs",
+            "crates/wtime-validate/Cargo.toml",
+            "crates/wtime-validate/src/acceptance.rs",
+            "crates/wtime-validate/src/atomics.rs",
+            "crates/wtime-validate/src/continuations.rs",
+            "crates/wtime-validate/src/exceptions.rs",
+            "crates/wtime-validate/src/gc.rs",
+            "crates/wtime-validate/src/lib.rs",
+            "crates/wtime-validate/src/types.rs",
+            "crates/wtime-validate/tests/exceptions.rs",
+            "crates/wtime-validate/tests/policy.rs",
+            "rust-toolchain.toml"
+          ]
+        }
+      }
+    },
+    {
+      "baseline_manifest": {
+        "path": "/workspace/wtime/target/performance/P055-before-adapter/manifest.json",
+        "sha256": "3cf7eaf03c5fac69efe6cb30d0e44c223bed5c50d134d52655b6d549a72f9ff7"
+      },
+      "candidate_binary": {
+        "path": "/workspace/wtime/target/verification/runs/P055/verify/attempt-0003/production-compact/bin/wtime-bench",
+        "sha256": "57a35a8c2ecda76939fc83e0451fe6df3e24b9fba967d7c4914092beb9bd8743"
+      },
+      "candidate_source": {
+        "path": "/workspace/wtime/target/verification/runs/P055/verify/attempt-0003/production-compact/source/crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+        "selected_shape": "Handlers",
+        "sha256": "bfa08328264b181f8e1e0ab6099edc0eb0524e178319d697c539b49ab92ae3f1"
+      },
+      "comparison": {
+        "path": "/workspace/wtime/target/verification/runs/P055/measure/attempt-0003/comparison-handlers/report.json",
+        "sha256": "df7eb0d0dc036e492a5cb7bd49dfa96caa1fd3a1a87c1e06655740c4d6dfcc91"
+      },
+      "declaration": {
+        "lane": "candidate",
+        "rationale": "Target accumulator, dependent, and branch-entropy scalar loops at n32/n10000; hold out n17 for each; protect direct-call and host-call controls plus call_overhead and prepare_large. Each verification contract measures one isolated Compact source variant, split or handlers, with identical workload selection and no protocol or feature change.",
+        "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+        "rows": [
+          {
+            "family": "scalar",
+            "id": "scalar_accumulator_n32",
+            "role": "targeted",
+            "row_sha256": "e170921225c53db35a5c2e059c80583aa0871c5ffd816ea6b85d89c5be58118e",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_accumulator_n10000",
+            "role": "targeted",
+            "row_sha256": "f054339b75a92f5b463d4b1aac1180624c6997bd6cfc11b5eecf7919d633630e",
+            "scale": "large",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_dependent_n32",
+            "role": "targeted",
+            "row_sha256": "c547abec2e465bf2fa624ce5310c96a4db24407dbaeffe8b02e8f0faf3a8a59d",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_dependent_n10000",
+            "role": "targeted",
+            "row_sha256": "df4e9eca14831c4e91e9c9750998debd6b13e0ccec45a0d2192b9281a5b5ab3d",
+            "scale": "large",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_branch_entropy_n32",
+            "role": "targeted",
+            "row_sha256": "22f214cf8311bb7c4c4c758db9fff08890dd907337cabf46cf7be3045eefca71",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_branch_entropy_n10000",
+            "role": "targeted",
+            "row_sha256": "c0891675621c1dd1fac3a4f734377f11c8f701237eb4f42c3c472288baff8683",
+            "scale": "large",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_accumulator_n17",
+            "role": "held_out",
+            "row_sha256": "0458b3b8adf3a40910d3d77cf9dad653dd5eaabdf39fed193677b58e43a294d3",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_dependent_n17",
+            "role": "held_out",
+            "row_sha256": "4ed53fb153ab6d2d3de076a960dcfbe69d85654ad937b139d598b637930186a1",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_branch_entropy_n17",
+            "role": "held_out",
+            "row_sha256": "d86c59cf60aa886ab66e9d038f7bb588eb0294923492e5e637bb433c80c06023",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_direct_calls_n32",
+            "role": "protected",
+            "row_sha256": "6051db22ca4b03eaf4fc101b5c0d7127678aa7c9bba0f62be79b7465dcd91d66",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "scalar",
+            "id": "scalar_host_call_n32",
+            "role": "protected",
+            "row_sha256": "fdb0d2c8bbb5f570dc86a846a835705d87cab131471cdb4d73f863f3cbd35b22",
+            "scale": "other",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "original-mvp",
+            "id": "call_overhead",
+            "role": "protected",
+            "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62",
+            "scale": "small",
+            "stages": [
+              "prepare",
+              "instantiate",
+              "first_call",
+              "warm_call",
+              "load_and_call"
+            ]
+          },
+          {
+            "family": "original-mvp",
+            "id": "prepare_large",
+            "role": "protected",
+            "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab",
+            "scale": "large",
+            "stages": [
+              "prepare"
+            ]
+          }
+        ],
+        "schema": "wtime-candidate-selection-v1",
+        "semantic_cases": [
+          "p055_dispatch_shapes_match_original_scalar_operations_and_selected_path",
+          "p055_numeric_locals_and_iterative_loops_preserve_source_counts",
+          "p055_every_fuel_prefix_barrier_and_materialization_remains_canonical"
+        ],
+        "task": "P055"
+      },
+      "gate_decision": "inconclusive",
+      "selection_freeze": {
+        "path": "/workspace/wtime/target/verification/runs/P055/freeze/attempt-0002/selection.json",
+        "sha256": "fc6cde1ed553e23cf266174bade1402480620bf465f9ee863f60c09786d09244"
+      },
+      "selection_manifest": {
+        "path": "/workspace/wtime/docs/benchmarks/performance/P055-selection.json",
+        "sha256": "8c154651a5b2652a5143eb67f0f35a0dd31e900a0f06fa44424e1556a1215b69"
+      },
+      "source_binding": {
+        "scope": "frozen candidate declaration"
+      },
+      "statistics": {
+        "path": "/workspace/wtime/target/verification/runs/P055/analyze/attempt-0002/statistics-handlers.json",
+        "sha256": "a69add1573f6a096b191ee21e630e65c71fbd7625057f2f35e860f7f1f2d15e6"
+      },
+      "variant": "handlers",
+      "verification_input_key": "e5be8e0d560cb0fea1178c07806f650b3f59f5b6e0fd56ebecbca237f868843d",
+      "verification_output_sha256": {
+        "compact_build": "b601d882b0e6f2a26d00f1d527b2efa9c97c27df3e8d9a039c657c179ac48b1c",
+        "default_build": "a04929260e20425fb3eaea77525f7a2058e799f28d5b0e2745d8fbe008383676",
+        "production_record": "0b87e1265c4f511bbc38bee627ee050c43815e92e48aeeeb0c831e24b56c122b"
+      },
+      "verification_receipt": {
+        "path": "/workspace/wtime/target/verification/runs/P055/verify/attempt-0003/receipt.json",
+        "sha256": "e03161218d23a83501d9d3996762248730698f42b60c321cad958d932237d54f"
+      },
+      "verification_source_delta": {
+        "baseline_sha256": "fc6cde1ed553e23cf266174bade1402480620bf465f9ee863f60c09786d09244",
+        "declaration": {
+          "allowed_additions": [
+            "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+            "crates/wtime-runtime/tests/performance/p055.rs"
+          ],
+          "allowed_changes": [
+            "crates/wtime-runtime/src/execution/compact/ir.rs",
+            "crates/wtime-runtime/src/execution/compact/execute.rs",
+            "crates/wtime-runtime/tests/performance.rs"
+          ],
+          "baseline": "{freeze_dir}/selection.json",
+          "identity": "runtime",
+          "pointer": "/runtime_sources"
+        },
+        "delta": {
+          "added": [
+            "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+            "crates/wtime-runtime/tests/performance/p055.rs"
+          ],
+          "changed": [
+            "crates/wtime-runtime/src/execution/compact/execute.rs",
+            "crates/wtime-runtime/src/execution/compact/ir.rs",
+            "crates/wtime-runtime/tests/performance.rs"
+          ],
+          "unchanged": [
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/wtime-decode/Cargo.toml",
+            "crates/wtime-decode/src/instructions.rs",
+            "crates/wtime-decode/src/lib.rs",
+            "crates/wtime-decode/src/metadata.rs",
+            "crates/wtime-decode/src/module.rs",
+            "crates/wtime-decode/src/reader.rs",
+            "crates/wtime-runtime/Cargo.toml",
+            "crates/wtime-runtime/examples/embedding.rs",
+            "crates/wtime-runtime/examples/suspension.rs",
+            "crates/wtime-runtime/src/arena.rs",
+            "crates/wtime-runtime/src/canonical.rs",
+            "crates/wtime-runtime/src/continuation.rs",
+            "crates/wtime-runtime/src/coverage.rs",
+            "crates/wtime-runtime/src/exceptions.rs",
+            "crates/wtime-runtime/src/execution.rs",
+            "crates/wtime-runtime/src/execution/accounting.rs",
+            "crates/wtime-runtime/src/execution/compact/calls.rs",
+            "crates/wtime-runtime/src/execution/compact/fuse.rs",
+            "crates/wtime-runtime/src/execution/compact/indirect.rs",
+            "crates/wtime-runtime/src/execution/compact/inline.rs",
+            "crates/wtime-runtime/src/execution/compact/lower_control.rs",
+            "crates/wtime-runtime/src/execution/compact/lower_numeric.rs",
+            "crates/wtime-runtime/src/execution/compact/lower_scalar.rs",
+            "crates/wtime-runtime/src/execution/compact/memory.rs",
+            "crates/wtime-runtime/src/execution/compact/mod.rs",
+            "crates/wtime-runtime/src/execution/compact/prefix.rs",
+            "crates/wtime-runtime/src/execution/compact/source_map.rs",
+            "crates/wtime-runtime/src/execution/compact/verify.rs",
+            "crates/wtime-runtime/src/execution/cursor.rs",
+            "crates/wtime-runtime/src/execution/effects.rs",
+            "crates/wtime-runtime/src/execution/plan.rs",
+            "crates/wtime-runtime/src/gc.rs",
+            "crates/wtime-runtime/src/gc_exec.rs",
+            "crates/wtime-runtime/src/lib.rs",
+            "crates/wtime-runtime/src/linker.rs",
+            "crates/wtime-runtime/src/numeric.rs",
+            "crates/wtime-runtime/src/perf.rs",
+            "crates/wtime-runtime/src/reference.rs",
+            "crates/wtime-runtime/src/shared_memory.rs",
+            "crates/wtime-runtime/src/simd.rs",
+            "crates/wtime-runtime/src/wide.rs",
+            "crates/wtime-runtime/tests/core.rs",
+            "crates/wtime-runtime/tests/exception_root_safety.rs",
+            "crates/wtime-runtime/tests/exceptions.rs",
+            "crates/wtime-runtime/tests/feature_profiles.rs",
+            "crates/wtime-runtime/tests/performance/p016.rs",
+            "crates/wtime-runtime/tests/performance/p017.rs",
+            "crates/wtime-runtime/tests/performance/p018.rs",
+            "crates/wtime-runtime/tests/performance/p019.rs",
+            "crates/wtime-runtime/tests/performance/p020.rs",
+            "crates/wtime-runtime/tests/performance/p021.rs",
+            "crates/wtime-runtime/tests/performance/p022.rs",
+            "crates/wtime-runtime/tests/performance/p023.rs",
+            "crates/wtime-runtime/tests/performance/p024.rs",
+            "crates/wtime-runtime/tests/performance/p025.rs",
+            "crates/wtime-runtime/tests/performance/p026.rs",
+            "crates/wtime-runtime/tests/performance/p027.rs",
+            "crates/wtime-runtime/tests/performance/p028.rs",
+            "crates/wtime-runtime/tests/performance/p029.rs",
+            "crates/wtime-runtime/tests/performance/p030.rs",
+            "crates/wtime-runtime/tests/performance/p031.rs",
+            "crates/wtime-runtime/tests/performance/p032.rs",
+            "crates/wtime-runtime/tests/performance/p033.rs",
+            "crates/wtime-runtime/tests/performance/p034.rs",
+            "crates/wtime-runtime/tests/performance/p036.rs",
+            "crates/wtime-runtime/tests/performance/p036_private.rs",
+            "crates/wtime-runtime/tests/performance/p037.rs",
+            "crates/wtime-runtime/tests/performance/p037_private.rs",
+            "crates/wtime-runtime/tests/performance/p038.rs",
+            "crates/wtime-runtime/tests/performance/p039.rs",
+            "crates/wtime-runtime/tests/performance/p040.rs",
+            "crates/wtime-runtime/tests/performance/p040_private.rs",
+            "crates/wtime-runtime/tests/performance/p041.rs",
+            "crates/wtime-runtime/tests/performance/p041_private.rs",
+            "crates/wtime-runtime/tests/performance/p042.rs",
+            "crates/wtime-runtime/tests/performance/p042_private.rs",
+            "crates/wtime-runtime/tests/performance/p043.rs",
+            "crates/wtime-runtime/tests/performance/p043_private.rs",
+            "crates/wtime-runtime/tests/performance/p045.rs",
+            "crates/wtime-runtime/tests/performance/p045_private.rs",
+            "crates/wtime-runtime/tests/performance/p047.rs",
+            "crates/wtime-runtime/tests/performance/p050.rs",
+            "crates/wtime-runtime/tests/performance/p114_private.rs",
+            "crates/wtime-runtime/tests/performance/p115.rs",
+            "crates/wtime-runtime/tests/performance/p116.rs",
+            "crates/wtime-runtime/tests/performance/p117.rs",
+            "crates/wtime-runtime/tests/performance/p118.rs",
+            "crates/wtime-runtime/tests/performance/p119.rs",
+            "crates/wtime-runtime/tests/performance/p120.rs",
+            "crates/wtime-runtime/tests/performance/p121.rs",
+            "crates/wtime-runtime/tests/proposals.rs",
+            "crates/wtime-types/Cargo.toml",
+            "crates/wtime-types/src/error.rs",
+            "crates/wtime-types/src/features.rs",
+            "crates/wtime-types/src/indices.rs",
+            "crates/wtime-types/src/lib.rs",
+            "crates/wtime-types/src/types.rs",
+            "crates/wtime-validate/Cargo.toml",
+            "crates/wtime-validate/src/acceptance.rs",
+            "crates/wtime-validate/src/atomics.rs",
+            "crates/wtime-validate/src/continuations.rs",
+            "crates/wtime-validate/src/exceptions.rs",
+            "crates/wtime-validate/src/gc.rs",
+            "crates/wtime-validate/src/lib.rs",
+            "crates/wtime-validate/src/types.rs",
+            "crates/wtime-validate/tests/exceptions.rs",
+            "crates/wtime-validate/tests/policy.rs",
+            "rust-toolchain.toml"
+          ]
+        }
+      }
+    }
+  ]
+}

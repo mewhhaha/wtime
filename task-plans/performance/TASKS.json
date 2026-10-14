@@ -81410,10 +81410,10 @@
     {
       "id": "P055",
       "key": "dispatch-shape-experiment",
-      "title": "Compare safe match, split dispatch and handler-table shapes",
+      "title": "Compare split match and handler-function scalar dispatch",
       "group": "04-specialization-and-fusion",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "inconclusive",
       "kind": "experiment",
       "dependencies": [
         "P002",
@@ -81428,25 +81428,34 @@
         "P053"
       ],
       "owned_paths": [
+        "crates/wtime-runtime/src/execution/compact/ir.rs",
+        "crates/wtime-runtime/src/execution/compact/execute.rs",
         "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
-        "tools/wtime-bench/workloads.json",
-        "crates/wtime-runtime/tests/performance/p055.rs"
+        "crates/wtime-runtime/tests/performance/p055.rs",
+        "crates/wtime-runtime/tests/performance.rs",
+        "tools/wtime-bench/src/protocol.rs",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/tests/test_p055_batch_capacity.py",
+        "tools/verification/producers/p055_batch.py"
       ],
-      "input_output_contract": "Nondefault dispatch variants execute the same compact op stream: current match, hot/cold split match, and safe handler functions returning a loop action. No recursive Rust guest stack or computed-goto unsafe trick is introduced.",
+      "input_output_contract": "Compare two separately compiled, source-sealed variants of only the existing final Compact scalar dispatch subset: a split match and safe handler functions. The existing lower_scalar pipeline, including fusions, memory, control, and lower_numeric, remains unchanged. Both variants use existing Compact mode and compact-executor; there is no new Cargo feature or mode, runtime selector, Store change, or public diagnostic API. Preserve exact source accounting, fuel, cancellation, barrier, trap, and materialization behavior; do not use computed-goto or unsafe dispatch. A recorded first paired measurement attempt stopped before statistics because run 2 call_overhead warm-up could not meet the 20 ms minimum within the 100,000-call single-case cap; it produced no statistics and is a harness-capacity blocker, not a semantic failure or performance rejection. The recovery is a harness-only single-case cap increase to 1,000,000 with exact generic wire validation and focused calibration; all scalar, SIMD, and thread caps, the 20 ms minimum, and all 13 rows / 61 logical stage groups remain fixed.",
       "implementation_steps": [
-        "Implement only the common numeric/local/control subset in all variants; route other tags through one identical barrier path and account for indirect-call overhead.",
-        "Use an iterative outer loop and explicit action/cursor, not handler recursion; retain the same source accounting and checked operands.",
-        "Record compiler/assembly/code-size/branch-sampling evidence where available and predeclare identical workload/op streams.",
-        "Promote at most one shape if both runs/control/build gates pass; delete or keep other shapes solely as isolated experiment evidence.",
-        "Forward the explicit `compact-dispatch-experiment` setting through the harness/policy integrator and record actual optimized/fallback counts. Persistent research selectors are nondefault; reversible changes to an existing tier use before/after artifacts and are selected only by their gate."
+        "Freeze the actual Compact production predecessor using baseline.py with `--mode compact`, then freeze the identical admitted scalar workload/op-stream selection with the positional selection-freeze output path.",
+        "Compare two separately compiled source-sealed implementations of only the existing final scalar dispatch subset: split match and safe handler functions. Keep all earlier lower_scalar fusions, memory, control, and lower_numeric stages unchanged. Use no new Cargo feature, execution mode, runtime selector, Store behavior, or public diagnostic API.",
+        "Wire the variants at the final scalar dispatch in execution/compact/execute.rs and place the experiment in sibling dispatch_experiment.rs imported from ir.rs. Use compile-time selection sealed by each archived source build; test-only thread-local counters privately prove that the selected route executed. Root owns registration in tests/performance.rs.",
+        "Preserve exact source-event and source-fuel accounting, cancellation, checked operands, iterative deep-loop behavior, and barrier/trap/fuel materialization semantics. Do not edit the workload registry or weaken source coverage.",
+        "Build separate source-bound verification contracts at docs/benchmarks/performance/P055-split-verification.json and docs/benchmarks/performance/P055-handlers-verification.json against the same frozen predecessor. Analyze each distinct dataset once; the aggregate combines results without reanalysis.",
+        "The first paired measurement attempt stopped before statistics: run 2 call_overhead warm-up could not reach the 20 ms floor within the 100,000-call single-case cap. Preserve that failed attempt as measurement history. Apply only a harness-side single-case cap increase to 1,000,000, validate exact generic wire records, and run focused calibration; keep all scalar/SIMD/thread caps, the 20 ms minimum, and the 13-row/61-group selection unchanged.",
+        "Build the matching upgraded harness against the immutable P055-before Core113 archive using the existing p123_adapter.py --current-api --mode compact flow, with adapter outputs under target/performance/P055-before-adapter. The candidate source remains split/handlers sealed; the comparison adapter manifest must bind the original before archive. Keep P055 todo/pending and make no performance conclusion until a full gate completes."
       ],
       "fixture_cases": [
-        "Identical source sequences produce identical op/event counts across variants.",
-        "Deep guest loops do not consume the Rust call stack.",
-        "Barrier/trap/fuel paths retain exact state and small/large code distributions are both measured."
+        "p055_dispatch_shapes_match_original_scalar_operations_and_selected_path",
+        "p055_numeric_locals_and_iterative_loops_preserve_source_counts",
+        "p055_every_fuel_prefix_barrier_and_materialization_remains_canonical"
       ],
       "measurement_selection": "scalar",
-      "execution_mode": "compact-dispatch-experiment",
+      "execution_mode": "compact",
       "semantic_contracts": [
         "C2",
         "C3",
@@ -81461,30 +81470,54 @@
         "reasoning_effort": "low"
       },
       "test_commands": [
-        "cargo test --locked -p wtime-runtime --features compact-executor,experimental-executors,execution-reference p055_ -- --nocapture",
-        "cargo build --locked --release --manifest-path tools/wtime-bench/Cargo.toml --features compact-executor,experimental-executors -j 4",
-        "python3 tools/wtime-bench/compare.py --baseline target/performance/P055-before --candidate tools/wtime-bench/target/release/wtime-bench --candidate-mode compact-dispatch-experiment --selection scalar --output target/performance/P055",
-        "python3 tools/wtime-bench/analyze.py --input target/performance/P055 --output target/performance/P055/analysis.json",
-        "python3 tools/checks/build_budget.py --output target/performance/P055/build.json",
-        "python3 tools/checks/build_budget.py --features wtime-runtime/compact-executor --output target/performance/P055/optional-build.json",
-        "python3 tools/wtime-bench/gates.py --task P055 --comparison target/performance/P055 --build target/performance/P055/build.json --optional-build target/performance/P055/optional-build.json --output target/performance/P055/decision.json"
+        "cargo test --locked -p wtime-runtime --features compact-executor,execution-reference p055_ -- --nocapture",
+        "cargo build --locked -p wtime-runtime --features compact-executor -j 4",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_fast_candidate.py -v -b",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_fast_selection.py -v -b",
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_p055_batch_capacity.py -v -b",
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P055-split-verification.json",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P055-split-verification.json --output target/performance/P055/split/complete --execute",
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P055-handlers-verification.json",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P055-handlers-verification.json --output target/performance/P055/handlers/complete --execute"
       ],
       "path": "04-specialization-and-fusion/P055-dispatch-shape-experiment.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P055/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "cb6e4f2c1357eea2e1dc4e42053bb292e8a2cf23ad92777104966f999ddc8df0",
+          "bytes": 1639
+        }
+      ],
       "branch": "optional",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
-      "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.",
+      "integration_owner": "Root owns registration in crates/wtime-runtime/tests/performance.rs and tools/verification/producers/p055_batch.py. P055 changes only final scalar dispatch wiring plus bounded harness capacity/wire validation/calibration. Earlier lowering stages remain unchanged. No workload registry edit, new Cargo feature/mode, runtime selector, Store change, or public diagnostic API.",
       "minimum_focused_cases": 3,
-      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.",
+      "evidence_contract": "Completed: each separately built candidate passed 357 Rust and 35 Python checks (0 failed/ignored); the 5-case batch probe ran 22 commands (12 successful observations, 8 expected guard rejections); six aggregation checks passed. Canonical outcome is inconclusive, with no supported regressions or promotion. Restored verification passed 354 tests (0 failed/ignored) and confirmed all 113 core files match the frozen predecessor. See the plan for exact paired ratios, dataset counts, and preserved initial cap failure; no CPU-profile attribution is claimed.",
       "external_constraints": [
         "original pinned core/proposal snapshot and exclusions",
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
       "before_edit_commands": [
-        "python3 tools/wtime-bench/baseline.py --output target/performance/P055-before"
-      ]
+        "python3 tools/wtime-bench/baseline.py --mode compact --output target/performance/P055-before",
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P055-selection.json target/performance/P055-before/manifest.json target/performance/P055/selection-freeze.json"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P055/shared-finalization/attempt-0001/evidence.json": "cb6e4f2c1357eea2e1dc4e42053bb292e8a2cf23ad92777104966f999ddc8df0"
+        },
+        "evidence": [
+          {
+            "bytes": 1639,
+            "path": "/workspace/wtime/target/performance/P055/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "cb6e4f2c1357eea2e1dc4e42053bb292e8a2cf23ad92777104966f999ddc8df0"
+          }
+        ],
+        "outcome": "inconclusive",
+        "status": "done",
+        "task": "P055"
+      }
     },
     {
       "id": "P056",

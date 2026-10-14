@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=71, todo=57, in_progress=0, blocked=0, deferred=0 (128 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=72, todo=56, in_progress=0, blocked=0, deferred=0 (128 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -111,7 +111,7 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P052 — Try safe unboxed storage for proven numeric activations](04-specialization-and-fusion/P052-numeric-slot-storage.md) | experiment / optional | P002, P004, P005, P008, P014, P016, P021, P038, P051 |
 | [P053 — Separate metered and unmetered dispatch without weaker defaults](04-specialization-and-fusion/P053-accounting-mode-specialization.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P020, P038, P047 |
 | [P054 — Fold pure integer work while preserving source events](04-specialization-and-fusion/P054-effect-preserving-peepholes.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P019, P020, P037, P047 |
-| [P055 — Compare safe match, split dispatch and handler-table shapes](04-specialization-and-fusion/P055-dispatch-shape-experiment.md) | experiment / optional | P002, P004, P005, P007, P008, P014, P016, P038, P040, P053 |
+| [P055 — Compare split match and handler-function scalar dispatch](04-specialization-and-fusion/P055-dispatch-shape-experiment.md) | experiment / optional | P002, P004, P005, P007, P008, P014, P016, P038, P040, P053 |
 | [P056 — Select fusions and keep the portable hot path small](04-specialization-and-fusion/P056-specialization-milestone.md) | gate / portable | P004, P005, P014, P015, P046, P047, P048, P049, P050, P053, P054 |
 | [P127 — Bind metered and unmetered settings to staged benchmark runs](04-specialization-and-fusion/P127-metered-unmetered-benchmark-setting.md) | foundation / portable | P002, P003, P008, P014, P016, P020, P126 |
 | [P128 — Add minimal scalar identity and literal-folding workloads](04-specialization-and-fusion/P128-minimal-scalar-workloads.md) | foundation / portable | P003, P008, P014, P016, P019, P020, P037, P047, P126 |

@@ -1,0 +1,157 @@
+{
+  "copies": [
+    {
+      "bytes": 502,
+      "copy_path": "docs/benchmarks/performance/P055-completion.json",
+      "original_copy_bytes": true,
+      "sha256": "60fb93ee7eef14484c51255573f4011f4dcd614690e38c032801849bdce46121",
+      "source_path": "target/performance/P055/shared-finalization/attempt-0001/completion.json"
+    },
+    {
+      "bytes": 1639,
+      "copy_path": "docs/benchmarks/performance/P055-evidence.json",
+      "original_copy_bytes": true,
+      "sha256": "cb6e4f2c1357eea2e1dc4e42053bb292e8a2cf23ad92777104966f999ddc8df0",
+      "source_path": "target/performance/P055/shared-finalization/attempt-0001/evidence.json"
+    },
+    {
+      "bytes": 33583,
+      "copy_path": "docs/benchmarks/performance/P055-decision.json",
+      "original_copy_bytes": true,
+      "sha256": "2b29eafd7777db1ca4b0a0385633851e1fcd17fce138cc698da5ae7ebbf38974",
+      "source_path": "target/verification/runs/P055/verify/attempt-0004/decision.json"
+    },
+    {
+      "bytes": 375901,
+      "copy_path": "docs/benchmarks/performance/P055-split-statistics.json",
+      "original_copy_bytes": true,
+      "sha256": "6e7800d125e1a1b0629e2174552a81ee13d0ccf177dc4963cb62407e98a17c79",
+      "source_path": "target/verification/runs/P055/analyze/attempt-0001/statistics-split.json"
+    },
+    {
+      "bytes": 375082,
+      "copy_path": "docs/benchmarks/performance/P055-handlers-statistics.json",
+      "original_copy_bytes": true,
+      "sha256": "a69add1573f6a096b191ee21e630e65c71fbd7625057f2f35e860f7f1f2d15e6",
+      "source_path": "target/verification/runs/P055/analyze/attempt-0002/statistics-handlers.json"
+    },
+    {
+      "bytes": 268575,
+      "copy_path": "docs/benchmarks/performance/P055-split-default-build.json",
+      "original_copy_bytes": true,
+      "sha256": "48d25a63e471ce6ac2b13420067015bd8bef9311ac4012006ebfba4173946583",
+      "source_path": "target/verification/runs/P055/verify/attempt-0002/default-build.json"
+    },
+    {
+      "bytes": 268733,
+      "copy_path": "docs/benchmarks/performance/P055-split-compact-build.json",
+      "original_copy_bytes": true,
+      "sha256": "6834a3e4d35ebda0501619eb972ce1919b66073bcc99b4227b9bc2b21d2f9382",
+      "source_path": "target/verification/runs/P055/verify/attempt-0002/compact-build.json"
+    },
+    {
+      "bytes": 268575,
+      "copy_path": "docs/benchmarks/performance/P055-handlers-default-build.json",
+      "original_copy_bytes": true,
+      "sha256": "a04929260e20425fb3eaea77525f7a2058e799f28d5b0e2745d8fbe008383676",
+      "source_path": "target/verification/runs/P055/verify/attempt-0003/default-build.json"
+    },
+    {
+      "bytes": 268735,
+      "copy_path": "docs/benchmarks/performance/P055-handlers-compact-build.json",
+      "original_copy_bytes": true,
+      "sha256": "b601d882b0e6f2a26d00f1d527b2efa9c97c27df3e8d9a039c657c179ac48b1c",
+      "source_path": "target/verification/runs/P055/verify/attempt-0003/compact-build.json"
+    },
+    {
+      "bytes": 60759,
+      "copy_path": "docs/benchmarks/performance/P055-split-batch-proof.json",
+      "original_copy_bytes": true,
+      "sha256": "9e48c0b8383c4a78d0435590709dda06da7eb7f97093296d5ed96cb8b6296708",
+      "source_path": "target/verification/runs/P055/verify/attempt-0002/batch-proof/report.json"
+    },
+    {
+      "bytes": 60758,
+      "copy_path": "docs/benchmarks/performance/P055-handlers-batch-proof.json",
+      "original_copy_bytes": true,
+      "sha256": "89e2585a320ccca5e57d0eb86259acfb78d7d436de65cc4fae9253d1af8660cc",
+      "source_path": "target/verification/runs/P055/verify/attempt-0003/batch-proof/report.json"
+    },
+    {
+      "bytes": 14816,
+      "copy_path": "docs/benchmarks/performance/P055-rollback.json",
+      "original_copy_bytes": true,
+      "sha256": "19f6234e2480099a30225cd6c83da895a08f32115427c73834498a62ea832232",
+      "source_path": "target/performance/P055/rollback/attempt-0001/report.json"
+    },
+    {
+      "bytes": 39612,
+      "copy_path": "docs/benchmarks/performance/P055-restored-verification.json",
+      "original_copy_bytes": true,
+      "sha256": "d1c16c40d1609d997ec702a780d80492ffbd968c8483a888de34339ddc1c3280",
+      "source_path": "target/performance/P055/restored-verification/attempt-0001/report.json"
+    }
+  ],
+  "final_decision": {
+    "additional_statistics_computations": 0,
+    "candidate_promoted": false,
+    "decision": "inconclusive",
+    "selected_variant": null,
+    "statistics_computations": 2
+  },
+  "referenced_local_exclusions": {
+    "binaries": {
+      "copied": false,
+      "paths": [
+        "/workspace/wtime/target/verification/runs/P055/verify/attempt-0002/production-compact/bin/wtime-bench",
+        "/workspace/wtime/target/verification/runs/P055/verify/attempt-0003/production-compact/bin/wtime-bench"
+      ]
+    },
+    "note": "Raw timing datasets and production binaries remain in their local target paths and are not part of these checkpoint copies.",
+    "raw_datasets": {
+      "copied": false,
+      "paths": [
+        "/workspace/wtime/target/verification/runs/P055/measure/attempt-0002/comparison-split/report.json",
+        "/workspace/wtime/target/verification/runs/P055/measure/attempt-0003/comparison-handlers/report.json"
+      ]
+    }
+  },
+  "removed_candidate_core": {
+    "removed_test_paths": [
+      "crates/wtime-runtime/tests/performance.rs",
+      "crates/wtime-runtime/tests/performance/p055.rs"
+    ],
+    "restored_predecessor_core_files": 113,
+    "runtime_core_matches_frozen_predecessor": true,
+    "source_hashes": {
+      "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs": "bfa08328264b181f8e1e0ab6099edc0eb0524e178319d697c539b49ab92ae3f1",
+      "crates/wtime-runtime/src/execution/compact/execute.rs": "5b9ad895f7bc403c2791acb98bfce0ef1a27c42984dcc1d64f7a84de0e2dd7e3",
+      "crates/wtime-runtime/src/execution/compact/ir.rs": "fabb31f6826b631a49944dce21bc22fb2be2bc1d353d9b734c1dc6a2826d896c"
+    },
+    "source_paths": [
+      "crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs",
+      "crates/wtime-runtime/src/execution/compact/execute.rs",
+      "crates/wtime-runtime/src/execution/compact/ir.rs"
+    ]
+  },
+  "restored_verification": {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 354,
+    "status": "passed"
+  },
+  "schema": "wtime-p055-review-records-v1",
+  "task": "P055",
+  "variant_results": {
+    "handlers": {
+      "decision": "inconclusive",
+      "selected_shape": "Handlers",
+      "statistics_computations": 1
+    },
+    "split": {
+      "decision": "inconclusive",
+      "selected_shape": "Split",
+      "statistics_computations": 1
+    }
+  }
+}

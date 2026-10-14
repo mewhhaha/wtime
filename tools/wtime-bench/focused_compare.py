@@ -309,7 +309,10 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
 
 def calibrate(entry, observer):
     """Confirm the same requested batch reaches 20 ms on BOTH actual sides."""
+    workload_id = entry.get('id', '<unknown>')
     maximum = 100_000
+    if entry['oracle'].get('module') == 'run.py':
+        maximum = 1_000_000
     if entry['oracle'].get('module') == 'thread_workloads.py':
         maximum = 128
     if entry['oracle'].get('module') == 'representative_workloads.py':
@@ -328,8 +331,17 @@ def calibrate(entry, observer):
         audit.append({'batch': batch, 'observations': rows})
         if min(times) >= 20_000_000:
             return batch, audit
+        if batch >= maximum:
+            totals = ', '.join(f'{side}={rows[side]["ns_per_operation"] * batch:.0f}ns '
+                               f'({rows[side]["ns_per_operation"]:.6g}ns/op)'
+                               for side in ('baseline', 'candidate'))
+            raise ValueError(f'{workload_id}: calibration reached batch cap {maximum}; '
+                             f'final batch {batch}, side totals below 20000000ns: {totals}; '
+                             'calibration cannot reach 20 ms')
         next_batch = min(maximum, max(batch + 1, math.ceil(batch * 20_000_000/min(times) * 1.1)))
-        need(next_batch > batch, 'calibration cannot reach 20 ms within the workload limit')
+        need(next_batch > batch,
+             f'{workload_id}: calibration cannot reach 20 ms; final batch {batch}, '
+             f'baseline={times[0]:.0f}ns, candidate={times[1]:.0f}ns, cap={maximum}')
         batch = next_batch
     raise ValueError('calibration failed to reach 20 ms on both sides')
 

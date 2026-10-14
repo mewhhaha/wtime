@@ -1,0 +1,257 @@
+diff --git a/crates/wtime-runtime/src/execution/compact/execute.rs b/crates/wtime-runtime/src/execution/compact/execute.rs
+index ea09281..4e82530 100644
+--- a/crates/wtime-runtime/src/execution/compact/execute.rs
++++ b/crates/wtime-runtime/src/execution/compact/execute.rs
+@@ -19,7 +19,11 @@ pub(super) fn record(op: CompactOp, store: &Store) {
+     crate::coverage::record(op.opcode);
+ }
+ 
+-pub(super) fn execute(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, _store: &Store) -> Result<Step> {
++pub(super) fn execute(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, store: &Store) -> Result<Step> {
++    super::dispatch_experiment::execute(op, locals, stack, store)
++}
++
++pub(super) fn original(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, _store: &Store) -> Result<Step> {
+     match op.opcode {
+         1 => {},
+         0x0b | 0x0f => return Ok(Step::Return),
+diff --git a/crates/wtime-runtime/src/execution/compact/ir.rs b/crates/wtime-runtime/src/execution/compact/ir.rs
+index 58f182f..b655d3b 100644
+--- a/crates/wtime-runtime/src/execution/compact/ir.rs
++++ b/crates/wtime-runtime/src/execution/compact/ir.rs
+@@ -296,5 +296,7 @@ pub(super) mod lower_numeric;
+ pub(super) mod lower_control;
+ #[path = "execute.rs"]
+ pub(super) mod execute;
++#[path = "dispatch_experiment.rs"]
++pub(super) mod dispatch_experiment;
+ #[path = "prefix.rs"]
+ pub(super) mod prefix;
+diff --git a/crates/wtime-runtime/tests/performance.rs b/crates/wtime-runtime/tests/performance.rs
+index 6d0dd92..9eb78d4 100644
+--- a/crates/wtime-runtime/tests/performance.rs
++++ b/crates/wtime-runtime/tests/performance.rs
+@@ -90,3 +90,6 @@ mod p047;
+ 
+ #[path = "performance/p050.rs"]
+ mod p050;
++
++#[path = "performance/p055.rs"]
++mod p055;
+diff --git a/crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs b/crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs
+new file mode 100644
+index 0000000..cbb8ea9
+--- /dev/null
++++ b/crates/wtime-runtime/src/execution/compact/dispatch_experiment.rs
+@@ -0,0 +1,111 @@
++//! Reversible source-selected shapes for the existing scalar fallback only.
++//! The charged outer loop and prepared numeric/control/memory paths are shared.
++use super::*;
++use super::execute::Step;
++
++#[derive(Clone, Copy)]
++#[allow(dead_code)]
++enum Shape { Split, Handlers }
++const SELECTED: Shape = Shape::Handlers;
++type Handler = fn(CompactOp, &mut [Value], &mut Vec<Value>, &Store) -> Result<Step>;
++
++pub(super) fn execute(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, store: &Store) -> Result<Step> {
++    #[cfg(test)]
++    PATHS.with(|paths| { let mut counts=paths.get(); counts[match SELECTED { Shape::Split=>0,Shape::Handlers=>1 }]+=1; paths.set(counts); });
++    match SELECTED { Shape::Split=>split(op,locals,stack,store),
++        Shape::Handlers=>handlers(op,locals,stack,store) }
++}
++
++fn get(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, _: &Store) -> Result<Step> {
++    stack.push(*locals.get(op.aux as usize).ok_or_else(|| trap("local index"))?);
++    Ok(Step::Continue)
++}
++fn set(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, _: &Store) -> Result<Step> {
++    let value=pop(stack)?;
++    *locals.get_mut(op.aux as usize).ok_or_else(|| trap("local index"))?=value;
++    Ok(Step::Continue)
++}
++fn tee(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, _: &Store) -> Result<Step> {
++    let value=*stack.last().ok_or_else(|| trap("empty stack"))?;
++    *locals.get_mut(op.aux as usize).ok_or_else(|| trap("local index"))?=value;
++    Ok(Step::Continue)
++}
++fn i32_const(op: CompactOp, _: &mut [Value], stack: &mut Vec<Value>, _: &Store) -> Result<Step> {
++    stack.push(Value::I32(op.payload as u32 as i32)); Ok(Step::Continue)
++}
++fn i64_const(op: CompactOp, _: &mut [Value], stack: &mut Vec<Value>, _: &Store) -> Result<Step> {
++    stack.push(Value::I64(op.payload as i64)); Ok(Step::Continue)
++}
++#[cold]
++#[inline(never)]
++fn cold(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, store: &Store) -> Result<Step> {
++    // Calls return an action to the common iterative loop. This calls the
++    // archived scalar match directly, never recursing into selected dispatch.
++    super::execute::original(op,locals,stack,store)
++}
++fn split(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, store: &Store) -> Result<Step> {
++    match op.opcode {
++        0x20=>get(op,locals,stack,store),0x21=>set(op,locals,stack,store),
++        0x22=>tee(op,locals,stack,store),0x41=>i32_const(op,locals,stack,store),
++        0x42=>i64_const(op,locals,stack,store),_=>cold(op,locals,stack,store),
++    }
++}
++const fn table() -> [Handler;256] {
++    let mut table=[cold as Handler;256];
++    table[0x20]=get;table[0x21]=set;table[0x22]=tee;
++    table[0x41]=i32_const;table[0x42]=i64_const;
++    table
++}
++static HANDLERS: [Handler;256]=table();
++fn handlers(op: CompactOp, locals: &mut [Value], stack: &mut Vec<Value>, store: &Store) -> Result<Step> {
++    let handler=HANDLERS.get(usize::from(op.opcode)).copied().unwrap_or(cold);
++    handler(op,locals,stack,store)
++}
++
++#[cfg(test)]
++thread_local! { static PATHS: std::cell::Cell<[u64;2]> = const { std::cell::Cell::new([0;2]) }; }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn action(result: Result<Step>) -> std::result::Result<String,(ErrorKind,String)> {
++        result.map(|step|match step {
++            Step::Continue=>"continue".into(),Step::Return=>"return".into(),
++            Step::Call{index,tail}=>format!("call:{index}:{tail}"),
++            _=>panic!("scalar dispatch emitted an unsupported action"),
++        }).map_err(|error|(error.kind,error.message))
++    }
++    #[test]
++    fn p055_dispatch_shapes_match_original_scalar_operations_and_selected_path() {
++        let engine=Engine::with_execution_policy(Config::default(),ExecutionPolicy::Compact).unwrap();
++        let mut store=Store::new(&engine);
++        for opcode in [1,0x0b,0x0f,0x10,0x12,0x1a,0x1b,0x1c,0x20,0x21,0x22,0x41,0x42,0x45,0x6a,0x6b,0x6c,0x71,0x7f,0xffff] {
++            for aux in [0,1,2,u32::MAX] {
++                for input in [vec![],vec![Value::I32(-37)],vec![Value::I64(i64::MIN)],
++                    vec![Value::I32(i32::MAX),Value::I32(1)],
++                    vec![Value::I32(7),Value::I32(-9),Value::I32(-1)]] {
++                    let op=CompactOp{opcode,form:INDEX,aux,payload:0x80000000ffffffff};
++                    let mut original_stack=input.clone();
++                    let mut original_locals=vec![Value::I32(91),Value::I64(-23)];
++                    let expected=action(super::super::execute::original(op,&mut original_locals,&mut original_stack,&store));
++                    for dispatch in [split as Handler,handlers as Handler] {
++                        let mut stack=input.clone();let mut locals=vec![Value::I32(91),Value::I64(-23)];
++                        assert_eq!(action(dispatch(op,&mut locals,&mut stack,&store)),expected,"opcode {opcode:x}, aux {aux}");
++                        assert_eq!(stack,original_stack);assert_eq!(locals,original_locals);
++                    }
++                }
++            }
++        }
++        // A real invocation proves the compiled selected route is used, rather
++        // than counting direct helper calls in the comparison above.
++        let module=engine.compile(include_bytes!("../../../tests/fixtures/performance/p038/scalar32.wasm")).unwrap();
++        let instance=Linker::new(&engine).instantiate(&mut store,&module).unwrap();
++        let External::Func(run)=instance.export(&store,"run").unwrap() else { panic!() };
++        PATHS.with(|paths|paths.set([0;2]));
++        assert_eq!(store.invoke(run,&[Value::I32(i32::MIN),Value::I32(1)]).unwrap(),RunOutcome::Returned(vec![Value::I32(-2)]));
++        let counts=PATHS.with(|paths|paths.get());
++        let selected=match SELECTED { Shape::Split=>0,Shape::Handlers=>1 };
++        assert!(counts[selected]>0);assert_eq!(counts[1-selected],0);
++        assert_eq!(store.compact_dispatches,14);
++    }
++}
+diff --git a/crates/wtime-runtime/tests/performance/p055.rs b/crates/wtime-runtime/tests/performance/p055.rs
+new file mode 100644
+index 0000000..ce512fc
+--- /dev/null
++++ b/crates/wtime-runtime/tests/performance/p055.rs
+@@ -0,0 +1,94 @@
++#![cfg(all(feature="compact-executor",feature="execution-reference"))]
++use wtime_runtime::*;
++const SCALAR: &[u8]=include_bytes!("../fixtures/performance/p038/scalar32.wasm");
++const EFFECTS: &[u8]=include_bytes!("../fixtures/performance/p047/p047_effects_prefix.wasm");
++fn loaded(policy:ExecutionPolicy,config:Config,bytes:&[u8])->(Store,Instance,Func) {
++    let engine=Engine::with_execution_policy(config,policy).unwrap();
++    let module=engine.compile(bytes).unwrap();let mut store=Store::new(&engine);
++    let instance=Linker::new(&engine).instantiate(&mut store,&module).unwrap();
++    let External::Func(run)=instance.export(&store,"run").unwrap() else { panic!() };
++    (store,instance,run)
++}
++fn view(result:Result<RunOutcome>)->std::result::Result<RunOutcome,(ErrorKind,String)> {
++    result.map_err(|error|(error.kind,error.message))
++}
++#[test]
++fn p055_numeric_locals_and_iterative_loops_preserve_source_counts() {
++    for policy in [ExecutionPolicy::Decoded,ExecutionPolicy::Reference,ExecutionPolicy::Compact] {
++        let (mut store,_,run)=loaded(policy,Config::default(),SCALAR);
++        for input in [i32::MIN,i32::MAX,-1,0,1,0x2468ace] {
++            for condition in [0,1,-1] {
++                let before=store.compact_dispatches();
++                let expected=if condition==0 { 7 } else { input.wrapping_add(i32::MAX)^1 };
++                assert_eq!(store.invoke(run,&[Value::I32(input),Value::I32(condition)]).unwrap(),RunOutcome::Returned(vec![Value::I32(expected)]));
++                assert_eq!(store.compact_dispatches()-before,if policy==ExecutionPolicy::Compact { 14 } else { 0 });
++            }
++        }
++        for (bytes,expected) in [
++            (include_bytes!("../fixtures/performance/p047/accumulator.wasm").as_slice(),49995000),
++            (include_bytes!("../fixtures/performance/p047/dependent.wasm").as_slice(),{
++                let mut value=1i32;for _ in 0..10000 { value=value.wrapping_mul(1664525).wrapping_add(1013904223); } value
++            }),
++            (include_bytes!("../fixtures/performance/p050/direct_calls.wasm").as_slice(),{
++                let mut value=1i32;for _ in 0..10000 { value=value.wrapping_mul(3).wrapping_add(1); } value
++            }),
++        ] {
++            let (mut store,_,run)=loaded(policy,Config::default(),bytes);
++            assert_eq!(store.invoke(run,&[Value::I32(10000)]).unwrap(),RunOutcome::Returned(vec![Value::I32(expected)]));
++            if policy==ExecutionPolicy::Compact { assert!(store.compact_dispatches()>10000); }
++        }
++    }
++}
++#[test]
++fn p055_every_fuel_prefix_barrier_and_materialization_remains_canonical() {
++    for (bytes,args,expected,effects) in [
++        (SCALAR,vec![Value::I32(i32::MIN),Value::I32(1)],-2,false),
++        (EFFECTS,vec![Value::I32(i32::MAX)],-2147483642,true),
++    ] {
++        for fuel in 0..=15 {
++            for policy in [ExecutionPolicy::Decoded,ExecutionPolicy::Reference,ExecutionPolicy::Compact] {
++                let mut config=Config::default();config.limits.fuel=Some(fuel);
++                let (mut store,instance,run)=loaded(policy,config,bytes);
++                assert_eq!(view(store.invoke(run,&args)),if fuel<14 {
++                    Err((ErrorKind::ResourceLimit,"fuel exhausted".into()))
++                } else { Ok(RunOutcome::Returned(vec![Value::I32(expected)])) });
++                if effects {
++                    let External::Memory(memory)=instance.export(&store,"memory").unwrap() else { panic!() };
++                    let External::Global(global)=instance.export(&store,"state").unwrap() else { panic!() };
++                    let mut image=vec![0;65536];
++                    if fuel>=3 { image[..4].copy_from_slice(&42i32.to_le_bytes()); }
++                    if fuel>=12 { image[4..8].copy_from_slice(&(-2147483642i32).to_le_bytes()); }
++                    assert_eq!(store.read_memory(memory,0,65536).unwrap(),image);
++                    assert_eq!(store.get_global(global).unwrap(),Value::I32(if fuel>=9 { -2147483642 } else { -19 }));
++                }
++            }
++        }
++        for pc in 0..14 {
++            let mut snapshots=vec![];
++            for policy in [ExecutionPolicy::Decoded,ExecutionPolicy::Compact] {
++                let mut config=Config::default();config.limits.fuel=Some(14);
++                let (mut store,_,run)=loaded(policy,config,bytes);
++                store.request_materialization_roundtrip(run,pc).unwrap();
++                assert_eq!(store.invoke(run,&args).unwrap(),RunOutcome::Returned(vec![Value::I32(expected)]));
++                let snapshot=store.execution_snapshot().unwrap().clone();
++                assert_eq!(snapshot.cursor.source_pc,pc);assert_eq!(snapshot.remaining_fuel,Some(13-pc as u64));
++                assert!(snapshot.pending_boundary_charged);assert_eq!(store.materialization_roundtrips(),1);
++                snapshots.push(snapshot);
++            }
++            assert_eq!(snapshots[0],snapshots[1],"source boundary {pc}");
++        }
++    }
++    // A host callback requests cancellation; the pending store must not run.
++    for policy in [ExecutionPolicy::Decoded,ExecutionPolicy::Compact] {
++        let engine=Engine::with_execution_policy(Config::default(),policy).unwrap();
++        let module=engine.compile(include_bytes!("../fixtures/performance/accounting/host_then_store.wasm")).unwrap();
++        let mut store=Store::new(&engine);let cancellation=store.cancellation_token();
++        let callback=store.create_host_func(FuncType::new(vec![],vec![]),move |_| { cancellation.cancel();Ok(vec![]) }).unwrap();
++        let mut linker=Linker::new(&engine);linker.define("host","stop",External::Func(callback)).unwrap();
++        let instance=linker.instantiate(&mut store,&module).unwrap();
++        let External::Func(run)=instance.export(&store,"run").unwrap() else { panic!() };
++        assert_eq!(store.invoke(run,&[]).unwrap_err().message,"execution cancelled");
++        let External::Memory(memory)=instance.export(&store,"memory").unwrap() else { panic!() };
++        assert_eq!(store.read_memory(memory,0,4).unwrap(),[0,0,0,0]);
++    }
++}

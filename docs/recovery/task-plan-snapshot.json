@@ -1990,9 +1990,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/04-specialization-and-fusion/P055-dispatch-shape-experiment.md",
-      "sha256": "3341510c269573570b1294f55a5e5aa52eaacf9e82a9a0cd9bc785295afc1aa8",
-      "size_bytes": 6129,
-      "snapshot_sha256": "3341510c269573570b1294f55a5e5aa52eaacf9e82a9a0cd9bc785295afc1aa8"
+      "sha256": "04f49b38dfaf084e2e03cfdef5384cb6ac7cb131cae78a2b5f4dce803871f7b8",
+      "size_bytes": 12609,
+      "snapshot_sha256": "04f49b38dfaf084e2e03cfdef5384cb6ac7cb131cae78a2b5f4dce803871f7b8"
     },
     {
       "byte_equal": true,
@@ -2518,9 +2518,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/INDEX.md",
-      "sha256": "5e21cde954ad58c566a8dc19dc0b077aea92986319845322e7d955fa55ae9b28",
-      "size_bytes": 27744,
-      "snapshot_sha256": "5e21cde954ad58c566a8dc19dc0b077aea92986319845322e7d955fa55ae9b28"
+      "sha256": "d238632e9beaf3220902b740b9428ddd4662e60a0045cca836f3c20d65c41c45",
+      "size_bytes": 27741,
+      "snapshot_sha256": "d238632e9beaf3220902b740b9428ddd4662e60a0045cca836f3c20d65c41c45"
     },
     {
       "byte_equal": true,
@@ -2550,9 +2550,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/TASKS.json",
-      "sha256": "471ae2ea9c60e8bfe4aa8437b949c1d6a8476ed45551fd71f74d98fd0855944b",
-      "size_bytes": 4213042,
-      "snapshot_sha256": "471ae2ea9c60e8bfe4aa8437b949c1d6a8476ed45551fd71f74d98fd0855944b"
+      "sha256": "0a1d9e170837d33f858584233456abe6ef70a7d926364503f760ac5bac2e17a3",
+      "size_bytes": 4217399,
+      "snapshot_sha256": "0a1d9e170837d33f858584233456abe6ef70a7d926364503f760ac5bac2e17a3"
     },
     {
       "byte_equal": true,
@@ -3034,6 +3034,110 @@
         "stdout": "plan: 128 tasks; statuses: done=71, todo=57\nchecker: 0 error(s), 0 warning(s)\n",
         "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
       }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "87effe88c8c94212b14cb9569e226e658edc8ef14e595ad8bc31c2b224ed448d",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=71, todo=57\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "8d428a2281de48269b4acf97e6d90e3c0ede464327df878b6463decf9a6979da",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=71, todo=57\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "f7421322628a92f6ae08d53ff7bba3c557b6f13bae193aa633dd69a3ce80ec23",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=71, todo=57\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "0a1d9e170837d33f858584233456abe6ef70a7d926364503f760ac5bac2e17a3",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=72, todo=56\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
     ]
   ],
   "validators": [
@@ -3056,9 +3160,9 @@
         "/workspace/tasks/performance/check_plan.py"
       ],
       "exit_code": 0,
-      "plan_manifest_sha256": "471ae2ea9c60e8bfe4aa8437b949c1d6a8476ed45551fd71f74d98fd0855944b",
+      "plan_manifest_sha256": "0a1d9e170837d33f858584233456abe6ef70a7d926364503f760ac5bac2e17a3",
       "stderr": "",
-      "stdout": "plan: 128 tasks; statuses: done=71, todo=57\nchecker: 0 error(s), 0 warning(s)\n",
+      "stdout": "plan: 128 tasks; statuses: done=72, todo=56\nchecker: 0 error(s), 0 warning(s)\n",
       "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
     }
   ]
