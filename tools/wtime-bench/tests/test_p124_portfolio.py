@@ -62,7 +62,7 @@ def _report(family, baseline):
 class P124PortfolioMatrixTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Build once: the complete structural matrix contains 65,700 pairs.
+        # Build once from the complete current workload registry.
         cls.reports = {"structural": {family: _report(family, "decoded")
                                        for family in gate.FAMILIES},
                        "p001": {family: _report(family, "p001")
@@ -70,11 +70,14 @@ class P124PortfolioMatrixTests(unittest.TestCase):
 
     def test_p124_full_four_family_two_baseline_matrix_counts_exactly(self):
         result = gate.validate_matrix(self.reports, check_sources=False)
-        self.assertEqual(result["decoded_pairs_total"], 65_700)
-        self.assertEqual(result["p001_pairs_total"], 65_700)
+        expected_total = sum(len(gate._expected_groups(family)) * gate.MIN_PAIRS * 2
+                             for family in gate.FAMILIES)
+        self.assertEqual(expected_total, 71_100)
+        self.assertEqual(result["decoded_pairs_total"], expected_total)
+        self.assertEqual(result["p001_pairs_total"], expected_total)
         self.assertEqual(set(result["counts"]["decoded"]), set(gate.FAMILIES))
         self.assertEqual(set(result["counts"]["p001"]), set(gate.FAMILIES))
-        self.assertEqual(result["counts"]["decoded"]["memory"]["groups_per_run"], 91)
+        self.assertEqual(result["counts"]["decoded"]["memory"]["groups_per_run"], 181)
 
     def test_p124_missing_family_workload_stage_run_or_pair_fails_closed(self):
         original = self.reports["structural"]["scalar"]

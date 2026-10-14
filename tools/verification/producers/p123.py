@@ -19,7 +19,9 @@ HERE=ROOT/'tools/wtime-bench'
 sys.path.insert(0,str(HERE))
 P001_MANIFEST='7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472'
 P001_BINARY='735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498'
-COUNTS={'scalar':85,'memory':35,'simd':114,'representative':9}
+import workloads
+FAMILIES=('scalar','memory','simd','representative')
+COUNTS={family:len(workloads.selection(family)) for family in FAMILIES}
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def need(condition,message):

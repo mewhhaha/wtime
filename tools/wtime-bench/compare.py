@@ -20,6 +20,7 @@ MEMORY_STAGED_FAMILIES = {'memory_widths_predictable', 'memory_widths_shuffled',
                           'memory_widths_read_scan', 'memory_copy_distinct_seeded',
                           'memory_fill_seeded'}
 LEGACY_SCALAR_CONTROL_IDS = {'call_overhead', 'integer_loop', 'branch_calls'}
+SCALAR_MAX_BATCH = 1_000_000
 INPUTS = {'call_overhead':100, 'integer_loop':10000, 'memory_fill_scan':4096,
           'branch_calls':5000, 'prepare_large':0}
 
@@ -54,7 +55,8 @@ def _read_build_growth_explanation(path):
 
 def _common_calibrated_batch(fixture, observations):
     batches=[row.get('batch') for row in observations]
-    if (not batches or any(type(batch) is not int or batch<1 or batch>100000 for batch in batches)):
+    max_batch = 100000 if fixture.get('memory') is True else SCALAR_MAX_BATCH
+    if (not batches or any(type(batch) is not int or batch<1 or batch>max_batch for batch in batches)):
         raise ComparisonError('warm calibration returned an invalid batch')
     # Memory warm calls preserve the minimum calibrated duration on both sides;
     # scalar compatibility retains the established smaller common batch.
@@ -453,7 +455,7 @@ def scalar_observation(exe, fixture, entry, input_value, expected, stage, batch,
     ns=data.get('ns_per_operation'); count=data.get('batch')
     if isinstance(ns,bool) or not isinstance(ns,(int,float)) or not math.isfinite(ns) or ns<=0:
         raise ComparisonError('invalid scalar timing')
-    if isinstance(count,bool) or not isinstance(count,int) or count<1 or count>100000:
+    if isinstance(count,bool) or not isinstance(count,int) or count<1 or count>SCALAR_MAX_BATCH:
         raise ComparisonError('invalid scalar batch')
     if batch>0 and count!=batch: raise ComparisonError('scalar batch mismatch')
     result=dict(data)
@@ -646,12 +648,15 @@ def _is_calibratable_scalar_fixture(fixture):
 
 
 def _calibrate_scalar_shared_batch(fixture, sides, cpu, *, target_ns=20_000_000,
-                                   max_batch=100000, max_attempts=8):
+                                   max_batch=None, max_attempts=8):
     """Find one exact warm batch whose measured interval clears target on both sides."""
     if not _is_calibratable_scalar_fixture(fixture):
         raise ComparisonError('shared scalar calibration requires a typed scalar fixture or an explicit legacy control')
+    hard_cap = SCALAR_MAX_BATCH
+    if max_batch is None:
+        max_batch = hard_cap
     if (type(target_ns) is not int or target_ns <= 0 or type(max_batch) is not int
-            or not 1 <= max_batch <= 100000 or type(max_attempts) is not int
+            or not 1 <= max_batch <= hard_cap or type(max_attempts) is not int
             or not 1 <= max_attempts <= 8):
         raise ComparisonError('invalid scalar calibration limits')
     if len(sides) != 2:
@@ -1016,7 +1021,7 @@ def run(args):
                    memory_warm_calibration_target_ns=(20_000_000 if memory_entries else None))
     if scalar_entries or selected_legacy_ids:
         settings['scalar_warm_calibration']={
-            'target_ns':20_000_000,'max_batch':100000,'max_attempts':8,
+            'target_ns':20_000_000,'max_batch':SCALAR_MAX_BATCH,'max_attempts':8,
             'policy':'shared_exact_batch_both_sides_confirmed',
             'scope':'selected typed scalar-driver rows and selected explicit legacy controls',
             'typed_scalar_row_count':len(scalar_entries),

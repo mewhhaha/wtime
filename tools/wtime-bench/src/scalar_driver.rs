@@ -576,7 +576,7 @@ mod current {
         let expected = args[4].parse::<i32>().unwrap();
         let stage = args[5].as_str();
         let requested_batch = args[6].parse::<usize>().unwrap();
-        assert!(requested_batch <= 100_000);
+        assert!(requested_batch <= 1_000_000);
         let mode = args[7].as_str();
         let profile = args[8].as_str();
         let Some(driver) = Driver::parse(&args[9]) else {
@@ -677,7 +677,7 @@ mod current {
                 let batch = if requested_batch == 0 {
                     let (one_ns, _) =
                         measured(1, || invoke_timed(&mut store, func, input), expected);
-                    (20_000_000.0 / one_ns).ceil().clamp(1.0, 100_000.0) as usize
+                    (20_000_000.0 / one_ns).ceil().clamp(1.0, 1_000_000.0) as usize
                 } else {
                     requested_batch
                 };

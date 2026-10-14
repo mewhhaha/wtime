@@ -126,16 +126,21 @@ def digest_source_map(value, root=ROOT):
 
 
 def expected_implementation_sources(root=ROOT):
+    root = Path(root).resolve()
     sources = {}
     for crate in ("wtime-runtime", "wtime-types", "wtime-decode", "wtime-validate"):
-        directory = Path(root) / "crates" / crate / "src"
+        directory = root / "crates" / crate / "src"
+        if not directory.is_dir():
+            raise ValueError(f"implementation source map lacks {crate}")
+        crate_sources = []
         for path in directory.rglob("*.rs"):
-            relative = path.relative_to(root).as_posix()
-            sources[relative] = sha(path)
-    if sum(name.startswith("crates/wtime-runtime/src/") for name in sources) != 32:
-        raise ValueError("current runtime implementation source set is not the frozen 32-file set")
-    for crate in ("wtime-types", "wtime-decode", "wtime-validate"):
-        if not any(name.startswith(f"crates/{crate}/src/") for name in sources):
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file() or not resolved.is_relative_to(root):
+                raise ValueError("implementation source path escapes repository root")
+            relative = resolved.relative_to(root).as_posix()
+            sources[relative] = sha(resolved)
+            crate_sources.append(relative)
+        if not crate_sources:
             raise ValueError(f"implementation source map lacks {crate}")
     return dict(sorted(sources.items()))
 

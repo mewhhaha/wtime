@@ -23,11 +23,28 @@ import execution_identity
 import dataset_cache
 
 CACHE = ROOT/'target/verification/datasets/P046'
+P056_CACHE = ROOT/'target/verification/datasets/P056'
 
 
-def dataset_identity(report):
+def _structural_reference(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, Path)):
+        value = ref(Path(value))
+    if not isinstance(value, dict) or not isinstance(value.get('path'), str):
+        raise ValueError('structural_predecessor must be a hashed declaration reference')
+    import p046_gate
+    p046_gate._load_structural_predecessor(value)
+    return dict(value)
+
+
+def _cache_root(cache, structural_predecessor):
+    return Path(cache) if cache is not None else (P056_CACHE if structural_predecessor is not None else CACHE)
+
+
+def dataset_identity(report, structural_predecessor=None):
     metadata = report['metadata']
-    return {'schema':'p046-dataset-identity-v1','selection':report['selection'],
+    identity = {'schema':'p046-dataset-identity-v1','selection':report['selection'],
             'baseline_manifest_sha256':metadata['baseline_manifest_sha256'],
             'candidate_binary_sha256':metadata['candidate_binary_sha256'],
             'candidate_mode':metadata['settings']['candidate_mode'],
@@ -35,23 +52,31 @@ def dataset_identity(report):
             'execution_sources':execution_identity.project(metadata['candidate_sources']),
             'hardware':{key:metadata['hardware'][key] for key in ('selected_cpu','cpu_model','cpu_quota')},
             'run_seeds':[run['seed'] for run in report['runs']], 'pairs_per_group':30}
+    if structural_predecessor is not None:
+        identity['structural_predecessor_sha256'] = structural_predecessor['sha256']
+    return identity
 
 
-def validate_dataset(path):
+def validate_dataset(path, structural_predecessor=None):
     import analyze
     import p046_gate
+    structural_predecessor = _structural_reference(structural_predecessor)
     report = read(path)
     selection = report['selection']
     name = 'p001' if read(Path(report['metadata']['baseline_archive_path'])/'manifest.json').get('legacy_api') else 'decoded'
     if selection in FAMILIES:
-        p046_gate._report_groups(report, selection, name, check_sources=True)
+        p046_gate._report_groups(report, selection, name, check_sources=True,
+                                 structural_predecessor=(structural_predecessor
+                                                         if name == 'decoded' else None))
         if selection == 'representative':
             p046_gate._representative_images(report, ref(path))
     else:
         if selection != 'original-mvp' or report.get('workload_subset'):
             raise ValueError('P046 cache accepts complete family or original-MVP datasets only')
         execution_identity.verify_inputs(report)
-        p046_gate._verify_baseline_archive(report,name,check_sources=True)
+        p046_gate._verify_baseline_archive(
+            report, name, check_sources=True,
+            structural_predecessor=(structural_predecessor if name == 'decoded' else None))
         _, runs = analyze._validated_runs(report)
         expected = p046_gate._expected_groups(selection)
         for run in runs:
@@ -62,11 +87,17 @@ def validate_dataset(path):
     return report
 
 
-def admit_dataset(path, cache=CACHE):
-    report = validate_dataset(path)
-    return dataset_cache.admit(path, cache, dataset_identity(report), validator=validate_dataset)
+def admit_dataset(path, cache=None, structural_predecessor=None):
+    structural_predecessor = _structural_reference(structural_predecessor)
+    cache = _cache_root(cache, structural_predecessor)
+    validator = lambda candidate: validate_dataset(candidate, structural_predecessor)
+    report = validator(path)
+    return dataset_cache.admit(path, cache,
+                               dataset_identity(report, structural_predecessor),
+                               validator=validator)
 
-def _comparison(argv: list[str], output: Path, label: str) -> Path:
+def _comparison(argv: list[str], output: Path, label: str, *,
+                structural_predecessor=None, cache=None) -> Path:
     directory = output / label
     if directory.exists():
         raise FileExistsError(f"comparison output already exists: {directory}")
@@ -89,7 +120,12 @@ def _comparison(argv: list[str], output: Path, label: str) -> Path:
                 if line.startswith('model name')), 'unknown'),
             'cpu_quota':Path('/sys/fs/cgroup/cpu.max').read_text().strip()},
         'run_seeds':[seed,seed+1_000_003],'pairs_per_group':30}
-    reused = dataset_cache.lookup(CACHE, expected, validator=validate_dataset)
+    structural_predecessor = _structural_reference(structural_predecessor)
+    cache = _cache_root(cache, structural_predecessor)
+    if structural_predecessor is not None:
+        expected['structural_predecessor_sha256'] = structural_predecessor['sha256']
+    validator = lambda candidate: validate_dataset(candidate, structural_predecessor)
+    reused = dataset_cache.lookup(cache, expected, validator=validator)
     if reused is not None:
         # The phase bundle must retain the actual evidence, not just a pointer
         # into another attempt which could later disappear. Copying is outside
@@ -125,15 +161,19 @@ def _comparison(argv: list[str], output: Path, label: str) -> Path:
         raise ValueError(f"comparison {label} failed production/source stability checks")
     if before_sources != _production_sources() or before_core != _core_source_map():
         raise ValueError(f"candidate source identities changed during comparison {label}")
-    if dataset_identity(report) != expected:
+    if dataset_identity(report, structural_predecessor) != expected:
         raise ValueError('completed dataset differs from requested measurement identity')
-    admit_dataset(report_path)
+    admit_dataset(report_path, cache=cache, structural_predecessor=structural_predecessor)
     return report_path
 
 
 def measure(verify_dir: Path, output: Path, *, cold: bool = True,
-            seed: int = 20261013) -> dict[str, Any]:
+            seed: int = 20261013, structural_predecessor=None, cache=None) -> dict[str, Any]:
     """Run eight full portfolio comparisons and optional predeclared cold controls."""
+    structural_predecessor = _structural_reference(structural_predecessor)
+    if structural_predecessor is not None and not cold:
+        raise ValueError('P056 structural measurement requires both cold-control datasets')
+    cache = _cache_root(cache, structural_predecessor)
     verify_dir, output = Path(verify_dir).resolve(strict=True), Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     shutil.copy2(__file__, output / "helper.executed.py")
@@ -156,7 +196,7 @@ def measure(verify_dir: Path, output: Path, *, cold: bool = True,
             path = _comparison(["--baseline", str(adapter), "--candidate", str(candidate),
                          "--candidate-mode", "compact", "--selection", family,
                          "--pairs", "30", "--seed", str(seed + i * 2 + (baseline_name == "structural"))],
-                        output, label)
+                         output, label, structural_predecessor=structural_predecessor, cache=cache)
             reports[baseline_name][family] = ref(path)
     cold_reports: dict[str, Any] = {}
     if cold:
@@ -167,7 +207,7 @@ def measure(verify_dir: Path, output: Path, *, cold: bool = True,
             path = _comparison(["--baseline", str(adapter), "--candidate", str(candidate),
                          "--candidate-mode", "compact", "--selection", "original-mvp",
                          "--pairs", "30", "--seed", str(seed + 20 + (baseline_name == "structural"))],
-                        output, label)
+                         output, label, structural_predecessor=structural_predecessor, cache=cache)
             cold_reports[baseline_name] = ref(path)
     report = {"schema": "p046-measurements-v1", "status": "passed",
               "timing_evidence": True, "candidate": ref(candidate),
@@ -177,8 +217,14 @@ def measure(verify_dir: Path, output: Path, *, cold: bool = True,
               "cold_controls": cold_reports,
               "commands": ref(output / "commands.jsonl"),
               "pair_count_per_comparison": 30,
-              "portfolio_pair_count": 131400 + (2520 if cold else 0),
+              "portfolio_pair_count": (
+                  sum(len(p046_gate._expected_groups(family)) * 30 * 2
+                      for family in FAMILIES) * 2
+                  + (sum(len(p046_gate._expected_groups("original-mvp")) * 30 * 2
+                         for _ in range(2)) if cold else 0)),
               "cpu_affinity": sorted(os.sched_getaffinity(0))}
+    if structural_predecessor is not None:
+        report['structural_predecessor'] = structural_predecessor
     write_new(output / "report.json", report)
     return report
 
@@ -190,6 +236,7 @@ def main() -> int:
     parser.add_argument("--report",type=Path)
     parser.add_argument("--skip-cold-controls", action="store_true")
     parser.add_argument("--seed", type=int, default=20261013)
+    parser.add_argument("--structural-predecessor", type=Path)
     args = parser.parse_args()
     if args.phase == 'admit':
         if args.report is None:
@@ -198,7 +245,9 @@ def main() -> int:
     else:
         if args.verify_dir is None:
             parser.error('measure requires --verify-dir')
-        value = measure(args.verify_dir, args.output, cold=not args.skip_cold_controls, seed=args.seed)
+        value = measure(args.verify_dir, args.output, cold=not args.skip_cold_controls, seed=args.seed,
+                        structural_predecessor=(ref(args.structural_predecessor)
+                                                if args.structural_predecessor else None))
     print(json.dumps({"phase": args.phase, "status": value.get("status", "passed")}))
     return 0
 

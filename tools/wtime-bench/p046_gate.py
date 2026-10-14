@@ -170,9 +170,156 @@ def _representative_images(report, reference):
     return len(cache)
 
 
+
+P056_CORE_CRATES = ("wtime-runtime", "wtime-types", "wtime-decode", "wtime-validate")
+P056_CORE_FILES = 113
+
+
+class _StructuralPredecessor:
+    """Verified P056 structural predecessor declaration and immutable archive."""
+    def __init__(self, declaration, reference, archive_path, archive_manifest):
+        self.declaration = declaration
+        self.reference = reference
+        self.archive_path = archive_path
+        self.archive_manifest = archive_manifest
+
+
+def _p056_current_core_source_map(repo_root: Path = ROOT) -> dict[str, str]:
+    repo_root = Path(repo_root).resolve()
+    paths = {repo_root / name for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")}
+    for crate in P056_CORE_CRATES:
+        crate_root = repo_root / "crates" / crate
+        if crate_root.is_dir():
+            paths.update(path for path in crate_root.rglob("*.rs") if path.is_file())
+            paths.update(path for path in crate_root.rglob("Cargo.toml") if path.is_file())
+    result = {}
+    for path in sorted(paths):
+        resolved = path.resolve(strict=True)
+        need(resolved.is_relative_to(repo_root), "P056 core source escapes repository root")
+        result[resolved.relative_to(repo_root).as_posix()] = _sha(resolved)
+    return result
+
+
+def _p056_runtime_source_map(core_source_map: dict[str, str]) -> dict[str, str]:
+    return {path: digest for path, digest in core_source_map.items()
+            if path.startswith("crates/wtime-runtime/src/") and path.endswith(".rs")}
+
+
+def _p056_source_map(value: Any, label: str) -> dict[str, str]:
+    need(isinstance(value, dict) and all(isinstance(path, str) and path
+         and _is_sha(digest) for path, digest in value.items()),
+         f"{label} must be a path-to-SHA-256 map")
+    for path in value:
+        relative = Path(path)
+        need(not relative.is_absolute() and ".." not in relative.parts,
+             f"{label} contains an unsafe source path")
+    return dict(value)
+
+
+def _load_structural_predecessor(reference: Any, *,
+                                current_core_source_map: dict[str, str] | None = None
+                                ) -> _StructuralPredecessor:
+    if isinstance(reference, _StructuralPredecessor):
+        return reference
+    need(isinstance(reference, dict) and isinstance(reference.get("path"), str)
+         and _is_sha(reference.get("sha256")),
+         "P056 structural predecessor must be a hashed declaration reference")
+    declaration_path = Path(reference["path"]).resolve(strict=True)
+    need(declaration_path.is_file(), "P056 structural predecessor declaration is not a file")
+    declaration_bytes = declaration_path.read_bytes()
+    need(_sha(declaration_path) == reference["sha256"],
+         "P056 structural predecessor declaration hash is stale")
+    if "bytes" in reference:
+        need(type(reference["bytes"]) is int and reference["bytes"] == len(declaration_bytes),
+             "P056 structural predecessor declaration byte count changed")
+    try:
+        declaration = json.loads(declaration_bytes)
+    except json.JSONDecodeError as error:
+        raise PortfolioError("P056 structural predecessor declaration is invalid JSON") from error
+    required_fields = {"schema", "task", "status", "source_stable", "archive",
+                       "runtime_source_map", "core_source_map", "source_current"}
+    need(isinstance(declaration, dict) and set(declaration) == required_fields,
+         "P056 structural predecessor declaration fields differ")
+    need(declaration.get("schema") == "wtime-p056-predecessor-v1"
+         and declaration.get("task") == "P056" and declaration.get("status") == "passed"
+         and declaration.get("source_stable") is True and declaration.get("source_current") is True,
+         "P056 structural predecessor declaration is not current and passed")
+    archive_ref = declaration.get("archive")
+    need(isinstance(archive_ref, dict) and set(archive_ref) == {"path", "sha256", "bytes"}
+         and isinstance(archive_ref.get("path"), str) and _is_sha(archive_ref.get("sha256"))
+         and type(archive_ref.get("bytes")) is int and archive_ref["bytes"] >= 0,
+         "P056 archive reference is malformed")
+    archive_manifest_path = Path(archive_ref["path"]).resolve(strict=True)
+    need(archive_manifest_path.name == "manifest.json" and archive_manifest_path.is_file(),
+         "P056 immutable archive reference must point to manifest.json")
+    need(_sha(archive_manifest_path) == archive_ref["sha256"]
+         and archive_manifest_path.stat().st_size == archive_ref["bytes"],
+         "P056 immutable archive manifest hash or byte count changed")
+    runtime_map = _p056_source_map(declaration["runtime_source_map"], "P056 runtime_source_map")
+    core_map = _p056_source_map(declaration["core_source_map"], "P056 core_source_map")
+    need(len(core_map) == P056_CORE_FILES,
+         f"P056 core_source_map must cover {P056_CORE_FILES} files")
+    need(runtime_map == _p056_runtime_source_map(core_map) and runtime_map,
+         "P056 runtime_source_map must be the exact runtime Rust subset of core_source_map")
+    root = archive_manifest_path.parent.resolve(strict=True)
+    import baseline as baseline_tool
+    try:
+        manifest = baseline_tool.verify_archive(root)
+    except Exception as error:
+        raise PortfolioError(f"P056 structural predecessor archive failed verification: {error}") from error
+    expected_paths = set(core_map)
+    archive_core = {}
+    for name, row in manifest.get("files", {}).items():
+        if not isinstance(row, dict) or row.get("role") != "source":
+            continue
+        logical = row.get("source_path", name.removeprefix("source/"))
+        if logical in expected_paths:
+            need(logical not in archive_core, "P056 predecessor archive duplicates a core source path")
+            archive_core[logical] = row.get("sha256")
+    need(archive_core == core_map,
+         "P056 predecessor archive full core source map differs from declaration")
+    archive_runtime = _p056_runtime_source_map(archive_core)
+    need(archive_runtime == runtime_map,
+         "P056 predecessor archive runtime source map differs from declaration")
+    current_map = (current_core_source_map if current_core_source_map is not None
+                   else _p056_current_core_source_map())
+    current_map = _p056_source_map(current_map, "P056 current core source map")
+    need(len(current_map) == P056_CORE_FILES and current_map == core_map,
+         "P056 current core differs from the immutable structural predecessor")
+    return _StructuralPredecessor(declaration, dict(reference), archive_manifest_path, manifest)
+
+
 def _verify_baseline_archive(report: dict[str, Any], baseline_name: str,
-                             *, check_sources: bool) -> dict[str, Any] | None:
+                             *, check_sources: bool,
+                             structural_predecessor: Any = None) -> dict[str, Any] | None:
     metadata = report["metadata"]
+    if structural_predecessor is not None:
+        need(baseline_name == "decoded",
+             "P056 structural predecessor can bind only the decoded structural route")
+        predecessor = _load_structural_predecessor(structural_predecessor)
+        adapter_path = Path(metadata.get("baseline_archive_path", "")).resolve(strict=True)
+        try:
+            import baseline as baseline_tool
+            import p123_adapter
+            adapted = p123_adapter.verify(adapter_path)
+        except Exception as error:
+            raise PortfolioError(f"P056 structural decoded adapter failed verification: {error}") from error
+        declaration_archive = predecessor.archive_path.parent.resolve()
+        need(adapted.get("legacy_api") is False and adapted.get("mode") == "decoded",
+             "P056 structural adapter must use current API and decoded mode")
+        need(Path(adapted.get("baseline", "")).resolve() == declaration_archive
+             and adapted.get("baseline_manifest_sha256") == predecessor.declaration["archive"]["sha256"],
+             "P056 structural adapter is not bound to the exact declared immutable archive")
+        need(_sha(adapter_path / "manifest.json") == metadata.get("baseline_manifest_sha256")
+             and adapted.get("binary_sha256") == metadata.get("baseline_binary_sha256"),
+             "P056 structural adapter identity differs from comparison metadata")
+        need(metadata.get("baseline_archive_kind") == "frozen-typed-adapter",
+             "P056 structural baseline must be a frozen typed adapter")
+        try:
+            manifest = baseline_tool.verify_archive(declaration_archive)
+        except Exception as error:
+            raise PortfolioError(f"P056 immutable structural archive failed verification: {error}") from error
+        return {"adapter": adapted, "archive": manifest}
     archive_path = metadata.get("baseline_archive_path")
     if baseline_name == "decoded":
         need(isinstance(archive_path, str) and archive_path,
@@ -246,7 +393,7 @@ def _verify_baseline_archive(report: dict[str, Any], baseline_name: str,
 
 
 def _report_groups(report: dict[str, Any], family: str, baseline_name: str,
-                   *, check_sources: bool) -> dict[str, Any]:
+                   *, check_sources: bool, structural_predecessor: Any = None) -> dict[str, Any]:
     label = f"{baseline_name}/{family}"
     need(type(report.get("schema_version")) is int and report["schema_version"] == 2,
          f"{label} report schema must be version 2")
@@ -296,8 +443,9 @@ def _report_groups(report: dict[str, Any], family: str, baseline_name: str,
     baseline_binary = metadata.get("baseline_binary_sha256")
     need(_is_sha(candidate_binary), f"{label} candidate binary identity is malformed")
     need(_is_sha(baseline_binary), f"{label} baseline binary identity is malformed")
-    archive_record = _verify_baseline_archive(report, baseline_name,
-                                               check_sources=check_sources)
+    archive_record = _verify_baseline_archive(
+        report, baseline_name, check_sources=check_sources,
+        structural_predecessor=structural_predecessor)
     if baseline_name == "decoded":
         need(metadata.get("baseline_archive_kind") in ("current-source-archive", "frozen-typed-adapter"),
              f"{label} decoded baseline archive kind is invalid")
@@ -443,7 +591,8 @@ def _p001_support_map(value: Any) -> tuple[dict[str, bool], dict[str, Any]]:
 
 
 def validate_matrix(reports: Any, *, p001_supported: Any = True,
-                    check_sources: bool = True) -> dict[str, Any]:
+                    check_sources: bool = True,
+                    structural_predecessor: Any = None) -> dict[str, Any]:
     """Validate the full decoded matrix and every P001 route declared supported.
 
     `reports` is `{decoded: {family: report}, p001: {family: report}}`. P001
@@ -451,6 +600,8 @@ def validate_matrix(reports: Any, *, p001_supported: Any = True,
     unsupported rows include a concrete hashed capability receipt.
     """
     need(type(check_sources) is bool, "check_sources must be a strict bool")
+    if structural_predecessor is not None:
+        structural_predecessor = _load_structural_predecessor(structural_predecessor)
     need(isinstance(reports, dict), "portfolio reports must be an object")
     # The public P046 portfolio schema calls the current structural baseline
     # `structural`; keep `decoded` as a direct unit-level alias.
@@ -476,7 +627,9 @@ def validate_matrix(reports: Any, *, p001_supported: Any = True,
         for family, source in family_reports.items():
             report, _digest = _load_json(source, f"{baseline_name}/{family} report")
             identities[(baseline_name, family)] = _report_groups(
-                report, family, baseline_name, check_sources=check_sources)
+                report, family, baseline_name, check_sources=check_sources,
+                structural_predecessor=(structural_predecessor
+                                        if baseline_name == "decoded" else None))
             if check_sources and family == 'representative':
                 _representative_images(report, source)
 
@@ -506,15 +659,17 @@ def validate_matrix(reports: Any, *, p001_supported: Any = True,
                  "pairs_total": identity["pairs_total"]}
         for (matrix, family), identity in identities.items() if matrix == baseline_name
     } for baseline_name in BASELINES}
-    need(sum(row["pairs_total"] for row in counts["decoded"].values()) == 65_700,
-         "decoded full matrix must total 65,700 paired observations")
+    decoded_pair_total = sum(row["pairs_total"] for row in counts["decoded"].values())
+    need(decoded_pair_total == sum(len(_expected_groups(family)) * MIN_PAIRS * 2
+                                   for family in FAMILIES),
+         "decoded full matrix pair total differs from the complete current registry")
     if required_p001:
         p001_pair_total = sum(row["pairs_total"] for row in counts["p001"].values())
     else:
         p001_pair_total = 0
     return {"status": "passed", "candidate_binary_sha256": next(iter(candidate_hashes)),
             "selected_cpu": next(iter(cpu_ids)), "counts": counts,
-            "decoded_pairs_total": 65_700, "p001_pairs_total": p001_pair_total,
+            "decoded_pairs_total": decoded_pair_total, "p001_pairs_total": p001_pair_total,
             "p001_supported": p001_map, "p001_limitations": limitations,
             "reports": identities}
 
@@ -860,8 +1015,10 @@ def _family_statistics(report, identity):
     return statistics
 
 
-def _cold_controls(portfolio, matrix, *, check_sources=True):
+def _cold_controls(portfolio, matrix, *, check_sources=True, structural_predecessor=None):
     """Full original-MVP controls include large preparation and one-shot use."""
+    if structural_predecessor is not None:
+        structural_predecessor = _load_structural_predecessor(structural_predecessor)
     references=portfolio.get('cold_controls')
     need(isinstance(references,dict) and set(references)=={'structural','p001'},
          'both full original-MVP cold controls are required')
@@ -882,7 +1039,11 @@ def _cold_controls(portfolio, matrix, *, check_sources=True):
              'cold controls changed candidate or selected CPU')
         if check_sources:
             execution_identity.verify(metadata.get('candidate_sources'), compare.sources())
-            _verify_baseline_archive(report,'decoded' if baseline_name=='structural' else 'p001',check_sources=True)
+        if baseline_name == 'structural' and structural_predecessor is not None:
+            _verify_baseline_archive(report, 'decoded', check_sources=True,
+                                     structural_predecessor=structural_predecessor)
+        elif check_sources:
+            _verify_baseline_archive(report, 'p001', check_sources=True)
         try:
             _,runs=analyze._validated_runs(report)
         except analyze.ReportError as error:
@@ -1031,22 +1192,29 @@ def evaluate_portfolio(portfolio_path: Path, build_path: Path,
                        optional_build_path: Path | None = None,
                        contract_path: Path | None = None,
                        candidate_build_record_path: Path | None = None,
-                       *, analyzer_fn=None, check_sources: bool = True) -> dict[str, Any]:
+                       *, analyzer_fn=None, check_sources: bool = True,
+                       structural_predecessor: Any = None) -> dict[str, Any]:
     """Shared P046 entry point. Validates all inputs and computes eight analyses."""
     portfolio, portfolio_sha = _load_json(portfolio_path, "P046 portfolio input")
     need(portfolio.get("schema") == "p046-portfolio-v1",
          "portfolio schema must be p046-portfolio-v1")
+    structural_reference = (portfolio.get("structural_predecessor")
+                            if structural_predecessor is None else structural_predecessor)
+    if structural_reference is not None:
+        structural_predecessor = _load_structural_predecessor(structural_reference)
     reports = portfolio.get("reports")
     need(isinstance(reports, dict) and set(reports) == {"structural", "p001"},
          "portfolio must bind structural and P001 report matrices")
     p123, support = _load_p123_support(portfolio.get("p123"), check_sources=check_sources)
     matrix = validate_matrix(reports, p001_supported=support,
-                             check_sources=check_sources)
+                             check_sources=check_sources,
+                             structural_predecessor=structural_predecessor)
     p121 = validate_p121(portfolio.get("p121"), check_sources=check_sources)
     build = _build_decision(Path(build_path), optional_build_path, portfolio,
                             candidate_build_record_path, check_sources=check_sources)
     retained = _retained_gate(portfolio.get("retained"), check_sources=check_sources)
-    cold = _cold_controls(portfolio,matrix,check_sources=check_sources) if check_sources or portfolio.get('cold_controls') else {}
+    cold = _cold_controls(portfolio, matrix, check_sources=check_sources,
+                          structural_predecessor=structural_predecessor) if check_sources or portfolio.get('cold_controls') else {}
 
     analyzer_fn = analyzer_fn or analyze.analyze
     summaries: dict[str, Any] = {}
@@ -1096,7 +1264,8 @@ def evaluate_portfolio(portfolio_path: Path, build_path: Path,
         reasons.append("relative size/build growth requires documented packaging review")
     if build["relative_growth_explanation_missing"] or retained["explanation_missing"]:
         reasons.append("relative growth lacks the required simplification/packaging decision")
-    return {"schema": "wtime-p046-portfolio-statistics-v1", "task": "P046",
+    return {"schema": "wtime-p046-portfolio-statistics-v1",
+            "task": "P056" if structural_predecessor is not None else "P046",
             "status": "passed", "decision": decision, "reasons": reasons,
             "source_binding": {"portfolio_sha256": portfolio_sha,
                                "candidate_binary_sha256": matrix["candidate_binary_sha256"],

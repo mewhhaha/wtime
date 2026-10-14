@@ -50,8 +50,9 @@ def compute(repo, task, comparison, build, optional_build, contract, candidate_b
     repo = Path(repo).resolve(strict=True)
     bench = repo / 'tools/wtime-bench'
     sys.path.insert(0, str(bench))
-    if task == 'P046':
-        return compute_portfolio(repo, comparison, build, optional_build, contract, candidate_build, output)
+    if task in ('P046', 'P056'):
+        return compute_portfolio(repo, comparison, build, optional_build, contract, candidate_build, output,
+                                 task=task)
     report = Path(comparison)
     report = report if report.is_file() else report / 'report.json'
     if read_json(report).get('schema') == 'wtime-focused-comparison-v1':
@@ -110,7 +111,8 @@ def compute_candidate(repo, task, report, build, optional_build, contract, candi
     return record
 
 
-def compute_portfolio(repo, portfolio, build, optional_build, contract, candidate_build, output):
+def compute_portfolio(repo, portfolio, build, optional_build, contract, candidate_build, output,
+                      *, task='P046'):
     """One full-matrix producer call; each distinct report is analyzed once."""
     repo = Path(repo).resolve(strict=True)
     bench = repo / 'tools/wtime-bench'
@@ -132,18 +134,23 @@ def compute_portfolio(repo, portfolio, build, optional_build, contract, candidat
     for name in ('p121', 'p123', 'retained'):
         reference = declaration[name]
         inputs[name] = bound(reference)
+    if task == 'P056':
+        need(isinstance(declaration.get('structural_predecessor'), dict),
+             'P056 requires its immutable predecessor declaration')
+        inputs['structural_predecessor'] = bound(declaration['structural_predecessor'])
     for name, path in [('optional_build', optional_build), ('contract', contract), ('candidate_build', candidate_build)]:
         if path:
             inputs[name] = normal(path)
     result = gate.evaluate_portfolio(Path(portfolio), Path(build),
         Path(optional_build) if optional_build else None,
         Path(contract) if contract else None, Path(candidate_build) if candidate_build else None)
+    need(result.get('task') == task, 'portfolio task differs from requested statistics task')
     analysis = result.pop('analysis')
     source_binding = result.pop('source_binding')
     from .artifacts import verify_normal
     for reference in inputs.values():
         verify_normal(reference)
-    record = {'schema': 'wtime-verification-statistics-v1', 'task': 'P046', 'status': 'passed',
+    record = {'schema': 'wtime-verification-statistics-v1', 'task': task, 'status': 'passed',
               'inputs': inputs, 'analysis': analysis, 'decision': result,
               'source_binding': source_binding, 'statistics_computations': 1,
               'dataset_statistics_computations': result['dataset_statistics_computations'],
@@ -172,7 +179,7 @@ def audit(path, repo):
         analysis = result.pop('analysis')
         need(analysis == record['analysis'] and result == record['decision'], 'recomputed candidate decision differs')
         return {'status':'passed','recomputed':True,'decision_recomputed':True,'record_sha256':sha(path)}
-    if record['task'] == 'P046':
+    if record['task'] in ('P046', 'P056'):
         need(normal(bench/'p046_gate.py') == record['inputs']['gate']
              and normal(bench/'analyze.py') == record['inputs']['analyzer'],
              'audit portfolio producer paths differ')

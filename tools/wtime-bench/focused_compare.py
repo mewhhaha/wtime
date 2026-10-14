@@ -134,7 +134,7 @@ def _p128_scalar_row(entry, n, stage, mode, batch):
     need(type(n) is int and n == n_expected, 'P128 scalar input differs from admitted fixed input')
     need(stage in model.STAGES, 'unsupported P128 scalar stage: '+str(stage))
     need(mode in model.MODES, 'unsupported P128 scalar mode: '+str(mode))
-    need(type(batch) is int and 1 <= batch <= 100000, 'invalid P128 scalar batch')
+    need(type(batch) is int and 1 <= batch <= compare.SCALAR_MAX_BATCH, 'invalid P128 scalar batch')
     need(stage == 'warm_call' or batch == 1, 'P128 cold stages require batch one')
     driver = entry.get('driver', {'kind': 'plain', 'profile': model.PROFILE})
     need(driver == {'kind': 'plain', 'profile': model.PROFILE},
@@ -311,8 +311,8 @@ def calibrate(entry, observer):
     """Confirm the same requested batch reaches 20 ms on BOTH actual sides."""
     workload_id = entry.get('id', '<unknown>')
     maximum = 100_000
-    if entry['oracle'].get('module') == 'run.py':
-        maximum = 1_000_000
+    if entry['oracle'].get('module') in ('run.py', 'scalar_workloads.py', 'scalar_p128_workloads.py'):
+        maximum = compare.SCALAR_MAX_BATCH
     if entry['oracle'].get('module') == 'thread_workloads.py':
         maximum = 128
     if entry['oracle'].get('module') == 'representative_workloads.py':

@@ -238,7 +238,7 @@ class P123TypedAdapterTests(unittest.TestCase):
 
     def test_p123_typed_scalar_and_memory_routes_preserve_oracles(self):
         report = producer.validate_report(synthetic_report())
-        for family, expected_rows in (("scalar", 85), ("memory", 35)):
+        for family, expected_rows in (("scalar", 85), ("memory", 53)):
             with self.subTest(family=family):
                 value = report["families"][family]
                 self.assertEqual(value["supported"], expected_rows)
