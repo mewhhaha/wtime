@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=86, todo=47, in_progress=0, blocked=0, deferred=0 (133 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=87, todo=47, in_progress=0, blocked=0, deferred=0 (134 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -136,6 +136,7 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P131 — Prepare bounded Register prefixes for decoded handoff](05-register-executor/P131-bounded-register-prefix.md) | foundation / portable | P057, P058, P063, P129 |
 | [P132 — Extract transactional per-function Register preparation](05-register-executor/P132-extract-transactional-register-preparation.md) | foundation / portable | P065, P130, P131 |
 | [P133 — Add a bounded lazy Register preparation cache](05-register-executor/P133-bounded-lazy-register-cache.md) | foundation / portable | P132 |
+| [P134 — Integrate opt-in lazy Register entry](05-register-executor/P134-opt-in-lazy-register-entry.md) | foundation / portable | P133 |
 
 ### 06-memory-gc-simd-and-continuations
 

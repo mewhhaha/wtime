@@ -11,8 +11,9 @@ mod integer;
 mod ir;
 mod lower;
 mod memory;
+pub(crate) use cache::Cache;
 #[cfg(feature = "execution-reference")]
 pub(crate) use execute::materialize;
 pub(crate) use execute::{
-    Activation, PreparedModule, Step, activate, bindings_admitted, logical_height, step,
+    Activation, PreparedModule, Step, activate_entry, logical_height, step,
 };

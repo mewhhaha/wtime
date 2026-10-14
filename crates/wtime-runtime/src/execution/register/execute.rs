@@ -1,4 +1,5 @@
 //! Whole-function numeric tier. The caller charges the original source boundary.
+use super::cache::CachedFunction;
 use super::{
     control::{MovePlan, MoveSource, MoveStep},
     exits, float, integer,
@@ -9,6 +10,7 @@ use super::{
 use crate::execution::{Frame, Label, arity};
 use crate::{Immediate, Module, Result, Store, ValType, Value, trap};
 use std::mem::size_of;
+use std::sync::Arc;
 const MAX_WORK: usize = 100_000;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_ACTIVATION_BYTES: usize = 2 * 1024 * 1024;
@@ -280,6 +282,8 @@ fn prepare_checked(
 #[derive(Clone)]
 pub(crate) struct Activation {
     slots: Vec<u64>,
+    // One entry-time pin. Dispatch borrows it without per-instruction Arc clones.
+    artifact: Option<Arc<CachedFunction>>,
 }
 fn bits(value: Value) -> Option<u64> {
     match value {
@@ -310,23 +314,41 @@ fn write(slots: &mut [u64], index: u32, value: u64) -> Result<()> {
         .ok_or_else(|| trap("register slot index"))? = value;
     Ok(())
 }
-fn function<'a>(frame: &Frame, store: &'a Store) -> Result<(&'a Module, &'a PreparedFunction)> {
+fn prepared<'a>(
+    module: &'a Module,
+    body: usize,
+    artifact: &'a Option<Arc<CachedFunction>>,
+) -> Result<&'a PreparedFunction> {
+    artifact
+        .as_ref()
+        .map(|cached| &cached.function)
+        .or_else(|| {
+            module
+                .data
+                .register
+                .as_ref()
+                .and_then(|program| program.function(body))
+        })
+        .ok_or_else(|| trap("missing admitted register function"))
+}
+fn function<'a>(frame: &'a Frame, store: &'a Store) -> Result<(&'a Module, &'a PreparedFunction)> {
     let module = &store.instances[frame.function.instance].module;
-    let function = module
-        .data
+    let artifact = &frame
         .register
         .as_ref()
-        .and_then(|program| program.function(frame.function.body))
-        .ok_or_else(|| trap("missing admitted register function"))?;
+        .ok_or_else(|| trap("register activation"))?
+        .artifact;
+    let function = prepared(module, frame.function.body, artifact)?;
     Ok((module, function))
 }
-pub(crate) fn activate(
+fn activate_prepared(
     module: &Module,
     body: usize,
     locals: &[Value],
     labels: &mut Vec<Label>,
+    artifact: Option<Arc<CachedFunction>>,
 ) -> Option<Activation> {
-    let function = module.data.register.as_ref()?.function(body)?;
+    let function = prepared(module, body, &artifact).ok()?;
     let recipe = function.lowered.program.materialization(module, 0).ok()?;
     if recipe.locals.len() != locals.len() {
         return None;
@@ -360,19 +382,29 @@ pub(crate) fn activate(
     }
     slots.resize(count, 0);
     *labels = prepared_labels;
-    Some(Activation { slots })
+    Some(Activation { slots, artifact })
 }
-pub(crate) fn bindings_admitted(store: &Store, instance: usize, body: usize) -> bool {
-    let Some(instance) = store.instances.get(instance) else {
-        return false;
+pub(crate) fn activate_entry(
+    store: &Store,
+    instance: usize,
+    body: usize,
+    locals: &[Value],
+    labels: &mut Vec<Label>,
+) -> Option<Activation> {
+    let module = &store.instances.get(instance)?.module;
+    let artifact = if let Some(cache) = &module.data.register_cache {
+        Some(cache.enter(module, body)?)
+    } else {
+        None
     };
-    let Some(function) = instance
-        .module
-        .data
-        .register
-        .as_ref()
-        .and_then(|program| program.function(body))
-    else {
+    let function = prepared(module, body, &artifact).ok()?;
+    if !bindings_for_function(store, instance, function) {
+        return None;
+    }
+    activate_prepared(module, body, locals, labels, artifact)
+}
+fn bindings_for_function(store: &Store, instance: usize, function: &PreparedFunction) -> bool {
+    let Some(instance) = store.instances.get(instance) else {
         return false;
     };
     function
@@ -391,6 +423,31 @@ pub(crate) fn bindings_admitted(store: &Store, instance: usize, body: usize) -> 
             memory::eligible(memory.ty) && memory.shared.is_none()
         })
 }
+#[cfg(test)]
+fn activate(
+    module: &Module,
+    body: usize,
+    locals: &[Value],
+    labels: &mut Vec<Label>,
+) -> Option<Activation> {
+    activate_prepared(module, body, locals, labels, None)
+}
+#[cfg(test)]
+pub(super) fn bindings_admitted(store: &Store, instance: usize, body: usize) -> bool {
+    let Some(instance_data) = store.instances.get(instance) else {
+        return false;
+    };
+    let Some(function) = instance_data
+        .module
+        .data
+        .register
+        .as_ref()
+        .and_then(|program| program.function(body))
+    else {
+        return false;
+    };
+    bindings_for_function(store, instance, function)
+}
 pub(crate) fn logical_height(frame: &Frame, store: &Store) -> Result<usize> {
     let (_, function) = function(frame, store)?;
     let recipe = function
@@ -404,17 +461,18 @@ pub(crate) fn logical_height(frame: &Frame, store: &Store) -> Result<usize> {
         .ok_or_else(|| trap("register logical height overflow"))
 }
 pub(crate) fn materialize(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> Result<()> {
-    let (module, function) = function(frame, store)?;
+    let module = &store.instances[frame.function.instance].module;
+    let activation = frame
+        .register
+        .as_ref()
+        .ok_or_else(|| trap("register activation"))?;
+    let function = prepared(module, frame.function.body, &activation.artifact)?;
     let recipe = function
         .lowered
         .program
         .materialization(module, frame.pc)
         .map_err(|_| trap("register materialization identity"))?;
-    let slots = &frame
-        .register
-        .as_ref()
-        .ok_or_else(|| trap("register activation"))?
-        .slots;
+    let slots = &activation.slots;
     for (index, ty) in recipe.locals.iter().enumerate() {
         frame.locals[index] = value(*ty, read(slots, index as u32)?)?;
     }
@@ -484,12 +542,11 @@ fn results(
 pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store) -> Result<Step> {
     let instance = &store.instances[frame.function.instance];
     let module = &instance.module;
-    let function = module
-        .data
+    let activation = frame
         .register
-        .as_ref()
-        .and_then(|program| program.function(frame.function.body))
-        .ok_or_else(|| trap("missing admitted register function"))?;
+        .as_mut()
+        .ok_or_else(|| trap("register activation"))?;
+    let function = prepared(module, frame.function.body, &activation.artifact)?;
     let program = &function.lowered.program;
     let pc = frame.pc;
     if matches!(program.operation(pc), Some(Operation::ExitToDecoded)) {
@@ -521,11 +578,7 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
     frame.pc = pc
         .checked_add(1)
         .ok_or_else(|| trap("register pc overflow"))?;
-    let bank = &mut frame
-        .register
-        .as_mut()
-        .ok_or_else(|| trap("register activation"))?
-        .slots;
+    let bank = &mut activation.slots;
     let mut taken = false;
     let mut table_depth = None;
     let next = match program
@@ -722,4 +775,5 @@ mod tests {
     include!("../../../tests/performance/p065_private.rs");
     include!("../../../tests/performance/p132_inventory.rs");
     include!("../../../tests/performance/p132_private.rs");
+    include!("../../../tests/performance/p134_private.rs");
 }

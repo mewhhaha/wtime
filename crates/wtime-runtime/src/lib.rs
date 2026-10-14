@@ -77,6 +77,8 @@ pub enum ExecutionPolicy {
 pub struct Engine {
     id: u64,
     policy: ExecutionPolicy,
+    #[cfg(feature = "register-executor")]
+    register_entry_threshold: Option<u64>,
     config: Config,
     canonical: Arc<std::sync::Mutex<canonical::CanonicalTypes>>,
 }
@@ -117,12 +119,26 @@ impl Engine {
         Ok(Self {
             id,
             policy,
+            #[cfg(feature = "register-executor")]
+            register_entry_threshold: None,
             config,
             canonical: Arc::new(std::sync::Mutex::new(canonical)),
         })
     }
     pub fn execution_policy(&self) -> ExecutionPolicy {
         self.policy
+    }
+    /// Opt-in Register preparation at function entry. A positive threshold
+    /// counts entries across Stores sharing a Module; cold entries use decoded
+    /// execution. The ordinary Register constructor prepares eagerly.
+    #[cfg(feature = "register-executor")]
+    pub fn with_register_entry_threshold(config: Config, threshold: u64) -> Result<Self> {
+        if threshold == 0 {
+            return Err(err(ErrorKind::Host, "register entry threshold must be positive"));
+        }
+        let mut engine = Self::with_execution_policy(config, ExecutionPolicy::Register)?;
+        engine.register_entry_threshold = Some(threshold);
+        Ok(engine)
     }
     pub fn compile(&self, bytes: &[u8]) -> Result<Module> {
         let validated =
@@ -146,6 +162,8 @@ impl Engine {
                 compact: None,
                 #[cfg(feature = "register-executor")]
                 register: None,
+                #[cfg(feature = "register-executor")]
+                register_cache: None,
                 control,
                 canonical: ids,
                 inner: validated,
@@ -167,8 +185,13 @@ impl Engine {
         let module = {
             let mut module = module;
             if self.policy == ExecutionPolicy::Register {
-                let prepared = execution::register::PreparedModule::prepare(&module);
-                if let Some(data) = Arc::get_mut(&mut module.data) { data.register = prepared; }
+                if let Some(threshold) = self.register_entry_threshold {
+                    let cache = execution::register::Cache::with_threshold(&module, threshold);
+                    if let Some(data) = Arc::get_mut(&mut module.data) { data.register_cache = cache; }
+                } else {
+                    let prepared = execution::register::PreparedModule::prepare(&module);
+                    if let Some(data) = Arc::get_mut(&mut module.data) { data.register = prepared; }
+                }
             }
             module
         };
@@ -185,6 +208,8 @@ struct ModuleData {
     compact: Option<execution::compact::PreparedModule>,
     #[cfg(feature = "register-executor")]
     register: Option<execution::register::PreparedModule>,
+    #[cfg(feature = "register-executor")]
+    register_cache: Option<Arc<execution::register::Cache>>,
     control: ControlMap,
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,

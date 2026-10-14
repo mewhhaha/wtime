@@ -1,0 +1,363 @@
+{
+  "schema_version": 1,
+  "task": "P134",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P134-before/manifest.json",
+        "target/performance/P134-before/source/**/*",
+        "target/performance/P134-before/binary/**/*",
+        "target/performance/P134-before/fixtures/**/*",
+        "target/performance/P134-before/runs/**/*",
+        "target/performance/P134-before/historical_reports/**/*"
+      ],
+      "settings": {
+        "manifest_sha256": "c07542121418df9ff55d1e933dfb013b262befd53b1e5c557a5b9561cbdad755",
+        "mode": "register",
+        "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+        "repository_commit": "4ed0c0b1c4e9f905db1948d256d093551329f0ff"
+      }
+    },
+    "p001": {
+      "paths": [
+        "target/performance/baseline/manifest.json",
+        "target/performance/baseline/binary/**/*",
+        "target/performance/baseline/fixtures/**/*",
+        "target/performance/baseline/historical_reports/**/*",
+        "target/performance/baseline/runs/**/*",
+        "target/performance/baseline/source/**/*"
+      ],
+      "settings": {
+        "manifest_sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472",
+        "binary_sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498",
+        "maximum_attempted_work": 100000,
+        "maximum_retained_metadata_bytes": 1048576,
+        "maximum_cache_entries": 64
+      }
+    },
+    "completed_foundations": {
+      "paths": [
+        "docs/benchmarks/performance/P133-completion.json",
+        "docs/benchmarks/performance/P133-evidence.json",
+        "docs/benchmarks/performance/P133-verification.json",
+        "docs/architecture/register-cache.md",
+        "target/performance/P133/shared-finalization/attempt-0002/evidence.json"
+      ],
+      "settings": {
+        "completion_sha256": "f7a9a1c7888434db84492f1ee921cc70e52aa8b39e39e3fcfe10a2479901add0",
+        "evidence_sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7",
+        "architecture_sha256": "01ca2597e01405af175aeea0567c61f8257df3485a0de9b5e3ac2a5396f5161f",
+        "contract_sha256": "99b1c35b1c0e95af52b96a954325d0cbcdc56b72680a166f89b599c7d1a268dc"
+      }
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "optional_paths": [".cargo/config", ".cargo/config.toml"],
+      "paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat"
+      ]
+    },
+    "fixtures": {
+      "paths": ["crates/wtime-runtime/tests/fixtures/**"]
+    },
+    "test_sources": {
+      "paths": ["crates/wtime-runtime/tests/**/*.rs"]
+    },
+    "task_plan": {
+      "paths": [
+        "task-plans/performance/05-register-executor/P133-bounded-lazy-register-cache.md",
+        "task-plans/performance/05-register-executor/P134-opt-in-lazy-register-entry.md",
+        "task-plans/performance/ARCHITECTURE.md",
+        "docs/architecture/register-cache.md"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/verification/producers/p134.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "p134-entry",
+        "uses": ["runtime", "compilation", "fixtures", "test_sources"],
+        "commands": [
+          {
+            "name": "p134-entry",
+            "argv": [
+              "cargo", "test", "--locked", "-p", "wtime-runtime",
+              "--features", "register-executor,execution-reference",
+              "p134_", "--", "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p134-entry",
+            "features": ["register-executor", "execution-reference"],
+            "minimum_passed": 5,
+            "required_names": [
+              "p134_cold_hot_entry_threshold_and_diagnostics",
+              "p134_shared_module_concurrency_and_store_ownership",
+              "p134_host_effect_fuel_and_foreign_refusal",
+              "p134_eviction_pin_and_continuation_resume_without_reentry",
+              "p134_activation_pin_survives_eviction"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "p133-cache-regression",
+        "uses": ["runtime", "compilation", "fixtures", "test_sources"],
+        "commands": [
+          {
+            "name": "p133-cache-regression",
+            "argv": [
+              "cargo", "test", "--locked", "-p", "wtime-runtime",
+              "--features", "register-executor,execution-reference",
+              "p133_", "--", "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p133-cache-regression",
+            "features": ["register-executor", "execution-reference"],
+            "minimum_passed": 4,
+            "required_names": [
+              "p133_cold_threshold_and_single_publish",
+              "p133_concurrent_duplicate_uses_one_unlocked_builder",
+              "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+              "p133_fifo_eviction_pinned_lifetime_and_budget_churn"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "p065-capture-regression",
+        "uses": ["runtime", "compilation", "fixtures", "test_sources"],
+        "commands": [
+          {
+            "name": "p065-capture-regression",
+            "argv": [
+              "cargo", "test", "--locked", "-p", "wtime-runtime",
+              "--features", "register-executor,execution-reference",
+              "p065_", "--", "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p065-capture-regression",
+            "features": ["register-executor", "execution-reference"],
+            "minimum_passed": 6,
+            "required_names": [
+              "p065_outer_reference_survives_reentrant_collection",
+              "p065_capture_retains_numeric_state_and_source_cursor",
+              "p065_cross_module_exact_suspend_and_resource_controls",
+              "p065_reference_and_vector_frames_decline",
+              "p065_exception_unwind_preserves_numeric_payload",
+              "p065_root_barrier_recipes_are_complete"
+            ]
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/runtime.json",
+    "pointer": "/runtime_source_map",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/lib.rs",
+      "crates/wtime-runtime/src/execution.rs",
+      "crates/wtime-runtime/src/execution/register/mod.rs",
+      "crates/wtime-runtime/src/execution/register/cache.rs",
+      "crates/wtime-runtime/src/execution/register/execute.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/tests/performance/p134.rs",
+      "crates/wtime-runtime/tests/performance/p134_private.rs"
+    ]
+  },
+  "stages": {
+    "freeze": {
+      "uses": ["predecessor", "p001", "completed_foundations", "task_plan", "tooling"],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}", "-B", "{repo}/tools/verification/producers/p134.py",
+            "freeze", "--output", "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json",
+        "runtime_map": "{stage}/freeze/runtime.json"
+      },
+      "checks": [
+        {"artifact": "report", "pointer": "/status", "op": "equal", "value": "passed"},
+        {"artifact": "report", "pointer": "/timing_evidence", "op": "equal", "value": false},
+        {"artifact": "report", "pointer": "/predecessor_commit", "op": "equal", "value": "4ed0c0b1c4e9f905db1948d256d093551329f0ff"},
+        {"artifact": "report", "pointer": "/predecessor_manifest_sha256_pinned", "op": "equal", "value": "c07542121418df9ff55d1e933dfb013b262befd53b1e5c557a5b9561cbdad755"},
+        {"artifact": "report", "pointer": "/p001/max_work", "op": "equal", "value": 100000},
+        {"artifact": "report", "pointer": "/p001/max_metadata_bytes", "op": "equal", "value": 1048576},
+        {"artifact": "report", "pointer": "/p001/max_cache_entries", "op": "equal", "value": 64},
+        {"artifact": "report", "pointer": "/p133/outcome", "op": "equal", "value": "contract_only"},
+        {"artifact": "report", "pointer": "/runtime_source_file_count", "op": "positive"}
+      ]
+    },
+    "verify": {
+      "uses": ["runtime", "compilation", "fixtures", "test_sources", "tooling", "task_plan"],
+      "dependencies": ["freeze"],
+      "commands": [
+        {
+          "name": "register-semantics",
+          "argv": ["cargo", "test", "--locked", "-p", "wtime-runtime", "--features", "register-executor,execution-reference", "--", "--nocapture"]
+        },
+        {
+          "name": "combined-semantics",
+          "argv": ["cargo", "test", "--locked", "-p", "wtime-runtime", "--features", "compact-executor,register-executor,execution-reference", "--", "--nocapture"]
+        },
+        {
+          "name": "default-policy",
+          "argv": ["cargo", "test", "--locked", "-p", "wtime-runtime", "--test", "performance", "p132_module_preparation_remains_policy_neutral", "--", "--nocapture"]
+        },
+        {
+          "name": "default-build-budget",
+          "argv": ["{python}", "-B", "{repo}/tools/checks/build_budget.py", "--output", "{stage}/default-build.json"]
+        },
+        {
+          "name": "register-build-budget",
+          "argv": ["{python}", "-B", "{repo}/tools/checks/build_budget.py", "--features", "wtime-runtime/register-executor", "--output", "{stage}/register-build.json"]
+        },
+        {
+          "name": "proof",
+          "argv": [
+            "{python}", "-B", "{repo}/tools/verification/producers/p134.py", "verify",
+            "--output", "{stage}/proof",
+            "--register-log", "{stage}/register-semantics.stdout",
+            "--register-stderr", "{stage}/register-semantics.stderr",
+            "--combined-log", "{stage}/combined-semantics.stdout",
+            "--default-log", "{stage}/default-policy.stdout",
+            "--default-build", "{stage}/default-build.json",
+            "--register-build", "{stage}/register-build.json",
+            "--freeze-report", "{freeze_dir}/freeze/report.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "register_log": "{stage}/register-semantics.stdout",
+        "register_stderr": "{stage}/register-semantics.stderr",
+        "combined_log": "{stage}/combined-semantics.stdout",
+        "default_log": "{stage}/default-policy.stdout",
+        "default_build": "{stage}/default-build.json",
+        "register_build": "{stage}/register-build.json",
+        "proof": "{stage}/proof/report.json"
+      },
+      "tests": [
+        {
+          "command": "register-semantics",
+          "features": ["register-executor", "execution-reference"],
+          "minimum_passed": 15,
+          "unfiltered": true,
+          "required_names": [
+            "p134_cold_hot_entry_threshold_and_diagnostics",
+            "p134_shared_module_concurrency_and_store_ownership",
+            "p134_host_effect_fuel_and_foreign_refusal",
+            "p134_eviction_pin_and_continuation_resume_without_reentry",
+            "p134_activation_pin_survives_eviction",
+            "p133_cold_threshold_and_single_publish",
+            "p133_concurrent_duplicate_uses_one_unlocked_builder",
+            "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+            "p133_fifo_eviction_pinned_lifetime_and_budget_churn",
+            "p065_outer_reference_survives_reentrant_collection",
+            "p065_capture_retains_numeric_state_and_source_cursor",
+            "p065_cross_module_exact_suspend_and_resource_controls",
+            "p065_reference_and_vector_frames_decline",
+            "p065_exception_unwind_preserves_numeric_payload",
+            "p065_root_barrier_recipes_are_complete"
+          ]
+        },
+        {
+          "command": "combined-semantics",
+          "features": ["compact-executor", "register-executor", "execution-reference"],
+          "minimum_passed": 15,
+          "unfiltered": true,
+          "required_names": [
+            "p134_cold_hot_entry_threshold_and_diagnostics",
+            "p134_shared_module_concurrency_and_store_ownership",
+            "p134_host_effect_fuel_and_foreign_refusal",
+            "p134_eviction_pin_and_continuation_resume_without_reentry",
+            "p134_activation_pin_survives_eviction",
+            "p133_cold_threshold_and_single_publish",
+            "p133_concurrent_duplicate_uses_one_unlocked_builder",
+            "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+            "p133_fifo_eviction_pinned_lifetime_and_budget_churn",
+            "p065_outer_reference_survives_reentrant_collection",
+            "p065_capture_retains_numeric_state_and_source_cursor",
+            "p065_cross_module_exact_suspend_and_resource_controls",
+            "p065_reference_and_vector_frames_decline",
+            "p065_exception_unwind_preserves_numeric_payload",
+            "p065_root_barrier_recipes_are_complete"
+          ]
+        },
+        {
+          "command": "default-policy",
+          "features": [],
+          "minimum_passed": 1,
+          "required_names": ["p132_module_preparation_remains_policy_neutral"]
+        }
+      ],
+      "checks": [
+        {"artifact": "proof", "pointer": "/status", "op": "equal", "value": "passed"},
+        {"artifact": "proof", "pointer": "/timing_evidence", "op": "equal", "value": false},
+        {"artifact": "proof", "pointer": "/performance_candidate", "op": "equal", "value": false},
+        {"artifact": "proof", "pointer": "/decision", "op": "equal", "value": "contract_only"},
+        {"artifact": "proof", "pointer": "/counts/p134_named_cases", "op": "equal", "value": 5},
+        {"artifact": "proof", "pointer": "/counts/p133_regression_named_cases", "op": "equal", "value": 4},
+        {"artifact": "proof", "pointer": "/counts/p065_regression_named_cases", "op": "equal", "value": 6},
+        {"artifact": "proof", "pointer": "/build_budgets/default/default_dependency_closure_pass", "op": "equal", "value": true},
+        {"artifact": "proof", "pointer": "/build_budgets/register/default_dependency_closure_pass", "op": "equal", "value": true}
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": ["freeze", "verify"],
+    "outcome": "contract_only",
+    "limitations": [
+      "Opt-in lazy Register entry, cache integration, frame/pin and continuation semantics, and default/optional build budgets only; no timing or performance promotion is claimed."
+    ]
+  }
+}

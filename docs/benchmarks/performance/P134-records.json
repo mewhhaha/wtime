@@ -1,0 +1,314 @@
+{
+  "schema": "wtime-p134-durable-records-v1",
+  "task": "P134",
+  "status": "done",
+  "outcome": "contract_only",
+  "timing_evidence": false,
+  "candidate_promoted": false,
+  "copies": [
+    {
+      "source": {
+        "path": "target/performance/P134/shared-finalization/attempt-0001/completion.json",
+        "sha256": "855cdac4f67472c5a8552a4750278a0b48bf67f9f2adc91231be4a846248e3e1",
+        "bytes": 503
+      },
+      "copy_path": "docs/benchmarks/performance/P134-completion.json",
+      "copy_sha256": "855cdac4f67472c5a8552a4750278a0b48bf67f9f2adc91231be4a846248e3e1",
+      "copy_bytes": 503,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/performance/P134/shared-finalization/attempt-0001/evidence.json",
+        "sha256": "e03bc0fa5d417a131158858f56739749b3fdf4eb4e4857db52f7b02c2bcd30c5",
+        "bytes": 1570
+      },
+      "copy_path": "docs/benchmarks/performance/P134-evidence.json",
+      "copy_sha256": "e03bc0fa5d417a131158858f56739749b3fdf4eb4e4857db52f7b02c2bcd30c5",
+      "copy_bytes": 1570,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P134/freeze/attempt-0001/freeze/report.json",
+        "sha256": "41de586fefd7383d05c81fbbed249c23ccb323422514ad623e5e6e8f80b2762b",
+        "bytes": 20742
+      },
+      "copy_path": "docs/benchmarks/performance/P134-freeze.json",
+      "copy_sha256": "41de586fefd7383d05c81fbbed249c23ccb323422514ad623e5e6e8f80b2762b",
+      "copy_bytes": 20742,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P134/verify/attempt-0001/proof/report.json",
+        "sha256": "842e4d3e6857406d5ffbeb054fc813678ebed3910e7414282f0738661fc86b05",
+        "bytes": 4813
+      },
+      "copy_path": "docs/benchmarks/performance/P134-proof.json",
+      "copy_sha256": "842e4d3e6857406d5ffbeb054fc813678ebed3910e7414282f0738661fc86b05",
+      "copy_bytes": 4813,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P134/verify/attempt-0001/default-build.json",
+        "sha256": "800490448cea73d37b80ef6cae11b84cbbb0ff5443ecf6f12fe53a3baa828c05",
+        "bytes": 330120
+      },
+      "copy_path": "docs/benchmarks/performance/P134-default-build.json",
+      "copy_sha256": "800490448cea73d37b80ef6cae11b84cbbb0ff5443ecf6f12fe53a3baa828c05",
+      "copy_bytes": 330120,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P134/verify/attempt-0001/register-build.json",
+        "sha256": "a7576f9e8c2abc64372833064a6802807ed73b9a4a9b073c00bd0ef9f13f7796",
+        "bytes": 330283
+      },
+      "copy_path": "docs/benchmarks/performance/P134-register-build.json",
+      "copy_sha256": "a7576f9e8c2abc64372833064a6802807ed73b9a4a9b073c00bd0ef9f13f7796",
+      "copy_bytes": 330283,
+      "original_copy_bytes": true
+    }
+  ],
+  "phase_receipts": {
+    "freeze": {
+      "path": "target/verification/runs/P134/freeze/attempt-0001/receipt.json",
+      "sha256": "8d288ceee79d800ce28626d96d4898861439897c178bd214ea9ea83da8b7067b",
+      "bytes": 310206
+    },
+    "verify": {
+      "path": "target/verification/runs/P134/verify/attempt-0001/receipt.json",
+      "sha256": "ae0213b71946bf3cc31a4b84d7d6de5bce6c1fd11c5a5ef402003da55f62f46f",
+      "bytes": 932734
+    }
+  },
+  "counts": {
+    "verification_tests": {
+      "groups": {
+        "combined-semantics": {
+          "passed": 419,
+          "failed": 0,
+          "ignored": 0
+        },
+        "default-policy": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "register-semantics": {
+          "passed": 313,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "totals": {
+        "passed": 733,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "proof": {
+      "default_named_cases": 1,
+      "p065_regression_named_cases": 6,
+      "p133_regression_named_cases": 4,
+      "p134_named_cases": 5
+    },
+    "case_records": {
+      "p134_activation_pin_survives_eviction": {
+        "builders_per_body": 1,
+        "dispatch_arc_count": 1,
+        "eager_artifact_absent": true,
+        "foreign_owner_refused": true,
+        "last_drop_refunds_only_bytes": true,
+        "name": "p134_activation_pin_survives_eviction",
+        "passed": true,
+        "pinned_bytes": 1054,
+        "resume_entry_lookups": 0,
+        "shared_concurrent_builders": 1
+      },
+      "p134_cold_hot_entry_threshold_and_diagnostics": {
+        "cold_fallback_frames": 2,
+        "fuel_prefixes": 4,
+        "hot_dispatches": 6,
+        "name": "p134_cold_hot_entry_threshold_and_diagnostics",
+        "passed": true,
+        "threshold": 3,
+        "zero_threshold_refused": true
+      },
+      "p134_eviction_pin_and_continuation_resume_without_reentry": {
+        "capture_resumes": 24,
+        "exact_and_nominal": true,
+        "name": "p134_eviction_pin_and_continuation_resume_without_reentry",
+        "one_shot_preserved": true,
+        "passed": true,
+        "resume_dispatches": 0,
+        "source_state_preserved": true
+      },
+      "p134_host_effect_fuel_and_foreign_refusal": {
+        "callback_once": true,
+        "cancellation_preserved": true,
+        "fuel_prefixes": 12,
+        "name": "p134_host_effect_fuel_and_foreign_refusal",
+        "passed": true,
+        "policies": 4,
+        "reentry_gc_and_memory_preserved": true
+      },
+      "p134_shared_module_concurrency_and_store_ownership": {
+        "calls": 40,
+        "foreign_store_refused": true,
+        "isolated_memory": true,
+        "name": "p134_shared_module_concurrency_and_store_ownership",
+        "optimized_path_ran": true,
+        "passed": true,
+        "stores": 2
+      }
+    }
+  },
+  "limits": {
+    "attempted_work": 100000,
+    "cache_entries": 64,
+    "retained_metadata_bytes": 1048576
+  },
+  "cases": [
+    "p134_activation_pin_survives_eviction",
+    "p134_cold_hot_entry_threshold_and_diagnostics",
+    "p134_eviction_pin_and_continuation_resume_without_reentry",
+    "p134_host_effect_fuel_and_foreign_refusal",
+    "p134_shared_module_concurrency_and_store_ownership"
+  ],
+  "baseline": {
+    "path": "target/performance/P134-before/manifest.json",
+    "sha256": "c07542121418df9ff55d1e933dfb013b262befd53b1e5c557a5b9561cbdad755",
+    "bytes": 102171
+  },
+  "baseline_repository_commit": "4ed0c0b1c4e9f905db1948d256d093551329f0ff",
+  "baseline_mode": "register",
+  "p001": {
+    "manifest_sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472",
+    "binary_sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498"
+  },
+  "p133_foundation": {
+    "completion": {
+      "path": "docs/benchmarks/performance/P133-completion.json",
+      "sha256": "f7a9a1c7888434db84492f1ee921cc70e52aa8b39e39e3fcfe10a2479901add0",
+      "bytes": 503
+    },
+    "evidence": {
+      "path": "docs/benchmarks/performance/P133-evidence.json",
+      "sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7",
+      "bytes": 1535
+    },
+    "final_evidence": {
+      "path": "target/performance/P133/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7",
+      "bytes": 1535
+    },
+    "architecture": {
+      "path": "docs/architecture/register-cache.md",
+      "sha256": "01ca2597e01405af175aeea0567c61f8257df3485a0de9b5e3ac2a5396f5161f",
+      "bytes": 2109
+    },
+    "contract": {
+      "path": "docs/benchmarks/performance/P133-verification.json",
+      "sha256": "99b1c35b1c0e95af52b96a954325d0cbcdc56b72680a166f89b599c7d1a268dc",
+      "bytes": 12630
+    }
+  },
+  "runtime_source_map_sha256": "ddd29f961a7b46bcb8efbfe34dc62d4f64fb36f25d146d30eec12357f36cf332",
+  "runtime_source_file_count": 148,
+  "test_source": {
+    "path": "target/verification/objects/d6/d60857fe7689fb5996f3d27d381174880f8ccf0a0c8c197844296b4a71712318",
+    "sha256": "d60857fe7689fb5996f3d27d381174880f8ccf0a0c8c197844296b4a71712318",
+    "bytes": 7331
+  },
+  "store_work_debit_check": {
+    "stores": 2,
+    "calls": 40,
+    "shared_concurrent_builders": 1,
+    "one_work_debit_asserted_against_two_store_shared_cache": true
+  },
+  "build_budgets": {
+    "default": {
+      "artifact": {
+        "bytes": 330120,
+        "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/default-build.json",
+        "sha256": "800490448cea73d37b80ef6cae11b84cbbb0ff5443ecf6f12fe53a3baa828c05"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [],
+      "mode": "default",
+      "stripped_bytes": 1000960
+    },
+    "register": {
+      "artifact": {
+        "bytes": 330283,
+        "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/register-build.json",
+        "sha256": "a7576f9e8c2abc64372833064a6802807ed73b9a4a9b073c00bd0ef9f13f7796"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [
+        "wtime-runtime/register-executor"
+      ],
+      "mode": "optional-feature",
+      "stripped_bytes": 1090512
+    }
+  },
+  "build_clean_seconds": {
+    "default": 2.7464731790096266,
+    "register": 3.3086598579975544
+  },
+  "logs": {
+    "register": {
+      "bytes": 22520,
+      "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/register-semantics.stdout",
+      "sha256": "898a40928477b28b88de6e6fea9d1571f30b7eeddbb28880ea7aa312d6b2457e"
+    },
+    "register_stderr": {
+      "bytes": 172861,
+      "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/register-semantics.stderr",
+      "sha256": "6cfb62613859054b1dee8bac0adf11754c22689b05c043b0b399f423022ca615"
+    },
+    "combined": {
+      "bytes": 474247,
+      "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/combined-semantics.stdout",
+      "sha256": "95ce189d929b86ba46ebaa4d70f0b1fa26419795544d0a8e6d194889df942fa5"
+    },
+    "default": {
+      "bytes": 178,
+      "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/default-policy.stdout",
+      "sha256": "ad9540fa17914a08152b7ac03fb02e8df6057309f11fe3f624a9b1ac3baf386b"
+    }
+  },
+  "helper_archive": {
+    "sha256": "b58653e97e19d5681056e6ba8aafcf231d7c45cdfb82a900335a761182507387",
+    "bytes": 22016,
+    "invocation": {
+      "path": "target/recovery/P134-export-0002/invocation.json",
+      "sha256": "4f76b085e6db4c43809d819b7e2d73134ce796894aabef94198a693e38cae8f0",
+      "bytes": 436
+    },
+    "command": {
+      "path": "target/recovery/P134-export-0002/command.json",
+      "sha256": "dd4275cace4659d1800d02d4d763e922d15adda64ad8ae5ebcf7940a22bdb6f7",
+      "bytes": 187
+    },
+    "stdout_log": {
+      "path": "target/recovery/P134-export-0002/stdout.log",
+      "sha256": "36ea3338aead21a80170dffb68cddcb9ab6bc73b268f84c05112bf9c9ed49ede",
+      "bytes": 132
+    },
+    "stderr_log": {
+      "path": "target/recovery/P134-export-0002/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  },
+  "limitations": [
+    "Opt-in lazy Register entry, cache integration, frame/pin and continuation semantics, and default/optional build budgets only; no timing or performance promotion is claimed."
+  ]
+}

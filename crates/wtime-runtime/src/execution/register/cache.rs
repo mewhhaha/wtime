@@ -77,7 +77,7 @@ struct State {
     entries: Vec<Entry>,
     active: Option<usize>,
 }
-pub(super) struct Cache {
+pub(crate) struct Cache {
     owner: Owner,
     state: Mutex<State>,
     ledger: Arc<Mutex<Ledger>>,
@@ -85,6 +85,24 @@ pub(super) struct Cache {
     threshold: u64,
 }
 impl Cache {
+    #[cfg(test)]
+    pub(super) fn test_budget(&self) -> (usize, usize, usize) {
+        let ledger = self.ledger.lock().unwrap();
+        (ledger.attempted, ledger.work, ledger.bytes)
+    }
+    #[cfg(test)]
+    pub(super) fn test_entry(&self, body: usize) -> Option<(u64, u8, bool)> {
+        let state = self.state.lock().unwrap();
+        let entry = state.entries.iter().find(|entry| entry.body == body)?;
+        Some((
+            entry.entries,
+            entry.attempts,
+            matches!(entry.state, EntryState::Ready(_)),
+        ))
+    }
+    pub(crate) fn with_threshold(module: &Module, threshold: u64) -> Option<Arc<Self>> {
+        Self::with_limits(module, MAX_ENTRIES, threshold, MAX_WORK, MAX_BYTES)
+    }
     pub(super) fn new(module: &Module) -> Option<Arc<Self>> {
         Self::with_limits(module, MAX_ENTRIES, HOT_THRESHOLD, MAX_WORK, MAX_BYTES)
     }
@@ -228,6 +246,20 @@ impl Cache {
             Preparation::Exhausted
         };
         lease.finish(module, result)
+    }
+}
+#[cfg(test)]
+impl CachedFunction {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self._retention.bytes
+    }
+}
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisterEntryCache")
+            .field("threshold", &self.threshold)
+            .finish_non_exhaustive()
     }
 }
 

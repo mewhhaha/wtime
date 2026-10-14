@@ -114,3 +114,5 @@ mod p064;
 mod p065;
 #[path = "performance/p132.rs"]
 mod p132;
+#[path = "performance/p134.rs"]
+mod p134;
