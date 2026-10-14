@@ -1,0 +1,82 @@
+{
+  "bootstrap_computations": 0,
+  "commands_rerun": 0,
+  "finalized_seal_streams": {
+    "stderr": {
+      "bytes": 0,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/e3/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stored_bytes": 0,
+      "stored_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stdout": {
+      "bytes": 38,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/51/51ff89330499358f609597557bbe869c49e3f1e4cf48597bc63f555a831a70f3",
+      "sha256": "51ff89330499358f609597557bbe869c49e3f1e4cf48597bc63f555a831a70f3",
+      "stored_bytes": 38,
+      "stored_sha256": "51ff89330499358f609597557bbe869c49e3f1e4cf48597bc63f555a831a70f3"
+    }
+  },
+  "matched_input_key": "6ae06c291241f504784929ec6436b39c6d1df2ec1ac8ab67867511e7ecd021ec",
+  "outputs": {
+    "decision.json": {
+      "bytes": 1836,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/decision.json",
+      "sha256": "d881401368d1aa2461f861b4e1b55aaee7c76ec4fe60aa42024e129ba11a05b9"
+    },
+    "evidence.json": {
+      "bytes": 3489,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/evidence.json",
+      "sha256": "068441d0e8246fa590ef1f20e7f981e5607c63e2311a4d3295dd2ce3daf95a7f"
+    },
+    "inventory.json": {
+      "bytes": 100763,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/inventory.json",
+      "sha256": "d49de0256e7c3dc82b24281b942e776bc91e9d8f18ccf4f83d0d93e2e6156dad"
+    },
+    "portfolio/report.json": {
+      "bytes": 276,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/portfolio/report.json",
+      "sha256": "4a1ceece58953b7c32fb3395277e8735e9f1f9ce5ffa77fe3e207a46b09071cc"
+    },
+    "statistics.json": {
+      "bytes": 14584546,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/statistics.json",
+      "sha256": "8d414f2a0ddcf3ee052811b08ad40a7fddb7267687caf7b52c3372a7eae3fb92"
+    },
+    "variants-statistics.json": {
+      "bytes": 362876,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/variants-statistics.json",
+      "sha256": "ae147aea198ea19e6089e65c16d62e48d19c5977c01c99aa87ba896c33d64d6b"
+    }
+  },
+  "paired_sample_events": 0,
+  "prior_bundle": {
+    "bytes": 2442708,
+    "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/artifacts.tar.gz",
+    "sha256": "0e6818cd33bf4bc80b863d5f32e047f580099d7090adc2333d555dabc373a9ed"
+  },
+  "prior_failure": {
+    "bytes": 9238,
+    "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/failure.json",
+    "sha256": "81661fd9cad0601e906370a7402e6832fa719d4dcb3fcc2971d065601f237bbd"
+  },
+  "prior_inputs": {
+    "bytes": 1210036,
+    "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/inputs.json",
+    "sha256": "5e3a2c9336dacf5fae5cb5e7c469db94113ce093bf20cf3bf589cc1660bc4b19"
+  },
+  "prior_inventory": {
+    "bytes": 100763,
+    "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/inventory.json",
+    "sha256": "d49de0256e7c3dc82b24281b942e776bc91e9d8f18ccf4f83d0d93e2e6156dad"
+  },
+  "schema": "p056-analysis-revalidation-v1",
+  "source_current": true,
+  "statistics_computations": 0,
+  "status": "passed"
+}

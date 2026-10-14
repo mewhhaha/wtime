@@ -1,8 +1,8 @@
 # P056 — Select fusions and keep the portable hot path small
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -83,4 +83,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P056/shared-finalization/attempt-0013/evidence.json": "1d0b3bef28b5ea5fb6b6fb15ec12919c03e180e1e5cae07a615962d864586b5d"
+  },
+  "evidence": [
+    {
+      "bytes": 3158,
+      "path": "/workspace/wtime/target/performance/P056/shared-finalization/attempt-0013/evidence.json",
+      "sha256": "1d0b3bef28b5ea5fb6b6fb15ec12919c03e180e1e5cae07a615962d864586b5d"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P056"
+}
+```

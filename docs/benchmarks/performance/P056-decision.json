@@ -1,0 +1,57 @@
+{
+  "additional_statistics_computations": 0,
+  "decision": {
+    "decision": "rejected",
+    "enabled_variants": [],
+    "policy": "only variants individually adopted and compatible with the combined gate may be enabled",
+    "portfolio_decision": "rejected"
+  },
+  "inputs": {
+    "evidence": {
+      "bytes": 3489,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/evidence.json",
+      "sha256": "068441d0e8246fa590ef1f20e7f981e5607c63e2311a4d3295dd2ce3daf95a7f"
+    },
+    "individual_variants": {
+      "bytes": 362876,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/variants-statistics.json",
+      "sha256": "ae147aea198ea19e6089e65c16d62e48d19c5977c01c99aa87ba896c33d64d6b"
+    },
+    "statistics": {
+      "bytes": 14584546,
+      "path": "/workspace/wtime/target/verification/runs/P056/analyze/attempt-0001/statistics.json",
+      "sha256": "8d414f2a0ddcf3ee052811b08ad40a7fddb7267687caf7b52c3372a7eae3fb92"
+    },
+    "tier": {
+      "bytes": 110284,
+      "path": "/workspace/wtime/target/verification/runs/P056/verify/attempt-0009/tier/report.json",
+      "sha256": "f09c2a2e367349cf2d2a555fcd37959dc0961b1f9fc417aff646cabfbf50d576"
+    },
+    "verify_receipt": {
+      "bytes": 6303295,
+      "path": "/workspace/wtime/target/verification/runs/P056/verify/attempt-0009/receipt.json",
+      "sha256": "a98a2b30c61c588fdef79dab24170734be4045d3bf6350c08c148cf6d3a13037"
+    }
+  },
+  "optional_unimplemented": [
+    "P051",
+    "P052"
+  ],
+  "removed_variants": [
+    "P048",
+    "P049",
+    "P053",
+    "P054",
+    "P055"
+  ],
+  "retained_opt_in": [
+    "P047",
+    "P050"
+  ],
+  "schema": "wtime-p056-specialization-decision-v1",
+  "source_stable": true,
+  "statistics_computations": 1,
+  "status": "passed",
+  "task": "P056",
+  "timing_evidence": true
+}

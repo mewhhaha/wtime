@@ -81524,8 +81524,8 @@
       "key": "specialization-milestone",
       "title": "Select fusions and keep the portable hot path small",
       "group": "04-specialization-and-fusion",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "gate",
       "dependencies": [
         "P004",
@@ -81578,7 +81578,13 @@
         "python3 tools/wtime-bench/tier_check.py --tier compact --selection integration --output target/performance/P056/conformance"
       ],
       "path": "04-specialization-and-fusion/P056-specialization-milestone.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P056/shared-finalization/attempt-0013/evidence.json",
+          "sha256": "1d0b3bef28b5ea5fb6b6fb15ec12919c03e180e1e5cae07a615962d864586b5d",
+          "bytes": 3158
+        }
+      ],
       "reviews_optional_tasks": [
         "P051",
         "P052",
@@ -81594,7 +81600,22 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P056/shared-finalization/attempt-0013/evidence.json": "1d0b3bef28b5ea5fb6b6fb15ec12919c03e180e1e5cae07a615962d864586b5d"
+        },
+        "evidence": [
+          {
+            "bytes": 3158,
+            "path": "/workspace/wtime/target/performance/P056/shared-finalization/attempt-0013/evidence.json",
+            "sha256": "1d0b3bef28b5ea5fb6b6fb15ec12919c03e180e1e5cae07a615962d864586b5d"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P056"
+      }
     },
     {
       "id": "P057",

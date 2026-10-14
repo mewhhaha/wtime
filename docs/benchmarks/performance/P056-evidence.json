@@ -1,0 +1,63 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 70141,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P056-verification.json",
+    "sha256": "4d7ff8ab58a17a45a84e504aca81d3de1476b54841a2c99292aeb8e953aefefd"
+  },
+  "decision": "rejected",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "The full P056 comparison is eight family/baseline reports (four families against P001 and the structural predecessor) plus two predeclared cold controls; the current admitted registry has 53 rows and 181 stage groups, for 144720 declared pairs total.",
+    "The frozen P001 capability probe covers 261 admitted workloads and 1185 observed stages across scalar, memory, SIMD, and representative families; probes are correctness-only and carry no timing evidence.",
+    "P047 and P050 individual refresh datasets are analyzed independently; aggregation adds no statistics recomputation.",
+    "P007 provides counters without sampled CPU percentages; no CPU-profile attribution is permitted.",
+    "Historical P047-P055 statuses and dispositions are validated against their published completion/evidence records and cannot be reclassified by P056.",
+    "P051 and P052 are optional unimplemented variants. Native AArch64 evidence remains unresolved until real native evidence exists."
+  ],
+  "outcome": "rejected",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 5203106,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/12/127ffe6c6b6c771bbe7534bc687b919ca3f7a7c3709c2eefc5b30379d75a5fc8",
+      "sha256": "127ffe6c6b6c771bbe7534bc687b919ca3f7a7c3709c2eefc5b30379d75a5fc8",
+      "stored_bytes": 5203106,
+      "stored_sha256": "127ffe6c6b6c771bbe7534bc687b919ca3f7a7c3709c2eefc5b30379d75a5fc8"
+    },
+    "freeze": {
+      "bytes": 950938,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/ed/ede6b4f3e4a8412195fafdca7f7e7e8c047cd637432622fcc1320c26b08e2860",
+      "sha256": "ede6b4f3e4a8412195fafdca7f7e7e8c047cd637432622fcc1320c26b08e2860",
+      "stored_bytes": 950938,
+      "stored_sha256": "ede6b4f3e4a8412195fafdca7f7e7e8c047cd637432622fcc1320c26b08e2860"
+    },
+    "measure": {
+      "bytes": 6130545,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/51/511405b4d4f532edc35cc51f685dec37022f8ab5f3da481c8af7acd4ba108ae9",
+      "sha256": "511405b4d4f532edc35cc51f685dec37022f8ab5f3da481c8af7acd4ba108ae9",
+      "stored_bytes": 6130545,
+      "stored_sha256": "511405b4d4f532edc35cc51f685dec37022f8ab5f3da481c8af7acd4ba108ae9"
+    },
+    "verify": {
+      "bytes": 6303295,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/a9/a98a2b30c61c588fdef79dab24170734be4045d3bf6350c08c148cf6d3a13037",
+      "sha256": "a98a2b30c61c588fdef79dab24170734be4045d3bf6350c08c148cf6d3a13037",
+      "stored_bytes": 6303295,
+      "stored_sha256": "a98a2b30c61c588fdef79dab24170734be4045d3bf6350c08c148cf6d3a13037"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P056"
+}

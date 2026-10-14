@@ -1,6 +1,7 @@
 # P056 calibration preflight
 
-Status: implemented; awaiting fresh full P056 execution. P056 remains pending.
+Status: implemented and executed. P056 is complete with a rejected portfolio
+outcome; calibration and semantic verification passed.
 
 ## Why this preflight exists
 
@@ -17,8 +18,8 @@ This followed the earlier scalar-driver capacity failure. The four completed
 historical datasets total 72,720 pairs and remain in the immutable P056 dataset
 cache. They are evidence from the previous harness and are not reusable after
 the calibration harness change. Partial SIMD evidence and both failed
-measurement attempts remain preserved. No P056 statistics or promotion
-decision has been produced.
+measurement attempts remain preserved. Those attempts produced no completed
+P056 statistics or promotion decision.
 
 ## Implemented behavior
 
@@ -51,10 +52,20 @@ producer and its contract tests are
 Normal measurement retains its per-run calibration, two runs of 30 pairs per
 declared group, all semantic and protected controls, and the full workload
 matrix. Diagnostic confirmations are not paired samples. Analysis computes
-statistics once per dataset, separately from publication. No diagnostic
-latency is claimed here; record the measured elapsed time and work counts from
-the fresh preflight report when P056 is executed.
+statistics once per dataset, separately from publication. The successful
+preflight passed all 490 groups in 88.344 s, with zero failures, paired samples,
+or statistics computations. All five real binaries passed the numeric and
+memory boundary probes. The report is retained in
+[P056-calibration.json.gz](../benchmarks/performance/P056-calibration.json.gz).
+
+The full milestone analyzed 144,720 source-current cached pairs plus 1,500
+independent P047 and 3,360 independent P050 pairs. Full verification passed
+487 tests, 145,760 corpus cases, 89 integration checks and 68 source-fuel probes.
+The combined portfolio was rejected and enabled no variants. A corrected
+post-analysis check reused the sealed statistics without rerunning timings or
+bootstrap calculations. See the
+[completed specialization report](../benchmarks/performance/specialization.md).
 
 The optional removal of redundant memory-driver preflights remains separate
-work. P057 remains behind the P056 milestone dependency. The default runtime
+work. P057's P056 milestone dependency is complete. The default runtime
 remains Decoded, safe Rust, with zero external core dependencies.

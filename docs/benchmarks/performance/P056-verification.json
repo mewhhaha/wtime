@@ -574,6 +574,43 @@
         "uses": [
           "harness"
         ]
+      },
+      {
+        "name": "p056-analysis-revalidation-tests",
+        "uses": [
+          "analysis_revalidation"
+        ],
+        "commands": [
+          {
+            "name": "p056-analysis-revalidation-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/performance/tests",
+              "-p",
+              "test_p056_revalidate_analysis.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p056-analysis-revalidation-tests",
+            "kind": "unittest",
+            "minimum_passed": 3,
+            "required_names": [
+              "test_complete_postcheck_failure_reuses_analysis",
+              "test_changed_consumed_inputs_rejected",
+              "test_failed_command_or_wrong_failure_rejected"
+            ]
+          }
+        ]
       }
     ]
   },
@@ -744,6 +781,14 @@
         "target/verification/runs/P050/verify/attempt-0002/production/build-record.json",
         "docs/verification/build-final.json"
       ]
+    },
+    "analysis_revalidation": {
+      "paths": [
+        "tools/performance/p056_revalidate_analysis.py",
+        "tools/performance/tests/test_p056_revalidate_analysis.py",
+        "tools/verification/*.py",
+        "target/verification/runs/P056/analyze/attempt-0001/**"
+      ]
     }
   },
   "schema_version": 1,
@@ -811,8 +856,8 @@
         {
           "artifact": "variants-statistics",
           "op": "equal",
-          "pointer": "/additional_statistics_computations",
-          "value": 0
+          "pointer": "/additional_bootstrap_computations",
+          "value": 2
         },
         {
           "artifact": "decision",
@@ -843,104 +888,64 @@
           "op": "equal",
           "pointer": "/source_stable",
           "value": true
+        },
+        {
+          "artifact": "variants-statistics",
+          "op": "equal",
+          "pointer": "/dataset_statistics_computations",
+          "value": 2
+        },
+        {
+          "artifact": "revalidation",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "revalidation",
+          "op": "equal",
+          "pointer": "/source_current",
+          "value": true
+        },
+        {
+          "artifact": "revalidation",
+          "op": "equal",
+          "pointer": "/paired_sample_events",
+          "value": 0
+        },
+        {
+          "artifact": "revalidation",
+          "op": "equal",
+          "pointer": "/statistics_computations",
+          "value": 0
+        },
+        {
+          "artifact": "revalidation",
+          "op": "equal",
+          "pointer": "/bootstrap_computations",
+          "value": 0
         }
       ],
       "commands": [
         {
-          "argv": [
-            "{python}",
-            "-B",
-            "{repo}/tools/verification/producers/p056_workflow.py",
-            "portfolio",
-            "--verify-dir",
-            "{verify_dir}",
-            "--measure-dir",
-            "{measure_dir}/matrix",
-            "--output",
-            "{stage}/portfolio",
-            "--frozen",
-            "{freeze_dir}/report.json"
-          ],
-          "name": "portfolio-input"
+          "name": "p056-analysis-revalidation-tests",
+          "argv": ["{python}", "-B", "-m", "unittest", "discover", "-s", "tools/performance/tests", "-p", "test_p056_revalidate_analysis.py", "-v", "-b"]
         },
         {
+          "name": "revalidate-completed-analysis",
           "argv": [
             "{python}",
             "-B",
-            "{repo}/tools/verify.py",
-            "statistics",
-            "--task",
-            "P056",
-            "--comparison",
-            "{stage}/portfolio/input.json",
-            "--build",
-            "{verify_dir}/build.json",
-            "--optional-build",
-            "{verify_dir}/optional-build.json",
-            "--candidate-build-record",
-            "{verify_dir}/production/build-record.json",
+            "{repo}/tools/performance/p056_revalidate_analysis.py",
+            "--prior",
+            "{repo}/target/verification/runs/P056/analyze/attempt-0001",
+            "--output",
+            "{stage}",
             "--contract",
-            "{repo}/docs/benchmarks/performance/P124-contract.json",
-            "--output",
-            "{stage}/statistics.json",
-            "--execute"
-          ],
-          "name": "portfolio-statistics"
-        },
-        {
-          "argv": [
-            "{python}",
-            "-B",
-            "{repo}/tools/verification/producers/p056_workflow.py",
-            "variant-statistics",
-            "--measure-dir",
-            "{measure_dir}/individual",
-            "--output",
-            "{stage}/variants-statistics.json"
-          ],
-          "name": "individual-variant-statistics"
-        },
-        {
-          "argv": [
-            "{python}",
-            "-B",
-            "{repo}/tools/verification/producers/p056_workflow.py",
-            "evidence",
-            "--verify-dir",
-            "{verify_dir}",
-            "--statistics",
-            "{stage}/statistics.json",
-            "--variants",
-            "{stage}/variants-statistics.json",
-            "--output",
-            "{stage}/evidence.json"
-          ],
-          "name": "portfolio-evidence"
-        },
-        {
-          "argv": [
-            "{python}",
-            "-B",
-            "{repo}/tools/verification/producers/p056.py",
-            "--statistics",
-            "{stage}/statistics.json",
-            "--evidence",
-            "{stage}/evidence.json",
-            "--output",
-            "{stage}/decision.json"
-          ],
-          "name": "portfolio-decision"
-        },
-        {
-          "argv": [
-            "{python}",
-            "-B",
-            "{repo}/tools/verification/producers/p046_verify.py",
-            "seal",
-            "--output",
-            "{stage}"
-          ],
-          "name": "seal-analysis"
+            "{repo}/docs/benchmarks/performance/P056-verification.json",
+            "--store",
+            "{repo}/target/verification"
+          ]
         }
       ],
       "dependencies": [
@@ -954,13 +959,23 @@
         "inventory": "{stage}/inventory.json",
         "portfolio": "{stage}/portfolio/report.json",
         "statistics": "{stage}/statistics.json",
-        "variants-statistics": "{stage}/variants-statistics.json"
+        "variants-statistics": "{stage}/variants-statistics.json",
+        "revalidation": "{stage}/revalidation.json"
       },
+      "tests": [
+        {
+          "command": "p056-analysis-revalidation-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": ["test_complete_postcheck_failure_reuses_analysis", "test_changed_consumed_inputs_rejected", "test_failed_command_or_wrong_failure_rejected"]
+        }
+      ],
       "uses": [
         "analysis",
         "corpus",
         "harness",
-        "history"
+        "history",
+        "analysis_revalidation"
       ]
     },
     "freeze": {
