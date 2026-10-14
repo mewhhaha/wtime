@@ -208,8 +208,11 @@ fn p061_whole_function_fallback_and_owner_guards() {
             };
             observations.push(outcome(store.invoke(function, &args)));
             if policy == ExecutionPolicy::Register {
-                assert_eq!(store.register_dispatches(), 0);
-                assert_eq!(store.register_fallback_frames(), 1);
+                // P062 admits scalar float constants/reinterpretation. The
+                // reference-local body must still decline as a whole.
+                let numeric = args.len() == 2;
+                assert_eq!(store.register_dispatches(), if numeric { 16 } else { 0 });
+                assert_eq!(store.register_fallback_frames(), u64::from(!numeric));
             }
         }
         assert_eq!(observations[0], observations[1]);

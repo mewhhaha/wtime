@@ -1,0 +1,1077 @@
+{
+  "license": "MIT",
+  "generator": "target/recovery/P062-fixtures-0001/generate.py",
+  "float_ops": {
+    "fixture": "float_ops.wat",
+    "exports": [
+      {
+        "export": "f32_eq",
+        "opcode": 91,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "f32.eq",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x5b"
+        }
+      },
+      {
+        "export": "f32_ne",
+        "opcode": 92,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "f32.ne",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x5c"
+        }
+      },
+      {
+        "export": "f32_lt",
+        "opcode": 93,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "f32.lt",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x5d"
+        }
+      },
+      {
+        "export": "f32_gt",
+        "opcode": 94,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "f32.gt",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x5e"
+        }
+      },
+      {
+        "export": "f32_le",
+        "opcode": 95,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "f32.le",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x5f"
+        }
+      },
+      {
+        "export": "f32_ge",
+        "opcode": 96,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "f32.ge",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x60"
+        }
+      },
+      {
+        "export": "f64_eq",
+        "opcode": 97,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "f64.eq",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x61"
+        }
+      },
+      {
+        "export": "f64_ne",
+        "opcode": 98,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "f64.ne",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x62"
+        }
+      },
+      {
+        "export": "f64_lt",
+        "opcode": 99,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "f64.lt",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x63"
+        }
+      },
+      {
+        "export": "f64_gt",
+        "opcode": 100,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "f64.gt",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x64"
+        }
+      },
+      {
+        "export": "f64_le",
+        "opcode": 101,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "f64.le",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x65"
+        }
+      },
+      {
+        "export": "f64_ge",
+        "opcode": 102,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "f64.ge",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x66"
+        }
+      },
+      {
+        "export": "f32_abs",
+        "opcode": 139,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.abs",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x8b"
+        }
+      },
+      {
+        "export": "f32_neg",
+        "opcode": 140,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.neg",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x8c"
+        }
+      },
+      {
+        "export": "f32_ceil",
+        "opcode": 141,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.ceil",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x8d"
+        }
+      },
+      {
+        "export": "f32_floor",
+        "opcode": 142,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.floor",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x8e"
+        }
+      },
+      {
+        "export": "f32_trunc",
+        "opcode": 143,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.trunc",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x8f"
+        }
+      },
+      {
+        "export": "f32_nearest",
+        "opcode": 144,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.nearest",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x90"
+        }
+      },
+      {
+        "export": "f32_sqrt",
+        "opcode": 145,
+        "params": [
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.sqrt",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x91"
+        }
+      },
+      {
+        "export": "f32_add",
+        "opcode": 146,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.add",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x92"
+        }
+      },
+      {
+        "export": "f32_sub",
+        "opcode": 147,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.sub",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x93"
+        }
+      },
+      {
+        "export": "f32_mul",
+        "opcode": 148,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.mul",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x94"
+        }
+      },
+      {
+        "export": "f32_div",
+        "opcode": 149,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.div",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x95"
+        }
+      },
+      {
+        "export": "f32_min",
+        "opcode": 150,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.min",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x96"
+        }
+      },
+      {
+        "export": "f32_max",
+        "opcode": 151,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.max",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x97"
+        }
+      },
+      {
+        "export": "f32_copysign",
+        "opcode": 152,
+        "params": [
+          "f32",
+          "f32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.copysign",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0x98"
+        }
+      },
+      {
+        "export": "f64_abs",
+        "opcode": 153,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.abs",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x99"
+        }
+      },
+      {
+        "export": "f64_neg",
+        "opcode": 154,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.neg",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x9a"
+        }
+      },
+      {
+        "export": "f64_ceil",
+        "opcode": 155,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.ceil",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x9b"
+        }
+      },
+      {
+        "export": "f64_floor",
+        "opcode": 156,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.floor",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x9c"
+        }
+      },
+      {
+        "export": "f64_trunc",
+        "opcode": 157,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.trunc",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x9d"
+        }
+      },
+      {
+        "export": "f64_nearest",
+        "opcode": 158,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.nearest",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x9e"
+        }
+      },
+      {
+        "export": "f64_sqrt",
+        "opcode": 159,
+        "params": [
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.sqrt",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0x9f"
+        }
+      },
+      {
+        "export": "f64_add",
+        "opcode": 160,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.add",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa0"
+        }
+      },
+      {
+        "export": "f64_sub",
+        "opcode": 161,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.sub",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa1"
+        }
+      },
+      {
+        "export": "f64_mul",
+        "opcode": 162,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.mul",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa2"
+        }
+      },
+      {
+        "export": "f64_div",
+        "opcode": 163,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.div",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa3"
+        }
+      },
+      {
+        "export": "f64_min",
+        "opcode": 164,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.min",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa4"
+        }
+      },
+      {
+        "export": "f64_max",
+        "opcode": 165,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.max",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa5"
+        }
+      },
+      {
+        "export": "f64_copysign",
+        "opcode": 166,
+        "params": [
+          "f64",
+          "f64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.copysign",
+        "source_events": 4,
+        "encoding": {
+          "opcode_hex": "0xa6"
+        }
+      },
+      {
+        "export": "i32_trunc_f32_s",
+        "opcode": 168,
+        "params": [
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_f32_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xa8"
+        }
+      },
+      {
+        "export": "i32_trunc_f32_u",
+        "opcode": 169,
+        "params": [
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_f32_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xa9"
+        }
+      },
+      {
+        "export": "i32_trunc_f64_s",
+        "opcode": 170,
+        "params": [
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_f64_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xaa"
+        }
+      },
+      {
+        "export": "i32_trunc_f64_u",
+        "opcode": 171,
+        "params": [
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_f64_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xab"
+        }
+      },
+      {
+        "export": "i64_trunc_f32_s",
+        "opcode": 174,
+        "params": [
+          "f32"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_f32_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xae"
+        }
+      },
+      {
+        "export": "i64_trunc_f32_u",
+        "opcode": 175,
+        "params": [
+          "f32"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_f32_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xaf"
+        }
+      },
+      {
+        "export": "i64_trunc_f64_s",
+        "opcode": 176,
+        "params": [
+          "f64"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_f64_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb0"
+        }
+      },
+      {
+        "export": "i64_trunc_f64_u",
+        "opcode": 177,
+        "params": [
+          "f64"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_f64_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb1"
+        }
+      },
+      {
+        "export": "f32_convert_i32_s",
+        "opcode": 178,
+        "params": [
+          "i32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.convert_i32_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb2"
+        }
+      },
+      {
+        "export": "f32_convert_i32_u",
+        "opcode": 179,
+        "params": [
+          "i32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.convert_i32_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb3"
+        }
+      },
+      {
+        "export": "f32_convert_i64_s",
+        "opcode": 180,
+        "params": [
+          "i64"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.convert_i64_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb4"
+        }
+      },
+      {
+        "export": "f32_convert_i64_u",
+        "opcode": 181,
+        "params": [
+          "i64"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.convert_i64_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb5"
+        }
+      },
+      {
+        "export": "f64_convert_i32_s",
+        "opcode": 183,
+        "params": [
+          "i32"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.convert_i32_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb7"
+        }
+      },
+      {
+        "export": "f64_convert_i32_u",
+        "opcode": 184,
+        "params": [
+          "i32"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.convert_i32_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb8"
+        }
+      },
+      {
+        "export": "f64_convert_i64_s",
+        "opcode": 185,
+        "params": [
+          "i64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.convert_i64_s",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb9"
+        }
+      },
+      {
+        "export": "f64_convert_i64_u",
+        "opcode": 186,
+        "params": [
+          "i64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.convert_i64_u",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xba"
+        }
+      },
+      {
+        "export": "f32_demote_f64",
+        "opcode": 182,
+        "params": [
+          "f64"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.demote_f64",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xb6"
+        }
+      },
+      {
+        "export": "f64_promote_f32",
+        "opcode": 187,
+        "params": [
+          "f32"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.promote_f32",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xbb"
+        }
+      },
+      {
+        "export": "i32_reinterpret_f32",
+        "opcode": 188,
+        "params": [
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.reinterpret_f32",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xbc"
+        }
+      },
+      {
+        "export": "i64_reinterpret_f64",
+        "opcode": 189,
+        "params": [
+          "f64"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.reinterpret_f64",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xbd"
+        }
+      },
+      {
+        "export": "f32_reinterpret_i32",
+        "opcode": 190,
+        "params": [
+          "i32"
+        ],
+        "result": "f32",
+        "mnemonic": "f32.reinterpret_i32",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xbe"
+        }
+      },
+      {
+        "export": "f64_reinterpret_i64",
+        "opcode": 191,
+        "params": [
+          "i64"
+        ],
+        "result": "f64",
+        "mnemonic": "f64.reinterpret_i64",
+        "source_events": 3,
+        "encoding": {
+          "opcode_hex": "0xbf"
+        }
+      },
+      {
+        "export": "i32_trunc_sat_f32_s",
+        "opcode": 252,
+        "params": [
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_sat_f32_s",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 0,
+          "subopcode_hex": "0x00"
+        }
+      },
+      {
+        "export": "i32_trunc_sat_f32_u",
+        "opcode": 252,
+        "params": [
+          "f32"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_sat_f32_u",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 1,
+          "subopcode_hex": "0x01"
+        }
+      },
+      {
+        "export": "i32_trunc_sat_f64_s",
+        "opcode": 252,
+        "params": [
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_sat_f64_s",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 2,
+          "subopcode_hex": "0x02"
+        }
+      },
+      {
+        "export": "i32_trunc_sat_f64_u",
+        "opcode": 252,
+        "params": [
+          "f64"
+        ],
+        "result": "i32",
+        "mnemonic": "i32.trunc_sat_f64_u",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 3,
+          "subopcode_hex": "0x03"
+        }
+      },
+      {
+        "export": "i64_trunc_sat_f32_s",
+        "opcode": 252,
+        "params": [
+          "f32"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_sat_f32_s",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 4,
+          "subopcode_hex": "0x04"
+        }
+      },
+      {
+        "export": "i64_trunc_sat_f32_u",
+        "opcode": 252,
+        "params": [
+          "f32"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_sat_f32_u",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 5,
+          "subopcode_hex": "0x05"
+        }
+      },
+      {
+        "export": "i64_trunc_sat_f64_s",
+        "opcode": 252,
+        "params": [
+          "f64"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_sat_f64_s",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 6,
+          "subopcode_hex": "0x06"
+        }
+      },
+      {
+        "export": "i64_trunc_sat_f64_u",
+        "opcode": 252,
+        "params": [
+          "f64"
+        ],
+        "result": "i64",
+        "mnemonic": "i64.trunc_sat_f64_u",
+        "source_events": 3,
+        "encoding": {
+          "prefix": "0xfc",
+          "subopcode": 7,
+          "subopcode_hex": "0x07"
+        }
+      }
+    ]
+  },
+  "mixed_slots": {
+    "fixture": "mixed_slots.wat",
+    "export": "run",
+    "params": [
+      "i32",
+      "i64",
+      "f32",
+      "f64"
+    ],
+    "results": [
+      "i32",
+      "i64",
+      "f32",
+      "f64"
+    ],
+    "locals": [
+      "i32",
+      "i64",
+      "f32",
+      "f64"
+    ],
+    "source_events": 14,
+    "source_sequence": [
+      "local.get 0",
+      "local.tee 4",
+      "drop",
+      "local.get 1",
+      "local.set 5",
+      "local.get 2",
+      "local.set 6",
+      "local.get 3",
+      "local.set 7",
+      "local.get 4",
+      "local.get 5",
+      "local.get 6",
+      "local.get 7",
+      "implicit function end"
+    ],
+    "oracle": "All outputs equal their corresponding raw input bits; f32/f64 values are moved with local.get/tee/set only."
+  },
+  "copied_loops": [
+    {
+      "fixture": "float_loop.wat",
+      "source": "tools/wtime-bench/fixtures/simd/scalar_float_arithmetic.wat",
+      "export": "run",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "prefix_check": "Exact-byte source copy; preserves the original scalar f32 loop body and source prefix.",
+      "source_sha256": "a11d4969aaa9fb4066b72d0123f905bfa2e2e708f2f178234a0252a7bd727bab",
+      "fixture_sha256": "a11d4969aaa9fb4066b72d0123f905bfa2e2e708f2f178234a0252a7bd727bab",
+      "byte_identical": true
+    },
+    {
+      "fixture": "double_loop.wat",
+      "source": "tools/wtime-bench/fixtures/simd/scalar_f64_arithmetic.wat",
+      "export": "run",
+      "params": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ],
+      "prefix_check": "Exact-byte source copy; preserves the original scalar f64 loop body and source prefix.",
+      "source_sha256": "d5bd87cd9029c7050048fea8b3932be7a0531d68cc1ab91b3578d059e7a8667a",
+      "fixture_sha256": "d5bd87cd9029c7050048fea8b3932be7a0531d68cc1ab91b3578d059e7a8667a",
+      "byte_identical": true
+    }
+  ],
+  "sources": {
+    "float_ops.wat": {
+      "sha256": "22379d9a8d6982b5ea1ec76df1276b50c5ce71e8f08afef3c004d6cb486fac50"
+    },
+    "mixed_slots.wat": {
+      "sha256": "708ece48426d809543be5f882ee70f7d428e4441c1edfd52f24ab54cca7400db"
+    },
+    "float_loop.wat": {
+      "sha256": "a11d4969aaa9fb4066b72d0123f905bfa2e2e708f2f178234a0252a7bd727bab"
+    },
+    "double_loop.wat": {
+      "sha256": "d5bd87cd9029c7050048fea8b3932be7a0531d68cc1ab91b3578d059e7a8667a"
+    }
+  },
+  "encoded": {
+    "float_ops": {
+      "wasm": "float_ops.wasm",
+      "sha256": "8172c4a372ec6bffa409472aa9d520230f0dd515178ec46cce4411ff25586b3a"
+    },
+    "mixed_slots": {
+      "wasm": "mixed_slots.wasm",
+      "sha256": "82b79a2138ab3a07645e957bb0ec0bde50c74e96db3bae8adfc6fde88574a9a6"
+    },
+    "float_loop": {
+      "wasm": "float_loop.wasm",
+      "sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92"
+    },
+    "double_loop": {
+      "wasm": "double_loop.wasm",
+      "sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac"
+    }
+  },
+  "license_sha256": "d395980256acd29b58e408a704c4071228164a172af76dad43ee9b0c12cc0d37",
+  "encoding": {
+    "encoder": "target/performance/baseline/binary/wtime-conformance",
+    "encoder_sha256": "36bede285fc5a1ad57b35566abf4bb68d3acf4e015944ff07e8dc6fb76e3bc14",
+    "command": "wtime-conformance encode {source} -o {output}"
+  },
+  "validation": {
+    "independent_decoder": "target/recovery/P062-fixtures-0001/decode-audit.py",
+    "stable_core_probe": "target/recovery/P062-fixtures-0001/probe-helper.sh",
+    "probe_sha256": "599737ef728292106e4c4e06da11a7288f0297d367fd35ea41b340dfde72ba53",
+    "status": "passed"
+  }
+}

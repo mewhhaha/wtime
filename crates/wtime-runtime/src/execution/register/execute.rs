@@ -1,7 +1,7 @@
-//! Whole-function integer tier. The caller charges the original source boundary.
+//! Whole-function numeric tier. The caller charges the original source boundary.
 use super::{
     control::{MovePlan, MoveSource, MoveStep},
-    integer,
+    float, integer,
     ir::{Budget, Constant, NumericType, Operation},
     lower::LoweredFunction,
 };
@@ -29,28 +29,13 @@ impl std::fmt::Debug for PreparedModule {
             .finish()
     }
 }
-fn integer_type(ty: NumericType) -> bool {
-    matches!(ty, NumericType::I32 | NumericType::I64)
-}
 fn valid_operation(op: &Operation, function: &LoweredFunction) -> bool {
     match op {
-        Operation::Move { ty, .. } => integer_type(*ty),
-        Operation::Const { constant, .. } => matches!(
-            function.program.constant(*constant),
-            Some(Constant::I32(_) | Constant::I64(_))
-        ),
-        Operation::Unary {
-            opcode,
-            input,
-            result,
-            ..
+        Operation::Move { .. } => true,
+        Operation::Const { constant, .. } => function.program.constant(*constant).is_some(),
+        Operation::Unary { opcode, .. } | Operation::Binary { opcode, .. } => {
+            integer::supported(*opcode) || float::supported(*opcode)
         }
-        | Operation::Binary {
-            opcode,
-            input,
-            result,
-            ..
-        } => integer::supported(*opcode) && integer_type(*input) && integer_type(*result),
         Operation::Jump { .. }
         | Operation::Branch { .. }
         | Operation::Table { .. }
@@ -129,7 +114,12 @@ impl PreparedModule {
                 .iter()
                 .chain(layout.locals)
                 .chain(layout.results)
-                .all(|ty| matches!(ty, ValType::I32 | ValType::I64))
+                .all(|ty| {
+                    matches!(
+                        ty,
+                        ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+                    )
+                })
             {
                 continue;
             }
@@ -235,6 +225,8 @@ fn bits(value: Value) -> Option<u64> {
     match value {
         Value::I32(n) => Some(n as u32 as u64),
         Value::I64(n) => Some(n as u64),
+        Value::F32(n) => Some(n as u64),
+        Value::F64(n) => Some(n),
         _ => None,
     }
 }
@@ -242,7 +234,8 @@ fn value(ty: NumericType, bits: u64) -> Result<Value> {
     match ty {
         NumericType::I32 => Ok(Value::I32(bits as u32 as i32)),
         NumericType::I64 => Ok(Value::I64(bits as i64)),
-        _ => Err(trap("unverified register value type")),
+        NumericType::F32 => Ok(Value::F32(bits as u32)),
+        NumericType::F64 => Ok(Value::F64(bits)),
     }
 }
 fn read(slots: &[u64], index: u32) -> Result<u64> {
@@ -296,7 +289,10 @@ pub(crate) fn activate(
     for (ty, local) in recipe.locals.iter().zip(locals) {
         if !matches!(
             (ty, local),
-            (NumericType::I32, Value::I32(_)) | (NumericType::I64, Value::I64(_))
+            (NumericType::I32, Value::I32(_))
+                | (NumericType::I64, Value::I64(_))
+                | (NumericType::F32, Value::F32(_))
+                | (NumericType::F64, Value::F64(_))
         ) {
             return None;
         }
@@ -441,6 +437,8 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> 
             let v = match program.constant(*constant) {
                 Some(Constant::I32(n)) => n as u64,
                 Some(Constant::I64(n)) => n,
+                Some(Constant::F32(n)) => n as u64,
+                Some(Constant::F64(n)) => n,
                 _ => return Err(trap("unverified register constant")),
             };
             write(bank, *to, v)?;
@@ -449,7 +447,12 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> 
         Operation::Unary {
             opcode, from, to, ..
         } => {
-            let v = integer::unary(*opcode, read(bank, *from)?)?;
+            let a = read(bank, *from)?;
+            let v = if integer::supported(*opcode) {
+                integer::unary(*opcode, a)?
+            } else {
+                float::unary(*opcode, a)?
+            };
             write(bank, *to, v)?;
             pc + 1
         }
@@ -460,7 +463,12 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> 
             to,
             ..
         } => {
-            let v = integer::binary(*opcode, read(bank, *left)?, read(bank, *right)?)?;
+            let (a, b) = (read(bank, *left)?, read(bank, *right)?);
+            let v = if integer::supported(*opcode) {
+                integer::binary(*opcode, a, b)?
+            } else {
+                float::binary(*opcode, a, b)?
+            };
             write(bank, *to, v)?;
             pc + 1
         }
@@ -588,4 +596,5 @@ mod tests {
     use crate::*;
     include!("../../../tests/performance/p061_private.rs");
     include!("../../../tests/performance/p060_private.rs");
+    include!("../../../tests/performance/p062_private.rs");
 }

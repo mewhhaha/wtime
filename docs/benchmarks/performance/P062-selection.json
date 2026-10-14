@@ -1,0 +1,125 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P062",
+  "lane": "candidate",
+  "rationale": "Target scalar f32/f64 arithmetic kernels at n17 and n1000, hold out both n0 rows, and protect the n17 v128 f32x4 kernel plus call_overhead cold stages and prepare_large. The scalar kernels exercise mixed integer/float locals, raw float constants, add/mul, and trapping or saturating float-to-integer conversion. Whole-function register eligibility must retain fallback for v128 functions and any unsupported mixed numeric shape; the vector row is a protected fallback control. This focused selection does not alter the benchmark protocol.",
+  "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+  "rows": [
+    {
+      "family": "simd",
+      "id": "simd_scalar_float_arithmetic_n17",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "cde96709e0d516fd5bf07eaddc9b21684927a22e066f22dd07bc0b3b07633395"
+    },
+    {
+      "family": "simd",
+      "id": "simd_scalar_float_arithmetic_n1000",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "b2536e8ccc14f2b5f16b3b6d139d728e0578822684b3f74895605bbbf7e37e06"
+    },
+    {
+      "family": "simd",
+      "id": "simd_scalar_f64_arithmetic_n17",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "8bcf86306f5b54411b2a437b6473f20b6e6e4eb5bdf806c042995d1df663cd21"
+    },
+    {
+      "family": "simd",
+      "id": "simd_scalar_f64_arithmetic_n1000",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "e23fc409cc0303aa688b61615086bc9133d405f7063fe5f4a0e3d9d9d2e00cf1"
+    },
+    {
+      "family": "simd",
+      "id": "simd_scalar_float_arithmetic_n0",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "cd95b0b0e5ae0dbe2d738f82f0a1d8fcf3045efb128060b757943c09afdc41c6"
+    },
+    {
+      "family": "simd",
+      "id": "simd_scalar_f64_arithmetic_n0",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "78430752721863ca67082b4e6d30ed887dff0daad73bedd44acc5819384b10ae"
+    },
+    {
+      "family": "simd",
+      "id": "simd_float_arithmetic_n17",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "c477622ab12e5f519a774f3db94086b316496b0b12bbf79ce737b0db9b80c0f7"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p062_raw_bits_and_strict_float_rules",
+    "p062_trapping_and_saturating_conversion_boundaries",
+    "p062_mixed_numeric_prefixes_and_vector_fallback",
+    "p062_opcode_boundaries_match_decoded"
+  ]
+}

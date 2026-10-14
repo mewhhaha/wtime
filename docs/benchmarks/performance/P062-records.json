@@ -1,0 +1,2030 @@
+{
+  "schema": "wtime-p062-durable-records-v1",
+  "task": "P062",
+  "status": "done",
+  "outcome": "rejected",
+  "copies": [
+    {
+      "source": {
+        "path": "target/performance/P062/shared-finalization/attempt-0001/completion.json",
+        "sha256": "ad35e6bcbfee7380f9855e75a0c34c5344f3354faf53aea89fb14d4cbed6da57",
+        "bytes": 498
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-completion.json",
+        "sha256": "ad35e6bcbfee7380f9855e75a0c34c5344f3354faf53aea89fb14d4cbed6da57",
+        "bytes": 498
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/performance/P062/shared-finalization/attempt-0001/evidence.json",
+        "sha256": "fc5b4da462f417d721826ebe1ced0973bacf97da9567e655ada7c9bf5e344066",
+        "bytes": 2602
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-evidence.json",
+        "sha256": "fc5b4da462f417d721826ebe1ced0973bacf97da9567e655ada7c9bf5e344066",
+        "bytes": 2602
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P062/freeze/attempt-0001/selection.json",
+        "sha256": "050fd66a9c0a5ce53b9f0a124deff7d341100ad89370399a059f491afa7287fd",
+        "bytes": 18692
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-freeze.json",
+        "sha256": "050fd66a9c0a5ce53b9f0a124deff7d341100ad89370399a059f491afa7287fd",
+        "bytes": 18692
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P062/verify/attempt-0001/default-build.json",
+        "sha256": "897fd1620ec4cdbabf8af637ea484338cb5a16b08dfe7bdac04f65998fed596c",
+        "bytes": 287627
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-default-build.json",
+        "sha256": "897fd1620ec4cdbabf8af637ea484338cb5a16b08dfe7bdac04f65998fed596c",
+        "bytes": 287627
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P062/verify/attempt-0001/register-build.json",
+        "sha256": "b254e8cdf10588eb3775396d0d64ce7cb14aa92a35d5793909c5c8550d4e6996",
+        "bytes": 287792
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-register-build.json",
+        "sha256": "b254e8cdf10588eb3775396d0d64ce7cb14aa92a35d5793909c5c8550d4e6996",
+        "bytes": 287792
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P062/verify/attempt-0001/production/build-record.json",
+        "sha256": "d537c928c8dec65607cffabf91aaff074e410a3e1c2c169bd40ddfed1b2a5819",
+        "bytes": 227723
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-production-build.json",
+        "sha256": "d537c928c8dec65607cffabf91aaff074e410a3e1c2c169bd40ddfed1b2a5819",
+        "bytes": 227723
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P062/analyze/attempt-0001/statistics.json",
+        "sha256": "ce150b1ecd78b041d62d703dc891db51c4721d64ef384bf83718e2b075ca6985",
+        "bytes": 206645
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-statistics.json",
+        "sha256": "ce150b1ecd78b041d62d703dc891db51c4721d64ef384bf83718e2b075ca6985",
+        "bytes": 206645
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P062/measure/attempt-0001/comparison/report.json",
+        "sha256": "6408b6b93b51ecd0bfdbb018795eefe5ba89ab240a117baaf51d080185dbdb1a",
+        "bytes": 2216217
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P062-comparison.json.gz",
+        "sha256": "3dbe4e712b5e447fad98467b4defeb1f888a4320b5e19299ad4c67e6d5f1f1e0",
+        "bytes": 60282
+      },
+      "encoding": "gzip",
+      "original_uncompressed_bytes": true
+    }
+  ],
+  "phase_receipts": {
+    "analyze": {
+      "path": "target/verification/runs/P062/analyze/attempt-0001/receipt.json",
+      "sha256": "0c50d5e75a0e2a78c0dd16d3e212503ef4ede8d09dddaf2b402a59bcc494c81a",
+      "bytes": 101696
+    },
+    "freeze": {
+      "path": "target/verification/runs/P062/freeze/attempt-0001/receipt.json",
+      "sha256": "63dbf68e68a53c6e741f51944b9f203487f23fd416dfa2ffcb6a902f29823c60",
+      "bytes": 229123
+    },
+    "measure": {
+      "path": "target/verification/runs/P062/measure/attempt-0001/receipt.json",
+      "sha256": "3ca59e745c2ee42f8919f51525191a059cf8e033dbabd2caf337ab1b1b3f72b1",
+      "bytes": 463262
+    },
+    "verify": {
+      "path": "target/verification/runs/P062/verify/attempt-0001/receipt.json",
+      "sha256": "90115daba77fc3e22a13fa06a0d43a35db3fa1e8e57dae9c98941353d2c94c86",
+      "bytes": 518270
+    }
+  },
+  "counts": {
+    "selection_count": 9,
+    "selection_groups": 29,
+    "verification_tests": {
+      "groups": {
+        "combined-control": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "default-policy": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "register-semantics": {
+          "passed": 279,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "totals": {
+        "passed": 281,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "sample_counts": {
+      "extra_samples": 0,
+      "logical_pair_references": 1740,
+      "sampling_note": "aliases reuse the planned raw pairs; no extra samples are added",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_pair_count": 1500
+    },
+    "semantic_cases": {
+      "float_boundary_cases": 15966,
+      "float_opcodes": 70,
+      "register_source_events": 62893,
+      "mixed_numeric_and_float_kernel_prefixes": 164,
+      "combined_control_repeat_prefixes": 164
+    }
+  },
+  "decision": {
+    "build": {
+      "attestation": {
+        "binary_sha256": "32c2d15f8e8b9f5c2a022d750dca7394b31720ef12f1029f21c2cccaac5052fb",
+        "command_features": [
+          "register-executor"
+        ],
+        "lane": "runtime-only-production",
+        "protocol": {
+          "batch_limits": {
+            "typed_memory": 100000,
+            "typed_numeric": 1000000
+          },
+          "engine": "wtime",
+          "features": [
+            "mvp",
+            "stable-core",
+            "all-phase3-core",
+            "mvp-saturating",
+            "simd",
+            "simd-relaxed"
+          ],
+          "instrumented": false,
+          "modes": [
+            "decoded",
+            "portable",
+            "register"
+          ],
+          "schema_version": 2,
+          "source_fuel_contract": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          },
+          "thread_driver": true,
+          "types": [
+            "i32",
+            "i64",
+            "f32_bits",
+            "f64_bits",
+            "v128_bits",
+            "reference"
+          ]
+        },
+        "protocol_sha256": "503bab7cf8bdb621a5747c0f58dd5be751691490ac5d4a98b84e8ee04650ea10",
+        "record": {
+          "bytes": 227723,
+          "path": "/workspace/wtime/target/verification/runs/P062/verify/attempt-0001/production/build-record.json",
+          "sha256": "d537c928c8dec65607cffabf91aaff074e410a3e1c2c169bd40ddfed1b2a5819"
+        },
+        "runtime_features": [
+          "wtime-runtime/register-executor"
+        ],
+        "runtime_source_sha256": "7961699dc618431dee9173f3360cb3ea98c5d1e730a1f2547d9d1be158d4a04c"
+      },
+      "relative_growth": {
+        "default": {},
+        "optional": {}
+      }
+    },
+    "cold_products": {
+      "aliases": 4,
+      "groups": [
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n17"
+          },
+          "product_sha256": "0a2bf607469027f505cd815678e2bb466cd1c84855a537310dbfd7b42a49a94a",
+          "sample_workload": "simd_scalar_float_arithmetic_n17",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n1000"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n1000"
+          },
+          "product_sha256": "1d7b6453f5b91c96a99d7bed04ba1039c8cbdbf88c875b971cebf34d57e424b3",
+          "sample_workload": "simd_scalar_f64_arithmetic_n1000",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n1000"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n1000"
+          },
+          "product_sha256": "2b4942c6c4bca272ce5cea0ffbe5076f606e384b9617eb240acf3fe8da958820",
+          "sample_workload": "simd_scalar_float_arithmetic_n1000",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+            "workload": "call_overhead"
+          },
+          "product_sha256": "2d1bf734de2cf9c15944f8248a5930a76c37ee92960c996911813819d3b8f4ad",
+          "sample_workload": "call_overhead",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n0"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n0"
+          },
+          "product_sha256": "5b06192aa43df30161aaca787c5b0eaa24333dd411af138f7f0caebd20b5e5e6",
+          "sample_workload": "simd_scalar_f64_arithmetic_n0",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n17"
+          },
+          "product_sha256": "a1f5f9d4466709e5c80e8d8c9f6fef16f58693519b8c20973082ec3fb84ff7d6",
+          "sample_workload": "simd_scalar_f64_arithmetic_n17",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n0"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n0"
+          },
+          "product_sha256": "e0e0e08857beafcb330a4c64be4f26f8f71248178e1f324d133d5b4e60f06ff4",
+          "sample_workload": "simd_scalar_float_arithmetic_n0",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n1000"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n1000"
+          },
+          "product_sha256": "184875e6ffae7082f0c1b2e755392ae9086d82b04f7c90d977694801ca9cde42",
+          "sample_workload": "simd_scalar_f64_arithmetic_n1000",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n0"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n0"
+          },
+          "product_sha256": "2b195e47d778dfeb38a1420d5ed3de5b1d398aeba6f33bae7d5f7cd8d32385f7",
+          "sample_workload": "simd_scalar_f64_arithmetic_n0",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n17"
+          },
+          "product_sha256": "6e753bbc48f860243921709dfe2614880d4b89bbc4bfcff4e6209e82aa3a4142",
+          "sample_workload": "simd_scalar_float_arithmetic_n17",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n0"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n0"
+          },
+          "product_sha256": "8512f2e2b6db5e18b9ca6760d23361b696113884bffbe4ef2b520dcc6db49b8c",
+          "sample_workload": "simd_scalar_float_arithmetic_n0",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n1000"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n1000"
+          },
+          "product_sha256": "a07a5f0ba6b3cc16fe4a1832f7e6723f9ce6c77858744baaed160d0dfc881cb3",
+          "sample_workload": "simd_scalar_float_arithmetic_n1000",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+            "workload": "call_overhead"
+          },
+          "product_sha256": "e692f42deafdd7afdb82b57f629cfed984969a4b9e23eeb2c92f43a3be73a2d9",
+          "sample_workload": "call_overhead",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n17"
+          },
+          "product_sha256": "f07df03babd7d823f651629232f9ef3e43e11c466f359a3cd54bbbd65b756749",
+          "sample_workload": "simd_scalar_f64_arithmetic_n17",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n0",
+            "simd_scalar_float_arithmetic_n1000",
+            "simd_scalar_float_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92"
+          },
+          "product_sha256": "3ec07972f86558bc90e6b7b838c50df885dd1cbea1bd9c3a1641ea88855ee889",
+          "sample_workload": "simd_scalar_float_arithmetic_n0",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n0",
+            "simd_scalar_f64_arithmetic_n1000",
+            "simd_scalar_f64_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac"
+          },
+          "product_sha256": "6ded04aa5f7538828f8867e0ca827f5a82917e5e6e6f1cdf37418255fa15192f",
+          "sample_workload": "simd_scalar_f64_arithmetic_n0",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "prepare_large"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0"
+          },
+          "product_sha256": "d3a5473686fff6cd5d85a10ac84caad7d992913ecdf60ce646e941cf1e162bce",
+          "sample_workload": "prepare_large",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746"
+          },
+          "product_sha256": "eb4293b68c6c1278859485a77e237cc9c5d4d7fb759608413082a03126b7e390",
+          "sample_workload": "call_overhead",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n1000"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n1000"
+          },
+          "product_sha256": "2950c0e7eeec411817d2a632073f8f2e4fc708daec0a9f15acdf7cfe6b93d44b",
+          "sample_workload": "simd_scalar_f64_arithmetic_n1000",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "simd_float_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "simd",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "ece84319c9f3b540e99b4ddaf2585f778dda6cd8735d11b27f7ba35e6d5fbef0",
+            "workload": "simd_float_arithmetic_n17"
+          },
+          "product_sha256": "2a307eebe1608051839c72f9dfde17a116b9724018284f4c33d102f30a823bbe",
+          "sample_workload": "simd_float_arithmetic_n17",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n0"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n0"
+          },
+          "product_sha256": "4b36b031a13314cd437e88607af7b75d2cb92990ff2b180dcf988cc93cad3bae",
+          "sample_workload": "simd_scalar_float_arithmetic_n0",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n17"
+          },
+          "product_sha256": "7664fe24bbe31360b6f5dcc482900f24d74ad7fbafa3c6d11c8f3863073b44c6",
+          "sample_workload": "simd_scalar_float_arithmetic_n17",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n0"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n0"
+          },
+          "product_sha256": "7bc84e80d5f411f810d783392edc86b64801e7e114bab36e07ff5971095dff9e",
+          "sample_workload": "simd_scalar_f64_arithmetic_n0",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "simd_scalar_float_arithmetic_n1000"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+            "workload": "simd_scalar_float_arithmetic_n1000"
+          },
+          "product_sha256": "950be00e098b355dc7b81f85b130e50062ed338de406b287653e422bc3fb02d3",
+          "sample_workload": "simd_scalar_float_arithmetic_n1000",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "simd_scalar_f64_arithmetic_n17"
+          ],
+          "product": {
+            "profile": "mvp-saturating",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "simd_float_arithmetic_n17": "simd",
+                "simd_scalar_f64_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_f64_arithmetic_n17": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n0": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n1000": "mvp-saturating",
+                "simd_scalar_float_arithmetic_n17": "mvp-saturating"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "simd_workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "simd_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+            "workload": "simd_scalar_f64_arithmetic_n17"
+          },
+          "product_sha256": "bddc65c9aa38eeab781cf7a2829c9dfaf2ed951a364d070378f00d779834bc25",
+          "sample_workload": "simd_scalar_f64_arithmetic_n17",
+          "stage": "warm_call"
+        }
+      ],
+      "logical_groups": 29,
+      "schema": "wtime-cold-products-v1",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_groups": 25
+    },
+    "controls": [
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0535753403223283,
+          "median": 1.017216804312202,
+          "p25": 0.9816406104570409,
+          "p75": 1.0749814634961412
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.039026223361886936,
+          "median": 1.0098180758509234,
+          "p25": 0.7796251923345463,
+          "p75": 1.025950992635802
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.04123970767343643,
+          "median": 1.0357673686245783,
+          "p25": 1.0008066572256142,
+          "p75": 1.0832561184747087
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.05096123720109097,
+          "median": 0.9901329694440605,
+          "p25": 0.9527381984862451,
+          "p75": 1.0814128472359548
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03431821588755951,
+          "median": 0.9904286671369793,
+          "p25": 0.9580157300711857,
+          "p75": 1.0281678456140615
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.1051639133633393,
+          "median": 1.7753872633390706,
+          "p25": 1.7003188224216355,
+          "p75": 1.883746228140863
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0682429989602874,
+          "median": 1.8039838272317932,
+          "p25": 1.7338513940820006,
+          "p75": 1.8588747789138522
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.09443016434475515,
+          "median": 2.033312494423994,
+          "p25": 1.928704516134202,
+          "p75": 2.1232623765569008
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.026295204768595648,
+          "median": 0.8837879845981782,
+          "p25": 0.8499723592723913,
+          "p75": 0.8992458088906549
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05813226484061956,
+          "median": 0.870414298309076,
+          "p25": 0.8201760637409964,
+          "p75": 1.0205968832078847
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "simd_scalar_f64_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0827013077862927,
+          "median": 0.856949111168468,
+          "p25": 0.7725540449863577,
+          "p75": 0.9267131831984124
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_f64_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.02414040244474641,
+          "median": 0.7588620236006558,
+          "p25": 0.7136475657614813,
+          "p75": 0.7818037297894118
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_scalar_f64_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03928832893153411,
+          "median": 0.9861044816452786,
+          "p25": 0.9219459280106976,
+          "p75": 1.0223132733355333
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "simd_scalar_f64_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.09157479216187425,
+          "median": 1.3607128535272235,
+          "p25": 1.303151594638798,
+          "p75": 1.518637784009722
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_f64_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.029524626598553483,
+          "median": 0.7854852861529885,
+          "p25": 0.7546820624187707,
+          "p75": 0.8105157022504427
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_scalar_f64_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0356487511413891,
+          "median": 1.0690492573475914,
+          "p25": 1.0365709039274758,
+          "p75": 1.1079057896462448
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.08163744739216705,
+          "median": 1.7883554994990285,
+          "p25": 1.6789047734845162,
+          "p75": 1.8454484583805868
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.09765761505547799,
+          "median": 2.0054775694756275,
+          "p25": 1.931578368032178,
+          "p75": 2.181682312238694
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03522016418279722,
+          "median": 0.8929556063241786,
+          "p25": 0.8632715063961762,
+          "p75": 0.9431929208847989
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.07334385049093373,
+          "median": 0.787284335549081,
+          "p25": 0.6801363478649909,
+          "p75": 0.8464705864986883
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "simd_scalar_float_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.09112485677838389,
+          "median": 0.8139117032134282,
+          "p25": 0.7315786963636759,
+          "p75": 0.9385842838412518
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_float_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.017838590715332392,
+          "median": 0.7216775075627375,
+          "p25": 0.7079005715761715,
+          "p75": 0.7431995318328801
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_scalar_float_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.02068258795028055,
+          "median": 0.8823243166749248,
+          "p25": 0.8092721187330076,
+          "p75": 0.9026243644582701
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "simd_scalar_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.050760246167625755,
+          "median": 1.3211197983232785,
+          "p25": 1.2670315091505726,
+          "p75": 1.3538228406184367
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.030036454482330666,
+          "median": 0.7440577999065535,
+          "p25": 0.7130596843366512,
+          "p75": 0.7668016240016444
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "simd_scalar_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03355940888141873,
+          "median": 1.0,
+          "p25": 0.9657222071753293,
+          "p75": 1.0171388964123353
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.037629889703046926,
+          "median": 1.0129957914780805,
+          "p25": 0.9842798505538394,
+          "p75": 1.0511380665193952
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.023349038853265114,
+          "median": 1.0486050975844834,
+          "p25": 1.0251099769620606,
+          "p75": 1.070967008122953
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.05423345456111828,
+          "median": 0.9596605219706937,
+          "p25": 0.9199712547853983,
+          "p75": 1.0140464389351604
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.021942567834169924,
+          "median": 0.996875810004674,
+          "p25": 0.974728549331757,
+          "p75": 1.0168923096018225
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.07076147230699592,
+          "median": 1.8131231091859186,
+          "p25": 1.7080016300233967,
+          "p75": 1.8714187200366612
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.09022190467069469,
+          "median": 1.805636315366542,
+          "p25": 1.7254071043861172,
+          "p75": 1.913377812959403
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.17934002011685157,
+          "median": 1.9898150770036809,
+          "p25": 1.868786193673029,
+          "p75": 2.182635800987451
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.02202266241448647,
+          "median": 0.8602545835624713,
+          "p25": 0.8355864687759202,
+          "p75": 0.8812961421533596
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_scalar_f64_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.08436568811977285,
+          "median": 0.8949642170573491,
+          "p25": 0.7887979946761962,
+          "p75": 0.9735015824142994
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "simd_scalar_f64_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.10784974531584068,
+          "median": 0.8541407863733634,
+          "p25": 0.7989054935281308,
+          "p75": 0.9830413837373003
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_f64_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03676328779039617,
+          "median": 0.7878491021851146,
+          "p25": 0.7545627543654216,
+          "p75": 0.825113509103228
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_scalar_f64_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.037335108495124336,
+          "median": 1.0080635543501262,
+          "p25": 0.9529988391897164,
+          "p75": 1.0332012169610876
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "simd_scalar_f64_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.08403107937414056,
+          "median": 1.3315692204301075,
+          "p25": 1.2604928160109652,
+          "p75": 1.4165769335200573
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_f64_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03574105855621568,
+          "median": 0.7783842027065553,
+          "p25": 0.7508958234547801,
+          "p75": 0.8219561354367374
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_scalar_f64_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.025268922996195653,
+          "median": 1.0661425986322803,
+          "p25": 1.045015607152513,
+          "p75": 1.0929612215851776
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.07893510497181111,
+          "median": 1.8531573786412006,
+          "p25": 1.7765719747856037,
+          "p75": 1.9447474495626338
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.09526723844541873,
+          "median": 2.076457660841819,
+          "p25": 1.9835943527535083,
+          "p75": 2.171732149168636
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0417605647098922,
+          "median": 0.9302063218298067,
+          "p25": 0.887452429764482,
+          "p75": 0.9621809779490372
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_scalar_float_arithmetic_n0"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.07802203929947132,
+          "median": 0.751372438961361,
+          "p25": 0.7011298003536852,
+          "p75": 0.8562390423314337
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "simd_scalar_float_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0770692913421328,
+          "median": 0.7737094356860001,
+          "p25": 0.7227436995666634,
+          "p75": 0.877312124856835
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_float_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03751013326719527,
+          "median": 0.7167762771566515,
+          "p25": 0.6838369583555117,
+          "p75": 0.7559491973370986
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_scalar_float_arithmetic_n1000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.07350402254993749,
+          "median": 0.8610027532116019,
+          "p25": 0.7570962249548454,
+          "p75": 0.8963519416910405
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "simd_scalar_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03352558256678029,
+          "median": 1.2837975733661096,
+          "p25": 1.2473751965402844,
+          "p75": 1.3140945233874548
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "simd_scalar_float_arithmetic_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.014532343586377117,
+          "median": 0.7478993972194059,
+          "p25": 0.7295392796371005,
+          "p75": 0.7567760811462888
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "simd_scalar_float_arithmetic_n17"
+      }
+    ],
+    "decision": "rejected",
+    "primary": [
+      {
+        "bootstrap_resamples": 10000,
+        "lower": 0.7431476817284164,
+        "median": 0.7521613597602496,
+        "run": 1,
+        "stages": {
+          "simd_scalar_f64_arithmetic_n1000": "warm_call",
+          "simd_scalar_f64_arithmetic_n17": "warm_call",
+          "simd_scalar_float_arithmetic_n1000": "warm_call",
+          "simd_scalar_float_arithmetic_n17": "warm_call"
+        },
+        "upper": 0.76041936040384,
+        "weighting": "equal declared targeted workload weights"
+      },
+      {
+        "bootstrap_resamples": 10000,
+        "lower": 0.7479824469919423,
+        "median": 0.7572046450399434,
+        "run": 2,
+        "stages": {
+          "simd_scalar_f64_arithmetic_n1000": "warm_call",
+          "simd_scalar_f64_arithmetic_n17": "warm_call",
+          "simd_scalar_float_arithmetic_n1000": "warm_call",
+          "simd_scalar_float_arithmetic_n17": "warm_call"
+        },
+        "upper": 0.7659491498934815,
+        "weighting": "equal declared targeted workload weights"
+      }
+    ],
+    "reasons": [
+      "simd_scalar_f64_arithmetic_n0/first_call: supported regression",
+      "simd_scalar_f64_arithmetic_n0/load_and_call: supported regression",
+      "simd_scalar_f64_arithmetic_n0/prepare: supported regression",
+      "simd_scalar_f64_arithmetic_n17/load_and_call: supported regression",
+      "simd_scalar_float_arithmetic_n0/first_call: supported regression",
+      "simd_scalar_float_arithmetic_n0/load_and_call: supported regression",
+      "simd_scalar_float_arithmetic_n0/prepare: supported regression",
+      "simd_scalar_float_arithmetic_n17/load_and_call: supported regression",
+      "simd_scalar_f64_arithmetic_n0/first_call: supported regression",
+      "simd_scalar_f64_arithmetic_n0/load_and_call: supported regression",
+      "simd_scalar_f64_arithmetic_n0/prepare: supported regression",
+      "simd_scalar_f64_arithmetic_n17/load_and_call: supported regression",
+      "simd_scalar_float_arithmetic_n0/load_and_call: supported regression",
+      "simd_scalar_float_arithmetic_n0/prepare: supported regression",
+      "simd_scalar_float_arithmetic_n17/load_and_call: supported regression",
+      "call_overhead/first_call: regression bound is inconclusive",
+      "call_overhead/load_and_call: regression bound is inconclusive",
+      "simd_scalar_float_arithmetic_n0/first_call: regression bound is inconclusive"
+    ],
+    "sample_counts": {
+      "extra_samples": 0,
+      "logical_pair_references": 1740,
+      "sampling_note": "aliases reuse the planned raw pairs; no extra samples are added",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_pair_count": 1500
+    },
+    "scope": "predeclared candidate only; no milestone or P001 total claim",
+    "statistics_computations": 1,
+    "status": "passed",
+    "task": "P062"
+  },
+  "timing_evidence": true,
+  "retention_justification": "The measured gate rejected promotion. Retain the nondefault numeric register interface as a prerequisite for P063 and P064, with strict float semantics validated. Make no Decoded or Portable promotion claim.",
+  "limitations": [
+    "Register remains opt-in; this task does not change decoded defaults.",
+    "Focused scalar floating-point results do not constitute P001 or portfolio/milestone evidence.",
+    "The immediate predecessor is the frozen register-mode P062-before archive bound by the selection receipt.",
+    "The statistics producer separately binds and rechecks the sibling performance TASKS.json; it is outside repository component identity paths.",
+    "Focused scalar and float evidence only; no SIMD performance claim.",
+    "No Wasmtime comparison is included.",
+    "Native ARM evidence remains unresolved."
+  ]
+}
