@@ -1,8 +1,8 @@
 # P064 — Exit register execution before calls and resume decoded state
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -115,4 +115,26 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P064/shared-finalization/attempt-0002/evidence.json": "2c112dae8233a37e0be25acfe7526bea40e3e771f61f0d18bd540e2cdf480b89"
+  },
+  "evidence": [
+    {
+      "bytes": 2599,
+      "path": "/workspace/wtime/target/performance/P064/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "2c112dae8233a37e0be25acfe7526bea40e3e771f61f0d18bd540e2cdf480b89"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P064"
+}
+```
+
+The full contract closed successfully with freeze attempt 0001, verify attempt 0002, measure attempt 0001, analyze attempt 0001, and close attempt 0079; publication attempt 0001 recorded `done/rejected`. Verification executed 294 register semantic tests, one default-policy test, and five combined-control tests (300 passed, zero failed or ignored). The frozen candidate contained 9 workload rows across 29 row-stage groups; measurement retained 1,500 physical pairs and 1,740 logical pair references, with two independent runs of 30 pairs per group and 10,000 bootstrap resamples. Warm ratios were 0.992807658 (95% CI 0.9817787–1.0123182) and 0.996689483 (95% CI 0.9838080–1.0130657). The gate rejected promotion because neither run supported the required 5% gain and small/held-out cold-load controls regressed. The default clean build was 2.583861 MB-equivalent and the optional Register build 3.005915; stripped sizes were 1,000,712 and 1,078,248 bytes respectively, with zero external core dependencies and all build budgets passing. The immutable predecessor was `target/performance/P064-before` at commit `85c90e5`. Durable reports are `docs/benchmarks/performance/P064*`; export attempt `target/recovery/P064-export-0002` completed with eight copies and hash records. Fixture inputs and probe identities are recorded in `crates/wtime-runtime/tests/fixtures/performance/p064/provenance.json`. The first full verification exposed a stale P060 counter assertion; it was corrected to account for three new caller steps and the full verification then passed, with no semantic failure suppressed. The implementation and interface are documented in `docs/architecture/register-call-exits.md`. Register remains opt-in; this focused result makes no broad portfolio or P001 claim, and the nondefault interface work remains relevant to P065/P066.

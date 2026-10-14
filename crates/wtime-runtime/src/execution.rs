@@ -194,10 +194,9 @@ impl Store {
             let inst_id = frame.function.instance;
             #[cfg(feature = "register-executor")]
             if frame.register.is_some() {
-                #[cfg(feature = "execution-reference")]
-                { self.register_dispatches = self.register_dispatches.saturating_add(1); }
                 match register::step(frame, &mut stack, self)? {
                     register::Step::Continue => continue,
+                    register::Step::ExitToDecoded => {},
                     register::Step::Return => {
                         frames.pop();
                         if frames.is_empty() {

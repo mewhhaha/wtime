@@ -182,9 +182,10 @@ fn p061_every_source_prefix_and_logical_limits() {
             if policy == ExecutionPolicy::Register {
                 assert_eq!(
                     store.register_dispatches(),
-                    if message.is_some() { 2 } else { 4 }
+                    if message.is_some() { 3 } else { 5 }
                 );
-                assert_eq!(store.register_fallback_frames(), 1);
+                assert_eq!(store.register_fallback_frames(), 0);
+                assert_eq!(store.register_exits(), 1);
             }
         }
         assert_eq!(results[0], results[1]);

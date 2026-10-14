@@ -82270,8 +82270,8 @@
       "key": "register-call-exits",
       "title": "Exit register execution before calls and resume decoded state",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -82331,7 +82331,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P064-verification.json --output target/performance/P064/complete --execute"
       ],
       "path": "05-register-executor/P064-register-call-exits.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P064/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "2c112dae8233a37e0be25acfe7526bea40e3e771f61f0d18bd540e2cdf480b89",
+          "bytes": 2599
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -82346,7 +82352,22 @@
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P064-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P064-selection.json target/performance/P064-before/manifest.json --output target/performance/P064/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P064/shared-finalization/attempt-0002/evidence.json": "2c112dae8233a37e0be25acfe7526bea40e3e771f61f0d18bd540e2cdf480b89"
+        },
+        "evidence": [
+          {
+            "bytes": 2599,
+            "path": "/workspace/wtime/target/performance/P064/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "2c112dae8233a37e0be25acfe7526bea40e3e771f61f0d18bd540e2cdf480b89"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P064"
+      }
     },
     {
       "id": "P065",

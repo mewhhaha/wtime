@@ -388,6 +388,8 @@ pub struct Store {
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     register_dispatches: u64,
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    register_exits: u64,
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     register_fallback_frames: std::cell::Cell<u64>,
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
     compact_dispatches: u64,
@@ -453,6 +455,8 @@ impl Store {
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     pub fn register_dispatches(&self) -> u64 { self.register_dispatches }
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    pub fn register_exits(&self) -> u64 { self.register_exits }
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     pub fn register_fallback_frames(&self) -> u64 { self.register_fallback_frames.get() }
     /// Development-only proof of executed compact source events.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
@@ -501,6 +505,8 @@ impl Store {
             Self {
                 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
                 register_dispatches: 0,
+                #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+                register_exits: 0,
                 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
                 register_fallback_frames: std::cell::Cell::new(0),
                 #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]

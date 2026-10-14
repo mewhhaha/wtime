@@ -2,6 +2,7 @@
 //! supply execution. Compiling this feature does not select a runtime policy.
 mod control;
 mod execute;
+mod exits;
 mod float;
 mod integer;
 mod ir;

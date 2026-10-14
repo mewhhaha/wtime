@@ -1,7 +1,7 @@
 //! Whole-function numeric tier. The caller charges the original source boundary.
 use super::{
     control::{MovePlan, MoveSource, MoveStep},
-    float, integer,
+    exits, float, integer,
     ir::{Budget, Constant, NumericType, Operation},
     lower::LoweredFunction,
     memory,
@@ -32,7 +32,7 @@ impl std::fmt::Debug for PreparedModule {
 }
 fn valid_operation(op: &Operation, function: &LoweredFunction) -> bool {
     match op {
-        Operation::ExitToDecoded => false,
+        Operation::ExitToDecoded => true,
         Operation::Move { .. } => true,
         Operation::Const { constant, .. } => function.program.constant(*constant).is_some(),
         Operation::Unary { opcode, .. } | Operation::Binary { opcode, .. } => {
@@ -119,7 +119,7 @@ impl PreparedModule {
                                 .decoded()
                                 .imports
                                 .len()
-                                .checked_mul(3)?
+                                .checked_mul(5)?
                                 .checked_add(8)?,
                         )?,
                     )?;
@@ -149,9 +149,16 @@ impl PreparedModule {
                 continue;
             }
             let mut transaction = budget.clone();
-            let Ok(lowered) = LoweredFunction::lower(module, body, &mut transaction) else {
-                continue;
+            let lowered = match LoweredFunction::lower(module, body, &mut transaction) {
+                Ok(lowered) => lowered,
+                Err(_) => {
+                    let Some(lowered) = exits::prepare(module, body, &mut transaction) else {
+                        continue;
+                    };
+                    lowered
+                }
             };
+            let n = lowered.program.instruction_count();
             if (0..n).any(|pc| {
                 !lowered
                     .program
@@ -361,7 +368,6 @@ pub(crate) fn logical_height(frame: &Frame, store: &Store) -> Result<usize> {
         .checked_add(recipe.operands.len())
         .ok_or_else(|| trap("register logical height overflow"))
 }
-#[cfg(feature = "execution-reference")]
 pub(crate) fn materialize(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> Result<()> {
     let (module, function) = function(frame, store)?;
     let recipe = function
@@ -386,6 +392,7 @@ pub(crate) fn materialize(frame: &mut Frame, stack: &mut Vec<Value>, store: &Sto
 pub(crate) enum Step {
     Continue,
     Return,
+    ExitToDecoded,
 }
 fn apply_moves(plan: &MovePlan, bank: &mut [u64]) -> Result<()> {
     let mut scratch = None;
@@ -450,6 +457,14 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
         .ok_or_else(|| trap("missing admitted register function"))?;
     let program = &function.lowered.program;
     let pc = frame.pc;
+    if matches!(program.operation(pc), Some(Operation::ExitToDecoded)) {
+        exits::handoff(frame, stack, store)?;
+        return Ok(Step::ExitToDecoded);
+    }
+    #[cfg(feature = "execution-reference")]
+    {
+        store.register_dispatches = store.register_dispatches.saturating_add(1);
+    }
     let recipe = program
         .boundary(pc)
         .map_err(|_| trap("register source identity"))?;
@@ -482,7 +497,7 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
         .operation(pc)
         .ok_or_else(|| trap("register operation pc"))?
     {
-        Operation::ExitToDecoded => return Err(trap("unselected register prefix")),
+        Operation::ExitToDecoded => return Err(trap("register barrier ordering")),
         Operation::Move { from, to, .. } => {
             let v = read(bank, *from)?;
             write(bank, *to, v)?;
@@ -668,4 +683,5 @@ mod tests {
     include!("../../../tests/performance/p061_private.rs");
     include!("../../../tests/performance/p060_private.rs");
     include!("../../../tests/performance/p062_private.rs");
+    include!("../../../tests/performance/p064_private.rs");
 }

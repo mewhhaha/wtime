@@ -149,8 +149,10 @@ fn p060_structural_fuel_cancel_and_operand_limits() {
             let actual = view(store.invoke(function, &[Value::I32(0)]));
             assert_eq!(actual, expected);
             if policy == ExecutionPolicy::Register {
-                assert_eq!(store.register_fallback_frames(), 1);
-                assert_eq!(store.register_dispatches(), if limit == 3 { 4 } else { 11 });
+                assert_eq!(store.register_fallback_frames(), 0);
+                assert_eq!(store.register_exits(), 1);
+                // Three caller source events now execute before the call exit.
+                assert_eq!(store.register_dispatches(), if limit == 3 { 7 } else { 14 });
             }
             observations.push(actual);
         }
@@ -174,7 +176,8 @@ fn p060_structural_fuel_cancel_and_operand_limits() {
         observations.push(view(store.invoke(function, &[Value::I32(17)])));
         if policy == ExecutionPolicy::Register {
             assert!(store.register_dispatches() > 0);
-            assert_eq!(store.register_fallback_frames(), 1);
+            assert_eq!(store.register_fallback_frames(), 0);
+            assert_eq!(store.register_exits(), 1);
         }
     }
     assert_eq!(observations[0], observations[1]);

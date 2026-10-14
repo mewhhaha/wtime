@@ -1,0 +1,126 @@
+{
+  "lane": "candidate",
+  "rationale": "Target direct guest-call and host-callback kernels at small and large iteration counts, with n17 held out. P064 measures the bounded numeric prefix admitted in call-containing bodies: execution reaches the first control/call/reference/effect barrier and continues through the original decoded path. It does not introduce mid-loop OSR; unsupported whole-function and memory-only bodies continue to fall back. The timed target benefit may therefore be limited to work before the first barrier and is assessed independently from semantic eligibility. Preserve multi-value behavior, the tiny call cold controls, and large-module preparation.",
+  "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+  "rows": [
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n32",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "6051db22ca4b03eaf4fc101b5c0d7127678aa7c9bba0f62be79b7465dcd91d66"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n10000",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "2aa0a9a6c94cc85da93254b46d8c89d1003db2ca8268e169fd5719efd5c932b6"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_host_call_n32",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "fdb0d2c8bbb5f570dc86a846a835705d87cab131471cdb4d73f863f3cbd35b22"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_host_call_n10000",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0fa25da0e29bd3b2cf0c4282fc09dddbdc05b0a7c24ec8ee7856068149314e31"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n17",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "5fada772c953d9ada4a54afafe048ad67ad3a01e298fd03534b486ade8f711ef"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_host_call_n17",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "4dbe80dfecdc142c30582b9da4f3d26d00ca0985be2c3ae4a6f5e409f94b2261"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_multivalue_branch_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "0ae8ab8a67a140b2b3b602b8e42348cb738b1641903de6f6529aab234c8b8ef4"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "schema": "wtime-candidate-selection-v1",
+  "semantic_cases": [
+    "p064_direct_call_and_store_prefix_execute_once",
+    "p064_host_reentry_keeps_state_and_fuel",
+    "p064_tail_indirect_and_depth_errors_match",
+    "p064_every_prefix_and_fallback_preserve_accounting",
+    "p064_prefix_preparation_limits_and_owner_guards"
+  ],
+  "task": "P064"
+}
