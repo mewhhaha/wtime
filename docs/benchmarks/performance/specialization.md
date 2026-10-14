@@ -2,6 +2,8 @@
 
 P056 is pending. The complete milestone comparison and independent variant
 refresh have not finished; this document makes no new speed or promotion claim.
+Implementation is paused for the
+[calibration preflight proposal](../../verification/calibration-preflight-proposal.md).
 
 Decoded remains the default. Compact is opt-in. The four core crates use safe
 Rust and have no external production dependencies.
@@ -33,6 +35,19 @@ allows up to one million calls. Both sides must still independently reach
 20 ms with the same exact batch. Memory and SIMD bounds are unchanged.
 The earlier full and partial datasets remain retained as historical attempts;
 the changed execution inputs require fresh measurements.
+
+The next closure passed 439 named checks (zero failures or ignored checks),
+145,760 corpus cases, and 89 integration checks. Default and optional Compact
+clean builds took 2.7243 s and 3.1779 s; their stripped artifacts were 1,000,712
+and 1,091,296 bytes. Both dependency and build budgets passed.
+
+That closure completed both scalar and both memory datasets, totaling 72,720
+pairs. It then stopped after 6,240 P001 SIMD pairs because
+`simd_typed_f64_neg_1_75` could not reach the 20 ms floor within the separate
+typed driver's 100,000-call bound. The completed and failed attempts remain
+preserved. No statistics or performance decision was produced. The next run
+needs consistent driver capacities and an exhaustive calibration check before
+paired collection.
 
 The final source-current decision, uncertainty, cold/build/retained costs,
 artifact identities, executed counts, and remaining profiles will be recorded
