@@ -1,0 +1,202 @@
+{
+  "command_logs": {
+    "cast_branch:encode": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/encode-cast_branch.json",
+      "sha256": "2daf47e8c70f767c8b6543e787d6fadff059df181247648d0cf60015215afadd"
+    },
+    "cast_branch:validation": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/validate-cast_branch.json",
+      "sha256": "4944a894d7d89f4021f0fbae2a22d17a05b79beca086cef3430b8d4502529714"
+    },
+    "continuation_root:encode": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/encode-continuation_root.json",
+      "sha256": "fd2c533e032087bc52126aa6e033894784d1d34124c58634d3a2f280cdc14e5a"
+    },
+    "continuation_root:validation": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/validate-continuation_root.json",
+      "sha256": "ba54544f34511b32d9dcb90514786d1b682ff0fbd8ee7fa996b8ebebd8e30309"
+    },
+    "long_metadata:encode": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/encode-long_metadata.json",
+      "sha256": "b8fa0fd1c07d1237aacfdfe421649164cf3f3ed25972b9166feaf9cc2ab102c1"
+    },
+    "long_metadata:validation": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/validate-long_metadata.json",
+      "sha256": "8eb4640955ddac4b61344415e3e2b4ed04887f6be8f84ad8918e9559656d2e6c"
+    },
+    "shuffle:encode": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/encode-shuffle.json",
+      "sha256": "0243838914f6187b2a43cd8fc16f9ad186d962eff0797ffb3f0b80204afdf748"
+    },
+    "shuffle:validation": {
+      "path": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/validate-shuffle.json",
+      "sha256": "65f35ad88d1f2625ef8df9abd9000f0a6f8aa2c9f6e6219a9024fa6c41232228"
+    }
+  },
+  "encoder": {
+    "path": "/workspace/wtime/target/performance/P035-fixture-recovery/tools/encoder",
+    "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+  },
+  "fixtures": {
+    "cast_branch": {
+      "encode_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/encoder",
+        "encode",
+        "/tmp/P036-durable-stage/fixtures/cast_branch.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P036/fixtures/cast_branch.wasm"
+      ],
+      "encode_exit_code": 0,
+      "encode_log_sha256": "2daf47e8c70f767c8b6543e787d6fadff059df181247648d0cf60015215afadd",
+      "source_sha256": "5eebdbc85bdb66c826c536e9d474062c3887a712cc9d5f74c2a0c351330de8ae",
+      "validation_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/validator",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P036/fixtures/cast_branch.wasm"
+      ],
+      "validation_exit_code": 0,
+      "validation_log_sha256": "4944a894d7d89f4021f0fbae2a22d17a05b79beca086cef3430b8d4502529714",
+      "validation_profile": "all-phase3-core",
+      "validation_result": "valid",
+      "wasm_sha256": "853112cefe2506c80269f586cf71d22c982d404ef8e4557d9150c42c9fa28560"
+    },
+    "continuation_root": {
+      "encode_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/encoder",
+        "encode",
+        "/tmp/P036-durable-stage/fixtures/continuation_root.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P036/fixtures/continuation_root.wasm"
+      ],
+      "encode_exit_code": 0,
+      "encode_log_sha256": "fd2c533e032087bc52126aa6e033894784d1d34124c58634d3a2f280cdc14e5a",
+      "source_sha256": "05d3278c9be02485919784bae44f7b5fcd55a63856296b0fb1e4a2c854379448",
+      "validation_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/validator",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P036/fixtures/continuation_root.wasm"
+      ],
+      "validation_exit_code": 0,
+      "validation_log_sha256": "ba54544f34511b32d9dcb90514786d1b682ff0fbd8ee7fa996b8ebebd8e30309",
+      "validation_profile": "all-phase3-core",
+      "validation_result": "valid",
+      "wasm_sha256": "f3a432da4b984b715e74e26016d593a61e5dd4b24e421d1434bf63bf83c39f31"
+    },
+    "long_metadata": {
+      "encode_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/encoder",
+        "encode",
+        "/tmp/P036-durable-stage/fixtures/long_metadata.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P036/fixtures/long_metadata.wasm"
+      ],
+      "encode_exit_code": 0,
+      "encode_log_sha256": "b8fa0fd1c07d1237aacfdfe421649164cf3f3ed25972b9166feaf9cc2ab102c1",
+      "source_sha256": "1ab5c20da62a29ac5e27546a10a0d49c19cc9962bd9e7cdfa8a61ff24b9e3719",
+      "validation_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/validator",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P036/fixtures/long_metadata.wasm"
+      ],
+      "validation_exit_code": 0,
+      "validation_log_sha256": "8eb4640955ddac4b61344415e3e2b4ed04887f6be8f84ad8918e9559656d2e6c",
+      "validation_profile": "all-phase3-core",
+      "validation_result": "valid",
+      "wasm_sha256": "8ab166cf1fe217e49b98ffdc30a51aac2ca5270bad26bd4b84e06ec37d42f290"
+    },
+    "shuffle": {
+      "encode_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/encoder",
+        "encode",
+        "/tmp/P036-durable-stage/fixtures/shuffle.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P036/fixtures/shuffle.wasm"
+      ],
+      "encode_exit_code": 0,
+      "encode_log_sha256": "0243838914f6187b2a43cd8fc16f9ad186d962eff0797ffb3f0b80204afdf748",
+      "source_sha256": "ce2af411702310c035dc1a3133feaa096b40fe43def12806e1bac0915dfe877a",
+      "validation_command": [
+        "/workspace/wtime/target/performance/P035-fixture-recovery/tools/validator",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P036/fixtures/shuffle.wasm"
+      ],
+      "validation_exit_code": 0,
+      "validation_log_sha256": "65f35ad88d1f2625ef8df9abd9000f0a6f8aa2c9f6e6219a9024fa6c41232228",
+      "validation_profile": "all-phase3-core",
+      "validation_result": "valid",
+      "wasm_sha256": "b71c56264d750cc8f7300e3b9900534072d92838447a2f600c920e20625f5f77"
+    }
+  },
+  "license_sha256": {
+    "LICENSE-APACHE.txt": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "LICENSE-MIT.txt": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
+    "gc-CC0-LICENSE.txt": "0960f19d7554375da3008da6277ead6b7ede71ba54ab2b35a7df5c2e964ca9e7"
+  },
+  "p035_decision": {
+    "path": "/workspace/wtime/target/performance/P035/decision.json",
+    "sha256": "7b9f63f93abd84ca3e48a69bcf2f1273eb51ed225b8863590e73905c586a9644"
+  },
+  "p035_native_preflight": {
+    "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+    "path": "/workspace/wtime/target/performance/P035-native-preflight/record.json",
+    "sha256": "283d1bdbc54179221dc2311d325157c0b4ca287a2f670f924618af70a92efc3c",
+    "validator_sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+  },
+  "p035_runner": {
+    "command_count": 16,
+    "path": "/workspace/wtime/target/performance/P035-runner-attempts/attempt-0004/commands.json",
+    "sha256": "42d4153b87ffc5d5e5ae2ed9fcc57e3192d40b727c9f1535e7dd087c320d5c73"
+  },
+  "p036_before_archive": {
+    "command": [
+      "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+      "tools/wtime-bench/baseline.py",
+      "--output",
+      "/workspace/wtime/target/performance/P036-before",
+      "--mode",
+      "decoded"
+    ],
+    "exit_code": 0,
+    "log": "/workspace/wtime/target/performance/P036/prepare-20261012T011718748411Z/fresh-decoded-archive.json",
+    "log_sha256": "3908f4e0a5938469706ab1a9113e2d89bc7a78b34e1c7d59cef16ce80ab965fa",
+    "path": "/workspace/wtime/target/performance/P036-before/manifest.json",
+    "runtime_sources": {
+      "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+      "crates/wtime-runtime/src/canonical.rs": "0bed54a47fbca8a39c7359a9140a5284f0513a6744505ddb5a0b92d531d0776d",
+      "crates/wtime-runtime/src/continuation.rs": "c30b6fb4b89999b2e6f494b9258ce9ea3ea1e39a5971643b43147026e0fc8f46",
+      "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+      "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+      "crates/wtime-runtime/src/execution.rs": "d2ef4ca6928c9c9f9ca7c02f9a94d0a4b8bdfd5b560ed1d3d6dab93fcb3f751d",
+      "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+      "crates/wtime-runtime/src/execution/cursor.rs": "ff93a3f0056d109366d2b77ea93d459f456d048c05b4bf05369305a3b491d3d3",
+      "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+      "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+      "crates/wtime-runtime/src/gc.rs": "7dcfcc9aaff6a333041d9d8a7323d1ce0fad90b382b5023e9caeeb52815b3471",
+      "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+      "crates/wtime-runtime/src/lib.rs": "997a0ec8d835c83567e13aa4c755ed30ad0e44a0bdb9e689c14753abdd47bb45",
+      "crates/wtime-runtime/src/linker.rs": "39a2068993bcb65fb4434f42d02b56687e8ae31914840487ee4c35de07677806",
+      "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+      "crates/wtime-runtime/src/perf.rs": "df87993399e014674e63c8f15ea9dfb74888fe86ba5bd39a9129a4048121b3e5",
+      "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+      "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+      "crates/wtime-runtime/src/simd.rs": "84c223e6a546aa8955ff5214b9add03df4c94d25f3ffcd45b33a808d299334b1",
+      "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a"
+    },
+    "sha256": "8b65ef3c1cf964b158f8c014c0badd77a783e384e0bd075e6ac217d4a294c729"
+  },
+  "receipt_sha256": "5fcb182a190087b0bddc0f774ac0e7833870ecdd898209009e062c9040ebc02a",
+  "schema": "p036-durable-fixtures-v1",
+  "status": "freshly_encoded_and_cli_validated",
+  "validator": {
+    "path": "/workspace/wtime/target/performance/P035-fixture-recovery/tools/validator",
+    "sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+  }
+}

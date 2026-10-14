@@ -1,0 +1,50 @@
+{
+  "schema": "p048-comparison-fixture-admission-v1",
+  "purpose": "Mechanical fixture admission only; no guest execution and no runtime behavior claim.",
+  "tool_references": "/tmp/p048-fixtures/tool-references.json",
+  "tool_identity_receipt": "/tmp/p047-fixture-drafts/helper-sources.sha256",
+  "validation_profile": "all-phase3-core",
+  "operator_names": ["eq", "ne", "lt_s", "lt_u", "gt_s", "gt_u", "le_s", "le_u", "ge_s", "ge_u"],
+  "routes": ["br_if block result", "if result"],
+  "exports_per_module": 40,
+  "functions_per_module": 40,
+  "expected_route_results_i32": {"comparison_true": 71, "comparison_false": -13},
+  "instruction_counts_including_implicit_function_end": {
+    "each_br_route_function": 10,
+    "each_if_route_function": 9,
+    "all_functions_per_module": 380,
+    "branch_hint_annotations_are_instructions": false
+  },
+  "operator_expectations": {
+    "path": "/tmp/p048-fixtures/oracle.json",
+    "sha256": "0fff17e928b1b4b8ddfbc1e99ca316235b3d4466423b5845fe2dfec85ea514f6",
+    "coverage": "All ordered pairs from INT_MIN, INT_MAX, -1, 0, 1 at each width; signed relations use signed values and unsigned relations reinterpret modulo 2^width.",
+    "independent_host_language_model": true
+  },
+  "modules": [
+    {
+      "name": "comparisons",
+      "hints": false,
+      "source": {"path": "/tmp/p048-fixtures/source/comparisons.wat", "bytes": 8398, "sha256": "3ed68f730a4cd8b0ef76255f46d869c426e669e681acfefa2776aadbbc812c04"},
+      "wasm": {"path": "/tmp/p048-fixtures/wasm/comparisons.wasm", "bytes": 1670, "sha256": "78a56d1d25efa7eb956e7ce4c04e9b7cec19e8efd20f157d4e5450eac33249bd"},
+      "validator_status": "valid",
+      "command_log": "/tmp/p048-fixtures/logs/comparisons.log"
+    },
+    {
+      "name": "comparisons_hinted",
+      "hints": true,
+      "source": {"path": "/tmp/p048-fixtures/source/comparisons_hinted.wat", "bytes": 9998, "sha256": "4ea93dfacbeb89c23e0de6984160047745d36ad94550eb9eab13d7247e4d41aa"},
+      "wasm": {"path": "/tmp/p048-fixtures/wasm/comparisons_hinted.wasm", "bytes": 1900, "sha256": "6b942d15ba04b2f0d42ab146747ec40f0bfdc842a70bf9427225a3b6c2c04312"},
+      "validator_status": "valid",
+      "hint_annotations": 40,
+      "command_log": "/tmp/p048-fixtures/logs/comparisons_hinted.log"
+    }
+  ],
+  "archive": {
+    "generator_source": "/tmp/p048-fixtures/generate.executed.py",
+    "generator_command": "/tmp/p048-fixtures/generator-command.txt",
+    "commands": "/tmp/p048-fixtures/commands.txt",
+    "executed_tool_helper": "/tmp/p048-fixtures/run_tools.executed.sh",
+    "prevalidation_hashes": "/tmp/p048-fixtures/prevalidation.sha256"
+  }
+}

@@ -1,0 +1,331 @@
+{
+  "fixtures": {
+    "br_if_taken_untaken": {
+      "commands": {
+        "encode": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+            "encode",
+            "/tmp/P040-fixture-stage/br_if_taken_untaken.wat",
+            "-o",
+            "/workspace/wtime/target/performance/P040/fixtures/br_if_taken_untaken.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 352,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/encode-br_if_taken_untaken.json",
+            "sha256": "53b9f745d90fb518a7948e1ceb51cd5b3f907716b423e1a7f496fdd24e54877f"
+          }
+        },
+        "validate": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+            "--profile",
+            "all-phase3-core",
+            "check",
+            "/workspace/wtime/target/performance/P040/fixtures/br_if_taken_untaken.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 335,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/validate-br_if_taken_untaken.json",
+            "sha256": "49110c8aecd5f205a212cf9345026618c6f982cc7a39abd3810c73ca4c6dad9e"
+          }
+        }
+      },
+      "source": {
+        "bytes": 509,
+        "path": "/tmp/P040-fixture-stage/br_if_taken_untaken.wat",
+        "sha256": "7db3f3a11234cba76b65d84e2766fd27dd07996102a0ca57f4da26e7760b936d"
+      },
+      "wasm": {
+        "bytes": 65,
+        "path": "/workspace/wtime/target/performance/P040/fixtures/br_if_taken_untaken.wasm",
+        "sha256": "1ef089715846b6f725ab36a33454f8cc191871f1892f02fec18b8aa46c3e5b57"
+      }
+    },
+    "br_table_three_paths": {
+      "commands": {
+        "encode": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+            "encode",
+            "/tmp/P040-fixture-stage/br_table_three_paths.wat",
+            "-o",
+            "/workspace/wtime/target/performance/P040/fixtures/br_table_three_paths.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 354,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/encode-br_table_three_paths.json",
+            "sha256": "4612dd83453cc56d69654652c2d2d7dd470d20eb23504f8c5c516568eaa4fff0"
+          }
+        },
+        "validate": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+            "--profile",
+            "all-phase3-core",
+            "check",
+            "/workspace/wtime/target/performance/P040/fixtures/br_table_three_paths.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 336,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/validate-br_table_three_paths.json",
+            "sha256": "82c74bd0953fa7eecf930f4f1d70695e4f83badb1ed00df67c7925eadcde3ecf"
+          }
+        }
+      },
+      "source": {
+        "bytes": 785,
+        "path": "/tmp/P040-fixture-stage/br_table_three_paths.wat",
+        "sha256": "e2a1798f06d9f5705c708e74daac16d35757d71cbb2b5f01ae48c79fead72c60"
+      },
+      "wasm": {
+        "bytes": 77,
+        "path": "/workspace/wtime/target/performance/P040/fixtures/br_table_three_paths.wasm",
+        "sha256": "f775130cdd1cc7089a5497d3e59c8e6e9188d26ab4a958d53ff708f4d0992f34"
+      }
+    },
+    "function_branch_vs_return": {
+      "commands": {
+        "encode": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+            "encode",
+            "/tmp/P040-fixture-stage/function_branch_vs_return.wat",
+            "-o",
+            "/workspace/wtime/target/performance/P040/fixtures/function_branch_vs_return.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 364,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/encode-function_branch_vs_return.json",
+            "sha256": "0256c740aac7a76508ff682f6fa59b0409c30208ae34ab86ec74e4eb7ee86949"
+          }
+        },
+        "validate": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+            "--profile",
+            "all-phase3-core",
+            "check",
+            "/workspace/wtime/target/performance/P040/fixtures/function_branch_vs_return.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 341,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/validate-function_branch_vs_return.json",
+            "sha256": "2cd868b6e65e1382aaa7c5ce43b2106c9f08c8f4148bd060b89798f9388395ab"
+          }
+        }
+      },
+      "source": {
+        "bytes": 912,
+        "path": "/tmp/P040-fixture-stage/function_branch_vs_return.wat",
+        "sha256": "9e729d5deb484252dbae149e43cebd5094c6b2c396ddb13d15a9b64456686922"
+      },
+      "wasm": {
+        "bytes": 100,
+        "path": "/workspace/wtime/target/performance/P040/fixtures/function_branch_vs_return.wasm",
+        "sha256": "1fc5674a11b5aef598ae6ba62a76680f24cbb89a411cf382012e7fc5aa4c8c84"
+      }
+    },
+    "multivalue_loop": {
+      "commands": {
+        "encode": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+            "encode",
+            "/tmp/P040-fixture-stage/multivalue_loop.wat",
+            "-o",
+            "/workspace/wtime/target/performance/P040/fixtures/multivalue_loop.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 344,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/encode-multivalue_loop.json",
+            "sha256": "0e87096bf7d93def7808de793fb378350c27d2b2a801a134f1de9aa5f2942cb8"
+          }
+        },
+        "validate": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+            "--profile",
+            "all-phase3-core",
+            "check",
+            "/workspace/wtime/target/performance/P040/fixtures/multivalue_loop.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 331,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/validate-multivalue_loop.json",
+            "sha256": "0a9257f2f21358553409921afb77d6029629d3346e883c53a7ee00c1cbac5aeb"
+          }
+        }
+      },
+      "source": {
+        "bytes": 884,
+        "path": "/tmp/P040-fixture-stage/multivalue_loop.wat",
+        "sha256": "655a13e87c1ae2a49a2d84fa6cc6f7ffa9aaa615d8620888a03eee6724b736ff"
+      },
+      "wasm": {
+        "bytes": 85,
+        "path": "/workspace/wtime/target/performance/P040/fixtures/multivalue_loop.wasm",
+        "sha256": "ab8c4ca0f71156ed0ca30fc0c87abe17e940d3de5d1efafd9624dd8dd221dbce"
+      }
+    },
+    "nested_if_results": {
+      "commands": {
+        "encode": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+            "encode",
+            "/tmp/P040-fixture-stage/nested_if_results.wat",
+            "-o",
+            "/workspace/wtime/target/performance/P040/fixtures/nested_if_results.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 348,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/encode-nested_if_results.json",
+            "sha256": "9f95367e4c94b2a6e6bed2240a918b1b10774b410b7689e78078e747fdc75935"
+          }
+        },
+        "validate": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+            "--profile",
+            "all-phase3-core",
+            "check",
+            "/workspace/wtime/target/performance/P040/fixtures/nested_if_results.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 333,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/validate-nested_if_results.json",
+            "sha256": "5e467a754663807367619f6d9fce8678762d4cabfc3c570693c97c7900725c4c"
+          }
+        }
+      },
+      "source": {
+        "bytes": 768,
+        "path": "/tmp/P040-fixture-stage/nested_if_results.wat",
+        "sha256": "9c4eb9eb041478ef8c3bfd948fdbf51905735879243e4e6dca5afe2f1540be05"
+      },
+      "wasm": {
+        "bytes": 94,
+        "path": "/workspace/wtime/target/performance/P040/fixtures/nested_if_results.wasm",
+        "sha256": "194ba33c860add868dfe77ed31fb9ab07190f0755e61b6a4735ff6702421f7e7"
+      }
+    },
+    "unreachable_local_prefix": {
+      "commands": {
+        "encode": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+            "encode",
+            "/tmp/P040-fixture-stage/unreachable_local_prefix.wat",
+            "-o",
+            "/workspace/wtime/target/performance/P040/fixtures/unreachable_local_prefix.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 362,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/encode-unreachable_local_prefix.json",
+            "sha256": "9ffb4d4380d4f0536ac8f0b4c71960481c7b36e9ea857495ed73295f44934047"
+          }
+        },
+        "validate": {
+          "command": [
+            "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+            "--profile",
+            "all-phase3-core",
+            "check",
+            "/workspace/wtime/target/performance/P040/fixtures/unreachable_local_prefix.wasm"
+          ],
+          "exit_code": 0,
+          "log": {
+            "bytes": 340,
+            "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/validate-unreachable_local_prefix.json",
+            "sha256": "954b8bd6bea85638acd740344ad041c99c58f356263274f3ae1c7be0ab7b4365"
+          }
+        }
+      },
+      "source": {
+        "bytes": 447,
+        "path": "/tmp/P040-fixture-stage/unreachable_local_prefix.wat",
+        "sha256": "80432900a5c3facc4f79cf92665b3a8825cfa170420b6d540398c6f40ab1d5df"
+      },
+      "wasm": {
+        "bytes": 64,
+        "path": "/workspace/wtime/target/performance/P040/fixtures/unreachable_local_prefix.wasm",
+        "sha256": "d7733f5aad85961cbfdca38abc20b3fb50ae78d6f21be75105af071b71cbf354"
+      }
+    }
+  },
+  "implementation_sources": {
+    "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+    "crates/wtime-runtime/src/canonical.rs": "0bed54a47fbca8a39c7359a9140a5284f0513a6744505ddb5a0b92d531d0776d",
+    "crates/wtime-runtime/src/continuation.rs": "c30b6fb4b89999b2e6f494b9258ce9ea3ea1e39a5971643b43147026e0fc8f46",
+    "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+    "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+    "crates/wtime-runtime/src/execution.rs": "241475afda76571e1ddc7886d343ca263cef4d7f66bbf95a481db6e633f1f3fe",
+    "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+    "crates/wtime-runtime/src/execution/compact/execute.rs": "95b773913e411f8b816cc94a0def8d61e37e43d7caf503fdb95795e6e1237fbf",
+    "crates/wtime-runtime/src/execution/compact/ir.rs": "168fcfed05f421812f8ee2a9e3017c0b3626219ae3ac87d2e4ecadbcf13e0380",
+    "crates/wtime-runtime/src/execution/compact/lower_control.rs": "0f474dcb314ec814d0651b8f050e65ee459acf194890efb5ab89d493f115edd7",
+    "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "ce661d5a7b5a75c53b27cd3fa7dc411ddb813ccc0f321930fa7e448cf9476d78",
+    "crates/wtime-runtime/src/execution/compact/mod.rs": "3dec85fa82f2acfb44a093360c23eab1026bfd9d35a804f8204e256d45bcd0ef",
+    "crates/wtime-runtime/src/execution/compact/source_map.rs": "cb64b63e549cf95d1687e15390f03cf1279832bfb25dbb800eb8951ce6a7013d",
+    "crates/wtime-runtime/src/execution/cursor.rs": "ff93a3f0056d109366d2b77ea93d459f456d048c05b4bf05369305a3b491d3d3",
+    "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+    "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+    "crates/wtime-runtime/src/gc.rs": "7dcfcc9aaff6a333041d9d8a7323d1ce0fad90b382b5023e9caeeb52815b3471",
+    "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+    "crates/wtime-runtime/src/lib.rs": "dfa3a5be5e6fbbdefeb9182b83c046eb71f5557efc2b6c668b014adae1e27d6b",
+    "crates/wtime-runtime/src/linker.rs": "39a2068993bcb65fb4434f42d02b56687e8ae31914840487ee4c35de07677806",
+    "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+    "crates/wtime-runtime/src/perf.rs": "0df5f11b174b26d7e21ee00e64f3f22f2568364ae7ae96b77815b46c5ad19f16",
+    "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+    "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+    "crates/wtime-runtime/src/simd.rs": "84c223e6a546aa8955ff5214b9add03df4c94d25f3ffcd45b33a808d299334b1",
+    "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a"
+  },
+  "license": {
+    "bytes": 1056,
+    "path": "/tmp/P040-fixture-stage/LICENSE.txt",
+    "sha256": "1126322e2cc8d165adc4c792eeb195717de2bcc7b39be1ce77959d78e87ef685"
+  },
+  "manual_oracles": {
+    "bytes": 5395,
+    "path": "/tmp/P040-fixture-stage/MANUAL_ORACLES.md",
+    "sha256": "8dbef840671d478c98fc34cd773548b8b18cca55453dc3605283fab31a0ef7aa"
+  },
+  "receipt": {
+    "bytes": 22462,
+    "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/receipt.json",
+    "sha256": "e53d55cd9dd88705a4500224b974ae8fa62bf3581997a85b3bc589e9df3e6c6a"
+  },
+  "schema": "p040-durable-fixtures-v1",
+  "status": "freshly_encoded_and_validated",
+  "tools": {
+    "encoder": {
+      "bytes": 24493024,
+      "mode": "0o700",
+      "original_path": "/workspace/wtime/target/performance/P038/coverage/tools/wtime-conformance",
+      "original_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+      "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/encoder",
+      "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+    },
+    "validator": {
+      "bytes": 11591264,
+      "mode": "0o700",
+      "original_path": "/workspace/wtime/target/performance/P038/coverage/tools/wtime-cli",
+      "original_sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab",
+      "path": "/workspace/wtime/target/performance/P040/prepare/attempt-0001/inputs/tools/validator",
+      "sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+    }
+  }
+}

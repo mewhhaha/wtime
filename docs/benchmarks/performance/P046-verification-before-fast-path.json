@@ -1,0 +1,558 @@
+{
+  "schema_version": 1,
+  "task": "P046",
+  "identities": {
+    "predecessors": {
+      "paths": [
+        "target/performance/P046-before/manifest.json",
+        "target/performance/P046-decoded-before/manifest.json",
+        "target/performance/P046/predeclaration/**",
+        "target/performance/baseline/manifest.json",
+        "target/performance/baseline/source/**",
+        "target/performance/baseline/fixtures/**",
+        "target/performance/baseline/binary/*",
+        "target/performance/baseline/historical_reports/**"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-retained/Cargo.toml",
+        "tools/wtime-retained/Cargo.lock",
+        "tools/wtime-retained/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/fixtures/**",
+        "tools/verification/producers/p046_verify.py",
+        "tools/verification/producers/p123.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/Cargo.toml"
+      ]
+    },
+    "corpus": {
+      "paths": [
+        "docs/architecture/corpus-lock.json",
+        "target/verification/runs/P121/verify/attempt-0001/coverage.json",
+        "tools/verification/producers/p121.py"
+      ]
+    },
+    "analysis": {
+      "paths": [
+        "tools/verification/statistics.py",
+        "tools/wtime-bench/p046_gate.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/gates.py",
+        "docs/benchmarks/performance/P124-contract.json",
+        "tools/wtime-bench/tests/test_p046*.py",
+        "tools/wtime-bench/tests/test_p124*.py",
+        "tools/verification/producers/p046_analysis.py",
+        "tools/verification/producers/p046_verify.py"
+      ]
+    },
+    "measurement_producer": {
+      "paths": [
+        "tools/verification/producers/p046_measure.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessors"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_verify.py",
+            "freeze",
+            "--output",
+            "{stage}"
+          ]
+        }
+      ],
+      "outputs": {
+        "predecessor": "{stage}/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "predecessor",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "compilation",
+        "harness",
+        "corpus",
+        "analysis"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "gate-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p046*.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "retained-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--manifest-path",
+            "tools/wtime-retained/Cargo.toml",
+            "--target-dir",
+            "target/performance/P046-retained-target",
+            "--",
+            "--test-threads=1"
+          ]
+        },
+        {
+          "name": "retained-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--manifest-path",
+            "tools/wtime-retained/Cargo.toml",
+            "--target-dir",
+            "target/performance/P046-retained-target",
+            "-j",
+            "4"
+          ]
+        },
+        {
+          "name": "tier-check",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/tier_check.py",
+            "--tier",
+            "compact",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/tier"
+          ]
+        },
+        {
+          "name": "production-build",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_verify.py",
+            "build-production",
+            "--output",
+            "{stage}"
+          ]
+        },
+        {
+          "name": "baseline-builds",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_verify.py",
+            "build-baselines",
+            "--output",
+            "{stage}"
+          ]
+        },
+        {
+          "name": "retained-products",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_verify.py",
+            "retained",
+            "--binary",
+            "{repo}/target/performance/P046-retained-target/release/wtime-retained",
+            "--output",
+            "{stage}/retained"
+          ]
+        },
+        {
+          "name": "default-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/build.json"
+          ]
+        },
+        {
+          "name": "optional-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/compact-executor",
+            "--output",
+            "{stage}/optional-build.json"
+          ]
+        },
+        {
+          "name": "seal-evidence",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_verify.py",
+            "seal",
+            "--output",
+            "{stage}"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "gate-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_p046_cold_requires_both_full_selections_and_large_prepare",
+            "test_p046_cold_over_budget_blocks_other_speed_gains",
+            "test_p046_cold_crossing_interval_is_inconclusive",
+            "test_p046_distinct_report_sets_are_analyzed_once_and_decision_once",
+            "test_p046_hard_build_failure_overrides_speed_gain",
+            "test_same_image_reuses_one_hashed_artifact_and_keeps_observation_fields",
+            "test_changed_valid_image_gets_a_distinct_content_address",
+            "test_oracle_rejects_bad_image_before_any_archive_is_written",
+            "test_corrupt_existing_content_address_fails_closed",
+            "test_valid_images_and_full_proofs_pass",
+            "test_corrupt_compressed_artifact_fails_checksum",
+            "test_rehashed_wrong_full_image_fails_independent_oracle",
+            "test_wrong_stored_proof_fails_oracle_binding",
+            "test_escaping_image_path_is_rejected_before_read",
+            "test_seal_inventory_bundle_hashes_contents_and_is_deterministic",
+            "test_external_symlink_rejects_without_publishing_inventory",
+            "test_runner_streams_are_excluded_while_artifacts_and_helper_are_included"
+          ],
+          "minimum_passed": 17
+        },
+        {
+          "command": "retained-tests",
+          "features": [],
+          "required_names": [
+            "p046_retained_tracks_real_allocation_and_release",
+            "p046_retained_tracks_reallocation_growth_and_shrink",
+            "p046_retained_compiled_graph_releases_in_both_policies"
+          ],
+          "minimum_passed": 3
+        }
+      ],
+      "outputs": {
+        "production": "{stage}/production/build-record.json",
+        "binary": "{stage}/production/bin/wtime-bench",
+        "baselines": "{stage}/baselines/report.json",
+        "capabilities": "{stage}/baselines/p123probe/capabilities/report.json",
+        "retained": "{stage}/retained/report.json",
+        "default_build": "{stage}/build.json",
+        "optional_build": "{stage}/optional-build.json",
+        "inventory": "{stage}/inventory.json",
+        "bundle": "{stage}/artifacts.tar.gz",
+        "tier": "{stage}/tier/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "inventory",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "inventory",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "tier",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "tier",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "measure": {
+      "uses": [
+        "compilation",
+        "harness",
+        "measurement_producer"
+      ],
+      "dependencies": [
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "full-matrix",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_measure.py",
+            "measure",
+            "--verify-dir",
+            "{verify_dir}",
+            "--output",
+            "{stage}/measurements"
+          ]
+        },
+        {
+          "name": "seal-evidence",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_verify.py",
+            "seal",
+            "--output",
+            "{stage}"
+          ]
+        }
+      ],
+      "outputs": {
+        "matrix": "{stage}/measurements/report.json",
+        "inventory": "{stage}/inventory.json",
+        "bundle": "{stage}/artifacts.tar.gz"
+      },
+      "checks": [
+        {
+          "artifact": "matrix",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "inventory",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "inventory",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "analysis",
+        "corpus"
+      ],
+      "dependencies": [
+        "verify",
+        "measure"
+      ],
+      "commands": [
+        {
+          "name": "portfolio-input",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p046_analysis.py",
+            "portfolio",
+            "--verify-dir",
+            "{verify_dir}",
+            "--measure-dir",
+            "{measure_dir}/measurements",
+            "--default-build",
+            "{verify_dir}/build.json",
+            "--optional-build",
+            "{verify_dir}/optional-build.json",
+            "--output",
+            "{stage}/portfolio"
+          ]
+        },
+        {
+          "name": "portfolio-statistics",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verify.py",
+            "statistics",
+            "--task",
+            "P046",
+            "--comparison",
+            "{stage}/portfolio/input.json",
+            "--build",
+            "{verify_dir}/build.json",
+            "--optional-build",
+            "{verify_dir}/optional-build.json",
+            "--candidate-build-record",
+            "{verify_dir}/production/build-record.json",
+            "--contract",
+            "{repo}/docs/benchmarks/performance/P124-contract.json",
+            "--output",
+            "{stage}/statistics.json",
+            "--execute"
+          ]
+        }
+      ],
+      "outputs": {
+        "portfolio": "{stage}/portfolio/input.json",
+        "statistics": "{stage}/statistics.json"
+      },
+      "checks": [
+        {
+          "artifact": "statistics",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "statistics",
+          "pointer": "/statistics_computations",
+          "op": "equal",
+          "value": 1
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ],
+    "decision": {
+      "phase": "analyze",
+      "artifact": "statistics",
+      "pointer": "/decision/decision"
+    },
+    "limitations": [
+      "Shared cloud CPU, no guaranteed idle reference core. Retained heap uses requested allocation sizes, excluding allocator bookkeeping and RSS. Native AArch64 evidence remains unresolved."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "gate-unit",
+        "uses": [
+          "analysis",
+          "harness"
+        ],
+        "commands": [
+          {
+            "name": "gate-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p046*.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "gate-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_p046_cold_requires_both_full_selections_and_large_prepare",
+              "test_p046_cold_over_budget_blocks_other_speed_gains",
+              "test_p046_cold_crossing_interval_is_inconclusive",
+              "test_p046_distinct_report_sets_are_analyzed_once_and_decision_once",
+              "test_p046_hard_build_failure_overrides_speed_gain",
+              "test_same_image_reuses_one_hashed_artifact_and_keeps_observation_fields",
+              "test_changed_valid_image_gets_a_distinct_content_address",
+              "test_oracle_rejects_bad_image_before_any_archive_is_written",
+              "test_corrupt_existing_content_address_fails_closed",
+              "test_valid_images_and_full_proofs_pass",
+              "test_corrupt_compressed_artifact_fails_checksum",
+              "test_rehashed_wrong_full_image_fails_independent_oracle",
+              "test_wrong_stored_proof_fails_oracle_binding",
+              "test_escaping_image_path_is_rejected_before_read",
+              "test_seal_inventory_bundle_hashes_contents_and_is_deterministic",
+              "test_external_symlink_rejects_without_publishing_inventory",
+              "test_runner_streams_are_excluded_while_artifacts_and_helper_are_included"
+            ],
+            "minimum_passed": 17
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "retained-tool",
+        "uses": [
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "retained-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "--manifest-path",
+              "tools/wtime-retained/Cargo.toml",
+              "--target-dir",
+              "target/performance/P046-retained-target",
+              "--",
+              "--test-threads=1"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "retained-tests",
+            "features": [],
+            "required_names": [
+              "p046_retained_tracks_real_allocation_and_release",
+              "p046_retained_tracks_reallocation_growth_and_shrink",
+              "p046_retained_compiled_graph_releases_in_both_policies"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "task": "P116",
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**",
+        "tools/wtime-bench/fixtures/integration_p113/**",
+        "target/performance/P115/fixtures/attempt-0002/receipt.json"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation",
+        "fixtures"
+      ],
+      "commands": [
+        {
+          "name": "gc-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,execution-reference",
+            "p116_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "gc-tests",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p116_sole_active_compact_local_survives_zero_argument_host_collection",
+            "p116_nested_numeric_invoke_keeps_outer_reference_local_visible",
+            "p116_low_fuel_cancellation_foreign_and_stale_refs_release_roots"
+          ],
+          "minimum_passed": 3
+        }
+      ],
+      "outputs": {
+        "test_log": "{stage}/gc-tests.stdout"
+      }
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "GC/host handoff coverage only; measured promotion remains P044."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "gc-reentry",
+        "uses": [
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "gc-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "--features",
+              "compact-executor,execution-reference",
+              "p116_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "gc-tests",
+            "kind": "cargo",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p116_sole_active_compact_local_survives_zero_argument_host_collection",
+              "p116_nested_numeric_invoke_keeps_outer_reference_local_visible",
+              "p116_low_fuel_cancellation_foreign_and_stale_refs_release_roots"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

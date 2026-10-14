@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "task": "P047",
+  "development_only": true,
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation"
+      ],
+      "commands": [
+        {
+          "name": "default-compact-feature-guard",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "p036_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "default-compact-feature-guard",
+          "features": [],
+          "required_names": [
+            "p036_public_default_and_portable_keep_decoded_policy",
+            "p036_public_default_build_does_not_expose_compact_policy",
+            "p036_public_long_function_remains_invocable_with_exact_decoded_fuel",
+            "p036_public_wide_local_keeps_full_index_and_decoded_result"
+          ],
+          "minimum_passed": 4
+        }
+      ],
+      "outputs": {}
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "default-feature-guard",
+        "uses": [
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "default-compact-feature-guard",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "p036_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "default-compact-feature-guard",
+            "features": [],
+            "required_names": [
+              "p036_public_default_and_portable_keep_decoded_policy",
+              "p036_public_default_build_does_not_expose_compact_policy",
+              "p036_public_long_function_remains_invocable_with_exact_decoded_fuel",
+              "p036_public_wide_local_keeps_full_index_and_decoded_result"
+            ],
+            "minimum_passed": 4
+          }
+        ]
+      }
+    ]
+  }
+}

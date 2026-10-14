@@ -1,0 +1,13 @@
+(module
+  (type $unary (func (result i32)))
+  (memory (export "memory") 1 1)
+  (global (export "state") (mut i32) (i32.const 0))
+  (table (export "table") 2 funcref)
+  (func $helper (type $unary) (i32.const 42))
+  (elem (i32.const 0) $helper)
+  (func (export "run") (result i32)
+    (global.set 0 (i32.const 5))
+    (i32.store (i32.const 0) (i32.const 5))
+    (i32.store (i32.const 65535) (i32.const 99))
+    (i32.const 0)
+    (call_indirect (type $unary))))

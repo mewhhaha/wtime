@@ -1,0 +1,23 @@
+{
+  "cpu": "x86_64",
+  "logical_cpus": 5,
+  "jobs": 5,
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "lock_sha256": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
+  "target_initially_empty": true,
+  "budgets": {
+    "clean_seconds": 60,
+    "leaf_seconds": 5,
+    "stripped_bytes": 5242880
+  },
+  "clean_seconds": 6.777848243000335,
+  "clean_peak_rss_kib": 285496,
+  "unchanged_seconds": 0.09907187099997827,
+  "leaf_seconds": 0.2645257770000171,
+  "release_seconds": 14.812744912999733,
+  "stripped_bytes": 1002024,
+  "unchanged_peak_rss_kib": 30884,
+  "source_sha256": "e5a3a4eeba54a547ec8102acb6d03bb823de92643b7b34fc435817fcf0a3c75f",
+  "source_stable": true,
+  "budget_pass": true
+}

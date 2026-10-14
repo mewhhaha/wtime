@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "snapshot": "Wasm Core 3.0 plus the active Phase 3\u20135 core entries selected by the pinned task/source locks",
+  "spec_revision": "7e9fb78c63d65018cc111422f657947b3df80d7b",
+  "corpus_revision": "7e9fb78c63d65018cc111422f657947b3df80d7b",
+  "source_test_sha256": "",
+  "supported_claims": [
+    "core-3.0",
+    "threads",
+    "compact-import-section",
+    "wide-arithmetic",
+    "stack-switching",
+    "custom-page-sizes",
+    "custom-descs: specified custom descriptor semantics; excludes unresolved Type Section Field Deduplication and JS embedding behavior",
+    "mvp",
+    "import_export_of_mutable_globals",
+    "non-trapping_float-to-int_conversions",
+    "sign-extension_operators",
+    "multi-value",
+    "reference_types",
+    "bulk_memory_operations",
+    "fixed-width_simd",
+    "tail_call",
+    "extended-const",
+    "function_references",
+    "garbage_collection",
+    "multi-memory",
+    "relaxed-simd",
+    "annotations",
+    "branch-hinting",
+    "exception_handling",
+    "memory64"
+  ],
+  "unsupported_behavior": [
+    "content-security-policy",
+    "custom-descs: JS prototype, compileOptions, and configureAll behavior is embedding API and excluded.",
+    "custom-descs: Type Section Field Deduplication is a bare TODO; no encoding or semantics are specified.",
+    "ecmascript_module_integration",
+    "javascript_bigint_to_webassembly_i64_integration",
+    "js-promise-integration",
+    "js-string-builtins"
+  ],
+  "toolchain": {
+    "rustc": "rustc 1.99.0",
+    "supported_targets": [
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "licenses": {
+    "project_license": "MIT OR Apache-2.0",
+    "report_path": "docs/verification/dependency-budget.txt",
+    "report_sha256": "83c69960430478c8271fd4a128c4fe2fd52bfc019626f3a201a5c973a709569a"
+  },
+  "evidence": {
+    "core3": {
+      "path": "docs/verification/core3.json",
+      "sha256": "2d1b1e665cf253f58ab3ffe305e6f77d60f2776283db2d9cb7bd0509d6bb1a4c"
+    },
+    "phase3": {
+      "path": "docs/verification/phase3.json",
+      "sha256": "6a675490cd218d3ec0c5e4917d26074221da49aa59df3b6b4ecefdd313b4ac21"
+    },
+    "feature_profiles": {
+      "path": "docs/verification/feature-profiles.json",
+      "sha256": "f221fad68c96a637d5abde783d552d1880c980240231fef82e33a6cefc5d53e8"
+    },
+    "interactions": {
+      "path": "docs/verification/interactions.json",
+      "sha256": "64350d8ba233b562d164e72be7ab5b27e575a0e9986657cd7e6118881391babb",
+      "corpus_report": "docs/verification/interaction-corpus.json",
+      "corpus_sha256": "7b5dbeb1fc0a0c502eece8d9e5e975574f410ae53c4d1d735d986449c1547119"
+    },
+    "fuzz": {
+      "path": "docs/verification/fuzz.json",
+      "sha256": "41134573bb682f707fe305113d60d6f3996387989c2bbfba25f8a8b9910dd562"
+    },
+    "differential": {
+      "path": "docs/verification/differential.json",
+      "sha256": "e11c92419fd017f9e96ec3ebd8c02f605be33b2866d9efe2f6c6c1afff515566"
+    },
+    "hardening": {
+      "path": "docs/verification/native-x86_64.json",
+      "sha256": "8c834781e9fa173fb6d289c1328065d2eab6db4c04a7813ed9c2098a4ba02b4d"
+    },
+    "build_final": {
+      "path": "docs/verification/build-final.json",
+      "sha256": "75ca00ffe625229d325da4369c167bca4b2ce5b0c68ac8d86de9b093bd6035d0"
+    },
+    "api_docs": {
+      "path": "docs/verification/api-docs.json",
+      "sha256": "b9aaccab2e3afe617f01c4fc330904507e5ee006b1f287f5a852b230c26c60f4"
+    },
+    "native_x86_64": {
+      "path": "docs/verification/native-x86_64.json",
+      "sha256": "8c834781e9fa173fb6d289c1328065d2eab6db4c04a7813ed9c2098a4ba02b4d"
+    },
+    "native_aarch64": {
+      "path": "docs/verification/native-aarch64.json",
+      "sha256": ""
+    },
+    "allocation_failure": {
+      "path": "docs/verification/allocation-failure.json",
+      "sha256": "2535eac8917e2639e8f79b9dfe2616e1a1dd2be5233b45493c215264c60a64d1"
+    }
+  },
+  "source_sha256": "e5a3a4eeba54a547ec8102acb6d03bb823de92643b7b34fc435817fcf0a3c75f"
+}

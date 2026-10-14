@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "fixture_exports": {
+    "memory": "one 64KiB page",
+    "state": "mutable i32",
+    "table": "2 funcref entries",
+    "run": "() -> i32"
+  },
+  "cases": {
+    "state_normal": {
+      "source": {
+        "wat_sha256": "9e0278001f41ea1f2cc229b3ddc7c670f24d1f2860adb5c552fa613037f43717",
+        "wasm_sha256": "63cdccecaa341f9f2d8ef8ad8f779356549d3227b234e73117f6bdd33e612a9b"
+      },
+      "expected_outcome": "returned:i32:42",
+      "global_state_i32": 11,
+      "memory": {
+        "byte_length": 65536,
+        "sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+        "prefix_u32": 11,
+        "remaining_bytes": "zero"
+      },
+      "table": {
+        "length": 2,
+        "slots": [
+          "function:helper",
+          "null"
+        ]
+      },
+      "root_graph": null
+    },
+    "state_trap": {
+      "source": {
+        "wat_sha256": "99c3408b7697ad7184440d5d37593796b94a2ddf5c6369f0f27f61be5c1ba72d",
+        "wasm_sha256": "94155562450b9f3668eb31dacb751fe24d2180e68f30a88a91a1cc88cc5476b7"
+      },
+      "expected_outcome": "trap:MemoryOutOfBounds",
+      "global_state_i32": 5,
+      "memory": {
+        "byte_length": 65536,
+        "sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+        "prefix_u32": 5,
+        "remaining_bytes": "zero"
+      },
+      "table": {
+        "length": 2,
+        "slots": [
+          "function:helper",
+          "null"
+        ]
+      },
+      "root_graph": null
+    },
+    "state_graph": {
+      "source": {
+        "wat_sha256": "a2c4d3f0986f615828779cf256f15e2db425697e2240fecbd179e5b967612589",
+        "wasm_sha256": "5370ba21415ef9f2245caa51e73c86d8034b4ff294e4645c7dbb4701e15d36c2"
+      },
+      "expected_outcome": "returned:i32:42",
+      "global_state_i32": 33,
+      "memory": {
+        "byte_length": 65536,
+        "sha256": "5e9595c77555d6b0c3782705054e329e2fdd44e4074f96f19349bd2b0bfad509",
+        "prefix_u32": 33,
+        "remaining_bytes": "zero"
+      },
+      "table": {
+        "length": 2,
+        "slots": [
+          "function:helper",
+          "null"
+        ]
+      },
+      "root_graph": {
+        "normalized_guest_projection": [
+          2,
+          12,
+          19,
+          1
+        ],
+        "projection_fields": [
+          "node_count",
+          "head_value",
+          "next_value",
+          "terminal_is_null"
+        ],
+        "after_collection": {
+          "live_gc_objects": 2,
+          "reclaimed_gc_objects": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "lane": "candidate",
+  "rationale": "Target the scalar branch-entropy workload at n32 and n10000: its fixture includes predictable loop-exit compare/br_if and data-dependent compare/if paths. Hold out n17 and multivalue-branch n17; retain the multivalue warm control, dynamic API control, and mandatory call_overhead/prepare_large cold controls. This is a focused candidate gate, not a portfolio measurement.",
+  "registry_sha256": "228a4a921f1fa1d67092e331dfba7b90309e18265118a29dcfb6fb631b68308c",
+  "rows": [
+    {
+      "family": "scalar",
+      "id": "scalar_branch_entropy_n32",
+      "role": "targeted",
+      "row_sha256": "22f214cf8311bb7c4c4c758db9fff08890dd907337cabf46cf7be3045eefca71",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_branch_entropy_n10000",
+      "role": "targeted",
+      "row_sha256": "c0891675621c1dd1fac3a4f734377f11c8f701237eb4f42c3c472288baff8683",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_branch_entropy_n17",
+      "role": "held_out",
+      "row_sha256": "d86c59cf60aa886ab66e9d038f7bb588eb0294923492e5e637bb433c80c06023",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_multivalue_branch_n17",
+      "role": "held_out",
+      "row_sha256": "39bfe2d838005bc75a0ab5105c86b9f76ee4e3ae6539303ad9ab5858e87c8e5a",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_multivalue_branch_n32",
+      "role": "protected",
+      "row_sha256": "0ae8ab8a67a140b2b3b602b8e42348cb738b1641903de6f6529aab234c8b8ef4",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_dynamic_api_n32",
+      "role": "protected",
+      "row_sha256": "97fac9834e628c16f08a914017be980f202e89942695bab37de43495c221887f",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ]
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ]
+    }
+  ],
+  "schema": "wtime-candidate-selection-v1",
+  "semantic_cases": [
+    "p048_taken_untaken_signed_unsigned_boundary_predicates",
+    "p048_stop_between_compare_and_branch_preserves_predicate",
+    "p048_multivalue_branches_and_branch_hint_modules_preserve_behavior"
+  ],
+  "task": "P048"
+}

@@ -1,0 +1,433 @@
+--- a/crates/wtime-runtime/src/numeric.rs
++++ b/crates/wtime-runtime/src/numeric.rs
+@@ -1,4 +1,25 @@
+ use super::*;
++
++// Unit-test-only evidence that a valid operand suffix reaches the direct
++// overwrite/truncate branch. Thread-local scope keeps unrelated parallel
++// numeric tests from contaminating the assertion; production builds contain
++// no counter or event call.
++#[cfg(test)]
++std::thread_local! {
++    static P028_IN_PLACE_OPS: std::cell::Cell<u64> = std::cell::Cell::new(0);
++}
++#[cfg(test)]
++fn record_in_place_for_test() {
++    P028_IN_PLACE_OPS.with(|count| count.set(count.get().saturating_add(1)));
++}
++#[cfg(test)]
++fn reset_in_place_test_count() {
++    P028_IN_PLACE_OPS.with(|count| count.set(0));
++}
++#[cfg(test)]
++fn in_place_test_count() -> u64 {
++    P028_IN_PLACE_OPS.with(|count| count.get())
++}
+ pub(super) fn exec(op: u16, s: &mut Vec<Value>) -> Result<()> {
+     macro_rules! unary {
+         ($v:ident,$e:expr) => {{
+@@ -19,15 +40,47 @@
+             s.push($e(a, b));
+         }};
+     }
++    // Only infallible integer operations use these paths. Malformed internal
++    // stacks still take the original pop-based path, including its mutations.
++    macro_rules! unary_in_place {
++        ($v:ident,$e:expr) => {{
++            if let Some(Value::$v(a)) = s.last().copied() {
++                let result = ($e)(a);
++                *s.last_mut().unwrap() = result;
++                #[cfg(test)]
++                record_in_place_for_test();
++            } else {
++                unary!($v, $e);
++            }
++        }};
++    }
++    macro_rules! binary_in_place {
++        ($v:ident,$e:expr) => {{
++            let inputs = match s.as_slice() {
++                [.., Value::$v(a), Value::$v(b)] => Some((*a, *b)),
++                _ => None,
++            };
++            if let Some((a, b)) = inputs {
++                let result = ($e)(a, b);
++                let output = s.len() - 2;
++                s[output] = result;
++                s.truncate(output + 1);
++                #[cfg(test)]
++                record_in_place_for_test();
++            } else {
++                binary!($v, $e);
++            }
++        }};
++    }
+     macro_rules! intops {
+         ($v:ident,$t:ty,$u:ty,$base:expr) => {{
+             match op - $base {
+-                0 => unary!($v, |a: $t| Value::$v(a.leading_zeros() as $t)),
+-                1 => unary!($v, |a: $t| Value::$v(a.trailing_zeros() as $t)),
+-                2 => unary!($v, |a: $t| Value::$v(a.count_ones() as $t)),
+-                3 => binary!($v, |a: $t, b: $t| Value::$v(a.wrapping_add(b))),
+-                4 => binary!($v, |a: $t, b: $t| Value::$v(a.wrapping_sub(b))),
+-                5 => binary!($v, |a: $t, b: $t| Value::$v(a.wrapping_mul(b))),
++                0 => unary_in_place!($v, |a: $t| Value::$v(a.leading_zeros() as $t)),
++                1 => unary_in_place!($v, |a: $t| Value::$v(a.trailing_zeros() as $t)),
++                2 => unary_in_place!($v, |a: $t| Value::$v(a.count_ones() as $t)),
++                3 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.wrapping_add(b))),
++                4 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.wrapping_sub(b))),
++                5 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.wrapping_mul(b))),
+                 6..=9 => {
+                     let Value::$v(b) = pop(s)? else {
+                         return Err(trap("integer expected"));
+@@ -46,16 +99,16 @@
+                     };
+                     s.push(Value::$v(v));
+                 }
+-                10 => binary!($v, |a: $t, b: $t| Value::$v(a & b)),
+-                11 => binary!($v, |a: $t, b: $t| Value::$v(a | b)),
+-                12 => binary!($v, |a: $t, b: $t| Value::$v(a ^ b)),
+-                13 => binary!($v, |a: $t, b: $t| Value::$v(a.wrapping_shl(b as u32))),
+-                14 => binary!($v, |a: $t, b: $t| Value::$v(a.wrapping_shr(b as u32))),
+-                15 => binary!($v, |a: $t, b: $t| Value::$v(
++                10 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a & b)),
++                11 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a | b)),
++                12 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a ^ b)),
++                13 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.wrapping_shl(b as u32))),
++                14 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.wrapping_shr(b as u32))),
++                15 => binary_in_place!($v, |a: $t, b: $t| Value::$v(
+                     (a as $u).wrapping_shr(b as u32) as $t
+                 )),
+-                16 => binary!($v, |a: $t, b: $t| Value::$v(a.rotate_left(b as u32))),
+-                17 => binary!($v, |a: $t, b: $t| Value::$v(a.rotate_right(b as u32))),
++                16 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.rotate_left(b as u32))),
++                17 => binary_in_place!($v, |a: $t, b: $t| Value::$v(a.rotate_right(b as u32))),
+                 _ => unreachable!(),
+             }
+         }};
+@@ -63,9 +116,9 @@
+     macro_rules! cmp {
+         ($v:ident,$t:ty,$u:ty,$base:expr) => {{
+             if op == $base {
+-                unary!($v, |a: $t| Value::I32((a == 0) as i32))
+-            } else {
+-                binary!($v, |a: $t, b: $t| Value::I32(match op - $base {
++                unary_in_place!($v, |a: $t| Value::I32((a == 0) as i32))
++            } else {
++                binary_in_place!($v, |a: $t, b: $t| Value::I32(match op - $base {
+                     1 => a == b,
+                     2 => a != b,
+                     3 => a < b,
+@@ -268,3 +321,312 @@
+         _ => a >= b,
+     }
+ }
++
++#[cfg(test)]
++mod p028_tests {
++    use super::*;
++
++    #[test]
++    fn p028_malformed_i32_binary_inputs_keep_original_pop_mutations() {
++        for (before, remaining, message) in [
++            (vec![], vec![], "operand stack underflow"),
++            (vec![Value::I32(3)], vec![], "operand stack underflow"),
++            (vec![Value::I64(3)], vec![], "numeric type mismatch"),
++            (
++                vec![Value::I64(99), Value::I32(3), Value::I64(4)],
++                vec![Value::I64(99), Value::I32(3)],
++                "numeric type mismatch",
++            ),
++            (
++                vec![Value::I64(99), Value::I64(3), Value::I32(4)],
++                vec![Value::I64(99)],
++                "numeric type mismatch",
++            ),
++        ] {
++            reset_in_place_test_count();
++            let mut stack = before;
++            let error = exec(0x6a, &mut stack).unwrap_err();
++            assert_eq!(error.kind, ErrorKind::Trap);
++            assert_eq!(error.message, message);
++            assert_eq!(stack, remaining);
++            assert_eq!(
++                in_place_test_count(),
++                0,
++                "malformed suffix must use fallback"
++            );
++        }
++    }
++
++    #[test]
++    fn p028_malformed_unary_and_i64_compare_keep_pop_mutations() {
++        reset_in_place_test_count();
++        let mut unary = vec![Value::I32(99), Value::I64(4)];
++        let error = exec(0x67, &mut unary).unwrap_err();
++        assert_eq!(error.kind, ErrorKind::Trap);
++        assert_eq!(error.message, "numeric type mismatch");
++        assert_eq!(unary, [Value::I32(99)]);
++        assert_eq!(in_place_test_count(), 0);
++
++        for (before, remaining, message) in [
++            (vec![Value::I64(3)], vec![], "operand stack underflow"),
++            (
++                vec![Value::I64(99), Value::I64(3), Value::I32(4)],
++                vec![Value::I64(99), Value::I64(3)],
++                "numeric type mismatch",
++            ),
++            (
++                vec![Value::I32(99), Value::I32(3), Value::I64(4)],
++                vec![Value::I32(99)],
++                "numeric type mismatch",
++            ),
++        ] {
++            reset_in_place_test_count();
++            let mut stack = before;
++            let error = exec(0x53, &mut stack).unwrap_err();
++            assert_eq!(error.kind, ErrorKind::Trap);
++            assert_eq!(error.message, message);
++            assert_eq!(stack, remaining);
++            assert_eq!(in_place_test_count(), 0);
++        }
++    }
++
++    fn mask(width: u32) -> u128 {
++        (1u128 << width) - 1
++    }
++
++    fn signed(bits: u128, width: u32) -> i128 {
++        let sign = 1u128 << (width - 1);
++        if bits & sign == 0 {
++            bits as i128
++        } else {
++            bits as i128 - (1i128 << width)
++        }
++    }
++
++    fn expected(op: u16, width: u32, a: u128, b: Option<u128>) -> u128 {
++        let mask = mask(width);
++        let base = if op >= 0x79 {
++            0x79
++        } else if op >= 0x67 {
++            0x67
++        } else if op >= 0x50 {
++            0x50
++        } else {
++            0x45
++        };
++        let n = op - base;
++        let b = b.unwrap_or(0);
++        let shift = (b & (width as u128 - 1)) as u32;
++        if op < 0x67 && (op < 0x50 || op <= 0x5a) {
++            let truth = match n {
++                0 => a == 0,
++                1 => a == b,
++                2 => a != b,
++                3 => signed(a, width) < signed(b, width),
++                4 => a < b,
++                5 => signed(a, width) > signed(b, width),
++                6 => a > b,
++                7 => signed(a, width) <= signed(b, width),
++                8 => a <= b,
++                9 => signed(a, width) >= signed(b, width),
++                _ => a >= b,
++            };
++            return truth as u128;
++        }
++        match n {
++            0 => (0..width)
++                .rev()
++                .take_while(|bit| (a >> *bit) & 1 == 0)
++                .count() as u128,
++            1 => (0..width).take_while(|bit| (a >> *bit) & 1 == 0).count() as u128,
++            2 => (0..width).map(|bit| ((a >> bit) & 1) as u32).sum::<u32>() as u128,
++            3 => (a + b) & mask,
++            4 => ((1u128 << width) + a - b) & mask,
++            5 => (a * b) & mask,
++            10 => a & b,
++            11 => a | b,
++            12 => a ^ b,
++            13 => (a << shift) & mask,
++            14 => (signed(a, width) >> shift) as u128 & mask,
++            15 => a >> shift,
++            16 => {
++                if shift == 0 {
++                    a
++                } else {
++                    ((a << shift) | (a >> (width - shift))) & mask
++                }
++            }
++            17 => {
++                if shift == 0 {
++                    a
++                } else {
++                    ((a >> shift) | (a << (width - shift))) & mask
++                }
++            }
++            _ => panic!("unexpected eligible opcode {op:#x}"),
++        }
++    }
++
++    fn integer(bits: u128, width: u32) -> Value {
++        if width == 32 {
++            Value::I32(bits as u32 as i32)
++        } else {
++            Value::I64(bits as u64 as i64)
++        }
++    }
++
++    fn integer_bits(value: Value) -> u128 {
++        match value {
++            Value::I32(x) => x as u32 as u128,
++            Value::I64(x) => x as u64 as u128,
++            _ => panic!(),
++        }
++    }
++
++    fn vectors(width: u32) -> Vec<u128> {
++        let mask = mask(width);
++        let sign = 1u128 << (width - 1);
++        let mut values = vec![
++            0,
++            1,
++            2,
++            width as u128,
++            width as u128 + 1,
++            sign - 1,
++            sign,
++            mask - 1,
++            mask,
++            0x5555_5555_5555_5555u128 & mask,
++            0xaaaa_aaaa_aaaa_aaaau128 & mask,
++        ];
++        let mut state = 0x9e37_79b9_7f4a_7c15u64;
++        for _ in 0..8 {
++            state = state
++                .wrapping_mul(6_364_136_223_846_793_005)
++                .wrapping_add(1_442_695_040_888_963_407);
++            values.push(state as u128 & mask);
++        }
++        values
++    }
++
++    #[test]
++    fn p028_all_eligible_integer_ops_match_independent_masked_model_and_hit_path() {
++        for (width, int_base, cmp_base) in [(32, 0x67, 0x45), (64, 0x79, 0x50)] {
++            let values = vectors(width);
++            let mut ops: Vec<(u16, bool)> = (0..=5).map(|n| (int_base + n, n >= 3)).collect();
++            ops.extend((10..=17).map(|n| (int_base + n, true)));
++            ops.extend((0..=10).map(|n| (cmp_base + n, n != 0)));
++            for (op, binary) in ops {
++                for &a in &values {
++                    let b_values: Vec<Option<u128>> = if binary {
++                        values.iter().copied().map(Some).collect()
++                    } else {
++                        vec![None]
++                    };
++                    for b in b_values {
++                        let prefix = Value::F32(0x3f80_0000);
++                        let mut stack = vec![prefix];
++                        stack.push(integer(a, width));
++                        if let Some(b) = b {
++                            stack.push(integer(b, width));
++                        }
++                        let want = expected(op, width, a, b);
++                        reset_in_place_test_count();
++                        exec(op, &mut stack).unwrap();
++                        let output = stack.pop().unwrap();
++                        assert_eq!(
++                            stack,
++                            [prefix],
++                            "opcode {op:#x} must preserve lower stack values"
++                        );
++                        assert_eq!(
++                            integer_bits(output),
++                            want,
++                            "opcode {op:#x}, width {width}, a={a:#x}, b={b:?}"
++                        );
++                        if op >= cmp_base && op <= cmp_base + 10 {
++                            assert!(matches!(output, Value::I32(_)));
++                        }
++                        assert_eq!(
++                            in_place_test_count(),
++                            1,
++                            "opcode {op:#x} missed direct path"
++                        );
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn p028_fallback_and_unoptimized_numeric_families_report_no_direct_hit() {
++        for (op, mut stack, remaining, message) in [
++            (
++                0x6d,
++                vec![Value::I32(8), Value::I32(2), Value::I32(0)],
++                vec![Value::I32(8)],
++                "integer divide by zero",
++            ),
++            (
++                0x6f,
++                vec![Value::I32(8), Value::I32(2), Value::I32(0)],
++                vec![Value::I32(8)],
++                "integer divide by zero",
++            ),
++            (
++                0x7f,
++                vec![Value::I64(8), Value::I64(2), Value::I64(0)],
++                vec![Value::I64(8)],
++                "integer divide by zero",
++            ),
++            (
++                0x81,
++                vec![Value::I64(8), Value::I64(2), Value::I64(0)],
++                vec![Value::I64(8)],
++                "integer divide by zero",
++            ),
++            (
++                0x6d,
++                vec![Value::I32(i32::MIN), Value::I32(-1)],
++                vec![],
++                "integer overflow",
++            ),
++        ] {
++            reset_in_place_test_count();
++            let error = exec(op, &mut stack).unwrap_err();
++            assert_eq!(error.kind, ErrorKind::Trap);
++            assert_eq!(error.message, message);
++            assert_eq!(stack, remaining);
++            assert_eq!(
++                in_place_test_count(),
++                0,
++                "opcode {op:#x} should use old path"
++            );
++        }
++
++        for (op, mut stack, expected) in [
++            (
++                0x92,
++                vec![Value::F32(0x3f80_0000), Value::F32(0x4000_0000)],
++                Value::F32(0x4040_0000),
++            ),
++            (0xa7, vec![Value::I64(0x1_0000_0001)], Value::I32(1)),
++        ] {
++            reset_in_place_test_count();
++            exec(op, &mut stack).unwrap();
++            assert_eq!(stack, [expected]);
++            assert_eq!(
++                in_place_test_count(),
++                0,
++                "opcode {op:#x} should use old path"
++            );
++        }
++
++        reset_in_place_test_count();
++        let mut bad_conversion = vec![Value::F32(0x7fc0_0000)];
++        let error = exec(0xa8, &mut bad_conversion).unwrap_err();
++        assert_eq!(error.message, "invalid integer conversion");
++        assert!(bad_conversion.is_empty());
++        assert_eq!(in_place_test_count(), 0);
++    }
++}

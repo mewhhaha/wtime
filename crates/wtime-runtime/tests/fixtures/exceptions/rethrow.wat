@@ -1,0 +1,1 @@
+(module (tag $e (param i32)) (func (export "f") (result i32) (block (result i32) (try_table (catch $e 0) (block (result exnref) (try_table (catch_all_ref 0) i32.const 42 throw $e) ref.null exn) throw_ref) i32.const 0)))

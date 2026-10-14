@@ -1,0 +1,21 @@
+[package]
+name = "wtime-p043-diagnostics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "wtime-bench"
+path = "src/main.rs"
+
+[workspace]
+
+[features]
+default = []
+compact-executor = ["wtime-runtime/compact-executor"]
+execution-reference = ["wtime-runtime/execution-reference"]
+performance-counters = ["wtime-runtime/performance-counters"]
+
+[dependencies]
+wtime-runtime = { path = "../../../crates/wtime-runtime" }
+wtime-types = { path = "../../../crates/wtime-types" }

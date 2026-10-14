@@ -1,0 +1,1024 @@
+{
+  "completion": {
+    "outcome": "contract_only",
+    "required_phases": [
+      "verify"
+    ],
+    "limitations": [
+      "18fixed model rows only; the459 sharedregistry rows/selections are byteidentical.",
+      "Source-current Decoded and Compact runtime-only productionrecords; no runtimeRust edits or speedclaims.",
+      "The source/fuel proof reuses126actualdiagnosticcommands and the current seven P047 cases in the full354-case P050 verification lane.",
+      "An initial draft overcounted loop-exit endinstructions; actualReferencecounts and exactfuelboundaries establish9+14*n. Historicaldraftadmission/evidence remains preserved."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "fixture-model",
+        "uses": [
+          "harness",
+          "tests",
+          "selection"
+        ],
+        "commands": [
+          {
+            "name": "fixture-model",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p128_scalar_workloads.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "fixture-model",
+            "kind": "unittest",
+            "minimum_passed": 9,
+            "required_names": [
+              "test_fixed_alias_grid_is_exact_and_registry_stays_459_rows",
+              "test_identity_copy_fixture_has_an_independent_n_oracle",
+              "test_literal_add_wraps_as_i32_without_float_or_trapping_ops",
+              "test_literal_bitwise_fixture_matches_independent_mask_oracle",
+              "test_fixture_work_count_is_exactly_n_and_invalid_aliases_fail",
+              "test_wat_opcode_shape_rejects_multiply_divide_float_memory_or_calls",
+              "test_admitted_wat_and_wasm_bytes_match_frozen_hashes",
+              "test_rows_bind_profile_modes_stages_oracle_and_mvp_work_units",
+              "test_frozen_registry_rows_and_selections_survive_model_generation"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "independent-oracle",
+        "uses": [
+          "harness",
+          "tests",
+          "producer"
+        ],
+        "commands": [
+          {
+            "name": "proof-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_p128_scalar.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "proof-tests",
+            "kind": "unittest",
+            "minimum_passed": 5,
+            "required_names": [
+              "test_complete_matrix_and_all_outputs_are_contained",
+              "test_oracle_mismatch_preserves_raw_output_before_failure",
+              "test_stale_record_rejected_before_guest_commands",
+              "test_nonzero_command_output_and_status_are_retained",
+              "test_output_escape_is_rejected_before_any_write"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "staged-runtime",
+        "uses": [
+          "runtime",
+          "compilation",
+          "harness",
+          "build_producer",
+          "producer",
+          "tests",
+          "predecessor",
+          "selection"
+        ],
+        "commands": [
+          {
+            "name": "current-semantics-and-source-events",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/p128_evidence.py",
+              "--semantic-receipt",
+              "{repo}/target/verification/runs/P050/verify/attempt-0002/receipt.json",
+              "--source-proof",
+              "{repo}/target/performance/P128/source-event-proof/attempt-0002/report.json",
+              "--output",
+              "{stage}/prerequisite.json"
+            ]
+          },
+          {
+            "name": "build-decoded",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/runtime_production.py",
+              "--mode",
+              "decoded",
+              "--output",
+              "{stage}/decoded"
+            ]
+          },
+          {
+            "name": "build-compact",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/runtime_production.py",
+              "--mode",
+              "compact",
+              "--output",
+              "{stage}/compact"
+            ]
+          },
+          {
+            "name": "scalar-proof",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/p128_scalar.py",
+              "--decoded-record",
+              "{stage}/decoded/build-record.json",
+              "--compact-record",
+              "{stage}/compact/build-record.json",
+              "--output",
+              "{stage}/scalar-proof"
+            ]
+          }
+        ],
+        "tests": [],
+        "outputs": {
+          "decoded_record": "{stage}/decoded/build-record.json",
+          "compact_record": "{stage}/compact/build-record.json",
+          "proof": "{stage}/scalar-proof/report.json",
+          "prerequisite": "{stage}/prerequisite.json"
+        },
+        "checks": [
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/schema",
+            "value": "wtime-runtime-only-production-v1"
+          },
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/mode",
+            "value": "decoded"
+          },
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/instrumented",
+            "value": false
+          },
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/source_stable",
+            "value": true
+          },
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/cargo_features",
+            "value": [
+              "runtime-only"
+            ]
+          },
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/runtime_features",
+            "value": []
+          },
+          {
+            "artifact": "decoded_record",
+            "op": "equal",
+            "pointer": "/harness_features",
+            "value": [
+              "runtime-only"
+            ]
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/schema",
+            "value": "wtime-runtime-only-production-v1"
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/mode",
+            "value": "compact"
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/instrumented",
+            "value": false
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/source_stable",
+            "value": true
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/cargo_features",
+            "value": [
+              "runtime-only",
+              "compact-executor"
+            ]
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/runtime_features",
+            "value": [
+              "compact-executor"
+            ]
+          },
+          {
+            "artifact": "compact_record",
+            "op": "equal",
+            "pointer": "/harness_features",
+            "value": [
+              "runtime-only"
+            ]
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/schema",
+            "op": "equal",
+            "value": "wtime-p128-scalar-foundation-v1"
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/status",
+            "op": "equal",
+            "value": "passed"
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/source_stable",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/performance_candidate",
+            "op": "equal",
+            "value": false
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/timing_analysis",
+            "op": "equal",
+            "value": false
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/registry/rows",
+            "op": "equal",
+            "value": 459
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/registry/sha256",
+            "op": "equal",
+            "value": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668"
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/registry/unchanged",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/settings/profile",
+            "op": "equal",
+            "value": "mvp"
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/settings/warm_batch",
+            "op": "equal",
+            "value": 3
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/settings/instrumented",
+            "op": "equal",
+            "value": false
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/aliases",
+            "op": "equal",
+            "value": 18
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/fixtures",
+            "op": "equal",
+            "value": 3
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/observations",
+            "op": "equal",
+            "value": 180
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/observation_commands",
+            "op": "equal",
+            "value": 180
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/bad_exits",
+            "op": "equal",
+            "value": 0
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/skipped",
+            "op": "equal",
+            "value": 0
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_mode/decoded",
+            "op": "equal",
+            "value": 90
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_mode/compact",
+            "op": "equal",
+            "value": 90
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_stage/prepare",
+            "op": "equal",
+            "value": 36
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_stage/instantiate",
+            "op": "equal",
+            "value": 36
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_stage/first_call",
+            "op": "equal",
+            "value": 36
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_stage/warm_call",
+            "op": "equal",
+            "value": 36
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/by_stage/load_and_call",
+            "op": "equal",
+            "value": 36
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/status",
+            "op": "equal",
+            "value": "passed"
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/runtime_core_unchanged",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/p047_case_count",
+            "op": "equal",
+            "value": 7
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/source_event_rows",
+            "op": "equal",
+            "value": 18
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/source_event_commands",
+            "op": "equal",
+            "value": 126
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/source_events_match",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "prerequisite",
+            "pointer": "/exact_fuel_boundaries_match",
+            "op": "equal",
+            "value": true
+          }
+        ]
+      }
+    ]
+  },
+  "identities": {
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**"
+      ]
+    },
+    "harness": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wat",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/fixtures/exceptions/**/*.wat",
+        "tools/wtime-bench/fixtures/gc/**/*.wasm",
+        "tools/wtime-bench/fixtures/gc/**/*.wat",
+        "tools/wtime-bench/fixtures/memory/**/*.wat",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/scalar/**/*.wat",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/**/Cargo.toml",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/p128_scalar_scaling.py"
+      ],
+      "settings": {
+        "foundation": true,
+        "modes": [
+          "decoded",
+          "compact"
+        ],
+        "warm_batch": 3,
+        "profile": "mvp",
+        "source_event_formula": "9 + 14*n"
+      }
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P128/integration/attempt-0001/before-core/receipt.json",
+        "target/performance/P128/integration/attempt-0001/before-core/source/**",
+        "target/performance/P128/source-event-proof/attempt-0002/report.json",
+        "target/verification/runs/P050/verify/attempt-0002/receipt.json"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p128_scalar.py",
+        "tools/verification/producers/p128_evidence.py",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "docs/benchmarks/performance/P125-fixture-tools.json",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/verification/artifacts.py",
+        "tools/verification/runner.py"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p128_scalar_workloads.py",
+        "tools/verification/tests/test_p128_scalar.py",
+        "tools/verification/tests/data/admitted_wasm/p128_*.wasm"
+      ]
+    },
+    "selection": {
+      "paths": [
+        "docs/benchmarks/performance/P128-selection.json",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/fixtures/scalar/p128_*.wat",
+        "tools/wtime-bench/workloads.json"
+      ]
+    }
+  },
+  "schema_version": 1,
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{repo}/target/performance/P128/integration/attempt-0001/before-core/receipt.json",
+    "pointer": "/runtime_sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "harness",
+        "build_producer",
+        "producer",
+        "tests",
+        "predecessor",
+        "selection"
+      ],
+      "commands": [
+        {
+          "name": "fixture-model",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p128_scalar_workloads.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "proof-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p128_scalar.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "current-semantics-and-source-events",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p128_evidence.py",
+            "--semantic-receipt",
+            "{repo}/target/verification/runs/P050/verify/attempt-0002/receipt.json",
+            "--source-proof",
+            "{repo}/target/performance/P128/source-event-proof/attempt-0002/report.json",
+            "--output",
+            "{stage}/prerequisite.json"
+          ]
+        },
+        {
+          "name": "build-decoded",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/decoded"
+          ]
+        },
+        {
+          "name": "build-compact",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "compact",
+            "--output",
+            "{stage}/compact"
+          ]
+        },
+        {
+          "name": "scalar-proof",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p128_scalar.py",
+            "--decoded-record",
+            "{stage}/decoded/build-record.json",
+            "--compact-record",
+            "{stage}/compact/build-record.json",
+            "--output",
+            "{stage}/scalar-proof"
+          ]
+        }
+      ],
+      "outputs": {
+        "decoded_record": "{stage}/decoded/build-record.json",
+        "compact_record": "{stage}/compact/build-record.json",
+        "proof": "{stage}/scalar-proof/report.json",
+        "prerequisite": "{stage}/prerequisite.json"
+      },
+      "tests": [
+        {
+          "command": "fixture-model",
+          "kind": "unittest",
+          "minimum_passed": 9,
+          "required_names": [
+            "test_fixed_alias_grid_is_exact_and_registry_stays_459_rows",
+            "test_identity_copy_fixture_has_an_independent_n_oracle",
+            "test_literal_add_wraps_as_i32_without_float_or_trapping_ops",
+            "test_literal_bitwise_fixture_matches_independent_mask_oracle",
+            "test_fixture_work_count_is_exactly_n_and_invalid_aliases_fail",
+            "test_wat_opcode_shape_rejects_multiply_divide_float_memory_or_calls",
+            "test_admitted_wat_and_wasm_bytes_match_frozen_hashes",
+            "test_rows_bind_profile_modes_stages_oracle_and_mvp_work_units",
+            "test_frozen_registry_rows_and_selections_survive_model_generation"
+          ]
+        },
+        {
+          "command": "proof-tests",
+          "kind": "unittest",
+          "minimum_passed": 5,
+          "required_names": [
+            "test_complete_matrix_and_all_outputs_are_contained",
+            "test_oracle_mismatch_preserves_raw_output_before_failure",
+            "test_stale_record_rejected_before_guest_commands",
+            "test_nonzero_command_output_and_status_are_retained",
+            "test_output_escape_is_rejected_before_any_write"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "decoded"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/cargo_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": []
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "compact"
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/cargo_features",
+          "value": [
+            "runtime-only",
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": [
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-p128-scalar-foundation-v1"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/performance_candidate",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_analysis",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/registry/rows",
+          "op": "equal",
+          "value": 459
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/registry/sha256",
+          "op": "equal",
+          "value": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/registry/unchanged",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/settings/profile",
+          "op": "equal",
+          "value": "mvp"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/settings/warm_batch",
+          "op": "equal",
+          "value": 3
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/settings/instrumented",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/aliases",
+          "op": "equal",
+          "value": 18
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/fixtures",
+          "op": "equal",
+          "value": 3
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/observations",
+          "op": "equal",
+          "value": 180
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/observation_commands",
+          "op": "equal",
+          "value": 180
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/bad_exits",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/skipped",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_mode/decoded",
+          "op": "equal",
+          "value": 90
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_mode/compact",
+          "op": "equal",
+          "value": 90
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_stage/prepare",
+          "op": "equal",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_stage/instantiate",
+          "op": "equal",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_stage/first_call",
+          "op": "equal",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_stage/warm_call",
+          "op": "equal",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/by_stage/load_and_call",
+          "op": "equal",
+          "value": 36
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/runtime_core_unchanged",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/p047_case_count",
+          "op": "equal",
+          "value": 7
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/source_event_rows",
+          "op": "equal",
+          "value": 18
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/source_event_commands",
+          "op": "equal",
+          "value": 126
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/source_events_match",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "prerequisite",
+          "pointer": "/exact_fuel_boundaries_match",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    }
+  },
+  "task": "P128"
+}

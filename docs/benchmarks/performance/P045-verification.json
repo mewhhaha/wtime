@@ -1,0 +1,547 @@
+{
+  "schema_version": 1,
+  "task": "P045",
+  "identities": {
+    "runtime": {
+      "paths": [
+        "crates/wtime-runtime/src/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-conformance/**",
+        "tools/wtime-bench/profiling/Cargo.toml",
+        "tools/wtime-bench/profiling/Cargo.lock",
+        "tools/wtime-bench/profiling/src/*.rs",
+        "tools/wtime-bench/src/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**",
+        "tools/wtime-bench/fixtures/**",
+        "docs/architecture/corpus-lock.json",
+        "tests/fixtures/**",
+        "tools/checks/fetch_corpus.py"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/wtime-bench/p045_corpus.py",
+        "tools/wtime-bench/tests/test_p045*.py",
+        "tools/wtime-bench/tier_check.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P045-before/**",
+        "target/performance/baseline/**",
+        "target/performance/P045/predeclaration/attempt-0001/**",
+        "tools/verification/producers/p045.py",
+        "tools/wtime-bench/baseline.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor"
+      ],
+      "commands": [
+        {
+          "name": "predecessor",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p045.py",
+            "--output",
+            "{stage}/predecessor.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "predecessor": "{stage}/predecessor.json"
+      },
+      "checks": [
+        {
+          "artifact": "predecessor",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "fixtures",
+        "tooling"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "focused-rust",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,execution-reference",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "focused-python",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p045*.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "conformance-cli-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-conformance",
+            "--bin",
+            "wtime-conformance",
+            "--features",
+            "compact-executor,execution-reference",
+            "cli::tests",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "external-corpus",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/p045_corpus.py",
+            "--rust-log",
+            "{stage}/focused-rust.stdout",
+            "--output",
+            "{stage}/corpus"
+          ]
+        },
+        {
+          "name": "diagnostic-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--manifest-path",
+            "tools/wtime-bench/profiling/Cargo.toml",
+            "--features",
+            "compact-executor,execution-reference",
+            "--target-dir",
+            "target/performance/P045-diagnostic-target",
+            "-j",
+            "4"
+          ]
+        },
+        {
+          "name": "counter-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--manifest-path",
+            "tools/wtime-bench/profiling/Cargo.toml",
+            "--features",
+            "compact-executor,execution-reference,performance-counters",
+            "--target-dir",
+            "target/performance/P045-counter-target",
+            "-j",
+            "4"
+          ]
+        },
+        {
+          "name": "conformance-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "wtime-conformance",
+            "--features",
+            "compact-executor,execution-reference,opcode-coverage",
+            "--target-dir",
+            "target/performance/P045-conformance-target",
+            "-j",
+            "4"
+          ]
+        },
+        {
+          "name": "tier-check",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/tier_check.py",
+            "--tier",
+            "compact",
+            "--selection",
+            "integration",
+            "--binary",
+            "{repo}/target/performance/P045-diagnostic-target/release/wtime-bench",
+            "--diagnostic-binary",
+            "{repo}/target/performance/P045-counter-target/release/wtime-bench",
+            "--conformance-binary",
+            "{repo}/target/performance/P045-conformance-target/release/wtime-conformance",
+            "--output",
+            "{stage}/tier-check"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "focused-rust",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p045_aggregate_whole_and_prefix_certificates_reject_corruption",
+            "p045_lowering_and_verifier_faults_discard_partial_publication",
+            "p045_all_declines_and_feature_disabled_input_preserve_validation",
+            "p045_smoke_all_generated_families_and_boundary_inputs",
+            "p045_generated_thousand_cases_match_three_policies_state_and_every_fuel",
+            "p045_precancellation_has_no_compact_or_memory_effects"
+          ],
+          "minimum_passed": 340,
+          "unfiltered": true
+        },
+        {
+          "command": "focused-python",
+          "kind": "unittest",
+          "required_names": [
+            "test_valid_thousand_case_corpus_replays_in_one_batched_node_run",
+            "test_rejects_duplicate_seed_and_insufficient_compact_coverage",
+            "test_node_oracle_rejects_an_altered_expected_result",
+            "test_rejects_forged_body_before_node_replay",
+            "test_node_rejects_memory_mismatch_and_retains_hash_summary",
+            "test_compact_state_run_accepts_compact_policy_and_full_memory",
+            "test_compact_fuel_probe_accepts_compact_policy_and_full_memory",
+            "test_foreign_and_invalid_resolved_policies_are_rejected_without_fallback",
+            "test_compact_auto_build_forwards_policy_to_bench_and_conformance",
+            "test_invalid_auto_build_tier_is_rejected_before_builder_work"
+          ],
+          "minimum_passed": 10
+        },
+        {
+          "command": "conformance-cli-tests",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "compact_mode_selects_compact_execution_policy",
+            "unknown_mode_is_rejected",
+            "replay_features_preserve_existing_features_and_add_compact"
+          ],
+          "minimum_passed": 3
+        }
+      ],
+      "outputs": {
+        "corpus": "{stage}/corpus/report.json",
+        "tier": "{stage}/tier-check/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "corpus",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/tested/case_count",
+          "op": "at_least",
+          "value": 1000
+        },
+        {
+          "artifact": "tier",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "tier",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/families",
+          "op": "exact_set",
+          "value": [
+            "scalar",
+            "local",
+            "if",
+            "branch",
+            "memory",
+            "trap"
+          ]
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/family_counts/scalar",
+          "op": "positive"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/family_counts/local",
+          "op": "positive"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/family_counts/if",
+          "op": "positive"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/family_counts/branch",
+          "op": "positive"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/family_counts/memory",
+          "op": "positive"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/family_counts/trap",
+          "op": "positive"
+        },
+        {
+          "artifact": "corpus",
+          "pointer": "/checks/identity_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/predecessor.json",
+    "pointer": "/runtime_source_map",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/execution/compact/*.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/src/execution/compact/verify.rs"
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Verifier/generation gate only; Compact promotion remains P046."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "private",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "private",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "compact-executor,execution-reference",
+              "--lib",
+              "p045_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "private",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p045_aggregate_whole_and_prefix_certificates_reject_corruption",
+              "p045_lowering_and_verifier_faults_discard_partial_publication",
+              "p045_all_declines_and_feature_disabled_input_preserve_validation"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "smoke",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "smoke",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "compact-executor,execution-reference",
+              "--test",
+              "performance",
+              "p045_smoke",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "smoke",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p045_smoke_all_generated_families_and_boundary_inputs"
+            ],
+            "minimum_passed": 1
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "tooling",
+        "uses": [
+          "tooling"
+        ],
+        "commands": [
+          {
+            "name": "focused-python",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p045*.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "focused-python",
+            "kind": "unittest",
+            "required_names": [
+              "test_valid_thousand_case_corpus_replays_in_one_batched_node_run",
+              "test_rejects_duplicate_seed_and_insufficient_compact_coverage",
+              "test_node_oracle_rejects_an_altered_expected_result",
+              "test_rejects_forged_body_before_node_replay",
+              "test_node_rejects_memory_mismatch_and_retains_hash_summary",
+              "test_compact_state_run_accepts_compact_policy_and_full_memory",
+              "test_compact_fuel_probe_accepts_compact_policy_and_full_memory",
+              "test_foreign_and_invalid_resolved_policies_are_rejected_without_fallback",
+              "test_compact_auto_build_forwards_policy_to_bench_and_conformance",
+              "test_invalid_auto_build_tier_is_rejected_before_builder_work"
+            ],
+            "minimum_passed": 10
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "conformance-cli",
+        "uses": [
+          "runtime",
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "conformance-cli-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-conformance",
+              "--bin",
+              "wtime-conformance",
+              "--features",
+              "compact-executor,execution-reference",
+              "cli::tests",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "conformance-cli-tests",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "compact_mode_selects_compact_execution_policy",
+              "unknown_mode_is_rejected",
+              "replay_features_preserve_existing_features_and_add_compact"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

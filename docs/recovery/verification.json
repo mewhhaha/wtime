@@ -1,0 +1,102 @@
+{
+  "archived_files": [
+    {
+      "path": "docs/recovery/checks/core-all-features.argv.json",
+      "sha256": "3aff09457b36c97afc93f72bb4f7d3c1de75b7cfc227b4ccf3c8fa385060c06e",
+      "size_bytes": 266
+    },
+    {
+      "path": "docs/recovery/checks/core-all-features.result.json",
+      "sha256": "55f3179eee5a45e48cf1630c44f7be76807a368d7e08c9e16e51230338aca15e",
+      "size_bytes": 267
+    },
+    {
+      "path": "docs/recovery/checks/core-all-features.stderr",
+      "sha256": "19ff9bc02d0cdc3e562c20fee20392a7e0e1c3a94ba4e64c495e89114127956a",
+      "size_bytes": 1948
+    },
+    {
+      "path": "docs/recovery/checks/core-all-features.stdout",
+      "sha256": "0e813fa6d0ad035dc636696fd441817d22377542843e5eb1a702244c14c2899c",
+      "size_bytes": 36705
+    },
+    {
+      "path": "docs/recovery/checks/dependency-budget.argv.json",
+      "sha256": "1d5caf13ea488a30bcc5052e7235e93ae58a1e0f8be7c2e2360817facd298749",
+      "size_bytes": 335
+    },
+    {
+      "path": "docs/recovery/checks/dependency-budget.result.json",
+      "sha256": "4127d68297cd6ce60557f567ffdc1b344b7d31d883dfd6bdfda0e548ebdcdf58",
+      "size_bytes": 269
+    },
+    {
+      "path": "docs/recovery/checks/dependency-budget.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "docs/recovery/checks/dependency-budget.stdout",
+      "sha256": "83c69960430478c8271fd4a128c4fe2fd52bfc019626f3a201a5c973a709569a",
+      "size_bytes": 1444
+    },
+    {
+      "path": "docs/recovery/checks/executed-helper.py",
+      "sha256": "b29d16c7e50e35e6beb865550ba59c642ca244fbbfcf0d96e8dca72ce6e4ff8d",
+      "size_bytes": 5029
+    },
+    {
+      "path": "docs/recovery/checks/invocation.json",
+      "sha256": "a9ff107cd6e3e12b1fa76b9642bbe28e2b7a3f639cb9e7863ea64afbfff29018",
+      "size_bytes": 246
+    },
+    {
+      "path": "docs/recovery/checks/p128-tooling-and-identity.argv.json",
+      "sha256": "235745ba6d929d2ed18abadccab0d23bf6e16993ca7f37e7f6c04062d1561e85",
+      "size_bytes": 497
+    },
+    {
+      "path": "docs/recovery/checks/p128-tooling-and-identity.result.json",
+      "sha256": "3f866177a4dfc95ad451ee50cc704b0a3e233674c630588eef891e16df2702eb",
+      "size_bytes": 276
+    },
+    {
+      "path": "docs/recovery/checks/p128-tooling-and-identity.stderr",
+      "sha256": "a44bcfc3480d7e556c6813c44d5734a908917a5bfc49bdf7780d122f262b3f0e",
+      "size_bytes": 4269
+    },
+    {
+      "path": "docs/recovery/checks/p128-tooling-and-identity.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "docs/recovery/checks/result.json",
+      "sha256": "69e9ba8598ab51005f794d084a13546104aa28b1b4d1aac09835324c1aaa905b",
+      "size_bytes": 1022
+    },
+    {
+      "path": "docs/recovery/checks/source-inputs.json",
+      "sha256": "32f98a3e11371ec7bc02e4c3ed01a9db99454cd1f4db165a36f86c6abfc21528",
+      "size_bytes": 82307
+    }
+  ],
+  "core_all_features": {
+    "failed": 0,
+    "filtered": 0,
+    "ignored": 2,
+    "measured": 0,
+    "passed": 489
+  },
+  "date": "2026-10-14",
+  "dependency_budget": "passed",
+  "p128_tooling_and_identity": {
+    "failed": 0,
+    "passed": 21,
+    "skipped": 0
+  },
+  "passed": true,
+  "purpose": "recovery checkpoint verification; not task completion or timing evidence",
+  "schema_version": 1,
+  "source_inputs_unchanged": true
+}

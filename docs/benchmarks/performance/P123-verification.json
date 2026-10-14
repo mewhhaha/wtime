@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "task": "P123",
+  "identities": {
+    "frozen_baseline": {
+      "paths": [
+        "target/performance/baseline/manifest.json",
+        "target/performance/baseline/source/**",
+        "target/performance/baseline/fixtures/**",
+        "target/performance/baseline/binary/wtime-bench",
+        "target/performance/baseline/binary/wtime-conformance"
+      ],
+      "settings": {
+        "manifest_sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472",
+        "original_binary_sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498"
+      }
+    },
+    "adapter_and_routes": {
+      "paths": [
+        "rust-toolchain.toml",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/simd_workloads.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/fixtures/simd/**",
+        "tools/wtime-bench/fixtures/representative/**"
+      ]
+    },
+    "producer_and_tests": {
+      "paths": [
+        "tools/verification/producers/p123.py",
+        "tools/wtime-bench/tests/test_p123*.py"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "frozen_baseline",
+        "adapter_and_routes",
+        "producer_and_tests"
+      ],
+      "commands": [
+        {
+          "name": "build-typed-adapter",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/p123_adapter.py",
+            "build",
+            "--baseline",
+            "{repo}/target/performance/baseline",
+            "--output",
+            "{repo}/target/performance/P123-p001-adapter"
+          ]
+        },
+        {
+          "name": "typed-capability-probes",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p123.py",
+            "--adapter",
+            "{repo}/target/performance/P123-p001-adapter",
+            "--output",
+            "{stage}/probes"
+          ]
+        },
+        {
+          "name": "typed-adapter-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p123*.py",
+            "-v"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "typed-adapter-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_p123_adapter_is_hash_bound_to_immutable_p001",
+            "test_p123_typed_scalar_and_memory_routes_preserve_oracles",
+            "test_p123_simd_representative_capabilities_are_actual",
+            "test_p123_rejects_mutated_archive_and_false_capabilities",
+            "test_p123_adapter_rejects_substituted_core_and_stale_harness"
+          ],
+          "minimum_passed": 5
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/probes/report.json",
+        "artifacts": "{stage}/probes/artifacts.tar.gz",
+        "inventory": "{stage}/probes/inventory.json",
+        "binary": "{stage}/probes/wtime-bench",
+        "adapter": "{stage}/probes/adapter-manifest.json",
+        "commands": "{stage}/probes/commands.jsonl"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "p123-capabilities-v1"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/compile_source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/baseline_manifest_sha256",
+          "op": "equal",
+          "value": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/original_binary_sha256",
+          "op": "equal",
+          "value": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/scalar/supported",
+          "op": "equal",
+          "value": 85
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/scalar/passed",
+          "op": "equal",
+          "value": 85
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/scalar/unsupported",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/memory/supported",
+          "op": "equal",
+          "value": 35
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/memory/unsupported",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/memory/passed",
+          "op": "equal",
+          "value": 35
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/simd/supported",
+          "op": "equal",
+          "value": 114
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/simd/unsupported",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/simd/passed",
+          "op": "equal",
+          "value": 114
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/representative/supported",
+          "op": "equal",
+          "value": 9
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/representative/passed",
+          "op": "equal",
+          "value": 9
+        },
+        {
+          "artifact": "report",
+          "pointer": "/families/representative/unsupported",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "report",
+          "pointer": "/actual_stage_probes",
+          "op": "equal",
+          "value": 1095
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Typed P001 API compatibility and oracle capability evidence only; no timing or performance promotion claim."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "typed-adapter-checker-tests",
+        "uses": [
+          "frozen_baseline",
+          "adapter_and_routes",
+          "producer_and_tests"
+        ],
+        "commands": [
+          {
+            "name": "typed-adapter-checker-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p123*.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "typed-adapter-checker-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_p123_adapter_is_hash_bound_to_immutable_p001",
+              "test_p123_typed_scalar_and_memory_routes_preserve_oracles",
+              "test_p123_simd_representative_capabilities_are_actual",
+              "test_p123_rejects_mutated_archive_and_false_capabilities",
+              "test_p123_adapter_rejects_substituted_core_and_stale_harness"
+            ],
+            "minimum_passed": 5
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

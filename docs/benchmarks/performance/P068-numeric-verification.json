@@ -1,0 +1,742 @@
+{
+  "schema_version": 1,
+  "task": "P068",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P068-before/manifest.json",
+        "target/performance/P068-before/source/**",
+        "target/performance/P068-before/binary/**",
+        "target/performance/P068/numeric-selection-freeze.json",
+        "target/verification/runs/P125/verify/attempt-0002/proof/adapter/manifest.json",
+        "target/verification/runs/P125/verify/attempt-0002/proof/adapter/binary/**",
+        "target/verification/runs/P125/verify/attempt-0002/proof/adapter/src/**",
+        "target/verification/runs/P125/verify/attempt-0002/proof/adapter/source/**",
+        "target/verification/runs/P125/verify/attempt-0002/proof/adapter/Cargo.toml",
+        "target/verification/runs/P125/verify/attempt-0002/proof/adapter/Cargo.lock"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/fixtures/integration/**"
+      ]
+    },
+    "selection": {
+      "paths": [
+        "docs/benchmarks/performance/P068-numeric-selection.json",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/gc_workloads.py",
+        "tools/wtime-bench/gc_scaling.py",
+        "tools/wtime-bench/gc_compare.py",
+        "tools/wtime-bench/gc_cold_adapter.py",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/root_compare.py"
+      ],
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {
+        "candidate_mode": "decoded",
+        "pairs_per_run": 30,
+        "runs": 2,
+        "selected_cpu": 1
+      }
+    },
+    "analysis": {
+      "paths": [
+        "tools/verification/statistics.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/gates.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/root_compare.py"
+      ]
+    },
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/candidate_production.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "candidate_freeze_producer": {
+      "paths": [
+        "tools/verification/producers/candidate_freeze.py",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "tool_checks": {
+      "paths": [
+        "tools/verification/**/*.py",
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/tests/test_fast_candidate.py",
+        "tools/wtime-bench/tests/test_fast_gc_candidate.py",
+        "tools/wtime-bench/tests/test_root*.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "selection",
+        "candidate_freeze_producer"
+      ],
+      "commands": [
+        {
+          "name": "revalidate-selection-freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_freeze.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P068-numeric-selection.json",
+            "--predecessor",
+            "{repo}/target/performance/P068-before/manifest.json",
+            "--frozen",
+            "{repo}/target/performance/P068/numeric-selection-freeze.json",
+            "--output",
+            "{stage}/selection.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "selection": "{stage}/selection.json"
+      },
+      "checks": [
+        {
+          "artifact": "selection",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-candidate-selection-freeze-v1"
+        },
+        {
+          "artifact": "selection",
+          "pointer": "/predecessor_path",
+          "op": "equal",
+          "value": "/workspace/wtime-specialists/target/performance/P068-before/manifest.json"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "compilation",
+        "selection",
+        "runtime",
+        "build_producer",
+        "tool_checks"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "semantic-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "p068_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "root-timer-checks",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_root*.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "production-build",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/production"
+          ]
+        },
+        {
+          "name": "default-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/build.json"
+          ]
+        },
+        {
+          "name": "existing-root-providers",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "t113_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "outputs": {
+        "production_record": "{stage}/production/build-record.json",
+        "binary": "{stage}/production/bin/wtime-bench",
+        "build": "{stage}/build.json"
+      },
+      "tests": [
+        {
+          "command": "semantic-tests",
+          "required_names": [
+            "p068_all_reference_variants_remain_owned",
+            "p068_numeric_reentry_has_no_copied_roots",
+            "p068_callback_outcomes_release_snapshots",
+            "p068_sole_host_gc_argument_survives_reentry",
+            "p068_guest_pending_reference_survives_collection",
+            "p068_failure_then_success_has_no_stale_roots"
+          ],
+          "minimum_passed": 6,
+          "features": []
+        },
+        {
+          "command": "existing-root-providers",
+          "required_names": [
+            "t113_each_store_provider_is_a_sole_root",
+            "t113_nested_host_reentry_retains_arguments_and_pending_results"
+          ],
+          "minimum_passed": 2,
+          "features": []
+        },
+        {
+          "command": "root-timer-checks",
+          "kind": "unittest",
+          "required_names": [
+            "test_valid_cold_warm_and_zero_callback_proofs",
+            "test_rejects_incomplete_or_forged_proofs",
+            "test_rejects_wrong_settings_batch_timing_and_retained_wire",
+            "test_rejects_unknown_model_row",
+            "test_observe_routes_root_cli_and_validates_complete_proof",
+            "test_root_calibration_shares_batches_and_stops_at_model_cap",
+            "test_candidate_gate_rejects_tampered_copied_wire_and_normalized_sample",
+            "test_focused_identity_protects_root_timing_sources",
+            "test_analysis_only_gate_source_is_excluded_from_focused_identity",
+            "test_independent_oracle_matches_closed_form_for_every_case",
+            "test_rows_are_fixed_bank_positive_units_with_bounded_batches",
+            "test_fixture_hashing_is_contained_in_fresh_temporary_root",
+            "test_registry_adds_only_the_new_selection"
+          ],
+          "minimum_passed": 13,
+          "features": []
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "production_record",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-production-command-v1"
+        },
+        {
+          "artifact": "production_record",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "build",
+          "pointer": "/budget_pass",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "build",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "measure": {
+      "uses": [
+        "compilation",
+        "selection",
+        "harness"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "timing_evidence": true,
+      "commands": [
+        {
+          "name": "focused-candidate",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/focused_compare.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P068-numeric-selection.json",
+            "--frozen",
+            "{freeze_dir}/selection.json",
+            "--semantic-receipt",
+            "{verify_dir}/receipt.json",
+            "--baseline",
+            "{repo}/target/verification/runs/P125/verify/attempt-0002/proof/adapter",
+            "--candidate",
+            "{verify_dir}/production/bin/wtime-bench",
+            "--candidate-mode",
+            "decoded",
+            "--output",
+            "{stage}/comparison",
+            "--cpu",
+            "1"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/comparison/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/lane",
+          "op": "equal",
+          "value": "candidate"
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "analysis",
+        "selection",
+        "tool_checks"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify",
+        "measure"
+      ],
+      "commands": [
+        {
+          "name": "producer-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_candidate_producers.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "gc-adapter-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_gc_candidate.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "candidate-gate-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_candidate.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "candidate-statistics",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verify.py",
+            "statistics",
+            "--task",
+            "P068",
+            "--comparison",
+            "{measure_dir}/comparison",
+            "--build",
+            "{verify_dir}/build.json",
+            "--candidate-build-record",
+            "{verify_dir}/production/build-record.json",
+            "--contract",
+            "{repo}/docs/benchmarks/performance/P068-numeric-selection.json",
+            "--output",
+            "{stage}/statistics.json",
+            "--execute"
+          ]
+        }
+      ],
+      "outputs": {
+        "statistics": "{stage}/statistics.json"
+      },
+      "checks": [
+        {
+          "artifact": "statistics",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "statistics",
+          "pointer": "/statistics_computations",
+          "op": "equal",
+          "value": 1
+        }
+      ],
+      "tests": [
+        {
+          "command": "producer-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_revalidates_exact_predecessor_and_copies_receipt",
+            "test_wrong_predecessor_fails_before_output",
+            "test_compact_record_has_gate_schema_paths_and_hashes",
+            "test_decoded_has_no_optional_features_and_strict_mode_attestation",
+            "test_rejects_instrumented_or_missing_mode_protocol"
+          ],
+          "minimum_passed": 5,
+          "features": []
+        },
+        {
+          "command": "gc-adapter-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_legacy_gc_rows_keep_typed_profile_and_full_cold_timer_identity",
+            "test_observer_routes_gc_through_existing_cold_adapter",
+            "test_cold_gc_target_can_drive_candidate_decision",
+            "test_normalized_gc_result_revalidates_raw_wire_and_cold_intervals"
+          ],
+          "minimum_passed": 4,
+          "features": []
+        },
+        {
+          "command": "candidate-gate-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_target_warm_and_cold_stages_keep_warm_as_primary"
+          ],
+          "minimum_passed": 15,
+          "features": []
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/selection.json",
+    "pointer": "/runtime_sources",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/lib.rs",
+      "crates/wtime-runtime/src/execution.rs",
+      "crates/wtime-runtime/src/continuation.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/src/root_snapshots.rs",
+      "crates/wtime-runtime/tests/performance/p068*.rs"
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ],
+    "decision": {
+      "phase": "analyze",
+      "artifact": "statistics",
+      "pointer": "/decision/decision"
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "semantics",
+        "uses": [
+          "runtime",
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "semantic-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "p068_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "semantic-tests",
+            "required_names": [
+              "p068_all_reference_variants_remain_owned",
+              "p068_numeric_reentry_has_no_copied_roots",
+              "p068_callback_outcomes_release_snapshots",
+              "p068_sole_host_gc_argument_survives_reentry",
+              "p068_guest_pending_reference_survives_collection",
+              "p068_failure_then_success_has_no_stale_roots"
+            ],
+            "minimum_passed": 6,
+            "features": []
+          }
+        ]
+      },
+      {
+        "name": "candidate-tooling",
+        "uses": [
+          "tool_checks"
+        ],
+        "commands": [
+          {
+            "name": "producer-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_candidate_producers.py",
+              "-v"
+            ]
+          },
+          {
+            "name": "gc-adapter-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_gc_candidate.py",
+              "-v"
+            ]
+          },
+          {
+            "name": "candidate-gate-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_candidate.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "producer-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_revalidates_exact_predecessor_and_copies_receipt",
+              "test_wrong_predecessor_fails_before_output",
+              "test_compact_record_has_gate_schema_paths_and_hashes",
+              "test_decoded_has_no_optional_features_and_strict_mode_attestation",
+              "test_rejects_instrumented_or_missing_mode_protocol"
+            ],
+            "minimum_passed": 5,
+            "features": []
+          },
+          {
+            "command": "gc-adapter-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_legacy_gc_rows_keep_typed_profile_and_full_cold_timer_identity",
+              "test_observer_routes_gc_through_existing_cold_adapter",
+              "test_cold_gc_target_can_drive_candidate_decision"
+            ],
+            "minimum_passed": 3,
+            "features": []
+          },
+          {
+            "command": "candidate-gate-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_target_warm_and_cold_stages_keep_warm_as_primary"
+            ],
+            "minimum_passed": 15,
+            "features": []
+          }
+        ]
+      },
+      {
+        "name": "root-timer",
+        "uses": [
+          "compilation",
+          "harness",
+          "tool_checks"
+        ],
+        "commands": [
+          {
+            "name": "root-timer-checks",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_root*.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "root-timer-checks",
+            "kind": "unittest",
+            "required_names": [
+              "test_valid_cold_warm_and_zero_callback_proofs",
+              "test_rejects_incomplete_or_forged_proofs",
+              "test_rejects_wrong_settings_batch_timing_and_retained_wire",
+              "test_rejects_unknown_model_row",
+              "test_observe_routes_root_cli_and_validates_complete_proof",
+              "test_root_calibration_shares_batches_and_stops_at_model_cap",
+              "test_candidate_gate_rejects_tampered_copied_wire_and_normalized_sample",
+              "test_focused_identity_protects_root_timing_sources",
+              "test_analysis_only_gate_source_is_excluded_from_focused_identity",
+              "test_independent_oracle_matches_closed_form_for_every_case",
+              "test_rows_are_fixed_bank_positive_units_with_bounded_batches",
+              "test_fixture_hashing_is_contained_in_fresh_temporary_root",
+              "test_registry_adds_only_the_new_selection"
+            ],
+            "minimum_passed": 13,
+            "features": []
+          }
+        ]
+      }
+    ]
+  }
+}

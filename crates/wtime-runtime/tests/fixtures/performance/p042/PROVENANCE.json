@@ -1,0 +1,63 @@
+{
+  "authorship": "All listed WAT files and the manual-oracle packet were written specifically for this P042 task; no repository fixture or external test suite fixture was copied or adapted.",
+  "correction_history": {
+    "followup": "Exported matching and differently typed functions plus call_null/tail_null to let the later host harness test the correct argument-validation boundary.",
+    "host_root_case": "Added the parent-specified host-indirect root case with literal object payload 91 and callback input 5; collection/reentry remains unexecuted.",
+    "preserved_original_packet": "history/pre-correction/",
+    "prior_manifest_sha256": "78e7754a4ade987aa442f33075514ba7f6a705e0dbc2e498b4c1a96c03a7199e",
+    "reason": "Corrected typed call_ref operand and mnemonic syntax from local fixtures/runtime validator; changed indirect-call fixtures to explicit folded WAT operand forms. Original packet remains preserved byte-for-byte.",
+    "source_inspection_only": true
+  },
+  "files": [
+    "LICENSE.txt",
+    "call-ref.wat",
+    "host-indirect.wat",
+    "invalid-indirect.wat",
+    "manual-oracles.json",
+    "table-alias-consumer.wat",
+    "table-alias-provider.wat",
+    "table-mutations.wat",
+    "table64-indirect.wat"
+  ],
+  "license": "MIT OR Apache-2.0; see LICENSE.txt",
+  "manual_oracles": "manual-oracles.json",
+  "not_completed": [
+    "WAT parser validation",
+    "Wasm encoding",
+    "runtime invocation",
+    "conformance or fuel measurement",
+    "cache-hit or performance measurement"
+  ],
+  "schema": "p042-fixture-source-packet-v1",
+  "scope": [
+    "mutable table slot reread after set/grow/fill/copy and overlapping copy",
+    "multiple explicit table indices in call_indirect",
+    "same-Store imported table alias changed by a consumer instance",
+    "null/type-mismatch/out-of-bounds indirect-call categories",
+    "typed nullable call_ref and tail call_ref with matching and null targets; host-side typed-reference argument rejection controls",
+    "ordinary/tail indirect and call_ref host target behavior",
+    "table64 large-index nontruncation (syntax pending validation)",
+    "Store affinity, generation reuse, subtype budget and bounded churn as runtime API test oracles",
+    "outer GC root preserved across dynamic indirect host call and host-driven collection/reentry"
+  ],
+  "sha256_manifest": "SHA256SUMS",
+  "status": "draft_source_only_unencoded_unvalidated_unexecuted",
+  "task": "P042",
+  "syntax_correction": {
+    "history": "/tmp/P042-fixture-history/call-indirect-syntax-0001/packet",
+    "basis": "source-only indexed call syntax from pinned return_call_indirect.wast at line175: return_call_indirect 1 (type ...)",
+    "change": "explicit table identifier precedes type use; unsupported (table $name) call operand removed only from call_indirect/return_call_indirect",
+    "call_sites_changed": {
+      "host-indirect.wat": 2,
+      "invalid-indirect.wat": 1,
+      "table-alias-consumer.wat": 1,
+      "table-alias-provider.wat": 1,
+      "table-mutations.wat": 2,
+      "table64-indirect.wat": 1
+    },
+    "manual_oracles_sha256_unchanged": "eaae840b91b423c050a756c7a6415cfde9a99935e5ffaa97860c9a77ff48307b",
+    "native_validation_executed": false,
+    "guest_execution_executed": false,
+    "note": "failed original draft preserved; corrected sources remain unvalidated until root rerun"
+  }
+}

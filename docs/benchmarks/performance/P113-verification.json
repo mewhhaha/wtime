@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "task": "P113",
+  "identities": {
+    "model": {
+      "paths": [
+        "tools/wtime-bench/integration_workloads.py",
+        "tools/wtime-bench/tests/test_p113_integration_model.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "tools/wtime-bench/fixtures/integration_p113/**",
+        "tools/wtime-bench/workloads.json",
+        "target/performance/P113/fixtures/attempt-0002/receipt.json"
+      ]
+    },
+    "helpers": {
+      "paths": [
+        "tools/wtime-bench/integration_workflow.py",
+        "tools/wtime-bench/p043_workflow.py"
+      ]
+    },
+    "adapter": {
+      "paths": [
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/tests/test_p113_integration_compare.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "model",
+        "compilation",
+        "fixtures",
+        "helpers",
+        "adapter"
+      ],
+      "commands": [
+        {
+          "name": "model-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p113_integration_model.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "adapter-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p113_integration_compare.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "production-build",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/p043_workflow.py",
+            "build",
+            "--output",
+            "{stage}/production",
+            "--execute"
+          ]
+        },
+        {
+          "name": "production-probes",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/integration_workflow.py",
+            "probe",
+            "--binary",
+            "{stage}/production/wtime-bench",
+            "--output",
+            "{stage}/preflight",
+            "--execute"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "model-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_selected_rows_and_signed_i32_prefix_oracle",
+            "test_full_memory_image_rejects_unchanged_state_and_hash_tampering",
+            "test_lifecycle_positive_byte_counts_are_variable_but_zero_is_rejected",
+            "test_production_settings_batch_and_continuation_lifecycle_are_required",
+            "test_untimed_preflight_checks_complete_state_on_its_own"
+          ],
+          "minimum_passed": 5,
+          "features": []
+        },
+        {
+          "command": "adapter-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_bad_full_image_preflight_stops_before_timed_path",
+            "test_mixed_mode_profile_or_instrumentation_is_rejected",
+            "test_balanced_random_orders_and_confirmed_shared_calibration",
+            "test_batch_zero_calibration_below_target_fails_hard"
+          ],
+          "minimum_passed": 4,
+          "features": []
+        }
+      ],
+      "outputs": {
+        "preflight": "{stage}/preflight/report.json",
+        "candidate": "{stage}/production/wtime-bench",
+        "candidate_build": "{stage}/production/build-record.json"
+      },
+      "checks": [
+        {
+          "artifact": "preflight",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "preflight",
+          "pointer": "/case_count",
+          "op": "equal",
+          "value": 6
+        },
+        {
+          "artifact": "preflight",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "The benchmark foundation validates current Compact fallback; prefix/handoff promotion belongs to P044."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "model",
+        "uses": [
+          "model"
+        ],
+        "commands": [
+          {
+            "name": "model-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p113_integration_model.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "model-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_selected_rows_and_signed_i32_prefix_oracle",
+              "test_full_memory_image_rejects_unchanged_state_and_hash_tampering",
+              "test_lifecycle_positive_byte_counts_are_variable_but_zero_is_rejected",
+              "test_production_settings_batch_and_continuation_lifecycle_are_required",
+              "test_untimed_preflight_checks_complete_state_on_its_own"
+            ],
+            "minimum_passed": 5,
+            "features": []
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "harness",
+        "uses": [
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "harness-check",
+            "argv": [
+              "cargo",
+              "check",
+              "--manifest-path",
+              "tools/wtime-bench/Cargo.toml",
+              "--locked",
+              "--no-default-features",
+              "--features",
+              "compact-executor",
+              "-j",
+              "4"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "adapter",
+        "uses": [
+          "adapter",
+          "model"
+        ],
+        "commands": [
+          {
+            "name": "adapter-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p113_integration_compare.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "adapter-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_bad_full_image_preflight_stops_before_timed_path",
+              "test_mixed_mode_profile_or_instrumentation_is_rejected",
+              "test_balanced_random_orders_and_confirmed_shared_calibration",
+              "test_batch_zero_calibration_below_target_fails_hard"
+            ],
+            "minimum_passed": 4,
+            "features": []
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

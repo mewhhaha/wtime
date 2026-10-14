@@ -1,0 +1,11 @@
+[package]
+name = "wtime-retained"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+wtime-runtime = { path = "../../crates/wtime-runtime", features = ["compact-executor", "performance-counters"] }
+wtime-types = { path = "../../crates/wtime-types" }

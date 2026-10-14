@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/wtime-conformance"]
+default-members = ["crates/wtime-types", "crates/wtime-decode", "crates/wtime-validate", "crates/wtime-runtime", "crates/wtime-cli"]
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.99"
+[workspace.dependencies]
+wtime-types = { path = "crates/wtime-types" }
+wtime-decode = { path = "crates/wtime-decode" }
+wtime-validate = { path = "crates/wtime-validate" }
+wtime-runtime = { path = "crates/wtime-runtime" }
+[profile.dev]
+debug = 1
+[profile.test]
+debug = 1

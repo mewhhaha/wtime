@@ -1,0 +1,24 @@
+[package]
+name = "wtime-conformance"
+default-run = "wtime-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+wtime-runtime.workspace = true
+wtime-types.workspace = true
+wast = "=261.0.0"
+sha2 = "=0.10.9"
+
+[features]
+default = []
+opcode-coverage = ["wtime-runtime/opcode-coverage"]
+execution-reference = ["wtime-runtime/execution-reference"]
+compact-executor = ["wtime-runtime/compact-executor"]
+performance-counters = ["wtime-runtime/performance-counters"]
+
+[build-dependencies]
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+wtime-decode.workspace = true

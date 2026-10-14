@@ -1,0 +1,206 @@
+{
+  "task": "P044",
+  "status": "done",
+  "outcome": "inconclusive",
+  "candidate_promoted": false,
+  "default_policy": "decoded",
+  "compact_opt_in": true,
+  "verification": {
+    "default_tests": 228,
+    "compact_reference_tests": 334,
+    "prefix_child_cases": 21,
+    "p022_cases": 8,
+    "candidate_full_state_probes": 6,
+    "default_and_optional_absolute_build_budgets": "passed",
+    "core_external_dependencies": 0
+  },
+  "measurement": {
+    "runs": 2,
+    "groups_total": 60,
+    "pairs_per_group": 30,
+    "pair_events": 1800,
+    "side_observations": 3600,
+    "independent_preflights": 12,
+    "confirmed_warm_calibrations": 12,
+    "instrumented": false,
+    "mode": "compact"
+  },
+  "warm_results": [
+    {
+      "run": 1,
+      "workload": "integration_cont_entry_control",
+      "median_candidate_over_baseline": 1.0437030984127516,
+      "ci95": {
+        "lower": 0.9421851641959798,
+        "upper": 1.0966865282358667
+      }
+    },
+    {
+      "run": 1,
+      "workload": "integration_cont_prefix",
+      "median_candidate_over_baseline": 0.7654285441996155,
+      "ci95": {
+        "lower": 0.6963870490135581,
+        "upper": 0.8262496914222828
+      }
+    },
+    {
+      "run": 1,
+      "workload": "integration_eh_prefix",
+      "median_candidate_over_baseline": 0.7274622659305598,
+      "ci95": {
+        "lower": 0.6473393095082408,
+        "upper": 0.8164892780674162
+      }
+    },
+    {
+      "run": 1,
+      "workload": "integration_gc_prefix",
+      "median_candidate_over_baseline": 0.6729084519997639,
+      "ci95": {
+        "lower": 0.6535243466575216,
+        "upper": 0.7118247106146758
+      }
+    },
+    {
+      "run": 1,
+      "workload": "integration_numeric_control",
+      "median_candidate_over_baseline": 1.0129453715065808,
+      "ci95": {
+        "lower": 0.9412140037232687,
+        "upper": 1.0822904522347978
+      }
+    },
+    {
+      "run": 1,
+      "workload": "integration_ref_entry_control",
+      "median_candidate_over_baseline": 0.9785622406977943,
+      "ci95": {
+        "lower": 0.9342285481927982,
+        "upper": 1.0667800052627905
+      }
+    },
+    {
+      "run": 2,
+      "workload": "integration_cont_entry_control",
+      "median_candidate_over_baseline": 1.0272283380143157,
+      "ci95": {
+        "lower": 0.9640520302837271,
+        "upper": 1.0596301642555284
+      }
+    },
+    {
+      "run": 2,
+      "workload": "integration_cont_prefix",
+      "median_candidate_over_baseline": 0.7018374413209107,
+      "ci95": {
+        "lower": 0.6389732800936087,
+        "upper": 0.7831763843102901
+      }
+    },
+    {
+      "run": 2,
+      "workload": "integration_eh_prefix",
+      "median_candidate_over_baseline": 0.6645225802760257,
+      "ci95": {
+        "lower": 0.6286712074021313,
+        "upper": 0.7234347758460359
+      }
+    },
+    {
+      "run": 2,
+      "workload": "integration_gc_prefix",
+      "median_candidate_over_baseline": 0.6930564831128299,
+      "ci95": {
+        "lower": 0.6750269538560619,
+        "upper": 0.7288610129184482
+      }
+    },
+    {
+      "run": 2,
+      "workload": "integration_numeric_control",
+      "median_candidate_over_baseline": 1.0986137690454176,
+      "ci95": {
+        "lower": 1.0425555567549445,
+        "upper": 1.1449560877807823
+      }
+    },
+    {
+      "run": 2,
+      "workload": "integration_ref_entry_control",
+      "median_candidate_over_baseline": 1.0301952294100145,
+      "ci95": {
+        "lower": 0.9667079672212455,
+        "upper": 1.075509276901999
+      }
+    }
+  ],
+  "build_growth_pass": false,
+  "build_ratios": {
+    "build": {
+      "clean_peak_rss_kib": 1.0560001201074962,
+      "clean_seconds": 1.3532200673926085,
+      "leaf_seconds": 0.541888528681591,
+      "release_seconds": 0.6893389819692844,
+      "runtime_leaf_seconds": 0.8475236799095138,
+      "stripped_bytes": 1.0000159888717453
+    },
+    "optional-build": {
+      "clean_peak_rss_kib": 0.9904018563442675,
+      "clean_seconds": 1.0065149430710811,
+      "leaf_seconds": 0.9210251092514431,
+      "release_seconds": 0.5271782194372656,
+      "runtime_leaf_seconds": 0.7402336163911456,
+      "stripped_bytes": 1.0065024882353826
+    }
+  },
+  "reasons": [
+    "warm protected integration_cont_entry_control group interval crosses 1.05 in run 1",
+    "warm protected integration_numeric_control group interval crosses 1.05 in run 1",
+    "warm protected integration_ref_entry_control group interval crosses 1.05 in run 1",
+    "warm protected integration_cont_entry_control group interval crosses 1.05 in run 2",
+    "warm protected integration_numeric_control group interval crosses 1.05 in run 2",
+    "warm protected integration_ref_entry_control group interval crosses 1.05 in run 2",
+    "first_call control integration_cont_entry_control interval crosses 1.05 in run 1",
+    "instantiate control integration_cont_entry_control interval crosses 1.05 in run 1",
+    "load_and_call control integration_cont_entry_control interval crosses 1.05 in run 1",
+    "instantiate control integration_cont_prefix interval crosses 1.05 in run 1",
+    "load_and_call control integration_cont_prefix interval crosses 1.05 in run 1",
+    "instantiate control integration_eh_prefix interval crosses 1.05 in run 1",
+    "load_and_call control integration_gc_prefix interval crosses 1.05 in run 1",
+    "instantiate control integration_numeric_control interval crosses 1.05 in run 1",
+    "load_and_call control integration_numeric_control interval crosses 1.05 in run 1",
+    "first_call control integration_ref_entry_control interval crosses 1.05 in run 1",
+    "load_and_call control integration_ref_entry_control interval crosses 1.05 in run 1",
+    "first_call control integration_cont_entry_control interval crosses 1.05 in run 2",
+    "instantiate control integration_cont_entry_control interval crosses 1.05 in run 2",
+    "load_and_call control integration_cont_entry_control interval crosses 1.05 in run 2",
+    "load_and_call control integration_cont_prefix interval crosses 1.05 in run 2",
+    "load_and_call control integration_eh_prefix interval crosses 1.05 in run 2",
+    "load_and_call control integration_gc_prefix interval crosses 1.05 in run 2",
+    "first_call control integration_numeric_control interval crosses 1.05 in run 2",
+    "first_call control integration_ref_entry_control interval crosses 1.05 in run 2",
+    "instantiate control integration_ref_entry_control interval crosses 1.05 in run 2",
+    "relative build/RSS/size growth above 1.25 requires a documented decision",
+    "Immediate-predecessor build growth exceeds 1.25; promotion withheld."
+  ],
+  "limitations": [
+    "Primary warm latency improves by 23\u201334% in these arithmetic-prefix fixtures; protected/cold controls and relative clean-build limits prevent promotion.",
+    "Build timing comes from a shared cloud environment; the observed ratio does not establish a causal compiler-cost increase.",
+    "No Wasmtime ratio is established by this integration comparison."
+  ],
+  "artifacts": {
+    "proof": {
+      "path": "/workspace/wtime/target/performance/P044/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "ddfcc67673c4cc621a7cc94e8303df69854de83072a945e7c86bc840ae79b15f"
+    },
+    "statistics": {
+      "path": "/workspace/wtime/target/verification/runs/P044/analyze/attempt-0001/statistics.json",
+      "sha256": "ab7f53f49af065a7ff8d88fd879c5af9a7af7e9630e7ce9d48c934110c608c93"
+    },
+    "decision": {
+      "path": "/workspace/wtime/target/verification/runs/P044/analyze/attempt-0001/decision.json",
+      "sha256": "15b52aa56c240d393a2f79f067c9267e5c0a01fb7dc2e1e6a87910a8a7ac3244"
+    }
+  }
+}

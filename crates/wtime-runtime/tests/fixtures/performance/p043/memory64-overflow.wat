@@ -1,0 +1,15 @@
+;; Original P043 memory64 fixture; dual MIT OR Apache-2.0. Source-only, not encoded.
+(module
+  (memory (export "memory") i64 1 1)
+  (func (export "last_byte") (result i32)
+    (i32.store8 (i64.const 65535) (i32.const 128))
+    (i32.load8_s (i64.const 65535)))
+  (func (export "effective_address_overflow") (result i32)
+    (i32.store8 (i64.const 8) (i32.const 170))
+    (drop (i32.load offset=18446744073709551615 (i64.const 1)))
+    (i32.store8 (i64.const 9) (i32.const 204))
+    (i32.const 0))
+  (func (export "last_valid_i64") (result i64)
+    (i64.load (i64.const 65528)))
+  (func (export "first_oob_i64") (result i64)
+    (i64.load (i64.const 65529))))

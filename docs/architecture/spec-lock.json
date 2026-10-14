@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "lock_date": "2026-10-11",
+  "identity_algorithm": "Git commit object plus root Git tree SHA-1; tree checksum covers each repository snapshot by path and blob identity. No branch or tag resolves acceptance.",
+  "scope": "Core Wasm through Phase 3 inclusive: finished core proposals plus active Phase 3, 4, and 5 entries selected in SOURCES.json. Text tooling entries are included as listed. JS/browser behavior excluded.",
+  "catalog_commit": "df6a2aca1cd9d779eb4f2f3e19dae8277f336015",
+  "core_spec_commit": "7e9fb78c63d65018cc111422f657947b3df80d7b",
+  "sources": [
+    {
+      "feature_id": "proposal-catalog",
+      "repository": "https://github.com/WebAssembly/proposals.git",
+      "commit": "df6a2aca1cd9d779eb4f2f3e19dae8277f336015",
+      "tree_sha1": "726afe890e2ab94865843aacc46e2391dd604756",
+      "tree_checksum": "git-tree-sha1:726afe890e2ab94865843aacc46e2391dd604756",
+      "source_directories": [],
+      "normative_source": "proposals.json at repository root; phase and membership only",
+      "test_source_strategy": "No execution tests: catalog is scope authority.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "core-3.0",
+      "repository": "https://github.com/WebAssembly/spec.git",
+      "commit": "7e9fb78c63d65018cc111422f657947b3df80d7b",
+      "tree_sha1": "c0d54135b69559e4844c642fcc1593e4fcc12e23",
+      "tree_checksum": "git-tree-sha1:c0d54135b69559e4844c642fcc1593e4fcc12e23",
+      "source_directories": [
+        "specification",
+        "spectec",
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "document/core; specification/wasm-3.0 and spectec/wasm-3.0 in the pinned tree",
+      "test_source_strategy": "test/core and test/spec; integrated core tests cover finished semantics.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "threads",
+      "repository": "https://github.com/webassembly/threads.git",
+      "commit": "cc535ada1aa21cfaa3cabf3ac73b89acef78a0a0",
+      "tree_sha1": "6babe48eb4d76eb5165d7d53ae88c0df418330f6",
+      "tree_checksum": "git-tree-sha1:6babe48eb4d76eb5165d7d53ae88c0df418330f6",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "compact-import-section",
+      "repository": "https://github.com/WebAssembly/compact-import-section.git",
+      "commit": "0624de829e2663da799e708444dec80337a3fe54",
+      "tree_sha1": "b5d68f5adfec45d72192a47abea66c2bbf97a358",
+      "tree_checksum": "git-tree-sha1:b5d68f5adfec45d72192a47abea66c2bbf97a358",
+      "source_directories": [
+        "specification",
+        "spectec",
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "wide-arithmetic",
+      "repository": "https://github.com/WebAssembly/wide-arithmetic.git",
+      "commit": "024d4ce1b28cee7fd006d9c5175e3b7ece52b429",
+      "tree_sha1": "b7d7bf97d0e46d4a6c9361db0c0ff153359c6942",
+      "tree_checksum": "git-tree-sha1:b7d7bf97d0e46d4a6c9361db0c0ff153359c6942",
+      "source_directories": [
+        "specification",
+        "spectec",
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "stack-switching",
+      "repository": "https://github.com/WebAssembly/stack-switching.git",
+      "commit": "c7be390539e5fc10669c88cadc4fa4b32fba1d47",
+      "tree_sha1": "6e4a54c2f8c736dc3120a2edb20d19e87cdb2c8c",
+      "tree_checksum": "git-tree-sha1:6e4a54c2f8c736dc3120a2edb20d19e87cdb2c8c",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "custom-page-sizes",
+      "repository": "https://github.com/WebAssembly/custom-page-sizes.git",
+      "commit": "61c873a1860acad2772539164f284cc5110f1b1b",
+      "tree_sha1": "8de63cf2f423c87eef01af9aa91be13b66a0e549",
+      "tree_checksum": "git-tree-sha1:8de63cf2f423c87eef01af9aa91be13b66a0e549",
+      "source_directories": [
+        "specification",
+        "spectec",
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "custom-descs",
+      "repository": "https://github.com/WebAssembly/custom-descriptors.git",
+      "commit": "4aa477a4c1ca064fe3592b3a0307509e9059d0f9",
+      "tree_sha1": "9b8eb7842d03b1ca6c34029540d2f3b4815e375a",
+      "tree_checksum": "git-tree-sha1:9b8eb7842d03b1ca6c34029540d2f3b4815e375a",
+      "source_directories": [
+        "specification",
+        "spectec",
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "The pinned proposals/custom-descriptors/Overview.md contains the proposal delta formal binary grammar, typing judgments, and execution descriptions; use it with integrated Core 3.0 baseline. The proposal repository specification/wasm-3.0 is an inherited integrated spec tree and does not itself contain descriptor-specific clauses.",
+      "test_source_strategy": "test/core and test/custom at this commit; use core cases and exclude test/js-api.",
+      "unresolved_clauses": [
+        "Type Section Field Deduplication is a bare TODO; no encoding or semantics are specified.",
+        "JS prototype, compileOptions, and configureAll behavior is embedding API and excluded."
+      ]
+    },
+    {
+      "feature_id": "mvp",
+      "repository": "https://github.com/WebAssembly/design.git",
+      "commit": "6e43416ebc8becd6cdf5d91d9ae7d3712111df32",
+      "tree_sha1": "1c61bc2f65b1be4e3561ac4114b116de76eadcde",
+      "tree_checksum": "git-tree-sha1:1c61bc2f65b1be4e3561ac4114b116de76eadcde",
+      "source_directories": [],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "import_export_of_mutable_globals",
+      "repository": "https://github.com/WebAssembly/mutable-global.git",
+      "commit": "89e5be9d69f2afac7243b6d2ff36b9c8723efb77",
+      "tree_sha1": "32ffccfe23923186dbe306aee24e915521c1a3e7",
+      "tree_checksum": "git-tree-sha1:32ffccfe23923186dbe306aee24e915521c1a3e7",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "non-trapping_float-to-int_conversions",
+      "repository": "https://github.com/WebAssembly/nontrapping-float-to-int-conversions.git",
+      "commit": "aa25b24de97a53f359b0e37615f61a2aacce1ff8",
+      "tree_sha1": "4123df84e7271e0121b839c77ad777c52897884d",
+      "tree_checksum": "git-tree-sha1:4123df84e7271e0121b839c77ad777c52897884d",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "sign-extension_operators",
+      "repository": "https://github.com/WebAssembly/sign-extension-ops.git",
+      "commit": "a09a028ee7106d3d3ab8fe11b8e18b2e5263aa07",
+      "tree_sha1": "c5ba0c376c239d22a89df7b1aeeabb56d0373a92",
+      "tree_checksum": "git-tree-sha1:c5ba0c376c239d22a89df7b1aeeabb56d0373a92",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "multi-value",
+      "repository": "https://github.com/WebAssembly/multi-value.git",
+      "commit": "61975c83a286b96517659eded062f4e11dbac4c7",
+      "tree_sha1": "15031eb915a2adc9ee199fffde5d606d9277f402",
+      "tree_checksum": "git-tree-sha1:15031eb915a2adc9ee199fffde5d606d9277f402",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "reference_types",
+      "repository": "https://github.com/WebAssembly/reference-types.git",
+      "commit": "c7a3558bb5cbacb9c8879a91e08d0ac7276b740c",
+      "tree_sha1": "a9535f5d61e321c0e4c9ff89e6f45dee5bc712e5",
+      "tree_checksum": "git-tree-sha1:a9535f5d61e321c0e4c9ff89e6f45dee5bc712e5",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "bulk_memory_operations",
+      "repository": "https://github.com/WebAssembly/bulk-memory-operations.git",
+      "commit": "dcaa1b6791401c29b67e8cd7929ec80949f1f849",
+      "tree_sha1": "2711c6972102627653ea26b5041ba148c318ad5d",
+      "tree_checksum": "git-tree-sha1:2711c6972102627653ea26b5041ba148c318ad5d",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "fixed-width_simd",
+      "repository": "https://github.com/webassembly/simd.git",
+      "commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+      "tree_sha1": "90061b52fc74efa52549bcf10073a6de72179581",
+      "tree_checksum": "git-tree-sha1:90061b52fc74efa52549bcf10073a6de72179581",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "tail_call",
+      "repository": "https://github.com/WebAssembly/tail-call.git",
+      "commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+      "tree_sha1": "c65a433fdcb6148619d3695395ef666ce1e064ed",
+      "tree_checksum": "git-tree-sha1:c65a433fdcb6148619d3695395ef666ce1e064ed",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "extended-const",
+      "repository": "https://github.com/WebAssembly/extended-const.git",
+      "commit": "8d4f6aa2b00a8e7c0174410028625c6a176db8a1",
+      "tree_sha1": "0204df9775f9a3a7e3d7fc616e238858bf99f8b5",
+      "tree_checksum": "git-tree-sha1:0204df9775f9a3a7e3d7fc616e238858bf99f8b5",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "function_references",
+      "repository": "https://github.com/WebAssembly/function-references.git",
+      "commit": "74d2ec81d15efd3c0f2fba46a023f376101d8e46",
+      "tree_sha1": "adfc3211ac3e778df925fdc5114cc556e2995e0b",
+      "tree_checksum": "git-tree-sha1:adfc3211ac3e778df925fdc5114cc556e2995e0b",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "garbage_collection",
+      "repository": "https://github.com/WebAssembly/gc.git",
+      "commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
+      "tree_sha1": "3ab8936174f2119acddaa804c9632b38b8615df4",
+      "tree_checksum": "git-tree-sha1:3ab8936174f2119acddaa804c9632b38b8615df4",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "multi-memory",
+      "repository": "https://github.com/WebAssembly/multi-memory.git",
+      "commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+      "tree_sha1": "ade49780215b5e076181f56eea56580e79b001b9",
+      "tree_checksum": "git-tree-sha1:ade49780215b5e076181f56eea56580e79b001b9",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "relaxed-simd",
+      "repository": "https://github.com/WebAssembly/relaxed-simd.git",
+      "commit": "c3f9359af2cd607cc46b0a3274f90ea52543a2f2",
+      "tree_sha1": "d7b08414e187fb31ccdadcef64311f24f577ec78",
+      "tree_checksum": "git-tree-sha1:d7b08414e187fb31ccdadcef64311f24f577ec78",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "annotations",
+      "repository": "https://github.com/WebAssembly/annotations.git",
+      "commit": "20a8e4f125d5d856aac392105c35055af9ed49f7",
+      "tree_sha1": "03506bc9edfc09b0975edf4cda7afe3bc759d142",
+      "tree_checksum": "git-tree-sha1:03506bc9edfc09b0975edf4cda7afe3bc759d142",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "document/annotations.md and pinned text-format rules; tooling syntax only.",
+      "test_source_strategy": "test/ text-tooling parser fixtures where applicable; no runtime execution behavior.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "branch-hinting",
+      "repository": "https://github.com/WebAssembly/branch-hinting.git",
+      "commit": "23ce0bb32bbb690ce08877154e3879af060fb1d4",
+      "tree_sha1": "512fbe078d0e07584b3d0caa525791d92e252a86",
+      "tree_checksum": "git-tree-sha1:512fbe078d0e07584b3d0caa525791d92e252a86",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "document/branch-hinting formal custom-section rules.",
+      "test_source_strategy": "test/ for decoding and inspection; execution may ignore optimization hints.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "exception_handling",
+      "repository": "https://github.com/WebAssembly/exception-handling.git",
+      "commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+      "tree_sha1": "2ebc644628df2e92e1002cf5192f5300924a1ba4",
+      "tree_checksum": "git-tree-sha1:2ebc644628df2e92e1002cf5192f5300924a1ba4",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    },
+    {
+      "feature_id": "memory64",
+      "repository": "https://github.com/WebAssembly/memory64.git",
+      "commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+      "tree_sha1": "a93b870a087d919a3235d542b926aac336026350",
+      "tree_checksum": "git-tree-sha1:a93b870a087d919a3235d542b926aac336026350",
+      "source_directories": [
+        "document",
+        "proposals",
+        "test"
+      ],
+      "normative_source": "specification/ and spectec/ where present; otherwise document/ formal rules at this commit. For finished semantics, integrated core specification is normative baseline.",
+      "test_source_strategy": "test/ at this commit where present; prefer core tests and exclude JS API tests.",
+      "unresolved_clauses": []
+    }
+  ],
+  "excluded_sources": [
+    {
+      "feature_id": "js-promise-integration",
+      "repository": "WebAssembly/js-promise-integration",
+      "commit": "5b247b1026d2f438eefe51914a79f4218cbda9f9",
+      "reason": "JS Promise API and embedding integration, excluded by the user."
+    },
+    {
+      "feature_id": "content-security-policy",
+      "repository": "WebAssembly/content-security-policy",
+      "commit": "284adaf2fecaf76ac05d35132c09e60bb4145041",
+      "reason": "Browser CSP enforcement, excluded by the user."
+    },
+    {
+      "feature_id": "ecmascript_module_integration",
+      "repository": "WebAssembly/esm-integration",
+      "commit": "b141a950ab4b3d507f28a844d6ed2fcc0f950d4b",
+      "reason": "JavaScript module loader integration, excluded by the user."
+    },
+    {
+      "feature_id": "javascript_bigint_to_webassembly_i64_integration",
+      "repository": "WebAssembly/JS-BigInt-integration",
+      "commit": "bd58b9899fb1e26e5710eefdcf0270a5350fc138",
+      "reason": "JS BigInt conversion API, excluded; core i64 remains required."
+    },
+    {
+      "feature_id": "js-string-builtins",
+      "repository": "WebAssembly/js-string-builtins",
+      "commit": "81bfc5fb7b8277c6b7d1b0a8f6e57cb31a7bf080",
+      "reason": "JS builtin binding/options/string constants excluded. Source audit found no independent new Core opcode, binary encoding, type or validation rule; existing import/GC operations remain required."
+    }
+  ]
+}

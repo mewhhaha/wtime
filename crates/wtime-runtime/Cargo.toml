@@ -1,0 +1,21 @@
+[package]
+name = "wtime-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+[features]
+default = []
+# Development-only tracing; omitted from production builds.
+opcode-coverage = []
+# Bounded Store-local attribution only; excluded from production timings.
+performance-counters = []
+
+# Nondefault tiers are selected explicitly; placeholders remain unavailable.
+execution-reference = []
+compact-executor = []
+register-executor = []
+experimental-executors = ["compact-executor", "register-executor"]
+[dependencies]
+wtime-types.workspace = true
+wtime-validate.workspace = true

@@ -1,0 +1,297 @@
+{
+  "fixtures": {
+    "call-ref.wat": {
+      "cases": [
+        {
+          "export": "call_inc",
+          "input": 7,
+          "result": 8
+        },
+        {
+          "export": "tail_inc",
+          "input": 7,
+          "result": 8
+        },
+        {
+          "arg": 7,
+          "export": "call",
+          "result": 8,
+          "target": "inc as (ref null $unary)"
+        },
+        {
+          "arg": 7,
+          "export": "tail_call",
+          "result": 8,
+          "target": "inc as (ref null $unary)"
+        },
+        {
+          "arg": 7,
+          "export": "call_null",
+          "trap": "null call_ref"
+        },
+        {
+          "arg": 7,
+          "export": "tail_null",
+          "trap": "null call_ref"
+        },
+        {
+          "arg": 7,
+          "export": "call",
+          "host_error": "argument type mismatch before guest call_ref executes",
+          "target": "wrong as (ref null $wide_unary)"
+        },
+        {
+          "arg": 7,
+          "export": "tail_call",
+          "host_error": "argument type mismatch before guest tail_call_ref executes",
+          "target": "wrong as (ref null $wide_unary)"
+        }
+      ],
+      "notes": [
+        "Exports inc and wrong let the host obtain references for matching and host-argument-type controls.",
+        "The guest target parameter is nullable and typed to $unary. A $wide_unary value supplied by the host is rejected by argument validation before call_ref dispatch; it is not a runtime call_ref mismatch trap.",
+        "The null exports exercise the runtime null call_ref check. Tail variants should preserve tail-call frame replacement and result semantics."
+      ]
+    },
+    "host-indirect.wat": {
+      "cases": [
+        {
+          "callback_count": 1,
+          "export": "indirect",
+          "input": 7,
+          "result": 10
+        },
+        {
+          "callback_count": 1,
+          "export": "tail_indirect",
+          "input": 7,
+          "result": 10
+        },
+        {
+          "callback_count": 1,
+          "export": "by_ref",
+          "input": 7,
+          "result": 10
+        },
+        {
+          "callback_count": 1,
+          "export": "tail_by_ref",
+          "input": 7,
+          "result": 10
+        },
+        {
+          "callback_count": 1,
+          "callback_result": 8,
+          "during_callback": "collect and reenter through the host harness; outer guest root remains live and field value remains 91",
+          "export": "root",
+          "host_input": 5,
+          "result": 91
+        }
+      ],
+      "host_callback": "h(x)=x+3 and increments a side-effect counter exactly once per invocation",
+      "notes": [
+        "Host targets must use the same checked callback path for indirect and typed call_ref, including argument/result validation and host-root/reentry behavior. Suspension across the active callback boundary remains rejected.",
+        "WAT call_ref syntax follows the existing typed call_ref fixture form (call_ref $type ...); no parser or validator was run here.",
+        "The root export retains a $box containing 91 across an indirect host call with input 5; the host harness collection/reentry oracle must observe the outer guest root live, and root returns 91 afterward."
+      ]
+    },
+    "invalid-indirect.wat": {
+      "cases": [
+        {
+          "index": 0,
+          "result": 42
+        },
+        {
+          "index": 1,
+          "trap": "null indirect call"
+        },
+        {
+          "index": 2,
+          "trap": "indirect call type mismatch"
+        },
+        {
+          "index": 3,
+          "trap": "table out of bounds"
+        }
+      ],
+      "notes": [
+        "The table has a valid zero-argument target at slot 0, a null slot at 1, a function with a different signature at 2, and no slot 3.",
+        "The expected runtime categories are success, null indirect call, indirect call type mismatch, and table out of bounds respectively. This is a valid module-level plan, not validator evidence."
+      ],
+      "trap_order": "The call source event is charged once before indirect-call dispatch. Current slot lookup/null check precedes canonical subtype comparison; mismatch is not converted to null or out-of-bounds. No fuel counts are asserted in this unvalidated packet."
+    },
+    "table-alias-consumer.wat": {
+      "notes": [
+        "The consumer mutates an imported alias to the provider table with a consumer-local target. The next provider call must resolve that current target."
+      ],
+      "same_store_scenario": [
+        {
+          "result": 10,
+          "step": "provider.run(0) before consumer mutation"
+        },
+        {
+          "result": 30,
+          "step": "consumer.set_c30(0); provider.run(0)"
+        },
+        {
+          "old_size": 2,
+          "step": "consumer.grow_c30(1)"
+        },
+        {
+          "results": [
+            30,
+            3
+          ],
+          "step": "consumer.set_c30(2); provider.run(2); provider.size()"
+        }
+      ]
+    },
+    "table-alias-provider.wat": {
+      "exports": {
+        "run(0)": 10,
+        "run(1)": 20,
+        "size()": 2
+      },
+      "initial_shared_table": [
+        "p10",
+        "p20"
+      ],
+      "notes": [
+        "The table is exported and can be imported by another instance in the same Store."
+      ]
+    },
+    "table-mutations.wat": {
+      "cases": [
+        {
+          "action": "run_t(0), run_t(1), run_other(0), run_other(1)",
+          "results": [
+            11,
+            22,
+            22,
+            33
+          ]
+        },
+        {
+          "action": "set_b(0); run_t(0)",
+          "result": 22,
+          "tables": {
+            "t": [
+              "b22",
+              "b22"
+            ]
+          }
+        },
+        {
+          "action": "fill_c(0,1); run_t(0), run_t(1)",
+          "results": [
+            33,
+            22
+          ],
+          "tables": {
+            "t": [
+              "c33",
+              "b22"
+            ]
+          }
+        },
+        {
+          "action": "grow_c(1); size_t(); run_t(2)",
+          "new_size": 3,
+          "old_size": 2,
+          "result": 33
+        },
+        {
+          "action": "copy_from_other(0,0,2); run_t(0), run_t(1)",
+          "results": [
+            22,
+            33
+          ],
+          "tables": {
+            "t": [
+              "b22",
+              "c33"
+            ]
+          }
+        },
+        {
+          "action": "fresh initial table [a,b]; grow_c(1); copy_overlap_right(); run_t(1), run_t(2)",
+          "results": [
+            11,
+            22
+          ],
+          "tables": {
+            "t": [
+              "a11",
+              "a11",
+              "b22"
+            ]
+          }
+        }
+      ],
+      "fresh_instance_for_each_case": true,
+      "function_values": {
+        "a": 11,
+        "b": 22,
+        "c": 33
+      },
+      "initial_tables": {
+        "other": [
+          "b22",
+          "c33"
+        ],
+        "t": [
+          "a11",
+          "b22"
+        ]
+      },
+      "notes": [
+        "Folded call_indirect expressions select the explicit named table and evaluate the dynamic index for each invocation.",
+        "Mutation methods are separate exported calls so a harness can call and then invoke again; no batching or cache hit is assumed.",
+        "Each independent case begins with a fresh instance and the listed initial tables, unless its action explicitly includes the preceding mutation steps."
+      ]
+    },
+    "table64-indirect.wat": {
+      "cases": [
+        {
+          "input_i64": 0,
+          "result": 64
+        },
+        {
+          "input_i64": 4294967297,
+          "notes": "must not truncate to an in-range 32-bit index",
+          "trap": "table out of bounds"
+        }
+      ],
+      "notes": [
+        "The WAT syntax and table64 profile support are pending parser/validator checks."
+      ]
+    }
+  },
+  "limitations": [
+    "These are hand-written source-level expected results, not Wasm validator or runtime observations.",
+    "WAT text syntax remains unvalidated; table64 syntax and table64 profile support are explicitly pending.",
+    "Trap names follow reviewed runtime source paths and remain to be confirmed by P042 differential tests.",
+    "No cache hit, eviction count, fuel total, or performance result is claimed."
+  ],
+  "oracle_method": "Evaluate literal constant-return functions, typed function references, and table operations from their declared source. Host callback, Store-affinity, stale-generation, and collection checks are harness/API expectations, not execution results. The rooted host case is derived from the literal struct field value 91 and host input 5; collection/reentry liveness is an independent harness expectation, not a source-only execution result.",
+  "runtime_api_cases_not_expressible_as_wat": [
+    {
+      "case": "foreign-store-function-reference",
+      "expected": "Store affinity check rejects the foreign target before a cache hit; destination table remains unchanged."
+    },
+    {
+      "case": "stale-generation-after-arena-reuse",
+      "expected": "Store/generation check rejects stale function identity; no old cache entry is reused for a new generation at the same arena index."
+    },
+    {
+      "case": "bounded-polymorphic-churn",
+      "expected": "A/B alternation and more targets than fixed cache capacity always use the currently selected function and keep cache size bounded; misses/evictions are diagnostic only."
+    },
+    {
+      "case": "subtype-work-limit",
+      "expected": "Cache misses preserve the current subtype-work limit and error; failed/negative answers are not cached."
+    }
+  ],
+  "schema": "p042-static-manual-oracles-v1",
+  "status": "source-derived; WAT unencoded and unvalidated; no runtime observations"
+}

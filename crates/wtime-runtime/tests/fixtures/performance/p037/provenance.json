@@ -1,0 +1,47 @@
+{
+  "encoder": {
+    "path": "/workspace/wtime/target/debug/wtime-conformance",
+    "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+  },
+  "fixture": {
+    "encode_command": [
+      "/workspace/wtime/target/debug/wtime-conformance",
+      "encode",
+      "/tmp/P037-test-stage/fixtures/control-edges.wat",
+      "-o",
+      "/workspace/wtime/target/performance/P037/fixtures/control-edges.wasm"
+    ],
+    "encode_exit_code": 0,
+    "encode_log": "/workspace/wtime/target/performance/P037/prepare-20261012T012321452318Z/encode-control-edges.json",
+    "encode_log_sha256": "dc7e9b85565ad2c4b15d2544066f75fdcf52013fe90f4e3179131d29d1dc68ac",
+    "name": "control-edges",
+    "validation_command": [
+      "/workspace/wtime/target/debug/wtime-cli",
+      "--profile",
+      "all-phase3-core",
+      "check",
+      "/workspace/wtime/target/performance/P037/fixtures/control-edges.wasm"
+    ],
+    "validation_exit_code": 0,
+    "validation_log": "/workspace/wtime/target/performance/P037/prepare-20261012T012321452318Z/validate-control-edges.json",
+    "validation_log_sha256": "9eb5fef7d250605a03f8af2579b27791b8aa2109fa39991a90e62bf6394d29ba",
+    "validation_profile": "all-phase3-core",
+    "validation_result": "valid",
+    "wasm_path": "/workspace/wtime/target/performance/P037/fixtures/control-edges.wasm",
+    "wasm_sha256": "012b9605ee55420e4bdd056991b11ecc3cfe3b0605b5f32810471122a4ff410a",
+    "wat_path": "/tmp/P037-test-stage/fixtures/control-edges.wat",
+    "wat_sha256": "5a3fd7d66a7ac35cef97b8ff2224007be07985613640621007a046ff83ea4a2b"
+  },
+  "fixture_guest_executed": false,
+  "license": {
+    "sha256": "521a08b283d7a32effe3955d15eea4d82427dc16f192e5180f023f77b5324778",
+    "source_path": "/tmp/P037-test-stage/LICENSE-fixture.txt"
+  },
+  "receipt_path": "/workspace/wtime/target/performance/P037/prepare-20261012T012321452318Z/fixture-validation-receipt.json",
+  "receipt_sha256": "0ea1f24680fa0068d1577e886a62118ce867992875b149c69841a3a1911fa2e1",
+  "schema": "p037-durable-fixture-v1",
+  "validator": {
+    "path": "/workspace/wtime/target/debug/wtime-cli",
+    "sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+  }
+}

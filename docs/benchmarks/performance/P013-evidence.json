@@ -1,0 +1,199 @@
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P013-build-final.log": {
+      "bytes": 132,
+      "sha256": "15f9b87b80829789f0a6b1b01abba2e0892cb8d9f0e65b5c3fc6c0c0edcc9626"
+    },
+    "/workspace/wtime/target/performance/P013-fixtures/atomic_add.wasm": {
+      "bytes": 123,
+      "sha256": "46b8bdb39ef9b69deda41fa91c18f3cc4dd7ee7f58ee20dc6f1824d22a558029"
+    },
+    "/workspace/wtime/target/performance/P013-fixtures/atomic_load_store.wasm": {
+      "bytes": 140,
+      "sha256": "85c25183d6ca23da20bbce7ae10b89acfb90499f413fa891151e558e7f4975ce"
+    },
+    "/workspace/wtime/target/performance/P013-fixtures/ordinary_rw.wasm": {
+      "bytes": 138,
+      "sha256": "2a0e01aaf458a30970c52b18855a27a508f6bac0f87dcd9c961a3246af58abdf"
+    },
+    "/workspace/wtime/target/performance/P013-fixtures/sc_store_buffering.wasm": {
+      "bytes": 119,
+      "sha256": "d28965e8c9f3a157e7e3a55f80680e1542654699f3a49016a2b3532f404c4d22"
+    },
+    "/workspace/wtime/target/performance/P013-fixtures/wait_notify.wasm": {
+      "bytes": 185,
+      "sha256": "6a307ae5db566a43b1c3a8753e361f0aef14304ed7e56144f029fa5d6c268e06"
+    },
+    "/workspace/wtime/target/performance/P013-run.log": {
+      "bytes": 86,
+      "sha256": "c8d5846b07d948f66de2e2b9a3541e3cf4976ba479c1b6ddf9d9ea93a5dc2c34"
+    },
+    "/workspace/wtime/target/performance/P013-tests-final2.log": {
+      "bytes": 2376,
+      "sha256": "3f5f84b5fff43ba489eab740ae3e4fe26883f0dab92c723776f7691d0ba54a20"
+    },
+    "/workspace/wtime/target/performance/P013/binary/wtime-bench": {
+      "bytes": 17189288,
+      "sha256": "2d9b4e89d610fe152d18abae399bc1b8e1fad704b6bfa77270f92386a8858750"
+    },
+    "/workspace/wtime/target/performance/P013/report.json": {
+      "bytes": 392532,
+      "sha256": "959d62f71b50220e74dc2940457c9a16345a3a773818a482324f2659e016ae5d"
+    },
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/atomic_add.wat": {
+      "bytes": 390,
+      "sha256": "f821deb4c8c142de5972053b9644029f7092a1be1468eb1ed10c1002d7e2776c"
+    },
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/atomic_load_store.wat": {
+      "bytes": 498,
+      "sha256": "400f2e0826eff320b781ebd216dcf45a61fcccc73e8f60f8ef0af19e9ead330d"
+    },
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/ordinary_rw.wat": {
+      "bytes": 474,
+      "sha256": "0a0d74f8b24c53299ac14d0094f13e38129326cfc421a41399e4a3ab9653f002"
+    },
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/sc_store_buffering.wat": {
+      "bytes": 369,
+      "sha256": "fc6f24e92a0904de4797731ce2642e47adb46eeac2f8a62549db67889b63a12e"
+    },
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/wait_notify.wat": {
+      "bytes": 514,
+      "sha256": "94ce5b5bd02b46b71b0677795e79beb85081b928edc154bda30f2b3daadaebcb"
+    }
+  },
+  "artifacts": [
+    "/workspace/wtime/target/performance/P013/report.json",
+    "/workspace/wtime/target/performance/P013/binary/wtime-bench",
+    "/workspace/wtime/target/performance/P013-tests-final2.log",
+    "/workspace/wtime/target/performance/P012-default-build.log",
+    "/workspace/wtime/target/performance/P013-run.log",
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/atomic_add.wat",
+    "/workspace/wtime/target/performance/P013-fixtures/atomic_add.wasm",
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/atomic_load_store.wat",
+    "/workspace/wtime/target/performance/P013-fixtures/atomic_load_store.wasm",
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/ordinary_rw.wat",
+    "/workspace/wtime/target/performance/P013-fixtures/ordinary_rw.wasm",
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/sc_store_buffering.wat",
+    "/workspace/wtime/target/performance/P013-fixtures/sc_store_buffering.wasm",
+    "/workspace/wtime/tools/wtime-bench/fixtures/threads/wait_notify.wat",
+    "/workspace/wtime/target/performance/P013-fixtures/wait_notify.wasm"
+  ],
+  "binary": {
+    "bytes": 17189288,
+    "path": "/workspace/wtime/target/performance/P013/binary/wtime-bench",
+    "sha256": "2d9b4e89d610fe152d18abae399bc1b8e1fad704b6bfa77270f92386a8858750"
+  },
+  "binary_matches_report": true,
+  "build": {
+    "artifact": {
+      "path": "/workspace/wtime/target/performance/P012-default-build.log",
+      "bytes": 131,
+      "sha256": "86c87daf729868cc4966b59e8dcdd508a4feae7628f7a5e76db0886207e957d9"
+    },
+    "duration_seconds_from_log": 9.57,
+    "features": [
+      "runtime-only"
+    ],
+    "note": "Retained binary is byte-identical to P012-default measured binary; later thread Python/model changes did not rebuild Rust. P013-build-final.log is historical and not used to bind this binary."
+  },
+  "commands": [
+    ". /workspace/.setup/rust-env.sh && cargo build --locked --release --manifest-path tools/wtime-bench/Cargo.toml --features runtime-only -j4",
+    "WTIME_BENCH_THREAD_DRIVER=/workspace/wtime/tools/wtime-bench/target/release/wtime-bench WTIME_CONFORMANCE_ENCODER=/workspace/wtime/target/debug/wtime-conformance python3 -m unittest discover -s tools/wtime-bench/tests -p 'test_p013*.py' -v",
+    "python3 tools/wtime-bench/thread_scaling.py --driver tools/wtime-bench/target/release/wtime-bench --driver-source tools/wtime-bench/src/thread_driver.rs --encoder target/debug/wtime-conformance --source-root /workspace/wtime --model tools/wtime-bench/thread_workloads.py --registry tools/wtime-bench/workloads.json --encoded-dir target/performance/P013-fixtures --selection threads --trials 21 --latency-samples 1024 --timeout-ns 10000000 --seed 20499 --output target/performance/P013/report.json",
+    "target/performance/P013/binary/wtime-bench --protocol"
+  ],
+  "configuration": {
+    "instrumented": false,
+    "mode": "decoded",
+    "protocol_modes": [
+      "decoded",
+      "portable"
+    ],
+    "runtime_features": [
+      "runtime-only"
+    ],
+    "samples_per_steady_case": 21,
+    "seed": 20499,
+    "wait_samples": 1024,
+    "wasmtime": {
+      "reason": "registered capability is unsupported without threads/shared memory",
+      "timing": "not_measured"
+    }
+  },
+  "counts": {
+    "cleanup_probes": 1,
+    "encoded_module_fixtures": 5,
+    "individual_wait_latency_samples": 1024,
+    "source_snapshot_files": 187,
+    "steady_state_trials": 336,
+    "steady_state_workloads": 16,
+    "store_buffering_trials": 1024,
+    "total_timed_observations": 2384,
+    "workloads": 18
+  },
+  "fixtures": [
+    {
+      "name": "atomic_add",
+      "wasm_sha256": "46b8bdb39ef9b69deda41fa91c18f3cc4dd7ee7f58ee20dc6f1824d22a558029",
+      "wat_sha256": "f821deb4c8c142de5972053b9644029f7092a1be1468eb1ed10c1002d7e2776c"
+    },
+    {
+      "name": "atomic_load_store",
+      "wasm_sha256": "85c25183d6ca23da20bbce7ae10b89acfb90499f413fa891151e558e7f4975ce",
+      "wat_sha256": "400f2e0826eff320b781ebd216dcf45a61fcccc73e8f60f8ef0af19e9ead330d"
+    },
+    {
+      "name": "ordinary_rw",
+      "wasm_sha256": "2a0e01aaf458a30970c52b18855a27a508f6bac0f87dcd9c961a3246af58abdf",
+      "wat_sha256": "0a0d74f8b24c53299ac14d0094f13e38129326cfc421a41399e4a3ab9653f002"
+    },
+    {
+      "name": "sc_store_buffering",
+      "wasm_sha256": "d28965e8c9f3a157e7e3a55f80680e1542654699f3a49016a2b3532f404c4d22",
+      "wat_sha256": "fc6f24e92a0904de4797731ce2642e47adb46eeac2f8a62549db67889b63a12e"
+    },
+    {
+      "name": "wait_notify",
+      "wasm_sha256": "6a307ae5db566a43b1c3a8753e361f0aef14304ed7e56144f029fa5d6c268e06",
+      "wat_sha256": "94ce5b5bd02b46b71b0677795e79beb85081b928edc154bda30f2b3daadaebcb"
+    }
+  ],
+  "limits": [
+    "Pinned default Wasmtime lacks threads/shared-memory capability; all 18 comparator entries are unsupported and timing was not measured. No cross-runtime timing ratio is available.",
+    "Wait timing includes guest notify invocation overhead and there is no independent public pre-timer registration observer; successful notify returning one demonstrates registration at its call linearization point.",
+    "Timeout/cancellation cleanup values are correctness diagnostics, not timing observations.",
+    "The store-buffering oracle forbids [0,0]; observed legal outcomes are recorded in the workload summary.",
+    "P013 is a generated shared-memory/thread workload suite, not representative application performance. Report source_stable binds the exact measurement-time 187-file source snapshot."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "report": {
+    "bytes": 392532,
+    "path": "/workspace/wtime/target/performance/P013/report.json",
+    "sha256": "959d62f71b50220e74dc2940457c9a16345a3a773818a482324f2659e016ae5d"
+  },
+  "source_stable": true,
+  "status": "done",
+  "store_buffering_observed_outcome_counts": {
+    "0,1": 239,
+    "1,0": 731,
+    "1,1": 54
+  },
+  "task": "P013",
+  "tests": {
+    "artifact": {
+      "bytes": 2376,
+      "path": "/workspace/wtime/target/performance/P013-tests-final2.log",
+      "sha256": "3f5f84b5fff43ba489eab740ae3e4fe26883f0dab92c723776f7691d0ba54a20"
+    },
+    "failed": 0,
+    "passed": 13,
+    "skipped": 0
+  },
+  "wait_latency": {
+    "p50_ns": 2963,
+    "p99_ns": 821649,
+    "p99_status": "reported",
+    "sample_count": 1024
+  }
+}

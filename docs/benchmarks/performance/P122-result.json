@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "task": "P122",
+  "status": "passed",
+  "outcome": "contract_only",
+  "candidate_promoted": false,
+  "timing_evidence": false,
+  "evidence_receipt": {
+    "path": "target/performance/P122/shared-finalization/attempt-0004/evidence.json",
+    "sha256": "83e35bbac0154eea6a46e452c117df9c38b9041141e8b585d047522a782e5abb"
+  },
+  "verification": {
+    "attempt": "target/verification/runs/P122/verify/attempt-0003",
+    "status": "passed",
+    "earlier_failed_attempts": [
+      "attempt-0001",
+      "attempt-0002"
+    ],
+    "protocol_tests": {
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    "actual_representative_rows": 9,
+    "production_calls_per_row": 3,
+    "diagnostic_calls_per_row": 1,
+    "production_binary_instrumented": false,
+    "diagnostic_binary_instrumented": true,
+    "production_build": "passed",
+    "diagnostic_build": "passed"
+  },
+  "fixtures": {
+    "path": "target/performance/P122/fixtures/attempt-0001",
+    "status": "passed",
+    "real_fixtures": 3,
+    "names": [
+      "graph_bfs",
+      "image_filter",
+      "parser_hash"
+    ],
+    "source_and_wasm_hashes_recorded": true,
+    "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+    "validator_sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031003f4e01f776ab"
+  },
+  "limitation": "Representative mode/timer and optimized-path correctness contract only; no paired performance claim. P046 owns production performance decisions."
+}

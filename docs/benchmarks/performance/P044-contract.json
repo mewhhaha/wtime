@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "selection": "integration",
+  "primary_workloads": [
+    "integration_gc_prefix",
+    "integration_eh_prefix",
+    "integration_cont_prefix"
+  ],
+  "protected_workloads": [
+    "integration_numeric_control",
+    "integration_ref_entry_control",
+    "integration_cont_entry_control"
+  ]
+}

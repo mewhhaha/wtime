@@ -1,0 +1,20 @@
+[package]
+name = "wtime-profile"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+[workspace]
+[[bin]]
+name = "wtime-bench"
+path = "src/main.rs"
+[features]
+default = ["runtime-only"]
+runtime-only = []
+legacy-api = []
+performance-counters = ["wtime-runtime/performance-counters"]
+execution-reference = ["wtime-runtime/execution-reference"]
+compact-executor = ["wtime-runtime/compact-executor"]
+[dependencies]
+wtime-runtime = { path = "../../../crates/wtime-runtime" }
+wtime-types = { path = "../../../crates/wtime-types" }

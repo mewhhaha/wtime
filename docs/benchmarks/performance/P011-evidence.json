@@ -1,0 +1,170 @@
+{
+  "binary": {
+    "matches_report": true,
+    "path": "/workspace/wtime/target/performance/P011/binary/wtime-bench",
+    "sha256": "e61f3766d7dc6642810102c35a7c55ab7e284d4ec9b6e20f45462e8f3efbbaad",
+    "size_bytes": 16811304
+  },
+  "build": {
+    "corrected_release_build_seconds": 5.82,
+    "log": {
+      "path": "/workspace/wtime/target/performance/P011-build-corrected.log",
+      "sha256": "2411544b46a01e54422666b93c4aa59e82a48581689c6a08e3066cbaf1ef1190",
+      "size_bytes": 131
+    },
+    "pre_correction_build_log": "/workspace/wtime/target/performance/P011-build-final.log"
+  },
+  "capability": {
+    "pinned_wasmtime": "49.0.2",
+    "reason": "The pinned Wasmtime build does not include the required GC/exception support.",
+    "timing_measured": false,
+    "unsupported_cases": 45
+  },
+  "detail_json": "/tmp/P011-evidence.json",
+  "fixtures": [
+    {
+      "fixture": "caught_throw",
+      "wasm_sha256": "9ae413316b376fffe5b1755f7fb842b8b9d6f3a6deefef9c0e72fff84f080eb9",
+      "wat_sha256": "5433ec09235db09ebfd9e02c9ad89afb76732b7b42586c9204d0bbb5c67245f9"
+    },
+    {
+      "fixture": "cross_call_catch",
+      "wasm_sha256": "58971ea6345c2693f4fc0cf173b2b13a61a108d5da8bd395de5b4aa70e119f44",
+      "wat_sha256": "d8b1444bb104bc896f56ad1e67fca80a5977c58f52e05805b231c4753d2ea521"
+    },
+    {
+      "fixture": "host_throw_catch",
+      "wasm_sha256": "16fc8471e8b82acabbb7a1b1c5501ea0b9df884c539f452e49cc4f39c834eec2",
+      "wat_sha256": "52c9f9b5da3990de5a948b6614680fc0099891c226d4b6903ed56560a3d2b087"
+    },
+    {
+      "fixture": "normal_path",
+      "wasm_sha256": "c4b8a9ad3a665906d9ee6528c32f784520cf1322934645bdb16c5c171ba49721",
+      "wat_sha256": "cd26d75fd8d2f01183fd3c40ad2b0eb5865d433a4efe2826cd86dda709e2d9cb"
+    },
+    {
+      "fixture": "throw_ref_unwind",
+      "wasm_sha256": "2567e8fbc746714d9e316044665a2501670b77946f55e66b63938b99b17c8936",
+      "wat_sha256": "47a2d51cc83f365c3099c82712c57d422968535750eb91f078868c204ebf0f9f"
+    },
+    {
+      "fixture": "uncaught_throw",
+      "wasm_sha256": "365142a10cf7d4a6da89ca87f404d5c21e4bb442c5daf0d5053a5ce81232837e",
+      "wat_sha256": "e89d6eca82d1d903fcac6dd8bda281f6ec837f4c268513c416b979528a674fd8"
+    },
+    {
+      "fixture": "continuation_root",
+      "wasm_sha256": "f3a432da4b984b715e74e26016d593a61e5dd4b24e421d1434bf63bf83c39f31",
+      "wat_sha256": "05d3278c9be02485919784bae44f7b5fcd55a63856296b0fb1e4a2c854379448"
+    },
+    {
+      "fixture": "descriptor_consumer",
+      "wasm_sha256": "991fabf92a687b0557bd6e7b0959c500dca3bd4549fc3ccce1ad517cf44438ca",
+      "wat_sha256": "f80a41c42745545c0007917baeb5b905f3085a49b507cb8e9f4331fec1607118"
+    },
+    {
+      "fixture": "descriptor_graph",
+      "wasm_sha256": "474d6c1d97ac8548a942098293451ac53e66561e199e95dcfa91bfd72ed9d443",
+      "wat_sha256": "f7bf5ef8fb302e705e232586f720e9d864e5431be67b29590ea9b7f98b9b1a93"
+    },
+    {
+      "fixture": "descriptor_provider",
+      "wasm_sha256": "a3f7000c6231b8acf83b56a22e08b6f4fceff4dc7930712f16c7b734d6d9cbdb",
+      "wat_sha256": "3197bba5170209b278b8a436d09923fd383255d10b51fe0014383f5099dec9d3"
+    },
+    {
+      "fixture": "host_reentry_collect",
+      "wasm_sha256": "63852bfe7dd4659db0cabbd8a01fe4249734ea4a719c8a0dcb5396e1c8a7c8e4",
+      "wat_sha256": "91d9a3ba857c39ace65f4a9e1e3ff91cdfe96ca0b52ad45539b63a61534ae7cd"
+    },
+    {
+      "fixture": "nominal_exact_casts",
+      "wasm_sha256": "6fc8a2cac95a90fe0d1a3d7c1cf1a9f57041df41f6ec8ccae747c1368b9f03e2",
+      "wat_sha256": "278b748822210879d166c0131c10b88ac32b38bf8437c1ada05667e1d8156ada"
+    },
+    {
+      "fixture": "packed_array",
+      "wasm_sha256": "fbfb37283a67bee4e8a6a769a8491e68115758c321885cd776cbb4ce9bbceec1",
+      "wat_sha256": "7580ef1c80342937d900b7acac0bde6e4cddf21fc03de15b9da0d7c91dad6a8d"
+    },
+    {
+      "fixture": "root_lifecycle",
+      "wasm_sha256": "7210514252b38d64d46fb0d7452e91aa838ae87077922e9277aa81b65bd9fa5f",
+      "wat_sha256": "79f4ac8511123ba14bdde5a31cd1953bae1c69f1dcba9ec5878785e1db447a51"
+    },
+    {
+      "fixture": "struct_graph",
+      "wasm_sha256": "641b2835a88599370dfb09c90dca596caded5d22deb98f4300435b4900aced0d",
+      "wat_sha256": "9fe9e8f7c7c9cd995d063bf4a54eb8d4aab61eb526f101b8c50126c50ddbc8df"
+    },
+    {
+      "fixture": "typed_function_refs",
+      "wasm_sha256": "c07a43c30d251223ebd9769ef3742eb32ec5d3ef751d6a9f0e1507ad353b4cb7",
+      "wat_sha256": "5d62ffda642de10f8ddbfa828512e8bc7d36d3cbcd70ce2e52f5532c030d990b"
+    }
+  ],
+  "interpretation": "Setup, invoke, collect, root-lifecycle, and host-collection durations are individually named. These are generated fixtures; exception-arena reclamation is not claimed as public CollectionStats.",
+  "measurement": {
+    "cases": 45,
+    "instrumented": false,
+    "mode": "decoded",
+    "observations": 225,
+    "profile": "all-phase3-core",
+    "samples_each": 5,
+    "seed": 20497,
+    "source_stable": true,
+    "timing_fields": {
+      "checksum_ns": 15,
+      "collect_after_checksum_ns": 15,
+      "collect_after_release_ns": 15,
+      "collect_ns": 210,
+      "collect_with_root_ns": 15,
+      "host_collect_ns": 30,
+      "invoke_ns": 210,
+      "make_ns": 15,
+      "setup_ns": 225
+    }
+  },
+  "report": {
+    "path": "/workspace/wtime/target/performance/P011/report.json",
+    "sha256": "c22ea1937a43f69bf0ce774e05d9d1ac0d65c3ddd0d1837a38d2eb5a245a8272",
+    "size_bytes": 643329
+  },
+  "result": "corrected P011 run passed and source-stable; no Wasmtime timing comparison",
+  "schema": "wtime-p011-evidence-summary-v1",
+  "sources": {
+    "all_match_current": true,
+    "model_runner_registry_all_match_current": true,
+    "runtime_benchmark_files": 66,
+    "source_snapshot_mismatches": [
+      {
+        "current_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+        "path": "/workspace/wtime/target/debug/wtime-conformance",
+        "recorded_sha256": "6616cabefdaf1cb99514a43fc27b63a039210727ac0ee22e2dab3cfb2f5b4ce7"
+      }
+    ]
+  },
+  "task": "P011",
+  "tests": {
+    "corrected_passed": 13,
+    "failed": 0,
+    "initial_draft": {
+      "counting_note": "unittest failure/error totals include repeated subTest outcomes.",
+      "log": {
+        "path": "/workspace/wtime/target/performance/P011-tests.log",
+        "sha256": "5cca1408bda96be9b9a3cef6a80d452e38e22606680c00c4be5e36d9e63f5bbb",
+        "size_bytes": 17819
+      },
+      "methods_reported_ok": 10,
+      "reported_error_count": 6,
+      "reported_failure_count": 7,
+      "test_methods_run": 13
+    },
+    "log": {
+      "path": "/workspace/wtime/target/performance/P011-tests-corrected.log",
+      "sha256": "da9a9a8fb9f27a6441432418f6e4ab61f804e68ee4601c48c43ded324e6a5eba",
+      "size_bytes": 2267
+    },
+    "skipped": 0
+  }
+}

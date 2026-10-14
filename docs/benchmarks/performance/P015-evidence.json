@@ -1,0 +1,256 @@
+{
+  "artifacts": [
+    {
+      "bytes": 17878942,
+      "path": "/workspace/wtime/target/performance/P015/report.json",
+      "role": "passing report",
+      "sha256": "187c94fabf93fcbb07505a225459029cc431305bd04852b959522e75fd4ef003"
+    },
+    {
+      "bytes": 85,
+      "path": "/workspace/wtime/target/performance/P015-run3.log",
+      "role": "passing run record",
+      "sha256": "ad4bd3301293d5f45b7937953aa4656f0c0aebc57721bfdd5672fcdd099d3948"
+    },
+    {
+      "bytes": 1711,
+      "path": "/workspace/wtime/target/performance/P015-tests-final.log",
+      "role": "passing focused tests",
+      "sha256": "e3b1dd68bb5d8440d5b61a885a35c9ab7a43c5691bd33fcce70b260fa945e81d"
+    },
+    {
+      "bytes": 244,
+      "path": "/workspace/wtime/target/performance/P015-baseline.log",
+      "role": "supporting artifact",
+      "sha256": "203c518814df36f5a53cd549b0a46877c9f757bec3069ce8531dc1507594014b"
+    },
+    {
+      "bytes": 132,
+      "path": "/workspace/wtime/target/performance/P015-build2.log",
+      "role": "supporting artifact",
+      "sha256": "ad1e89aabe876927dde1a9748f42dbc440d111329b3914ab3d246453c6661cc2"
+    },
+    {
+      "bytes": 29601,
+      "path": "/workspace/wtime/target/performance/P015-before/manifest.json",
+      "role": "baseline archive manifest",
+      "sha256": "2bac1d438973ef3bb46b1775117c695a9477528e81ca5f1d604e62e5935d5368"
+    },
+    {
+      "bytes": 17262064,
+      "path": "/workspace/wtime/target/performance/P015-before/binary/wtime-bench",
+      "role": "retained binary",
+      "sha256": "4e6d01abd36fde9e2b5f94ecc367949a4de7d0f946ce20fcdcdc7b335dd91d08"
+    },
+    {
+      "bytes": 17262080,
+      "path": "/workspace/wtime/target/performance/P015/binary/wtime-bench",
+      "role": "retained binary",
+      "sha256": "a3c01d83a184acbea2659e3b62a411a817a36ef6b9d781c81b041182a05fab70"
+    },
+    {
+      "bytes": 24493024,
+      "path": "/workspace/wtime/target/debug/wtime-conformance",
+      "role": "supporting artifact",
+      "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+    },
+    {
+      "bytes": 460,
+      "path": "/workspace/wtime/target/performance/P015-fixtures/graph_bfs.wasm",
+      "role": "encoded fixture",
+      "sha256": "28de8728d043d81703727cd71f4f67c9c1aa32b45fecba0f8bb760560ee2f63c"
+    },
+    {
+      "bytes": 399,
+      "path": "/workspace/wtime/target/performance/P015-fixtures/image_filter.wasm",
+      "role": "encoded fixture",
+      "sha256": "678eee3d25fff15f867befd2602cf403f25db7da67339f1f1b7b9b2c4e2e6f0a"
+    },
+    {
+      "bytes": 290,
+      "path": "/workspace/wtime/target/performance/P015-fixtures/parser_hash.wasm",
+      "role": "encoded fixture",
+      "sha256": "4ab2c42b5ec50f2b8a2d4c325ebaa54a6673b7ce42265cf9f9f477788f634a98"
+    },
+    {
+      "bytes": 2552,
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/representative/graph_bfs.wat",
+      "role": "fixture source",
+      "sha256": "641c210679045e870953ec340aa479d4282fd5d798c8e5857b507c49c2643069"
+    },
+    {
+      "bytes": 2137,
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/representative/image_filter.wat",
+      "role": "fixture source",
+      "sha256": "081e25e5b2f01d521167678c1aca46c967f4379989e945f14bc59bcc670e225c"
+    },
+    {
+      "bytes": 1419,
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/representative/parser_hash.wat",
+      "role": "fixture source",
+      "sha256": "44aefe0593f79d3732466f248d1c69f1e9450145b15c6bd64908bc8f217bf32b"
+    },
+    {
+      "bytes": 2142,
+      "path": "/workspace/wtime/docs/benchmarks/performance/fixture-provenance.json",
+      "role": "fixture provenance",
+      "sha256": "a2b3012c834b172ab04f615236c3cbd09cbdfc9418d79573881e62dc9639bc7f"
+    },
+    {
+      "bytes": 106,
+      "path": "/workspace/wtime/target/performance/P015-run.log",
+      "role": "historical failed attempt",
+      "sha256": "483d26389b377243a76841be88a0dba2171a5bc4104007bde10ab7287c55e34e"
+    },
+    {
+      "bytes": 100,
+      "path": "/workspace/wtime/target/performance/P015-run2.log",
+      "role": "historical failed attempt",
+      "sha256": "3a4780848fd335f18c9fe1c7bbaaa2af9750feb60631ba765bca05cd81eba8ce"
+    },
+    {
+      "bytes": 2121,
+      "path": "/workspace/wtime/target/performance/P015-tests.log",
+      "role": "historical failed attempt",
+      "sha256": "eab63a5db4717c45f66f20ff68905f6b9dce80786eed992ddca5782bb9399f98"
+    },
+    {
+      "bytes": 1711,
+      "path": "/workspace/wtime/target/performance/P015-tests2.log",
+      "role": "historical failed attempt",
+      "sha256": "e2b0370c0c67eac88914a5f2ba726313175604f938a73ba356b50a4fedae77c7"
+    },
+    {
+      "bytes": 815,
+      "path": "/workspace/wtime/target/performance/P015-build.log",
+      "role": "historical failed attempt",
+      "sha256": "1b303c2719e2fda5107278c487c89f985c32ed673ff1ef818f1ae07823b9e77c"
+    }
+  ],
+  "baseline_archive": {
+    "listed_files": 109,
+    "manifest_sha256": "2bac1d438973ef3bb46b1775117c695a9477528e81ca5f1d604e62e5935d5368",
+    "mismatches": [],
+    "path": "/workspace/wtime/target/performance/P015-before",
+    "verified_files": 109
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/workspace/wtime/target/performance/P015-before/binary/wtime-bench",
+      "sha256": "4e6d01abd36fde9e2b5f94ecc367949a4de7d0f946ce20fcdcdc7b335dd91d08"
+    },
+    "candidate": {
+      "path": "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+      "sha256": "a3c01d83a184acbea2659e3b62a411a817a36ef6b9d781c81b041182a05fab70"
+    },
+    "encoder": {
+      "path": "/workspace/wtime/target/debug/wtime-conformance",
+      "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+    },
+    "wasmtime_harness": {
+      "path": "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+      "sha256": "a3c01d83a184acbea2659e3b62a411a817a36ef6b9d781c81b041182a05fab70"
+    }
+  },
+  "claim": "No speedup, ratio, or performance promotion claim; five samples are integrity observations, not calibrated comparison evidence.",
+  "correctness": {
+    "all_full_memory_hashes_match": true,
+    "all_observations_status_ok": true,
+    "all_results_and_output_hashes_match": true,
+    "one_64KiB_page_per_observation": true,
+    "readback_outside_timing": true
+  },
+  "counts": {
+    "observations": 135,
+    "per_engine": {
+      "baseline": 45,
+      "candidate": 45,
+      "wasmtime": 45
+    },
+    "wasmtime_capabilities_supported": 9,
+    "wasmtime_capabilities_unsupported": 0,
+    "workloads": 9
+  },
+  "fixture_provenance_path": "/workspace/wtime/docs/benchmarks/performance/fixture-provenance.json",
+  "fixture_wasm_sha256": {
+    "graph_bfs.wat": "28de8728d043d81703727cd71f4f67c9c1aa32b45fecba0f8bb760560ee2f63c",
+    "image_filter.wat": "678eee3d25fff15f867befd2602cf403f25db7da67339f1f1b7b9b2c4e2e6f0a",
+    "parser_hash.wat": "4ab2c42b5ec50f2b8a2d4c325ebaa54a6673b7ce42265cf9f9f477788f634a98"
+  },
+  "limitations": [
+    "Evidence is integrity-only: batch size is one and five samples per input are not calibrated comparison evidence.",
+    "No Wasmtime-relative timing ratio or speedup is claimed.",
+    "The report preserves all 135 raw observations, including full memory payloads; this summary deliberately omits them.",
+    "Source stability is the runner\u2019s within-run result. Later workspace changes are listed separately and do not rewrite the historical report."
+  ],
+  "post_run_snapshot_differences": [
+    "/workspace/wtime/crates/wtime-runtime/tests/performance/p022.rs",
+    "/workspace/wtime/tools/wtime-bench/src/memory_driver.rs",
+    "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+    "/workspace/wtime/tools/wtime-bench/workloads.json"
+  ],
+  "report": "/workspace/wtime/target/performance/P015/report.json",
+  "report_sha256": "187c94fabf93fcbb07505a225459029cc431305bd04852b959522e75fd4ef003",
+  "schema": "wtime-performance-evidence-summary-v1",
+  "settings": {
+    "baseline_mode": "decoded",
+    "candidate_mode": "decoded",
+    "instrumented": false,
+    "profile": "mvp",
+    "samples_per_input_per_engine": 5,
+    "stage": "run_after_setup",
+    "timing_scope": "run after setup; setup, compile, instantiate, and full-memory readback are outside timing",
+    "wasmtime_mode": "wasmtime"
+  },
+  "source_snapshot_entries": 98,
+  "source_stable_during_run": true,
+  "status": "passed_integrity_only",
+  "task": "P015",
+  "workloads": {
+    "representative_graph_bfs_held_out": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_graph_bfs_medium": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_graph_bfs_small": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_image_filter_held_out": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_image_filter_medium": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_image_filter_small": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_parser_hash_held_out": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_parser_hash_medium": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    },
+    "representative_parser_hash_small": {
+      "baseline": 5,
+      "candidate": 5,
+      "wasmtime": 5
+    }
+  }
+}

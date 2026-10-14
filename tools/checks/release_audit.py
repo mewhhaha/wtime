@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Join task, source, coverage and run evidence for a release readiness decision.
+
+This checker intentionally fails closed. Evidence reports must be created by the
+named gate commands, include the current source/test snapshot digest, and be
+bound to the manifest by their SHA-256. It never edits task status or evidence.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+TASKS_ROOT = Path('/workspace/tasks')
+MANIFEST = ROOT / 'docs/architecture/release-manifest.json'
+REQUIRED_EVIDENCE = {
+    'core3', 'phase3', 'feature_profiles', 'interactions', 'fuzz',
+    'differential', 'hardening', 'build_final', 'api_docs',
+    'native_x86_64', 'native_aarch64', 'allocation_failure',
+}
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def core_source_hash(root: Path = ROOT) -> str:
+    """Match the native hardening/build measurement source digest exactly."""
+    paths = sorted([root / 'Cargo.lock', root / 'Cargo.toml',
+                    *root.glob('crates/**/*.rs'), *root.glob('crates/**/Cargo.toml')])
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path.relative_to(root)).encode() + b'\0' + path.read_bytes() + b'\0')
+    return digest.hexdigest()
+
+
+def task_closure(plan: dict, task_id: str = 'T169') -> set[str]:
+    by_id = {task['id']: task for task in plan.get('tasks', [])}
+    closure: set[str] = set()
+    pending = list(by_id.get(task_id, {}).get('dependencies', []))
+    while pending:
+        task_id = pending.pop()
+        if task_id in closure or task_id not in by_id:
+            continue
+        closure.add(task_id)
+        pending.extend(by_id[task_id].get('dependencies', []))
+    return closure
+
+
+def unsupported_items(lock: dict) -> set[str]:
+    items = {row.get('feature_id', '') for row in lock.get('excluded_sources', [])}
+    for source in lock.get('sources', []):
+        feature = source.get('feature_id', '<unknown>')
+        items.update(f'{feature}: {clause}' for clause in source.get('unresolved_clauses', []))
+    return {item for item in items if item}
+
+
+def _report(root: Path, entry: dict, key: str, errors: list[str]) -> dict | None:
+    label = f'evidence {key}'
+    path_value = entry.get('path') if isinstance(entry, dict) else None
+    if not path_value:
+        errors.append(f'{label}: missing path')
+        return None
+    path = root / path_value
+    if not path.is_file():
+        errors.append(f'{label}: report is missing ({path_value})')
+        return None
+    try:
+        report = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        errors.append(f'{label}: report is not valid JSON')
+        return None
+    if entry.get('sha256') != sha256(path):
+        errors.append(f'{label}: report hash mismatch')
+    return report
+
+
+def _stable_core_report(report: dict, label: str, errors: list[str], root: Path) -> None:
+    if report.get('passed') is not True or report.get('source_stable') is not True:
+        errors.append(f'{label}: report is not a stable passing run')
+    if report.get('source_sha256') != core_source_hash(root):
+        errors.append(f'{label}: core source hash is missing or stale')
+
+
+def _check_allocation_failure(report: dict, errors: list[str], root: Path) -> None:
+    """Validate the allocation-failure producer's concrete report schema/provenance."""
+    label = 'evidence allocation_failure'
+    if report.get('passed') is not True or report.get('source_stable') is not True:
+        errors.append(f'{label}: report is not a stable passing run')
+    if report.get('source_sha256') != core_source_hash(root):
+        errors.append(f'{label}: core source hash is missing or stale')
+    if report.get('architecture') not in ('x86_64', 'aarch64'):
+        errors.append(f'{label}: native architecture is missing or unsupported')
+    worker = root / 'target/debug/wtime-allocation-check'
+    command = report.get('command')
+    if not worker.is_file() or command != [str(worker.resolve())]:
+        errors.append(f'{label}: worker command is missing or does not match the local worker')
+    worker_digest = report.get('worker_sha256')
+    if (not worker.is_file() or not isinstance(worker_digest, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', worker_digest)
+            or worker_digest != sha256(worker)):
+        errors.append(f'{label}: worker binary fingerprint is missing or stale')
+    if (report.get('address_space_bytes') != 128 * 1024 * 1024
+            or report.get('requested_allocation_bytes') != 512 * 1024 * 1024):
+        errors.append(f'{label}: report does not record the constrained failing allocation')
+    stdout = report.get('stdout')
+    try:
+        result = json.loads(stdout) if isinstance(stdout, str) else {}
+    except json.JSONDecodeError:
+        result = {}
+    if (report.get('executed') != 1 or report.get('exit_code') != 0
+            or result.get('allocator_failed') is not True
+            or result.get('recovery_passed') is not True or result.get('executed') != 1):
+        errors.append(f'{label}: worker did not report allocator failure and successful recovery')
+
+
+def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
+                       spec_revision: str, corpus_revision: str) -> None:
+    label = f'evidence {key}'
+    selected, executed = report.get('selected', 0), report.get('executed', 0)
+    if not isinstance(selected, int) or selected <= 0 or executed != selected:
+        errors.append(f'{label}: selected assertions were skipped, empty, or unaccounted')
+    if any(report.get(field, 0) != 0 for field in ('failed', 'skipped', 'unsupported', 'text_tool_errors')):
+        errors.append(f'{label}: failures, unsupported directives, skips, or tool errors remain')
+    expected = {'core3': ('stable-core', 'core3'),
+                'phase3': ('all-phase3-core', 'phase3'),
+                'interaction_corpus': ('all-phase3-core', 'interactions')}.get(key)
+    if expected and (report.get('profile'), report.get('suite')) != expected:
+        errors.append(f'{label}: profile/suite does not match the release gate')
+    source_hash = report.get('source_hash', '')
+    if not source_hash.startswith(f'corpus-lock:{corpus_revision};'):
+        errors.append(f'{label}: corpus lock hash is missing or stale')
+    if report.get('engine_revision') in (None, '', 'HEAD'):
+        errors.append(f'{label}: engine revision is missing')
+    if not re.fullmatch(r'[0-9a-f]{64}', report.get('binary_sha256', '')):
+        errors.append(f'{label}: executed binary fingerprint is missing')
+    else:
+        binaries = [root / 'target/debug/wtime-conformance',
+                    root / 'target/release/wtime-conformance']
+        available = [binary for binary in binaries if binary.is_file()]
+        if not available:
+            errors.append(f'{label}: current conformance executable is missing')
+        elif not any(sha256(binary) == report['binary_sha256'] for binary in available):
+            errors.append(f'{label}: executed binary fingerprint is stale')
+    implementation_sources = report.get('implementation_sources', {})
+    if not implementation_sources:
+        errors.append(f'{label}: implementation source fingerprints are missing')
+    for source, digest in implementation_sources.items():
+        path = root / source
+        if not path.is_file() or not re.fullmatch(r'[0-9a-f]{64}', digest) or sha256(path) != digest:
+            errors.append(f'{label}: stale implementation source fingerprint: {source}')
+    if report.get('core_spec_commit') and report.get('core_spec_commit') != spec_revision:
+        errors.append(f'{label}: Core specification revision is stale')
+
+
+def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -> list[str]:
+    errors: list[str] = []
+    if manifest.get('schema_version') != 1:
+        errors.append('manifest schema_version must be 1')
+
+    plan_path = tasks_root / 'TASKS.json'
+    lock_path = root / 'docs/architecture/spec-lock.json'
+    ledger_path = root / 'docs/architecture/opcodes.json'
+    if not plan_path.is_file():
+        return [f'missing task graph: {plan_path}']
+    if not lock_path.is_file() or not ledger_path.is_file():
+        return ['missing source lock or opcode ledger']
+    plan, lock, ledger = (json.loads(p.read_text()) for p in (plan_path, lock_path, ledger_path))
+    by_id = {task['id']: task for task in plan.get('tasks', [])}
+    required_tasks = task_closure(plan)
+    if 'T169' not in by_id:
+        errors.append('task graph has no T169 definition')
+    for task_id in sorted(required_tasks):
+        task = by_id.get(task_id)
+        if task is None or task.get('status') != 'done':
+            errors.append(f'{task_id}: required task is missing or not done')
+        elif task.get('path'):
+            task_file = tasks_root / task['path']
+            expected_line = f"Status: **{task['status']}**"
+            if not task_file.is_file() or expected_line not in task_file.read_text():
+                errors.append(f'{task_id}: task file status does not match the task graph')
+
+    current_source = core_source_hash(root)
+    if manifest.get('source_sha256') != current_source:
+        errors.append('manifest source_sha256 is missing or stale')
+    if manifest.get('spec_revision') != lock.get('core_spec_commit'):
+        errors.append('manifest spec_revision does not match the pinned Core specification')
+    corpus_lock_path = root / 'docs/architecture/corpus-lock.json'
+    if not corpus_lock_path.is_file():
+        errors.append('missing pinned corpus lock')
+    else:
+        corpus_lock = json.loads(corpus_lock_path.read_text())
+        if manifest.get('corpus_revision') != corpus_lock.get('revision'):
+            errors.append('manifest corpus_revision does not match corpus-lock.json')
+
+    claimed = set(manifest.get('supported_claims', []))
+    unsupported = unsupported_items(lock)
+    included = {source.get('feature_id') for source in lock.get('sources', [])
+                if source.get('feature_id') != 'proposal-catalog'}
+    claim_features = {claim.split(':', 1)[0] for claim in claimed}
+    for feature in sorted(included - claim_features):
+        errors.append(f'included feature is missing from supported snapshot: {feature}')
+    for feature in sorted(claim_features - included):
+        errors.append(f'supported claim is absent from the pinned source scope: {feature}')
+    for source in lock.get('sources', []):
+        feature = source.get('feature_id')
+        if source.get('unresolved_clauses') and feature in claim_features and not any(
+                claim.startswith(feature + ':') for claim in claimed):
+            errors.append(f'{feature}: claim must be limited to its specified semantics because source clauses remain unresolved')
+    overlap = claimed & unsupported
+    for claim in sorted(overlap):
+        errors.append(f'unsupported behavior claimed complete: {claim}')
+    declared_unsupported = set(manifest.get('unsupported_behavior', []))
+    for item in sorted(unsupported - declared_unsupported):
+        errors.append(f'unsupported behavior is not explicitly documented: {item}')
+
+    pending_owners = 0
+    for row in ledger.get('instructions', []) + ledger.get('non_opcode_features', []):
+        for owner in row.get('owners', {}).values():
+            if owner.get('status') == 'pending-audit':
+                pending_owners += 1
+    if pending_owners:
+        errors.append(f'opcode/rule ledger has {pending_owners} pending semantic owners')
+
+    evidence = manifest.get('evidence', {})
+    missing_keys = REQUIRED_EVIDENCE - set(evidence)
+    for key in sorted(missing_keys):
+        errors.append(f'missing required evidence block: {key}')
+    for key in sorted(REQUIRED_EVIDENCE & set(evidence)):
+        entry = evidence[key]
+        label = f'evidence {key}'
+        path_value = entry.get('path') if isinstance(entry, dict) else None
+        if not path_value:
+            errors.append(f'{label}: missing path')
+            continue
+        path = root / path_value
+        if not path.is_file():
+            errors.append(f'{label}: report is missing ({path_value})')
+            continue
+        report = _report(root, entry, key, errors)
+        if report is None:
+            continue
+        if key in ('feature_profiles', 'interactions', 'api_docs'):
+            _stable_core_report(report, label, errors, root)
+            if not isinstance(report.get('executed'), int) or report['executed'] <= 0:
+                errors.append(f'{label}: no assertions/tests executed')
+            if key == 'api_docs':
+                for document, digest in report.get('documents', {}).items():
+                    path = root / document
+                    if not path.is_file() or sha256(path) != digest:
+                        errors.append(f'{label}: stale document fingerprint: {document}')
+                if any(result.get('passed') is not True or result.get('exit_code') != 0
+                       for result in report.get('results', [])):
+                    errors.append(f'{label}: an embedding example failed')
+        elif key in ('core3', 'phase3', 'interaction_corpus'):
+            _check_conformance(report, key, errors, root, lock['core_spec_commit'],
+                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest())
+        elif key in ('fuzz', 'differential'):
+            if report.get('failed') != 0 or report.get('selected', 0) <= 0 or report.get('executed') != report.get('selected') or report.get('failures'):
+                errors.append(f'{label}: run is empty, incomplete, or has failures')
+            if report.get('core_spec_commit') != lock.get('core_spec_commit'):
+                errors.append(f'{label}: Core specification revision is stale')
+            generator = root / ('tools/checks/fuzz_decode.py' if key == 'fuzz' else 'tools/checks/differential.py')
+            if report.get('generator_sha256') != sha256(generator):
+                errors.append(f'{label}: generator fingerprint is missing or stale')
+            probe = root / 'target/debug/wtime-probe'
+            if not probe.is_file() or report.get('target_sha256') != sha256(probe):
+                errors.append(f'{label}: target binary fingerprint is missing or stale')
+            if key == 'fuzz':
+                if report.get('profile') != 'all-phase3-core' or report.get('oracle_unsupported') != 0 or report.get('oracle_differences') != 0:
+                    errors.append(f'{label}: required profile or oracle checks are incomplete')
+                for source, digest in report.get('corpus_sha256', {}).items():
+                    path = root / source
+                    if not path.is_file() or sha256(path) != digest:
+                        errors.append(f'{label}: stale fixture fingerprint: {source}')
+            elif report.get('oracle_compared', 0) <= 0 or report.get('oracle_not_run') != 0:
+                errors.append(f'{label}: independent oracle comparison is missing')
+        elif key == 'build_final':
+            if report.get('source_sha256') != current_source or report.get('source_stable') is not True:
+                errors.append(f'{label}: core source hash is missing/stale or source changed during measurement')
+            lock_digest = sha256(root / 'Cargo.lock')
+            if report.get('lock_sha256') != lock_digest:
+                errors.append(f'{label}: Cargo.lock fingerprint is stale')
+            if report.get('budget_pass') is not True:
+                errors.append(f'{label}: build budget did not pass')
+            if report.get('clean_seconds', float('inf')) > report.get('budgets', {}).get('clean_seconds', 0) or report.get('leaf_seconds', float('inf')) > report.get('budgets', {}).get('leaf_seconds', 0) or report.get('stripped_bytes', float('inf')) > report.get('budgets', {}).get('stripped_bytes', 0):
+                errors.append(f'{label}: a recorded build budget is exceeded')
+        elif key.startswith('native_'):
+            arch = key.removeprefix('native_')
+            if report.get('source_sha256') != current_source or report.get('source_stable') is not True:
+                errors.append(f'{label}: core source hash is missing/stale or source changed during collection')
+            if report.get('architecture') != arch or report.get('native_execution') is not True:
+                errors.append(f'{label}: evidence was not collected on native {arch}')
+            if report.get('passed') is not True or report.get('exit_code') != 0 or report.get('tests_executed', 0) <= 0:
+                errors.append(f'{label}: native tests failed or executed zero tests')
+            if arch == 'x86_64' and not all(marker in report.get('output', '') for marker in (
+                    't045_cancelled_execution_releases_frames_and_store_can_resume',
+                    't036_reuse_rejects_stale_generation')):
+                errors.append(f'{label}: cancellation or stale-generation regression was not executed')
+        elif key == 'allocation_failure':
+            _check_allocation_failure(report, errors, root)
+    interaction_entry = evidence.get('interactions', {})
+    if interaction_entry.get('corpus_report'):
+        related = {**interaction_entry, 'path': interaction_entry['corpus_report'],
+                   'sha256': interaction_entry.get('corpus_sha256')}
+        report = _report(root, related, 'interaction_corpus', errors)
+        if report is not None:
+            _check_conformance(report, 'interaction_corpus', errors, root, lock['core_spec_commit'],
+                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest())
+
+    toolchain = manifest.get('toolchain', {})
+    if not toolchain.get('rustc') or not toolchain.get('supported_targets'):
+        errors.append('toolchain version and supported targets must be recorded')
+    else:
+        build_entry = evidence.get('build_final', {})
+        build_path = root / build_entry.get('path', '')
+        if build_path.is_file():
+            build_report = json.loads(build_path.read_text())
+            if not build_report.get('rustc', '').startswith(toolchain['rustc']):
+                errors.append('manifest rustc does not match final build report')
+            host = next((line.removeprefix('host: ') for line in build_report.get('rustc', '').splitlines()
+                         if line.startswith('host: ')), None)
+            if host and host not in toolchain['supported_targets']:
+                errors.append(f'manifest omits the measured build host target: {host}')
+    licenses = manifest.get('licenses', {})
+    license_path = root / licenses.get('report_path', '') if licenses.get('report_path') else None
+    if (not licenses.get('project_license') or not license_path or not license_path.is_file()
+            or licenses.get('report_sha256') != sha256(license_path)
+            or '0 violations' not in license_path.read_text()):
+        errors.append('project and production dependency license evidence is incomplete')
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manifest', type=Path, default=MANIFEST)
+    parser.add_argument('--tasks-root', type=Path, default=TASKS_ROOT)
+    args = parser.parse_args()
+    try:
+        manifest = json.loads(args.manifest.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        print(f'cannot read release manifest: {error}', file=sys.stderr)
+        return 2
+    errors = audit(manifest, tasks_root=args.tasks_root)
+    if errors:
+        print('\n'.join(errors), file=sys.stderr)
+        print(f'Release audit blocked: {len(errors)} unresolved gate(s)')
+        return 1
+    print('Release audit passed: required tasks, locks, coverage, reports and claims agree')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

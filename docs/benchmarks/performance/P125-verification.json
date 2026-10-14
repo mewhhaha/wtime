@@ -1,0 +1,665 @@
+{
+  "schema_version": 1,
+  "task": "P125",
+  "identities": {
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/fixtures/integration/**"
+      ]
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P068-before/manifest.json",
+        "target/performance/P068-before/source/**",
+        "target/performance/P068-before/binary/**",
+        "target/performance/P068-before/fixtures/**"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p125_roots.py",
+        "tools/verification/producers/candidate_production.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "docs/benchmarks/performance/P125-fixture-tools.json"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/continuation_scaling.py",
+        "tools/wtime-bench/continuation_workloads.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/gc_cold_adapter.py",
+        "tools/wtime-bench/gc_compare.py",
+        "tools/wtime-bench/gc_layout_workloads.py",
+        "tools/wtime-bench/gc_scaling.py",
+        "tools/wtime-bench/gc_warm_workloads.py",
+        "tools/wtime-bench/gc_workloads.py",
+        "tools/wtime-bench/integration_compare.py",
+        "tools/wtime-bench/integration_workflow.py",
+        "tools/wtime-bench/integration_workloads.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/p043_fixtures.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/root_compare.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/simd_scaling.py",
+        "tools/wtime-bench/simd_workloads.py",
+        "tools/wtime-bench/thread_scaling.py",
+        "tools/wtime-bench/thread_workloads.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/fixtures/gc/roots/**"
+      ]
+    },
+    "checks": {
+      "paths": [
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/tests/test_root*.py",
+        "tools/wtime-bench/tests/test_fast_candidate.py",
+        "tools/wtime-bench/tests/test_fast_gc_candidate.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "producer"
+      ],
+      "commands": [
+        {
+          "name": "predecessor-archive",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p125_roots.py",
+            "freeze",
+            "--predecessor",
+            "{repo}/target/performance/P068-before",
+            "--output",
+            "{stage}/predecessor.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "predecessor": "{stage}/predecessor.json"
+      },
+      "checks": [
+        {
+          "artifact": "predecessor",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "producer",
+        "harness",
+        "checks"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "root-checks",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_root*.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "candidate-checks",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_candidate.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "gc-checks",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_gc_candidate.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "identity-checks",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_execution_identity.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "source-bound-capability",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p125_roots.py",
+            "verify",
+            "--frozen",
+            "{freeze_dir}/predecessor.json",
+            "--output",
+            "{stage}/proof"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "root-checks",
+          "kind": "unittest",
+          "required_names": [
+            "test_valid_cold_warm_and_zero_callback_proofs",
+            "test_rejects_incomplete_or_forged_proofs",
+            "test_rejects_wrong_settings_batch_timing_and_retained_wire",
+            "test_rejects_unknown_model_row",
+            "test_observe_routes_root_cli_and_validates_complete_proof",
+            "test_root_calibration_shares_batches_and_stops_at_model_cap",
+            "test_candidate_gate_rejects_tampered_copied_wire_and_normalized_sample",
+            "test_focused_identity_protects_root_timing_sources",
+            "test_analysis_only_gate_source_is_excluded_from_focused_identity",
+            "test_independent_oracle_matches_closed_form_for_every_case",
+            "test_rows_are_fixed_bank_positive_units_with_bounded_batches",
+            "test_fixture_hashing_is_contained_in_fresh_temporary_root",
+            "test_registry_adds_only_the_new_selection"
+          ],
+          "minimum_passed": 13,
+          "features": []
+        },
+        {
+          "command": "candidate-checks",
+          "kind": "unittest",
+          "required_names": [
+            "test_calibration_reaches_twenty_ms_on_both_sides_at_shared_batch",
+            "test_calibration_fails_when_workload_cap_cannot_reach_target",
+            "test_calibration_rejects_a_side_that_changes_the_requested_batch",
+            "test_target_warm_and_cold_stages_keep_warm_as_primary",
+            "test_candidate_decision_adopts_supported_small_and_large_target_win",
+            "test_protected_tiny_supported_regression_rejects_candidate",
+            "test_large_target_regression_cannot_be_masked_by_small_target_win",
+            "test_crossing_protected_tiny_regression_interval_is_inconclusive",
+            "test_aliased_cold_pairs_are_counted_once_without_alias_pair_rows",
+            "test_valid_full_receipt_parses_real_stored_test_logs",
+            "test_missing_required_semantic_case_is_rejected",
+            "test_stale_core_source_hash_is_rejected",
+            "test_development_and_synthetic_receipts_are_rejected",
+            "test_altered_stored_log_artifact_is_rejected",
+            "test_candidate_report_rejects_development_lane_before_other_dependencies"
+          ],
+          "minimum_passed": 15,
+          "features": []
+        },
+        {
+          "command": "gc-checks",
+          "kind": "unittest",
+          "required_names": [
+            "test_legacy_gc_rows_keep_typed_profile_and_full_cold_timer_identity",
+            "test_observer_routes_gc_through_existing_cold_adapter",
+            "test_normalized_gc_result_revalidates_raw_wire_and_cold_intervals",
+            "test_cold_gc_target_can_drive_candidate_decision"
+          ],
+          "minimum_passed": 4,
+          "features": []
+        },
+        {
+          "command": "identity-checks",
+          "kind": "unittest",
+          "required_names": [
+            "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+            "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+            "test_membership_changes_and_unknown_python_modules_fail_closed",
+            "test_focused_producer_changes_stale_focused_pairs",
+            "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+            "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+            "test_adapter_archive_corruption_is_still_rejected"
+          ],
+          "minimum_passed": 7,
+          "features": []
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof/report.json",
+        "production_record": "{stage}/proof/production/build-record.json",
+        "production_binary": "{stage}/proof/production/bin/wtime-bench",
+        "adapter_manifest": "{stage}/proof/adapter/manifest.json",
+        "adapter_binary": "{stage}/proof/adapter/binary/wtime-bench",
+        "fixture_encoder": "{stage}/proof/tools/encoder",
+        "fixture_validator": "{stage}/proof/tools/validator"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/performance_candidate",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/workloads",
+          "op": "equal",
+          "value": 24
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/fixtures",
+          "op": "equal",
+          "value": 6
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/row_stage_records/baseline",
+          "op": "equal",
+          "value": 120
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/row_stage_records/candidate",
+          "op": "equal",
+          "value": 120
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/warm_repeated_records",
+          "op": "equal",
+          "value": 48
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/predecessor.json",
+    "pointer": "/runtime_sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Foundation capability probes have no speed-promotion decision. Shared cloud execution, with hardware isolation unknown."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "model",
+        "uses": [
+          "harness",
+          "checks"
+        ],
+        "commands": [
+          {
+            "name": "root-model-checks",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_root_workloads.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "root-model-checks",
+            "kind": "unittest",
+            "required_names": [
+              "test_independent_oracle_matches_closed_form_for_every_case",
+              "test_rows_are_fixed_bank_positive_units_with_bounded_batches",
+              "test_fixture_hashing_is_contained_in_fresh_temporary_root",
+              "test_registry_adds_only_the_new_selection"
+            ],
+            "minimum_passed": 4,
+            "features": []
+          }
+        ]
+      },
+      {
+        "name": "driver",
+        "uses": [
+          "harness",
+          "checks"
+        ],
+        "commands": [
+          {
+            "name": "root-checks",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_root*.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "candidate-checks",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_candidate.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "gc-checks",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_gc_candidate.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "identity-checks",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_execution_identity.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "root-checks",
+            "kind": "unittest",
+            "required_names": [
+              "test_valid_cold_warm_and_zero_callback_proofs",
+              "test_rejects_incomplete_or_forged_proofs",
+              "test_rejects_wrong_settings_batch_timing_and_retained_wire",
+              "test_rejects_unknown_model_row",
+              "test_observe_routes_root_cli_and_validates_complete_proof",
+              "test_root_calibration_shares_batches_and_stops_at_model_cap",
+              "test_candidate_gate_rejects_tampered_copied_wire_and_normalized_sample",
+              "test_focused_identity_protects_root_timing_sources",
+              "test_analysis_only_gate_source_is_excluded_from_focused_identity",
+              "test_independent_oracle_matches_closed_form_for_every_case",
+              "test_rows_are_fixed_bank_positive_units_with_bounded_batches",
+              "test_fixture_hashing_is_contained_in_fresh_temporary_root",
+              "test_registry_adds_only_the_new_selection"
+            ],
+            "minimum_passed": 13,
+            "features": []
+          },
+          {
+            "command": "candidate-checks",
+            "kind": "unittest",
+            "required_names": [
+              "test_calibration_reaches_twenty_ms_on_both_sides_at_shared_batch",
+              "test_calibration_fails_when_workload_cap_cannot_reach_target",
+              "test_calibration_rejects_a_side_that_changes_the_requested_batch",
+              "test_target_warm_and_cold_stages_keep_warm_as_primary",
+              "test_candidate_decision_adopts_supported_small_and_large_target_win",
+              "test_protected_tiny_supported_regression_rejects_candidate",
+              "test_large_target_regression_cannot_be_masked_by_small_target_win",
+              "test_crossing_protected_tiny_regression_interval_is_inconclusive",
+              "test_aliased_cold_pairs_are_counted_once_without_alias_pair_rows",
+              "test_valid_full_receipt_parses_real_stored_test_logs",
+              "test_missing_required_semantic_case_is_rejected",
+              "test_stale_core_source_hash_is_rejected",
+              "test_development_and_synthetic_receipts_are_rejected",
+              "test_altered_stored_log_artifact_is_rejected",
+              "test_candidate_report_rejects_development_lane_before_other_dependencies"
+            ],
+            "minimum_passed": 15,
+            "features": []
+          },
+          {
+            "command": "gc-checks",
+            "kind": "unittest",
+            "required_names": [
+              "test_legacy_gc_rows_keep_typed_profile_and_full_cold_timer_identity",
+              "test_observer_routes_gc_through_existing_cold_adapter",
+              "test_normalized_gc_result_revalidates_raw_wire_and_cold_intervals",
+              "test_cold_gc_target_can_drive_candidate_decision"
+            ],
+            "minimum_passed": 4,
+            "features": []
+          },
+          {
+            "command": "identity-checks",
+            "kind": "unittest",
+            "required_names": [
+              "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+              "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+              "test_membership_changes_and_unknown_python_modules_fail_closed",
+              "test_focused_producer_changes_stale_focused_pairs",
+              "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+              "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+              "test_adapter_archive_corruption_is_still_rejected"
+            ],
+            "minimum_passed": 7,
+            "features": []
+          }
+        ]
+      },
+      {
+        "name": "capability",
+        "uses": [
+          "runtime",
+          "compilation",
+          "producer",
+          "harness",
+          "checks",
+          "predecessor"
+        ],
+        "commands": [
+          {
+            "name": "predecessor-archive",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/p125_roots.py",
+              "freeze",
+              "--predecessor",
+              "{repo}/target/performance/P068-before",
+              "--output",
+              "{stage}/frozen.json"
+            ]
+          },
+          {
+            "name": "source-bound-capability",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/p125_roots.py",
+              "verify",
+              "--frozen",
+              "{stage}/frozen.json",
+              "--output",
+              "{stage}/proof"
+            ]
+          }
+        ],
+        "outputs": {
+          "proof": "{stage}/proof/report.json"
+        },
+        "checks": [
+          {
+            "artifact": "proof",
+            "pointer": "/status",
+            "op": "equal",
+            "value": "passed"
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/source_stable",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/performance_candidate",
+            "op": "equal",
+            "value": false
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/workloads",
+            "op": "equal",
+            "value": 24
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/fixtures",
+            "op": "equal",
+            "value": 6
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/row_stage_records/baseline",
+            "op": "equal",
+            "value": 120
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/row_stage_records/candidate",
+            "op": "equal",
+            "value": 120
+          },
+          {
+            "artifact": "proof",
+            "pointer": "/counts/warm_repeated_records",
+            "op": "equal",
+            "value": 48
+          }
+        ]
+      }
+    ]
+  }
+}

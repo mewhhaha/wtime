@@ -1,0 +1,531 @@
+{
+  "schema_version": 1,
+  "executed": false,
+  "basis": "manual integer bit construction, specification NaN classes and concatenated-vector lane selection; no native floating calculations",
+  "exports": {
+    "f32_negative_zero": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f32.const -0"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.reinterpret_f32"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "i32",
+        "bits_hex": "80000000",
+        "signed": -2147483648
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 3,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "f64_negative_zero": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const -0"
+        },
+        {
+          "pc": 1,
+          "operation": "i64.reinterpret_f64"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "i64",
+        "bits_hex": "8000000000000000",
+        "signed": -9223372036854775808
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 3,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "f32_payload": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f32.const nan:0x412345"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.reinterpret_f32"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "i32",
+        "bits_hex": "7fc12345",
+        "signed": 2143363909
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 3,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "f64_payload": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const -nan:0x8000000001234"
+        },
+        {
+          "pc": 1,
+          "operation": "i64.reinterpret_f64"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "i64",
+        "bits_hex": "fff8000000001234",
+        "signed": -2251799813680588
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 3,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "minimum_zero": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f32.const 0"
+        },
+        {
+          "pc": 1,
+          "operation": "f32.const -0"
+        },
+        {
+          "pc": 2,
+          "operation": "f32.min"
+        },
+        {
+          "pc": 3,
+          "operation": "i32.reinterpret_f32"
+        },
+        {
+          "pc": 4,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "bits_hex": "80000000"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 5,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 5,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "maximum_zero": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const -0"
+        },
+        {
+          "pc": 1,
+          "operation": "f64.const 0"
+        },
+        {
+          "pc": 2,
+          "operation": "f64.max"
+        },
+        {
+          "pc": 3,
+          "operation": "i64.reinterpret_f64"
+        },
+        {
+          "pc": 4,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "bits_hex": "0000000000000000"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 5,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 5,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "copy_nan_sign": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f32.const nan:0x412345"
+        },
+        {
+          "pc": 1,
+          "operation": "f32.const -0"
+        },
+        {
+          "pc": 2,
+          "operation": "f32.copysign"
+        },
+        {
+          "pc": 3,
+          "operation": "i32.reinterpret_f32"
+        },
+        {
+          "pc": 4,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "bits_hex": "ffc12345",
+        "rule": "copysign preserves magnitude/payload bits and copies negative sign exactly"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 5,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 5,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "minimum_nan": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f32.const nan:0x412345"
+        },
+        {
+          "pc": 1,
+          "operation": "f32.const 1"
+        },
+        {
+          "pc": 2,
+          "operation": "f32.min"
+        },
+        {
+          "pc": 3,
+          "operation": "i32.reinterpret_f32"
+        },
+        {
+          "pc": 4,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "allowed": "arithmetic_nan_f32",
+        "mask_hex": "7fc00000",
+        "masked_expected_hex": "7fc00000",
+        "sign": "either",
+        "low_payload_bits": "any; no exact payload assertion"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 5,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 5,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "maximum_signaling_nan": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const nan:0x1234"
+        },
+        {
+          "pc": 1,
+          "operation": "f64.const 2"
+        },
+        {
+          "pc": 2,
+          "operation": "f64.max"
+        },
+        {
+          "pc": 3,
+          "operation": "i64.reinterpret_f64"
+        },
+        {
+          "pc": 4,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "allowed": "arithmetic_nan_f64",
+        "mask_hex": "7ff8000000000000",
+        "masked_expected_hex": "7ff8000000000000",
+        "sign": "either",
+        "low_payload_bits": "any; quiet bit required"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 5,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 5,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "run": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "v128.const first"
+        },
+        {
+          "pc": 1,
+          "operation": "v128.const second"
+        },
+        {
+          "pc": 2,
+          "operation": "i8x16.shuffle 31 0 17 14 22 5 16 15 8 25 3 30 19 12 27 6"
+        },
+        {
+          "pc": 3,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "v128",
+        "bytes": [
+          116,
+          0,
+          102,
+          14,
+          107,
+          5,
+          101,
+          15,
+          8,
+          110,
+          3,
+          115,
+          104,
+          12,
+          112,
+          6
+        ],
+        "hex": "7400660e6b05650f086e0373680c7006",
+        "rule": "lane index0..15 selects first vector; index16..31 selects second[index-16]"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 4,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 4,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "division_overflow": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "i32.const -2147483648"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.const -1"
+        },
+        {
+          "pc": 2,
+          "operation": "i32.div_s"
+        },
+        {
+          "pc": 3,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "semantic_expected_trap_category": "integer overflow",
+        "actual_wtime_message": "integer overflow"
+      },
+      "trap_pc": 2,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "insufficient_fuel": {
+          "fuel_at_most": 2,
+          "outcome": "fuel exhausted before pc=initial_fuel; arithmetic operation not executed"
+        },
+        "sufficient_fuel": {
+          "fuel_at_least": 3,
+          "outcome": "specified arithmetic trap at trap_pc; end never executed"
+        }
+      }
+    },
+    "division_zero": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "i32.const 123"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.const 0"
+        },
+        {
+          "pc": 2,
+          "operation": "i32.div_s"
+        },
+        {
+          "pc": 3,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "semantic_expected_trap_category": "integer divide by zero",
+        "actual_wtime_message": "integer divide by zero"
+      },
+      "trap_pc": 2,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "insufficient_fuel": {
+          "fuel_at_most": 2,
+          "outcome": "fuel exhausted before pc=initial_fuel; arithmetic operation not executed"
+        },
+        "sufficient_fuel": {
+          "fuel_at_least": 3,
+          "outcome": "specified arithmetic trap at trap_pc; end never executed"
+        }
+      }
+    },
+    "division_success": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "i32.const 84"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.const 2"
+        },
+        {
+          "pc": 2,
+          "operation": "i32.div_s"
+        },
+        {
+          "pc": 3,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "i32",
+        "value": 42
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 4,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 4,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    },
+    "conversion_nan": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const nan:0x8000000001234"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.trunc_f64_s"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "semantic_expected_trap_category": "invalid conversion to integer",
+        "actual_wtime_message": "invalid integer conversion"
+      },
+      "trap_pc": 1,
+      "source_events_to_outcome": 2,
+      "fuel_prefix_rule": {
+        "insufficient_fuel": {
+          "fuel_at_most": 1,
+          "outcome": "fuel exhausted before pc=initial_fuel; arithmetic operation not executed"
+        },
+        "sufficient_fuel": {
+          "fuel_at_least": 2,
+          "outcome": "specified arithmetic trap at trap_pc; end never executed"
+        }
+      }
+    },
+    "conversion_overflow": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const 2147483648"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.trunc_f64_s"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "semantic_expected_trap_category": "integer overflow",
+        "actual_wtime_message": "integer overflow"
+      },
+      "trap_pc": 1,
+      "source_events_to_outcome": 2,
+      "fuel_prefix_rule": {
+        "insufficient_fuel": {
+          "fuel_at_most": 1,
+          "outcome": "fuel exhausted before pc=initial_fuel; arithmetic operation not executed"
+        },
+        "sufficient_fuel": {
+          "fuel_at_least": 2,
+          "outcome": "specified arithmetic trap at trap_pc; end never executed"
+        }
+      }
+    },
+    "conversion_success": {
+      "source_instructions": [
+        {
+          "pc": 0,
+          "operation": "f64.const 42.75"
+        },
+        {
+          "pc": 1,
+          "operation": "i32.trunc_f64_s"
+        },
+        {
+          "pc": 2,
+          "operation": "end"
+        }
+      ],
+      "oracle": {
+        "type": "i32",
+        "value": 42,
+        "rule": "truncate toward zero"
+      },
+      "trap_pc": null,
+      "source_events_to_outcome": 3,
+      "fuel_prefix_rule": {
+        "fuel_less_than": 3,
+        "outcome": "fuel exhausted before pc=initial_fuel; success for fuel>=threshold"
+      }
+    }
+  }
+}

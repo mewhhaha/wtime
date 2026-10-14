@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "source_stable": true,
+  "source_sha256": "e5a3a4eeba54a547ec8102acb6d03bb823de92643b7b34fc435817fcf0a3c75f",
+  "architecture": "x86_64",
+  "command": [
+    "/workspace/wtime/target/debug/wtime-allocation-check"
+  ],
+  "worker_sha256": "71bd9df730607d11e4c90d869e823c27e8628acb3c07a2e0780db438a70ae6de",
+  "address_space_bytes": 134217728,
+  "requested_allocation_bytes": 536870912,
+  "executed": 1,
+  "exit_code": 0,
+  "stdout": "{\"allocator_failed\":true,\"recovery_passed\":true,\"executed\":1}\n",
+  "stderr": ""
+}

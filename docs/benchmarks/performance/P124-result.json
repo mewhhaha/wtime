@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "task": "P124",
+  "status": "passed",
+  "outcome": "contract_only",
+  "candidate_promoted": false,
+  "timing_evidence": false,
+  "evidence_receipt": {
+    "path": "target/performance/P124/shared-finalization/attempt-0001/evidence.json",
+    "sha256": "b90c03aa061fb6c15bcd0ac0579c4fee4dfce835d8bfbfc73d56a348fc47ee3f",
+    "bytes": 1165
+  },
+  "verification": {
+    "attempt": "target/verification/runs/P124/verify/attempt-0001",
+    "receipt_sha256": "ee261b1502fbdbdd54c35bec3f43a9401bd60c19d16800370cd6924e7af46daf",
+    "status": "passed",
+    "exit_code": 0,
+    "contract": {
+      "path": "docs/benchmarks/performance/P124-verification.json",
+      "sha256": "c8870411be6aac22026eefb42ebe71177e312e57cf22717af3bdb580489ffc4f"
+    },
+    "commands": [
+      "python3 -B -m unittest discover -s tools/wtime-bench/tests -p 'test_p124*.py' -v",
+      "python3 -B -m unittest discover -s tools/wtime-bench/tests -p 'test_p046*.py' -v"
+    ],
+    "tests": {
+      "matrix_and_bootstrap": {
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "wall_seconds": 77.12,
+        "names": [
+          "test_p124_failed_or_zero_work_p121_evidence_blocks_portfolio",
+          "test_p124_full_four_family_two_baseline_matrix_counts_exactly",
+          "test_p124_hard_matrix_identity_requires_same_candidate_and_cpu",
+          "test_p124_large_groups_keep_explicit_bootstrap_and_reject_bad_counts",
+          "test_p124_missing_family_workload_stage_run_or_pair_fails_closed",
+          "test_p124_primary_family_uses_equal_workload_weights",
+          "test_p124_rank_distribution_matches_all_even_and_odd_resamples",
+          "test_p124_rank_sampler_is_seeded_and_preserves_constant_medians",
+          "test_p124_representative_rejects_wrong_mode_stage_and_instrumentation"
+        ]
+      },
+      "portfolio_orchestration": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "wall_seconds": 0.019,
+        "names": [
+          "test_p046_distinct_report_sets_are_analyzed_once_and_decision_once",
+          "test_p046_hard_build_failure_overrides_speed_gain"
+        ]
+      }
+    },
+    "matrix": {
+      "families": {
+        "scalar": 85,
+        "memory": 35,
+        "simd": 114,
+        "representative": 9
+      },
+      "baselines": ["decoded", "p001"],
+      "internal_runs_per_report": 2,
+      "pairs_per_workload_stage_per_run": 30,
+      "paired_observations_per_baseline": 65700
+    },
+    "bootstrap": {
+      "method": "exact categorical median-rank distribution",
+      "resamples": 10000,
+      "seed_stream_version": "v1",
+      "primary_family_workload_weights": "equal"
+    },
+    "bound_sources": {
+      "tools/wtime-bench/p046_gate.py": "03ec7e41378b5cb7c73291a2b45eb595eeff9a2f3463f0fb09aef4d58a7c80cb",
+      "tools/wtime-bench/bootstrap.py": "2dcb988c2d00cb06a7afc4a5076ea3ec443618c6a0fbd47bb8651d9f804bb3e2",
+      "tools/wtime-bench/tests/test_p124_portfolio.py": "6399e84d8d3b56da691f72138a63021905aa48ccdf88fc61767e8d76555bcb00",
+      "tools/wtime-bench/tests/test_p124_bootstrap.py": "d08afa0bea3657fa15bf60af26130a1ecacbd6ee8c6fe1908f5286ec3488823c",
+      "tools/wtime-bench/tests/test_p046_compact_gate.py": "96ec0a3fe174d48468061cc63ca47e7ed434761f9abea593141bfe6c9e018fa9"
+    }
+  },
+  "task_graph_validation": {
+    "attempt": "target/performance/plan-validation/attempt-0009",
+    "status": "passed",
+    "validators": [
+      {
+        "command": "python3 -B /workspace/tasks/check_plan.py",
+        "exit_code": 0,
+        "summary": "169 tasks; acyclic dependencies; links and statuses match; 24 included proposals covered; 5 excluded",
+        "stdout_sha256": "633fcd04db9b82fd1540893f04c430273293849f5104d05888ce54213964d30f"
+      },
+      {
+        "command": "python3 -B /workspace/tasks/performance/check_plan.py",
+        "exit_code": 0,
+        "summary": "124 tasks; 0 errors; 0 warnings",
+        "stdout_sha256": "16e25856fb2f69f6b08e634d21223ba5ae85a8e9d38b10821242c03433d9fbd7"
+      }
+    ]
+  },
+  "limitations": [
+    "Synthetic producer validation only; P046 owns real full-family paired measurements, final analysis, and default-selection review.",
+    "No performance claim, promotion, or default engine change follows from P124."
+  ],
+  "draft_failure_archive": "/tmp/p124-checker-archive"
+}

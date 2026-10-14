@@ -1,0 +1,10 @@
+(module
+  (func (export "run") (result i32)
+    (local $wide i64)
+    (block (result i32 i64)
+      (block (result i32 i64)
+        (block (result i32 i64)
+          (block (result i32 i64)
+            (i32.const 42)
+            (i64.const 99)))))
+    (local.set $wide)))

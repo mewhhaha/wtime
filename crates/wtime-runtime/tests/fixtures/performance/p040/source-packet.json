@@ -1,0 +1,21 @@
+{
+  "packet": "P040 original structured-control fixture packet",
+  "provenance": "All six WAT modules and the oracle note were authored for this packet; no external fixture or generated Wasm is included.",
+  "license": "MIT",
+  "license_file": "LICENSE.txt",
+  "validation_status": "unvalidated_source_only",
+  "execution_status": "unexecuted",
+  "performance_status": "not_measured",
+  "source_event_oracles": "MANUAL_ORACLES.md; hand-derived, requires validation against decoded runtime",
+  "fixtures": {
+    "br_if_taken_untaken.wat": "7db3f3a11234cba76b65d84e2766fd27dd07996102a0ca57f4da26e7760b936d",
+    "br_table_three_paths.wat": "e2a1798f06d9f5705c708e74daac16d35757d71cbb2b5f01ae48c79fead72c60",
+    "function_branch_vs_return.wat": "9e729d5deb484252dbae149e43cebd5094c6b2c396ddb13d15a9b64456686922",
+    "multivalue_loop.wat": "655a13e87c1ae2a49a2d84fa6cc6f7ffa9aaa615d8620888a03eee6724b736ff",
+    "nested_if_results.wat": "9c4eb9eb041478ef8c3bfd948fdbf51905735879243e4e6dca5afe2f1540be05",
+    "unreachable_local_prefix.wat": "80432900a5c3facc4f79cf92665b3a8825cfa170420b6d540398c6f40ab1d5df"
+  },
+  "manual_oracle_sha256": "8dbef840671d478c98fc34cd773548b8b18cca55453dc3605283fab31a0ef7aa",
+  "license_sha256": "1126322e2cc8d165adc4c792eeb195717de2bcc7b39be1ce77959d78e87ef685",
+  "deferred": ["V128/f32/f64 structured-control pending P039 numeric adapters"]
+}

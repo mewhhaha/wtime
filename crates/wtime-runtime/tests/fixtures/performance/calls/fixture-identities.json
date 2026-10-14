@@ -1,0 +1,149 @@
+{
+  "task": "P029",
+  "fixture_source_license": "CC0-1.0",
+  "wasm_tools": {
+    "path": "/workspace/.rust/cargo/bin/wasm-tools",
+    "version": "wasm-tools 1.261.0"
+  },
+  "wtime_conformance_encoder": {
+    "path": "/workspace/wtime/target/debug/wtime-conformance",
+    "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+    "implementation": "tools/wtime-conformance/src/cli.rs::encode; wast = 261.0.0",
+    "cpu_affinity": "CPU 4"
+  },
+  "records": [
+    {
+      "name": "direct-recursive-multivalue",
+      "wat": {
+        "path": "direct-recursive-multivalue.wat",
+        "bytes": 475,
+        "sha256": "3c9b7e47eb48465ba0d8d520ebd7ae206ab2f13f8bf9b5f8bc0a2c6ee3b01691"
+      },
+      "wasm_tools": {
+        "path": "direct-recursive-multivalue.wasm",
+        "bytes": 101,
+        "sha256": "7b925ca1e6786bee6925a3349acd787037f09058d09a14fef48607b15dbe42c6"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/direct-recursive-multivalue.wasm",
+        "bytes": 101,
+        "sha256": "7b925ca1e6786bee6925a3349acd787037f09058d09a14fef48607b15dbe42c6"
+      },
+      "outputs_byte_identical": true
+    },
+    {
+      "name": "host-type-import",
+      "wat": {
+        "path": "host-type-import.wat",
+        "bytes": 205,
+        "sha256": "7b2b3dd322f828e4a97c1de973efaff98ece8182ad29a619750f5836916b5594"
+      },
+      "wasm_tools": {
+        "path": "host-type-import.wasm",
+        "bytes": 64,
+        "sha256": "8e6370d1e97841dd12bb788fe1227085aa070062c18bdd1cdcb910a2a86701dc"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/host-type-import.wasm",
+        "bytes": 64,
+        "sha256": "8e6370d1e97841dd12bb788fe1227085aa070062c18bdd1cdcb910a2a86701dc"
+      },
+      "outputs_byte_identical": true
+    },
+    {
+      "name": "imported-direct",
+      "wat": {
+        "path": "imported-direct.wat",
+        "bytes": 313,
+        "sha256": "7f349428d8d412ca436f75a5c9cabd068d7e3b97020da48d451a0c786ebbcb0f"
+      },
+      "wasm_tools": {
+        "path": "imported-direct.wasm",
+        "bytes": 87,
+        "sha256": "8c4425a236e663dc0719486fe2f8f5bc55d0ddaea556713e93f665a14d8ff5d7"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/imported-direct.wasm",
+        "bytes": 87,
+        "sha256": "8c4425a236e663dc0719486fe2f8f5bc55d0ddaea556713e93f665a14d8ff5d7"
+      },
+      "outputs_byte_identical": true
+    },
+    {
+      "name": "indirect-bad-signature",
+      "wat": {
+        "path": "indirect-bad-signature.wat",
+        "bytes": 481,
+        "sha256": "ba0543b6d7371678b60e201e846dc85d9a0883c12ab41139172fac1315deeb64"
+      },
+      "wasm_tools": {
+        "path": "indirect-bad-signature.wasm",
+        "bytes": 110,
+        "sha256": "597e8e47f7d3ae6fd65c8e865bbf13d2f479a9b3249dbf8c0c802b61d8b1ccde"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/indirect-bad-signature.wasm",
+        "bytes": 110,
+        "sha256": "597e8e47f7d3ae6fd65c8e865bbf13d2f479a9b3249dbf8c0c802b61d8b1ccde"
+      },
+      "outputs_byte_identical": true
+    },
+    {
+      "name": "indirect-good",
+      "wat": {
+        "path": "indirect-good.wat",
+        "bytes": 383,
+        "sha256": "a872c229fd7034cd96c6db5c965919f0bc0991e6430527d384698c965d082e30"
+      },
+      "wasm_tools": {
+        "path": "indirect-good.wasm",
+        "bytes": 94,
+        "sha256": "ffba0329f4e61b902af779d0830bfeb97a8a814480eed0a6820fe57ceef41381"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/indirect-good.wasm",
+        "bytes": 94,
+        "sha256": "ffba0329f4e61b902af779d0830bfeb97a8a814480eed0a6820fe57ceef41381"
+      },
+      "outputs_byte_identical": true
+    },
+    {
+      "name": "reentry-gc-roots",
+      "wat": {
+        "path": "reentry-gc-roots.wat",
+        "bytes": 503,
+        "sha256": "338a28c008cd73b17b353b2b2d84d7d0a97e05d144e3c579efbb04458607b85d"
+      },
+      "wasm_tools": {
+        "path": "reentry-gc-roots.wasm",
+        "bytes": 149,
+        "sha256": "4433710cba9269e27e53b9dee1ec239a0da5c1ea8c34d60c7963158f8d7a4154"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/reentry-gc-roots.wasm",
+        "bytes": 149,
+        "sha256": "4433710cba9269e27e53b9dee1ec239a0da5c1ea8c34d60c7963158f8d7a4154"
+      },
+      "outputs_byte_identical": true
+    },
+    {
+      "name": "tail-recursive",
+      "wat": {
+        "path": "tail-recursive.wat",
+        "bytes": 420,
+        "sha256": "76666457fee68c1dc8207c4c4cbe57e4f4de1879a5e7a0a0706ff28d5ef5e232"
+      },
+      "wasm_tools": {
+        "path": "tail-recursive.wasm",
+        "bytes": 88,
+        "sha256": "e78e53476819e4df2aa759b954ee9eb93e8fc093a49091b3805a5021635006de"
+      },
+      "wtime_conformance": {
+        "path": "encoded-wtime/tail-recursive.wasm",
+        "bytes": 88,
+        "sha256": "e78e53476819e4df2aa759b954ee9eb93e8fc093a49091b3805a5021635006de"
+      },
+      "outputs_byte_identical": true
+    }
+  ]
+}

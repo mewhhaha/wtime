@@ -1,0 +1,833 @@
+{
+  "archives": {
+    "calibrated_used": {
+      "binary_sha256": "77132ce9531de66a1c8a14e2c43946eeee9f80951de11b18c55c7d4fcd920398",
+      "files": 134,
+      "manifest_sha256": "25dc3ba5d2b51d8de3177672b955458cf8907b3da51ab2c7ecf71357cbe2be67",
+      "path": "target/performance/P026-before-calibrated"
+    },
+    "candidate_retained": {
+      "binary_file_sha256": "dfa8f1139e87d50ef6dca48e7810359326296aec5ef741c5f6bbc1f3056d2d88",
+      "binary_matches_manifest": true,
+      "binary_path": "target/performance/P026-candidate-retained/tools/wtime-bench/target/release/wtime-bench",
+      "binary_sha256": "dfa8f1139e87d50ef6dca48e7810359326296aec5ef741c5f6bbc1f3056d2d88",
+      "candidate_patch_path": "docs/benchmarks/performance/P026-candidate.patch",
+      "candidate_patch_sha256": "d9fa4aec88dc94a75658e6eeed3af53ec131bdaff7ea51a893521f08665306c5",
+      "manifest_path": "target/performance/P026-candidate-retained/source-manifest.json",
+      "manifest_sha256": "fdfcae4bb5652c4b1d94a925a7b4d483657406dac99a3578e0094e72d30b80b7",
+      "source_files": 149,
+      "source_identity_sha256": "2a2cd8dd18c8364cc188161d638928dc7337542d4d9c1cc1a908b4cec47fefa4"
+    },
+    "candidate_retained_verified_at_finalization": {
+      "binary_path": "/workspace/wtime/target/performance/P026-candidate-retained/tools/wtime-bench/target/release/wtime-bench",
+      "binary_sha256": "dfa8f1139e87d50ef6dca48e7810359326296aec5ef741c5f6bbc1f3056d2d88",
+      "manifest_path": "/workspace/wtime/target/performance/P026-candidate-retained/source-manifest.json",
+      "manifest_sha256": "fdfcae4bb5652c4b1d94a925a7b4d483657406dac99a3578e0094e72d30b80b7",
+      "patch_path": "/workspace/wtime/docs/benchmarks/performance/P026-candidate.patch",
+      "patch_sha256": "d9fa4aec88dc94a75658e6eeed3af53ec131bdaff7ea51a893521f08665306c5",
+      "source_files_verified": 149,
+      "source_identity_sha256": "2a2cd8dd18c8364cc188161d638928dc7337542d4d9c1cc1a908b4cec47fefa4"
+    },
+    "changed_runtime_sources": {
+      "crates/wtime-runtime/src/execution.rs": {
+        "before": "1baf160513d2daf53706f2bc03a54f7d01777b75da65656c5a6bedb4e995f4a5",
+        "candidate": "65b8f9b15bb2f68a1e899663fbb8b9acb1b8d5c378c08d6503adddefae18565c"
+      },
+      "crates/wtime-runtime/src/lib.rs": {
+        "before": "997a0ec8d835c83567e13aa4c755ed30ad0e44a0bdb9e689c14753abdd47bb45",
+        "candidate": "13357c4735da348c4471dc2360153b186ff30679029d36662eb290f3860866cb"
+      },
+      "crates/wtime-runtime/src/shared_memory.rs": {
+        "before": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+        "candidate": "f64f46b42620a79f83617038e949bfee387291411b2fe3e01e7c0572b0c3a24a"
+      },
+      "crates/wtime-runtime/tests/performance/p026.rs": {
+        "before": "f65e7ff08187e14099cff8b98d13fc8b3ebc98fa278c83343cd4099d50fc2c2a",
+        "candidate": "d06fe0a9a44a5856f0fe03aebfa8a3bf190fb9e5b5507fd3364153924c614268"
+      }
+    },
+    "original": {
+      "binary_sha256": "77132ce9531de66a1c8a14e2c43946eeee9f80951de11b18c55c7d4fcd920398",
+      "files": 134,
+      "manifest_sha256": "d951d141b6dd8b8d7eb96886b9086da612adeb7faed4c4f5eb40efe6963f3882",
+      "path": "target/performance/P026-before"
+    },
+    "verified_at_finalization": [
+      {
+        "binary_sha256": "77132ce9531de66a1c8a14e2c43946eeee9f80951de11b18c55c7d4fcd920398",
+        "files_verified": 134,
+        "manifest_sha256": "d951d141b6dd8b8d7eb96886b9086da612adeb7faed4c4f5eb40efe6963f3882",
+        "path": "/workspace/wtime/target/performance/P026-before"
+      },
+      {
+        "binary_sha256": "77132ce9531de66a1c8a14e2c43946eeee9f80951de11b18c55c7d4fcd920398",
+        "files_verified": 134,
+        "manifest_sha256": "25dc3ba5d2b51d8de3177672b955458cf8907b3da51ab2c7ecf71357cbe2be67",
+        "path": "/workspace/wtime/target/performance/P026-before-calibrated"
+      }
+    ]
+  },
+  "artifact_hashes_final": {
+    "/tmp/P026-calibration-copy-plan.json": {
+      "bytes": 10219,
+      "sha256": "3384b4af72c622372c81888e6944ed4a70a1b74bea50a82e68322ee3fb39db0e"
+    },
+    "/tmp/extract_p026-schema-draft.py": {
+      "bytes": 8589,
+      "sha256": "bc53eea53078a55bc8fa65e141f778e46ae5b3d27c389403a4fa396d65cf0562"
+    },
+    "/workspace/wtime/docs/benchmarks/performance/P026-candidate.patch": {
+      "bytes": 4166,
+      "sha256": "d9fa4aec88dc94a75658e6eeed3af53ec131bdaff7ea51a893521f08665306c5"
+    },
+    "/workspace/wtime/docs/benchmarks/performance/P026-contract.json": {
+      "bytes": 4265,
+      "sha256": "1482c6ff7feea38d0a247dbff91c80d8443f2f217ed126fbc95a879a90f34cf0"
+    },
+    "/workspace/wtime/target/performance/P026-candidate-retained/source-manifest.json": {
+      "bytes": 17332,
+      "sha256": "fdfcae4bb5652c4b1d94a925a7b4d483657406dac99a3578e0094e72d30b80b7"
+    },
+    "/workspace/wtime/target/performance/P026-extraction-schema-failure.log": {
+      "bytes": 88,
+      "sha256": "c12a9f2f18b03bed16c7f1469236f4845dad89958296f9a21df621fd38f77bef"
+    },
+    "/workspace/wtime/target/performance/P026-rollback-feature-name-failure.log": {
+      "bytes": 85,
+      "sha256": "ff1220273e954051f2c9056bbf51d09ea6a419a758db85f7f76ab8d0806298e1"
+    },
+    "/workspace/wtime/target/performance/P026-rollback-stale-default-tests.log": {
+      "bytes": 13339,
+      "sha256": "427df192a483779982ea368e473b6a11082968c4aae08db04c79f251fb9c8583"
+    },
+    "/workspace/wtime/target/performance/P026-rollback-stale-diagnostic-tests.log": {
+      "bytes": 5270,
+      "sha256": "1e63147ad470f29885f4a5842291b8d29500e461406c0fdb28cb0329036a6c71"
+    },
+    "/workspace/wtime/target/performance/P026/extraction.json": {
+      "bytes": 2030,
+      "sha256": "666cc4a2c70806e2053389c676f85d79e54a46e68d370d43ed3cd0a5cd062c76"
+    },
+    "target/performance/P026-incremental-build-decision.json": {
+      "bytes": 632,
+      "sha256": "69606f734b4b7398f036eabf72ce68c06dd79fcc7c8ba10501713974deb54f82"
+    },
+    "target/performance/P026-rollback-build.json": {
+      "bytes": 84254,
+      "sha256": "cf1ecc7cf3f06e690829249ab243a3d904f681388b085239435210552923c04e"
+    },
+    "target/performance/P026-rollback-identities.json": {
+      "bytes": 1196,
+      "sha256": "921866f97d5066b67afa1b3b9d5903e45a48d9715ee525fe5adee1b26b86f7a4"
+    },
+    "target/performance/P026-rollback-performance-tests.log": {
+      "bytes": 3537,
+      "sha256": "ab6f758e404d120506bef29b87705ce36ece5f7e7667dd2be227d72f356bd277"
+    },
+    "target/performance/P026-rollback-runtime-tests.log": {
+      "bytes": 13339,
+      "sha256": "4bea0e4bb141677515545216150216b9f3612db5b1d6902f2b60a59b53b3253d"
+    },
+    "target/performance/P026/analysis.json": {
+      "bytes": 1705571,
+      "sha256": "0345619c41eec4c4d09a3fad633cffeaa65a3cf2585ead007ba60934cc138a5d"
+    },
+    "target/performance/P026/build.json": {
+      "bytes": 84251,
+      "sha256": "4e8dbb2ce9ef63c2075464db4042a8a8d3b59787b1786fb094009dee48a77235"
+    },
+    "target/performance/P026/decision.json": {
+      "bytes": 2270828,
+      "sha256": "553b021ed57d73e1317f569cc8b0a898c76af2a44d8e16246041b7a302e63285"
+    },
+    "target/performance/P026/report.json": {
+      "bytes": 49825330,
+      "sha256": "fa628e3fa042e7c2ed00d45830e1b0dcd13c468ec38b39c94d0afdb9bf9517a7"
+    }
+  },
+  "artifacts_sha256": {
+    "/workspace/wtime/target/performance/P026/task-definition-before-completion.md": "2225a547c8f7381459ab70f8d621f406b999dcd2e44dd790c4aa852cb324aa10",
+    "docs/benchmarks/performance/P026-build-decision.md": "e84474b7d4133a73ee77e57b14ddf23d06c47317b036bd179cf53f08128b21af",
+    "docs/benchmarks/performance/P026-candidate.patch": "d9fa4aec88dc94a75658e6eeed3af53ec131bdaff7ea51a893521f08665306c5",
+    "docs/benchmarks/performance/P026-contract.json": "1482c6ff7feea38d0a247dbff91c80d8443f2f217ed126fbc95a879a90f34cf0",
+    "target/performance/P026-adapter-tests-final.log": "7dd574d8a658b8716e3f89405fef8482bbb7dd6a64a47283c4e2995bec0c5b95",
+    "target/performance/P026-baseline-calibrated.log": "b9012989aa3ff9da67a025bca51ec8a771065ad6056f8191af38020a3e49f501",
+    "target/performance/P026-baseline.log": "82fc76dba46ad4c7ce0e3ff6e808c0a9dcfab1de324ab17687b8cc99584221ed",
+    "target/performance/P026-before-build.json": "23620e9cf4fdc6b311c2a3256434240d66d2ae48b0d585393c52866daa736bc4",
+    "target/performance/P026-before-calibrated/manifest.json": "25dc3ba5d2b51d8de3177672b955458cf8907b3da51ab2c7ecf71357cbe2be67",
+    "target/performance/P026-before-diagnostic-tests-final.log": "f9958d4560268765af028131c842432312074b2d2c1bf32c97494c580190cf4f",
+    "target/performance/P026-before-tests-final.log": "172d1c088efb19ce65f7b37464ed99e009fa5cc11f6da49e83ed4f89c460b4c9",
+    "target/performance/P026-before/manifest.json": "d951d141b6dd8b8d7eb96886b9086da612adeb7faed4c4f5eb40efe6963f3882",
+    "target/performance/P026-build.json": "4e8dbb2ce9ef63c2075464db4042a8a8d3b59787b1786fb094009dee48a77235",
+    "target/performance/P026-calibration-tests-import-failure.log": "1ef540051402af492197f5ff265b2cdd8ecfd7a7917ba362c3cfb94e873733b7",
+    "target/performance/P026-calibration-tests.log": "120f07996d1ca8c5a017aa4265917326ded87c4d61c26185b8241374c93b2536",
+    "target/performance/P026-candidate-diagnostic-tests.log": "d457a11705de01728766e13c82fc7149485afb012cb99eb8a2c3cc107ebf7e58",
+    "target/performance/P026-candidate-retained/source-manifest.json": "fdfcae4bb5652c4b1d94a925a7b4d483657406dac99a3578e0094e72d30b80b7",
+    "target/performance/P026-candidate-retained/tools/wtime-bench/target/release/wtime-bench": "dfa8f1139e87d50ef6dca48e7810359326296aec5ef741c5f6bbc1f3056d2d88",
+    "target/performance/P026-candidate-tests.log": "c5020931211f508feccc23c75ceedabe5be09830cb38ecb195cd48e9627ed4c6",
+    "target/performance/P026-incremental-build-decision.json": "69606f734b4b7398f036eabf72ce68c06dd79fcc7c8ba10501713974deb54f82",
+    "target/performance/P026-performance-tests.log": "a6a65a77a2dd14d5d1f875d19c737d1d6d1c201a8df3d898ca2e6e72bac6ad87",
+    "target/performance/P026-plan-check-calibrated.log": "bb88bf5f9edd2b3f5ee5b4d97af53f3bf9ae8c85afe8bf0c516daad4dd552964",
+    "target/performance/P026-plan-check-preparation.log": "bb88bf5f9edd2b3f5ee5b4d97af53f3bf9ae8c85afe8bf0c516daad4dd552964",
+    "target/performance/P026-runtime-tests.log": "764416e07178864125d4773c4cb11fbc9c6d16f653be18e25e23d811c3f4e8fe",
+    "target/performance/P026-source-binding-tests.log": "19f27f1637e5d2cd39a3122da7a49d6e9e271a9f2017ad26884d018d964923bf",
+    "target/performance/P026-warm-adapter-probes-initial.json": "13452df52fbef302e7fef778a04d48b4f40bcfff6c84b0912f3f999617945a8a",
+    "target/performance/P026-warm-adapter-probes-path-failure.json": "0cc317efcd45171376bad8303016df4e9bc992b187692acc41d82f34e8aae18a"
+  },
+  "build_gate": {
+    "all_six_ratios_passed": true,
+    "before": {
+      "clean_peak_rss_kib": 278460,
+      "clean_seconds": 11.088336353997875,
+      "leaf_seconds": 1.242012591996172,
+      "release_seconds": 19.830528607002634,
+      "runtime_leaf_seconds": 1.8417936800033203,
+      "source_sha256": "442bfb49f4b75cc5f8e7fab7b6d359a0986be3e141f22fdeed221778f049c636",
+      "stripped_bytes": 1000264
+    },
+    "candidate": {
+      "clean_peak_rss_kib": 278680,
+      "clean_seconds": 8.85717074200511,
+      "leaf_seconds": 0.3519534750012099,
+      "release_seconds": 18.808194477001962,
+      "runtime_leaf_seconds": 1.5163415570059442,
+      "source_sha256": "0280e06bada95f526239d1d186109d7daec38575c4523b794bbee985820ae114",
+      "stripped_bytes": 1001336
+    },
+    "decision_path": "target/performance/P026-incremental-build-decision.json",
+    "decision_sha256": "69606f734b4b7398f036eabf72ce68c06dd79fcc7c8ba10501713974deb54f82",
+    "final_build_decision_sha256": "69606f734b4b7398f036eabf72ce68c06dd79fcc7c8ba10501713974deb54f82",
+    "final_build_report_sha256": "4e8dbb2ce9ef63c2075464db4042a8a8d3b59787b1786fb094009dee48a77235",
+    "hard_budgets_passed": true,
+    "inner_build_command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-j",
+      "5"
+    ],
+    "limit": 1.25,
+    "policy_path": "docs/benchmarks/performance/P026-build-decision.md",
+    "policy_sha256": "e84474b7d4133a73ee77e57b14ddf23d06c47317b036bd179cf53f08128b21af",
+    "ratios": {
+      "clean_peak_rss_kib": 1.000790059613589,
+      "clean_seconds": 0.7987826540643923,
+      "leaf_seconds": 0.28337351591222404,
+      "release_seconds": 0.9484464509110634,
+      "runtime_leaf_seconds": 0.8232961017670615,
+      "stripped_bytes": 1.0010717170666943
+    },
+    "source_stable": true,
+    "zero_default_external_dependencies": true
+  },
+  "calibration_evidence_copies": [
+    {
+      "bytes": 2309,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-adaptive-probes/README.md",
+      "sha256": "51b206827629a846c457f0cfd4bf14b965a08c51553cc12143f44b52f93cf6ac",
+      "source": "/tmp/P026-adaptive-probes/README.md"
+    },
+    {
+      "bytes": 1096843,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-adaptive-probes/adaptive-warm-probe.json",
+      "sha256": "62443e49e9f9791586360e9c553a3588a00ef7723f936ea17cb73812b653e467",
+      "source": "/tmp/P026-adaptive-probes/adaptive-warm-probe.json"
+    },
+    {
+      "bytes": 9012,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-adaptive-probes/adaptive-warm-probe.log",
+      "sha256": "8fdb5b564bedd19f6b00e2886436b2fbe7d13a0b5cb777ac81917fe059951f56",
+      "source": "/tmp/P026-adaptive-probes/adaptive-warm-probe.log"
+    },
+    {
+      "bytes": 1371937,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-adaptive-probes/attempt0-harness-mismatch.json",
+      "sha256": "280fc4c5351b312d927de5b3563e90a4842ad3306bd277ade998f8adf57cdbb4",
+      "source": "/tmp/P026-adaptive-probes/attempt0-harness-mismatch.json"
+    },
+    {
+      "bytes": 7188,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-adaptive-probes/attempt0-harness-mismatch.log",
+      "sha256": "82c6b44ddb573111c2da7e4f2319f790aeaef9517cdd8ba8e561d8c57920153d",
+      "source": "/tmp/P026-adaptive-probes/attempt0-harness-mismatch.log"
+    },
+    {
+      "bytes": 11247,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-adaptive-probes/run_adaptive_warm_probe.py",
+      "sha256": "4392812631234902705aa0543d977d24f378df9d91ce4008b6b1ffb6c38f6267",
+      "source": "/tmp/P026-adaptive-probes/run_adaptive_warm_probe.py"
+    },
+    {
+      "bytes": 1717,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-warm-probes/README.md",
+      "sha256": "c7a891f24dd3a209458a12affb78ba5652fbb231b776ae30add484776a627d6f",
+      "source": "/tmp/P026-warm-probes/README.md"
+    },
+    {
+      "bytes": 10009,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-warm-probes/run_warm_calibration_probe.py",
+      "sha256": "593c2f421123f6e9b63357d132b1a289300c433327512adc0df25a0c6b2625c2",
+      "source": "/tmp/P026-warm-probes/run_warm_calibration_probe.py"
+    },
+    {
+      "bytes": 133564,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-warm-probes/warm-calibration-probe.json",
+      "sha256": "56f21e895d7731cc17a8eb7c5d725127f5c33e1c0f759a8d0c71fce8ea4da013",
+      "source": "/tmp/P026-warm-probes/warm-calibration-probe.json"
+    },
+    {
+      "bytes": 7981,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-warm-probes/warm-calibration-probe.log",
+      "sha256": "3c0539de69742cc738f255be5d0690a3c04c93155c62bc48f42e442f46d9bee1",
+      "source": "/tmp/P026-warm-probes/warm-calibration-probe.log"
+    },
+    {
+      "bytes": 2214,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/README.md",
+      "sha256": "43aa3d6684ec3c718d7984f5d22e2bbd08eea7bce2e72f52ccbbec682707a947",
+      "source": "/tmp/P026-driver-probes/README.md"
+    },
+    {
+      "bytes": 10003,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/encoded-fixtures.json",
+      "sha256": "19f062ddad10802021a66857322b85f5638eb5530b8d1b8af812555c818de7a7",
+      "source": "/tmp/P026-driver-probes/encoded-fixtures.json"
+    },
+    {
+      "bytes": 117766,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/first-call-probe.json",
+      "sha256": "ce018d372fc52d33eb10a112793a0a063af1bc7dbb16d699e1b5599865f0895f",
+      "source": "/tmp/P026-driver-probes/first-call-probe.json"
+    },
+    {
+      "bytes": 5510,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/first-call-probe.log",
+      "sha256": "04a6333839de6b1445541f14e95c12397874f0ba3dcd9185c594c2f8a2323e12",
+      "source": "/tmp/P026-driver-probes/first-call-probe.log"
+    },
+    {
+      "bytes": 182,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/f64_arithmetic.wasm",
+      "sha256": "4b8677abfcf31c65bf72fb19952629c037e4903a8596a508f32af4ce38a25643",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/f64_arithmetic.wasm"
+    },
+    {
+      "bytes": 78,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/f64_minmax.wasm",
+      "sha256": "69ed757b2f76f1605f3b4c9332d995887848a44406d99b929df38676c4486b77",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/f64_minmax.wasm"
+    },
+    {
+      "bytes": 196,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/float_arithmetic.wasm",
+      "sha256": "ece84319c9f3b540e99b4ddaf2585f778dda6cd8735d11b27f7ba35e6d5fbef0",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/float_arithmetic.wasm"
+    },
+    {
+      "bytes": 257,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/float_edges.wasm",
+      "sha256": "6d21067a0c105455857d2d0c46b6b142e98f0794d2f1870da0ea5f467768a506",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/float_edges.wasm"
+    },
+    {
+      "bytes": 210,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/integer_lanes.wasm",
+      "sha256": "95ad86610276d9db5ca8ea3d6426d087fca8a702225606139e79673de60003a7",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/integer_lanes.wasm"
+    },
+    {
+      "bytes": 202,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/integer_lanes_typed.wasm",
+      "sha256": "3a690996697e34089e18a5e9883ce551f6d600dece89e70580fd601ae2a82150",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/integer_lanes_typed.wasm"
+    },
+    {
+      "bytes": 209,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/lane_memory.wasm",
+      "sha256": "9c957181e2ca5d74e9a3f9fec4e4cf5fb22e3eea231ccbc4c826c5c8847bfa01",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/lane_memory.wasm"
+    },
+    {
+      "bytes": 273,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/lane_memory_footprint.wasm",
+      "sha256": "a92144289dae9ec957773fe0f5bfef50c2ef4d188f96338aff50a4cb55af5c2c",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/lane_memory_footprint.wasm"
+    },
+    {
+      "bytes": 241,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/relaxed_swizzle.wasm",
+      "sha256": "2017b5e0e15c1dd4406fc76832f92bcab1ea1f32187b1ca0dcc4c80e7aa121da",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/relaxed_swizzle.wasm"
+    },
+    {
+      "bytes": 121,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/relaxed_swizzle_oob.wasm",
+      "sha256": "0f79b71c6396e4e7e9c3f60828edfd1e8b185d83e65b2a1466292d29bb16dc3b",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/relaxed_swizzle_oob.wasm"
+    },
+    {
+      "bytes": 262,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/saturating_select.wasm",
+      "sha256": "22633c8544d3db06b0f47cef19966e357743e0db9a84815fc66d87b390a87bea",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/saturating_select.wasm"
+    },
+    {
+      "bytes": 179,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/scalar_f64_arithmetic.wasm",
+      "sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/scalar_f64_arithmetic.wasm"
+    },
+    {
+      "bytes": 221,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/scalar_float_arithmetic.wasm",
+      "sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/scalar_float_arithmetic.wasm"
+    },
+    {
+      "bytes": 150,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/scalar_float_edges.wasm",
+      "sha256": "621b5c278b5a3c706996d06a19cf12578c57dbd92e7015d57e4e8a384018405c",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/scalar_float_edges.wasm"
+    },
+    {
+      "bytes": 205,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/scalar_integer_lanes.wasm",
+      "sha256": "71f6ccd9b822a455d0248276eacdf61a61f39a2435000c0d3f12a9d3e3f5a15c",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/scalar_integer_lanes.wasm"
+    },
+    {
+      "bytes": 221,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/scalar_integer_lanes_typed.wasm",
+      "sha256": "45101f560f2675ae21c5b80b7e89974a3e0bff7814735bbf4609999ec2c44e19",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/scalar_integer_lanes_typed.wasm"
+    },
+    {
+      "bytes": 325,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/scalar_shuffle.wasm",
+      "sha256": "f7a3e0e209078c5afac21d24285412d7206921427e73fae451e90fa2df8c485a",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/scalar_shuffle.wasm"
+    },
+    {
+      "bytes": 194,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/shuffle.wasm",
+      "sha256": "b71c56264d750cc8f7300e3b9900534072d92838447a2f600c920e20625f5f77",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/shuffle.wasm"
+    },
+    {
+      "bytes": 53,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/typed_f64.wasm",
+      "sha256": "8b91d640241294a1dee9cfbe8605287a0b4e3d5e215d0c9aea529f77ec6da841",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/typed_f64.wasm"
+    },
+    {
+      "bytes": 73,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/fixtures/simd/typed_v128.wasm",
+      "sha256": "12f3541a902e0ea324af36e547d6af9ea2879720ccefb7e4fdb8b37b024b1a12",
+      "source": "/tmp/P026-driver-probes/fixtures/simd/typed_v128.wasm"
+    },
+    {
+      "bytes": 8211,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-driver-probes/run_first_call_probe.py",
+      "sha256": "96ce5d7fd9a5ba70cdd575b5051b99118dec6bc9eacd6643e52ef64669044fba",
+      "source": "/tmp/P026-driver-probes/run_first_call_probe.py"
+    },
+    {
+      "bytes": 60488,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-calibration-review/compare.py",
+      "sha256": "790cc715847bd73fd869e2b678cb50bb3c282ed9045a04874fdd9896f831ae0c",
+      "source": "/tmp/P026-calibration-review/compare.py"
+    },
+    {
+      "bytes": 2720,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-calibration-review/test_calibration.py",
+      "sha256": "54b19db7dc797781d1043a52dbf697979b49436637e56a86cc49c4c6adfb3b3f",
+      "source": "/tmp/P026-calibration-review/test_calibration.py"
+    },
+    {
+      "bytes": 3192,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-encode-report.json",
+      "sha256": "9eaf4175a397d410954106919060d28d213b7267e1b25d8fd64bd7afb9f63b8a",
+      "source": "/tmp/P026-encode-report.json"
+    },
+    {
+      "bytes": 2030,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-extraction.json",
+      "sha256": "666cc4a2c70806e2053389c676f85d79e54a46e68d370d43ed3cd0a5cd062c76",
+      "source": "/workspace/wtime/target/performance/P026/extraction.json"
+    },
+    {
+      "bytes": 88,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-extraction-schema-failure.log",
+      "sha256": "c12a9f2f18b03bed16c7f1469236f4845dad89958296f9a21df621fd38f77bef",
+      "source": "/workspace/wtime/target/performance/P026-extraction-schema-failure.log"
+    },
+    {
+      "bytes": 8589,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/extract_p026-schema-draft.py",
+      "sha256": "bc53eea53078a55bc8fa65e141f778e46ae5b3d27c389403a4fa396d65cf0562",
+      "source": "/tmp/extract_p026-schema-draft.py"
+    },
+    {
+      "bytes": 13339,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-rollback-stale-default-tests.log",
+      "sha256": "427df192a483779982ea368e473b6a11082968c4aae08db04c79f251fb9c8583",
+      "source": "/workspace/wtime/target/performance/P026-rollback-stale-default-tests.log"
+    },
+    {
+      "bytes": 5270,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-rollback-stale-diagnostic-tests.log",
+      "sha256": "1e63147ad470f29885f4a5842291b8d29500e461406c0fdb28cb0329036a6c71",
+      "source": "/workspace/wtime/target/performance/P026-rollback-stale-diagnostic-tests.log"
+    },
+    {
+      "bytes": 85,
+      "copy": "/workspace/wtime/target/performance/P026/calibration-evidence/P026-rollback-feature-name-failure.log",
+      "sha256": "ff1220273e954051f2c9056bbf51d09ea6a419a758db85f7f76ab8d0806298e1",
+      "source": "/workspace/wtime/target/performance/P026-rollback-feature-name-failure.log"
+    }
+  ],
+  "claims": {
+    "decision": "pending paired report, analyzer, and gates",
+    "note": "Build ratios are not a substitute for the paired performance gates; calibration is not timing evidence.",
+    "performance_decision": "rejected",
+    "speedup": null,
+    "wasmtime_ratio": null
+  },
+  "comparison": {
+    "analysis": "target/performance/P026/analysis.json",
+    "analysis_group_counts": {
+      "groups": 1140,
+      "pairs_per_group": 30,
+      "runs": 2,
+      "stages_per_workload": 5,
+      "workloads_per_run": 114
+    },
+    "analysis_sha256": "0345619c41eec4c4d09a3fad633cffeaa65a3cf2585ead007ba60934cc138a5d",
+    "checkpoint_path": "target/performance/P026/checkpoint.jsonl",
+    "correctness_only_probe_records": {
+      "extraction_checkpoint_sha256": "532757b32b2bc58b3191cf4e2edd93d60fe7fbc1f0b5cdec64673135a0b17efc",
+      "records": 114,
+      "side_checks": 228,
+      "timing_excluded": true
+    },
+    "correctness_probe_count": null,
+    "counts": {
+      "groups": 1140,
+      "observations": 34200,
+      "pair_id_count": 34200,
+      "pairs_per_group": 30,
+      "runs": 2,
+      "stages": [
+        "first_call",
+        "instantiate",
+        "load_and_call",
+        "prepare",
+        "warm_call"
+      ],
+      "workloads": 114
+    },
+    "decision": "target/performance/P026/decision.json",
+    "extraction_path": "/workspace/wtime/target/performance/P026/extraction.json",
+    "extraction_sha256": "666cc4a2c70806e2053389c676f85d79e54a46e68d370d43ed3cd0a5cd062c76",
+    "gate_decision": "rejected",
+    "instrumented": false,
+    "pair_count": null,
+    "raw_gate_primary_family": {
+      "decision": "inconclusive in both runs",
+      "raw_checks_rejected": 559,
+      "run_1": {
+        "confidence_interval_95": [
+          0.9464771182,
+          1.0261494497
+        ],
+        "median_candidate_over_baseline": 0.9819758485
+      },
+      "run_2": {
+        "confidence_interval_95": [
+          0.9750302804,
+          1.008277099
+        ],
+        "median_candidate_over_baseline": 0.9889897417
+      },
+      "source": "parent-provided extraction of the bound raw P026 gate; gate SHA256 is recorded below"
+    },
+    "raw_gate_sha256": "553b021ed57d73e1317f569cc8b0a898c76af2a44d8e16246041b7a302e63285",
+    "report_path": "target/performance/P026/report.json",
+    "report_sha256": "fa628e3fa042e7c2ed00d45830e1b0dcd13c468ec38b39c94d0afdb9bf9517a7",
+    "source_stable": true,
+    "status": "complete"
+  },
+  "contract": {
+    "path": "docs/benchmarks/performance/P026-contract.json",
+    "sha256": "1482c6ff7feea38d0a247dbff91c80d8443f2f217ed126fbc95a879a90f34cf0"
+  },
+  "development_history": {
+    "attempt_zero": "historical harness/setup notes preserved; no performance claim",
+    "calibration_copy_plan": {
+      "files_copied": 44,
+      "path": "/tmp/P026-calibration-copy-plan.json",
+      "sha256": "3384b4af72c622372c81888e6944ed4a70a1b74bea50a82e68322ee3fb39db0e"
+    },
+    "calibration_test_import_failure": {
+      "cause": "missing simd_scaling import; 4 errors in 5 test run; corrected final run 5/5",
+      "log": "target/performance/P026-calibration-tests-import-failure.log"
+    },
+    "extraction_history": {
+      "failed_attempt_extractor": "/tmp/extract_p026-schema-draft.py",
+      "failed_attempt_extractor_sha256": "bc53eea53078a55bc8fa65e141f778e46ae5b3d27c389403a4fa396d65cf0562",
+      "failure": "initial scalar-oriented extractor rejected SIMD correctness result shape; optional SIMD correctness fields were handled in the successful extraction",
+      "failure_log": "/workspace/wtime/target/performance/P026-extraction-schema-failure.log",
+      "failure_log_sha256": "c12a9f2f18b03bed16c7f1469236f4845dad89958296f9a21df621fd38f77bef",
+      "successful_extraction": "/workspace/wtime/target/performance/P026/extraction.json"
+    },
+    "finalization_copy_root": "/workspace/wtime/target/performance/P026/calibration-evidence",
+    "parent_reported_warm_probes": {
+      "adaptive_accepted": 114,
+      "batch_growth_events": 11,
+      "initial": [
+        95,
+        19
+      ],
+      "scope": "calibration only; no runtime speed inference"
+    },
+    "rollback_cache_mtime_issue": {
+      "cause": "shutil.copy2 restored predecessor file bytes and also restored old timestamps, so Cargo reused candidate artifacts in the first rollback test attempts",
+      "final_test_counts": {
+        "default_runtime": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 183,
+          "test_suites": 7
+        },
+        "reference_counters_performance": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 48,
+          "test_suites": 1
+        }
+      },
+      "resolution": "the three restored runtime files were touched, then the restored-source build and both test suites were rerun; final logs postdate all restored source mtimes"
+    },
+    "warm_probe_path_failure": {
+      "cause": "initial path expected before/bin/wtime-bench, archive layout uses before/binary/wtime-bench",
+      "log": "target/performance/P026-warm-adapter-probes-path-failure.json"
+    }
+  },
+  "evidence_status": "final evidence validated",
+  "fixtures": {
+    "hashes": {
+      "wasm": {
+        "target/performance/P026/fixtures/simd/f64_arithmetic.wasm": "4b8677abfcf31c65bf72fb19952629c037e4903a8596a508f32af4ce38a25643",
+        "target/performance/P026/fixtures/simd/f64_minmax.wasm": "69ed757b2f76f1605f3b4c9332d995887848a44406d99b929df38676c4486b77",
+        "target/performance/P026/fixtures/simd/float_arithmetic.wasm": "ece84319c9f3b540e99b4ddaf2585f778dda6cd8735d11b27f7ba35e6d5fbef0",
+        "target/performance/P026/fixtures/simd/float_edges.wasm": "6d21067a0c105455857d2d0c46b6b142e98f0794d2f1870da0ea5f467768a506",
+        "target/performance/P026/fixtures/simd/integer_lanes.wasm": "95ad86610276d9db5ca8ea3d6426d087fca8a702225606139e79673de60003a7",
+        "target/performance/P026/fixtures/simd/integer_lanes_typed.wasm": "3a690996697e34089e18a5e9883ce551f6d600dece89e70580fd601ae2a82150",
+        "target/performance/P026/fixtures/simd/lane_memory.wasm": "9c957181e2ca5d74e9a3f9fec4e4cf5fb22e3eea231ccbc4c826c5c8847bfa01",
+        "target/performance/P026/fixtures/simd/lane_memory_footprint.wasm": "a92144289dae9ec957773fe0f5bfef50c2ef4d188f96338aff50a4cb55af5c2c",
+        "target/performance/P026/fixtures/simd/relaxed_swizzle.wasm": "2017b5e0e15c1dd4406fc76832f92bcab1ea1f32187b1ca0dcc4c80e7aa121da",
+        "target/performance/P026/fixtures/simd/relaxed_swizzle_oob.wasm": "0f79b71c6396e4e7e9c3f60828edfd1e8b185d83e65b2a1466292d29bb16dc3b",
+        "target/performance/P026/fixtures/simd/saturating_select.wasm": "22633c8544d3db06b0f47cef19966e357743e0db9a84815fc66d87b390a87bea",
+        "target/performance/P026/fixtures/simd/scalar_f64_arithmetic.wasm": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+        "target/performance/P026/fixtures/simd/scalar_float_arithmetic.wasm": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+        "target/performance/P026/fixtures/simd/scalar_float_edges.wasm": "621b5c278b5a3c706996d06a19cf12578c57dbd92e7015d57e4e8a384018405c",
+        "target/performance/P026/fixtures/simd/scalar_integer_lanes.wasm": "71f6ccd9b822a455d0248276eacdf61a61f39a2435000c0d3f12a9d3e3f5a15c",
+        "target/performance/P026/fixtures/simd/scalar_integer_lanes_typed.wasm": "45101f560f2675ae21c5b80b7e89974a3e0bff7814735bbf4609999ec2c44e19",
+        "target/performance/P026/fixtures/simd/scalar_shuffle.wasm": "f7a3e0e209078c5afac21d24285412d7206921427e73fae451e90fa2df8c485a",
+        "target/performance/P026/fixtures/simd/shuffle.wasm": "b71c56264d750cc8f7300e3b9900534072d92838447a2f600c920e20625f5f77",
+        "target/performance/P026/fixtures/simd/typed_f64.wasm": "8b91d640241294a1dee9cfbe8605287a0b4e3d5e215d0c9aea529f77ec6da841",
+        "target/performance/P026/fixtures/simd/typed_v128.wasm": "12f3541a902e0ea324af36e547d6af9ea2879720ccefb7e4fdb8b37b024b1a12"
+      },
+      "wat": {
+        "tools/wtime-bench/fixtures/simd/f64_arithmetic.wat": "1ded010deec79fb83fbee8fd7f14512270be182574bd216c7b691cc49c3e0c3b",
+        "tools/wtime-bench/fixtures/simd/f64_minmax.wat": "27da5ed0409e2c811187eeb54c37da2c4ed3a3592645af5b93e6908702ecdcfd",
+        "tools/wtime-bench/fixtures/simd/float_arithmetic.wat": "98b2b50a26ef07e2a35c811eae0398deedfce2b1f99c11c4fe2e5c6b85004372",
+        "tools/wtime-bench/fixtures/simd/float_edges.wat": "ba3bc8c3abb8f6cf8a9f75dd586d0d78d5bb7a178f67e16d6e41424bf6e6be26",
+        "tools/wtime-bench/fixtures/simd/integer_lanes.wat": "fd4846ae1a22a31b17f5dc344bb20c015388d675991c9ac3a7c809ef83e7ad44",
+        "tools/wtime-bench/fixtures/simd/integer_lanes_typed.wat": "19abdb4ac058a1b3fec2be1c463975e87ab5f29f124a72e39d1ce409ddb4eccb",
+        "tools/wtime-bench/fixtures/simd/lane_memory.wat": "4f35680b9f3cb94cba0296cccb0cf0a8f96588ea637bea83cd83a6caac059141",
+        "tools/wtime-bench/fixtures/simd/lane_memory_footprint.wat": "8a713b01f558578da5179920488b9ec580de5681341d8a874d2a6c58e240ae4e",
+        "tools/wtime-bench/fixtures/simd/relaxed_swizzle.wat": "cc13f0de9250eaf780cf6082345e9c9bfc38be317a47ef1ce306d994624dc6f5",
+        "tools/wtime-bench/fixtures/simd/relaxed_swizzle_oob.wat": "af53075fe822615e699161579301dd484114bdac67c4fa41621ac8b58ce6861c",
+        "tools/wtime-bench/fixtures/simd/saturating_select.wat": "a4edecbc5fa5ace4c9d4d69b29be6b3131f1500b6cae84d8ebafe813454f70c6",
+        "tools/wtime-bench/fixtures/simd/scalar_f64_arithmetic.wat": "d5bd87cd9029c7050048fea8b3932be7a0531d68cc1ab91b3578d059e7a8667a",
+        "tools/wtime-bench/fixtures/simd/scalar_float_arithmetic.wat": "a11d4969aaa9fb4066b72d0123f905bfa2e2e708f2f178234a0252a7bd727bab",
+        "tools/wtime-bench/fixtures/simd/scalar_float_edges.wat": "5bbb77c7bb55bb2f436b9fe97f4e9f6c4a512473d9943024981489aeaa2386ba",
+        "tools/wtime-bench/fixtures/simd/scalar_integer_lanes.wat": "60fa829c372957e8aa2533153ceff2977361ec361eb01b38d72415083caba53e",
+        "tools/wtime-bench/fixtures/simd/scalar_integer_lanes_typed.wat": "6b90a27d798fb8ac6254a8e8c19dce1be396600447c65c9cd3baad1c38799156",
+        "tools/wtime-bench/fixtures/simd/scalar_shuffle.wat": "485df07d8a162fcbcbcc537ce0c067124629eb67946ad1e432de41d9c1beef23",
+        "tools/wtime-bench/fixtures/simd/shuffle.wat": "ce2af411702310c035dc1a3133feaa096b40fe43def12806e1bac0915dfe877a",
+        "tools/wtime-bench/fixtures/simd/typed_f64.wat": "486ba5030a6eebb0c08bc2dd530b2492c916c0ecc07614ba92479541517e8e9f",
+        "tools/wtime-bench/fixtures/simd/typed_v128.wat": "faea7f37b608c510fbba7a2fc6bcb1491df12b6741421f8636c0a637353787d2"
+      }
+    },
+    "wasm_count": 20,
+    "wat_count": 20
+  },
+  "outcome": "rejected",
+  "restored_tests": {
+    "default_runtime": {
+      "failed": 0,
+      "ignored": 0,
+      "passed": 183,
+      "test_suites": 7
+    },
+    "reference_counters_performance": {
+      "failed": 0,
+      "ignored": 0,
+      "passed": 48,
+      "test_suites": 1
+    },
+    "restored_source_identity_check": {
+      "byte_identical_files": [
+        "crates/wtime-runtime/src/execution.rs",
+        "crates/wtime-runtime/src/lib.rs",
+        "crates/wtime-runtime/src/shared_memory.rs"
+      ],
+      "default_tests_after_source_touch": true,
+      "diagnostic_tests_after_source_touch": true,
+      "final_restored_build": {
+        "budget_pass": true,
+        "default_dependency_closure_pass": true,
+        "path": "target/performance/P026-rollback-build.json",
+        "sha256": "cf1ecc7cf3f06e690829249ab243a3d904f681388b085239435210552923c04e",
+        "source_stable": true
+      },
+      "historical_attempts": [
+        {
+          "counts": {
+            "failed": 0,
+            "passed": 183
+          },
+          "disposition": "invalid as restored-source proof: Cargo reused candidate artifacts because copy2 preserved old mtimes",
+          "kind": "stale-cache-default-tests",
+          "log": "/workspace/wtime/target/performance/P026-rollback-stale-default-tests.log"
+        },
+        {
+          "disposition": "command setup error; corrected feature set was execution-reference,performance-counters",
+          "exit_code": 101,
+          "kind": "wrong-feature-name",
+          "log": "/workspace/wtime/target/performance/P026-rollback-feature-name-failure.log"
+        },
+        {
+          "counts": {
+            "failed": 5,
+            "passed": 43
+          },
+          "disposition": "restored-allocation assertions saw left 1/right 0 from a stale candidate artifact; Cargo cache issue, not a source semantic failure",
+          "failed_tests": [
+            "p026::p026_lanes_and_oob_prefix",
+            "p026::p026_extension_loads",
+            "p026::p026_reference_extending_load_uses_same_checked_backend",
+            "p026::p026_shared_vectors",
+            "p026::p026_splat_zero_loads"
+          ],
+          "kind": "stale-cache-diagnostic-tests",
+          "log": "/workspace/wtime/target/performance/P026-rollback-stale-diagnostic-tests.log"
+        }
+      ],
+      "production_restored": true,
+      "source_mtime_ns_max": 1791735003775011689
+    }
+  },
+  "rollback": {
+    "files": {
+      "crates/wtime-runtime/src/execution.rs": {
+        "byte_identical": true,
+        "candidate_sha256": "65b8f9b15bb2f68a1e899663fbb8b9acb1b8d5c378c08d6503adddefae18565c",
+        "predecessor_sha256": "1baf160513d2daf53706f2bc03a54f7d01777b75da65656c5a6bedb4e995f4a5",
+        "restored_sha256": "1baf160513d2daf53706f2bc03a54f7d01777b75da65656c5a6bedb4e995f4a5"
+      },
+      "crates/wtime-runtime/src/lib.rs": {
+        "byte_identical": true,
+        "candidate_sha256": "13357c4735da348c4471dc2360153b186ff30679029d36662eb290f3860866cb",
+        "predecessor_sha256": "997a0ec8d835c83567e13aa4c755ed30ad0e44a0bdb9e689c14753abdd47bb45",
+        "restored_sha256": "997a0ec8d835c83567e13aa4c755ed30ad0e44a0bdb9e689c14753abdd47bb45"
+      },
+      "crates/wtime-runtime/src/shared_memory.rs": {
+        "byte_identical": true,
+        "candidate_sha256": "f64f46b42620a79f83617038e949bfee387291411b2fe3e01e7c0572b0c3a24a",
+        "predecessor_sha256": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+        "restored_sha256": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44"
+      }
+    },
+    "production_restored": true,
+    "production_reverted": true,
+    "task": "P026"
+  },
+  "schema": "wtime-p026-completed-evidence-v1",
+  "selection": {
+    "mode": "decoded",
+    "output": "target/performance/P026",
+    "pairs_per_input_stage_run": 30,
+    "workloads": "simd"
+  },
+  "task": "P026",
+  "task_status_claim": null,
+  "tests": [
+    {
+      "failed": 0,
+      "log": "target/performance/P026-before-tests-final.log",
+      "name": "before default focused",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-before-diagnostic-tests-final.log",
+      "name": "before reference/counters focused",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-candidate-tests.log",
+      "name": "candidate default focused",
+      "passed": 4,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-candidate-diagnostic-tests.log",
+      "name": "candidate reference/counters focused",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-runtime-tests.log",
+      "name": "full default runtime",
+      "passed": 183,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-performance-tests.log",
+      "name": "reference/counters performance",
+      "passed": 48,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-adapter-tests-final.log",
+      "name": "adapter tests",
+      "passed": 8,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-calibration-tests.log",
+      "name": "calibration tests",
+      "passed": 5,
+      "skipped": 0
+    },
+    {
+      "failed": 0,
+      "log": "target/performance/P026-source-binding-tests.log",
+      "name": "source-binding tests",
+      "passed": 5,
+      "skipped": 0
+    }
+  ]
+}

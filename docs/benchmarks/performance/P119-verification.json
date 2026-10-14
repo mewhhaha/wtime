@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "task": "P119",
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**",
+        "tools/wtime-bench/fixtures/**",
+        "target/performance/P115/fixtures/attempt-0002/receipt.json",
+        "target/performance/P119/fixtures/attempt-0002/receipt.json"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation",
+        "fixtures"
+      ],
+      "commands": [
+        {
+          "name": "focused-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,execution-reference",
+            "p119_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "focused-tests",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p119_resume_restores_original_next_source_and_saved_fuel_without_prefix_reentry",
+            "p119_caught_resume_throw_unwinds_nested_frames_at_exact_fuel_boundaries",
+            "p119_unhandled_resume_throw_cancellation_and_foreign_handles_keep_one_shot_cleanup"
+          ],
+          "minimum_passed": 3
+        }
+      ],
+      "outputs": {
+        "test_log": "{stage}/focused-tests.stdout"
+      }
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Proposal interaction correctness only; measured promotion remains P044."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "resume",
+        "uses": [
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "focused-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "--features",
+              "compact-executor,execution-reference",
+              "p119_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "focused-tests",
+            "kind": "cargo",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p119_resume_restores_original_next_source_and_saved_fuel_without_prefix_reentry",
+              "p119_caught_resume_throw_unwinds_nested_frames_at_exact_fuel_boundaries",
+              "p119_unhandled_resume_throw_cancellation_and_foreign_handles_keep_one_shot_cleanup"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

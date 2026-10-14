@@ -1,0 +1,581 @@
+
+running 1 test
+test tests::t057_argument_types_and_errors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test t158_hints_do_not_change_execution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 26 tests
+test instructions::ledger_tests::t008_actual_dispatch_coverage ... ignored, requires opcode ledger environment from opcode_coverage.py
+test metadata::tests::t158_case_01 ... ok
+test metadata::tests::t158_case_02 ... ok
+test metadata::tests::t158_case_03 ... ok
+test module::tests::t017_sections_and_absolute_offsets ... ok
+test module::tests::t018_malformed_sections ... ok
+test module::tests::t020_reserved_and_relaxed_opcodes ... ok
+test module::tests::t019_malformed_precedes_local_policy ... ok
+test module::tests::t019_bounded_body_and_locals ... ok
+test module::tests::t021_padded_signed_constants ... ok
+test module::tests::t023_custom_sections_preserved ... ok
+test module::tests::t024_data_spans ... ok
+test module::tests::t024_external_corpus ... ignored, external fixture audit configured by WTIME_DECODE_CORPUS
+test module::tests::t024_empty_group_and_nonnull_legacy_elements ... ok
+test module::tests::t024_missing_data_count_is_malformed ... ok
+test module::tests::t113_memory_offset_width ... ok
+test module::tests::t085_invalid_page_size_is_semantic ... ok
+test module::tests::t141_compact_imports ... ok
+test module::tests::t142_extension_immediates ... ok
+test module::tests::t145_exact_import_and_table_initializer ... ok
+test module::tests::t146_descriptors_and_reference_blocks ... ok
+test module::tests::t162_truncated_disabled_feature_is_malformed ... ok
+test module::tests::t162_binary_feature_evidence ... ok
+test reader::tests::t015_invalid_reader_width ... ok
+test reader::tests::t015_padded_and_overflow ... ok
+test reader::tests::t016_child_bounds ... ok
+
+test result: ok. 24 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 142 tests
+test arena::tests::t036_exhausted_generation_retires_slot ... ok
+test aggregate_budget_tests::t036_live_object_budget_releases_with_retired_slot ... ok
+test aggregate_budget_tests::t038_aggregate_table_budget_and_nondefault_type ... ok
+test arena::tests::t036_reuse_rejects_stale_generation ... ok
+test canonical::tests::t108_aggregate_registry_limits_are_transactional ... ok
+test canonical::tests::t108_collision_and_nonequivalent_member_preserve_identity ... ok
+test canonical::tests::t108_empty_recursion_group_has_no_canonical_members ... ok
+test cancellation_tests::t045_cancelled_execution_releases_frames_and_store_can_resume ... ok
+test canonical::tests::t108_group_boundaries_and_work_budgets ... ok
+test canonical::tests::t108_recursive_groups_normalize_absolute_indices ... ok
+test canonical::tests::t154_exact_type_excludes_proper_subtypes ... ok
+test canonical::tests::t151_descriptor_edges_participate_in_recursive_identity ... ok
+test continuation::tests::t007_host_identity_rejects_foreign_reference ... ok
+test continuation::tests::t140_aggregate_bytes_fail_before_capture_and_release_after_drop ... ok
+test continuation::tests::t140_failed_resume_reservation_does_not_consume ... ok
+test aggregate_budget_tests::t037_aggregate_memory_counts_shared_backing_once ... ok
+test continuation::tests::t140_second_resume_traps ... ok
+test continuation::tests::t141_multiple_bind_preserves_order_and_invalidates_old_capabilities ... ok
+test continuation::tests::t141_suspend_skips_same_tag_switch_prompt ... ok
+test continuation::tests::t142_generator_resume_and_bind ... ok
+test continuation::tests::t143_switch_preserves_outgoing_local ... ok
+test continuation::tests::t144_resume_throw_uses_captured_exception_handler ... ok
+test continuation::tests::t145_detached_frame_keeps_gc_local_alive ... ok
+test continuation::tests::t145_resume_throw_ref_uncaught_consumes_and_cleans_segment ... ok
+test continuation::tests::t145_suspension_carries_remaining_fuel ... ok
+test continuation::tests::t146_guest_call_rejects_host_suspension_without_capturing_outer_frames ... ok
+test continuation::tests::t146_unhandled_suspension_is_resumable ... ok
+test continuation::tests::t146_host_suspension_forward_validates_capability_and_payload ... ok
+test embedding_tests::t040_nested_host_to_guest_preserves_ordered_results ... ok
+test embedding_tests::t040_wrong_host_result_shape_is_host_failure ... ok
+test exceptions::tests::t124_host_published_exception_preserves_payload ... ok
+test embedding_tests::t035_immutable_modules_recompile_and_share_across_threads ... ok
+test exceptions::tests::t124_rooted_gc_reaches_exception_payload ... ok
+test exceptions::tests::t124_unreachable_exception_payload_cycles_reclaimed ... ok
+test continuation::tests::t147_repeated_suspension_release_and_cancel_do_not_retain_segments ... ok
+test execution::compact::calls::tests::p041_instance_binding_work_and_peak_bytes_decline_without_partial_publication ... ok
+test execution::compact::calls::tests::p041_private_binding_context_and_signature_corruption_fail_closed ... ok
+test execution::compact::indirect::tests::p042_private_capacity_work_and_round_robin_replacement_are_bounded ... ok
+test execution::compact::calls::tests::p041_private_bindings_reject_foreign_sources_and_retired_or_reused_generations ... ok
+test execution::compact::ir::fuse::tests::p047_corrupt_or_over_budget_declines ... ok
+test execution::compact::indirect::tests::p042_private_context_signature_and_cached_metadata_corruption_fail_closed ... ok
+test execution::compact::indirect::tests::p042_private_live_generation_and_negative_answers_never_reuse_success ... ok
+test execution::compact::ir::fuse::tests::p047_internal_cancellation_materializes_the_completed_pure_prefix ... ok
+test execution::compact::ir::inline::tests::p050_all_leaf_boundaries_cancel_and_fuel_restore_logical_activation ... ok
+test execution::compact::ir::lower_control::p040_private::p040_private_corruption_and_wrong_source_identity_reject_before_publication ... ok
+test execution::compact::ir::inline::tests::p050_leaf_plan_corruption_and_budget_bounds_decline ... ok
+test execution::compact::ir::lower_control::p040_private::p040_private_records_match_independent_block_arities_and_targets ... ok
+test execution::compact::ir::lower_control::p040_private::p040_private_work_bytes_and_indexed_arity_are_bounded_before_traversal ... ok
+test execution::compact::ir::lower_scalar::tests::p045_aggregate_whole_and_prefix_certificates_reject_corruption ... ok
+test execution::compact::ir::lower_scalar::tests::p045_lowering_and_verifier_faults_discard_partial_publication ... ok
+test execution::compact::ir::memory::p043_private::p043_private_operand_source_width_offset_and_type_corruption_fail_closed ... ok
+test canonical::tests::t107_deep_declared_chain_uses_bounded_iteration ... ok
+test execution::compact::ir::prefix::tests::p114_actual_capacity_work_and_overflow_are_bounded ... ok
+test execution::compact::ir::memory::p043_private::p043_private_preparation_work_bytes_and_binding_peak_are_bounded ... ok
+test execution::compact::ir::memory::p043_private::p043_private_binding_identity_generations_classes_and_unshared_growth_are_live ... ok
+test execution::compact::ir::prefix::tests::p114_exact_prefix_exit_and_entry_decline_are_distinct ... ok
+test execution::compact::ir::source_map::tests::p037_tests::p037_aggregate_limits_and_absolute_ceilings_reject ... ok
+test execution::compact::ir::prefix::tests::p114_corrupt_identity_records_exit_and_accounting_fail_closed ... ok
+test execution::compact::ir::source_map::tests::p037_tests::p037_corrupted_maps_and_wrong_module_identity_reject ... ok
+test execution::compact::ir::source_map::tests::p037_tests::p037_independent_control_edges_identity_and_terminal ... ok
+test execution::compact::ir::tests::p036_actual_capacity_boundary_and_resume_payload_remain_transactional ... ok
+test execution::compact::ir::tests::p036_budget_decline_drops_partial_metadata_and_leaves_decoded_fallback ... ok
+test execution::compact::ir::lower_scalar::tests::p045_all_declines_and_feature_disabled_input_preserve_validation ... ok
+test execution::compact::ir::tests::p036_validated_factory_admits_heap_side_from_ref_null ... ok
+test execution::compact::ir::tests::p036_validated_factory_admits_nonempty_resume_handlers ... ok
+test execution::compact::ir::tests::p036_validated_factory_admits_nonzero_v128_constants_and_shuffle_bytes ... ok
+test execution::compact::ir::tests::p036_validated_factory_admits_typed_select_types_side ... ok
+test execution::compact::ir::tests::p036_validated_factory_preserves_cast_branch_metadata ... ok
+test execution::compact::ir::tests::p036_validated_memory64_side_keeps_maximum_offset ... ok
+test execution::compact::ir::tests::p036_verifier_rejects_corrupt_tags_side_indices_events_work_and_ownership ... ok
+test execution::compact::ir::tests::p036_wide_compound_storage_preserves_bits_and_declines_unknown_shapes ... ok
+test execution::effects::tests::p019_budget_decline_keeps_decoded_module_usable ... ok
+test execution::compact::ir::tests::p036_measured_record_sizes_and_lossless_wide_inline_fields ... ok
+test execution::effects::tests::p019_missing_and_reordered_source_effects_are_rejected ... ok
+test execution::effects::tests::p019_store_trap_and_fuel_metadata_cannot_be_erased ... ok
+test execution::effects::tests::p019_unknown_opcode_is_root_materialization_barrier ... ok
+test execution::effects::tests::p019_wrong_control_target_and_fabricated_stack_bound_are_rejected ... ok
+test execution::plan::tests::p021_budget_decline_is_transactional_and_decoded_remains_usable ... ok
+test execution::plan::tests::p021_deep_multivalue_arity_and_retention_are_shared ... ok
+test execution::plan::tests::p021_multivalue_nesting_and_peak_come_from_validation ... ok
+test execution::plan::tests::p021_reference_layout_borrows_admitted_nominal_context ... ok
+test gc::tests::t112_cycles_and_stale_references ... ok
+test gc::tests::t112_payload_byte_limit_is_transactional_and_reclaimed ... ok
+test gc::tests::t113_host_token_clones_and_descriptor_edges ... ok
+test execution::compact::ir::tests::p036_branch_and_catch_tables_round_trip_from_admitted_modules ... ok
+test gc::tests::t114_externalized_gc_values_trace_the_same_object ... ok
+test gc::tests::t114_foreign_refs_fail_and_budgets_preserve_heap ... ok
+test gc::tests::t114_mark_budget_failure_never_sweeps_and_identity_is_stable ... ok
+test gc::tests::t154_shared_meta_descriptor_chain_and_cycle_trace ... ok
+test gc_exec::tests::t109_host_null_references_preserve_family_boundaries ... ok
+test execution::plan::tests::p021_wide_local_index_uses_full_validated_layout ... ok
+test gc_exec::tests::t113_each_store_provider_is_a_sole_root ... ok
+test gc_exec::tests::t113_nested_host_reentry_retains_arguments_and_pending_results ... ok
+test gc_exec::tests::t115_struct_packed_reads_and_rooted_collection ... ok
+test gc_exec::tests::t116_array_overlap_and_bounds ... ok
+test gc_exec::tests::t119_i31_sign_and_unsigned_views ... ok
+test gc_exec::tests::t156_descriptor_identity_is_not_structural_equality ... ok
+test gc_exec::tests::t119_internalized_host_reference_is_any_but_not_eq ... ok
+test host_tests::t113_reentrant_host_collection_roots_arguments ... ok
+test linker::exact_host_import_tests::t152_exact_import_rejects_host_proper_subtype ... ok
+test linker::rollback_escape_tests::t043_failed_start_preserves_gc_and_exception_wrapped_function_escape ... ok
+test initialization_tests::t043_earlier_data_writes_survive_later_segment_trap ... ok
+test lowering_and_bulk_acceptance::t044_retained_lowering_bytes_share_validated_body ... ok
+test owned_resource_tests::t040_module_bound_host_can_be_instantiated_as_typed_import ... ok
+test owned_resource_tests::t113_owned_external_drop_is_reachable_and_generational ... ok
+test owned_resource_tests::t162_host_memory_cannot_bypass_feature_profile ... ok
+test perf::tests::p006_load_records_one_allocating_read ... ok
+test perf::tests::p006_saturation_and_store_isolation ... ok
+test perf::tests::p006_source_dispatch_count_and_no_memory_event ... ok
+test lowering_and_bulk_acceptance::t046_cancel_during_bulk_after_committed_first_chunk ... ok
+test performance_module_ownership::p017_defined_host_type_context_survives_module_drop ... ok
+test publication_tests::t007_scalar_results_do_not_accumulate_roots ... ok
+test publication_tests::t113_releasing_published_result_permits_collection ... ok
+test rollback_tests::t043_start_trap_retires_private_allocations_preserving_import_writes ... ok
+test shared_memory::tests::t130_concurrent_updates_and_distinct_memories ... ok
+test execution::compact::ir::tests::p036_constructor_hard_work_limit_cannot_be_overridden ... ok
+test shared_memory::tests::t131_atomic_subword_and_alignment ... ok
+test shared_memory::tests::t133_aliases_counted_notification_and_registration_races ... ok
+test shared_memory::tests::t130_two_memory_sc_store_buffering_and_fence_visibility ... ok
+test shared_memory::tests::t133_wait_mismatch_timeout_notify ... ok
+test shared_store_tests::t005_feature_dependencies_checked_at_engine_boundary ... ok
+test shared_store_tests::t052_signaling_nan_is_quieted_by_rounding ... ok
+test shared_store_tests::t134_two_host_threads_share_memory_without_foreign_handles ... ok
+test simd::tests::t093_shuffle_validates_lanes ... ok
+test simd::tests::t093_simd_wrapping_saturation_and_signed_comparison ... ok
+test simd::tests::t094_simd_extension_uses_upper_half ... ok
+test simd::tests::t095_simd_float_min_signed_zero_and_nan ... ok
+test simd::tests::t097_relaxed_multiply_add_and_bitselect ... ok
+test tests::t007_foreign_handles_rejected ... ok
+test tests::t043_memory_ranges_checked ... ok
+test tests::t045_branch_preserves_results ... ok
+test tests::t050_division_traps ... ok
+test tests::t050_integer_add_wraps ... ok
+test tests::t052_float_signed_zero_min ... ok
+test tests::t054_calls_use_explicit_frames ... ok
+test typed_host_tests::t040_concrete_host_refs_require_validated_instance_type ... ok
+test wide::tests::t091_case_01 ... ok
+test wide::tests::t091_case_02 ... ok
+test wide::tests::t091_case_03 ... ok
+test gc::tests::t114_deep_heap_chain_marks_and_reclaims_iteratively ... ok
+test shared_memory::tests::t133_cancel_infinite_wait_removes_registration ... ok
+test performance_module_ownership::p017_large_clone_shares_all_payload_storage ... ok
+
+test result: ok. 142 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 8 tests
+test t035_foreign_store_and_argument_types_rejected ... ok
+test t051_nearest_and_min_preserve_signed_zero ... ok
+test t039_instance_state_is_mutable ... ok
+test t048_wrapping_and_division_boundaries ... ok
+test t052_conversions_trap_and_unsigned_range ... ok
+test t055_unaligned_access_and_bounds ... ok
+test t056_growth_failure_and_zero_initialization ... ok
+test t054_recursive_calls_and_branch_loops ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test caught_reference_root_decoded ... ok
+test caught_reference_root_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test t123_rethrow_reference ... ok
+test t125_traps_are_not_catchable ... ok
+test t124_uncaught_identity_payload ... ok
+test t122_cross_call_catch ... ok
+test t126_host_throw ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 28 tests
+test t162_case_04 ... ok
+test t162_case_01 ... ok
+test t162_case_02 ... ok
+test t162_case_03 ... ok
+test t162_case_06 ... ok
+test t162_case_05 ... ok
+test t162_case_07 ... ok
+test t162_case_08 ... ok
+test t162_case_09 ... ok
+test t162_case_10 ... ok
+test t162_case_12 ... ok
+test t162_case_13 ... ok
+test t162_case_14 ... ok
+test t162_case_15 ... ok
+test t162_case_11 ... ok
+test t162_case_17 ... ok
+test t162_case_16 ... ok
+test t162_case_19 ... ok
+test t162_case_18 ... ok
+test t162_case_20 ... ok
+test t162_case_21 ... ok
+test t162_case_24_dependency_closure ... ok
+test t162_case_23_stable_and_all_phase3 ... ok
+test t162_case_26_ignorable_branch_hints ... ok
+test t162_case_27_syntax_only_feature_paths ... ok
+test t162_case_22_initializer_and_encoding_paths ... ok
+test t162_case_28_typed_indirect_calls ... ok
+test t162_case_25_unrelated_host_calls ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 171 tests
+test p016::p016_absent_tiers_fail_at_configuration ... ok
+test p017::p017_clone_retains_executable_after_original_drop ... ok
+test p016::p016_reference_preserves_fuel_failure_boundary ... ok
+test p016::p016_reference_executes_archived_dispatch ... ok
+test p016::p016_default_and_portable_keep_decoded ... ok
+test p017::p017_foreign_engine_rejects_shared_module ... ok
+test p017::p017_suspended_frame_retains_module_context_after_drop ... ok
+test p018::p018_multivalue_branch_restores_order_and_label ... ok
+test p018::p018_request_distinguishes_cross_module_body_indices ... ok
+test p018::p018_restore_never_replays_completed_host_call ... ok
+test p018::p018_restored_nominal_local_remains_rooted_during_host_collection ... ok
+test p018::p018_suspend_resume_preserves_saved_fuel_and_context ... ok
+test p018::p018_invalid_or_foreign_cursor_request_is_rejected ... ok
+test p018::p018_store_successor_preserves_memory_and_fuel ... ok
+test p020::p020_fuel_failure_precedes_transient_stack_limit ... ok
+test p020::p020_cancellation_after_host_prefix_prevents_later_store ... ok
+test p022::p022_budget_priority_and_continuation_cleanup_match_policies ... ok
+test p020::p020_every_fuel_prefix_preserves_completed_stores ... ok
+test p022::p022_cross_module_continuation_preserves_context_roots_and_one_shot ... ok
+test p020::p020_tail_recursion_preserves_logical_depth_policy ... ok
+test p022::p022_gc_budget_failure_preserves_prefix_and_heap ... ok
+test p022::p022_exception_unwind_and_stale_foreign_gc_values_are_checked ... ok
+test p022::p022_table_mutations_and_foreign_handles_are_checked ... ok
+test p023::p023_br_table_vector_and_default_preserve_results ... ok
+test p023::p023_resume_keeps_owned_capture_across_collection ... ok
+test p022::p022_host_reentry_collection_preserves_outer_root_and_state ... ok
+test p023::p023_try_table_catches_survive_callee_unwind_and_module_drop ... ok
+test p023::p023_source_fetch_preserves_every_fuel_boundary ... ok
+test p023::p023_typed_select_vector_preserves_both_choices ... ok
+test p024::p024_captured_module_lifetime ... ok
+test p024::p024_deep_captured_handlers_keep_order_and_release_bytes ... ok
+test p024::p024_loop_and_table_depth ... ok
+test p024::p024_nested_catch_order ... ok
+test p024::p024_overlap_and_zero ... ok
+test p024::p024_reference_captures_keep_owned_catch_accounting ... ok
+test p024::p024_restored_captures_account_for_owned_catches ... ok
+test p024::p024_restored_try_table_normal_path_keeps_result ... ok
+test p025::p025_load_boundaries_and_effective_address_overflow_preserve_prior_store ... ok
+test p025::p025_memory64_checked_add_and_custom_page_boundaries_preserve_prefix ... ok
+test p025::p025_shared_ordinary_load_and_public_host_read_keep_their_contracts ... ok
+test p025::p025_unaligned_scalar_widths_sign_extension_and_float_bits_match ... ok
+test p026::p026_extension_loads ... ok
+test p026::p026_reference_extending_load_uses_same_checked_backend ... ok
+test p026::p026_lanes_and_oob_prefix ... ok
+test p026::p026_shared_vectors ... ok
+test p026::p026_splat_zero_loads ... ok
+test p027::p027_distinct_shared_capabilities_keep_aliased_memmove_semantics ... ok
+test p022::p022_call_depth_and_tail_call_controls_match_policies ... ok
+test p027::p027_distinct_table_copy_roots_references_across_chunk_boundary ... ok
+test p022::p022_prefix_effects_and_fuel_match_all_policies ... ok
+test p027::p027_mixed_memory64_custom_page_copy_prechecks_both_full_ranges ... ok
+test p027::p027_oob_precheck_preserves_prior_full_memory ... ok
+test p027::p027_overlap_full_memory_images ... ok
+test p028::p028_bitwise ... ok
+test p028::p028_compare ... ok
+test p028::p028_fuel_prefix_full_memory ... ok
+test p028::p028_reference_matches_numeric_and_fuel_boundaries ... ok
+test p028::p028_shifts ... ok
+test p028::p028_unary ... ok
+test p028::p028_wrap ... ok
+test p029::p029_foreign_function_and_wrong_import ... ok
+test p029::p029_imported_direct_and_host_signature ... ok
+test p029::p029_indirect_checks ... ok
+test p029::p029_recursive_multivalue ... ok
+test p027::p027_reference_distinct_copy_uses_same_bounded_backend ... ok
+test p029::p029_reference_reuses_public_call_helpers ... ok
+test p029::p029_tail_depth ... ok
+test p030::p030_direct_guest_calls_check_zeroed_and_reset_locals ... ok
+test p030::p030_imported_direct_call_stays_at_host_boundary ... ok
+test p030::p030_nominal_reference_arguments_remain_store_checked ... ok
+test p030::p030_ordinary_and_tail_recursion_preserve_depth_contract ... ok
+test p030::p030_reference_policy_matches_public_call_outcomes ... ok
+test p030::p030_tail_call_forwards_and_checks_all_arguments_at_depth_two ... ok
+test p029::p029_reentry_growth_gc_root ... ok
+test p031::p031_detached_continuation_survives_unrelated_call_and_is_one_shot ... ok
+test p031::p031_errors_return_to_reuse_and_caught_gc_result_releases_exactly ... ok
+test p031::p031_nested_host_reentry_preserves_outer_arguments_and_result ... ok
+test p031::p031_reference_policy_runs_the_same_public_reentry_case ... ok
+test p032::p032_guest_frame_and_recursive_multivalue_preserve_exact_arguments ... ok
+test p032::p032_imported_host_owns_arguments_during_nested_guest_reentry ... ok
+test p032::p032_public_reference_arguments_keep_nominal_and_store_checks ... ok
+test p032::p032_reference_policy_repeats_public_guest_argument_results ... ok
+test p032::p032_tail_recursive_arguments_overlap_safely_at_depth_two ... ok
+test p033::p033_indirect_call_observes_each_table_target_mutation ... ok
+test p033::p033_nominal_exact_casts_match_oracle_and_collect_every_allocation ... ok
+test p033::p033_typed_function_reference_checks_match_oracle_without_gc_leaks ... ok
+test p033::p033_wrong_argument_and_foreign_store_errors_allow_later_valid_call ... ok
+test p034::p034_equal_heap_type_fields_keep_high_module_local_reference_context ... ok
+test p034::p034_layout_preparation_preserves_gc_resource_failure_without_live_objects ... ok
+test p034::p034_prior_engine_canonical_history_does_not_replace_module_local_indices ... ok
+test p036::p036_public_default_and_portable_keep_decoded_policy ... ok
+test p034::p034_high_local_array_and_struct_indices_keep_packed_field_semantics ... ok
+test p036::p036_public_wide_local_keeps_full_index_and_decoded_result ... ok
+test p037::p037_public_decoded_branch_handoff_keeps_source_order_and_labels ... ok
+test p037::p037_public_decoded_store_successor_has_exact_charged_cursor ... ok
+test p037::p037_public_metadata_keeps_default_and_portable_decoded ... ok
+test p038::p038_every_fuel_prefix_and_transient_stack_failure_match_decoded_and_reference ... ok
+test p038::p038_i64_wrapping_and_early_return_have_exact_executed_source_counts ... ok
+test p038::p038_integer_boundaries_locals_select_drop_execute_direct_records ... ok
+test p027::p027_fill_exact_images_zero_odd_and_multiple_chunks ... ok
+test p038::p038_module_lifetime_and_pre_cancel_do_not_weaken_entry_contracts ... ok
+test p038::p038_materialization_preserves_every_reachable_next_source_cursor_and_fuel ... ok
+test p027::p027_distinct_memory_copy_changes_destination_and_preserves_source ... ok
+test p039::p039_raw_float_constants_preserve_signed_zero_and_nan_payloads ... ok
+test p039::p039_strict_min_max_nan_sets_and_copysign_keep_wasm_bits ... ok
+test p036::p036_public_long_function_remains_invocable_with_exact_decoded_fuel ... ok
+test p039::p039_vector_shuffle_fuel_and_materialized_operands_match_source_events ... ok
+test p038::p038_reference_select_and_wide_locals_visibly_keep_decoded_fallback ... ok
+test p039::p039_vector_block_parameters_and_results_keep_source_control_and_prefixes ... ok
+test p040::p040_reference_valued_control_declines_whole_function_without_changing_identity ... ok
+test p039::p039_division_conversion_traps_and_fuel_priority_are_original_operations ... ok
+test p040::p040_unreachable_keeps_completed_local_prefix_and_charged_trap_cursor ... ok
+test p040::p040_zero_result_return_and_global_stack_peak_preserve_trap_priority ... ok
+test p040::p040_taken_fallthrough_and_structural_cursors_keep_exact_labels_and_fuel ... ok
+test p041::p041_call_and_callee_cursors_materialize_the_same_canonical_state ... ok
+test p041::p041_argument_ranges_and_every_call_fuel_prefix_match_independent_counts ... ok
+test p041::p041_failed_start_preserves_host_side_effect_and_cannot_reuse_old_bindings ... ok
+test p041::p041_reference_target_and_wrong_import_signature_decline_before_publication ... ok
+test p041::p041_shared_module_instances_and_stores_resolve_their_own_imported_guest ... ok
+test p041::p041_numeric_host_reentry_preserves_decoded_caller_gc_roots_and_growth ... ok
+test p040::p040_multivalue_loop_and_nested_if_match_each_source_fuel_prefix ... ok
+test p041::p041_tail_calls_preserve_logical_depth_and_host_suspension_barriers ... ok
+test p042::p042_cache_hits_keep_materialized_source_cursors_and_charged_fuel ... ok
+test p042::p042_imported_table_aliases_and_instances_do_not_reuse_other_targets ... ok
+test p042::p042_cached_host_targets_preserve_gc_roots_reentry_results_and_suspension ... ok
+test p042::p042_table64_large_indices_and_tail_logical_depth_do_not_alias_or_grow ... ok
+test p042::p042_table_set_grow_fill_copy_and_polymorphic_churn_read_current_targets ... ok
+test p040::p040_br_table_targets_and_early_returns_have_independent_prefixes ... ok
+test p042::p042_typed_call_ref_null_fuel_prefix_foreign_and_argument_validation_remain_checked ... ok
+test p042::p042_indirect_null_mismatch_bounds_and_every_trap_fuel_prefix_are_original ... ok
+test p043::p043_full_boundary_ranges_trap_before_side_effect_and_vector_memory_falls_back ... ok
+test p043::p043_one_byte_pages_use_byte_lengths_and_preserve_last_byte_store_prefix ... ok
+test p043::p043_shared_aliases_distinct_instances_and_host_growth_refresh_live_ranges ... ok
+test p043::p043_unshared_growth_and_memory_cursors_materialize_identical_source_state ... ok
+test p043::p043_memory64_overflow_trap_keeps_every_preceding_store_and_fuel_priority ... ok
+test p045::p045_precancellation_has_no_compact_or_memory_effects ... ok
+test p043::p043_every_scalar_load_width_sign_and_raw_float_has_exact_fuel_prefix ... ok
+test p043::p043_all_nine_store_kinds_have_independent_full_memory_prefix_images ... ok
+test p047::p047_cancel_and_materialize ... ok
+test p047::p047_branch_entry_and_peak_stack ... ok
+test p047::p047_fused_results_and_overflow ... ok
+test p047::p047_every_source_fuel_prefix ... ok
+test p045::p045_smoke_all_generated_families_and_boundary_inputs ... ok
+test p050::p050_fuel_stop_in_inline_leaf_reconstructs_arguments_and_return_point ... ok
+test p050::p050_low_logical_call_depth_fails_without_physical_frame ... ok
+test p050::p050_recursive_imported_effectful_leaves_decline_and_expansion_bounded ... ok
+test p050::p050_retained_operands_keep_global_peak_and_source_limits ... ok
+test p115::p115_branch_over_gc_uses_one_way_decoded_suffix ... ok
+test p115::p115_cancellation_priority_and_pending_exit_snapshot_are_exact ... ok
+test p047::p047_selected_accumulator_and_dependent_shapes_execute_verified_groups ... ok
+test p116::p116_low_fuel_cancellation_foreign_and_stale_refs_release_roots ... ok
+test p116::p116_nested_numeric_invoke_keeps_outer_reference_local_visible ... ok
+test p116::p116_sole_active_compact_local_survives_zero_argument_host_collection ... ok
+test p115::p115_every_fuel_prefix_preserves_memory_and_single_charge ... ok
+test p117::p117_nested_unwind_and_precancellation_preserve_canonical_frames ... ok
+test p050::p050_direct_leaf_results_and_wrapping_match ... ok
+test p117::p117_caught_transfer_preserves_all_fuel_prefixes_and_full_memory ... ok
+test p117::p117_unhandled_exception_keeps_exact_tag_payload_and_source_exit ... ok
+test p118::p118_failed_bind_budget_and_cancellation_preserve_ready_original ... ok
+test p118::p118_successful_bind_retains_bound_reference_and_consumes_old_capability ... ok
+test p118::p118_cross_module_capture_retains_source_context_roots_and_fuel ... ok
+test p119::p119_resume_restores_original_next_source_and_saved_fuel_without_prefix_reentry ... ok
+test p120::p120_stale_foreign_and_cancelled_continuations_do_no_prefix_work ... ok
+test p119::p119_unhandled_resume_throw_cancellation_and_foreign_handles_keep_one_shot_cleanup ... ok
+test p120::p120_switch_byte_and_frame_refusal_follow_prefix_and_preserve_cleanup ... ok
+test p119::p119_caught_resume_throw_unwinds_nested_frames_at_exact_fuel_boundaries ... ok
+test p121::p121_prefix_execution_reports_real_optimized_and_fallback_events ... ok
+test p121::p121_publication_counts_are_immutable_and_capacity_bounded ... ok
+test p120::p120_switch_preserves_outgoing_local_and_every_source_fuel_boundary ... ok
+test p121::p121_absent_or_budget_declined_artifact_has_unknown_discarded_work ... ok
+test p045::p045_generated_thousand_cases_match_three_policies_state_and_every_fuel ... ok
+
+test result: ok. 171 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.19s
+
+
+running 4 tests
+test t092_wide_arithmetic_public_execution ... ok
+test t086_byte_pages_and_growth ... ok
+test t083_mixed_width_copy_is_prechecked ... ok
+test t082_memory64_addresses_and_width ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 13 tests
+test error::tests::t005_case_01 ... ok
+test error::tests::t005_case_02 ... ok
+test error::tests::t005_case_03 ... ok
+test features::tests::t004_case_01 ... ok
+test features::tests::t004_case_02 ... ok
+test features::tests::t004_dependency_combinations ... ok
+test tests::t004_profiles_have_explicit_feature_policy ... ok
+test tests::t005_error_retains_category_and_absolute_offset ... ok
+test tests::t006_limits_and_vectors_keep_wire_widths ... ok
+test tests::t006_source_types_preserve_exactness_and_recursion_groups ... ok
+test types::tests::t006_case_01 ... ok
+test types::tests::t006_case_02 ... ok
+test types::tests::t006_case_03 ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 83 tests
+test acceptance::t025_case01_unknown_function_type ... ok
+test acceptance::t026_case01_duplicate_export_names ... ok
+test acceptance::t025_case03_disabled_type_and_malformed_type_differ ... ok
+test acceptance::t026_case02_start_requires_empty_signature ... ok
+test acceptance::t026_case03_enabled_mutable_import_and_export ... ok
+test acceptance::t025_case02_declared_type_count_budget ... ok
+test acceptance::t026_start_result_and_index_boundaries ... ok
+test acceptance::t026_export_indices_use_each_external_index_space ... ok
+test acceptance::t027_case01_mutable_global_not_constant_source ... ok
+test acceptance::t027_case02_initializer_requires_one_value ... ok
+test acceptance::t027_case03_float_initializer_preserves_raw_bits ... ok
+test acceptance::t027_case03_reference_initializer_must_match_global_type ... ok
+test acceptance::t028_case02_block_cannot_pop_below_frame ... ok
+test acceptance::t028_polymorphic_untyped_select_still_rejects_known_reference ... ok
+test acceptance::t029_case01_loop_label_uses_inputs_not_results ... ok
+test acceptance::t029_case02_br_if_preserves_branch_operands ... ok
+test acceptance::t029_case03_branch_table_requires_compatible_labels ... ok
+test acceptance::t030_case01_immutable_global_cannot_be_set ... ok
+test acceptance::t030_case02_call_requires_arguments ... ok
+test acceptance::t030_case03_indirect_call_requires_function_table ... ok
+test acceptance::t031_case01_numeric_operand_width ... ok
+test acceptance::t031_case02_conversion_result_width ... ok
+test acceptance::t032_case01_memory_alignment_limit ... ok
+test acceptance::t032_case02_data_segment_index_bounds ... ok
+test acceptance::t032_case03_active_data_bounds_are_dynamic ... ok
+test acceptance::t033_case01_failed_final_body_returns_no_module ... ok
+test acceptance::t033_case02_caller_bytes_cannot_mutate_certificate ... ok
+test acceptance::t033_case03_policy_provenance_is_retained ... ok
+test acceptance::t090_custom_page_count_fits_memory_size_result ... ok
+test acceptance::t107_declared_array_const_covariance_and_mutable_invariance ... ok
+test acceptance::t107_function_parameter_contravariance_and_result_covariance ... ok
+test acceptance::t121_try_table_accepts_abstract_reference_block_results ... ok
+test acceptance::t121_try_table_indexed_signature_obeys_multi_value_gate ... ok
+test continuation_tests::t033_stack_budget ... ok
+test continuation_tests::t033_type_work_budget ... ok
+test continuation_tests::t139_generator_bind ... ok
+test corpus_regressions::t073_tail_result_covariance ... ok
+test corpus_validation_regressions::t033_empty_element_type_checked ... ok
+test corpus_regressions::t111_large_polymorphic_array ... ok
+test corpus_validation_regressions::t033_nonnullable_table_legacy_element ... ok
+test corpus_validation_regressions::t033_nonnullable_table_requires_initializer ... ok
+test corpus_validation_regressions::t088_memory64_boundary ... ok
+test corpus_validation_regressions::t097_simd_offset_overflow ... ok
+test corpus_validation_regressions::t107_internal_external_distinction ... ok
+test descriptor_regressions::t150_desc_branch_refines_null ... ok
+test descriptor_regressions::t150_desc_fail_refines_null ... ok
+test descriptor_regressions::t150_exact_descriptor_bottom ... ok
+test descriptor_regressions::t150_exact_descriptor_subtype ... ok
+test empty_rec_regression::t107_empty_rec_group_valid ... ok
+test more_proposal_tests::t111_initialized_local ... ok
+test more_proposal_tests::t111_nondefaultable_local ... ok
+test more_proposal_tests::t130_atomic_alignment ... ok
+test more_proposal_tests::t130_atomic_type ... ok
+test more_proposal_tests::t130_atomic_valid ... ok
+test more_proposal_tests::t150_descriptor_normal_constructor ... ok
+test more_proposal_tests::t150_descriptor_requires_exact ... ok
+test more_proposal_tests::t150_descriptor_valid ... ok
+test mvp_regressions::t033_mvp_legacy_element ... ok
+test proposal_tests::t099_simd_bad_lane ... ok
+test proposal_tests::t099_simd_valid ... ok
+test proposal_tests::t107_case_01 ... ok
+test proposal_tests::t107_case_02 ... ok
+test proposal_tests::t107_case_03 ... ok
+test proposal_tests::t111_case_01 ... ok
+test proposal_tests::t111_case_02 ... ok
+test proposal_tests::t111_case_03 ... ok
+test proposal_tests::t111_packed ... ok
+test proposal_tests::t111_valid ... ok
+test tests::t033_block_result ... ok
+test tests::t033_branch_bounds ... ok
+test tests::t033_empty_module ... ok
+test tests::t033_extra_operand ... ok
+test tests::t033_if_needs_else ... ok
+test tests::t033_local_bounds ... ok
+test tests::t033_numeric_result ... ok
+test tests::t033_stack_underflow ... ok
+test tests::t033_unknown_opcode ... ok
+test tests::t033_unreachable_polymorphism ... ok
+test types::premise_tests::t107_array_storage_covariance_and_mutable_invariance ... ok
+test tests::t033_wrong_result ... ok
+test types::premise_tests::t107_reference_nullability_and_bottom_lattice_matrix ... ok
+test acceptance::t028_case03_deep_control_nesting_is_bounded ... ok
+test acceptance::t028_case03_deep_declared_subtyping_is_iterative_and_budgeted ... ok
+
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+
+running 2 tests
+test t121_exception_feature_gate ... ok
+test t121_rejects_invalid_exception_types_and_targets ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test t004_contradictory_profile_rejected_before_decoding ... ok
+test t004_case_03 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test crates/wtime-validate/src/lib.rs - FunctionBounds (line 22) - compile fail ... ok
+test crates/wtime-validate/src/lib.rs - FunctionBounds (line 16) - compile fail ... ok
+test crates/wtime-validate/src/lib.rs - FunctionBounds (line 28) - compile fail ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

@@ -1,0 +1,22 @@
+{
+  "cpu": "x86_64",
+  "logical_cpus": 5,
+  "jobs": 5,
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "lock_sha256": "ff061f755cb345e7752b47da3b8f02449bb658e7a25caf057b59f29e04de7faa",
+  "target_initially_empty": true,
+  "budgets": {
+    "clean_seconds": 60,
+    "leaf_seconds": 5,
+    "stripped_bytes": 5242880
+  },
+  "clean_seconds": 7.116912724000031,
+  "clean_peak_rss_kib": 272416,
+  "unchanged_seconds": 3.359134305000225,
+  "leaf_seconds": 0.32106943700000556,
+  "release_seconds": 14.113891334000073,
+  "stripped_bytes": 958672,
+  "unchanged_peak_rss_kib": 169876,
+  "budget_pass": true,
+  "measurement_context": "Development snapshot; source edits were concurrent, so unchanged-build timing is not a stable-source measurement. Use build-final.json for release gating."
+}

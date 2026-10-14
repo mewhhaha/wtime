@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "task": "P076",
+  "development_only": true,
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/fixtures/integration/**",
+        "crates/wtime-runtime/tests/fixtures/performance/p076/**"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation"
+      ],
+      "commands": [
+        {
+          "name": "semantics",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib",
+            "p076_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "semantics",
+          "features": [],
+          "required_names": [
+            "p076_fixed_width_alias_reads_preserve_atomic_alignment_and_bounds",
+            "p076_concurrent_grow_and_mixed_reads_copy_one_locked_image",
+            "p076_guest_scalar_vector_and_lane_reads_use_fixed_shared_path",
+            "p076_source_fuel_cancellation_oob_and_alias_growth_preserve_effects"
+          ],
+          "minimum_passed": 4
+        }
+      ],
+      "outputs": {
+        "placeholder": "{stage}/development-only-not-closable.json"
+      }
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "semantics",
+        "uses": [
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "semantics",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib",
+              "p076_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "semantics",
+            "features": [],
+            "required_names": [
+              "p076_fixed_width_alias_reads_preserve_atomic_alignment_and_bounds",
+              "p076_concurrent_grow_and_mixed_reads_copy_one_locked_image",
+              "p076_guest_scalar_vector_and_lane_reads_use_fixed_shared_path",
+              "p076_source_fuel_cancellation_oob_and_alias_growth_preserve_effects"
+            ],
+            "minimum_passed": 4
+          }
+        ]
+      },
+      {
+        "name": "tier-semantics",
+        "uses": [
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "tier-semantics",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib",
+              "--features",
+              "compact-executor,execution-reference",
+              "p076_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "tier-semantics",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p076_fixed_width_alias_reads_preserve_atomic_alignment_and_bounds",
+              "p076_concurrent_grow_and_mixed_reads_copy_one_locked_image",
+              "p076_guest_scalar_vector_and_lane_reads_use_fixed_shared_path",
+              "p076_source_fuel_cancellation_oob_and_alias_growth_preserve_effects"
+            ],
+            "minimum_passed": 4
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+;; Original CC0 P026 fixture. Lane syntax matches the pinned spec corpus.
+;; Data bytes are a0..af; the caller vector is 10..1f.
+(module
+  (memory (export "memory") 1)
+  (data (i32.const 0) "\a0\a1\a2\a3\a4\a5\a6\a7\a8\a9\aa\ab\ac\ad\ae\af")
+  (func (export "v128.load8_lane_nonzero") (param $address i32) (param $x v128) (result v128)
+    (v128.load8_lane 5 (local.get $address) (local.get $x)))
+  (func (export "v128.load16_lane_nonzero") (param $address i32) (param $x v128) (result v128)
+    (v128.load16_lane 3 (local.get $address) (local.get $x)))
+  (func (export "v128.load32_lane_nonzero") (param $address i32) (param $x v128) (result v128)
+    (v128.load32_lane 2 (local.get $address) (local.get $x)))
+  (func (export "v128.load64_lane_nonzero") (param $address i32) (param $x v128) (result v128)
+    (v128.load64_lane 1 (local.get $address) (local.get $x)))
+  (func (export "full_width_oob_after_prefix") (result i32)
+    (i32.store8 (i32.const 8) (i32.const 170))
+    (drop (v128.load (i32.const 65528)))
+    (i32.const 1))
+  (func (export "load64_lane_oob_after_prefix") (param $x v128) (result v128)
+    (i32.store8 (i32.const 8) (i32.const 170))
+    (v128.load64_lane 1 (i32.const 65532) (local.get $x))))

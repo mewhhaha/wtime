@@ -1,0 +1,636 @@
+{
+  "completion": {
+    "limitations": [
+      "This workload foundation has no performance measurements or promotion decision.",
+      "The default runtime remains Decoded; Compact is opt-in."
+    ],
+    "outcome": "contract_only",
+    "required_phases": [
+      "verify"
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p126_memory_scaling.py",
+              "-v",
+              "-b"
+            ],
+            "name": "registry-model"
+          }
+        ],
+        "name": "registry-model",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "registry-model",
+            "kind": "unittest",
+            "minimum_passed": 4,
+            "required_names": [
+              "test_old_rows_and_selection_membership_remain_identical",
+              "test_alias_rows_match_generated_metadata_and_full_registry",
+              "test_alias_oracles_return_complete_independent_memory_images",
+              "test_page_bounds_are_explicit"
+            ]
+          }
+        ],
+        "uses": [
+          "runtime",
+          "compilation",
+          "harness",
+          "producer",
+          "tests",
+          "predecessor"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_p126_memory.py",
+              "-v",
+              "-b"
+            ],
+            "name": "driver-oracle"
+          }
+        ],
+        "name": "driver-oracle",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "driver-oracle",
+            "kind": "unittest",
+            "minimum_passed": 8,
+            "required_names": [
+              "test_exact_alias_rows_and_stages_are_required",
+              "test_full_memory_oracle_rejects_altered_model_image",
+              "test_protocol_requires_requested_mode_and_uninstrumented_binary",
+              "test_staged_driver_argv_preserves_stage_and_batch_fields",
+              "test_wrong_memory_response_is_archived_before_oracle_failure",
+              "test_containment_refuses_escape_before_any_write",
+              "test_source_drift_comparison_is_exact",
+              "test_warm_call_uses_batch_three_and_full_state"
+            ]
+          }
+        ],
+        "uses": [
+          "runtime",
+          "compilation",
+          "harness",
+          "producer",
+          "tests",
+          "predecessor"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "--offline",
+              "--manifest-path",
+              "{repo}/target/verification/build-caches/runtime-protocol/compact/workspace/Cargo.toml",
+              "--no-default-features",
+              "--features",
+              "runtime-only,compact-executor",
+              "memory_driver::repeatable_memory_case_tests::",
+              "--",
+              "--nocapture"
+            ],
+            "name": "runtime-routes"
+          }
+        ],
+        "name": "runtime-routes",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "runtime-routes",
+            "features": [
+              "runtime-only",
+              "compact-executor"
+            ],
+            "minimum_passed": 2,
+            "required_names": [
+              "accepts_width_aliases_and_preserves_existing_cases",
+              "rejects_unknown_or_malformed_width_aliases"
+            ]
+          }
+        ],
+        "uses": [
+          "runtime",
+          "compilation",
+          "harness",
+          "producer",
+          "tests",
+          "predecessor"
+        ]
+      }
+    ]
+  },
+  "identities": {
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**"
+      ]
+    },
+    "harness": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wat",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/fixtures/exceptions/**/*.wat",
+        "tools/wtime-bench/fixtures/gc/**/*.wasm",
+        "tools/wtime-bench/fixtures/gc/**/*.wat",
+        "tools/wtime-bench/fixtures/memory/**/*.wat",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/scalar/**/*.wat",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/**/Cargo.toml"
+      ],
+      "settings": {
+        "foundation": true,
+        "modes": [
+          "decoded",
+          "compact"
+        ],
+        "warm_batch": 3
+      }
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P048/rollback/attempt-0001/receipt.json"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p126_memory.py",
+        "docs/benchmarks/performance/P125-fixture-tools.json"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p126_memory_scaling.py",
+        "tools/verification/tests/test_p126_memory.py"
+      ]
+    }
+  },
+  "schema_version": 1,
+  "source_delta": {
+    "allowed_additions": [],
+    "allowed_changes": [],
+    "baseline": "{repo}/target/performance/P048/rollback/attempt-0001/receipt.json",
+    "identity": "runtime",
+    "pointer": "/restored_sources"
+  },
+  "stages": {
+    "verify": {
+      "checks": [
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "decoded"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/cargo_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": []
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "compact"
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/cargo_features",
+          "value": [
+            "runtime-only",
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": [
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-p126-memory-foundation-v1"
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/performance_candidate",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/speed_decision",
+          "value": null
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/settings/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/settings/modes",
+          "value": [
+            "decoded",
+            "compact"
+          ]
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/aliases",
+          "value": 18
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/fixtures",
+          "value": 3
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/observations",
+          "value": 180
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/driver_commands",
+          "value": 180
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/logical_guest_invocations",
+          "value": 252
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_mode/decoded",
+          "value": 90
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_mode/compact",
+          "value": 90
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_stage/prepare",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_stage/instantiate",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_stage/first_call",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_stage/warm_call",
+          "value": 36
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_stage/load_and_call",
+          "value": 36
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/decoded"
+          ],
+          "name": "build-decoded"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "compact",
+            "--output",
+            "{stage}/compact"
+          ],
+          "name": "build-compact"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p126_memory_scaling.py",
+            "-v",
+            "-b"
+          ],
+          "name": "registry-model"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p126_memory.py",
+            "-v",
+            "-b"
+          ],
+          "name": "driver-oracle"
+        },
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "--manifest-path",
+            "{repo}/target/verification/build-caches/runtime-protocol/compact/workspace/Cargo.toml",
+            "--no-default-features",
+            "--features",
+            "runtime-only,compact-executor",
+            "memory_driver::repeatable_memory_case_tests::",
+            "--",
+            "--nocapture"
+          ],
+          "name": "runtime-routes"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p126_memory.py",
+            "--decoded",
+            "{stage}/decoded/bin/wtime-bench",
+            "--compact",
+            "{stage}/compact/bin/wtime-bench",
+            "--output",
+            "{stage}/memory-proof"
+          ],
+          "name": "memory-proof"
+        }
+      ],
+      "outputs": {
+        "compact_binary": "{stage}/compact/bin/wtime-bench",
+        "compact_record": "{stage}/compact/build-record.json",
+        "decoded_binary": "{stage}/decoded/bin/wtime-bench",
+        "decoded_record": "{stage}/decoded/build-record.json",
+        "proof": "{stage}/memory-proof/report.json"
+      },
+      "tests": [
+        {
+          "command": "registry-model",
+          "kind": "unittest",
+          "minimum_passed": 4,
+          "required_names": [
+            "test_old_rows_and_selection_membership_remain_identical",
+            "test_alias_rows_match_generated_metadata_and_full_registry",
+            "test_alias_oracles_return_complete_independent_memory_images",
+            "test_page_bounds_are_explicit"
+          ]
+        },
+        {
+          "command": "driver-oracle",
+          "kind": "unittest",
+          "minimum_passed": 8,
+          "required_names": [
+            "test_exact_alias_rows_and_stages_are_required",
+            "test_full_memory_oracle_rejects_altered_model_image",
+            "test_protocol_requires_requested_mode_and_uninstrumented_binary",
+            "test_staged_driver_argv_preserves_stage_and_batch_fields",
+            "test_wrong_memory_response_is_archived_before_oracle_failure",
+            "test_containment_refuses_escape_before_any_write",
+            "test_source_drift_comparison_is_exact",
+            "test_warm_call_uses_batch_three_and_full_state"
+          ]
+        },
+        {
+          "command": "runtime-routes",
+          "features": [
+            "runtime-only",
+            "compact-executor"
+          ],
+          "minimum_passed": 2,
+          "required_names": [
+            "accepts_width_aliases_and_preserves_existing_cases",
+            "rejects_unknown_or_malformed_width_aliases"
+          ]
+        }
+      ],
+      "uses": [
+        "build_producer",
+        "compilation",
+        "harness",
+        "predecessor",
+        "producer",
+        "runtime",
+        "tests"
+      ]
+    }
+  },
+  "task": "P126"
+}

@@ -1,0 +1,11 @@
+(module
+  (memory (export "memory") i64 1 1)
+  (func (export "run") (param $address i32) (result i32)
+    (local $wide i64)
+    (local.set $wide (i64.extend_i32_u (local.get $address)))
+    (local.get $wide)
+    (i64.const -128)
+    (i64.store8)
+    (local.get $wide)
+    (i64.load8_s)
+    (i32.wrap_i64)))

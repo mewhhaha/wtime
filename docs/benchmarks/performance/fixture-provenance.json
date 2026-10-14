@@ -1,0 +1,38 @@
+{
+  "kernels": {
+    "representative_parser_hash": {
+      "source": "fixtures/representative/parser_hash.wat",
+      "source_sha256": "44aefe0593f79d3732466f248d1c69f1e9450145b15c6bd64908bc8f217bf32b",
+      "wasm_sha256": "4ab2c42b5ec50f2b8a2d4c325ebaa54a6673b7ce42265cf9f9f477788f634a98",
+      "origin": "original WAT authored for the wtime performance fixture set",
+      "license": "CC0-1.0",
+      "external_source_or_download": false,
+      "encoder": "wtime-conformance existing encoder",
+      "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+      "encoding_command": "wtime-conformance encode {source} -o {output}"
+    },
+    "representative_image_filter": {
+      "source": "fixtures/representative/image_filter.wat",
+      "source_sha256": "081e25e5b2f01d521167678c1aca46c967f4379989e945f14bc59bcc670e225c",
+      "wasm_sha256": "678eee3d25fff15f867befd2602cf403f25db7da67339f1f1b7b9b2c4e2e6f0a",
+      "origin": "original WAT authored for the wtime performance fixture set",
+      "license": "CC0-1.0",
+      "external_source_or_download": false,
+      "encoder": "wtime-conformance existing encoder",
+      "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+      "encoding_command": "wtime-conformance encode {source} -o {output}"
+    },
+    "representative_graph_bfs": {
+      "source": "fixtures/representative/graph_bfs.wat",
+      "source_sha256": "641c210679045e870953ec340aa479d4282fd5d798c8e5857b507c49c2643069",
+      "wasm_sha256": "28de8728d043d81703727cd71f4f67c9c1aa32b45fecba0f8bb760560ee2f63c",
+      "origin": "original WAT authored for the wtime performance fixture set",
+      "license": "CC0-1.0",
+      "external_source_or_download": false,
+      "encoder": "wtime-conformance existing encoder",
+      "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+      "encoding_command": "wtime-conformance encode {source} -o {output}"
+    }
+  },
+  "toolchain_notes": "Readable original WAT avoids an external compiler and moving benchmark suite; output bytes are produced by the pinned existing encoder."
+}

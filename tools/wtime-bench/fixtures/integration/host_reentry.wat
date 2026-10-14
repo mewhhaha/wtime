@@ -1,0 +1,17 @@
+;; SPDX-License-Identifier: CC0-1.0
+(module
+ (type $object (struct (field i32)))
+ (import "host" "collect" (func $collect))
+ (global (export "phase") (mut i32) (i32.const 0))
+ (memory (export "memory") 1 1)
+ (func (export "nested") (result i32)
+   (global.set 0 (i32.const 2)) (i32.store (i32.const 4) (i32.const 19)) (i32.const 19))
+ (func (export "run") (result i32)
+   (local $root (ref null $object))
+   (local.set $root (struct.new $object (i32.const 77)))
+   (global.set 0 (i32.const 1)) (i32.store (i32.const 0) (i32.const 11))
+   (call $collect)
+   (struct.get $object 0 (local.get $root)))
+ (func (export "make") (result (ref $object)) (struct.new $object (i32.const 77)))
+ (func (export "get") (param (ref $object)) (result i32)
+   (struct.get $object 0 (local.get 0))))

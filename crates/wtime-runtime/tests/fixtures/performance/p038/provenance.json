@@ -1,0 +1,720 @@
+{
+  "encoder": {
+    "path": "/workspace/wtime/target/debug/wtime-conformance",
+    "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+  },
+  "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+  "fixtures": {
+    "explicit-return": {
+      "encoding_command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P038-fixture-stage/explicit-return.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P038/fixtures/explicit-return.wasm"
+      ],
+      "encoding_exit": 0,
+      "manual_oracle_sha256": "139dd57153a5c9f1bf13f7586acf8c8c7ea5012b89c48f7f4c7e07424e367be5",
+      "validation_command": [
+        "/workspace/wtime/target/debug/wtime-cli",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P038/fixtures/explicit-return.wasm"
+      ],
+      "validation_exit": 0,
+      "wasm_sha256": "4a3bccdfbf89dc953ca9dae236a84c7b74a4f12e69bb6caae590e6928bb698ef",
+      "wat_sha256": "d9f9ab2cd0885fdcbe6330425641e0a834fbc7514ede88facde5590607aa3184"
+    },
+    "reference-select": {
+      "encoding_command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P038-fixture-stage/reference-select.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P038/fixtures/reference-select.wasm"
+      ],
+      "encoding_exit": 0,
+      "manual_oracle_sha256": "139dd57153a5c9f1bf13f7586acf8c8c7ea5012b89c48f7f4c7e07424e367be5",
+      "validation_command": [
+        "/workspace/wtime/target/debug/wtime-cli",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P038/fixtures/reference-select.wasm"
+      ],
+      "validation_exit": 0,
+      "wasm_sha256": "dd6ffce94afced45c1cab366adade7a708ceb41d49745d5b0651cb952c7cad6a",
+      "wat_sha256": "63ca687e0eb7a8fbcedc4ac5b55d1af58855193ce17ad1928ed6c963135c0b1e"
+    },
+    "scalar32": {
+      "encoding_command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P038-fixture-stage/scalar32.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P038/fixtures/scalar32.wasm"
+      ],
+      "encoding_exit": 0,
+      "manual_oracle_sha256": "139dd57153a5c9f1bf13f7586acf8c8c7ea5012b89c48f7f4c7e07424e367be5",
+      "validation_command": [
+        "/workspace/wtime/target/debug/wtime-cli",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P038/fixtures/scalar32.wasm"
+      ],
+      "validation_exit": 0,
+      "wasm_sha256": "783e63abf2db7f97e423ad59f97b6a8c8be01a80a40387ea1503e5b74f89cda3",
+      "wat_sha256": "2f7b395ccdf7d17869f66ad4b62bfaef35a0a77dcaf60b0f06290ee31c7078cb"
+    },
+    "scalar64": {
+      "encoding_command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P038-fixture-stage/scalar64.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P038/fixtures/scalar64.wasm"
+      ],
+      "encoding_exit": 0,
+      "manual_oracle_sha256": "139dd57153a5c9f1bf13f7586acf8c8c7ea5012b89c48f7f4c7e07424e367be5",
+      "validation_command": [
+        "/workspace/wtime/target/debug/wtime-cli",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P038/fixtures/scalar64.wasm"
+      ],
+      "validation_exit": 0,
+      "wasm_sha256": "da60cb88240827d51c3c1aa3bfcffd133d427eb6629a4c90293a310dc283259c",
+      "wat_sha256": "3aff9952aa649e4eae1a2f5cbcf18bb2675e9d07fbf0b64d558cb8e1d9337fe1"
+    },
+    "transient-stack": {
+      "encoding_command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P038-fixture-stage/transient-stack.wat",
+        "-o",
+        "/workspace/wtime/target/performance/P038/fixtures/transient-stack.wasm"
+      ],
+      "encoding_exit": 0,
+      "manual_oracle_sha256": "139dd57153a5c9f1bf13f7586acf8c8c7ea5012b89c48f7f4c7e07424e367be5",
+      "validation_command": [
+        "/workspace/wtime/target/debug/wtime-cli",
+        "--profile",
+        "all-phase3-core",
+        "check",
+        "/workspace/wtime/target/performance/P038/fixtures/transient-stack.wasm"
+      ],
+      "validation_exit": 0,
+      "wasm_sha256": "fe644e32425d547f75cec9891277f7102bc92efd3c4a945c2e132af5d9293dab",
+      "wat_sha256": "2466dbfb2c3cb16dab6fc4251a2e569f904c371cbe21cb6f5a63edb9bf54b47a"
+    }
+  },
+  "implementation_sources": {
+    "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+    "crates/wtime-runtime/src/canonical.rs": "0bed54a47fbca8a39c7359a9140a5284f0513a6744505ddb5a0b92d531d0776d",
+    "crates/wtime-runtime/src/continuation.rs": "c30b6fb4b89999b2e6f494b9258ce9ea3ea1e39a5971643b43147026e0fc8f46",
+    "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+    "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+    "crates/wtime-runtime/src/execution.rs": "fd4d714c8aa0ae1045dcb027dff160d5603c3c201c0bd586795d440cfff3b58d",
+    "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+    "crates/wtime-runtime/src/execution/compact/execute.rs": "171794256d1e5a0b34cf19bfe129e74bdab4ccabbfab71eb0d9e7bf4d42e37f8",
+    "crates/wtime-runtime/src/execution/compact/ir.rs": "6a66e5844ecdf8314dbd9875a3670567f1b621206a421f2a834cde9bef9350f0",
+    "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "1b084aaac333a22896b85bb00ac6fc6eb5dc49aefe203c06644af411bb75de2a",
+    "crates/wtime-runtime/src/execution/compact/mod.rs": "d4317ee975f7c8e2a8bfad031ece04c58ee7452e3e29da970617bbce9c030fb8",
+    "crates/wtime-runtime/src/execution/compact/source_map.rs": "a90802f69c540eedf2ae069a19c51b2e71b1d18787a19f25c7d7c8b6d21198d4",
+    "crates/wtime-runtime/src/execution/cursor.rs": "ff93a3f0056d109366d2b77ea93d459f456d048c05b4bf05369305a3b491d3d3",
+    "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+    "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+    "crates/wtime-runtime/src/gc.rs": "7dcfcc9aaff6a333041d9d8a7323d1ce0fad90b382b5023e9caeeb52815b3471",
+    "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+    "crates/wtime-runtime/src/lib.rs": "dfa3a5be5e6fbbdefeb9182b83c046eb71f5557efc2b6c668b014adae1e27d6b",
+    "crates/wtime-runtime/src/linker.rs": "39a2068993bcb65fb4434f42d02b56687e8ae31914840487ee4c35de07677806",
+    "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+    "crates/wtime-runtime/src/perf.rs": "41d96f4caec0290546e329b487b9e1835dd58da4ea8f800bbe44881cf35917fb",
+    "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+    "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+    "crates/wtime-runtime/src/simd.rs": "84c223e6a546aa8955ff5214b9add03df4c94d25f3ffcd45b33a808d299334b1",
+    "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a"
+  },
+  "license": "Apache-2.0 OR MIT",
+  "license_files_sha256": {
+    "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5"
+  },
+  "manual_oracles": {
+    "executed": false,
+    "fixtures": {
+      "explicit-return": {
+        "fuel_prefixes": [
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 0,
+            "pending_pc": 0
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 1,
+            "pending_pc": 1
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 2,
+            "pending_pc": null
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 3,
+            "pending_pc": null
+          }
+        ],
+        "instructions": [
+          {
+            "operand_height_before_boundary": 0,
+            "operation": "i32.const 42",
+            "pc": 0,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "return",
+            "pc": 1,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": null,
+            "operation": "end",
+            "pc": 2,
+            "reachable_source_event": false
+          }
+        ],
+        "oracles": [
+          {
+            "params": [],
+            "result": 42
+          }
+        ],
+        "source_pc_basis": "manual linear WAT instruction ordinals, pending decoder confirmation",
+        "successful_source_events": 2,
+        "validation_status": "not_encoded_not_validated",
+        "wat_sha256": "d9f9ab2cd0885fdcbe6330425641e0a834fbc7514ede88facde5590607aa3184"
+      },
+      "reference-select": {
+        "compact_expectation": "whole-function decline at entry; zero compact source events, decoded source events5 on success",
+        "fuel_prefixes": [
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 0,
+            "pending_pc": 0
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 1,
+            "pending_pc": 1
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 2,
+            "pending_pc": 2
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 3,
+            "pending_pc": 3
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 4,
+            "pending_pc": 4
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 5,
+            "pending_pc": null
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 6,
+            "pending_pc": null
+          }
+        ],
+        "instructions": [
+          {
+            "operand_height_before_boundary": 0,
+            "operation": "local.get 0",
+            "pc": 0,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "local.get 1",
+            "pc": 1,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "local.get 2",
+            "pc": 2,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 3,
+            "operation": "typed select externref",
+            "pc": 3,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "end",
+            "pc": 4,
+            "reachable_source_event": true
+          }
+        ],
+        "oracles": [
+          {
+            "params": [
+              "externA",
+              "externB",
+              1
+            ],
+            "result": "externA identity"
+          },
+          {
+            "params": [
+              "externA",
+              "externB",
+              0
+            ],
+            "result": "externB identity"
+          },
+          {
+            "params": [
+              "null extern",
+              "externB",
+              -1
+            ],
+            "result": "null extern"
+          }
+        ],
+        "source_pc_basis": "manual linear WAT instruction ordinals, pending decoder confirmation",
+        "successful_source_events": 5,
+        "validation_status": "not_encoded_not_validated",
+        "wat_sha256": "63ca687e0eb7a8fbcedc4ac5b55d1af58855193ce17ad1928ed6c963135c0b1e"
+      },
+      "scalar32": {
+        "fuel_prefixes": [
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 0,
+            "pending_pc": 0
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 1,
+            "pending_pc": 1
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 2,
+            "pending_pc": 2
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 3,
+            "pending_pc": 3
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 4,
+            "pending_pc": 4
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 5,
+            "pending_pc": 5
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 6,
+            "pending_pc": 6
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 7,
+            "pending_pc": 7
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 8,
+            "pending_pc": 8
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 9,
+            "pending_pc": 9
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 10,
+            "pending_pc": 10
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 11,
+            "pending_pc": 11
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 12,
+            "pending_pc": 12
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 13,
+            "pending_pc": 13
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 14,
+            "pending_pc": null
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 15,
+            "pending_pc": null
+          }
+        ],
+        "instructions": [
+          {
+            "operand_height_before_boundary": 0,
+            "operation": "local.get 0",
+            "pc": 0,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i32.const 2147483647",
+            "pc": 1,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "i32.add",
+            "pc": 2,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "local.tee 2",
+            "pc": 3,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i32.const 1",
+            "pc": 4,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "i32.xor",
+            "pc": 5,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "local.set 2",
+            "pc": 6,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 0,
+            "operation": "local.get 2",
+            "pc": 7,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i32.const 7",
+            "pc": 8,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "local.get 1",
+            "pc": 9,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 3,
+            "operation": "select",
+            "pc": 10,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i32.const 99",
+            "pc": 11,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "drop",
+            "pc": 12,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "end",
+            "pc": 13,
+            "reachable_source_event": true
+          }
+        ],
+        "oracles": [
+          {
+            "params": [
+              1,
+              1
+            ],
+            "result": -2147483647
+          },
+          {
+            "params": [
+              0,
+              1
+            ],
+            "result": 2147483646
+          },
+          {
+            "params": [
+              -2147483648,
+              1
+            ],
+            "result": -2
+          },
+          {
+            "params": [
+              1,
+              0
+            ],
+            "result": 7
+          },
+          {
+            "params": [
+              1,
+              -1
+            ],
+            "result": -2147483647
+          }
+        ],
+        "source_pc_basis": "manual linear WAT instruction ordinals, pending decoder confirmation",
+        "successful_source_events": 14,
+        "validation_status": "not_encoded_not_validated",
+        "wat_sha256": "2f7b395ccdf7d17869f66ad4b62bfaef35a0a77dcaf60b0f06290ee31c7078cb"
+      },
+      "scalar64": {
+        "fuel_prefixes": [
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 0,
+            "pending_pc": 0
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 1,
+            "pending_pc": 1
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 2,
+            "pending_pc": 2
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 3,
+            "pending_pc": 3
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 4,
+            "pending_pc": 4
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 5,
+            "pending_pc": 5
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 6,
+            "pending_pc": null
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 7,
+            "pending_pc": null
+          }
+        ],
+        "instructions": [
+          {
+            "operand_height_before_boundary": 0,
+            "operation": "i64.const 9223372036854775807",
+            "pc": 0,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i64.const 1",
+            "pc": 1,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "i64.add",
+            "pc": 2,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i64.const -1",
+            "pc": 3,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "i64.mul",
+            "pc": 4,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "end",
+            "pc": 5,
+            "reachable_source_event": true
+          }
+        ],
+        "oracles": [
+          {
+            "params": [],
+            "result": -9223372036854775808
+          }
+        ],
+        "source_pc_basis": "manual linear WAT instruction ordinals, pending decoder confirmation",
+        "successful_source_events": 6,
+        "validation_status": "not_encoded_not_validated",
+        "wat_sha256": "3aff9952aa649e4eae1a2f5cbcf18bb2675e9d07fbf0b64d558cb8e1d9337fe1"
+      },
+      "transient-stack": {
+        "fuel_prefixes": [
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 0,
+            "pending_pc": 0
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 1,
+            "pending_pc": 1
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 2,
+            "pending_pc": 2
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 3,
+            "pending_pc": 3
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 4,
+            "pending_pc": 4
+          },
+          {
+            "expected": "ResourceLimit: fuel exhausted",
+            "initial_fuel": 5,
+            "pending_pc": 5
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 6,
+            "pending_pc": null
+          },
+          {
+            "expected": "Returned",
+            "initial_fuel": 7,
+            "pending_pc": null
+          }
+        ],
+        "instructions": [
+          {
+            "operand_height_before_boundary": 0,
+            "operation": "i32.const 1",
+            "pc": 0,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "i32.const 2",
+            "pc": 1,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "i32.const 3",
+            "pc": 2,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 3,
+            "operation": "drop",
+            "pc": 3,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 2,
+            "operation": "drop",
+            "pc": 4,
+            "reachable_source_event": true
+          },
+          {
+            "operand_height_before_boundary": 1,
+            "operation": "end",
+            "pc": 5,
+            "reachable_source_event": true
+          }
+        ],
+        "limit_case": {
+          "initial_fuel_3": "fuel exhausted at pc3 before charge, completed stack[1,2,3]",
+          "initial_fuel_4": "operand stack limit at pc3 after charge, current_fuel0, completed stack[1,2,3]",
+          "initial_fuel_6": "operand stack limit at pc3 after charge, current_fuel2",
+          "max_stack_height": 2,
+          "max_stack_height_3_fuel_6": "Returned I32(1)"
+        },
+        "oracles": [
+          {
+            "params": [],
+            "result": 1
+          }
+        ],
+        "source_pc_basis": "manual linear WAT instruction ordinals, pending decoder confirmation",
+        "successful_source_events": 6,
+        "validation_status": "not_encoded_not_validated",
+        "wat_sha256": "2466dbfb2c3cb16dab6fc4251a2e569f904c371cbe21cb6f5a63edb9bf54b47a"
+      }
+    },
+    "schema_version": 1
+  },
+  "manual_oracles_sha256": "139dd57153a5c9f1bf13f7586acf8c8c7ea5012b89c48f7f4c7e07424e367be5",
+  "receipt_path": "/workspace/wtime/target/performance/P038/prepare-20261012T014211747808Z/fixture-validation-receipt.json",
+  "receipt_sha256": "902e63fb45919696f2a9706ef6e8058112e00fbfc1b8f58a162467ece47aaa7e",
+  "schema_version": 1,
+  "status": "freshly_encoded_and_validated",
+  "validator": {
+    "path": "/workspace/wtime/target/debug/wtime-cli",
+    "sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+  },
+  "validator_sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+}

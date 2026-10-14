@@ -1,0 +1,307 @@
+--- a/crates/wtime-runtime/src/lib.rs
++++ b/crates/wtime-runtime/src/lib.rs
+@@ -249,15 +249,26 @@
+     Exception(ExceptionRef),
+ }
+ type HostCallback = Arc<dyn Fn(&mut Store, &[Value]) -> Result<RunOutcome> + Send + Sync>;
+-#[derive(Clone)]
+-struct Function {
++// Signature and reference-type context never change after function creation.
++// Frames retain this owner rather than copying signature vectors.
++struct FunctionMetadata {
+     host_type_instance: Option<usize>,
+     host_type_module: Option<Module>,
+     canonical: CanonicalTypeId,
+     ty: FuncType,
++}
++#[derive(Clone)]
++struct Function {
++    metadata: Arc<FunctionMetadata>,
+     instance: usize,
+     body: usize,
+     host: Option<HostCallback>,
++}
++impl std::ops::Deref for Function {
++    type Target = FunctionMetadata;
++    fn deref(&self) -> &Self::Target {
++        &self.metadata
++    }
+ }
+ struct Mem {
+     ty: MemoryType,
+@@ -586,10 +597,12 @@
+         self.reserve_objects(1)?;
+         let f = Func(self.h(self.funcs.len()));
+         self.funcs.push(Function {
+-            host_type_instance: None,
+-            host_type_module: None,
+-            canonical: self.canonical_func(&ty)?,
+-            ty,
++            metadata: Arc::new(FunctionMetadata {
++                host_type_instance: None,
++                host_type_module: None,
++                canonical: self.canonical_func(&ty)?,
++                ty,
++            }),
+             instance: 0,
+             body: 0,
+             host: Some(Arc::new(move |_, args| {
+@@ -981,10 +994,12 @@
+         self.reserve_objects(1)?;
+         let f = Func(self.h(self.funcs.len()));
+         self.funcs.push(Function {
+-            host_type_instance: None,
+-            host_type_module: None,
+-            canonical: self.canonical_func(&ty)?,
+-            ty,
++            metadata: Arc::new(FunctionMetadata {
++                host_type_instance: None,
++                host_type_module: None,
++                canonical: self.canonical_func(&ty)?,
++                ty,
++            }),
+             instance: 0,
+             body: 0,
+             host: Some(Arc::new(move |store, args| {
+@@ -1077,10 +1092,12 @@
+         self.reserve_objects(1)?;
+         let f = Func(self.h(self.funcs.len()));
+         self.funcs.push(Function {
+-            host_type_instance: None,
+-            host_type_module: None,
+-            canonical: self.canonical_func(&ty)?,
+-            ty,
++            metadata: Arc::new(FunctionMetadata {
++                host_type_instance: None,
++                host_type_module: None,
++                canonical: self.canonical_func(&ty)?,
++                ty,
++            }),
+             instance: 0,
+             body: 0,
+             host: Some(Arc::new(move |store, args| {
+@@ -1760,10 +1777,12 @@
+             return Err(err(ErrorKind::Host, "host function requires function type"));
+         };
+         let function = Function {
+-            host_type_instance: Some(ii),
+-            host_type_module: None,
+-            canonical: module.data.canonical[ty.as_usize()],
+-            ty: signature.clone(),
++            metadata: Arc::new(FunctionMetadata {
++                host_type_instance: Some(ii),
++                host_type_module: None,
++                canonical: module.data.canonical[ty.as_usize()],
++                ty: signature.clone(),
++            }),
+             instance: ii,
+             body: 0,
+             host: Some(Arc::new(move |store, args| {
+@@ -1798,10 +1817,12 @@
+             return Err(err(ErrorKind::Host, "host function requires function type"));
+         };
+         let function = Function {
+-            host_type_instance: None,
+-            host_type_module: Some(module.clone()),
+-            canonical: module.data.canonical[ty.as_usize()],
+-            ty: signature.clone(),
++            metadata: Arc::new(FunctionMetadata {
++                host_type_instance: None,
++                host_type_module: Some(module.clone()),
++                canonical: module.data.canonical[ty.as_usize()],
++                ty: signature.clone(),
++            }),
+             instance: 0,
+             body: 0,
+             host: Some(Arc::new(move |store, args| {
+@@ -2096,3 +2117,137 @@
+         assert!(retained.upgrade().is_none());
+     }
+ }
++
++#[cfg(test)]
++mod p029_tests {
++    use super::*;
++    #[test]
++    fn p029_multiple_frames_share_signature_owner_across_arena_growth() {
++        let engine = Engine::new(Config {
++            features: FeatureSet::all_phase3_core(),
++            ..Config::default()
++        })
++        .unwrap();
++        let module = engine
++            .compile(include_bytes!(
++                "../tests/fixtures/performance/calls/direct-recursive-multivalue.wasm"
++            ))
++            .unwrap();
++        let mut store = Store::new(&engine);
++        let instance = Linker::new(&engine)
++            .instantiate(&mut store, &module)
++            .unwrap();
++        let function = instance.function(&store, 0).unwrap();
++        let frame_a = store
++            .frame(function, vec![Value::I32(64), Value::I64(5)], 0)
++            .unwrap();
++        let frame_b = store
++            .frame(function, vec![Value::I32(32), Value::I64(6)], 0)
++            .unwrap();
++        let original = &store.funcs[function.0.index].metadata;
++        assert!(Arc::ptr_eq(original, &frame_a.function.metadata));
++        assert!(Arc::ptr_eq(original, &frame_b.function.metadata));
++        assert_eq!(
++            frame_a.function.ty.params.as_ptr(),
++            frame_b.function.ty.params.as_ptr()
++        );
++        for _ in 0..1024 {
++            store
++                .create_host_func(FuncType::new(vec![], vec![]), |_| Ok(vec![]))
++                .unwrap();
++        }
++        drop(module);
++        assert!(Arc::ptr_eq(
++            &store.funcs[function.0.index].metadata,
++            &frame_a.function.metadata
++        ));
++        assert_eq!(frame_a.function.ty.params, [ValType::I32, ValType::I64]);
++        assert_eq!(frame_a.function.ty.results, [ValType::I32, ValType::I64]);
++    }
++    #[test]
++    fn p029_invalid_internal_function_handle_still_fails_checked_entry() {
++        let engine = Engine::new(Config::default()).unwrap();
++        let mut store = Store::new(&engine);
++        let invalid = Func(store.h(store.funcs.len()));
++        assert_eq!(
++            store.invoke(invalid, &[]).unwrap_err().kind,
++            ErrorKind::Host
++        );
++        let valid = store
++            .create_host_func(FuncType::new(vec![], vec![]), |_| Ok(vec![]))
++            .unwrap();
++        let mut stale = valid;
++        stale.0.generation = stale.0.generation.wrapping_add(1);
++        assert_eq!(store.invoke(stale, &[]).unwrap_err().kind, ErrorKind::Host);
++    }
++    #[test]
++    fn p029_real_guest_frames_share_signature_during_host_reentry() {
++        let engine = Engine::new(Config::default()).unwrap();
++        let module = engine
++            .compile(include_bytes!(
++                "../tests/fixtures/performance/calls/imported-direct.wasm"
++            ))
++            .unwrap();
++        let mut store = Store::new(&engine);
++        let owners = Arc::new(std::sync::Mutex::new(Vec::<(
++            Func,
++            std::sync::Weak<FunctionMetadata>,
++            usize,
++        )>::new()));
++        let callback_owners = owners.clone();
++        let host = store
++            .create_host_func_with_caller(
++                FuncType::new(vec![ValType::I32], vec![ValType::I32]),
++                move |caller, arguments| {
++                    let expected = callback_owners.lock().unwrap().clone();
++                    assert_eq!(expected.len(), 2);
++                    for _ in 0..1024 {
++                        caller
++                            .store
++                            .create_host_func(FuncType::new(vec![], vec![]), |_| Ok(vec![]))
++                            .unwrap();
++                    }
++                    for (function, weak, params_pointer) in expected {
++                        let k = caller.store.check(function.0, &caller.store.funcs).unwrap();
++                        let metadata = &caller.store.funcs[k].metadata;
++                        assert!(std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(metadata)));
++                        // Weak expectations own no strong handles. The Store arena
++                        // and an actually active guest frame each retain one owner.
++                        assert!(Arc::strong_count(metadata) >= 2);
++                        assert_eq!(metadata.ty.params.as_ptr() as usize, params_pointer);
++                    }
++                    let Value::I32(value) = arguments[0] else {
++                        panic!("i32 host argument");
++                    };
++                    Ok(vec![Value::I32(value + 1)])
++                },
++            )
++            .unwrap();
++        let mut linker = Linker::new(&engine);
++        linker.define("host", "bump", External::Func(host)).unwrap();
++        let instance = linker.instantiate(&mut store, &module).unwrap();
++        for index in [1, 2] {
++            let function = instance.function(&store, index).unwrap();
++            let metadata = &store.funcs[function.0.index].metadata;
++            owners.lock().unwrap().push((
++                function,
++                Arc::downgrade(metadata),
++                metadata.ty.params.as_ptr() as usize,
++            ));
++        }
++        let External::Func(run) = instance.export(&store, "run").unwrap() else {
++            panic!("run");
++        };
++        assert_eq!(
++            store.invoke(run, &[Value::I32(5)]).unwrap(),
++            RunOutcome::Returned(vec![Value::I32(10)])
++        );
++        for (_, weak, _) in owners.lock().unwrap().iter() {
++            assert_eq!(
++                weak.strong_count(),
++                1,
++                "active frames released their metadata owners"
++            );
++        }
++    }
++}
+--- a/crates/wtime-runtime/src/execution.rs
++++ b/crates/wtime-runtime/src/execution.rs
+@@ -98,7 +98,8 @@
+         }
+         let k = self.check(f.0, &self.funcs)?;
+         if let Some(host) = self.funcs[k].host.clone() {
+-            let ty = self.funcs[k].ty.clone();
++            let metadata = self.funcs[k].metadata.clone();
++            let ty = &metadata.ty;
+             for value in args {
+                 self.validate_value(*value)?;
+             }
+@@ -406,7 +407,8 @@
+                     self.perf.record(perf::Event::Arguments, u64::from(n != 0));
+                     let args = stack.split_off(stack.len() - n);
+                     if let Some(host) = self.funcs[fun.0.index].host.clone() {
+-                        let ty = self.funcs[fun.0.index].ty.clone();
++                        let metadata = self.funcs[fun.0.index].metadata.clone();
++                        let ty = &metadata.ty;
+                         for value in &args {
+                             self.validate_value(*value)?;
+                         }
+--- a/crates/wtime-runtime/src/continuation.rs
++++ b/crates/wtime-runtime/src/continuation.rs
+@@ -84,8 +84,7 @@
+                     .labels
+                     .capacity()
+                     .saturating_mul(std::mem::size_of::<crate::execution::Label>()),
+-            )
+-            .saturating_add(signature_bytes(&frame.function.ty));
++            ); // Shared function metadata is already owned by the Store arena.
+         for label in &frame.labels {
+             bytes = bytes.saturating_add(
+                 label
+--- a/crates/wtime-runtime/src/linker.rs
++++ b/crates/wtime-runtime/src/linker.rs
+@@ -150,10 +150,12 @@
+         for (body, t) in d.functions.iter().enumerate() {
+             let f = Func(s.h(s.funcs.len()));
+             s.funcs.push(Function {
+-                host_type_instance: None,
+-                host_type_module: None,
+-                canonical: m.data.canonical[t.as_usize()],
+-                ty: d.types[t.as_usize()].clone(),
++                metadata: Arc::new(FunctionMetadata {
++                    host_type_instance: None,
++                    host_type_module: None,
++                    canonical: m.data.canonical[t.as_usize()],
++                    ty: d.types[t.as_usize()].clone(),
++                }),
+                 instance: ii,
+                 body,
+                 host: None,

@@ -1,0 +1,196 @@
+{
+  "lane": "candidate",
+  "rationale": "Target registered direct-call leaf loop n32 and n10000 (small and large); hold out n17. Protect direct-call n0/n1/n1024 boundaries, ordinary recursion, tail calls, host calls, indirect calls, call_ref, and mandatory call_overhead/prepare_large controls. The current registry has no imported-call workload row, so import/cross-instance fallback is required in named semantic tests rather than claimed as a timed selected row. Compact remains opt-in. This is a focused candidate gate, not portfolio evidence.",
+  "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+  "rows": [
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n32",
+      "role": "targeted",
+      "row_sha256": "6051db22ca4b03eaf4fc101b5c0d7127678aa7c9bba0f62be79b7465dcd91d66",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n10000",
+      "role": "targeted",
+      "row_sha256": "2aa0a9a6c94cc85da93254b46d8c89d1003db2ca8268e169fd5719efd5c932b6",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n17",
+      "role": "held_out",
+      "row_sha256": "5fada772c953d9ada4a54afafe048ad67ad3a01e298fd03534b486ade8f711ef",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n0",
+      "role": "protected",
+      "row_sha256": "99df829af690b16c4068a134da9f6979ecb7ccbd825ee7229c0280b213191db6",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n1",
+      "role": "protected",
+      "row_sha256": "5dc26e385820ce94cc5bb511a0ce75c3f01412f44640aed8431c1e1d3d1c8e1b",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_direct_calls_n1024",
+      "role": "protected",
+      "row_sha256": "39e08a9d56a0b7a90632cc118b92458ab1b561d8ce7fd7cb3476ebbef20373d2",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_ordinary_recursion_n17",
+      "role": "protected",
+      "row_sha256": "6cc3c938effc8dcaeff9974e9c4f85b6f6677ed3fa166581de34f3578c73285c",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_tail_calls_n32",
+      "role": "protected",
+      "row_sha256": "6cfc6c12bb6217e81508100696d6fca87487c912288d1764bed6416eb6a83893",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_host_call_n32",
+      "role": "protected",
+      "row_sha256": "fdb0d2c8bbb5f570dc86a846a835705d87cab131471cdb4d73f863f3cbd35b22",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_indirect_calls_n32",
+      "role": "protected",
+      "row_sha256": "dfc30e67a379201aa2544cbf52017fb607cc650b08a2af61f456187964f88ee1",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_call_ref_n32",
+      "role": "protected",
+      "row_sha256": "4ee86a1fd88685f312fda1e7efa64907b1ae5655d804b646741d9d68c505792a",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ]
+    }
+  ],
+  "schema": "wtime-candidate-selection-v1",
+  "semantic_cases": [
+    "p050_low_logical_call_depth_fails_without_physical_frame",
+    "p050_fuel_stop_in_inline_leaf_reconstructs_arguments_and_return_point",
+    "p050_recursive_imported_effectful_leaves_decline_and_expansion_bounded",
+    "p050_direct_leaf_results_and_wrapping_match",
+    "p050_all_leaf_boundaries_cancel_and_fuel_restore_logical_activation",
+    "p050_retained_operands_keep_global_peak_and_source_limits",
+    "p050_leaf_plan_corruption_and_budget_bounds_decline"
+  ],
+  "task": "P050"
+}

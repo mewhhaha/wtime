@@ -1,0 +1,38 @@
+{
+  "checks": {
+    "default_mode_and_features": true,
+    "hard_budget_passed": true,
+    "same_build_settings": true,
+    "source_stable": true,
+    "zero_default_external_dependencies": true
+  },
+  "decision_path": "/workspace/wtime/target/performance/P033-incremental-build-decision.json",
+  "decision_sha256": "6cab78b5edbee04b6ee57d0cfbc7144aeddafe75bb856b407d1f4eb46df5dfe3",
+  "failing_ratios": [
+    "leaf_seconds"
+  ],
+  "passed": false,
+  "policy": {
+    "bytes": 3017,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P033-build-decision.md",
+    "sha256": "8db05578d91f7e9b7468c5c27cb491fc8d147d14373fce76f65213bf1fc8456d"
+  },
+  "ratios": {
+    "clean_peak_rss_kib": 0.9917718202546345,
+    "clean_seconds": 0.9161518829576989,
+    "leaf_seconds": 1.42966102255939,
+    "release_seconds": 0.34593188559126475,
+    "stripped_bytes": 1.0013831700979412,
+    "unchanged_peak_rss_kib": 1.0111950364175883
+  },
+  "relative_limits": {
+    "clean_peak_rss_kib": 1.25,
+    "clean_seconds": 1.25,
+    "leaf_seconds": 1.25,
+    "release_seconds": 1.25,
+    "stripped_bytes": 1.25,
+    "unchanged_peak_rss_kib": 1.25
+  },
+  "schema": "wtime-p033-strict-build-summary-v1",
+  "task": "P033"
+}

@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "task": "P117",
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**",
+        "tools/wtime-bench/fixtures/**",
+        "target/performance/P115/fixtures/attempt-0002/receipt.json",
+        "target/performance/P117/fixtures/attempt-0001/receipt.json"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation",
+        "fixtures"
+      ],
+      "commands": [
+        {
+          "name": "focused-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,execution-reference",
+            "p117_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "focused-tests",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p117_caught_transfer_preserves_all_fuel_prefixes_and_full_memory",
+            "p117_unhandled_exception_keeps_exact_tag_payload_and_source_exit",
+            "p117_nested_unwind_and_precancellation_preserve_canonical_frames"
+          ],
+          "minimum_passed": 3
+        }
+      ],
+      "outputs": {
+        "test_log": "{stage}/focused-tests.stdout"
+      }
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Proposal interaction correctness only; measured promotion remains P044."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "exception-transfer",
+        "uses": [
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "focused-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "--features",
+              "compact-executor,execution-reference",
+              "p117_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "focused-tests",
+            "kind": "cargo",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p117_caught_transfer_preserves_all_fuel_prefixes_and_full_memory",
+              "p117_unhandled_exception_keeps_exact_tag_payload_and_source_exit",
+              "p117_nested_unwind_and_precancellation_preserve_canonical_frames"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

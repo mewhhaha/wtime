@@ -1,0 +1,310 @@
+{
+  "task": "P028",
+  "license": "CC0-1.0",
+  "wat_sha256": "e492085e73c2ba73e8508c3abf260b79b66ca19b35a0e7698a9b4770dc6fbcb4",
+  "wasm_sha256": "36d00fc4553f819953cdf34e9dc4573eb9694a93fa3d0b000aae276504b4f5f7",
+  "expected_exports": {
+    "wrap32": {
+      "type": "i32[]",
+      "values": [
+        -2147483648,
+        2147483647,
+        0
+      ],
+      "raw_bits_hex": [
+        "80000000",
+        "7fffffff",
+        "00000000"
+      ]
+    },
+    "wrap64": {
+      "type": "i64[]",
+      "values": [
+        -9223372036854775808,
+        9223372036854775807,
+        0
+      ],
+      "raw_bits_hex": [
+        "8000000000000000",
+        "7fffffffffffffff",
+        "0000000000000000"
+      ]
+    },
+    "bitwise32": {
+      "type": "i32[]",
+      "values": [
+        15732480,
+        -983281,
+        -16715761
+      ],
+      "raw_bits_hex": [
+        "00f00f00",
+        "fff0ff0f",
+        "ff00f00f"
+      ]
+    },
+    "bitwise64": {
+      "type": "i64[]",
+      "values": [
+        67570487084974080,
+        -4486007692984321,
+        -72056494777958401
+      ],
+      "raw_bits_hex": [
+        "00f00f0000000000",
+        "fff00ffff0ffffff",
+        "ff0000fff0ffffff"
+      ]
+    },
+    "shifts32": {
+      "type": "i32[]",
+      "values": [
+        1,
+        2,
+        -8,
+        -2147483648
+      ],
+      "raw_bits_hex": [
+        "00000001",
+        "00000002",
+        "fffffff8",
+        "80000000"
+      ]
+    },
+    "shifts64": {
+      "type": "i64[]",
+      "values": [
+        1,
+        2,
+        -8,
+        -9223372036854775808
+      ],
+      "raw_bits_hex": [
+        "0000000000000001",
+        "0000000000000002",
+        "fffffffffffffff8",
+        "8000000000000000"
+      ]
+    },
+    "compare32": {
+      "type": "i32[]",
+      "values": [
+        1,
+        0,
+        0,
+        1
+      ],
+      "raw_bits_hex": [
+        "00000001",
+        "00000000",
+        "00000000",
+        "00000001"
+      ]
+    },
+    "compare64": {
+      "type": "i32[]",
+      "values": [
+        1,
+        0,
+        0,
+        1
+      ],
+      "raw_bits_hex": [
+        "00000001",
+        "00000000",
+        "00000000",
+        "00000001"
+      ]
+    },
+    "unary32": {
+      "type": "i32[]",
+      "values": [
+        8,
+        24,
+        5
+      ],
+      "raw_bits_hex": [
+        "00000008",
+        "00000018",
+        "00000005"
+      ]
+    },
+    "unary64": {
+      "type": "i64[]",
+      "values": [
+        32,
+        32,
+        2
+      ],
+      "raw_bits_hex": [
+        "0000000000000020",
+        "0000000000000020",
+        "0000000000000002"
+      ]
+    }
+  },
+  "fuel_prefix": {
+    "export": "fuel_prefix",
+    "arguments": {
+      "a": "i32:2147483647",
+      "b": "i32:2"
+    },
+    "instruction_order": [
+      "i32.const 0",
+      "local.get a",
+      "local.get b",
+      "i32.add",
+      "i32.store",
+      "i32.const 4",
+      "local.get a",
+      "local.get b",
+      "i32.sub",
+      "i32.store",
+      "i32.const 8",
+      "local.get a",
+      "local.get b",
+      "i32.mul",
+      "i32.store",
+      "i32.const 42"
+    ],
+    "cases": [
+      {
+        "fuel": 0,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 0,
+        "memory_prefix_hex": "000000000000000000000000"
+      },
+      {
+        "fuel": 1,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 0,
+        "memory_prefix_hex": "000000000000000000000000"
+      },
+      {
+        "fuel": 2,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 0,
+        "memory_prefix_hex": "000000000000000000000000"
+      },
+      {
+        "fuel": 3,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 0,
+        "memory_prefix_hex": "000000000000000000000000"
+      },
+      {
+        "fuel": 4,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 0,
+        "memory_prefix_hex": "000000000000000000000000"
+      },
+      {
+        "fuel": 5,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 1,
+        "memory_prefix_hex": "010000800000000000000000"
+      },
+      {
+        "fuel": 6,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 1,
+        "memory_prefix_hex": "010000800000000000000000"
+      },
+      {
+        "fuel": 7,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 1,
+        "memory_prefix_hex": "010000800000000000000000"
+      },
+      {
+        "fuel": 8,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 1,
+        "memory_prefix_hex": "010000800000000000000000"
+      },
+      {
+        "fuel": 9,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 1,
+        "memory_prefix_hex": "010000800000000000000000"
+      },
+      {
+        "fuel": 10,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 2,
+        "memory_prefix_hex": "01000080fdffff7f00000000"
+      },
+      {
+        "fuel": 11,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 2,
+        "memory_prefix_hex": "01000080fdffff7f00000000"
+      },
+      {
+        "fuel": 12,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 2,
+        "memory_prefix_hex": "01000080fdffff7f00000000"
+      },
+      {
+        "fuel": 13,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 2,
+        "memory_prefix_hex": "01000080fdffff7f00000000"
+      },
+      {
+        "fuel": 14,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 2,
+        "memory_prefix_hex": "01000080fdffff7f00000000"
+      },
+      {
+        "fuel": 15,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 3,
+        "memory_prefix_hex": "01000080fdffff7ffeffffff"
+      },
+      {
+        "fuel": 16,
+        "outcome": "resource_limit:fuel exhausted",
+        "completed_stores": 3,
+        "memory_prefix_hex": "01000080fdffff7ffeffffff"
+      },
+      {
+        "fuel": 17,
+        "outcome": "returned:i32:42",
+        "completed_stores": 3,
+        "memory_prefix_hex": "01000080fdffff7ffeffffff"
+      }
+    ],
+    "note": "Each five-instruction store group completes at fuel 5, 10, and 15. Fuel 15 traps before the final i32.const; fuel 16 executes that constant but traps before the implicit function-end instruction (0x0b). Fuel 17 returns 42.",
+    "error_kind": "ResourceLimit",
+    "error_message": "fuel exhausted"
+  },
+  "derivation": "Expected integers are computed independently with fixed-width masks, signed two's-complement interpretation, masked shift counts, comparisons over signed or unsigned interpretations, and bit_count/leading/trailing-zero arithmetic. The fuel oracle counts each decoded source instruction, including the implicit function-end instruction, and applies the P020 one-unit pre-instruction debit.",
+  "fixture": {
+    "path": "integer_numeric.wat",
+    "sha256": "e492085e73c2ba73e8508c3abf260b79b66ca19b35a0e7698a9b4770dc6fbcb4",
+    "license_file_sha256": "7f9a9417e10284912c7ee12056d3b6d077371783b4afd1918ccf0bf18d1bb505"
+  },
+  "exports": [
+    "wrap32",
+    "wrap64",
+    "bitwise32",
+    "bitwise64",
+    "shifts32",
+    "shifts64",
+    "compare32",
+    "compare64",
+    "unary32",
+    "unary64",
+    "fuel_prefix"
+  ],
+  "wasm_sha256_status": "encoded successfully; guest validation and execution pending",
+  "fuel_oracle_revision": {
+    "status": "corrected before guest execution; validation_execution_status remains pending",
+    "prior_draft_expectation": "The initial staged model expected fuel 16 to return 42 after counting only the 16 explicit instructions.",
+    "correction": "The decoded function includes an implicit end instruction (opcode 0x0b), which is charged at the next loop head. Therefore fuel 16 traps after the final constant and fuel 17 returns.",
+    "executed_proof": "none; no guest execution was performed"
+  }
+}

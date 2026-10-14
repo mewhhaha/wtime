@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "task": "P074",
+  "development_only": true,
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/fixtures/integration/**",
+        "crates/wtime-runtime/tests/fixtures/performance/p074/**"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation"
+      ],
+      "commands": [
+        {
+          "name": "restored-vector-semantics",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib",
+            "simd::tests::",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "restored-vector-semantics",
+          "features": [],
+          "minimum_passed": 5,
+          "required_names": [
+            "t093_simd_wrapping_saturation_and_signed_comparison",
+            "t094_simd_extension_uses_upper_half",
+            "t095_simd_float_min_signed_zero_and_nan",
+            "t097_relaxed_multiply_add_and_bitselect",
+            "t093_shuffle_validates_lanes"
+          ]
+        }
+      ],
+      "outputs": {
+        "placeholder": "{stage}/development-only-not-closable.json"
+      }
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "restored-simd",
+        "uses": [
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "restored-vector-semantics",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib",
+              "simd::tests::",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "restored-vector-semantics",
+            "features": [],
+            "minimum_passed": 5,
+            "required_names": [
+              "t093_simd_wrapping_saturation_and_signed_comparison",
+              "t094_simd_extension_uses_upper_half",
+              "t095_simd_float_min_signed_zero_and_nan",
+              "t097_relaxed_multiply_add_and_bitselect",
+              "t093_shuffle_validates_lanes"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "files": [
+    "fixtures/scalar/p042/table-indirect-2targets.wat",
+    "fixtures/scalar/p042/table-indirect-3targets.wat",
+    "fixtures/scalar/p042/typed-call-ref-2targets.wat",
+    "fixtures/scalar/p042/typed-call-ref-3targets.wat",
+    "fixtures/scalar/p042/table-between-calls.wat",
+    "p042_extra_oracles.py",
+    "manual-oracles.json",
+    "selection-addition-proposal.json",
+    "selection-contract-proposal.json",
+    "registry-rows-proposal.json"
+  ],
+  "fixture_semantics": "Five proposed families: two-target and three-target monomorphic-per-invocation dispatch with changing targets per loop iteration for call_indirect and call_ref, plus a table target toggle before each exported run invocation.",
+  "license": {
+    "SPDX": "MIT OR Apache-2.0",
+    "files": [
+      "LICENSE-MIT",
+      "LICENSE-APACHE"
+    ],
+    "text_copied_from": "P042 candidate workspace root LICENSE-MIT and LICENSE-APACHE"
+  },
+  "measurement": "Proposed single named selection preserves all 85 default scalar IDs and appends 25 rows: 20 supplemental primary IDs at n=17,32,1024,10000 and five n=0 controls. Total 110 rows, 30 primary, 80 protected. The paired compare uses the same P042-before and candidate binaries, two runs, 30 pairs, all five established scalar stages, and no instrumentation. A missing, rejected, or inconclusive supplemental primary blocks overall adoption.",
+  "not_done": [
+    "No registry or task update installed",
+    "No source WAT encoded",
+    "No validator run",
+    "No benchmark or guest execution",
+    "No candidate implementation evidence"
+  ],
+  "oracle": "Independent analytical model returns n because each target adds one and the accumulator starts at zero. For compatibility with current compare.py, installation must add these families to the existing scalar_workloads.py oracle/FAMILIES map; compare.py currently hardcodes that module for scalar rows. p042_extra_oracles.py is a reviewable source model only and is not a drop-in registry module.",
+  "origin": "Original WAT sources authored for a staged P042 measurement-gap proposal; no source generator or Wasm encoder was used.",
+  "schema": "p042-extra-fixture-source-proposal-v1",
+  "status": "draft_source_only_unencoded_unvalidated_unexecuted",
+  "task": "P042"
+}

@@ -1,0 +1,16 @@
+;; Original CC0 P026 fixture. See README.md for independent expected bytes.
+(module
+  (memory (export "memory") 1)
+  (data (i32.const 0) "\80\ff\7f\81\fe\02\80\ff\34\12\cd\ab\00\80\ff\7f")
+  (func (export "v128.load8x8_s") (result v128)
+    (v128.load8x8_s (i32.const 0)))
+  (func (export "v128.load8x8_u") (result v128)
+    (v128.load8x8_u (i32.const 0)))
+  (func (export "v128.load16x4_s") (result v128)
+    (v128.load16x4_s (i32.const 0)))
+  (func (export "v128.load16x4_u") (result v128)
+    (v128.load16x4_u (i32.const 0)))
+  (func (export "v128.load32x2_s") (result v128)
+    (v128.load32x2_s (i32.const 0)))
+  (func (export "v128.load32x2_u") (result v128)
+    (v128.load32x2_u (i32.const 0))))

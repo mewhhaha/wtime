@@ -1,0 +1,114 @@
+{
+  "license": "CC0-1.0; newly authored P026 fixtures, not copied from upstream corpus",
+  "license_file": "LICENSE.txt",
+  "license_file_sha256": "feeef175563ff8ab8a58f82d04bb711ae4ba8bf3cfdfb790eeb2a426051059f5",
+  "source_provenance": "Copied byte-for-byte from /tmp/P026-stage; WAT hashes checked against its manifest.json.",
+  "encoder": {
+    "command": "wtime-conformance encode INPUT.wat -o OUTPUT.wasm",
+    "path": "/workspace/wtime/target/debug/wtime-conformance",
+    "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+    "wast_version": "261.0.0"
+  },
+  "pinned_syntax_reference_hashes": {
+    ".cache/spec/test/core/simd/simd_load8_lane.wast": "fa5d45d079947a3bf1c91733b3108ed5df9d42c9be8ef929db9918bfa5e46f9",
+    ".cache/spec/test/core/simd/simd_load16_lane.wast": "4b0f6e1e286b3d1305fe459679eb044b6967f355332ae22afc31139d95084bb0",
+    ".cache/spec/test/core/simd/simd_load32_lane.wast": "4653d8ee15db4c1c4eb2b24f6d10bad3fc90c684318d6ef4a2c2fae303f70237",
+    ".cache/spec/test/core/simd/simd_load64_lane.wast": "6f03666aeb820225f6d0f0a16ec4c53afc64112f2cf75fb095c65290a9fbf429"
+  },
+  "expected_values_and_traps": {
+    "extension_loads.v128.load8x8_s": "80ffffff7f0081fffeff020080ffffff",
+    "extension_loads.v128.load8x8_u": "8000ff007f008100fe0002008000ff00",
+    "extension_loads.v128.load16x4_s": "80ffffff7f81fffffe02000080ffffff",
+    "extension_loads.v128.load16x4_u": "80ff00007f810000fe02000080ff0000",
+    "extension_loads.v128.load32x2_s": "80ff7f81fffffffffe0280ffffffffff",
+    "extension_loads.v128.load32x2_u": "80ff7f8100000000fe0280ff00000000",
+    "splat_zero_loads.load8_splat": "80808080808080808080808080808080",
+    "splat_zero_loads.load16_splat": "80128012801280128012801280128012",
+    "splat_zero_loads.load32_splat": "80123456801234568012345680123456",
+    "splat_zero_loads.load64_splat": "80123456789abcde80123456789abcde",
+    "splat_zero_loads.load32_zero": "80123456000000000000000000000000",
+    "splat_zero_loads.load64_zero": "80123456789abcde0000000000000000",
+    "splat_zero_loads.load": "80123456789abcde0123456789abcdef",
+    "lane_loads_oob.load8_lane_nonzero@address0,x=10..1f": "1011121314a0161718191a1b1c1d1e1f",
+    "lane_loads_oob.load16_lane_nonzero@address0,x=10..1f": "101112131415a0a118191a1b1c1d1e1f",
+    "lane_loads_oob.load32_lane_nonzero@address0,x=10..1f": "1011121314151617a0a1a2a31c1d1e1f",
+    "lane_loads_oob.load64_lane_nonzero@address0,x=10..1f": "1011121314151617a0a1a2a3a4a5a6a7",
+    "shared_vector_loads.load": "101112131415161718191a1b1c1d1e1f",
+    "shared_vector_loads.load8_lane_nonzero@x=80..8f,address5": "808182838485868715898a8b8c8d8e8f"
+  },
+  "expected_traps": {
+    "lane_loads_oob.full_width_oob_after_prefix": {
+      "trap": "MemoryOutOfBounds",
+      "memory_byte_8": "aa",
+      "memory_byte_9": "a9",
+      "requested_access": "16 bytes at 65528"
+    },
+    "lane_loads_oob.load64_lane_oob_after_prefix": {
+      "trap": "MemoryOutOfBounds",
+      "memory_byte_8": "aa",
+      "memory_byte_9": "a9",
+      "requested_access": "8 bytes at 65532"
+    }
+  },
+  "fixtures": [
+    {
+      "wat": "extension_loads.wat",
+      "wat_sha256": "7e352c0941e0d8ee6efd04753b27aec9ebca77b5c3c73cffb5d2272772f587c6",
+      "wasm": "extension_loads.wasm",
+      "wasm_sha256": "af3a83df224e35cac00cbeb0aecf493d2ce3d3c0090c01b07e05ea1b5819f7d0",
+      "wasm_bytes": 228,
+      "exports": [
+        "v128.load8x8_s",
+        "v128.load8x8_u",
+        "v128.load16x4_s",
+        "v128.load16x4_u",
+        "v128.load32x2_s",
+        "v128.load32x2_u"
+      ]
+    },
+    {
+      "wat": "lane_loads_oob.wat",
+      "wat_sha256": "d211f824019a254cae7d2396e9c7ce456001bc90c26478f59ed78851933a4b9d",
+      "wasm": "lane_loads_oob.wasm",
+      "wasm_sha256": "5204ac6676557f4fe417c9cdb1d4c85a0ed53f8a7190506c81ff9e8acf9210d5",
+      "wasm_bytes": 411,
+      "exports": [
+        "v128.load8_lane_nonzero",
+        "v128.load16_lane_nonzero",
+        "v128.load32_lane_nonzero",
+        "v128.load64_lane_nonzero",
+        "full_width_oob_after_prefix",
+        "load64_lane_oob_after_prefix"
+      ]
+    },
+    {
+      "wat": "shared_vector_loads.wat",
+      "wat_sha256": "cda4c31a4839caf6de40c4da37407ad3a740067873bdeb7ed1b1f6f9f1d91197",
+      "wasm": "shared_vector_loads.wasm",
+      "wasm_sha256": "3fb7bb27ed971834063039a2614b7d6fd57ed221765432c8f14265ea9aab1ee5",
+      "wasm_bytes": 132,
+      "exports": [
+        "memory",
+        "v128.load",
+        "v128.load8_lane_nonzero"
+      ]
+    },
+    {
+      "wat": "splat_zero_loads.wat",
+      "wat_sha256": "7dc41e4459c09a62598c623834e93a8e6956848753d9ba740fcb0f88aee3d616",
+      "wasm": "splat_zero_loads.wasm",
+      "wasm_sha256": "b86c5af5cd9ca49d5773e0a00606438333d59e8081b991d20c0937796bedbe7f",
+      "wasm_bytes": 262,
+      "exports": [
+        "v128.load8_splat",
+        "v128.load16_splat",
+        "v128.load32_splat",
+        "v128.load64_splat",
+        "v128.load32_zero",
+        "v128.load64_zero",
+        "v128.load"
+      ]
+    }
+  ],
+  "status": "fixture/test leaf staged for review; no test executed from this leaf and no optimized-path proof claimed"
+}

@@ -1,0 +1,140 @@
+{
+  "task": "P030",
+  "operation": "WAT-to-Wasm encoding only; no validation or execution claim",
+  "started_utc": "2026-10-11T18:17:14.871682+00:00",
+  "encoder": "/workspace/wtime/target/debug/wtime-conformance",
+  "encoder_sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4",
+  "results": [
+    {
+      "name": "guest_frame",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P030-fixture-stage/guest_frame.wat",
+        "-o",
+        "/tmp/P030-fixture-stage/guest_frame.wasm"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "source_sha256": "d87f1e05ec16fedee430210e129e883834d68db0c0f1fa1726c8d72a08e4e7b1",
+      "wasm_sha256": "fcc11c6f6912cd045308cc8e78688190af5909d019a39c11ec9c465231058f55",
+      "wasm_bytes": 433
+    },
+    {
+      "name": "tail_call",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P030-fixture-stage/tail_call.wat",
+        "-o",
+        "/tmp/P030-fixture-stage/tail_call.wasm"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "source_sha256": "e5c14d4dab465bf98b4a72cca869095096f2e27e7cdd8d549ff3c1d824764be3",
+      "wasm_sha256": "2b98c41abe9436d575cc64f2f9850a602931181a58d7bef3cc2e3bd7f9bb6257",
+      "wasm_bytes": 363
+    },
+    {
+      "name": "recursion",
+      "command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P030-fixture-stage/recursion.wat",
+        "-o",
+        "/tmp/P030-fixture-stage/recursion.wasm"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "source_sha256": "52cd0e7715376bfc6807bdd1ecfa0802ce7f0be9fc08c6b1bf93b8a2a0280b66",
+      "wasm_sha256": "6c4867d91d35f052b0e2bde536aec305c2344eed2cb5608132da0f785901cd56",
+      "wasm_bytes": 159
+    },
+    {
+      "name": "import_control",
+      "command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P030-fixture-stage/import_control.wat",
+        "-o",
+        "/tmp/P030-fixture-stage/import_control.wasm"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "source_sha256": "18d249b9a1c0eb32c8e0cd3b49981859bc0001304c8bccb79ade1a26632e85ae",
+      "wasm_sha256": "08be40bddd97dda10bf2379ecfef9717a223f964e320ae56b21159d0e4ae6418",
+      "wasm_bytes": 69
+    },
+    {
+      "name": "reference_control",
+      "command": [
+        "/workspace/wtime/target/debug/wtime-conformance",
+        "encode",
+        "/tmp/P030-fixture-stage/reference_control.wat",
+        "-o",
+        "/tmp/P030-fixture-stage/reference_control.wasm"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "source_sha256": "59f5e62337a0a9ee3c9cb886a057681608cf522210a98239be25817dc4b2d857",
+      "wasm_sha256": "11768646358d8df6e21dbaa101fe751f737bfa92b7900a2dcf02606ed99090a1",
+      "wasm_bytes": 152
+    }
+  ],
+  "parameter_forwarding_reruns": {
+    "started_utc": "2026-10-11T18:41:04.697377+00:00",
+    "purpose": "Encode updated guest and tail-call WAT sources after adding parameter-forwarding observables; this is not validation/execution evidence.",
+    "results": [
+      {
+        "name": "guest_frame",
+        "command": [
+          "taskset",
+          "-c",
+          "4",
+          "/workspace/wtime/target/debug/wtime-conformance",
+          "encode",
+          "/tmp/P030-fixture-stage/guest_frame.wat",
+          "-o",
+          "/tmp/P030-fixture-stage/guest_frame.wasm"
+        ],
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "",
+        "source_sha256": "d87f1e05ec16fedee430210e129e883834d68db0c0f1fa1726c8d72a08e4e7b1",
+        "wasm_sha256": "fcc11c6f6912cd045308cc8e78688190af5909d019a39c11ec9c465231058f55",
+        "wasm_bytes": 433
+      },
+      {
+        "name": "tail_call",
+        "command": [
+          "taskset",
+          "-c",
+          "4",
+          "/workspace/wtime/target/debug/wtime-conformance",
+          "encode",
+          "/tmp/P030-fixture-stage/tail_call.wat",
+          "-o",
+          "/tmp/P030-fixture-stage/tail_call.wasm"
+        ],
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "",
+        "source_sha256": "e5c14d4dab465bf98b4a72cca869095096f2e27e7cdd8d549ff3c1d824764be3",
+        "wasm_sha256": "2b98c41abe9436d575cc64f2f9850a602931181a58d7bef3cc2e3bd7f9bb6257",
+        "wasm_bytes": 363
+      }
+    ]
+  },
+  "record_scope": "results rows describe the current output identities after the parameter-forwarding reruns. started_utc is the initial staging start, not a claim that updated guest/tail bytes existed then. Original pre-forwarding sources, bytes and encoder report are retained at target/performance/P030-preflight/parameter-forwarding-superseded/fixture-stage. The parameter_forwarding_reruns section binds the actual updated encodings."
+}

@@ -1,0 +1,148 @@
+{
+  "encoder": "wasm-tools 1.261.0 (external development tool, not a production or test dependency)",
+  "core_spec_revision": "7e9fb78c63d65018cc111422f657947b3df80d7b",
+  "policy": "FeatureSet stable_core and all_phase3_core from wtime-types; all fixtures must compile with all_phase3_core. Semantic disabled cases require ErrorKind::DisabledFeature. Advisory branch hints remain ignorable.",
+  "compact_imports": "Manually encoded according to pinned compact-import section grammar; see compact_imports.wat for exact payload.",
+  "files": {
+    "atomic_opcode.wasm": {
+      "sha256": "7815d4526b4470267f2ab454e92f86fab1a6d4872bdce0ca6ede89d8d480f11b",
+      "source": "atomic_opcode.wat"
+    },
+    "baseline_host.wasm": {
+      "sha256": "3c5e581ff2caca5e6a13d4ed9b0c930675e447981e3d73dbab9f4991d08ddddd",
+      "source": "baseline_host.wat"
+    },
+    "branch_hinting.wasm": {
+      "sha256": "6db9a3d4679e0c867eb47319e8d1d0052db500cbe8fee25563094a2a1839d44d",
+      "source": "branch_hinting.wat"
+    },
+    "bulk_memory.wasm": {
+      "sha256": "1376c92b7c36a2a3c361544df86013dd7687f60ac9b203627033bfb505ca6f58",
+      "source": "bulk_memory.wat"
+    },
+    "bulk_memory_passive.wasm": {
+      "sha256": "b0023addc0b423237d373d3e4bd50af8cc27629325fbe750d7a5a9929cee2568",
+      "source": "bulk_memory_passive.wat"
+    },
+    "compact_imports.wasm": {
+      "sha256": "4bca43793dddf2440ddb54df6dfcb3b42a9ca346ad1726bcc8b2872a6193c772",
+      "source": "compact_imports.wat"
+    },
+    "custom_default_page_syntax.wasm": {
+      "sha256": "d0cec829774a829b60ab2e887e9701d4afc685ab1489c35f64f5a74355f33ff5",
+      "source": "custom_default_page_syntax.wat"
+    },
+    "custom_descriptors.wasm": {
+      "sha256": "e09209ccb09545fb245d71f719097518b59702688879a05258c405be85f8086c",
+      "source": "custom_descriptors.wat"
+    },
+    "custom_descriptors_type.wasm": {
+      "sha256": "326b281bd45142759315372416e6003f67511f6b209548cdf29cfe125671ff2e",
+      "source": "custom_descriptors_type.wat"
+    },
+    "custom_exact_heap.wasm": {
+      "sha256": "31a555489c78288731e5d8bccc207757580f4578bba886a9868a1ecde5191cfc",
+      "source": "custom_exact_heap.wat"
+    },
+    "custom_page_sizes.wasm": {
+      "sha256": "abd59654212b7da35419dd3c70cc37ec820018d7db8285c7d537ac6ebac44305",
+      "source": "custom_page_sizes.wat"
+    },
+    "exception_handling.wasm": {
+      "sha256": "c7a9f0286d98687e58eacaaae6a7d2c456c876aeb01d62f3151d5085d8adf664",
+      "source": "exception_handling.wat"
+    },
+    "extended_const.wasm": {
+      "sha256": "41d0e8e4d525d1edef6e65eb540f72ea1cf8d2570843e8d013513c311096b864",
+      "source": "extended_const.wat"
+    },
+    "function_reference_initializer.wasm": {
+      "sha256": "dc0ac213f08e50d945d2f4fa1f7a2a64cd693798b34385a501c828a07e7d4711",
+      "source": "function_reference_initializer.wat"
+    },
+    "function_references.wasm": {
+      "sha256": "ba80b24c9998b02aa6e353b54158111aa217257c0ff91d0eef291439fdb3aa01",
+      "source": "function_references.wat"
+    },
+    "gc.wasm": {
+      "sha256": "1b8314d5fe69473ef6c83d6fbf88656de3fdc65c058aabd7b75809e02a53277e",
+      "source": "gc.wat"
+    },
+    "gc_initializer.wasm": {
+      "sha256": "d1fac28ebf0af2ec4e8eb1424c57d21aa780edcb61778e35361b74f5404c0ed4",
+      "source": "gc_initializer.wat"
+    },
+    "memory64.wasm": {
+      "sha256": "24df68d85363486f851d91138f7f34a91ae823244c1a6f5d0beb14ad86772cf7",
+      "source": "memory64.wat"
+    },
+    "memory64_table.wasm": {
+      "sha256": "a8f31a014255b43cd623ef82d37df8024aef7300e561d40a69527eccb342d07b",
+      "source": "memory64_table.wat"
+    },
+    "multi_memory.wasm": {
+      "sha256": "9a5618de640fb0cad783ddf92c9d9b51db1415a3db7ee13e70518e195b24a22a",
+      "source": "multi_memory.wat"
+    },
+    "multi_value.wasm": {
+      "sha256": "0414b5227f1e9aa15aa9ccfcf04896d4549fa61e656be62af7d1868515aa44da",
+      "source": "multi_value.wat"
+    },
+    "multi_value_block.wasm": {
+      "sha256": "3d6fcc0451a8e833d3a49a401f75ad0edc1ba1f09ae5d7c8db4ea1350c5be17e",
+      "source": "multi_value_block.wat"
+    },
+    "mutable_global_import.wasm": {
+      "sha256": "092787ae1cb6b1b2b3a2e9eec6eb2e9102ae1b2b2ff8b1b583c2549b708a52bf",
+      "source": "mutable_global_import.wat"
+    },
+    "mutable_globals.wasm": {
+      "sha256": "d9837c5a504a61696091cf688ddbdc283b0777bf16ffe10caf52df51b0e1d14e",
+      "source": "mutable_globals.wat"
+    },
+    "reference_types.wasm": {
+      "sha256": "9d151980b47655256f32fd09047416716848f02f62c541344f6a2dec6d171fb1",
+      "source": "reference_types.wat"
+    },
+    "relaxed_simd.wasm": {
+      "sha256": "fd1276ee0a3c5bb8b47b2a534628239d4b717551af790985292648227c37bb3b",
+      "source": "relaxed_simd.wat"
+    },
+    "saturating_float_to_int.wasm": {
+      "sha256": "32cb6726f93ed19174274cd5de5b74d750f558f9ef9a77200926a0ebb8499d16",
+      "source": "saturating_float_to_int.wat"
+    },
+    "sign_extension.wasm": {
+      "sha256": "7b1bd46611b5ff551f30900167eff2dbae5b8c60b73eb1fcd16edb3dae44498b",
+      "source": "sign_extension.wat"
+    },
+    "simd.wasm": {
+      "sha256": "e6ea5789b0962644d855d61189d3063b0223a853f886b61e62b5cbe65e8e45a7",
+      "source": "simd.wat"
+    },
+    "simd_opcode.wasm": {
+      "sha256": "41e509139920e0563a31fb016ec1d4901733fb0ac83d3bd374ca1ce164e77b20",
+      "source": "simd_opcode.wat"
+    },
+    "stack_switching.wasm": {
+      "sha256": "e9b7b1073f4a0c6c62a40360c16e8919b45c3fa3ae8350a172f37452f92e74c1",
+      "source": "stack_switching.wat"
+    },
+    "tail_call.wasm": {
+      "sha256": "ee0d8e3bc16491079f5e98ac7122f5b24189aa2e78be15ba102a077c82a8e8b2",
+      "source": "tail_call.wat"
+    },
+    "threads.wasm": {
+      "sha256": "6ca9898c08cd8f8d3af5e4ecb2c1a026119a2058d9ad0ed3aac6ab2616ece935",
+      "source": "threads.wat"
+    },
+    "typed_call_indirect.wasm": {
+      "sha256": "5ec0b86bfb911fb0d1555fc40d626454aec2ab8659331bdc0e5ac456672aaff3",
+      "source": "typed_call_indirect.wat"
+    },
+    "wide_arithmetic.wasm": {
+      "sha256": "5f8b0ed57d7e495b1fa805fd68976051f2bd1cb08f45be6f5e4220479bfe9b4a",
+      "source": "wide_arithmetic.wat"
+    }
+  }
+}

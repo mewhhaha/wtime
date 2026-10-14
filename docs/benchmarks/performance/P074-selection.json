@@ -1,0 +1,160 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P074",
+  "lane": "candidate",
+  "rationale": "Portable whole-vector bitwise change; existing integer-lane loops exercise repeated XOR, with randomized/zero held-outs and scalar, shuffle, lane-memory, strict float and relaxed SIMD protected. Semantics cover all seven operators; the speed claim is limited to this selected mixed-XOR compute portfolio.",
+  "registry_sha256": "228a4a921f1fa1d67092e331dfba7b90309e18265118a29dcfb6fb631b68308c",
+  "rows": [
+    {
+      "id": "simd_integer_lanes_n17",
+      "family": "simd",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "46c75ecb91cc9c983ed048a743781f651740aef6bdd511e6c76ee5115dd25612"
+    },
+    {
+      "id": "simd_integer_lanes_n1000",
+      "family": "simd",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "768698c0ef4fb558c0d97f8e92c47c6e43869322df65c14598c4a106fbeab994"
+    },
+    {
+      "id": "simd_integer_lanes_n0",
+      "family": "simd",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "edf7879854f9c4bff2f99bfc1cbad34800791231dda1cfc60d6388e0141f0149"
+    },
+    {
+      "id": "simd_integer_lanes_random_00",
+      "family": "simd",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "6c17529b9552dc0a610071546fdba26a2ef8eff9e2fa984e2e0c79f4ab16c89c"
+    },
+    {
+      "id": "simd_scalar_integer_lanes_n17",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "1006bb0a76cc5f0c7780fabcb92a484cc40cb02aa0087b005224fa301339e3db"
+    },
+    {
+      "id": "simd_scalar_integer_lanes_n1000",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "24fb1b5cbf26f9fcc67db976f0d7f215e235dc4cd3bdbd6ee847cc031f16d410"
+    },
+    {
+      "id": "simd_shuffle_n1000",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "a5716a60bdb7f2f393baffd1858bb1d3336bbfe7c2a1c21c93f41041213d0685"
+    },
+    {
+      "id": "simd_lane_memory_n1000",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "e7259ce7d602370ed582b171d85f65522ad934043f615ef23ec0f6af77fbabcf"
+    },
+    {
+      "id": "simd_float_arithmetic_n1000",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "6aefb217855dfbea33c6dd6d89d0c2346a05b644cd357bf5958e036f8a24acc1"
+    },
+    {
+      "id": "simd_float_min_zero",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "0c253a1067696c5486d4206f88a3bf7734ab64f34ab010661cce396d5aff1488"
+    },
+    {
+      "id": "simd_relaxed_swizzle_n1000",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "f4b57a1e4e7445b4eead2b487e281dcdcd5f6a0f76ff9e0d37350ccbe2489dee"
+    },
+    {
+      "id": "simd_relaxed_swizzle_oob_17",
+      "family": "simd",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "95d77f988f20b5775dc812ab120ef5d5cf89699aebe23235749cbc3fe3414f2a"
+    },
+    {
+      "id": "call_overhead",
+      "family": "original-mvp",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "id": "prepare_large",
+      "family": "original-mvp",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p074_random_bitwise_patterns_use_word_dispatch",
+    "p074_masks_any_true_and_fallback_preserve_bits",
+    "p074_fuel_prefixes_and_cancellation_keep_global_state"
+  ]
+}

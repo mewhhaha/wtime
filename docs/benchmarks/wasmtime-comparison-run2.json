@@ -1,0 +1,7605 @@
+{
+  "passed": true,
+  "source_stable": true,
+  "recorded_at_utc": "2026-10-11T06:11:57.227818+00:00",
+  "wasm_correctness_checked": true,
+  "wasmtime_version": "49.0.2",
+  "samples": 21,
+  "seed": 20261012,
+  "hardware": {
+    "cpu_model": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "os": "Linux-6.18.44-x86_64-with-glibc2.41",
+    "cpu_affinity_available": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "selected_cpu": 2,
+    "cpu_quota": "400000 100000"
+  },
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "settings": {
+    "profile": "release",
+    "wasmtime_features": [
+      "std",
+      "runtime",
+      "cranelift"
+    ],
+    "opcode_coverage": false,
+    "cranelift_optimization": "speed",
+    "fuel": false,
+    "epoch_interruption": false,
+    "wasmtime_cache": false,
+    "wasmtime_parallel_compilation": false,
+    "wtime_features": "mvp",
+    "call_api": "dynamic values; reusable argument arrays and Wasmtime result buffer; wtime returns owned results",
+    "preparation": "fresh initialized engine per sample; file IO/engine initialization/module drop excluded",
+    "instantiation": "compiled module reused; fresh store creation/export lookup/drop excluded; no start functions",
+    "first_call": "single invocation on fresh instance, excludes preparation/instantiation",
+    "load_and_call": "fresh initialized engine; includes compilation/store/instantiation/export lookup/first invocation; excludes file IO and engine initialization",
+    "warm_call": "five warmup invocations, calibrated batches targeting 20 ms, deterministic alternating A/B order"
+  },
+  "benchmark_binary_sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498",
+  "encoder_sha256": "36bede285fc5a1ad57b35566abf4bb68d3acf4e015944ff07e8dc6fb76e3bc14",
+  "implementation_sources": {
+    "Cargo.lock": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
+    "Cargo.toml": "9656851608b4f5ecb5f973a5ad370c67aef45fc557d4c132469bbf012662efff",
+    "crates/wtime-cli/Cargo.toml": "67dc333182e863f6bbe2a09d9c99e7519ff35a1bc41c551c49273cc1c9f935e8",
+    "crates/wtime-cli/src/main.rs": "760feeee1801d17c5675ba1f35e5fed10b3e2a02eb58458435e7d9ad355e6dfe",
+    "crates/wtime-cli/tests/metadata.rs": "38015f945e99ffca1c9dc18577575057050a91e4df215314d7636f3c9cc7141f",
+    "crates/wtime-decode/Cargo.toml": "1ae571b0eb1a293cd0ef6a181e33d267c40b228cd1afd5dd44ef9a309d113fa1",
+    "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+    "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+    "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+    "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+    "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+    "crates/wtime-runtime/Cargo.toml": "da3a83cae36bbab34d9d7838eb83b646f30b6a943709d35e0391713ddb7be14e",
+    "crates/wtime-runtime/examples/embedding.rs": "d9baac3b51bacbee00c42a109831e8bd1a845158b5a0ceae46a911307d8b0907",
+    "crates/wtime-runtime/examples/suspension.rs": "097175e5cbbcf1be4716d4c1b584702042558d299360392fa742a85ead331e1d",
+    "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+    "crates/wtime-runtime/src/canonical.rs": "0bed54a47fbca8a39c7359a9140a5284f0513a6744505ddb5a0b92d531d0776d",
+    "crates/wtime-runtime/src/continuation.rs": "5d9d3b8dc1b79776817f3a0a0d9c951a2a5b1cfd82ac97b7b7999e763bd44211",
+    "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+    "crates/wtime-runtime/src/exceptions.rs": "11d964449cfc6b193de8085eb04d4c064bfe6a35b405eeeb150fe1eb9903dbe1",
+    "crates/wtime-runtime/src/execution.rs": "de12b5611cdd4735d479a50e762b7ff167a597a9ad6ca7200b2f55da360a6db0",
+    "crates/wtime-runtime/src/gc.rs": "7dcfcc9aaff6a333041d9d8a7323d1ce0fad90b382b5023e9caeeb52815b3471",
+    "crates/wtime-runtime/src/gc_exec.rs": "e95c94b089847067f5cd60494f7473122116854b2f7dc8c7782623c4e21a2639",
+    "crates/wtime-runtime/src/lib.rs": "2df3f5229fe6abc733ebed62467d95a763b30a771e117a9393a4fc9e1b2336f6",
+    "crates/wtime-runtime/src/linker.rs": "8aa0cd1a1b69e4df44d7eff844e11c252ab21c43bf9e8e0471acc4bf7a50e18a",
+    "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+    "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+    "crates/wtime-runtime/src/simd.rs": "84c223e6a546aa8955ff5214b9add03df4c94d25f3ffcd45b33a808d299334b1",
+    "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+    "crates/wtime-runtime/tests/core.rs": "54f6e18cff27f3da96ae0736d7910013883742f0215d35abb551ce324c78af1f",
+    "crates/wtime-runtime/tests/exceptions.rs": "3cc47afeeb6428154f6d0a30db6362a009c45d292278f5f03ca60c53c3342a93",
+    "crates/wtime-runtime/tests/feature_profiles.rs": "dafe483c28f8683332d198935818fff885827dfc5cfd1ad62f27330490ebc14a",
+    "crates/wtime-runtime/tests/proposals.rs": "8fffaa52d03e81fc7d88d0970617f1a0c8ba7602fc241ad9c65367133d2a9927",
+    "crates/wtime-types/Cargo.toml": "e5c4d20d5d35fd4a15ce854f96602add82b86a1bbe4599aab69b0abcc7dc9031",
+    "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+    "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+    "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+    "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+    "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+    "crates/wtime-validate/Cargo.toml": "fed963beb5aa95d1c242f4131509edd95069e1b27c4e69f84f969357a04a0639",
+    "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+    "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+    "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+    "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+    "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+    "crates/wtime-validate/src/lib.rs": "666fc61b81e1719a5ef50c52a656801b560e4f8377047008e94e18767116df88",
+    "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0",
+    "crates/wtime-validate/tests/exceptions.rs": "061d15fe56d6028e54671c5dd5d86ee1069f2ac99183886a3c3441356d4da290",
+    "crates/wtime-validate/tests/policy.rs": "4a4c47509bd9da3850b1ab76235d585db2c7aba826f1f89ec9055a2d888774c3",
+    "tools/wtime-bench/Cargo.lock": "4d1a59eab7ae2ce8c6abcd203afb3a20d0787e6cd536b86a919fd133196c5431",
+    "tools/wtime-bench/Cargo.toml": "69a395a329b740b54d7e62a13470645a3f323238a9af59926fb945a1da231792",
+    "tools/wtime-bench/run.py": "f793c150ae38031467c91a70cddf66e85b6cd6d9782e227b773b4da6ff564bea",
+    "tools/wtime-bench/src/main.rs": "07c35bc4a074139c6aa7fb44f1e0b8c6f9de3834ea11870b5a45301ab37e151a"
+  },
+  "workloads": {
+    "call_overhead": {
+      "input": 100,
+      "expected_result": 101,
+      "wasm_bytes": 40,
+      "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+      "wat_sha256": "9493b8f751690a2fd6e8b19dcee5e2c1d50b717253d292ce34d5692b306663a5",
+      "command": [
+        "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+        "/workspace/wtime/tools/wtime-bench/fixtures/call_overhead.wasm",
+        "call_overhead",
+        "100",
+        "101",
+        "21",
+        "20261012"
+      ]
+    },
+    "integer_loop": {
+      "input": 10000,
+      "expected_result": -205621359,
+      "wasm_bytes": 122,
+      "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c",
+      "wat_sha256": "791730112109f3d5751a7b3e2c1134e7e0e6f71a7f7ee01ea8481eb989ee3fa4",
+      "command": [
+        "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+        "/workspace/wtime/tools/wtime-bench/fixtures/integer_loop.wasm",
+        "integer_loop",
+        "10000",
+        "-205621359",
+        "21",
+        "20261012"
+      ]
+    },
+    "memory_fill_scan": {
+      "input": 4096,
+      "expected_result": 25159680,
+      "wasm_bytes": 171,
+      "wasm_sha256": "1c933d404fe9feb93bb664af3bbb60a50319cdd6a2c29d442aa9ab7799f5e65f",
+      "wat_sha256": "c0a222245af932b6d43ca964fa710f56476dc90ebaca0b20915d35b242a6c87d",
+      "command": [
+        "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+        "/workspace/wtime/tools/wtime-bench/fixtures/memory_fill_scan.wasm",
+        "memory_fill_scan",
+        "4096",
+        "25159680",
+        "21",
+        "20261012"
+      ]
+    },
+    "branch_calls": {
+      "input": 5000,
+      "expected_result": 804656585,
+      "wasm_bytes": 157,
+      "wasm_sha256": "9b58d26f201900b5b6cce684133a98ab68b3cf55d979b64ce895e914e9d5327b",
+      "wat_sha256": "d0af4fdf9ad5be38344267ae72fc1855edb5a8fa1b475fd0af4cb507730b2309",
+      "command": [
+        "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+        "/workspace/wtime/tools/wtime-bench/fixtures/branch_calls.wasm",
+        "branch_calls",
+        "5000",
+        "804656585",
+        "21",
+        "20261012"
+      ]
+    },
+    "prepare_large": {
+      "input": 0,
+      "expected_result": 0,
+      "wasm_bytes": 215036,
+      "wasm_sha256": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0",
+      "wat_sha256": "aefc7237fa17bfbccd8c318bc104111c8e3296933a94017837d2c02130d638fd",
+      "command": [
+        "/workspace/wtime/tools/wtime-bench/target/release/wtime-bench",
+        "/workspace/wtime/tools/wtime-bench/fixtures/prepare_large.wasm",
+        "prepare_large",
+        "0",
+        "0",
+        "21",
+        "20261012"
+      ]
+    }
+  },
+  "summary": [
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "wtime": {
+        "median_ns": 14199.0,
+        "p25_ns": 13435.0,
+        "p75_ns": 14436.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 708924.0,
+        "p25_ns": 627979.0,
+        "p75_ns": 1004387.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.02002894527481084
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "wtime": {
+        "median_ns": 867.0,
+        "p25_ns": 514.0,
+        "p75_ns": 1061.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 679.0,
+        "p25_ns": 529.0,
+        "p75_ns": 833.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 1.2768777614138438
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "wtime": {
+        "median_ns": 600.0,
+        "p25_ns": 482.0,
+        "p75_ns": 969.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 317.0,
+        "p25_ns": 272.0,
+        "p75_ns": 567.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 1.8927444794952681
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "wtime": {
+        "median_ns": 658.056,
+        "p25_ns": 620.481,
+        "p75_ns": 700.462,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 323.328,
+        "p25_ns": 313.095,
+        "p75_ns": 344.882,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 2.0352583135391926
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "wtime": {
+        "median_ns": 23642.0,
+        "p25_ns": 23007.0,
+        "p75_ns": 24281.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 777604.0,
+        "p25_ns": 558573.0,
+        "p75_ns": 1114933.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.030403650186984633
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "wtime": {
+        "median_ns": 20646.0,
+        "p25_ns": 20280.0,
+        "p75_ns": 21331.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 1273122.0,
+        "p25_ns": 1018898.0,
+        "p75_ns": 1471933.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.016216827609608506
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "wtime": {
+        "median_ns": 6854.0,
+        "p25_ns": 6581.0,
+        "p75_ns": 7759.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 9278.0,
+        "p25_ns": 6953.0,
+        "p75_ns": 10787.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.7387367967234317
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "wtime": {
+        "median_ns": 16531562.0,
+        "p25_ns": 16171410.0,
+        "p75_ns": 17657380.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 18435.0,
+        "p25_ns": 16396.0,
+        "p75_ns": 18849.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 896.748684567399
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "wtime": {
+        "median_ns": 17756310.0,
+        "p25_ns": 16227925.5,
+        "p75_ns": 18853972.5,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 24017.297,
+        "p25_ns": 22056.436,
+        "p75_ns": 26919.953,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 739.3134206567876
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "wtime": {
+        "median_ns": 16180214.0,
+        "p25_ns": 15034868.0,
+        "p75_ns": 17283865.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 1265438.0,
+        "p25_ns": 1051141.0,
+        "p75_ns": 1437364.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 12.786255826046002
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "wtime": {
+        "median_ns": 21660.0,
+        "p25_ns": 18646.0,
+        "p75_ns": 22077.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 1174370.0,
+        "p25_ns": 872880.0,
+        "p75_ns": 1335851.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.01844393163994312
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "wtime": {
+        "median_ns": 10531.0,
+        "p25_ns": 9774.0,
+        "p75_ns": 14037.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 36986.0,
+        "p25_ns": 22681.0,
+        "p75_ns": 88277.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.2847293570540204
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "wtime": {
+        "median_ns": 42318958.0,
+        "p25_ns": 39138574.0,
+        "p75_ns": 45172116.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 25005.0,
+        "p25_ns": 20565.0,
+        "p75_ns": 75444.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 1692.4198360327935
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "wtime": {
+        "median_ns": 38420563.0,
+        "p25_ns": 37468260.0,
+        "p75_ns": 40431192.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 6807.359,
+        "p25_ns": 6422.558,
+        "p75_ns": 7360.845,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 5643.974851333682
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "wtime": {
+        "median_ns": 38086036.0,
+        "p25_ns": 34424068.0,
+        "p75_ns": 40423689.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 1264877.0,
+        "p25_ns": 1088995.0,
+        "p75_ns": 1453881.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 30.110466076938707
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "wtime": {
+        "median_ns": 23002.0,
+        "p25_ns": 21196.0,
+        "p75_ns": 27394.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 2730475.0,
+        "p25_ns": 2253927.0,
+        "p75_ns": 5042987.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.008424175280857727
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "wtime": {
+        "median_ns": 6795.0,
+        "p25_ns": 6253.0,
+        "p75_ns": 8073.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 8277.0,
+        "p25_ns": 6753.0,
+        "p75_ns": 10465.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.8209496194273287
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "wtime": {
+        "median_ns": 26217325.0,
+        "p25_ns": 24136140.0,
+        "p75_ns": 28178831.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 15934.0,
+        "p25_ns": 14357.0,
+        "p75_ns": 17329.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 1645.3699635998494
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "wtime": {
+        "median_ns": 22248134.0,
+        "p25_ns": 19244940.0,
+        "p75_ns": 24054211.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 22430.007,
+        "p25_ns": 19986.099,
+        "p75_ns": 24096.99,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 991.8915317324688
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "wtime": {
+        "median_ns": 19356986.0,
+        "p25_ns": 16888825.0,
+        "p75_ns": 20502836.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 1268178.0,
+        "p25_ns": 1049752.0,
+        "p75_ns": 1500766.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 15.26361914494653
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "wtime": {
+        "median_ns": 7718807.0,
+        "p25_ns": 7217152.0,
+        "p75_ns": 9671553.0,
+        "samples": 21
+      },
+      "wasmtime": {
+        "median_ns": 141381121.0,
+        "p25_ns": 126225634.0,
+        "p75_ns": 172984271.0,
+        "samples": 21
+      },
+      "wtime_over_wasmtime": 0.0545957405444536
+    }
+  ],
+  "raw_samples": [
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 1004387.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 17805.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 2465.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 636705.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 15111.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 1525271.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 14304.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 1430821.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 14199.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 448607.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 640879.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 14252.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 2386.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 1680180.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 945644.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 14313.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 624691.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 14193.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 2539.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 708924.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 14425.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 652314.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 470825.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 14491.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 1258256.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 14436.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 2404.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 802474.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 442220.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 14602.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 791438.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 41256.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 706156.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 14149.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 1478754.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 14177.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 2545.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 745152.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 13738.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 627979.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 13435.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 565585.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 43540.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 1529233.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1114933.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 30916.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 9932.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 466973.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 2343412.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 26287.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 562246.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 23607.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 2063418.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 24099.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 7060.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 529748.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 835237.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 23642.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 7214.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 833842.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 23605.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 1688998.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 23857.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 558573.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 23424.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 777604.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 23482.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 987939.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 24281.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 443623.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 775750.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 169016.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 10563.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 762909.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 543827.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 23671.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 425481.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 28508.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 622333.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 23007.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 7829.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 1769164.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 799749.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 24074.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 3574.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 2038.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 6858.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 3943.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1139.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 401.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1018.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 858.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 593.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 317.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 3300.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 1860.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 1506.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 796.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 1451.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 473.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 524.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 252.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 495.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 451.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 626.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 482.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 546.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 301.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 500.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 244.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 517.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 494.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 741.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 560.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 999.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 884.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 497.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 278.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 561.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 550.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 449.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 1164.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 833.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 567.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 867.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 600.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 36124.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 673.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 1061.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 969.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 679.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 628.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 761.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 242.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 1004.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 862.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 503.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 472.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 793.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 562.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 975.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 852.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 552.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 243.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 465.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 495.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 826.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 553.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 499.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 282.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 3464.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 124398.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 1710.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 1139.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 1405.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 830.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 501.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 249.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 540.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 561.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 529.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 272.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 495.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 469.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 514.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 474.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 629.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 284.0
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 42463,
+      "ns_per_operation": 595.729
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 87720,
+      "ns_per_operation": 319.493
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 87720,
+      "ns_per_operation": 305.046
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 42463,
+      "ns_per_operation": 704.843
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 42463,
+      "ns_per_operation": 620.153
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 87720,
+      "ns_per_operation": 314.12
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 42463,
+      "ns_per_operation": 828.231
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 87720,
+      "ns_per_operation": 328.23
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 42463,
+      "ns_per_operation": 592.434
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 87720,
+      "ns_per_operation": 313.095
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 87720,
+      "ns_per_operation": 351.866
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 42463,
+      "ns_per_operation": 626.133
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 42463,
+      "ns_per_operation": 577.415
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 87720,
+      "ns_per_operation": 355.736
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 42463,
+      "ns_per_operation": 712.414
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 87720,
+      "ns_per_operation": 334.98
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 87720,
+      "ns_per_operation": 315.902
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 42463,
+      "ns_per_operation": 691.183
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 42463,
+      "ns_per_operation": 642.456
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 87720,
+      "ns_per_operation": 320.954
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 87720,
+      "ns_per_operation": 303.99
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 42463,
+      "ns_per_operation": 700.462
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 42463,
+      "ns_per_operation": 620.481
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 87720,
+      "ns_per_operation": 344.882
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 87720,
+      "ns_per_operation": 337.53
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 42463,
+      "ns_per_operation": 675.617
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 87720,
+      "ns_per_operation": 309.365
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 42463,
+      "ns_per_operation": 622.515
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 42463,
+      "ns_per_operation": 649.464
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 87720,
+      "ns_per_operation": 394.8
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 87720,
+      "ns_per_operation": 311.951
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 42463,
+      "ns_per_operation": 658.056
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 42463,
+      "ns_per_operation": 705.742
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 87720,
+      "ns_per_operation": 337.786
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 42463,
+      "ns_per_operation": 740.19
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 87720,
+      "ns_per_operation": 323.328
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 42463,
+      "ns_per_operation": 618.012
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 87720,
+      "ns_per_operation": 312.541
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 42463,
+      "ns_per_operation": 689.068
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 87720,
+      "ns_per_operation": 380.367
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 87720,
+      "ns_per_operation": 395.022
+    },
+    {
+      "workload": "call_overhead",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 42463,
+      "ns_per_operation": 676.468
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 1286690.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 26651.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 5834.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1170301.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 22386.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 2748201.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 20533.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 1545100.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 21643.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 1273122.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 707744.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 21390.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 5802.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 730444.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 1279331.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 21128.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 1420340.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 20280.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 5262.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 1776504.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 21331.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 1666730.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 1591112.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 20763.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 1471933.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 20632.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 5033.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 798829.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 1297828.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 20846.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 524834.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 383224.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 1253863.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 20646.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 647633.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 20578.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 5261.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 1117560.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 21031.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 1018898.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 20312.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 1081379.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 15256378.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 1050917.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 843502.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 14653289.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 16630466.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 2555307.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 1252084.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 25310660.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 2741727.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 22697625.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 1400599.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 14845220.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 15489596.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 2166793.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 1103028.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 14779598.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 16180214.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 1161067.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 17126355.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 1365854.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 16871655.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 1265438.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 16141745.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 1437364.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 15034868.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 1555488.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 14000357.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 993526.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 1332078.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 16232145.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 16107182.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 1535685.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 1051141.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 14455919.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 715177.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 19216656.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 1433144.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 17435933.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 17283865.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 1244135.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 815937.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 19904304.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 6686.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 18535.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 10751.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 16449041.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 8064.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 16801.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 9695.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 16476918.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 7259.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 16986.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 6222.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 16471049.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 7165.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 16348.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 6334.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 16563878.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 6953.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 16396.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 6197.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 17657380.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 6591.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 16171410.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 12055.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 18435.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 602.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 13620.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 6753.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 20261406.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 10777.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 18839.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 7691.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 16066709.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 10041.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 18849.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 7077.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 15524078.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 6509.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 16140279.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 10787.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 19206.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 6741.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 16787352.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 11133.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 17574.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 7161.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 16481929.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 9278.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 18499.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 696.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 14859.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 7759.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 14958515.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 6581.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 15148740.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 9823.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 121824.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 5812.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 17514549.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 9967.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 18576.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 6838.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 16802865.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 9025.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 18110.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 677.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 14854.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 8326.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 18904844.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 7038.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 19059054.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 14392.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 19183.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 1861.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 14823.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 7785.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 18017642.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 11863.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 19199.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 8177.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 19253238.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 6854.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 16531562.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 15764.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 20390.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 2,
+      "ns_per_operation": 17795509.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1051,
+      "ns_per_operation": 21434.756
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1051,
+      "ns_per_operation": 27393.445
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 2,
+      "ns_per_operation": 17151577.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 2,
+      "ns_per_operation": 15904892.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1051,
+      "ns_per_operation": 24017.297
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 2,
+      "ns_per_operation": 19632119.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1051,
+      "ns_per_operation": 27496.334
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 2,
+      "ns_per_operation": 17977674.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1051,
+      "ns_per_operation": 26554.278
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1051,
+      "ns_per_operation": 26985.129
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 2,
+      "ns_per_operation": 18190711.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 2,
+      "ns_per_operation": 18853972.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1051,
+      "ns_per_operation": 26937.108
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 2,
+      "ns_per_operation": 15638046.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1051,
+      "ns_per_operation": 21655.934
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1051,
+      "ns_per_operation": 19822.177
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 2,
+      "ns_per_operation": 14677390.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 2,
+      "ns_per_operation": 20686787.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1051,
+      "ns_per_operation": 22777.502
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1051,
+      "ns_per_operation": 23069.057
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 2,
+      "ns_per_operation": 14506590.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 2,
+      "ns_per_operation": 19204617.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1051,
+      "ns_per_operation": 20699.574
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1051,
+      "ns_per_operation": 20756.065
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 2,
+      "ns_per_operation": 16847510.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1051,
+      "ns_per_operation": 24942.15
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 2,
+      "ns_per_operation": 17579855.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 2,
+      "ns_per_operation": 18509792.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1051,
+      "ns_per_operation": 26919.953
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1051,
+      "ns_per_operation": 25344.079
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 2,
+      "ns_per_operation": 21274294.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 2,
+      "ns_per_operation": 17756310.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1051,
+      "ns_per_operation": 24780.377
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 2,
+      "ns_per_operation": 16227925.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1051,
+      "ns_per_operation": 22056.436
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 2,
+      "ns_per_operation": 15697196.0
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1051,
+      "ns_per_operation": 22148.863
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 2,
+      "ns_per_operation": 16826260.5
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1051,
+      "ns_per_operation": 31094.328
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1051,
+      "ns_per_operation": 23055.144
+    },
+    {
+      "workload": "integer_loop",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 2,
+      "ns_per_operation": 18938026.5
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 1310443.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 411192.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 11614.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1044503.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 92940.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 807484.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 21334.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 965391.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 21550.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 1965550.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 875173.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 21763.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 6637.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 1236853.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 774043.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 58951.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 1184070.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 21660.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 6646.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 1174370.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 26417.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 1150116.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 872880.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 188465.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 846139.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 22077.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 6706.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 2132080.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 1329159.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 21721.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 2335007.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 21655.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 1335851.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 21998.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 635446.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 21094.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 6395.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 613335.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 18646.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 2189296.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 21820.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 1434222.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 43113394.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 1917213.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1101760.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 42665928.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 39756922.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 1503292.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 686522.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 36065932.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 1198062.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 35733037.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 1070523.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 20245274.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 41585644.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 1030685.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 1088995.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 21201231.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 49059557.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 1305387.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 38086036.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 1116778.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 45513707.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 1838809.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 18970720.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 1317036.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 38223103.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 1453881.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 28493811.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 1264877.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 1006155.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 38332941.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 37202729.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 1259514.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 970415.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 34424068.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 1600392.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 15068160.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 1376781.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 40423689.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 37770625.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 1277130.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 1726674.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 38647371.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 19936.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 17987.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 11730.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 19943216.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 23377.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 20565.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 10009.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 18788741.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 283366.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 20258.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 9289.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 20100973.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 22681.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 20199.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 288531.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 44008724.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 39273.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 25005.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 11013.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 41765649.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 9552.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 44400447.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 200251.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 24546.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 7844.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 13941.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 9355.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 45172116.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 88277.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 31165.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 9515.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 46430551.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 29344.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 147313.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 10134.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 40934356.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 9882.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 38641251.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 36986.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 24458.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 10531.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 39138574.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 31907.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 22598.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 9774.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 37107467.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 31397.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 23190.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 6605.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 14985.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 10194.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 39540456.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 9525.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 47009770.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 232392.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 75444.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 93687.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 55531803.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 986239.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 144502.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 393198.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 46729567.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 110115.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 56602.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 8760.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 284683.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 13928.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 43709201.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 14037.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 66010122.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 41774.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 76407.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 8022.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 68141.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 15644.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 42318958.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 69163.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 83766.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 13863.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 39421259.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 18503.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 44018481.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 41468.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 61158.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 42326411.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1678,
+      "ns_per_operation": 6590.071
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1678,
+      "ns_per_operation": 6394.013
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 38420563.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 37197559.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1678,
+      "ns_per_operation": 6883.461
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 44908940.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1678,
+      "ns_per_operation": 7774.691
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 38101361.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1678,
+      "ns_per_operation": 6571.259
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1678,
+      "ns_per_operation": 6548.243
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 36422488.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 40431192.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1678,
+      "ns_per_operation": 7288.337
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 38538828.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1678,
+      "ns_per_operation": 7173.765
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1678,
+      "ns_per_operation": 6807.359
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 38059295.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 36379628.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1678,
+      "ns_per_operation": 6202.393
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1678,
+      "ns_per_operation": 6301.501
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 37877962.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 50871672.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1678,
+      "ns_per_operation": 9478.645
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1678,
+      "ns_per_operation": 7807.844
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 39895163.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1678,
+      "ns_per_operation": 6718.604
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 35949784.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 35391559.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1678,
+      "ns_per_operation": 6422.558
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1678,
+      "ns_per_operation": 6017.691
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 38504795.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 37832366.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1678,
+      "ns_per_operation": 6327.781
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 37468260.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1678,
+      "ns_per_operation": 7360.845
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 39687054.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1678,
+      "ns_per_operation": 8562.321
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 46733223.0
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1678,
+      "ns_per_operation": 8007.662
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1678,
+      "ns_per_operation": 7076.965
+    },
+    {
+      "workload": "memory_fill_scan",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 53448267.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 2253927.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 32396.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 10385.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 2703290.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 27490.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 6945578.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 25208.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 2187589.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 22255.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 5042987.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 2524336.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 23002.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 7107.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 5736294.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 2730475.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 22908.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 2831916.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 41447.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 7662.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 672938.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 21196.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 6692494.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 7078172.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 23347.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 1628060.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 22212.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 6621.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 2134419.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 3281498.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 22139.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 2542302.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 416913.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 7132566.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 27394.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 2571426.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 25590.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 19307.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 3450729.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 23060.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 1423505.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 844349.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 4189923.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 25621015.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 2763621.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 1049752.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 20825453.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 16026467.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 1270680.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 1444900.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 19950266.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 1284266.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 19694035.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 1111391.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 20277279.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 18652093.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 838553.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 1873052.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 17298842.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 18809588.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 1500766.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 16628578.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 3233825.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 16795567.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 920358.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 16888825.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 1268178.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 16448253.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 936667.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 17316450.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 1384463.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 1114939.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 16172942.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 20548070.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 2277463.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 1075509.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 19414086.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 906853.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 19356986.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 961161.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 20502836.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 25652029.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 2960381.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 1220526.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "load_and_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 23340235.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 7492.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 19590.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 7353.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 25069590.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 6165.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 14011.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 23302.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 16895434.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 17034.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 17329.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 5579.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 30625911.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 550283.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 189364.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 71117.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 21093827.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 17865.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 14346.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 6298.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 24722479.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 131055.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 39493950.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 432427.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 231944.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 3115.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 14775.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 16985.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 30695496.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 9711.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 16135.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 7268.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 26258263.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 10465.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 17204.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 6906.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 25887905.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 6433.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 28178831.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 11178.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 278105.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 7250.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 32638268.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 10053.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 14988.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 6795.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 23412598.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 9440.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 15934.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 672.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 13253.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 6518.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 26354719.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 6186.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 22556676.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 9188.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 14738.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 5528.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 23927578.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 8277.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 14993.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 6237.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 24136140.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 7016.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 14357.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 733.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 13315.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 5653.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 26217325.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 77145.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 26798158.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 7344.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 105674.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 1607.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 13205.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 6506.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 33477210.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 6753.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 16843.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 6253.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 26122267.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 8073.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 26867173.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "instantiate",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 7585.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "first_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 16188.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 22519898.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1147,
+      "ns_per_operation": 22262.262
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1147,
+      "ns_per_operation": 23551.752
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 19244940.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 24054211.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1147,
+      "ns_per_operation": 23441.778
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 27171675.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1147,
+      "ns_per_operation": 22430.007
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 24637332.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1147,
+      "ns_per_operation": 27994.706
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1147,
+      "ns_per_operation": 22253.473
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 22529508.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 21157489.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1147,
+      "ns_per_operation": 23196.706
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 24723978.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1147,
+      "ns_per_operation": 23352.158
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1147,
+      "ns_per_operation": 21557.217
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 22248134.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 24063192.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1147,
+      "ns_per_operation": 24096.99
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1147,
+      "ns_per_operation": 24187.451
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 23409257.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 20161920.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1147,
+      "ns_per_operation": 25825.934
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1147,
+      "ns_per_operation": 19014.486
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 19951726.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1147,
+      "ns_per_operation": 19986.099
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 23031183.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 19171659.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1147,
+      "ns_per_operation": 18913.788
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1147,
+      "ns_per_operation": 19573.312
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 18731307.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 17775036.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1147,
+      "ns_per_operation": 18229.147
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 19212828.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1147,
+      "ns_per_operation": 25415.454
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 20061342.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1147,
+      "ns_per_operation": 18441.635
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 18019834.0
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1147,
+      "ns_per_operation": 21591.835
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1147,
+      "ns_per_operation": 25726.787
+    },
+    {
+      "workload": "branch_calls",
+      "stage": "warm_call",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 26040777.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 180768860.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 0,
+      "batch": 1,
+      "ns_per_operation": 12618865.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 7959861.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 1,
+      "batch": 1,
+      "ns_per_operation": 199301254.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 9557981.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 2,
+      "batch": 1,
+      "ns_per_operation": 152697697.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 29081016.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 3,
+      "batch": 1,
+      "ns_per_operation": 204159162.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 10031222.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 4,
+      "batch": 1,
+      "ns_per_operation": 182325084.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 172984271.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 5,
+      "batch": 1,
+      "ns_per_operation": 12599802.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 9780432.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 6,
+      "batch": 1,
+      "ns_per_operation": 205667433.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 149327974.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 7,
+      "batch": 1,
+      "ns_per_operation": 7674635.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 144385330.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 8,
+      "batch": 1,
+      "ns_per_operation": 7217152.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 7006509.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 9,
+      "batch": 1,
+      "ns_per_operation": 135931383.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 7306153.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 10,
+      "batch": 1,
+      "ns_per_operation": 141381121.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 116400509.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 11,
+      "batch": 1,
+      "ns_per_operation": 7457489.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 123941619.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 12,
+      "batch": 1,
+      "ns_per_operation": 7121819.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 6420055.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 13,
+      "batch": 1,
+      "ns_per_operation": 118120461.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 126819204.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 14,
+      "batch": 1,
+      "ns_per_operation": 6921042.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 115316206.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 15,
+      "batch": 1,
+      "ns_per_operation": 7718807.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 131039036.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 16,
+      "batch": 1,
+      "ns_per_operation": 8044135.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 130385351.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 17,
+      "batch": 1,
+      "ns_per_operation": 6817705.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 7844149.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 18,
+      "batch": 1,
+      "ns_per_operation": 121182853.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 7243849.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 19,
+      "batch": 1,
+      "ns_per_operation": 143284659.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 9671553.0
+    },
+    {
+      "workload": "prepare_large",
+      "stage": "prepare",
+      "engine": "wasmtime",
+      "sample": 20,
+      "batch": 1,
+      "ns_per_operation": 126225634.0
+    }
+  ],
+  "limitations": [
+    "Synthetic MVP workloads, not a production application suite.",
+    "Cloud CPU affinity does not guarantee an otherwise idle physical core.",
+    "Preparation compares interpreter validation/lowering against optimized JIT machine-code generation.",
+    "Reported invocation includes dynamic embedding API overhead."
+  ]
+}

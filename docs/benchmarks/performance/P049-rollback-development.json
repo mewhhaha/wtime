@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "task": "P049",
+  "development_only": true,
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation",
+        "runtime"
+      ],
+      "commands": [
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,execution-reference",
+            "p047_",
+            "--",
+            "--nocapture"
+          ],
+          "name": "p047-compact-semantics"
+        },
+        {
+          "name": "restored-memory-semantics",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,execution-reference",
+            "p043_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "p047-compact-semantics",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 7,
+          "required_names": [
+            "p047_fused_results_and_overflow",
+            "p047_every_source_fuel_prefix",
+            "p047_cancel_and_materialize",
+            "p047_branch_entry_and_peak_stack",
+            "p047_corrupt_or_over_budget_declines",
+            "p047_internal_cancellation_materializes_the_completed_pure_prefix",
+            "p047_selected_accumulator_and_dependent_shapes_execute_verified_groups"
+          ]
+        },
+        {
+          "command": "restored-memory-semantics",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 10,
+          "required_names": [
+            "p043_every_scalar_load_width_sign_and_raw_float_has_exact_fuel_prefix",
+            "p043_all_nine_store_kinds_have_independent_full_memory_prefix_images",
+            "p043_memory64_overflow_trap_keeps_every_preceding_store_and_fuel_priority",
+            "p043_shared_aliases_distinct_instances_and_host_growth_refresh_live_ranges",
+            "p043_unshared_growth_and_memory_cursors_materialize_identical_source_state"
+          ]
+        }
+      ],
+      "outputs": {}
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "restored-compact-memory",
+        "uses": [
+          "compilation",
+          "runtime"
+        ],
+        "commands": [
+          {
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "compact-executor,execution-reference",
+              "p047_",
+              "--",
+              "--nocapture"
+            ],
+            "name": "p047-compact-semantics"
+          },
+          {
+            "name": "restored-memory-semantics",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "compact-executor,execution-reference",
+              "p043_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p047-compact-semantics",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 7,
+            "required_names": [
+              "p047_fused_results_and_overflow",
+              "p047_every_source_fuel_prefix",
+              "p047_cancel_and_materialize",
+              "p047_branch_entry_and_peak_stack",
+              "p047_corrupt_or_over_budget_declines",
+              "p047_internal_cancellation_materializes_the_completed_pure_prefix",
+              "p047_selected_accumulator_and_dependent_shapes_execute_verified_groups"
+            ]
+          },
+          {
+            "command": "restored-memory-semantics",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 10,
+            "required_names": [
+              "p043_every_scalar_load_width_sign_and_raw_float_has_exact_fuel_prefix",
+              "p043_all_nine_store_kinds_have_independent_full_memory_prefix_images",
+              "p043_memory64_overflow_trap_keeps_every_preceding_store_and_fuel_priority",
+              "p043_shared_aliases_distinct_instances_and_host_growth_refresh_live_ranges",
+              "p043_unshared_growth_and_memory_cursors_materialize_identical_source_state"
+            ]
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

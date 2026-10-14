@@ -1,0 +1,1 @@
+Original CC0 fixture for an exception payload caught at function depth. The returned struct contains 91 and must remain live across Store::collect until the host releases published values. See encode-record.json for recorded encoder provenance. Encoding alone is not a validation or runtime result.

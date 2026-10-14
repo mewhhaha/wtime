@@ -1,0 +1,682 @@
+{
+  "catalog_commit": "df6a2aca1cd9d779eb4f2f3e19dae8277f336015",
+  "core_spec_commit": "7e9fb78c63d65018cc111422f657947b3df80d7b",
+  "observed_date": "2026-10-11",
+  "proposals": [
+    {
+      "id": "js-promise-integration",
+      "name": "JS Promise Integration",
+      "phase": 5,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/js-promise-integration",
+      "source_commit": "5b247b1026d2f438eefe51914a79f4218cbda9f9",
+      "source_url": "https://github.com/WebAssembly/js-promise-integration/tree/5b247b1026d2f438eefe51914a79f4218cbda9f9",
+      "scope": "excluded",
+      "scope_note": "JS Promise API and embedding integration, excluded by the user.",
+      "tasks": []
+    },
+    {
+      "id": "content-security-policy",
+      "name": "Web Content Security Policy",
+      "phase": 5,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/content-security-policy",
+      "source_commit": "284adaf2fecaf76ac05d35132c09e60bb4145041",
+      "source_url": "https://github.com/WebAssembly/content-security-policy/tree/284adaf2fecaf76ac05d35132c09e60bb4145041",
+      "scope": "excluded",
+      "scope_note": "Browser CSP enforcement, excluded by the user.",
+      "tasks": []
+    },
+    {
+      "id": "threads",
+      "name": "Threads",
+      "phase": 4,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "webassembly/threads",
+      "source_commit": "cc535ada1aa21cfaa3cabf3ac73b89acef78a0a0",
+      "source_url": "https://github.com/webassembly/threads/tree/cc535ada1aa21cfaa3cabf3ac73b89acef78a0a0",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T127",
+        "T128",
+        "T129",
+        "T130",
+        "T131",
+        "T132",
+        "T133",
+        "T134",
+        "T135",
+        "T136",
+        "T161"
+      ]
+    },
+    {
+      "id": "compact-import-section",
+      "name": "Compact Import Section",
+      "phase": 4,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/compact-import-section",
+      "source_commit": "0624de829e2663da799e708444dec80337a3fe54",
+      "source_url": "https://github.com/WebAssembly/compact-import-section/tree/0624de829e2663da799e708444dec80337a3fe54",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T087",
+        "T088",
+        "T089",
+        "T161"
+      ]
+    },
+    {
+      "id": "wide-arithmetic",
+      "name": "Wide Arithmetic",
+      "phase": 4,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/wide-arithmetic",
+      "source_commit": "024d4ce1b28cee7fd006d9c5175e3b7ece52b429",
+      "source_url": "https://github.com/WebAssembly/wide-arithmetic/tree/024d4ce1b28cee7fd006d9c5175e3b7ece52b429",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T090",
+        "T091",
+        "T092",
+        "T161"
+      ]
+    },
+    {
+      "id": "ecmascript_module_integration",
+      "name": "ESM Integration",
+      "phase": 3,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/esm-integration",
+      "source_commit": "b141a950ab4b3d507f28a844d6ed2fcc0f950d4b",
+      "source_url": "https://github.com/WebAssembly/esm-integration/tree/b141a950ab4b3d507f28a844d6ed2fcc0f950d4b",
+      "scope": "excluded",
+      "scope_note": "JavaScript module loader integration, excluded by the user.",
+      "tasks": []
+    },
+    {
+      "id": "stack-switching",
+      "name": "Stack Switching",
+      "phase": 3,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/stack-switching",
+      "source_commit": "c7be390539e5fc10669c88cadc4fa4b32fba1d47",
+      "source_url": "https://github.com/WebAssembly/stack-switching/tree/c7be390539e5fc10669c88cadc4fa4b32fba1d47",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T045",
+        "T046",
+        "T137",
+        "T138",
+        "T139",
+        "T140",
+        "T141",
+        "T142",
+        "T143",
+        "T144",
+        "T145",
+        "T146",
+        "T147",
+        "T161"
+      ]
+    },
+    {
+      "id": "custom-page-sizes",
+      "name": "Custom Page Sizes",
+      "phase": 3,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/custom-page-sizes",
+      "source_commit": "61c873a1860acad2772539164f284cc5110f1b1b",
+      "source_url": "https://github.com/WebAssembly/custom-page-sizes/tree/61c873a1860acad2772539164f284cc5110f1b1b",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T037",
+        "T056",
+        "T084",
+        "T085",
+        "T086",
+        "T136",
+        "T161"
+      ]
+    },
+    {
+      "id": "custom-descs",
+      "name": "Custom Descriptors and JS Interop",
+      "phase": 3,
+      "spec_version": null,
+      "catalog_affected_specs": null,
+      "repository": "WebAssembly/custom-descriptors",
+      "source_commit": "4aa477a4c1ca064fe3592b3a0307509e9059d0f9",
+      "source_url": "https://github.com/WebAssembly/custom-descriptors/tree/4aa477a4c1ca064fe3592b3a0307509e9059d0f9",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T148",
+        "T149",
+        "T150",
+        "T151",
+        "T152",
+        "T153",
+        "T154",
+        "T155",
+        "T156",
+        "T157",
+        "T161"
+      ]
+    },
+    {
+      "id": "mvp",
+      "name": "MVP",
+      "phase": "finished",
+      "spec_version": "1.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api",
+        "web-api"
+      ],
+      "repository": "WebAssembly/design",
+      "source_commit": "6e43416ebc8becd6cdf5d91d9ae7d3712111df32",
+      "source_url": "https://github.com/WebAssembly/design/tree/6e43416ebc8becd6cdf5d91d9ae7d3712111df32",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T005",
+        "T006",
+        "T007",
+        "T012",
+        "T013",
+        "T015",
+        "T016",
+        "T017",
+        "T018",
+        "T019",
+        "T020",
+        "T021",
+        "T022",
+        "T023",
+        "T024",
+        "T025",
+        "T026",
+        "T027",
+        "T028",
+        "T029",
+        "T030",
+        "T031",
+        "T032",
+        "T033",
+        "T034",
+        "T035",
+        "T036",
+        "T037",
+        "T038",
+        "T039",
+        "T040",
+        "T041",
+        "T042",
+        "T043",
+        "T044",
+        "T045",
+        "T046",
+        "T047",
+        "T048",
+        "T049",
+        "T050",
+        "T051",
+        "T052",
+        "T053",
+        "T054",
+        "T055",
+        "T056",
+        "T057",
+        "T058",
+        "T160"
+      ]
+    },
+    {
+      "id": "import_export_of_mutable_globals",
+      "name": "Import/Export of Mutable Globals",
+      "phase": "finished",
+      "spec_version": "1.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/mutable-global",
+      "source_commit": "89e5be9d69f2afac7243b6d2ff36b9c8723efb77",
+      "source_url": "https://github.com/WebAssembly/mutable-global/tree/89e5be9d69f2afac7243b6d2ff36b9c8723efb77",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T013",
+        "T019",
+        "T020",
+        "T026",
+        "T030",
+        "T039",
+        "T041",
+        "T047",
+        "T058"
+      ]
+    },
+    {
+      "id": "non-trapping_float-to-int_conversions",
+      "name": "Non-trapping float-to-int conversions",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/nontrapping-float-to-int-conversions",
+      "source_commit": "aa25b24de97a53f359b0e37615f61a2aacce1ff8",
+      "source_url": "https://github.com/WebAssembly/nontrapping-float-to-int-conversions/tree/aa25b24de97a53f359b0e37615f61a2aacce1ff8",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T060",
+        "T061"
+      ]
+    },
+    {
+      "id": "sign-extension_operators",
+      "name": "Sign-extension operators",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/sign-extension-ops",
+      "source_commit": "a09a028ee7106d3d3ab8fe11b8e18b2e5263aa07",
+      "source_url": "https://github.com/WebAssembly/sign-extension-ops/tree/a09a028ee7106d3d3ab8fe11b8e18b2e5263aa07",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T059"
+      ]
+    },
+    {
+      "id": "multi-value",
+      "name": "Multi-value",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/multi-value",
+      "source_commit": "61975c83a286b96517659eded062f4e11dbac4c7",
+      "source_url": "https://github.com/WebAssembly/multi-value/tree/61975c83a286b96517659eded062f4e11dbac4c7",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T018",
+        "T022",
+        "T028",
+        "T029",
+        "T044",
+        "T045",
+        "T053",
+        "T062",
+        "T063"
+      ]
+    },
+    {
+      "id": "javascript_bigint_to_webassembly_i64_integration",
+      "name": "JavaScript BigInt to WebAssembly i64 integration",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "js-api"
+      ],
+      "repository": "WebAssembly/JS-BigInt-integration",
+      "source_commit": "bd58b9899fb1e26e5710eefdcf0270a5350fc138",
+      "source_url": "https://github.com/WebAssembly/JS-BigInt-integration/tree/bd58b9899fb1e26e5710eefdcf0270a5350fc138",
+      "scope": "excluded",
+      "scope_note": "JS BigInt conversion API, excluded; core i64 remains required.",
+      "tasks": []
+    },
+    {
+      "id": "reference_types",
+      "name": "Reference Types",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/reference-types",
+      "source_commit": "c7a3558bb5cbacb9c8879a91e08d0ac7276b740c",
+      "source_url": "https://github.com/WebAssembly/reference-types/tree/c7a3558bb5cbacb9c8879a91e08d0ac7276b740c",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T007",
+        "T013",
+        "T018",
+        "T020",
+        "T021",
+        "T027",
+        "T029",
+        "T032",
+        "T036",
+        "T038",
+        "T040",
+        "T042",
+        "T054",
+        "T064",
+        "T065",
+        "T066",
+        "T069"
+      ]
+    },
+    {
+      "id": "bulk_memory_operations",
+      "name": "Bulk memory operations",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/bulk-memory-operations",
+      "source_commit": "dcaa1b6791401c29b67e8cd7929ec80949f1f849",
+      "source_url": "https://github.com/WebAssembly/bulk-memory-operations/tree/dcaa1b6791401c29b67e8cd7929ec80949f1f849",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T017",
+        "T021",
+        "T032",
+        "T042",
+        "T067",
+        "T068",
+        "T069"
+      ]
+    },
+    {
+      "id": "fixed-width_simd",
+      "name": "Fixed-width SIMD",
+      "phase": "finished",
+      "spec_version": "2.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "webassembly/simd",
+      "source_commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+      "source_url": "https://github.com/webassembly/simd/tree/a78b98a6899c9e91a13095e560767af6e99d98fd",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T093",
+        "T094",
+        "T095",
+        "T096",
+        "T097",
+        "T098",
+        "T099",
+        "T100",
+        "T101"
+      ]
+    },
+    {
+      "id": "tail_call",
+      "name": "Tail call",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/tail-call",
+      "source_commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+      "source_url": "https://github.com/WebAssembly/tail-call/tree/a6003d06aefef41e20a3e36fe2e500062555c895",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T075",
+        "T076"
+      ]
+    },
+    {
+      "id": "extended-const",
+      "name": "Extended Constant Expressions",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/extended-const",
+      "source_commit": "8d4f6aa2b00a8e7c0174410028625c6a176db8a1",
+      "source_url": "https://github.com/WebAssembly/extended-const/tree/8d4f6aa2b00a8e7c0174410028625c6a176db8a1",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T070",
+        "T071"
+      ]
+    },
+    {
+      "id": "function_references",
+      "name": "Typed Function References",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/function-references",
+      "source_commit": "74d2ec81d15efd3c0f2fba46a023f376101d8e46",
+      "source_url": "https://github.com/WebAssembly/function-references/tree/74d2ec81d15efd3c0f2fba46a023f376101d8e46",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T072",
+        "T073",
+        "T074",
+        "T075",
+        "T106",
+        "T107",
+        "T108",
+        "T109",
+        "T120"
+      ]
+    },
+    {
+      "id": "garbage_collection",
+      "name": "Garbage collection",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/gc",
+      "source_commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
+      "source_url": "https://github.com/WebAssembly/gc/tree/756060f5816c7e2159f4817fbdee76cf52f9c923",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T007",
+        "T106",
+        "T107",
+        "T108",
+        "T109",
+        "T110",
+        "T111",
+        "T112",
+        "T113",
+        "T114",
+        "T115",
+        "T116",
+        "T117",
+        "T118",
+        "T119",
+        "T120"
+      ]
+    },
+    {
+      "id": "multi-memory",
+      "name": "Multiple memories",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/multi-memory",
+      "source_commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+      "source_url": "https://github.com/WebAssembly/multi-memory/tree/cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T021",
+        "T077",
+        "T078",
+        "T079"
+      ]
+    },
+    {
+      "id": "relaxed-simd",
+      "name": "Relaxed SIMD",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/relaxed-simd",
+      "source_commit": "c3f9359af2cd607cc46b0a3274f90ea52543a2f2",
+      "source_url": "https://github.com/WebAssembly/relaxed-simd/tree/c3f9359af2cd607cc46b0a3274f90ea52543a2f2",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T102",
+        "T103",
+        "T104",
+        "T105"
+      ]
+    },
+    {
+      "id": "annotations",
+      "name": "Custom Annotation Syntax in the Text Format",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/annotations",
+      "source_commit": "20a8e4f125d5d856aac392105c35055af9ed49f7",
+      "source_url": "https://github.com/WebAssembly/annotations/tree/20a8e4f125d5d856aac392105c35055af9ed49f7",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T012",
+        "T159"
+      ]
+    },
+    {
+      "id": "branch-hinting",
+      "name": "Branch Hinting",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/branch-hinting",
+      "source_commit": "23ce0bb32bbb690ce08877154e3879af060fb1d4",
+      "source_url": "https://github.com/WebAssembly/branch-hinting/tree/23ce0bb32bbb690ce08877154e3879af060fb1d4",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T023",
+        "T158"
+      ]
+    },
+    {
+      "id": "exception_handling",
+      "name": "Exception handling",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/exception-handling",
+      "source_commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+      "source_url": "https://github.com/WebAssembly/exception-handling/tree/af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T017",
+        "T045",
+        "T046",
+        "T121",
+        "T122",
+        "T123",
+        "T124",
+        "T125",
+        "T126",
+        "T145"
+      ]
+    },
+    {
+      "id": "js-string-builtins",
+      "name": "JS String Builtins",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core",
+        "js-api"
+      ],
+      "repository": "WebAssembly/js-string-builtins",
+      "source_commit": "81bfc5fb7b8277c6b7d1b0a8f6e57cb31a7bf080",
+      "source_url": "https://github.com/WebAssembly/js-string-builtins/tree/81bfc5fb7b8277c6b7d1b0a8f6e57cb31a7bf080",
+      "scope": "excluded",
+      "scope_note": "JS builtin binding/options/string constants excluded. Source audit found no independent new Core opcode, binary encoding, type or validation rule; existing import/GC operations remain required.",
+      "tasks": []
+    },
+    {
+      "id": "memory64",
+      "name": "Memory64",
+      "phase": "finished",
+      "spec_version": "3.0",
+      "catalog_affected_specs": [
+        "core"
+      ],
+      "repository": "WebAssembly/memory64",
+      "source_commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+      "source_url": "https://github.com/WebAssembly/memory64/tree/9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+      "scope": "included",
+      "scope_note": "Specified core semantics only; JS/browser APIs excluded.",
+      "tasks": [
+        "T006",
+        "T016",
+        "T037",
+        "T038",
+        "T056",
+        "T080",
+        "T081",
+        "T082",
+        "T083",
+        "T136"
+      ]
+    }
+  ]
+}

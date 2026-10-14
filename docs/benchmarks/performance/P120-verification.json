@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "task": "P120",
+  "identities": {
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**",
+        "tools/wtime-bench/fixtures/**",
+        "target/performance/P115/fixtures/attempt-0002/receipt.json",
+        "target/performance/P120/fixtures/attempt-0001/receipt.json"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation",
+        "fixtures"
+      ],
+      "commands": [
+        {
+          "name": "focused-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,execution-reference",
+            "p120_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "interaction-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,execution-reference",
+            "p022_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "focused-tests",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p120_switch_preserves_outgoing_local_and_every_source_fuel_boundary",
+            "p120_switch_byte_and_frame_refusal_follow_prefix_and_preserve_cleanup",
+            "p120_stale_foreign_and_cancelled_continuations_do_no_prefix_work"
+          ],
+          "minimum_passed": 3
+        },
+        {
+          "command": "interaction-tests",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p022_prefix_effects_and_fuel_match_all_policies",
+            "p022_host_reentry_collection_preserves_outer_root_and_state",
+            "p022_cross_module_continuation_preserves_context_roots_and_one_shot",
+            "p022_budget_priority_and_continuation_cleanup_match_policies",
+            "p022_table_mutations_and_foreign_handles_are_checked",
+            "p022_exception_unwind_and_stale_foreign_gc_values_are_checked",
+            "p022_call_depth_and_tail_call_controls_match_policies",
+            "p022_gc_budget_failure_preserves_prefix_and_heap"
+          ],
+          "minimum_passed": 8
+        }
+      ],
+      "outputs": {
+        "test_log": "{stage}/focused-tests.stdout",
+        "interaction_log": "{stage}/interaction-tests.stdout"
+      }
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Proposal interaction correctness only; measured promotion remains P044."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "integration-interactions",
+        "uses": [
+          "compilation",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "focused-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "--features",
+              "compact-executor,execution-reference",
+              "p120_",
+              "--",
+              "--nocapture"
+            ]
+          },
+          {
+            "name": "interaction-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "--features",
+              "compact-executor,execution-reference",
+              "p022_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "focused-tests",
+            "kind": "cargo",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p120_switch_preserves_outgoing_local_and_every_source_fuel_boundary",
+              "p120_switch_byte_and_frame_refusal_follow_prefix_and_preserve_cleanup",
+              "p120_stale_foreign_and_cancelled_continuations_do_no_prefix_work"
+            ],
+            "minimum_passed": 3
+          },
+          {
+            "command": "interaction-tests",
+            "kind": "cargo",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p022_prefix_effects_and_fuel_match_all_policies",
+              "p022_host_reentry_collection_preserves_outer_root_and_state",
+              "p022_cross_module_continuation_preserves_context_roots_and_one_shot",
+              "p022_budget_priority_and_continuation_cleanup_match_policies",
+              "p022_table_mutations_and_foreign_handles_are_checked",
+              "p022_exception_unwind_and_stale_foreign_gc_values_are_checked",
+              "p022_call_depth_and_tail_call_controls_match_policies",
+              "p022_gc_budget_failure_preserves_prefix_and_heap"
+            ],
+            "minimum_passed": 8
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

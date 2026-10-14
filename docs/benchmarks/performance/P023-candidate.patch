@@ -1,0 +1,124 @@
+--- before/crates/wtime-runtime/src/execution.rs
++++ candidate/crates/wtime-runtime/src/execution.rs
+@@ -153,19 +153,14 @@
+             let inst_id = frame.function.instance;
+             let module = self.instances[inst_id].module.clone();
+             let ops = &module.data.inner.decoded().code[frame.function.body].instructions;
+-            let op = ops
++            // The retained immutable module owns this borrow across Store mutation.
++            let op: &Instruction = ops
+                 .get(frame.pc)
+-                .ok_or_else(|| trap("instruction pointer out of bounds"))?
+-                .clone();
++                .ok_or_else(|| trap("instruction pointer out of bounds"))?;
+             #[cfg(feature = "performance-counters")]
+             {
+                 self.perf.record(perf::Event::Dispatch, 1);
+ 
+-                self.perf.record(perf::Event::InstructionClone, 1);
+-                self.perf.record(
+-                    perf::Event::InstructionBytes,
+-                    perf::immediate_copy_bytes(&op.immediate),
+-                );
+             }
+             #[cfg(feature = "opcode-coverage")]
+             crate::coverage::record(op.opcode);
+@@ -513,7 +508,7 @@
+                         }
+                     }
+                 }
+-                0x28..=0x3e => self.load_store(inst_id, &op, &mut stack)?,
++                0x28..=0x3e => self.load_store(inst_id, op, &mut stack)?,
+                 0x3f | 0x40 => {
+                     let remaining_memory = self
+                         .engine
+@@ -642,7 +637,7 @@
+                 }
+                 0xe0..=0xe6 => {
+                     if let Some(ex) =
+-                        self.cont_step(inst_id, &op, &mut frames, &mut stack, &mut prompts)?
++                        self.cont_step(inst_id, op, &mut frames, &mut stack, &mut prompts)?
+                     {
+                         self.published.push(Value::Ref(RefValue::Exn(ex)));
+                         return Ok(RunOutcome::Exception(ex));
+@@ -698,11 +693,11 @@
+                         return Ok(RunOutcome::Returned(stack));
+                     }
+                 }
+-                0xfb00..=0xfb26 => self.gc_exec(inst_id, &op, &mut stack)?,
+-                0xfe00..=0xfe4e => self.atomic(inst_id, &op, &mut stack)?,
++                0xfb00..=0xfb26 => self.gc_exec(inst_id, op, &mut stack)?,
++                0xfe00..=0xfe4e => self.atomic(inst_id, op, &mut stack)?,
+                 0xfc13..=0xfc16 => crate::wide::execute(op.opcode, &mut stack)?,
+-                0xfc08..=0xfc11 => self.bulk(inst_id, &op, &mut stack)?,
+-                0xfd00..=0xfd0b | 0xfd54..=0xfd5d => self.simd_memory(inst_id, &op, &mut stack)?,
++                0xfc08..=0xfc11 => self.bulk(inst_id, op, &mut stack)?,
++                0xfd00..=0xfd0b | 0xfd54..=0xfd5d => self.simd_memory(inst_id, op, &mut stack)?,
+                 n if n & 0xff00 == 0xfd00 || n & 0xff00 == 0xfa00 => {
+                     crate::simd::execute(n, &op.immediate, &mut stack)?
+                 }
+--- before/crates/wtime-runtime/src/perf.rs
++++ candidate/crates/wtime-runtime/src/perf.rs
+@@ -1,6 +1,5 @@
+ //! Bounded Store-local diagnostic events, compiled out of production builds.
+ //! Byte counters count explicitly copied payloads, not allocator-wide traffic.
+-use crate::Immediate;
+ use std::cell::Cell;
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct CounterSnapshot {
+@@ -52,8 +51,6 @@
+     ModuleCopy,
+     #[allow(dead_code)]
+     ModuleBytes,
+-    InstructionClone,
+-    InstructionBytes,
+     ReadVec,
+     #[allow(dead_code)]
+     ReadFixed,
+@@ -79,8 +76,6 @@
+             Event::Dispatch => &mut s.source_dispatches,
+             Event::ModuleCopy => &mut s.module_deep_copy_events,
+             Event::ModuleBytes => &mut s.module_deep_copy_bytes,
+-            Event::InstructionClone => &mut s.instruction_clone_events,
+-            Event::InstructionBytes => &mut s.instruction_clone_bytes,
+             Event::ReadVec => &mut s.read_vec_operations,
+             Event::ReadFixed => &mut s.read_fixed_operations,
+             Event::Frame => &mut s.frame_entries,
+@@ -93,27 +88,6 @@
+         *field = field.saturating_add(n);
+         self.0.set(s);
+     }
+-}
+-pub(super) fn immediate_copy_bytes(i: &Immediate) -> u64 {
+-    let bytes = match i {
+-        Immediate::BrTable(v, _) => v.len().saturating_mul(std::mem::size_of::<u32>()),
+-        Immediate::Types(v) => v
+-            .len()
+-            .saturating_mul(std::mem::size_of::<crate::ValType>()),
+-        Immediate::Bytes(v) => v.len(),
+-        Immediate::TryTable { block, catches } => std::mem::size_of::<Immediate>()
+-            .saturating_add(
+-                catches
+-                    .len()
+-                    .saturating_mul(std::mem::size_of::<wtime_validate::Catch>()),
+-            )
+-            .saturating_add(immediate_copy_bytes(block) as usize),
+-        Immediate::Resume { handlers, .. } => handlers
+-            .len()
+-            .saturating_mul(std::mem::size_of::<(u32, Option<u32>)>()),
+-        _ => 0,
+-    };
+-    u64::try_from(bytes).unwrap_or(u64::MAX)
+ }
+ #[cfg(test)]
+ mod tests {
+@@ -143,7 +117,8 @@
+         assert_eq!(s.source_dispatches, 4);
+         assert_eq!(s.module_deep_copy_events, 0);
+         assert_eq!(s.module_deep_copy_bytes, 0);
+-        assert_eq!(s.instruction_clone_events, 4);
++        assert_eq!(s.instruction_clone_events, 0);
++        assert_eq!(s.instruction_clone_bytes, 0);
+         assert_eq!(s.read_vec_operations, 0);
+         assert_eq!(s.frame_entries, 1);
+     }

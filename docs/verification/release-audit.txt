@@ -1,0 +1,8 @@
+Command: python3 tools/checks/release_audit.py
+Exit code: 1
+
+stdout:
+Release audit blocked: 2 unresolved gate(s)
+stderr:
+T166: required task is missing or not done
+evidence native_aarch64: report is missing (docs/verification/native-aarch64.json)

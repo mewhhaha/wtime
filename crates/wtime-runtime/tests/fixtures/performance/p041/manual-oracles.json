@@ -1,0 +1,339 @@
+{
+  "fixtures": {
+    "direct-numeric.wat": {
+      "exports": {
+        "pair": {
+          "cases": [
+            {
+              "args": [
+                9000000000,
+                23
+              ],
+              "results": [
+                9000000000,
+                23
+              ]
+            }
+          ],
+          "params": [
+            "i64",
+            "i32"
+          ],
+          "results": [
+            "i64",
+            "i32"
+          ],
+          "source_events": 3
+        },
+        "pair_run": {
+          "calls": "pair",
+          "cases": [
+            {
+              "args": [
+                9000000000,
+                23
+              ],
+              "results": [
+                9000000000,
+                23
+              ]
+            }
+          ],
+          "params": [
+            "i64",
+            "i32"
+          ],
+          "results": [
+            "i64",
+            "i32"
+          ],
+          "source_events": 4
+        },
+        "sum2": {
+          "cases": [
+            {
+              "args": [
+                7,
+                35
+              ],
+              "results": [
+                42
+              ]
+            }
+          ],
+          "params": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ],
+          "source_events": 4
+        },
+        "sum2_run": {
+          "calls": "sum2",
+          "cases": [
+            {
+              "args": [
+                7,
+                35
+              ],
+              "results": [
+                42
+              ]
+            }
+          ],
+          "params": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ],
+          "source_events": 4
+        },
+        "zero": {
+          "cases": [
+            {
+              "args": [],
+              "results": [
+                29
+              ]
+            }
+          ],
+          "params": [],
+          "results": [
+            "i32"
+          ],
+          "source_events": 2
+        },
+        "zero_run": {
+          "calls": "zero",
+          "cases": [
+            {
+              "args": [],
+              "results": [
+                29
+              ]
+            }
+          ],
+          "params": [],
+          "results": [
+            "i32"
+          ],
+          "source_events": 2
+        }
+      },
+      "notes": [
+        "Each wrapper is an independent caller body and directly calls only its matching target."
+      ]
+    },
+    "host-calls.wat": {
+      "exports": {
+        "ordinary": {
+          "arg": 7,
+          "result": 10
+        },
+        "recurse": {
+          "arg": 4,
+          "result": 0
+        },
+        "tail": {
+          "arg": 7,
+          "result": 10
+        },
+        "tail_recurse": {
+          "arg": 4,
+          "result": 0
+        }
+      },
+      "host_callback_assumption": "For host-call examples only, assume callback h(x)=x+3.",
+      "imports": [
+        {
+          "module": "env",
+          "name": "host",
+          "params": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        }
+      ],
+      "notes": [
+        "ordinary and tail each pass their argument unchanged to the callback",
+        "the recursion functions terminate at n=0 and return 0",
+        "no error oracle is claimed"
+      ]
+    },
+    "host-gc-reentry.wat": {
+      "exports": {
+        "run": {
+          "notes": [
+            "run keeps the struct containing i32 91 in local $root across the numeric callee and host callback"
+          ],
+          "params": [],
+          "result": 91,
+          "results": [
+            "i32"
+          ],
+          "rooted_value": 91
+        }
+      },
+      "host_reentry": {
+        "callback_calls": 1,
+        "callback_returns": 6,
+        "collection_during_callback": true,
+        "expected_live_objects_during_collection": 1,
+        "live_object_reason": "the outer run activation local $root is the sole live guest root",
+        "nested_zero_run_result": 29,
+        "outer_run_result_after_reentry": 91
+      },
+      "imports": [
+        {
+          "callback_result": 6,
+          "input_from_run": 5,
+          "module": "env",
+          "name": "host",
+          "params": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        }
+      ],
+      "oracle_basis": "Evaluate the explicit i32 local/global-free stack flow: allocate struct field 91, retain the reference in local $root, call host(5), drop callback result, then read field 0 from the still-rooted struct. Callback collection/reentry values are harness expectations supplied by the P041 host driver, not claims about an executed runtime."
+    },
+    "import-consumer.wat": {
+      "composition": [
+        {
+          "arg": 5,
+          "provider_export": "f10",
+          "result": 15
+        },
+        {
+          "arg": 5,
+          "provider_export": "f20",
+          "result": 25
+        }
+      ],
+      "exports": {
+        "main": {
+          "params": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ],
+          "source_events": 3
+        }
+      },
+      "imports": [
+        {
+          "module": "env",
+          "name": "f",
+          "params": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        }
+      ]
+    },
+    "nonnumeric-target.wat": {
+      "exports": {
+        "run": {
+          "argless_call_result": 7,
+          "params": [],
+          "results": [
+            "i32"
+          ],
+          "source_events": 4
+        }
+      },
+      "host_callback_assumption": "ref returns a null externref.",
+      "imports": [
+        {
+          "module": "env",
+          "name": "ref",
+          "params": [],
+          "results": [
+            "externref"
+          ]
+        }
+      ],
+      "notes": [
+        "the caller's operand stack carries an externref which is dropped before returning i32 7",
+        "this fixture does not claim a numeric-only direct target"
+      ]
+    },
+    "provider-distinct.wat": {
+      "cases": [
+        {
+          "arg": 5,
+          "export": "f10",
+          "result": 15
+        },
+        {
+          "arg": 5,
+          "export": "f20",
+          "result": 25
+        }
+      ],
+      "exports": {
+        "f10": {
+          "params": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "f20": {
+          "params": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        }
+      },
+      "source_events_each": 4
+    },
+    "start-failure.wat": {
+      "expected_instantiation": "start traps after exactly one mark callback; provisional instance is not published and run is unavailable.",
+      "exports": {
+        "run": {
+          "body_result_if_called": 73,
+          "params": [],
+          "results": [
+            "i32"
+          ]
+        }
+      },
+      "host_callback_assumption": "mark increments a host-side counter and returns normally.",
+      "imports": [
+        {
+          "module": "env",
+          "name": "mark",
+          "params": [],
+          "results": []
+        }
+      ],
+      "notes": [
+        "run is defined/exported but is not called during instantiation",
+        "no leaked function handle or runtime behavior is claimed"
+      ],
+      "start": {
+        "calls": "env.mark",
+        "source_events": 3,
+        "then": "unreachable"
+      }
+    }
+  },
+  "oracle_method": "Evaluate the written straight-line integer stack operations and function composition directly. Fuel counts below are intended source-event counts including each function's implicit final end; start-failure describes only the explicit start callback then unreachable sequence. These are expectations, not observed runtime results. The host-gc-reentry expectation separately specifies the callback input/result, collection live-root count, nested zero-call result, and outer rooted field result; these are source/harness expectations, not observations.",
+  "schema": "p041-static-manual-oracles-v1",
+  "status": "source-derived; unencoded and unvalidated"
+}

@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "task": "P122",
+  "identities": {
+    "compilation": {
+      "paths": [
+        "rust-toolchain.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/profiling/Cargo.toml",
+        "tools/wtime-bench/profiling/Cargo.lock",
+        "tools/wtime-bench/profiling/src/**/*.rs",
+        "tools/wtime-bench/src/**/*.rs"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/verification/producers/p122.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/tests/test_p122*.py",
+        "tools/wtime-bench/tests/test_p035_representative.py"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "tools/wtime-bench/fixtures/representative/**",
+        "target/performance/P122/fixtures/attempt-0001/receipt.json",
+        "tools/wtime-bench/workloads.json"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "compilation",
+        "tooling",
+        "fixtures"
+      ],
+      "commands": [
+        {
+          "name": "production-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--manifest-path",
+            "tools/wtime-bench/profiling/Cargo.toml",
+            "--features",
+            "compact-executor",
+            "--target-dir",
+            "target/performance/P122-production-target",
+            "-j",
+            "4"
+          ]
+        },
+        {
+          "name": "diagnostic-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--manifest-path",
+            "tools/wtime-bench/profiling/Cargo.toml",
+            "--features",
+            "compact-executor,performance-counters",
+            "--target-dir",
+            "target/performance/P122-diagnostic-target",
+            "-j",
+            "4"
+          ]
+        },
+        {
+          "name": "protocol-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p122*.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "probe-record",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p122.py",
+            "--binary",
+            "{repo}/target/performance/P122-production-target/release/wtime-bench",
+            "--diagnostic",
+            "{repo}/target/performance/P122-diagnostic-target/release/wtime-bench",
+            "--output",
+            "{stage}/probe-tests",
+            "--test-log",
+            "{stage}/protocol-tests.stderr"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "protocol-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_p122_compact_staged_wire_is_accepted_with_full_memory_proof",
+            "test_p122_rejects_wrong_mode_stage_and_instrumentation",
+            "test_p122_host_timer_boundary_and_production_feature_guard",
+            "test_p122_real_compact_driver_stdout_confirms_mode_and_call_count"
+          ],
+          "minimum_passed": 4
+        }
+      ],
+      "outputs": {
+        "probe": "{stage}/probe-tests/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "probe",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "probe",
+          "pointer": "/binary_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "probe",
+          "pointer": "/actual_representative_rows",
+          "op": "equal",
+          "value": 9
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Representative mode/timer and optimized-path contract only; no paired performance claim."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "wire-tests",
+        "uses": [
+          "tooling",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "wire-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "tools.wtime-bench.tests.test_p122_representative_protocol.P122RepresentativeProtocolTests.test_p122_compact_staged_wire_is_accepted_with_full_memory_proof",
+              "tools.wtime-bench.tests.test_p122_representative_protocol.P122RepresentativeProtocolTests.test_p122_rejects_wrong_mode_stage_and_instrumentation",
+              "tools.wtime-bench.tests.test_p122_representative_protocol.P122RepresentativeProtocolTests.test_p122_host_timer_boundary_and_production_feature_guard",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "wire-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_p122_compact_staged_wire_is_accepted_with_full_memory_proof",
+              "test_p122_rejects_wrong_mode_stage_and_instrumentation",
+              "test_p122_host_timer_boundary_and_production_feature_guard"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

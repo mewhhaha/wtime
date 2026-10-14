@@ -1,0 +1,7 @@
+{
+  "argv": [
+    "target/recovery/push-main-2026-10-14/preflight.py"
+  ],
+  "helper_sha256": "b29d16c7e50e35e6beb865550ba59c642ca244fbbfcf0d96e8dca72ce6e4ff8d",
+  "purpose": "recovery verification; not performance or task-completion evidence"
+}

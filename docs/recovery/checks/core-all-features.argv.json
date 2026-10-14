@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "--all-features"
+  ],
+  "cargo_target_dir": "/workspace/wtime/tools/wtime-bench/target",
+  "compiler": "/workspace/.rust/rustup/toolchains/1.99.0-x86_64-unknown-linux-gnu/bin",
+  "cwd": "/workspace/wtime"
+}

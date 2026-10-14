@@ -1,0 +1,554 @@
+{
+  "completion": {
+    "decision": {
+      "artifact": "statistics",
+      "phase": "analyze",
+      "pointer": "/decision/decision"
+    },
+    "limitations": [
+      "The immediate predecessor has P047 opt-in and the P126 memory foundation; rejected P048/P049 runtime patches are removed.",
+      "P050 remains opt-in Compact; defaults remain Decoded.",
+      "This focused evidence is not a P001-relative portfolio claim."
+    ],
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "commands": [
+          {
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "compact-executor,execution-reference",
+              "p050_",
+              "--",
+              "--nocapture"
+            ],
+            "name": "p050-compact-semantics"
+          }
+        ],
+        "name": "p050-compact-semantics",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p050-compact-semantics",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 7,
+            "required_names": [
+              "p050_low_logical_call_depth_fails_without_physical_frame",
+              "p050_fuel_stop_in_inline_leaf_reconstructs_arguments_and_return_point",
+              "p050_recursive_imported_effectful_leaves_decline_and_expansion_bounded",
+              "p050_direct_leaf_results_and_wrapping_match",
+              "p050_all_leaf_boundaries_cancel_and_fuel_restore_logical_activation",
+              "p050_retained_operands_keep_global_peak_and_source_limits",
+              "p050_leaf_plan_corruption_and_budget_bounds_decline"
+            ]
+          }
+        ],
+        "uses": [
+          "runtime",
+          "compilation"
+        ]
+      }
+    ]
+  },
+  "identities": {
+    "analysis": {
+      "paths": [
+        "tools/verify.py",
+        "tools/verification/statistics.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/gates.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/verification/production_attestation.py",
+        "tools/verification/producers/runtime_production.py",
+        "docs/verification/build-final.json"
+      ]
+    },
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/src/memory_driver.rs",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/fixtures/scalar/**"
+      ]
+    },
+    "candidate_freeze_producer": {
+      "paths": [
+        "tools/verification/producers/candidate_freeze.py",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/src/memory_driver.rs",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/scalar_workloads.py"
+      ]
+    },
+    "harness": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**/*.wat",
+        "tools/wtime-bench/fixtures/gc/**/*.wasm",
+        "tools/wtime-bench/fixtures/exceptions/**/*.wat",
+        "tools/wtime-bench/fixtures/scalar/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wasm",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/**/Cargo.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/src/memory_driver.rs",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/fixtures/memory/**"
+      ],
+      "settings": {
+        "bootstrap_resamples": 10000,
+        "candidate_mode": "compact",
+        "pairs_per_run": 30,
+        "runs": 2,
+        "selected_cpu": 1
+      }
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P050-before/manifest.json",
+        "target/performance/P050-before/source/**",
+        "target/performance/P050-before/binary/**"
+      ],
+      "settings": {
+        "required_state": "fresh archive of actual immediate P050-final predecessor after P050 publication; freeze before P050 runtime edits"
+      }
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "selection": {
+      "paths": [
+        "docs/benchmarks/performance/P050-selection.json",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "tool_checks": {
+      "paths": [
+        "tools/verification/tests/test_runtime_production.py",
+        "tools/verification/tests/test_production_attestation.py",
+        "tools/wtime-bench/tests/test_fast_candidate.py",
+        "tools/wtime-bench/tests/test_fast_selection.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py"
+      ]
+    }
+  },
+  "schema_version": 1,
+  "source_delta": {
+    "allowed_additions": [
+      "crates/wtime-runtime/src/execution/compact/inline.rs",
+      "crates/wtime-runtime/tests/performance/p050.rs"
+    ],
+    "allowed_changes": [
+      "crates/wtime-runtime/src/execution/compact/ir.rs",
+      "crates/wtime-runtime/src/execution/compact/mod.rs",
+      "crates/wtime-runtime/src/execution/compact/lower_scalar.rs",
+      "crates/wtime-runtime/src/execution/compact/verify.rs",
+      "crates/wtime-runtime/src/lib.rs",
+      "crates/wtime-runtime/src/execution.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "baseline": "{freeze_dir}/selection.json",
+    "identity": "runtime",
+    "pointer": "/runtime_sources"
+  },
+  "stages": {
+    "analyze": {
+      "checks": [
+        {
+          "artifact": "statistics",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "statistics",
+          "op": "equal",
+          "pointer": "/statistics_computations",
+          "value": 1
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verify.py",
+            "statistics",
+            "--task",
+            "P050",
+            "--comparison",
+            "{measure_dir}/comparison",
+            "--build",
+            "{verify_dir}/default-build.json",
+            "--optional-build",
+            "{verify_dir}/compact-build.json",
+            "--candidate-build-record",
+            "{verify_dir}/production/build-record.json",
+            "--contract",
+            "{repo}/docs/benchmarks/performance/P050-selection.json",
+            "--output",
+            "{stage}/statistics.json",
+            "--execute"
+          ],
+          "name": "candidate-statistics"
+        }
+      ],
+      "dependencies": [
+        "freeze",
+        "verify",
+        "measure"
+      ],
+      "outputs": {
+        "statistics": "{stage}/statistics.json"
+      },
+      "uses": [
+        "analysis",
+        "selection",
+        "tool_checks",
+        "harness"
+      ]
+    },
+    "freeze": {
+      "checks": [
+        {
+          "artifact": "selection",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-candidate-selection-freeze-v1"
+        },
+        {
+          "artifact": "selection",
+          "op": "equal",
+          "pointer": "/selection_count",
+          "value": 13
+        },
+        {
+          "artifact": "selection",
+          "op": "length",
+          "pointer": "/selection_groups",
+          "value": 61
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_freeze.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P050-selection.json",
+            "--predecessor",
+            "{repo}/target/performance/P050-before/manifest.json",
+            "--frozen",
+            "{repo}/target/performance/P050/selection-freeze.json",
+            "--output",
+            "{stage}/selection.json"
+          ],
+          "name": "revalidate-selection-freeze"
+        }
+      ],
+      "outputs": {
+        "selection": "{stage}/selection.json"
+      },
+      "uses": [
+        "predecessor",
+        "selection",
+        "candidate_freeze_producer"
+      ]
+    },
+    "measure": {
+      "checks": [
+        {
+          "artifact": "report",
+          "op": "equal",
+          "pointer": "/passed",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "op": "equal",
+          "pointer": "/lane",
+          "value": "candidate"
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/focused_compare.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P050-selection.json",
+            "--frozen",
+            "{freeze_dir}/selection.json",
+            "--semantic-receipt",
+            "{verify_dir}/receipt.json",
+            "--baseline",
+            "{repo}/target/performance/P050-before",
+            "--candidate",
+            "{verify_dir}/production/bin/wtime-bench",
+            "--candidate-mode",
+            "compact",
+            "--output",
+            "{stage}/comparison",
+            "--cpu",
+            "1"
+          ],
+          "name": "focused-candidate"
+        }
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "outputs": {
+        "report": "{stage}/comparison/report.json"
+      },
+      "timing_evidence": true,
+      "uses": [
+        "compilation",
+        "selection",
+        "harness"
+      ]
+    },
+    "verify": {
+      "checks": [
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "compact"
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "production_record",
+          "op": "exact_set",
+          "pointer": "/runtime_features",
+          "value": [
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "production_record",
+          "op": "exact_set",
+          "pointer": "/cargo_features",
+          "value": [
+            "runtime-only",
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "default_build",
+          "op": "equal",
+          "pointer": "/budget_pass",
+          "value": true
+        },
+        {
+          "artifact": "default_build",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "compact_build",
+          "op": "equal",
+          "pointer": "/budget_pass",
+          "value": true
+        },
+        {
+          "artifact": "compact_build",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,execution-reference",
+            "--",
+            "--nocapture"
+          ],
+          "name": "compact-semantics"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "compact",
+            "--output",
+            "{stage}/production"
+          ],
+          "name": "compact-production-build"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ],
+          "name": "default-build-budget"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/compact-executor",
+            "--output",
+            "{stage}/compact-build.json"
+          ],
+          "name": "compact-build-budget"
+        }
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "outputs": {
+        "binary": "{stage}/production/bin/wtime-bench",
+        "compact_build": "{stage}/compact-build.json",
+        "default_build": "{stage}/default-build.json",
+        "production_record": "{stage}/production/build-record.json"
+      },
+      "tests": [
+        {
+          "command": "compact-semantics",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 7,
+          "required_names": [
+            "p050_low_logical_call_depth_fails_without_physical_frame",
+            "p050_fuel_stop_in_inline_leaf_reconstructs_arguments_and_return_point",
+            "p050_recursive_imported_effectful_leaves_decline_and_expansion_bounded",
+            "p050_direct_leaf_results_and_wrapping_match",
+            "p050_all_leaf_boundaries_cancel_and_fuel_restore_logical_activation",
+            "p050_retained_operands_keep_global_peak_and_source_limits",
+            "p050_leaf_plan_corruption_and_budget_bounds_decline"
+          ],
+          "unfiltered": true
+        }
+      ],
+      "uses": [
+        "compilation",
+        "selection",
+        "runtime",
+        "build_producer"
+      ]
+    }
+  },
+  "task": "P050"
+}

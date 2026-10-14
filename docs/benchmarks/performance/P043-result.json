@@ -1,0 +1,648 @@
+{
+  "artifacts": {
+    "P001_baseline_manifest": {
+      "bytes": 22024,
+      "path": "/workspace/wtime/target/performance/baseline/manifest.json",
+      "sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472"
+    },
+    "P043_predecessor_manifest": {
+      "bytes": 69849,
+      "path": "/workspace/wtime/target/performance/P043-before/manifest.json",
+      "sha256": "5faa86bc89f66e57737e44f8cd863a6ab0860cc8d9899a0b77882642f12e58d4"
+    },
+    "candidate_binary": {
+      "bytes": 17385976,
+      "path": "/workspace/wtime/target/verification/runs/P043/verify/attempt-0004/production/wtime-bench",
+      "sha256": "f1a62fb41d90afcefac208d25553ff112fe85de2595ba3314f26081ef9023a14"
+    },
+    "candidate_build": {
+      "bytes": 4576,
+      "path": "/workspace/wtime/target/verification/runs/P043/verify/attempt-0004/production/build-record.json",
+      "sha256": "05c4b24be35c1d8b8d9e5ed6bd25c38251f47057b424d8d97d648aa423f3bab5"
+    },
+    "completion": {
+      "bytes": 498,
+      "path": "/workspace/wtime/target/performance/P043/shared-finalization/attempt-0001/completion.json",
+      "sha256": "eb42a033e91f05655eabdfd1951ad68fd93c6fd47d4dd2b31b41b20e896306d5"
+    },
+    "contract": {
+      "bytes": 27565,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P043-verification.json",
+      "sha256": "10f4466092eb53f38da8cc024c42ba33e4edaacbbc73456688c47ad915bb692b"
+    },
+    "coverage": {
+      "bytes": 236315,
+      "path": "/workspace/wtime/target/verification/runs/P043/verify/attempt-0004/coverage/coverage.json",
+      "sha256": "bf323b3d6391c602581f4bd72ce642e9f230158457e7f005657924990075172b"
+    },
+    "decision": {
+      "bytes": 11844,
+      "path": "/workspace/wtime/target/verification/runs/P043/analyze/attempt-0001/decision.json",
+      "sha256": "49f72296ab42f531a47e1b391990d25678ab975f57d7e9011d6986a9672611b6"
+    },
+    "default_build": {
+      "bytes": 233057,
+      "path": "/workspace/wtime/target/verification/runs/P043/verify/attempt-0004/build.json",
+      "sha256": "30e6dc4b955cabfaff59f639e818c9f00dc0ab0d230f12f170ee18ee30b607d6"
+    },
+    "fixture_receipt": {
+      "bytes": 45514,
+      "path": "/workspace/wtime/target/performance/P043/fixtures/attempt-0001/receipt.json",
+      "sha256": "9b4ead6f5644ca86b5dcf84be7276d38bf147af1553a9c1cbc1571f77f22c13a"
+    },
+    "optional_build": {
+      "bytes": 233218,
+      "path": "/workspace/wtime/target/verification/runs/P043/verify/attempt-0004/optional-build.json",
+      "sha256": "2c9d78968684c5280ba58094d0151b628d4da2ab500415ddffc71907086b92ac"
+    },
+    "predecessor_binary": {
+      "bytes": 17368144,
+      "path": "/workspace/wtime/target/performance/P043-before/binary/wtime-bench",
+      "sha256": "a17d980b3a373b488f703fafd6d47fa2c4f9521f92203047f1fccd54f29e5d25"
+    },
+    "promotion_contract": {
+      "bytes": 1247,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P043-contract.json",
+      "sha256": "f33feed692829dc2ce58fd2e2ca6ea902d4faa4945e50be3d7f244934ddb3852"
+    },
+    "proof": {
+      "bytes": 2398,
+      "path": "/workspace/wtime/target/performance/P043/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "4d32df830cf46c058a76b34ea7370eaced71134001dbaa89258ae9870ec8e699"
+    },
+    "report": {
+      "bytes": 23593103,
+      "path": "/workspace/wtime/target/verification/runs/P043/measure/attempt-0002/comparison/report.json",
+      "sha256": "34805745b8549aff22b0ed39fa5d44c1e3de144a03512998a1b5c3ac3aaf6538"
+    },
+    "statistics": {
+      "bytes": 500828,
+      "path": "/workspace/wtime/target/verification/runs/P043/analyze/attempt-0001/statistics.json",
+      "sha256": "1d55c27d8bc7801cd6fa1dee454e0291303831426097693e0f0b5a762708f3a6"
+    }
+  },
+  "authoritative_proof": {
+    "bytes": 2398,
+    "path": "/workspace/wtime/target/performance/P043/shared-finalization/attempt-0001/evidence.json",
+    "sha256": "4d32df830cf46c058a76b34ea7370eaced71134001dbaa89258ae9870ec8e699"
+  },
+  "build": {
+    "build_growth_pass": false,
+    "candidate_runtime_source_count": 30,
+    "default": {
+      "budget_pass": true,
+      "budgets": {
+        "clean_seconds": 60.0,
+        "leaf_seconds": 5.0,
+        "stripped_bytes": 5242880
+      },
+      "clean_peak_rss_kib": 266428,
+      "clean_seconds": 35.767081874015275,
+      "default_dependency_closure_pass": true,
+      "default_dependency_violations": [],
+      "leaf_seconds": 1.180073221999919,
+      "release_seconds": 40.64792239799863,
+      "runtime_leaf_seconds": 3.175153516989667,
+      "source_stable": true,
+      "stripped_bytes": 1000696,
+      "unchanged_peak_rss_kib": 30052,
+      "unchanged_seconds": 0.6194497469987255
+    },
+    "fixture_predecessor_runtime_source_count": 29,
+    "immediate_predecessor_build_ratios": {
+      "build": {
+        "clean_peak_rss_kib": 0.9438162444028794,
+        "clean_seconds": 2.3785195319065005,
+        "leaf_seconds": 1.3145492902703193,
+        "release_seconds": 1.7994271486791484,
+        "runtime_leaf_seconds": 1.1799013448107132,
+        "stripped_bytes": 1.0
+      },
+      "optional-build": {
+        "clean_peak_rss_kib": 1.0245437722035364,
+        "clean_seconds": 1.569803998983596,
+        "leaf_seconds": 2.235941004474581,
+        "release_seconds": 2.471212510897101,
+        "runtime_leaf_seconds": 1.4480128642002388,
+        "stripped_bytes": 1.0136395501234416
+      }
+    },
+    "optional": {
+      "budget_pass": true,
+      "budgets": {
+        "clean_seconds": 60.0,
+        "leaf_seconds": 5.0,
+        "stripped_bytes": 5242880
+      },
+      "clean_peak_rss_kib": 303392,
+      "clean_seconds": 15.114001754001947,
+      "leaf_seconds": 0.881779251008993,
+      "release_seconds": 46.518142860993976,
+      "runtime_leaf_seconds": 3.0233882309985347,
+      "source_stable": true,
+      "stripped_bytes": 1064208,
+      "unchanged_peak_rss_kib": 29704,
+      "unchanged_seconds": 0.24825016400427558
+    },
+    "reasons": [
+      "load_and_call control memory_custom_page_one_byte exceeds 1.05 in run 1",
+      "load_and_call control memory_multi_memory_second_export exceeds 1.05 in run 1",
+      "prepare control memory_widths_predictable exceeds 1.25 in run 1",
+      "load_and_call control memory64_i32_extended exceeds 1.05 in run 2",
+      "load_and_call control memory_custom_page_one_byte exceeds 1.05 in run 2",
+      "prepare control memory_fill_scan exceeds 1.25 in run 2",
+      "load_and_call control memory_multi_memory_second_export exceeds 1.05 in run 2",
+      "prepare control memory_widths_predictable exceeds 1.25 in run 2",
+      "prepare control memory_widths_shuffled exceeds 1.25 in run 2",
+      "warm protected memory_copy_distinct_seeded_0 group interval crosses 1.05 in run 1",
+      "warm protected memory_copy_distinct_seeded_1048576 group interval crosses 1.05 in run 1",
+      "warm protected memory_copy_distinct_seeded_4096 group interval crosses 1.05 in run 1",
+      "warm protected memory_copy_distinct_seeded_64 group interval crosses 1.05 in run 1",
+      "warm protected memory_fill_seeded_1048576 group interval crosses 1.05 in run 1",
+      "warm protected memory_fill_seeded_17 group interval crosses 1.05 in run 1",
+      "warm protected memory_fill_seeded_4096 group interval crosses 1.05 in run 1",
+      "warm protected memory_fill_seeded_64 group interval crosses 1.05 in run 1",
+      "warm protected memory_copy_distinct_seeded_0 group interval crosses 1.05 in run 2",
+      "warm protected memory_copy_distinct_seeded_1048576 group interval crosses 1.05 in run 2",
+      "warm protected memory_copy_distinct_seeded_17 group interval crosses 1.05 in run 2",
+      "warm protected memory_copy_distinct_seeded_4096 group interval crosses 1.05 in run 2",
+      "warm protected memory_fill_seeded_1048576 group interval crosses 1.05 in run 2",
+      "warm protected memory_fill_seeded_17 group interval crosses 1.05 in run 2",
+      "warm protected memory_fill_seeded_4096 group interval crosses 1.05 in run 2",
+      "warm protected memory_fill_seeded_64 group interval crosses 1.05 in run 2",
+      "load_and_call control memory64_i32_extended interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_aliased_4096 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_aliased_64 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_backward_1048576 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_backward_4096 interval crosses 1.05 in run 1",
+      "first_call control memory_copy_distinct_seeded_0 interval crosses 1.05 in run 1",
+      "instantiate control memory_copy_distinct_seeded_0 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_distinct_seeded_0 interval crosses 1.05 in run 1",
+      "prepare control memory_copy_distinct_seeded_0 interval crosses 1.25 in run 1",
+      "first_call control memory_copy_distinct_seeded_1048576 interval crosses 1.05 in run 1",
+      "instantiate control memory_copy_distinct_seeded_1048576 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_distinct_seeded_1048576 interval crosses 1.05 in run 1",
+      "first_call control memory_copy_distinct_seeded_17 interval crosses 1.05 in run 1",
+      "instantiate control memory_copy_distinct_seeded_17 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_distinct_seeded_17 interval crosses 1.05 in run 1",
+      "first_call control memory_copy_distinct_seeded_4096 interval crosses 1.05 in run 1",
+      "instantiate control memory_copy_distinct_seeded_4096 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_distinct_seeded_4096 interval crosses 1.05 in run 1",
+      "instantiate control memory_copy_distinct_seeded_64 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_distinct_seeded_64 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_forward_1048576 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_forward_4096 interval crosses 1.05 in run 1",
+      "load_and_call control memory_copy_forward_64 interval crosses 1.05 in run 1",
+      "load_and_call control memory_effective_address_overflow interval crosses 1.05 in run 1",
+      "load_and_call control memory_fill_1048576 interval crosses 1.05 in run 1",
+      "instantiate control memory_fill_scan interval crosses 1.05 in run 1",
+      "prepare control memory_fill_scan interval crosses 1.25 in run 1",
+      "first_call control memory_fill_seeded_0 interval crosses 1.05 in run 1",
+      "instantiate control memory_fill_seeded_0 interval crosses 1.05 in run 1",
+      "load_and_call control memory_fill_seeded_0 interval crosses 1.05 in run 1",
+      "prepare control memory_fill_seeded_0 interval crosses 1.25 in run 1",
+      "first_call control memory_fill_seeded_1048576 interval crosses 1.05 in run 1",
+      "instantiate control memory_fill_seeded_1048576 interval crosses 1.05 in run 1",
+      "load_and_call control memory_fill_seeded_1048576 interval crosses 1.05 in run 1",
+      "first_call control memory_fill_seeded_17 interval crosses 1.05 in run 1",
+      "instantiate control memory_fill_seeded_17 interval crosses 1.05 in run 1",
+      "load_and_call control memory_fill_seeded_17 interval crosses 1.05 in run 1",
+      "first_call control memory_fill_seeded_4096 interval crosses 1.05 in run 1",
+      "instantiate control memory_fill_seeded_4096 interval crosses 1.05 in run 1",
+      "load_and_call control memory_fill_seeded_4096 interval crosses 1.05 in run 1",
+      "first_call control memory_fill_seeded_64 interval crosses 1.05 in run 1",
+      "instantiate control memory_fill_seeded_64 interval crosses 1.05 in run 1",
+      "load_and_call control memory_fill_seeded_64 interval crosses 1.05 in run 1",
+      "load_and_call control memory_growth_failure interval crosses 1.05 in run 1",
+      "load_and_call control memory_growth_success_max interval crosses 1.05 in run 1",
+      "instantiate control memory_widths_predictable interval crosses 1.05 in run 1",
+      "load_and_call control memory_widths_predictable interval crosses 1.05 in run 1",
+      "instantiate control memory_widths_read_scan interval crosses 1.05 in run 1",
+      "prepare control memory_widths_read_scan interval crosses 1.25 in run 1",
+      "instantiate control memory_widths_shuffled interval crosses 1.05 in run 1",
+      "load_and_call control memory_widths_shuffled interval crosses 1.05 in run 1",
+      "prepare control memory_widths_shuffled interval crosses 1.25 in run 1",
+      "load_and_call control memory_copy_aliased_1048576 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_aliased_4096 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_aliased_64 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_backward_1048576 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_backward_4096 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_backward_64 interval crosses 1.05 in run 2",
+      "first_call control memory_copy_distinct_seeded_0 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_distinct_seeded_0 interval crosses 1.05 in run 2",
+      "instantiate control memory_copy_distinct_seeded_1048576 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_distinct_seeded_1048576 interval crosses 1.05 in run 2",
+      "first_call control memory_copy_distinct_seeded_17 interval crosses 1.05 in run 2",
+      "instantiate control memory_copy_distinct_seeded_17 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_distinct_seeded_17 interval crosses 1.05 in run 2",
+      "instantiate control memory_copy_distinct_seeded_4096 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_distinct_seeded_4096 interval crosses 1.05 in run 2",
+      "instantiate control memory_copy_distinct_seeded_64 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_distinct_seeded_64 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_forward_1048576 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_forward_4096 interval crosses 1.05 in run 2",
+      "load_and_call control memory_copy_forward_64 interval crosses 1.05 in run 2",
+      "load_and_call control memory_effective_address_overflow interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_1048576 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_4096 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_64 interval crosses 1.05 in run 2",
+      "instantiate control memory_fill_scan interval crosses 1.05 in run 2",
+      "first_call control memory_fill_seeded_0 interval crosses 1.05 in run 2",
+      "instantiate control memory_fill_seeded_0 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_seeded_0 interval crosses 1.05 in run 2",
+      "first_call control memory_fill_seeded_1048576 interval crosses 1.05 in run 2",
+      "instantiate control memory_fill_seeded_1048576 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_seeded_1048576 interval crosses 1.05 in run 2",
+      "first_call control memory_fill_seeded_17 interval crosses 1.05 in run 2",
+      "instantiate control memory_fill_seeded_17 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_seeded_17 interval crosses 1.05 in run 2",
+      "instantiate control memory_fill_seeded_4096 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_seeded_4096 interval crosses 1.05 in run 2",
+      "first_call control memory_fill_seeded_64 interval crosses 1.05 in run 2",
+      "instantiate control memory_fill_seeded_64 interval crosses 1.05 in run 2",
+      "load_and_call control memory_fill_seeded_64 interval crosses 1.05 in run 2",
+      "load_and_call control memory_growth_success_max interval crosses 1.05 in run 2",
+      "load_and_call control memory_growth_success_one interval crosses 1.05 in run 2",
+      "load_and_call control memory_growth_success_zero interval crosses 1.05 in run 2",
+      "load_and_call control memory_oob_copy_order interval crosses 1.05 in run 2",
+      "instantiate control memory_widths_predictable interval crosses 1.05 in run 2",
+      "load_and_call control memory_widths_predictable interval crosses 1.05 in run 2",
+      "instantiate control memory_widths_read_scan interval crosses 1.05 in run 2",
+      "prepare control memory_widths_read_scan interval crosses 1.25 in run 2",
+      "instantiate control memory_widths_shuffled interval crosses 1.05 in run 2",
+      "Predeclared immediate-predecessor build growth exceeds 1.25; promotion withheld."
+    ]
+  },
+  "candidate_promoted": false,
+  "completion": {
+    "bytes": 498,
+    "path": "/workspace/wtime/target/performance/P043/shared-finalization/attempt-0001/completion.json",
+    "sha256": "eb42a033e91f05655eabdfd1951ad68fd93c6fd47d4dd2b31b41b20e896306d5"
+  },
+  "correctness": {
+    "groups": {
+      "compact-tests": {
+        "failed": 0,
+        "features": [
+          "compact-executor",
+          "execution-reference"
+        ],
+        "named_count": 313,
+        "passed": 313,
+        "required_names": [
+          "p038_every_fuel_prefix_and_transient_stack_failure_match_decoded_and_reference",
+          "p038_i64_wrapping_and_early_return_have_exact_executed_source_counts",
+          "p038_integer_boundaries_locals_select_drop_execute_direct_records",
+          "p038_materialization_preserves_every_reachable_next_source_cursor_and_fuel",
+          "p038_module_lifetime_and_pre_cancel_do_not_weaken_entry_contracts",
+          "p038_reference_select_and_wide_locals_visibly_keep_decoded_fallback",
+          "p039_division_conversion_traps_and_fuel_priority_are_original_operations",
+          "p039_raw_float_constants_preserve_signed_zero_and_nan_payloads",
+          "p039_strict_min_max_nan_sets_and_copysign_keep_wasm_bits",
+          "p039_vector_block_parameters_and_results_keep_source_control_and_prefixes",
+          "p039_vector_shuffle_fuel_and_materialized_operands_match_source_events",
+          "p040_br_table_targets_and_early_returns_have_independent_prefixes",
+          "p040_multivalue_loop_and_nested_if_match_each_source_fuel_prefix",
+          "p040_private_corruption_and_wrong_source_identity_reject_before_publication",
+          "p040_private_records_match_independent_block_arities_and_targets",
+          "p040_private_work_bytes_and_indexed_arity_are_bounded_before_traversal",
+          "p040_reference_valued_control_declines_whole_function_without_changing_identity",
+          "p040_taken_fallthrough_and_structural_cursors_keep_exact_labels_and_fuel",
+          "p040_unreachable_keeps_completed_local_prefix_and_charged_trap_cursor",
+          "p040_zero_result_return_and_global_stack_peak_preserve_trap_priority",
+          "p041_argument_ranges_and_every_call_fuel_prefix_match_independent_counts",
+          "p041_call_and_callee_cursors_materialize_the_same_canonical_state",
+          "p041_failed_start_preserves_host_side_effect_and_cannot_reuse_old_bindings",
+          "p041_instance_binding_work_and_peak_bytes_decline_without_partial_publication",
+          "p041_numeric_host_reentry_preserves_decoded_caller_gc_roots_and_growth",
+          "p041_private_binding_context_and_signature_corruption_fail_closed",
+          "p041_private_bindings_reject_foreign_sources_and_retired_or_reused_generations",
+          "p041_reference_target_and_wrong_import_signature_decline_before_publication",
+          "p041_shared_module_instances_and_stores_resolve_their_own_imported_guest",
+          "p041_tail_calls_preserve_logical_depth_and_host_suspension_barriers",
+          "p042_cache_hits_keep_materialized_source_cursors_and_charged_fuel",
+          "p042_cached_host_targets_preserve_gc_roots_reentry_results_and_suspension",
+          "p042_imported_table_aliases_and_instances_do_not_reuse_other_targets",
+          "p042_indirect_null_mismatch_bounds_and_every_trap_fuel_prefix_are_original",
+          "p042_private_capacity_work_and_round_robin_replacement_are_bounded",
+          "p042_private_context_signature_and_cached_metadata_corruption_fail_closed",
+          "p042_private_live_generation_and_negative_answers_never_reuse_success",
+          "p042_table64_large_indices_and_tail_logical_depth_do_not_alias_or_grow",
+          "p042_table_set_grow_fill_copy_and_polymorphic_churn_read_current_targets",
+          "p042_typed_call_ref_null_fuel_prefix_foreign_and_argument_validation_remain_checked",
+          "p043_all_nine_store_kinds_have_independent_full_memory_prefix_images",
+          "p043_every_scalar_load_width_sign_and_raw_float_has_exact_fuel_prefix",
+          "p043_full_boundary_ranges_trap_before_side_effect_and_vector_memory_falls_back",
+          "p043_memory64_overflow_trap_keeps_every_preceding_store_and_fuel_priority",
+          "p043_one_byte_pages_use_byte_lengths_and_preserve_last_byte_store_prefix",
+          "p043_private_binding_identity_generations_classes_and_unshared_growth_are_live",
+          "p043_private_operand_source_width_offset_and_type_corruption_fail_closed",
+          "p043_private_preparation_work_bytes_and_binding_peak_are_bounded",
+          "p043_shared_aliases_distinct_instances_and_host_growth_refresh_live_ranges",
+          "p043_unshared_growth_and_memory_cursors_materialize_identical_source_state"
+        ]
+      },
+      "default-tests": {
+        "failed": 0,
+        "features": [],
+        "named_count": 228,
+        "passed": 228,
+        "required_names": [
+          "t035_foreign_store_and_argument_types_rejected",
+          "t055_unaligned_access_and_bounds",
+          "t056_growth_failure_and_zero_initialization"
+        ]
+      },
+      "diagnostic-tests": {
+        "failed": 0,
+        "features": [
+          "compact-executor",
+          "execution-reference",
+          "performance-counters"
+        ],
+        "named_count": 10,
+        "passed": 10,
+        "required_names": [
+          "p043_all_nine_store_kinds_have_independent_full_memory_prefix_images",
+          "p043_every_scalar_load_width_sign_and_raw_float_has_exact_fuel_prefix",
+          "p043_full_boundary_ranges_trap_before_side_effect_and_vector_memory_falls_back",
+          "p043_memory64_overflow_trap_keeps_every_preceding_store_and_fuel_priority",
+          "p043_one_byte_pages_use_byte_lengths_and_preserve_last_byte_store_prefix",
+          "p043_private_binding_identity_generations_classes_and_unshared_growth_are_live",
+          "p043_private_operand_source_width_offset_and_type_corruption_fail_closed",
+          "p043_private_preparation_work_bytes_and_binding_peak_are_bounded",
+          "p043_shared_aliases_distinct_instances_and_host_growth_refresh_live_ranges",
+          "p043_unshared_growth_and_memory_cursors_materialize_identical_source_state"
+        ]
+      }
+    }
+  },
+  "diagnostics": {
+    "primary_count": 2,
+    "protected_count": 33,
+    "selected_count": 35,
+    "source_map_sha256": "c7bdd02ccef990142c6d738f4edb1f2912a06e3474f227310f929c203fd5160a",
+    "source_stable": true
+  },
+  "limitations": [
+    "Compact remains opt-in; default remains Decoded.",
+    "The candidate specializes scalar memory; measurements cover all 35 memory rows. SIMD, bulk, and growth use checked decoded fallback.",
+    "memory_fill_scan timing uses legacy checksum-only protocol; its full image is checked separately in untimed diagnostics with export-section-only adapter and unchanged other sections.",
+    "Other memory observations validate complete images; do not claim all 5460 timing pairs contain image digests.",
+    "No new Wasmtime comparison or default-adoption claim; failed history is retained."
+  ],
+  "measurement": {
+    "groups_per_run": 91,
+    "pairs_per_group": 30,
+    "pairs_total": 5460,
+    "primary": [
+      "memory_widths_predictable",
+      "memory_widths_shuffled"
+    ],
+    "protected": [
+      "memory64_i32_extended",
+      "memory_copy_aliased_1048576",
+      "memory_copy_aliased_4096",
+      "memory_copy_aliased_64",
+      "memory_copy_backward_1048576",
+      "memory_copy_backward_4096",
+      "memory_copy_backward_64",
+      "memory_copy_distinct_seeded_0",
+      "memory_copy_distinct_seeded_1048576",
+      "memory_copy_distinct_seeded_17",
+      "memory_copy_distinct_seeded_4096",
+      "memory_copy_distinct_seeded_64",
+      "memory_copy_forward_1048576",
+      "memory_copy_forward_4096",
+      "memory_copy_forward_64",
+      "memory_custom_page_one_byte",
+      "memory_effective_address_overflow",
+      "memory_fill_1048576",
+      "memory_fill_4096",
+      "memory_fill_64",
+      "memory_fill_scan",
+      "memory_fill_seeded_0",
+      "memory_fill_seeded_1048576",
+      "memory_fill_seeded_17",
+      "memory_fill_seeded_4096",
+      "memory_fill_seeded_64",
+      "memory_growth_failure",
+      "memory_growth_success_max",
+      "memory_growth_success_one",
+      "memory_growth_success_zero",
+      "memory_multi_memory_second_export",
+      "memory_oob_copy_order",
+      "memory_widths_read_scan"
+    ],
+    "runs": 2,
+    "selection": "memory",
+    "stored_primary_warm_call": [
+      {
+        "baseline_ns_per_operation": {
+          "mad": 80649.11750000005,
+          "median": 685638.7735,
+          "p25": 632387.8245,
+          "p75": 847064.32075
+        },
+        "candidate_ns_per_operation": {
+          "mad": 34106.92149999997,
+          "median": 403470.55449999997,
+          "p25": 379183.87925,
+          "p75": 506605.62275
+        },
+        "candidate_over_baseline": {
+          "mad": 0.06438840095151149,
+          "median": 0.6123465072958406,
+          "p25": 0.553228723933206,
+          "p75": 0.6766055055889549
+        },
+        "decision": "supported_improvement",
+        "fixture": "febd4bc1275c2db30f6d67c722a577c3e5fba64ee072c14175c5fb2f5769df74",
+        "input": "64",
+        "median_ratio_95ci": {
+          "lower": 0.581792092311072,
+          "upper": 0.6508377918330301
+        },
+        "paired_log_ratio": {
+          "mad": 0.10511966406638151,
+          "median": -0.4905542152370851,
+          "p25": -0.5920229596820069,
+          "p75": -0.3906885054302462
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 20261012,
+        "stage": "warm_call",
+        "workload": "memory_widths_predictable"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 62746.10149999999,
+          "median": 694434.172,
+          "p25": 635992.137,
+          "p75": 760934.2462500001
+        },
+        "candidate_ns_per_operation": {
+          "mad": 40493.91399999999,
+          "median": 435874.3595,
+          "p25": 394628.79275,
+          "p75": 473324.46074999997
+        },
+        "candidate_over_baseline": {
+          "mad": 0.08278014445194581,
+          "median": 0.6079642331271269,
+          "p25": 0.5575623596369685,
+          "p75": 0.7217932201603391
+        },
+        "decision": "supported_improvement",
+        "fixture": "e948f8be21a6e70d46be7dd3a1a3d78d700ba7535a6220bf8d213b2392eab511",
+        "input": "64",
+        "median_ratio_95ci": {
+          "lower": 0.5650622891320846,
+          "upper": 0.6907396259030297
+        },
+        "paired_log_ratio": {
+          "mad": 0.13367012213861917,
+          "median": -0.4976393647815215,
+          "p25": -0.5841922376622132,
+          "p75": -0.32603911491992293
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 20261012,
+        "stage": "warm_call",
+        "workload": "memory_widths_shuffled"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 52861.109,
+          "median": 679515.047,
+          "p25": 648378.3165000001,
+          "p75": 738997.9962500001
+        },
+        "candidate_ns_per_operation": {
+          "mad": 41076.64850000001,
+          "median": 435648.42949999997,
+          "p25": 413404.4765,
+          "p75": 508047.34775
+        },
+        "candidate_over_baseline": {
+          "mad": 0.09848780382135808,
+          "median": 0.6891246489156224,
+          "p25": 0.5878481651190809,
+          "p75": 0.7674032380966966
+        },
+        "decision": "supported_improvement",
+        "fixture": "febd4bc1275c2db30f6d67c722a577c3e5fba64ee072c14175c5fb2f5769df74",
+        "input": "64",
+        "median_ratio_95ci": {
+          "lower": 0.5974015958957034,
+          "upper": 0.7447296266642324
+        },
+        "paired_log_ratio": {
+          "mad": 0.1409788953630612,
+          "median": -0.37246012185955074,
+          "p25": -0.5312865924564849,
+          "p75": -0.2647446498292835
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 21261015,
+        "stage": "warm_call",
+        "workload": "memory_widths_predictable"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 94670.4535,
+          "median": 693764.922,
+          "p25": 637854.453,
+          "p75": 822624.18
+        },
+        "candidate_ns_per_operation": {
+          "mad": 52157.43750000003,
+          "median": 457760.281,
+          "p25": 417843.32825,
+          "p75": 523848.1875
+        },
+        "candidate_over_baseline": {
+          "mad": 0.10655301352927987,
+          "median": 0.6294254684924337,
+          "p25": 0.5619413417740559,
+          "p75": 0.7601714350258184
+        },
+        "decision": "supported_improvement",
+        "fixture": "e948f8be21a6e70d46be7dd3a1a3d78d700ba7535a6220bf8d213b2392eab511",
+        "input": "64",
+        "median_ratio_95ci": {
+          "lower": 0.5824448896320664,
+          "upper": 0.721146370162435
+        },
+        "paired_log_ratio": {
+          "mad": 0.16447051814442137,
+          "median": -0.4631392378903867,
+          "p25": -0.5763603387098672,
+          "p75": -0.27428641206255727
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 21261015,
+        "stage": "warm_call",
+        "workload": "memory_widths_shuffled"
+      }
+    ],
+    "workloads": 35
+  },
+  "outcome": "rejected",
+  "phase_receipts": {
+    "analyze": {
+      "object": {
+        "bytes": 44263,
+        "encoding": "raw",
+        "mode": "0o600",
+        "path": "objects/8c/8c367a2a84aee2014a4e5ba2f210ba654e2eeedc3e860de005dd8465332b08f7",
+        "sha256": "8c367a2a84aee2014a4e5ba2f210ba654e2eeedc3e860de005dd8465332b08f7",
+        "stored_bytes": 44263,
+        "stored_sha256": "8c367a2a84aee2014a4e5ba2f210ba654e2eeedc3e860de005dd8465332b08f7"
+      },
+      "store": "/workspace/wtime/target/verification"
+    },
+    "freeze": {
+      "object": {
+        "bytes": 269659,
+        "encoding": "raw",
+        "mode": "0o600",
+        "path": "objects/ee/ee19793e6c8124b15035676571166916c80a748c4313b3d1c80afa3373c9e3a2",
+        "sha256": "ee19793e6c8124b15035676571166916c80a748c4313b3d1c80afa3373c9e3a2",
+        "stored_bytes": 269659,
+        "stored_sha256": "ee19793e6c8124b15035676571166916c80a748c4313b3d1c80afa3373c9e3a2"
+      },
+      "store": "/workspace/wtime/target/verification"
+    },
+    "measure": {
+      "object": {
+        "bytes": 120122,
+        "encoding": "raw",
+        "mode": "0o600",
+        "path": "objects/94/9413fe4c26347827ff08a07600db72be521bebbf458b66b357bcf59e3c642cb8",
+        "sha256": "9413fe4c26347827ff08a07600db72be521bebbf458b66b357bcf59e3c642cb8",
+        "stored_bytes": 120122,
+        "stored_sha256": "9413fe4c26347827ff08a07600db72be521bebbf458b66b357bcf59e3c642cb8"
+      },
+      "store": "/workspace/wtime/target/verification"
+    },
+    "verify": {
+      "object": {
+        "bytes": 460629,
+        "encoding": "raw",
+        "mode": "0o600",
+        "path": "objects/b5/b577ca050635e217a8780f067de2cf369fa387746bc2a7383c9f584da944419e",
+        "sha256": "b577ca050635e217a8780f067de2cf369fa387746bc2a7383c9f584da944419e",
+        "stored_bytes": 460629,
+        "stored_sha256": "b577ca050635e217a8780f067de2cf369fa387746bc2a7383c9f584da944419e"
+      },
+      "store": "/workspace/wtime/target/verification"
+    }
+  },
+  "schema": "wtime-p043-human-evidence-index-v1",
+  "task": "P043"
+}

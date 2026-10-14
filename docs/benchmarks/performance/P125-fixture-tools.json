@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "source_receipt": {
+    "path": "/workspace/wtime/target/performance/P113/fixtures/attempt-0002/receipt.json",
+    "sha256": "9a74e7d05bec7d671a1d39d6c530a6d1e078e8e7de653a9728fdd26fe65e04c6"
+  },
+  "tools": {
+    "encoder": {
+      "bytes": 24493024,
+      "path": "/workspace/wtime/target/performance/P113/fixtures/attempt-0002/encoder",
+      "sha256": "5123b38fd1e6b2358027778d94256202e53ff7024b3b05cd94aa5ea50d7949d4"
+    },
+    "validator": {
+      "bytes": 11591264,
+      "path": "/workspace/wtime/target/performance/P113/fixtures/attempt-0002/validator",
+      "sha256": "c543c8a9690ddf9e5df10548b87bc476a7cc7bb9cc33031030003f4e01f776ab"
+    }
+  }
+}

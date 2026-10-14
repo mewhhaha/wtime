@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "task": "P121",
+  "status": "passed",
+  "outcome": "contract_only",
+  "candidate_promoted": false,
+  "timing_evidence": false,
+  "evidence_receipt": {
+    "path": "target/performance/P121/shared-finalization/attempt-0002/evidence.json",
+    "sha256": "9b5ab71a529c02911e865c1ad588b68ba9fb00314f20f661c64420efc81a4204"
+  },
+  "verification": {
+    "attempt": "target/verification/runs/P121/verify/attempt-0001",
+    "status": "passed",
+    "finalization_status": "done",
+    "selected": 145760,
+    "executed": 145760,
+    "failed": 0,
+    "skipped": 0,
+    "unsupported": 0,
+    "selections": [
+      "mvp",
+      "core3",
+      "phase3",
+      "interactions"
+    ],
+    "checks": {
+      "runtime_tests": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0
+      },
+      "conformance_tests": {
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      },
+      "python_report_tests": {
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0
+      },
+      "plain_build_check": "passed",
+      "performance_counters_only_check": "passed",
+      "release_conformance_build": "passed"
+    }
+  },
+  "totals": {
+    "total_dispatched_source_events": 235772645,
+    "optimized_compact_source_events": 163877104,
+    "decoded_fallback_source_events": 71895541,
+    "worker_stores_observed": 29,
+    "preparation": {
+      "accepted": 19673,
+      "declined": 1177,
+      "published_artifacts": 4409,
+      "unpublished_artifacts_unknown_work": 1221,
+      "attempted_work_known_sum": 7617618,
+      "retained_budget_bytes": 22345236,
+      "retained_budget_basis": "conservative capacity plus headers, not physical allocator bytes"
+    }
+  },
+  "limitation": "Diagnostic dispatch and conservative retained-artifact budget accounting only; no timing or promotion claim. P046 owns production performance decisions."
+}

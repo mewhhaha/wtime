@@ -1,0 +1,12 @@
+;; Locally authored, CC0. A real worker writes to the shared memory.
+(module $Mem (memory (export "shared") 1 1 shared))
+(thread $Worker (shared (module $Mem))
+  (register "mem" $Mem)
+  (module (import "mem" "shared" (memory 1 1 shared))
+    (func (export "write") i32.const 0 i32.const 42 i32.atomic.store))
+  (invoke "write"))
+(wait $Worker)
+(register "mem" $Mem)
+(module (import "mem" "shared" (memory 1 1 shared))
+  (func (export "read") (result i32) i32.const 0 i32.atomic.load))
+(assert_return (invoke "read") (i32.const 42))

@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+    "-B",
+    "-m",
+    "unittest",
+    "-v",
+    "tools.wtime-bench.tests.test_p128_scalar_workloads",
+    "tools.verification.tests.test_p128_scalar",
+    "tools.wtime-bench.tests.test_fast_execution_identity"
+  ],
+  "cargo_target_dir": "/workspace/wtime/tools/wtime-bench/target",
+  "compiler": "/workspace/.rust/rustup/toolchains/1.99.0-x86_64-unknown-linux-gnu/bin",
+  "cwd": "/workspace/wtime"
+}

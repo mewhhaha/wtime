@@ -1,0 +1,225 @@
+--- a/crates/wtime-runtime/src/execution.rs
++++ b/crates/wtime-runtime/src/execution.rs
+@@ -6,6 +6,11 @@
+ #[allow(dead_code)]
+ pub(super) mod plan;
+ use super::*;
++#[cfg(test)]
++std::thread_local! {
++    static P030_VALIDATED_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
++}
++
+ #[derive(Clone)]
+ pub(super) struct Label {
+     pub(super) catches: Vec<wtime_validate::Catch>,
+@@ -62,6 +67,38 @@
+         {
+             return Err(err(ErrorKind::Host, "argument type mismatch"));
+         }
++        self.finish_frame(fun, args, base)
++    }
++    // Private to the decoded executor. Only the sealed direct CALL/RETURN_CALL
++    // arm may request this entry; public, host and dynamic calls retain frame().
++    fn validated_direct_guest_frame(
++        &self,
++        f: Func,
++        args: Vec<Value>,
++        base: usize,
++    ) -> Result<Frame> {
++        let k = self.check(f.0, &self.funcs)?;
++        let fun = self.funcs[k].clone();
++        if fun.host.is_some() {
++            return Err(err(
++                ErrorKind::Host,
++                "validated guest entry requires a guest target",
++            ));
++        }
++        if fun.ty.params.iter().any(|ty| matches!(ty, ValType::Ref(_))) {
++            return self.frame(f, args, base);
++        }
++        // Scalar tags are certified by the caller's admitted source and fixed
++        // linked signature. Keep handle/arity admission; no unchecked user API.
++        if args.len() != fun.ty.params.len() {
++            return Err(err(ErrorKind::Host, "argument type mismatch"));
++        }
++        let frame = self.finish_frame(fun, args, base)?;
++        #[cfg(test)]
++        P030_VALIDATED_ENTRIES.with(|count| count.set(count.get().saturating_add(1)));
++        Ok(frame)
++    }
++    fn finish_frame(&self, fun: Function, args: Vec<Value>, base: usize) -> Result<Frame> {
+         let body = &self.instances[fun.instance]
+             .module
+             .data
+@@ -76,6 +113,9 @@
+         let local_types = planned_layout
+             .as_ref()
+             .map_or(body.locals.as_slice(), |p| p.locals);
++        locals
++            .try_reserve(local_types.len())
++            .map_err(|_| err(ErrorKind::ResourceLimit, "frame locals allocation failed"))?;
+         locals.extend(local_types.iter().map(|t| Value::zero(*t)));
+         Ok(Frame {
+             function: fun,
+@@ -468,7 +508,11 @@
+                     }
+                     let tail = matches!(op.opcode, 0x12 | 0x13 | 0x15);
+                     let base = if tail { frame.base } else { stack.len() };
+-                    let next = self.frame(fun, args, base)?;
++                    let next = if matches!(op.opcode, 0x10 | 0x12) {
++                        self.validated_direct_guest_frame(fun, args, base)?
++                    } else {
++                        self.frame(fun, args, base)?
++                    };
+                     if tail {
+                         stack.truncate(base);
+                         frames.pop();
+@@ -1231,3 +1275,148 @@
+         Ok(false)
+     }
+ }
++#[cfg(test)]
++mod p030_tests {
++    use super::*;
++    fn setup(bytes: &[u8], depth: usize) -> (Store, Instance) {
++        let mut config = Config::default();
++        config.features = FeatureSet::all_phase3_core();
++        config.limits.max_call_depth = depth;
++        let engine = Engine::new(config).unwrap();
++        let module = engine.compile(bytes).unwrap();
++        let mut store = Store::new(&engine);
++        let instance = Linker::new(&engine)
++            .instantiate(&mut store, &module)
++            .unwrap();
++        (store, instance)
++    }
++    fn invoke(
++        store: &mut Store,
++        instance: Instance,
++        name: &str,
++        args: &[Value],
++    ) -> Result<RunOutcome> {
++        let External::Func(function) = instance.export(store, name).unwrap() else {
++            panic!("function");
++        };
++        store.invoke(function, args)
++    }
++    fn reset() {
++        P030_VALIDATED_ENTRIES.with(|count| count.set(0));
++    }
++    fn hits() -> u64 {
++        P030_VALIDATED_ENTRIES.with(std::cell::Cell::get)
++    }
++    #[test]
++    fn p030_actual_scalar_vector_direct_calls_construct_validated_frames() {
++        let (mut store, instance) = setup(
++            include_bytes!("../tests/fixtures/performance/frames/guest_frame.wasm"),
++            16,
++        );
++        reset();
++        for expected_hits in [2, 4] {
++            assert_eq!(
++                invoke(&mut store, instance, "run", &[]).unwrap(),
++                RunOutcome::Returned(vec![Value::I32(84)])
++            );
++            assert_eq!(hits(), expected_hits);
++        }
++        let mut vector = [0u8; 16];
++        for (lane, value) in [-1i32, 0, 17, 99].into_iter().enumerate() {
++            vector[lane * 4..lane * 4 + 4].copy_from_slice(&value.to_le_bytes());
++        }
++        reset();
++        assert_eq!(
++            invoke(&mut store, instance, "echo_run", &[]).unwrap(),
++            RunOutcome::Returned(vec![
++                Value::I32(-17),
++                Value::I64(i64::MAX),
++                Value::F32(0x8000_0000),
++                Value::F64((-2.25f64).to_bits()),
++                Value::V128(V128(vector))
++            ])
++        );
++        assert_eq!(
++            hits(),
++            1,
++            "actual five-value echo uses certified direct entry"
++        );
++    }
++    #[test]
++    fn p030_actual_return_call_keeps_bounded_depth() {
++        let (mut store, instance) = setup(
++            include_bytes!("../tests/fixtures/performance/frames/tail_call.wasm"),
++            2,
++        );
++        reset();
++        assert_eq!(
++            invoke(&mut store, instance, "run", &[]).unwrap(),
++            RunOutcome::Returned(vec![Value::I32(42)])
++        );
++        assert_eq!(
++            hits(),
++            2,
++            "ordinary entry plus certified return_call target"
++        );
++    }
++    #[test]
++    fn p030_reference_parameter_direct_call_keeps_checked_fallback() {
++        let (mut store, instance) = setup(
++            include_bytes!("../tests/fixtures/performance/frames/reference_control.wasm"),
++            16,
++        );
++        reset();
++        assert_eq!(
++            invoke(&mut store, instance, "run", &[]).unwrap(),
++            RunOutcome::Returned(vec![Value::I32(41)])
++        );
++        assert_eq!(
++            hits(),
++            0,
++            "reference parameters retain full checked frame construction"
++        );
++        let collected = store.collect().unwrap();
++        assert_eq!(collected.reclaimed, 1);
++        assert_eq!(collected.live, 0);
++        assert_eq!(store.gc_payload_bytes(), 0);
++    }
++    #[test]
++    fn p030_direct_import_keeps_host_signature_boundary() {
++        let engine = Engine::new(Config::default()).unwrap();
++        let module = engine
++            .compile(include_bytes!(
++                "../tests/fixtures/performance/frames/import_control.wasm"
++            ))
++            .unwrap();
++        let mut store = Store::new(&engine);
++        let host = store
++            .create_host_func(
++                FuncType::new(vec![ValType::I32], vec![ValType::I32]),
++                |values| {
++                    let Value::I32(value) = values[0] else {
++                        panic!("checked host argument");
++                    };
++                    Ok(vec![Value::I32(value + 1)])
++                },
++            )
++            .unwrap();
++        let mut linker = Linker::new(&engine);
++        linker.define("env", "bump", External::Func(host)).unwrap();
++        let instance = linker.instantiate(&mut store, &module).unwrap();
++        reset();
++        assert_eq!(
++            invoke(&mut store, instance, "run", &[Value::I32(7)]).unwrap(),
++            RunOutcome::Returned(vec![Value::I32(8)])
++        );
++        assert_eq!(
++            hits(),
++            0,
++            "direct host import never requests certified guest frame"
++        );
++        assert_eq!(
++            store.invoke(host, &[Value::I64(7)]).unwrap_err().kind,
++            ErrorKind::Host
++        );
++        assert_eq!(hits(), 0);
++    }
++}

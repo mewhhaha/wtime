@@ -1,0 +1,105 @@
+{
+  "date": "2026-10-12",
+  "documentation": [
+    {
+      "bytes": 19688,
+      "path": "/workspace/wtime/tools/verification/README.md",
+      "sha256": "5149ea6bae53497ea7ec7507c32986b7fc5eb385f7d693e536c5e69a1d53eaf3"
+    },
+    {
+      "bytes": 3174,
+      "path": "/workspace/wtime/AGENTS.md",
+      "sha256": "5d6f0376e15df5f81be5a4ed804597092138bd5d53739d9efa55a47cc8b82a32"
+    },
+    {
+      "bytes": 5110,
+      "path": "/workspace/tasks/performance/EXECUTION.md",
+      "sha256": "ec2809ef4eebc6994e7c5a2a0b9634d9450872377b11fed719cc151c288492bf"
+    },
+    {
+      "bytes": 9170,
+      "path": "/workspace/tasks/performance/MEASUREMENT.md",
+      "sha256": "f028bf7d99a185e477cb25ffc3df41aeb9e9a0dfc448cdee93ed378faf005a9f"
+    }
+  ],
+  "implementation": {
+    "default_policy": "Decoded",
+    "entry_point": "tools/verify.py",
+    "experimental_compact_opt_in": true,
+    "external_dependencies_added": 0,
+    "runtime_changes_during_migration": 0
+  },
+  "limitations": [
+    "Tooling unit tests use isolated synthetic workflows; they are not new runtime or performance evidence.",
+    "P042 retains its original two-run inconclusive decision and does not refresh Wasmtime measurements.",
+    "The remaining 70 performance tasks are pending; P043/P044 preparations are drafts."
+  ],
+  "p042": {
+    "evidence": {
+      "bytes": 31081,
+      "path": "/workspace/wtime/target/performance/P042/shared-finalization/attempt-0001/indirect-cache-evidence.json",
+      "sha256": "5d8d785f25cb1d3c97178b7fa2bf19b0d5a1fd6286d9aec60ed1fe8b0ec7f315"
+    },
+    "existing_observations": 66000,
+    "existing_pairs": 33000,
+    "finalization_invocation": {
+      "bytes": 1983,
+      "path": "/workspace/wtime/target/verification/invocations/finalize-migration/attempt-0001/result.json",
+      "sha256": "1d583c1443ad84b5acb79287112212823a3a3153e8168b18abc02b21861faa15"
+    },
+    "logical_artifacts": 1022,
+    "migration_bootstrap_computations": 0,
+    "migration_guest_or_cargo_commands": 0,
+    "migration_invocation": {
+      "bytes": 1983,
+      "path": "/workspace/wtime/target/verification/invocations/migrate-p042/attempt-0002/result.json",
+      "sha256": "48057369c69cc274459df91b65e9b4093bc3180cf944f84c08d7968c8d4a27ec"
+    },
+    "migration_validation": {
+      "bytes": 352168,
+      "path": "/workspace/wtime/target/performance/P042/shared-migrations/attempt-0007/validation.json",
+      "sha256": "13e6503e4b5297c7a8e90c23f65a5a78be71c7368cd71335b1038b93634b35b2"
+    },
+    "new_timing_observations": 0,
+    "outcome": "inconclusive",
+    "publication": {
+      "bytes": 819,
+      "path": "/workspace/wtime/target/performance/TASK-status/P042-shared-verification-0001/publication-attempt.json",
+      "sha256": "eccd4c75827e5cbe9b1a93808267cbd0c9c15f0db74f198cf9163bff8a526299"
+    },
+    "status": "done",
+    "stored_payload_bytes": 232397825,
+    "unique_payloads": 521,
+    "unique_raw_bytes": 689956941
+  },
+  "schema": "wtime-verification-flow-implementation-v1",
+  "status": "passed",
+  "task_plans": {
+    "performance_total": 112,
+    "statuses": {
+      "done": 42,
+      "todo": 70
+    },
+    "validator_result": {
+      "bytes": 323,
+      "path": "/workspace/wtime/target/verification/plan-checks/attempt-0001/result.json",
+      "sha256": "f6d5adf111144e3f253d0e44c7b1b857b47c87ac9b36560f85d0d1f6bea74fde"
+    }
+  },
+  "tooling_tests": {
+    "failed": 0,
+    "passed": 39,
+    "raw_log": {
+      "bytes": 7173,
+      "path": "/workspace/wtime/target/verification/tooling-checks/attempt-0003/00.stderr",
+      "sha256": "d7edb0b361651d2f3726d912341e5bbb5b1ff646b5ea64701201f429c414d949"
+    },
+    "result": {
+      "bytes": 4077,
+      "path": "/workspace/wtime/target/verification/tooling-checks/attempt-0003/result.json",
+      "sha256": "8130e05ad2432bf0531e72d0b858946ef9ce16679a05e8ad5c0c47f047e79ada"
+    },
+    "source_archive": "/workspace/wtime/target/verification/tooling-checks/attempt-0003/sources",
+    "unique_cases": 39
+  }
+}

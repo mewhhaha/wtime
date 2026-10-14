@@ -1,0 +1,82 @@
+{
+  "task": "P050",
+  "outcome": "inconclusive",
+  "disposition": "retained-opt-in-experiment",
+  "completion": {
+    "path": "/workspace/wtime/target/performance/P050/shared-finalization/attempt-0003/completion.json",
+    "sha256": "1969a8734d6b48655a271e054bbc727dc73d87b58de4a8c14f8fa68588500fbc"
+  },
+  "statistics": {
+    "path": "/workspace/wtime/target/verification/runs/P050/analyze/attempt-0002/statistics.json",
+    "sha256": "da8c826bc509c1e7c4dc4c6e09a1a19ecdce4f45a9df1684617f4c0cf1398bed"
+  },
+  "feature": "compact-executor",
+  "policy": "ExecutionPolicy::Compact",
+  "default_policy": "ExecutionPolicy::Decoded",
+  "default_feature_exposure": false,
+  "default_path_cost": "The inliner table and guest-call hook are cfg(compact-executor), and tables are prepared only for the explicit Compact policy.",
+  "maintenance_justification": [
+    "Both runs support targeted warm gains of approximately48% and52%, with primary confidence intervals below1. There are no supported regressions; wide protected/cold bounds keep the official gate inconclusive.",
+    "Only one exact pure i32 affine leaf shape; same-instance direct calls only,128modulefunctions/64leaves/16KiB planner caps, verified source-derived descriptors and existing per-source accounting.",
+    "Seven named semantic cases plus354unfiltered runtime tests passed. Fuel/depth/stack/cancellation and interrupted callee reconstruction retain fallback; no external dependencies or unsafe additions."
+  ],
+  "selection_warning": "Retention is experimental; no default adoption, full-portfolio or P001-total claim, and no Wasmtime comparison.",
+  "primary": [
+    {
+      "bootstrap_resamples": 10000,
+      "lower": 0.42718021194346667,
+      "median": 0.519722976836287,
+      "run": 1,
+      "stages": {
+        "scalar_direct_calls_n10000": "warm_call",
+        "scalar_direct_calls_n32": "warm_call"
+      },
+      "upper": 0.5979348039134791,
+      "weighting": "equal declared targeted workload weights"
+    },
+    {
+      "bootstrap_resamples": 10000,
+      "lower": 0.3967372899652506,
+      "median": 0.482829012492064,
+      "run": 2,
+      "stages": {
+        "scalar_direct_calls_n10000": "warm_call",
+        "scalar_direct_calls_n32": "warm_call"
+      },
+      "upper": 0.641290408438301,
+      "weighting": "equal declared targeted workload weights"
+    }
+  ],
+  "counts": {
+    "extra_samples": 0,
+    "logical_pair_references": 3660,
+    "sampling_note": "aliases reuse the planned raw pairs; no extra samples are added",
+    "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+    "unique_pair_count": 3360
+  },
+  "protected_inconclusive_reason_count": 56,
+  "retained_sources": {
+    "crates/wtime-runtime/tests/performance.rs": "6296fccdc552887ca86700a6b4f132b8dfa2d552d418f4235bb4767a9b680fbf",
+    "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+    "crates/wtime-runtime/tests/performance/p050.rs": "1bfca2c47bf31d1cf248136f8014676a42556a1c15e908c81b5ec72834e119ff",
+    "crates/wtime-runtime/src/execution/compact/inline.rs": "e22f28cdb23e4ebb59684e5c72b3b10b9c3be6b6f463c098c5d0d9f17d3e8a45",
+    "crates/wtime-runtime/src/execution.rs": "d9871f1bb5715ae7463b9f8fabd07bf73fefbb36b1c1510ba187a3beeb9fe26d",
+    "crates/wtime-runtime/src/lib.rs": "4b76644400f9f878fe754cd8a36f4af57935f415f2a0aec087a42cf0c54cd654",
+    "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+    "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+    "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486"
+  },
+  "core_source_count": 113,
+  "analysis_attempts": {
+    "failed": "target/verification/runs/P050/analyze/attempt-0001",
+    "accepted": "target/verification/runs/P050/analyze/attempt-0002",
+    "note": "The first analysis computed statistics but failed its final task-index reference check after root prematurely added task entries. Its output was discarded; only analysis was repeated after exact index restoration. All3360physical pairs and passing build/correctness receipts were reused."
+  },
+  "build_budget_attempts": {
+    "failed_full": "target/verification/runs/P050/verify/attempt-0001",
+    "failed_targeted": "target/performance/P050/default-budget-retry/attempt-0001",
+    "accepted_full": "target/verification/runs/P050/verify/attempt-0002",
+    "thresholds_unchanged": true,
+    "note": "Same installed1.99.0 Cargo/rustc binaries were invoked directly to avoid rustup startup; host/compiler timing variation remains uncontrolled."
+  }
+}
