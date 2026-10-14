@@ -89,6 +89,10 @@ pub(super) enum Operation {
         yes: u32,
         no: u32,
     },
+    Table {
+        selector: u32,
+        targets: Range<u32>,
+    },
     // Defined for the later memory task; whole-function admission excludes it.
     Memory {
         argument: u32,
@@ -246,11 +250,17 @@ impl Admission {
             NumericType::admitted(*ty)?;
         }
         for instruction in &code.instructions {
-            if !matches!(instruction.opcode, 1..=5 | 0xb..=0xd | 0xf | 0x1a | 0x20..=0x22 | 0x41..=0xc4 | 0xfc00..=0xfc07)
+            if !matches!(instruction.opcode, 1..=5 | 0xb..=0xf | 0x1a | 0x20..=0x22 | 0x41..=0xc4 | 0xfc00..=0xfc07)
             {
                 return Err(Declined::Unsupported);
             }
             match &instruction.immediate {
+                Immediate::BrTable(targets, _) => {
+                    work = plus(work, plus(targets.len(), 1)?)?;
+                    if work > budget.work {
+                        return Err(Declined::Budget);
+                    }
+                }
                 Immediate::BlockType(ty) => {
                     NumericType::admitted(*ty)?;
                 }
@@ -390,7 +400,9 @@ pub(super) struct MaterializationRecipe<'a> {
     pub operands: &'a [StackSlot],
 }
 impl RegisterFunction {
-    pub(super) fn slots(&self) -> u32 { self.admission.slot_count() }
+    pub(super) fn slots(&self) -> u32 {
+        self.admission.slot_count()
+    }
     pub(super) fn operation(&self, pc: usize) -> Option<&Operation> {
         self.draft.operations.get(pc)
     }
@@ -405,6 +417,14 @@ impl RegisterFunction {
     pub(super) fn costs(&self) -> (usize, usize) {
         (self.work, self.retained_bytes)
     }
+    pub(super) fn targets(&self, range: Range<u32>) -> Option<&[u32]> {
+        self.draft
+            .targets
+            .get(range.start as usize..range.end as usize)
+    }
+    pub(super) fn opcode(&self, pc: usize) -> Option<u16> {
+        self.draft.events.get(pc).map(|event| event.opcode)
+    }
     pub(super) fn materialization(
         &self,
         module: &Module,
@@ -413,6 +433,11 @@ impl RegisterFunction {
         if !self.admission.matches(module) {
             return Err(Declined::Metadata);
         }
+        self.boundary(prepared_pc)
+    }
+    /// Private entry certificate: activate() checks the immutable source owner.
+    /// Pure whole functions cannot replace their module/context during execution.
+    pub(super) fn boundary(&self, prepared_pc: usize) -> Checked<MaterializationRecipe<'_>> {
         let event = self
             .draft
             .events
@@ -568,10 +593,27 @@ impl RegisterFunction {
                         [Some(target), None]
                     }
                 }
+                0xe => {
+                    let Immediate::BrTable(depths, default) = &source.immediate else {
+                        return Err(Declined::Metadata);
+                    };
+                    if targets.len() != plus(depths.len(), 1)? {
+                        return Err(Declined::Metadata);
+                    }
+                    for (target, depth) in targets
+                        .iter()
+                        .zip(depths.iter().chain(std::iter::once(default)))
+                    {
+                        if *target != branch(&labels, *depth, terminal)? {
+                            return Err(Declined::Metadata);
+                        }
+                    }
+                    [None, None]
+                }
                 0xf => [Some(terminal), None],
                 _ => [Some(next), None],
             };
-            if targets.iter().copied().ne(expected.into_iter().flatten())
+            if (source.opcode != 0xe && targets.iter().copied().ne(expected.into_iter().flatten()))
                 || targets.iter().any(|x| *x > terminal)
             {
                 return Err(Declined::Metadata);
@@ -667,6 +709,16 @@ impl RegisterFunction {
                         && stack.last().is_some_and(|top| top.slot == *condition)
                         && input(*condition, NumericType::I32)
                         && targets == [*yes, *no]
+                }
+                Operation::Table {
+                    selector,
+                    targets: range,
+                } => {
+                    source.opcode == 0xe
+                        && *range == event.successors
+                        && stack.last().is_some_and(|top| top.slot == *selector)
+                        && input(*selector, NumericType::I32)
+                        && !targets.is_empty()
                 }
                 Operation::Memory { .. } => false,
                 Operation::Exit { results } => {

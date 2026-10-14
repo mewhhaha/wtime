@@ -1,8 +1,8 @@
 # P060 — Implement safe parallel moves and register control transfers
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -80,7 +80,7 @@ compilation/fixture inputs and require every semantic
 case declared in the selection manifest. Its `measure` phase uses
 `focused_compare.py --manifest docs/benchmarks/performance/P060-selection.json`
 with `--frozen {freeze_dir}/selection.json`, `--semantic-receipt {verify_dir}/receipt.json`,
-the immutable predecessor adapter, and the actual production executable/mode.
+the direct frozen register-mode predecessor archive, and the actual production executable/mode.
 Its `analyze` phase calls `tools/verify.py statistics` once, supplying that
 selection manifest as `--contract`, the paired report, and all build attestations.
 Do not run an exhaustive comparison or a separate raw analyzer during this candidate gate.
@@ -101,7 +101,7 @@ Before implementation, freeze and verify the immediate-predecessor archive and a
 Run these commands before changing the candidate sources. The archive is immutable and captures the immediate predecessor. Retain P001's original archive for milestone totals. For native work, use the named portable control and verify its actual policy/quantum; if this archive already exists with different sources, choose a new recorded run-specific directory and update the comparison path rather than overwriting it.
 
 ```sh
-python3 tools/wtime-bench/baseline.py --output target/performance/P060-before
+python3 tools/wtime-bench/baseline.py --mode register --output target/performance/P060-before
 python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P060-selection.json target/performance/P060-before/manifest.json --output target/performance/P060/selection-freeze.json
 ```
 
@@ -114,4 +114,45 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+P060 completed all four shared-contract phases in attempt `0001` (freeze,
+verify, measure, analyze), then finalized as close `0074`, finalization
+attempt `0001`. The measured candidate was rejected for promotion. Register
+control transfers remain only as the nondefault prerequisite interface for
+P062, P063, and P064; there is no default-path promotion.
+
+The frozen baseline is the direct P060-before Register-mode archive from source
+commit `52a6461`; it uses the exact Register mode with no adapter. Verification
+passed 276 tests: 274 register semantic tests, one decoded-default policy test,
+and one combined-control test, with zero failures and zero ignored tests. The
+full snapshot matched exactly across 65 table prefixes. The tested cases also
+covered the production move-cycle oracle, budgets and foreign-entry guards,
+and source-fuel, operand-limit, and caller-priority behavior.
+
+The complete candidate measurement covered 9 declared rows in 29 logical
+groups, with 1,500 unique physical pairs, 1,740 logical pair references,
+30 pairs per row in each of two runs, and 10,000 bootstrap resamples. The
+primary warm-call candidate/baseline median ratios were 0.797854968 (95% CI
+0.783787–0.808190) and 0.798515119 (95% CI 0.781656–0.814344). The gate
+rejected promotion because small br_table load-and-call and large br_table
+preparation showed regressions. The tiny call-overhead first-call bound was
+inconclusive.
+
+Both default and optional builds passed their hard budgets with zero external
+dependencies. Clean build times were 2.80252 s (default) and 3.29044 s
+(optional Register); stripped binaries were 1,000,712 and 1,062,904 bytes.
+
+Durable artifacts and hashes are indexed by
+[`P060-records.json`](../../../wtime/docs/benchmarks/performance/P060-records.json).
+The frozen selection is in [`P060-freeze.json`](../../../wtime/docs/benchmarks/performance/P060-freeze.json),
+paired measurement in [`P060-comparison.json.gz`](../../../wtime/docs/benchmarks/performance/P060-comparison.json.gz),
+analysis in [`P060-statistics.json`](../../../wtime/docs/benchmarks/performance/P060-statistics.json),
+build attestations in [`P060-default-build.json`](../../../wtime/docs/benchmarks/performance/P060-default-build.json),
+[`P060-register-build.json`](../../../wtime/docs/benchmarks/performance/P060-register-build.json),
+and [`P060-production-build.json`](../../../wtime/docs/benchmarks/performance/P060-production-build.json),
+and final publication in [`P060-completion.json`](../../../wtime/docs/benchmarks/performance/P060-completion.json)
+and [`P060-evidence.json`](../../../wtime/docs/benchmarks/performance/P060-evidence.json).
+The records index includes the four phase-receipt paths and hashes.

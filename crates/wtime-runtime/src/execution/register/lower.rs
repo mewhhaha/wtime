@@ -129,6 +129,52 @@ fn pop(stack: &mut Vec<NumericType>, expected: NumericType) -> Checked<usize> {
     }
     Ok(stack.len())
 }
+fn edge_request(
+    pc: usize,
+    depth: usize,
+    terminal: usize,
+    locals: usize,
+    stack: &[NumericType],
+    labels: &[Label],
+    returns: &[NumericType],
+) -> Checked<EdgeRequest> {
+    let (target, base, args) = if depth == labels.len() {
+        (terminal, 0, returns)
+    } else {
+        let index = labels
+            .len()
+            .checked_sub(add(depth, 1)?)
+            .ok_or(Declined::Metadata)?;
+        let label = &labels[index];
+        (
+            if label.loop_ {
+                label.start
+            } else {
+                label.end + 1
+            },
+            label.prefix.len(),
+            if label.loop_ {
+                label.params.as_slice()
+            } else {
+                label.results.as_slice()
+            },
+        )
+    };
+    let from = tail(stack, args)?;
+    let mut moves = reserved(args.len())?;
+    for (index, ty) in args.iter().enumerate() {
+        moves.push(EdgeMove {
+            from: narrow(add(locals, from + index)?)?,
+            to: narrow(add(locals, base + index)?)?,
+            ty: *ty,
+        });
+    }
+    Ok(EdgeRequest {
+        source_pc: pc,
+        target,
+        moves,
+    })
+}
 
 impl LoweredFunction {
     pub(super) fn lower(module: &Module, body: usize, budget: &mut Budget) -> Checked<Self> {
@@ -146,6 +192,13 @@ impl LoweredFunction {
             .ok_or(Declined::Metadata)?
             .instructions;
         let n = code.len();
+        let mut table_extra = 0;
+        for instruction in code {
+            if let Immediate::BrTable(targets, _) = &instruction.immediate {
+                table_extra = add(table_extra, add(targets.len(), 1)?)?;
+            }
+        }
+        let edge_capacity = add(mul(n, 2)?, table_extra)?;
         let pool = mul(n, peak)?;
         // Conservative allocation peak, including label signatures/prefixes,
         // both branch edges, result requests and the immutable format tables.
@@ -166,13 +219,25 @@ impl LoweredFunction {
             size_of::<Self>(),
         )?;
         let planned = add(
-            planned_tables,
+            add(
+                planned_tables,
+                mul(
+                    add(mul(locals, 2)?, add(mul(layout.results.len(), 2)?, peak)?)?,
+                    size_of::<NumericType>(),
+                )?,
+            )?,
             mul(
-                add(mul(locals, 2)?, add(mul(layout.results.len(), 2)?, peak)?)?,
-                size_of::<NumericType>(),
+                table_extra,
+                add(
+                    add(size_of::<EdgeRequest>(), mul(peak, size_of::<EdgeMove>())?)?,
+                    size_of::<usize>() + size_of::<u32>(),
+                )?,
             )?,
         )?;
-        let analysis_work = add(mul(n, 8)?, mul(pool, 4)?)?;
+        let analysis_work = add(
+            add(mul(n, 8)?, mul(pool, 4)?)?,
+            mul(table_extra, add(mul(peak, 4)?, 4)?)?,
+        )?;
         if planned > transaction.remaining().1 || analysis_work > transaction.remaining().0 {
             return Err(Declined::Budget);
         }
@@ -186,14 +251,14 @@ impl LoweredFunction {
             operations: reserved(n)?,
             events: reserved(n)?,
             stack_slots: reserved(pool)?,
-            targets: reserved(mul(n, 2)?)?,
+            targets: reserved(edge_capacity)?,
             constants: reserved(n)?,
             memory: vec![],
             results: reserved(pool)?,
         };
         let mut stack = reserved(peak)?;
         let mut labels: Vec<Label> = reserved(n)?;
-        let mut edges: Vec<EdgeRequest> = reserved(mul(n, 2)?)?;
+        let mut edges: Vec<EdgeRequest> = reserved(edge_capacity)?;
         let mut block_entries = reserved(mul(n, 2)?)?;
         let mut dead = false;
         for (pc, instruction) in code.iter().enumerate() {
@@ -220,6 +285,7 @@ impl LoweredFunction {
             let edge_start = narrow(draft.targets.len())?;
             let mut targets = [pc + 1, 0];
             let mut target_count = 1;
+            let mut table_targets = None;
             let operation = match (&instruction.immediate, instruction.opcode) {
                 (Immediate::Index(index), 0x20) => {
                     let ty = *local_types.get(*index as usize).ok_or(Declined::Metadata)?;
@@ -426,6 +492,30 @@ impl LoweredFunction {
                         }
                     }
                 }
+                (Immediate::BrTable(depths, default), 0xe) => {
+                    let selector = narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?;
+                    let mut resolved = reserved(add(depths.len(), 1)?)?;
+                    for depth in depths.iter().chain(std::iter::once(default)) {
+                        let edge = edge_request(
+                            pc,
+                            *depth as usize,
+                            n,
+                            locals,
+                            &stack,
+                            &labels,
+                            &returns,
+                        )?;
+                        resolved.push(edge.target);
+                        edges.push(edge);
+                    }
+                    let range = edge_start..narrow(add(draft.targets.len(), resolved.len())?)?;
+                    table_targets = Some(resolved);
+                    dead = true;
+                    Operation::Table {
+                        selector,
+                        targets: range,
+                    }
+                }
                 (_, 0xb) if !labels.is_empty() => {
                     let label = labels.pop().ok_or(Declined::Metadata)?;
                     if pc != label.end
@@ -458,7 +548,8 @@ impl LoweredFunction {
             if stack.len() > peak || draft.stack_slots.len() > pool || draft.results.len() > pool {
                 return Err(Declined::Metadata);
             }
-            for target in &targets[..target_count] {
+            let resolved = table_targets.as_deref().unwrap_or(&targets[..target_count]);
+            for target in resolved {
                 draft.targets.push(narrow(*target)?);
             }
             draft.events.push(SourceEvent {

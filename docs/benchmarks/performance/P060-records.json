@@ -1,0 +1,2009 @@
+{
+  "schema": "wtime-p060-durable-records-v1",
+  "task": "P060",
+  "status": "done",
+  "outcome": "rejected",
+  "copies": [
+    {
+      "source": {
+        "path": "target/performance/P060/shared-finalization/attempt-0001/completion.json",
+        "sha256": "b41be5bf131eac79a21c4dcd2d138929fdae8122a8195107b8b6c421f5af1006",
+        "bytes": 498
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-completion.json",
+        "sha256": "b41be5bf131eac79a21c4dcd2d138929fdae8122a8195107b8b6c421f5af1006",
+        "bytes": 498
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/performance/P060/shared-finalization/attempt-0001/evidence.json",
+        "sha256": "1af758f520e2e1df800fde63284695e68fdc13516066c93a9bc2eb5fb88e150e",
+        "bytes": 2587
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-evidence.json",
+        "sha256": "1af758f520e2e1df800fde63284695e68fdc13516066c93a9bc2eb5fb88e150e",
+        "bytes": 2587
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P060/freeze/attempt-0001/selection.json",
+        "sha256": "572add63a5d4d068e3bd6c4a36a7a502ed705cce334e1758ceff6ed93f7d771c",
+        "bytes": 18293
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-freeze.json",
+        "sha256": "572add63a5d4d068e3bd6c4a36a7a502ed705cce334e1758ceff6ed93f7d771c",
+        "bytes": 18293
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P060/verify/attempt-0001/default-build.json",
+        "sha256": "5c609e29d337b7ab3cc01cf4137db491f8d5073c37d4a9a492b6b8135b2166ed",
+        "bytes": 282186
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-default-build.json",
+        "sha256": "5c609e29d337b7ab3cc01cf4137db491f8d5073c37d4a9a492b6b8135b2166ed",
+        "bytes": 282186
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P060/verify/attempt-0001/register-build.json",
+        "sha256": "d908c72653b385bf7935103e6db18ee7bb8107bde7e38fb3d4000e4c95097e70",
+        "bytes": 282347
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-register-build.json",
+        "sha256": "d908c72653b385bf7935103e6db18ee7bb8107bde7e38fb3d4000e4c95097e70",
+        "bytes": 282347
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P060/verify/attempt-0001/production/build-record.json",
+        "sha256": "9d607235196425f70dac63618d163aa8c2adc626f2ab178522028756490aa259",
+        "bytes": 225832
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-production-build.json",
+        "sha256": "9d607235196425f70dac63618d163aa8c2adc626f2ab178522028756490aa259",
+        "bytes": 225832
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P060/analyze/attempt-0001/statistics.json",
+        "sha256": "7cc9df59d1630fdd393b0090a6be3d7e25a046d5f70889b8b879b0af078fa97d",
+        "bytes": 201045
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-statistics.json",
+        "sha256": "7cc9df59d1630fdd393b0090a6be3d7e25a046d5f70889b8b879b0af078fa97d",
+        "bytes": 201045
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P060/measure/attempt-0001/comparison/report.json",
+        "sha256": "cb19f713c13134ad3b3504a3a797f9657010bfb3842602d7ec47982c750bda69",
+        "bytes": 3395209
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P060-comparison.json.gz",
+        "sha256": "193bfd16247b2ae38c95bc7de11cca54739e667280ed1389f9d5cb587f26cbbf",
+        "bytes": 80741
+      },
+      "encoding": "gzip",
+      "original_uncompressed_bytes": true
+    }
+  ],
+  "phase_receipts": {
+    "analyze": {
+      "path": "target/verification/runs/P060/analyze/attempt-0001/receipt.json",
+      "sha256": "3cdf1017b27cc9c8ef71c74b4e8b08ea45ea3dc9f5b85515ab7885329d513f5d",
+      "bytes": 101618
+    },
+    "freeze": {
+      "path": "target/verification/runs/P060/freeze/attempt-0001/receipt.json",
+      "sha256": "4de1f6ba178783600c32aa79728ee8578a0b1298f53c03f790cdf790c8d08d2b",
+      "bytes": 227809
+    },
+    "measure": {
+      "path": "target/verification/runs/P060/measure/attempt-0001/receipt.json",
+      "sha256": "ce01f9092f724337ef448989eea7593dd917d0fd41adaa45766d28edc4d7b434",
+      "bytes": 456513
+    },
+    "verify": {
+      "path": "target/verification/runs/P060/verify/attempt-0001/receipt.json",
+      "sha256": "cd72e70e5f4cc7440102c5559569321fe811bfaa11da469a7ceea6747530af54",
+      "bytes": 511470
+    }
+  },
+  "counts": {
+    "selection_count": 9,
+    "selection_groups": 29,
+    "verification_tests": {
+      "groups": {
+        "combined-control": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "default-policy": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "register-semantics": {
+          "passed": 274,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "totals": {
+        "passed": 276,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "sample_counts": {
+      "extra_samples": 0,
+      "logical_pair_references": 1740,
+      "sampling_note": "aliases reuse the planned raw pairs; no extra samples are added",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_pair_count": 1500
+    }
+  },
+  "decision": {
+    "build": {
+      "attestation": {
+        "binary_sha256": "39fa018d37ab2dd52d28d7be7fbd97b5fcd2acdcf6c02b3ddc40d47dd2d64975",
+        "command_features": [
+          "register-executor"
+        ],
+        "lane": "runtime-only-production",
+        "protocol": {
+          "batch_limits": {
+            "typed_memory": 100000,
+            "typed_numeric": 1000000
+          },
+          "engine": "wtime",
+          "features": [
+            "mvp",
+            "stable-core",
+            "all-phase3-core",
+            "mvp-saturating",
+            "simd",
+            "simd-relaxed"
+          ],
+          "instrumented": false,
+          "modes": [
+            "decoded",
+            "portable",
+            "register"
+          ],
+          "schema_version": 2,
+          "source_fuel_contract": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          },
+          "thread_driver": true,
+          "types": [
+            "i32",
+            "i64",
+            "f32_bits",
+            "f64_bits",
+            "v128_bits",
+            "reference"
+          ]
+        },
+        "protocol_sha256": "503bab7cf8bdb621a5747c0f58dd5be751691490ac5d4a98b84e8ee04650ea10",
+        "record": {
+          "bytes": 225832,
+          "path": "/workspace/wtime/target/verification/runs/P060/verify/attempt-0001/production/build-record.json",
+          "sha256": "9d607235196425f70dac63618d163aa8c2adc626f2ab178522028756490aa259"
+        },
+        "runtime_features": [
+          "wtime-runtime/register-executor"
+        ],
+        "runtime_source_sha256": "a267c535a53c5681ff815d63da5a27133066778457bf5cfb77d3cf64ae2eb11e"
+      },
+      "relative_growth": {
+        "default": {},
+        "optional": {}
+      }
+    },
+    "cold_products": {
+      "aliases": 4,
+      "groups": [
+        {
+          "members": [
+            "scalar_branch_entropy_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n32"
+          },
+          "product_sha256": "16164fbe13aad5ac1a361ca84ce2b21fcfbfa4493447851cc51d3727dca0d352",
+          "sample_workload": "scalar_branch_entropy_n32",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n17"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n17"
+          },
+          "product_sha256": "40fadfbd6d5c14102fd35f17204d9ff6844363c719a28cba6922615226d55be8",
+          "sample_workload": "scalar_branch_entropy_n17",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n10000"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n10000"
+          },
+          "product_sha256": "7c2856a9a0252cce53fd57345109eb7f05248f276f33c3eef61dd563bd760f25",
+          "sample_workload": "scalar_branch_entropy_n10000",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n10000"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n10000"
+          },
+          "product_sha256": "8779e298382f7c43f352f67683d926e4fee4ec956ad62d9c766a6fc1f72d4ded",
+          "sample_workload": "scalar_br_table_n10000",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+            "workload": "call_overhead"
+          },
+          "product_sha256": "94dcda26df90386ab487156713862aadbb9743437f6f0c9cb0847a8d8b2d114a",
+          "sample_workload": "call_overhead",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n17"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n17"
+          },
+          "product_sha256": "b39bba6d86e747a308ee65d73409a7d6d01f0ba6e32df4ca19627023126780eb",
+          "sample_workload": "scalar_br_table_n17",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n32"
+          },
+          "product_sha256": "d3668ef3d0314d305861f8d0aab6275542af5d85212b4c299c6078b63755122e",
+          "sample_workload": "scalar_br_table_n32",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n10000"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n10000"
+          },
+          "product_sha256": "135fe27091277cecc2c6ab1e6438abd03e542da25a210fbd78a8666c3d182cd5",
+          "sample_workload": "scalar_br_table_n10000",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n17"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n17"
+          },
+          "product_sha256": "14303b54306a1168b79c813f5f3680cd441f09e48b7a3d4c75cd97ad2fc0704c",
+          "sample_workload": "scalar_branch_entropy_n17",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n10000"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n10000"
+          },
+          "product_sha256": "259330e3c34d986c625a2f9ecf900a029e4c5ab4aed3da06c514de43b9d1068e",
+          "sample_workload": "scalar_branch_entropy_n10000",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n32"
+          },
+          "product_sha256": "4ddaaa219778b56ec3027872802207251cf2f216b32eb355293bcb0b24a7feb4",
+          "sample_workload": "scalar_branch_entropy_n32",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+            "workload": "call_overhead"
+          },
+          "product_sha256": "6f8601181811c24bcf4232546e0a84b5920e7fcc60ffa8a026476d9f27c80eed",
+          "sample_workload": "call_overhead",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n32"
+          },
+          "product_sha256": "b719bc3f03c1db65c07507f2894e0c4b36387785aa81efe86d1a398f68a78de6",
+          "sample_workload": "scalar_br_table_n32",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n17"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n17"
+          },
+          "product_sha256": "c5826d34e91e86aadbae1b0e15e40ec8cdb5b4b2fd8441476d64d281c71ded25",
+          "sample_workload": "scalar_br_table_n17",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n10000",
+            "scalar_branch_entropy_n17",
+            "scalar_branch_entropy_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0"
+          },
+          "product_sha256": "29420dc6b10028ea42e8334aa5a3dbec7c36f4bd416fd53f5fed375bbec7b7d2",
+          "sample_workload": "scalar_branch_entropy_n10000",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746"
+          },
+          "product_sha256": "36e4dcce4023393f75d9408b4e6e258ff2182b8e163687324446ef63be8e7025",
+          "sample_workload": "call_overhead",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "scalar_br_table_n10000",
+            "scalar_br_table_n17",
+            "scalar_br_table_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a"
+          },
+          "product_sha256": "67588fcaae94e4e93b2c94f281df4fb4c3d30d7d1284571c15b4ac263adf2643",
+          "sample_workload": "scalar_br_table_n10000",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "prepare_large"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0"
+          },
+          "product_sha256": "8e0090886e3510e8d2a630da599e0ef27fb9edb4337c39bc218f7cd95a342f7f",
+          "sample_workload": "prepare_large",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n17"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n17"
+          },
+          "product_sha256": "2d8d428aad29f9198819bf0fbb2c5573ccd3ba46900e1d5a2879ac09e9c62b28",
+          "sample_workload": "scalar_branch_entropy_n17",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n17"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n17"
+          },
+          "product_sha256": "31cf5cff4d7c18f298f76260afcbd4dd258e15681229c8816d17b747a39c893f",
+          "sample_workload": "scalar_br_table_n17",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n32"
+          },
+          "product_sha256": "78264a6bd86def4579f0e3ab339d4344995c7f104f345c688f82f96f78633bf4",
+          "sample_workload": "scalar_br_table_n32",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n10000"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n10000"
+          },
+          "product_sha256": "944cc4ceb27b5ef5b1836e25e47f7914350b729faf585209210348294b70c086",
+          "sample_workload": "scalar_branch_entropy_n10000",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "scalar_branch_entropy_n32"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "e4c87dbab50a2438cb1f749bc6fd6f9c834c81484acd42864735bd1ad1b6dec0",
+            "workload": "scalar_branch_entropy_n32"
+          },
+          "product_sha256": "a7a866cb7cde9c69b3685323c3582a7750a7b268512c54d134e947bbc0162d35",
+          "sample_workload": "scalar_branch_entropy_n32",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "scalar_multivalue_branch_n32"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "03ffdc2041ae8ba0c8d078422d36152cf1d35f1293c94a4074fe7e83791743ae",
+            "workload": "scalar_multivalue_branch_n32"
+          },
+          "product_sha256": "a7e64b4d84dae7a4163ba4a2d4e55be03e82c860fc1103db5b982195f66c4509",
+          "sample_workload": "scalar_multivalue_branch_n32",
+          "stage": "warm_call"
+        },
+        {
+          "members": [
+            "scalar_br_table_n10000"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "register",
+              "cancellation_policy": 1,
+              "candidate_mode": "register",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "prepare_large": "mvp",
+                "scalar_br_table_n10000": "mvp",
+                "scalar_br_table_n17": "mvp",
+                "scalar_br_table_n32": "mvp",
+                "scalar_branch_entropy_n10000": "mvp",
+                "scalar_branch_entropy_n17": "mvp",
+                "scalar_branch_entropy_n32": "mvp",
+                "scalar_multivalue_branch_n32": "all-phase3-core"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "plain",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "scalar_workloads.py",
+              "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+              "scalar_sha256": "93bebecf35692c50af40c233beee17493b83c9044828f8e4c60631f781a39c4c"
+            },
+            "wasm_sha256": "d43d5dd71d5ca1c3dae820aa85c13a2d69415e028b8d48097fed4558f743163a",
+            "workload": "scalar_br_table_n10000"
+          },
+          "product_sha256": "d52162ddb0860c5d961c5a2fb71a4f3f1d0601de0b888e656f8374e4b53bb19e",
+          "sample_workload": "scalar_br_table_n10000",
+          "stage": "warm_call"
+        }
+      ],
+      "logical_groups": 29,
+      "schema": "wtime-cold-products-v1",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_groups": 25
+    },
+    "controls": [
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03413702349211445,
+          "median": 1.0232128359889092,
+          "p25": 0.9870977868245536,
+          "p75": 1.0512055352381717
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04458943355143824,
+          "median": 1.0243515127551404,
+          "p25": 0.9975605789559278,
+          "p75": 1.0837889535398675
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.04966387324906446,
+          "median": 1.0166984777046943,
+          "p25": 0.9696685386354201,
+          "p75": 1.0657654648462815
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.07174218284011913,
+          "median": 0.9928623606504664,
+          "p25": 0.9095051084864493,
+          "p75": 1.0537112826335893
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03141154271590435,
+          "median": 0.7224534698818068,
+          "p25": 0.7000120493306956,
+          "p75": 0.7561358314779942
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04692456844636045,
+          "median": 0.7736995490522758,
+          "p25": 0.7259386937828471,
+          "p75": 0.7957511125060459
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.12133940523406783,
+          "median": 1.2585109452213399,
+          "p25": 1.1454770541095989,
+          "p75": 1.3748137769844895
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.035335363420270494,
+          "median": 0.7541285099902271,
+          "p25": 0.7195450456260636,
+          "p75": 0.7982891564363359
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.019019336820758903,
+          "median": 0.8039366764177476,
+          "p25": 0.7893320058822213,
+          "p75": 0.8235418005393962
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "scalar_br_table_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05215276453017903,
+          "median": 1.2290687095169672,
+          "p25": 1.208735227234215,
+          "p75": 1.296622879190596
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "scalar_br_table_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03202910440090456,
+          "median": 0.7464871912530302,
+          "p25": 0.7192692334999199,
+          "p75": 0.7795986525222578
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_br_table_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.016139050037328018,
+          "median": 0.7886003203906391,
+          "p25": 0.7738836479829222,
+          "p75": 0.8052160965560387
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "scalar_br_table_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.02368693745723094,
+          "median": 1.090467616137258,
+          "p25": 1.0654697409873768,
+          "p75": 1.109416588969672
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "scalar_br_table_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03689132508551074,
+          "median": 0.7801766835594601,
+          "p25": 0.7390299484313054,
+          "p75": 0.8072284613885761
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_br_table_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05778951812566091,
+          "median": 0.8412564843097945,
+          "p25": 0.7768424446106275,
+          "p75": 0.8940396381950645
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04367386749557284,
+          "median": 0.8520383308480084,
+          "p25": 0.8110541653242711,
+          "p75": 0.8991859464721438
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.07628761585202859,
+          "median": 0.9607934231252266,
+          "p25": 0.8737286571139898,
+          "p75": 1.029894185970006
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.041151212672460524,
+          "median": 0.8456405786410164,
+          "p25": 0.799333647495482,
+          "p75": 0.8675532074896429
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.030483630128790296,
+          "median": 0.8824094061388927,
+          "p25": 0.8660080078173904,
+          "p75": 0.9153364077544212
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "scalar_branch_entropy_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05376130693685838,
+          "median": 0.9592750617170448,
+          "p25": 0.916054367345755,
+          "p75": 1.0354802512396295
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "scalar_branch_entropy_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.037241852854813795,
+          "median": 0.8324774385778388,
+          "p25": 0.7932238101574995,
+          "p75": 0.8642970466307112
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_branch_entropy_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03832650323283515,
+          "median": 0.8881113773592209,
+          "p25": 0.8502846678320087,
+          "p75": 0.923031943272677
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "scalar_branch_entropy_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.032342921498158095,
+          "median": 0.9315937904733078,
+          "p25": 0.901487110598268,
+          "p75": 0.9628990987216538
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "scalar_branch_entropy_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.030832211250739927,
+          "median": 0.8144646854209419,
+          "p25": 0.7849338633177227,
+          "p75": 0.845493750290331
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_branch_entropy_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04547767427233118,
+          "median": 0.8948394712956397,
+          "p25": 0.8517763703224207,
+          "p75": 0.9407392066367356
+        },
+        "run": 1,
+        "stage": "warm_call",
+        "workload": "scalar_multivalue_branch_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.06623454675476614,
+          "median": 1.03322899953532,
+          "p25": 0.9673985520424003,
+          "p75": 1.1014951322384712
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03256213936972924,
+          "median": 0.9975320032493309,
+          "p25": 0.96732509290677,
+          "p75": 1.028852392557683
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.02965728304135845,
+          "median": 1.014431036683555,
+          "p25": 0.9736632141577074,
+          "p75": 1.039217975848509
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.049367419381354194,
+          "median": 0.9451826603697099,
+          "p25": 0.9011428792237286,
+          "p75": 1.006061414947777
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.060132714591504655,
+          "median": 0.7337861663688244,
+          "p25": 0.6733474891455122,
+          "p75": 0.7816799874777496
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.041718070138157703,
+          "median": 0.7517789910085855,
+          "p25": 0.7283537214412995,
+          "p75": 0.8065216973266036
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.18997334145737022,
+          "median": 1.3746563754704018,
+          "p25": 1.1949549748792274,
+          "p75": 1.572849711182167
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.027965429016431675,
+          "median": 0.7442717111457454,
+          "p25": 0.7158578917318175,
+          "p75": 0.768668945097235
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_br_table_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.02205615466374161,
+          "median": 0.7877169470349596,
+          "p25": 0.77373392996769,
+          "p75": 0.8112025701375797
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "scalar_br_table_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.040703412351334456,
+          "median": 1.2138218376223926,
+          "p25": 1.1925969834748171,
+          "p75": 1.2798663013141562
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "scalar_br_table_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03488415578134163,
+          "median": 0.7538350430966292,
+          "p25": 0.7122255548237273,
+          "p75": 0.785128832658735
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_br_table_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.025751542175713515,
+          "median": 0.7831915369482337,
+          "p25": 0.7578916964469474,
+          "p75": 0.8080102250868192
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "scalar_br_table_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04622084755403866,
+          "median": 1.1296782391589126,
+          "p25": 1.0889015639719486,
+          "p75": 1.1860288055328427
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "scalar_br_table_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.054276539992610395,
+          "median": 0.7696215858894697,
+          "p25": 0.7328465945594645,
+          "p75": 0.8534813992731658
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_br_table_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0369924677935371,
+          "median": 0.837756704113914,
+          "p25": 0.801814053311062,
+          "p75": 0.8709960992216195
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05427042700922913,
+          "median": 0.8744461403230883,
+          "p25": 0.791192822209992,
+          "p75": 0.8959623698853625
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.08077909573183456,
+          "median": 0.9648971246392744,
+          "p25": 0.8765787815062225,
+          "p75": 0.9989444254250828
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.061620807396186195,
+          "median": 0.8534882819947099,
+          "p25": 0.7931402793169348,
+          "p75": 0.9097162532314118
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_branch_entropy_n10000"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.021494565532343468,
+          "median": 0.8915956189070964,
+          "p25": 0.8724300757701036,
+          "p75": 0.9133553943494871
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "scalar_branch_entropy_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.037230513071041804,
+          "median": 0.9600174618746234,
+          "p25": 0.925488661883432,
+          "p75": 1.0018652898466613
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "scalar_branch_entropy_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03197287656826869,
+          "median": 0.8398868442487993,
+          "p25": 0.8087515521089611,
+          "p75": 0.8821756304857042
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_branch_entropy_n17"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0472651412395777,
+          "median": 0.8881173294058398,
+          "p25": 0.8464697692108125,
+          "p75": 0.9353347587186249
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "scalar_branch_entropy_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.046002030883531886,
+          "median": 0.955748936850628,
+          "p25": 0.9094564202294183,
+          "p75": 1.0008491595042548
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "scalar_branch_entropy_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04347078876812066,
+          "median": 0.8316329465427756,
+          "p25": 0.7830875695546007,
+          "p75": 0.86522448160612
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_branch_entropy_n32"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0583754521887665,
+          "median": 0.8905348469964223,
+          "p25": 0.8531419372715565,
+          "p75": 0.9689719143746713
+        },
+        "run": 2,
+        "stage": "warm_call",
+        "workload": "scalar_multivalue_branch_n32"
+      }
+    ],
+    "decision": "rejected",
+    "primary": [
+      {
+        "bootstrap_resamples": 10000,
+        "lower": 0.7837871635261822,
+        "median": 0.7978549681589815,
+        "run": 1,
+        "stages": {
+          "scalar_br_table_n10000": "warm_call",
+          "scalar_br_table_n32": "warm_call",
+          "scalar_branch_entropy_n10000": "warm_call",
+          "scalar_branch_entropy_n32": "warm_call"
+        },
+        "upper": 0.808189689992386,
+        "weighting": "equal declared targeted workload weights"
+      },
+      {
+        "bootstrap_resamples": 10000,
+        "lower": 0.7816564684587071,
+        "median": 0.7985151189426651,
+        "run": 2,
+        "stages": {
+          "scalar_br_table_n10000": "warm_call",
+          "scalar_br_table_n32": "warm_call",
+          "scalar_branch_entropy_n10000": "warm_call",
+          "scalar_branch_entropy_n32": "warm_call"
+        },
+        "upper": 0.814343866009581,
+        "weighting": "equal declared targeted workload weights"
+      }
+    ],
+    "reasons": [
+      "scalar_br_table_n17/load_and_call: supported regression",
+      "scalar_br_table_n32/load_and_call: supported regression",
+      "scalar_br_table_n10000/prepare: supported regression",
+      "scalar_br_table_n17/load_and_call: supported regression",
+      "scalar_br_table_n32/load_and_call: supported regression",
+      "scalar_br_table_n10000/prepare: regression bound is inconclusive",
+      "call_overhead/first_call: regression bound is inconclusive"
+    ],
+    "sample_counts": {
+      "extra_samples": 0,
+      "logical_pair_references": 1740,
+      "sampling_note": "aliases reuse the planned raw pairs; no extra samples are added",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_pair_count": 1500
+    },
+    "scope": "predeclared candidate only; no milestone or P001 total claim",
+    "statistics_computations": 1,
+    "status": "passed",
+    "task": "P060"
+  },
+  "timing_evidence": true,
+  "retention_justification": "The measured gate rejected promotion. Keep register control transfers behind the nondefault register feature as the tested prerequisite for P062, P063 and P064; make no default or Portable promotion claim.",
+  "limitations": [
+    "Register remains opt-in; this task does not change decoded defaults.",
+    "Focused scalar results do not constitute P001 or portfolio/milestone evidence.",
+    "The immediate predecessor is the frozen register-mode P060-before archive bound by the selection receipt.",
+    "The statistics producer separately binds and rechecks the sibling performance TASKS.json; it is outside repository component identity paths."
+  ]
+}

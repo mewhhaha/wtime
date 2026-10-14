@@ -1,0 +1,62 @@
+{
+  "fixture": "multivalue_table.wat",
+  "license": "MIT",
+  "origin": "Original fixture authored for P060; no external source.",
+  "encoding": {
+    "command": "target/performance/baseline/binary/wtime-conformance encode crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_table.wat -o crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_table.wasm",
+    "encoder_sha256": "36bede285fc5a1ad57b35566abf4bb68d3acf4e015944ff07e8dc6fb76e3bc14",
+    "wat_sha256": "527951d3e509f4a8be6a0145e3c2de2165cc8f40b38f1b8b93477856f8364ed7",
+    "wasm_sha256": "82cfdef74e7dfae3083dc2b42df63e1bc56e0979d59060f333d22f92e138a836",
+    "independent_decoder": "target/recovery/P060-fixtures-0001/decode-audit.py",
+    "decoder_result": "Validated Wasm 1 header, function signature, export, code-body instruction sequence, and br_table targets."
+  },
+  "module": {
+    "export": "run",
+    "signature": {
+      "params": ["i32"],
+      "results": ["i32", "i64"]
+    },
+    "static_source_pcs": [
+      {"pc": 0, "instruction": "outer block (result i32 i64)"},
+      {"pc": 1, "instruction": "inner block (result i32 i64)"},
+      {"pc": 2, "instruction": "i32.const 99"},
+      {"pc": 3, "instruction": "i32.const 7"},
+      {"pc": 4, "instruction": "i64.const 9"},
+      {"pc": 5, "instruction": "local.get $which"},
+      {"pc": 6, "instruction": "br_table 0 1 2"},
+      {"pc": 7, "instruction": "inner end"},
+      {"pc": 8, "instruction": "outer end"},
+      {"pc": 9, "instruction": "implicit function end"}
+    ],
+    "branch_cases": [
+      {
+        "selector": 0,
+        "target_depth": 0,
+        "source_pcs": [0, 1, 2, 3, 4, 5, 6, 8, 9],
+        "source_events": 9,
+        "expected_result": [7, 9]
+      },
+      {
+        "selector": 1,
+        "target_depth": 1,
+        "source_pcs": [0, 1, 2, 3, 4, 5, 6, 9],
+        "source_events": 8,
+        "expected_result": [7, 9]
+      },
+      {
+        "selectors": [2, -1, 2147483647],
+        "target_depth": 2,
+        "source_pcs": [0, 1, 2, 3, 4, 5, 6],
+        "source_events": 7,
+        "expected_result": [7, 9],
+        "return": "direct function return; function-end pc 9 is skipped"
+      }
+    ],
+    "stack_oracle": "Each target consumes the top two branch payload values (i32 7, i64 9); surplus i32 99 is discarded. The shifted destination slot's previous i32 payload is read as i32 before that storage is reused for the i64 result."
+  },
+  "validation": {
+    "stable_core_probe": "target/debug/wtime-probe stable-core crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_table.wasm",
+    "probe_result": {"execution_mode": "decoded", "status": "valid"},
+    "evidence_directory": "target/recovery/P060-fixtures-0001"
+  }
+}

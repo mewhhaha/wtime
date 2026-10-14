@@ -1,0 +1,63 @@
+{
+  "fixture": "multivalue_caller.wat",
+  "license": "MIT",
+  "origin": "Byte-for-byte copy of tools/wtime-bench/fixtures/scalar/multivalue_branch.wat (repository-authored MIT fixture).",
+  "protected_workload": {
+    "source": "tools/wtime-bench/fixtures/scalar/multivalue_branch.wat",
+    "sha256": "a1f4958100af82889208bb28090d6af7c3e56cbeeccabad4106601c9a9c17014",
+    "fixture_copy": "crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_caller.wat",
+    "fixture_copy_sha256": "a1f4958100af82889208bb28090d6af7c3e56cbeeccabad4106601c9a9c17014",
+    "byte_identical": true
+  },
+  "encoding": {
+    "command": "target/performance/baseline/binary/wtime-conformance encode crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_caller.wat -o crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_caller.wasm",
+    "encoder_sha256": "36bede285fc5a1ad57b35566abf4bb68d3acf4e015944ff07e8dc6fb76e3bc14",
+    "wasm_sha256": "03ffdc2041ae8ba0c8d078422d36152cf1d35f1293c94a4074fe7e83791743ae",
+    "independent_decoder": "target/recovery/P060-caller-fixture-0001/decode-audit.py"
+  },
+  "exports_and_functions": [
+    {
+      "function": "$choose",
+      "signature": {
+        "params": [
+          "i32",
+          "i32"
+        ],
+        "results": [
+          "i32",
+          "i32"
+        ]
+      },
+      "exported": false
+    },
+    {
+      "function": "run",
+      "export": "run",
+      "signature": {
+        "params": [
+          "i32"
+        ],
+        "results": [
+          "i32"
+        ]
+      }
+    }
+  ],
+  "n17_oracle_method": {
+    "initial_accumulator": 1,
+    "iterations": "i=0 through 16",
+    "recurrence": "If i is odd, acc becomes wrapping_i32(acc+1); otherwise acc becomes wrapping_i32(acc*3).",
+    "helper_pair": "Odd i returns (acc+1, i+2); even i returns (acc*3, i-1); run discards the second value and uses the first as the next accumulator.",
+    "result": "Derive by applying the recurrence for all 17 iterations; no scalar result is asserted by this fixture-encoding check."
+  },
+  "validation": {
+    "independent_decoder_result": "Valid Wasm 1 module; verified run export and both function signatures.",
+    "stable_core_probe_command": "target/debug/wtime-probe stable-core crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_caller.wasm",
+    "stable_core_probe_result": {
+      "execution_mode": "decoded",
+      "status": "valid"
+    },
+    "probe_sha256": "599737ef728292106e4c4e06da11a7288f0297d367fd35ea41b340dfde72ba53",
+    "evidence_directory": "target/recovery/P060-caller-fixture-0001"
+  }
+}

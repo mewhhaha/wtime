@@ -81868,8 +81868,8 @@
       "key": "register-edge-moves",
       "title": "Implement safe parallel moves and register control transfers",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -81925,7 +81925,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P060-verification.json --output target/performance/P060/complete --execute"
       ],
       "path": "05-register-executor/P060-register-edge-moves.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P060/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "1af758f520e2e1df800fde63284695e68fdc13516066c93a9bc2eb5fb88e150e",
+          "bytes": 2587
+        }
+      ],
       "reviews_optional_tasks": [
         "P059"
       ],
@@ -81940,9 +81946,24 @@
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
       "before_edit_commands": [
-        "python3 tools/wtime-bench/baseline.py --output target/performance/P060-before",
+        "python3 tools/wtime-bench/baseline.py --mode register --output target/performance/P060-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P060-selection.json target/performance/P060-before/manifest.json --output target/performance/P060/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P060/shared-finalization/attempt-0001/evidence.json": "1af758f520e2e1df800fde63284695e68fdc13516066c93a9bc2eb5fb88e150e"
+        },
+        "evidence": [
+          {
+            "bytes": 2587,
+            "path": "/workspace/wtime/target/performance/P060/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "1af758f520e2e1df800fde63284695e68fdc13516066c93a9bc2eb5fb88e150e"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P060"
+      }
     },
     {
       "id": "P061",
