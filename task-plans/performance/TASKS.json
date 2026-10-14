@@ -82481,7 +82481,8 @@
         "P063",
         "P064",
         "P065",
-        "P132"
+        "P132",
+        "P133"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -88435,6 +88436,97 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P132"
+      }
+    },
+    {
+      "id": "P133",
+      "key": "bounded-lazy-register-cache",
+      "title": "Add a bounded lazy Register preparation cache",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P132"
+      ],
+      "owned_paths": [
+        "crates/wtime-runtime/src/execution/register/cache.rs",
+        "crates/wtime-runtime/src/execution/register/mod.rs",
+        "crates/wtime-runtime/src/execution/register/execute.rs",
+        "crates/wtime-runtime/tests/performance/p133_private.rs"
+      ],
+      "input_output_contract": "Add a safe, private, per-module/body cache that can return an immutable `Arc<CachedFunction>` containing one P132 `PreparedFunction` and a retention token. Bind the cache at construction to the module’s engine ID and exact decoded source `Arc<[u8]>`; validate both before every lookup and again before publish. Use the decoded body index as the cache key. The cache retains the source `Arc` and engine ID only, never `Arc<ModuleData>`, so it cannot create an ownership cycle.",
+      "implementation_steps": [
+        "Add a private cache module and expose only the minimum P132 preparation types/functions to the sibling module with `pub(super)`: `PreparedFunction`, the four-outcome `Preparation`, and `prepare_function`. Add narrow accessors for the engine ID and decoded source `Arc`; do not expose module internals or make the cache public.",
+        "Implement a source-bound cache with fixed maximum entry capacity, saturating per-body counters, the five declared states, deterministic FIFO ordering, and a single RAII compile lease. A lease reserves the P132 remaining budget while active, releases all locks before `prepare_function`, and commits its outcome atomically after rechecking source and engine ownership. Duplicate and other-body calls while a lease is active return fallback.",
+        "Keep cache metadata accounting conservative and checked. Include actual vector capacity, cache/index state, cache entry storage, `Arc` header allowance, `CachedFunction` wrapper, retention token, and all P132-prepared function allocations. A separate ledger tracks live retained bytes and monotonic work; a token drop releases bytes only, never work. Eviction drops the cache reference while active `Arc` holders remain valid and charged.",
+        "Map P132 outcomes to states without partial publication: `Complete` may become `Ready`; `Declined` enters the declared cooldown; `Exhausted` and `Invalid` become fail-closed `Negative`; owner mismatch and poisoned state fail closed; dropping an unfinished lease clears `Compiling`, publishes nothing, preserves any already-consumed work, and prevents immediate retry.",
+        "Add the private cache tests in `p133_private.rs` and include them from `cache.rs`. Do not add Engine/Store integration, guest execution changes, policy selectors, or performance claims. Keep the task to at most two focused changes: the bounded cache/lease and the focused tests."
+      ],
+      "fixture_cases": [
+        "p133_cold_threshold_and_single_publish: a real admitted module stays cold below the declared threshold; the threshold entry creates one immutable cached artifact, and later lookup returns that same prepared result without another attempt.",
+        "p133_concurrent_duplicate_uses_one_unlocked_builder: a barrier-controlled real-module attempt proves one builder owns the lease, duplicate and other-body calls fall back, and the builder runs while both cache and canonical-type locks are available.",
+        "p133_decline_poison_foreign_and_aborted_lease_fail_closed: unsupported/declined preparation cannot publish partial state, retries wait at least 128 entries and stop after two attempts, malformed or foreign owners fail closed, poisoned locks do not panic, and an aborted lease clears `Compiling` without immediate retry.",
+        "p133_fifo_eviction_pinned_lifetime_and_budget_churn: deterministic FIFO stays within 64 entries and metadata bounds; an evicted function remains valid and charged while a test-held `Arc` exists, its last drop releases bytes but not work, and repeated cooldown/eviction churn cannot reset the work budget."
+      ],
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C6",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p133_ -- --nocapture",
+        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p132_ -- --nocapture",
+        "cargo check --locked -p wtime-runtime",
+        "cargo check --locked -p wtime-runtime --features register-executor,execution-reference"
+      ],
+      "path": "05-register-executor/P133-bounded-lazy-register-cache.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P133/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7",
+          "bytes": 1535
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One integrator owns lib.rs, execution.rs, dispatch, Cargo features and tests/performance.rs; P133 adds only private cache tests.",
+      "minimum_focused_cases": 4,
+      "evidence_contract": "Record P001 and P133-before identities, exact feature settings and commands, focused test counts, source/test/artifact hashes, cache entry and state transitions, builder/duplicate counts, work and byte ledger values, lease-abort outcomes, and pinned-Arc byte-release behavior. Keep task status pending until all semantic and budget checks pass. No timings are acceptance evidence.",
+      "external_constraints": [
+        "original pinned core/proposal snapshot and exclusions",
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [
+        "python3 -B tools/wtime-bench/baseline.py --output target/performance/P133-before --mode register"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P133/shared-finalization/attempt-0002/evidence.json": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7"
+        },
+        "evidence": [
+          {
+            "bytes": 1535,
+            "path": "/workspace/wtime/target/performance/P133/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P133"
       }
     }
   ]

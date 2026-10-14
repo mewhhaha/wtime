@@ -34,6 +34,8 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P132 — Extract transactional per-function Register preparation](P132-extract-transactional-register-preparation.md)
 
+[P133 — Add a bounded lazy Register preparation cache](P133-bounded-lazy-register-cache.md)
+
 ## Scope and ownership
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).

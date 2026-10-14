@@ -16,9 +16,17 @@ struct EdgePlan {
     target: usize,
     moves: MovePlan,
 }
-struct PreparedFunction {
+pub(super) struct PreparedFunction {
     lowered: LoweredFunction,
     edges: Vec<Vec<EdgePlan>>,
+}
+impl PreparedFunction {
+    pub(super) fn matches(&self, module: &Module, body: usize) -> bool {
+        self.lowered
+            .program
+            .materialization(module, 0)
+            .is_ok_and(|recipe| recipe.body == body)
+    }
 }
 pub(crate) struct PreparedModule {
     functions: Vec<Option<PreparedFunction>>,
@@ -90,13 +98,13 @@ impl PreparedModule {
 
 /// One bounded attempt. Failed attempts spend attempted work, while retained
 /// metadata commits only with a complete independently admitted function.
-enum Preparation {
+pub(super) enum Preparation {
     Complete(PreparedFunction),
     Declined,
     Exhausted,
     Invalid,
 }
-fn prepare_function(
+pub(super) fn prepare_function(
     module: &Module,
     body: usize,
     budget: &mut Budget,

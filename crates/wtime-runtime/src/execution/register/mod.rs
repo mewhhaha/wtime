@@ -1,5 +1,8 @@
 //! Private numeric register format. P058 supplies trusted lowering; later tasks
 //! supply execution. Compiling this feature does not select a runtime policy.
+// Standalone preparation foundation; P066 will connect entry-point selection.
+#[allow(dead_code)]
+mod cache;
 mod control;
 mod execute;
 mod exits;

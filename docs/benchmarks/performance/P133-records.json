@@ -1,0 +1,239 @@
+{
+  "schema": "wtime-p133-durable-records-v1",
+  "task": "P133",
+  "status": "done",
+  "outcome": "contract_only",
+  "timing_evidence": false,
+  "candidate_promoted": false,
+  "copies": [
+    {
+      "source": {
+        "path": "target/performance/P133/shared-finalization/attempt-0002/completion.json",
+        "sha256": "f7a9a1c7888434db84492f1ee921cc70e52aa8b39e39e3fcfe10a2479901add0",
+        "bytes": 503
+      },
+      "copy_path": "docs/benchmarks/performance/P133-completion.json",
+      "copy_sha256": "f7a9a1c7888434db84492f1ee921cc70e52aa8b39e39e3fcfe10a2479901add0",
+      "copy_bytes": 503,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/performance/P133/shared-finalization/attempt-0002/evidence.json",
+        "sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7",
+        "bytes": 1535
+      },
+      "copy_path": "docs/benchmarks/performance/P133-evidence.json",
+      "copy_sha256": "a52be75954ba51759c88cfa10971136885947db484304ce17a6e737e878284e7",
+      "copy_bytes": 1535,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P133/freeze/attempt-0002/freeze/report.json",
+        "sha256": "0ceb721f7f4b703628654b9f1a261f6f6b2787174a57292a70475d214c5d0346",
+        "bytes": 20427
+      },
+      "copy_path": "docs/benchmarks/performance/P133-freeze.json",
+      "copy_sha256": "0ceb721f7f4b703628654b9f1a261f6f6b2787174a57292a70475d214c5d0346",
+      "copy_bytes": 20427,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P133/verify/attempt-0001/proof/report.json",
+        "sha256": "f3e5a5433e00630ab50f119b867f5c32e3eef719288b6260198145b219b58262",
+        "bytes": 4417
+      },
+      "copy_path": "docs/benchmarks/performance/P133-proof.json",
+      "copy_sha256": "f3e5a5433e00630ab50f119b867f5c32e3eef719288b6260198145b219b58262",
+      "copy_bytes": 4417,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P133/verify/attempt-0001/default-build.json",
+        "sha256": "3b7978a1045116858c06e9e54c4317d52f497c1b158f7d057d254179cb55d76a",
+        "bytes": 329363
+      },
+      "copy_path": "docs/benchmarks/performance/P133-default-build.json",
+      "copy_sha256": "3b7978a1045116858c06e9e54c4317d52f497c1b158f7d057d254179cb55d76a",
+      "copy_bytes": 329363,
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P133/verify/attempt-0001/register-build.json",
+        "sha256": "536099b312886c709a8ece6e3061a2570b83749f5c8430545f1369a8f13db44b",
+        "bytes": 329524
+      },
+      "copy_path": "docs/benchmarks/performance/P133-register-build.json",
+      "copy_sha256": "536099b312886c709a8ece6e3061a2570b83749f5c8430545f1369a8f13db44b",
+      "copy_bytes": 329524,
+      "original_copy_bytes": true
+    }
+  ],
+  "phase_receipts": {
+    "freeze": {
+      "path": "target/verification/runs/P133/freeze/attempt-0002/receipt.json",
+      "sha256": "33f922d828e7bb58f021f57511c1eba0f0216a973ce2358c083af73ef29d26d5",
+      "bytes": 308684
+    },
+    "verify": {
+      "path": "target/verification/runs/P133/verify/attempt-0001/receipt.json",
+      "sha256": "a13e4ad94cdcebc52188b40cc74e7caee216d37d39e91e894f481b5c80cf2ed0",
+      "bytes": 925634
+    }
+  },
+  "counts": {
+    "verification_tests": {
+      "groups": {
+        "combined-semantics": {
+          "passed": 414,
+          "failed": 0,
+          "ignored": 0
+        },
+        "default-policy": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "register-semantics": {
+          "passed": 308,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "totals": {
+        "passed": 723,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "proof": {
+      "default_named_cases": 1,
+      "p133_named_cases": 4
+    },
+    "case_records": {
+      "p133_cold_threshold_and_single_publish": {
+        "builders": 1,
+        "decoded_policy_and_fuel_preserved": true,
+        "name": "p133_cold_threshold_and_single_publish",
+        "passed": true,
+        "same_artifact": true,
+        "threshold": 3
+      },
+      "p133_concurrent_duplicate_uses_one_unlocked_builder": {
+        "builders": 1,
+        "cache_lock_available": true,
+        "canonical_lock_available": true,
+        "duplicate_fallbacks": 2,
+        "name": "p133_concurrent_duplicate_uses_one_unlocked_builder",
+        "passed": true
+      },
+      "p133_decline_poison_foreign_and_aborted_lease_fail_closed": {
+        "abort_cleared_lease": true,
+        "cooldown_entries": 128,
+        "counter_saturates": true,
+        "decline_builders": 2,
+        "foreign_owner_refused": true,
+        "invalid_refused": true,
+        "name": "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+        "passed": true,
+        "poison_fail_closed": true
+      },
+      "p133_fifo_eviction_pinned_lifetime_and_budget_churn": {
+        "fifo_preserved": true,
+        "fixture_bodies": 66,
+        "last_drop_refunds_only_bytes": true,
+        "max_entries": 64,
+        "metadata_refusal": true,
+        "monotonic_work": true,
+        "name": "p133_fifo_eviction_pinned_lifetime_and_budget_churn",
+        "negative_churn_bounded": true,
+        "passed": true,
+        "pinned_bytes": 1054
+      }
+    }
+  },
+  "limits": {
+    "attempted_work": 100000,
+    "cache_entries": 64,
+    "retained_metadata_bytes": 1048576
+  },
+  "baseline": {
+    "path": "target/performance/P133-before/manifest.json",
+    "sha256": "076bedce1f7db694739398407116aad8272a92394f955ee0ac0689bf99ad1ad1",
+    "bytes": 101593
+  },
+  "baseline_repository_commit": "12dc7e7db2b0130fd81efa67939008cccc2013c2",
+  "baseline_mode": "register",
+  "p001": {
+    "manifest_sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472",
+    "binary_sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498"
+  },
+  "runtime_source_map_sha256": "ce4f1426de0d8af10dddcfc1a6569d2e5db8d97d94143af57cc3c819a94f14ae",
+  "runtime_source_file_count": 146,
+  "build_budgets": {
+    "default": {
+      "artifact": {
+        "bytes": 329363,
+        "path": "/workspace/wtime/target/verification/runs/P133/verify/attempt-0001/default-build.json",
+        "sha256": "3b7978a1045116858c06e9e54c4317d52f497c1b158f7d057d254179cb55d76a"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [],
+      "mode": "default",
+      "stripped_bytes": 1000960
+    },
+    "register": {
+      "artifact": {
+        "bytes": 329524,
+        "path": "/workspace/wtime/target/verification/runs/P133/verify/attempt-0001/register-build.json",
+        "sha256": "536099b312886c709a8ece6e3061a2570b83749f5c8430545f1369a8f13db44b"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [
+        "wtime-runtime/register-executor"
+      ],
+      "mode": "optional-feature",
+      "stripped_bytes": 1078992
+    }
+  },
+  "logs": {
+    "register": {
+      "bytes": 22164,
+      "path": "/workspace/wtime/target/verification/runs/P133/verify/attempt-0001/register-semantics.stdout",
+      "sha256": "db1f2b56fe0261e83226f5a3a03498576460c6acfe639e5c8f9ddb8114ecf381"
+    },
+    "register_stderr": {
+      "bytes": 171784,
+      "path": "/workspace/wtime/target/verification/runs/P133/verify/attempt-0001/register-semantics.stderr",
+      "sha256": "f998452f936ed6bc62e0f41a6e22c7d194327e12d699f703ddc7107fd43bd836"
+    },
+    "combined": {
+      "bytes": 473891,
+      "path": "/workspace/wtime/target/verification/runs/P133/verify/attempt-0001/combined-semantics.stdout",
+      "sha256": "05efb1e26b2691acdd31cd54aeebf7bbf7a96879994fec5ed5872e8c2af341e7"
+    },
+    "default": {
+      "bytes": 178,
+      "path": "/workspace/wtime/target/verification/runs/P133/verify/attempt-0001/default-policy.stdout",
+      "sha256": "ad9540fa17914a08152b7ac03fb02e8df6057309f11fe3f624a9b1ac3baf386b"
+    }
+  },
+  "helper_archive": {
+    "sha256": "127ae8fe4840835a6d6dbf18c55181eef4a9a442ef22cfc86d64916706d9d61c",
+    "bytes": 15250,
+    "invocation": {
+      "path": "target/recovery/P133-export-0001/invocation.json",
+      "sha256": "8f007610bb7bf9191d9707d96188c49ada252b8ed144ae614ca2f1009e384f73",
+      "bytes": 436
+    }
+  },
+  "limitations": [
+    "Bounded lazy Register preparation-cache semantics and default/optional build budgets only; no timing or performance promotion is claimed."
+  ]
+}

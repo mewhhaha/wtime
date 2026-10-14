@@ -1,0 +1,40 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 12630,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P133-verification.json",
+    "sha256": "99b1c35b1c0e95af52b96a954325d0cbcdc56b72680a166f89b599c7d1a268dc"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Bounded lazy Register preparation-cache semantics and default/optional build budgets only; no timing or performance promotion is claimed."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "freeze": {
+      "bytes": 308684,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/33/33f922d828e7bb58f021f57511c1eba0f0216a973ce2358c083af73ef29d26d5",
+      "sha256": "33f922d828e7bb58f021f57511c1eba0f0216a973ce2358c083af73ef29d26d5",
+      "stored_bytes": 308684,
+      "stored_sha256": "33f922d828e7bb58f021f57511c1eba0f0216a973ce2358c083af73ef29d26d5"
+    },
+    "verify": {
+      "bytes": 925634,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/a1/a13e4ad94cdcebc52188b40cc74e7caee216d37d39e91e894f481b5c80cf2ed0",
+      "sha256": "a13e4ad94cdcebc52188b40cc74e7caee216d37d39e91e894f481b5c80cf2ed0",
+      "stored_bytes": 925634,
+      "stored_sha256": "a13e4ad94cdcebc52188b40cc74e7caee216d37d39e91e894f481b5c80cf2ed0"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P133"
+}
