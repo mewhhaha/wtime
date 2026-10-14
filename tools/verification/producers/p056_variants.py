@@ -382,7 +382,8 @@ def _report(task,declaration,entries,left,right,output,semantic,seed,cpu,inputs,
             (output/'partial-report.json').write_text(json.dumps(report,indent=2)+'\n')
     report['counts']=cold_products.summarize(plan,{f"{g['sample_workload']}\0{g['stage']}":60 for g in plan['groups']})
     report['status']='passed'; report['passed']=report['source_stable']=True
-    validate_pair_groups(report['runs'],plan); _validate_warm(report,plan)
+    warm_batches=_validate_warm(report,plan)
+    validate_pair_groups(report['runs'],plan,entries=entries,warm_batches=warm_batches)
     return report
 
 def run(args):

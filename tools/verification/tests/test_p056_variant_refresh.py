@@ -62,6 +62,53 @@ class P056VariantRefreshTests(unittest.TestCase):
                 module.validate_observation_identity(
                     forged, 'call_overhead', 'load_and_call', 17)
 
+    def test_calibrated_warm_batch_is_required_for_both_complete_runs(self):
+        plan = {'groups': [
+            {'sample_workload': 'beta', 'stage': 'warm_call', 'product_sha256': 'b' * 64},
+        ]}
+        calibrations = []
+        runs = []
+        for run_id in (0, 1):
+            calibration_observation = {
+                'batch': 2, 'ns_per_operation': 10_000_000.0,
+            }
+            calibrations.append({
+                'run_id': run_id, 'workload': 'beta', 'stage': 'warm_call',
+                'batch': 2, 'target_ns': 20_000_000,
+                'attempts': [{
+                    'batch': 2,
+                    'observations': {'baseline': calibration_observation,
+                                     'candidate': calibration_observation},
+                }],
+            })
+            pairs = []
+            for sample in range(30):
+                observation = {
+                    'result': 7, 'expected': 7, 'stage': 'warm_call',
+                    'batch': 2, 'ns_per_operation': 10_000_000.0,
+                }
+                pairs.append({
+                    'pair_id': f'{run_id}:beta:warm_call:{sample}',
+                    'workload': 'beta', 'stage': 'warm_call',
+                    'product_sha256': 'b' * 64,
+                    'order': ['baseline', 'candidate'], 'expected': 7,
+                    'baseline': dict(observation), 'candidate': dict(observation),
+                })
+            runs.append({'run_id': run_id, 'pairs': pairs})
+
+        warm_batches = module._validate_warm(
+            {'warm_calibrations': calibrations}, plan)
+        self.assertEqual(warm_batches, {
+            (0, 'beta', 'warm_call'): 2,
+            (1, 'beta', 'warm_call'): 2,
+        })
+        self.assertTrue(module.validate_pair_groups(
+            runs, plan, warm_batches=warm_batches))
+
+        runs[0]['pairs'][0]['baseline']['batch'] = 1
+        with self.assertRaisesRegex(ValueError, 'calibrated or cold batch'):
+            module.validate_pair_groups(runs, plan, warm_batches=warm_batches)
+
     def test_full_planned_groups_require_two_complete_pair_runs(self):
         plan = {'groups': [
             {'sample_workload': 'alpha', 'stage': 'prepare', 'product_sha256': 'a' * 64},
