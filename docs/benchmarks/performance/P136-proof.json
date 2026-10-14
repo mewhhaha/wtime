@@ -1,0 +1,75 @@
+{
+  "adapter": {
+    "bytes": 225446,
+    "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/archived-adapter/adapter.json",
+    "sha256": "37fb10dd7ee847a174904943122b321d35717bc9d21f153eb911141b992d16c3"
+  },
+  "adapter_executable_sha256": "186855ed4c24c06291f4c673445a4e20babbe89ea900a3323332a45087c33849",
+  "build_budget_note": "P134/P135 core build-budget evidence is reused only; P136 makes no core build-time claim.",
+  "build_source_inputs_sha256": "71f313988ae1130c99950ca4a15d898920dc89987e9590c408812539a423bc0c",
+  "candidate": {
+    "bytes": 601064,
+    "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/candidate-adapter/adapter.json",
+    "sha256": "f76a134b84a93ab6464dfb5b950c63829ed10f9d7720aaf41cbde94225f32fb6"
+  },
+  "candidate_executable_sha256": "a90977d00dd42bf56720098819addaedc1f596629f2899ae4810dfa93304f95d",
+  "collection": {
+    "bytes": 310529,
+    "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/collection/report.json",
+    "sha256": "6b6e3e04c5f2733477d911e1775d053648287e6fe5617a69a7597c89eedc722d"
+  },
+  "core_build_budgets_reused": true,
+  "counts": {
+    "named_cases": 6,
+    "pairs": 32,
+    "rows": 8,
+    "runs": 2
+  },
+  "decision": "integrity",
+  "entry_batch_driver_sha256": "db4e943f6130225ac5f3d2dbb749828f789f6948748063904fb5d8c6a2a22bb9",
+  "inherited_core_builds": {
+    "default": {
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [],
+      "historical_build_reused": true,
+      "report": {
+        "bytes": 330120,
+        "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/default-build.json",
+        "sha256": "800490448cea73d37b80ef6cae11b84cbbb0ff5443ecf6f12fe53a3baa828c05"
+      },
+      "source_file_count": 730,
+      "source_sha256": "8daf832a4cbe4f63b4aba57254018343e88fd7bcc6013bc3cd9e8f93353158cb",
+      "stripped_bytes": 1000960
+    },
+    "register": {
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [
+        "wtime-runtime/register-executor"
+      ],
+      "historical_build_reused": true,
+      "report": {
+        "bytes": 330283,
+        "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/register-build.json",
+        "sha256": "a7576f9e8c2abc64372833064a6802807ed73b9a4a9b073c00bd0ef9f13f7796"
+      },
+      "source_file_count": 730,
+      "source_sha256": "8daf832a4cbe4f63b4aba57254018343e88fd7bcc6013bc3cd9e8f93353158cb",
+      "stripped_bytes": 1090512
+    }
+  },
+  "predecessor": {
+    "bytes": 103005,
+    "path": "/workspace/wtime/target/performance/P136-before/manifest.json",
+    "sha256": "9fe9882d9c7e23b833d769a8edddabcfe92bf04c0633d153c1e5e532e7537335"
+  },
+  "protocol_sha256": "ef1543096684bc927c683cf3e2fbc7d81462fadf96a25ec89bab8538f1813a1d",
+  "runtime_source_map_sha256": "90d7833af9e65339493d1b963cc763b5e68aab93a5c49fb8ed71c974b1bafd86",
+  "same_source_smoke": false,
+  "schema": "wtime-p136-verification-v1",
+  "smoke": true,
+  "source_stable": true,
+  "status": "passed",
+  "timing_evidence": false
+}

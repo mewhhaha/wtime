@@ -1,0 +1,32 @@
+{
+  "schema": "wtime-performance-task-contract-v1",
+  "task": "P136",
+  "kind": "foundation",
+  "selection": "register",
+  "protocol": "source-bound fresh-entry paired collection",
+  "predecessor": {
+    "archive": "target/performance/P136-before",
+    "repository_commit": "d2bcb28107d56f7c321312f82b4bfee8a11e970e",
+    "manifest_sha256": "9fe9882d9c7e23b833d769a8edddabcfe92bf04c0633d153c1e5e532e7537335",
+    "mode": "register"
+  },
+  "smoke": {
+    "rows": "p135_counter fixture, input 7, expected 8",
+    "call_counts": [1, 10, 100, 10000],
+    "settings": [{"strategy": "eager", "threshold": 0}, {"strategy": "adaptive", "threshold": 3}],
+    "pairs_per_row_per_run": 2,
+    "independent_run_seeds": [136001, 136002],
+    "same_source_alias": false
+  },
+  "acceptance": {
+    "distinct_archived_adapter_and_current_candidate": true,
+    "shared_protocol_driver_leaf_config_and_toolchain": true,
+    "preserve_raw_command_json_and_checkpoint_journal": true,
+    "revalidate_sources_and_receipts_after_collection": true,
+    "reuse_current_p134_p135_core_build_budget_evidence": true
+  },
+  "decision": "integrity",
+  "timing_evidence": false,
+  "performance_claim": false,
+  "outcome": "contract_only"
+}

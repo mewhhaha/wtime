@@ -40,6 +40,8 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P135 — Add a fresh-entry Register batch protocol](P135-fresh-entry-batch-protocol.md)
 
+[P136 — Bind Register entry settings to source-bound paired collection](P136-register-entry-paired-collection.md)
+
 ## Scope and ownership
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).

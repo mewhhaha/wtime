@@ -82484,7 +82484,8 @@
         "P132",
         "P133",
         "P134",
-        "P135"
+        "P135",
+        "P136"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -88977,6 +88978,106 @@
           },
           "interpretation": "CLI smoke protocol correctness only; no paired timings, threshold selection, or performance promotion"
         }
+      }
+    },
+    {
+      "id": "P136",
+      "key": "register-entry-paired-collection",
+      "title": "Bind Register entry settings to source-bound paired collection",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P135"
+      ],
+      "owned_paths": [
+        "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/wtime-bench/entry_batch_compare.py",
+        "tools/wtime-bench/tests/test_entry_batch_adapter.py",
+        "tools/wtime-bench/tests/test_p136_entry_batch.py",
+        "tools/verification/producers/p136.py",
+        "tools/verification/tests/test_p136_entry_batch.py",
+        "docs/benchmarks/performance/P136-contract.json",
+        "docs/benchmarks/performance/P136-verification.json"
+      ],
+      "input_output_contract": "The adapter builder accepts a generic verified immutable Register-mode archive through `--core-archive`; it requires the archived core to expose the P134 eager and positive-threshold Register constructors. The concrete P136 workflow freezes its immediate predecessor at `target/performance/P136-before` from the P135-complete source tree. P135-before is historical context only and is not pinned into the builder. Verify the archive manifest and every source hash before copying. Snapshot and hash the complete archived source-role workspace closure and current workspace closure, including member manifests and configuration needed to preserve Cargo workspace membership (including CLI and conformance manifests). The minimal adapter compiles only the four core crates needed by its runtime dependency closure (`wtime-runtime`, `wtime-types`, `wtime-decode`, `wtime-validate`); it adds no third-party dependency. Refresh copied Rust source modification times before Cargo. Never write to the archive. Overlay the current P135 `protocol.rs`, `entry_batch_driver.rs`, and every required protocol leaf by exact bytes and record their paths and hashes. Refuse archived sources that do not compile with the required P134 APIs or do not have Register support.\n\nBuild a tiny binary entry point that calls the shared protocol dispatcher. Generate a standalone workspace manifest with only the archived runtime crate paths and required features. Enable `register-executor` and `runtime-only`, keep execution instrumentation disabled, and omit Wasmtime entirely. The production `tools/wtime-bench/Cargo.toml` has an unconditional Wasmtime dependency; the adapter must not build that package. Generate and retain its isolated lockfile and build metadata. Do not overwrite an already configured `CARGO_TARGET_DIR`; use Cargo's normal workspace target unless the session already provides a target directory. Make the adapter workspace unique, refresh source mtimes, parse Cargo's `compiler-artifact` output to locate the executable, and record the actual target directory and executable path rather than guessing a fixed output path. The adapter manifest records archive path/manifest hash, complete copied core hash map, overlay protocol/driver/leaf map, generated workspace and lock hashes, Rust/Cargo versions, release profile, selected Cargo features, actual build command, and executable hash. Give this artifact a distinct `source-bound-register-entry-adapter` kind. Do not tag it as `legacy-api-adapter` or report its mode as decoded.\n\nThe paired collector accepts the immutable core archive, its verified archived-core adapter, the distinct current-core candidate executable and source/build record produced by `build_current`, an explicit fixture/case/input/expected row, one accepted P135 call count, explicit eager/adaptive strategy settings and threshold, a pair count, two run seeds, and a new output directory. Both executables are the same minimal P135 harness build shape: identical generated entry point, workspace manifest, protocol/driver/leaf overlay, Register/runtime-only features, uninstrumented timing, and Rust/Cargo toolchain identities. Their core source maps and source origins must differ and remain individually identified: one is the verified immutable archive and the other is the live current workspace. The current candidate is not the Wasmtime-linked `tools/wtime-bench` executable. Both executables receive exactly the same P135 argv for each paired row: same fixture bytes, input, expected result, call count, mode `register`, strategy, and threshold. Accept only call counts **1, 10, 100, 10000**; eager requires threshold zero and adaptive requires a caller-supplied positive threshold. Do not substitute the legacy decoded baseline or relabel the archived adapter as a current candidate.\n\nEach side observation is a separate process and fresh P135 Engine/Module/Store lifetime. Randomize archived-adapter/candidate process order from a recorded deterministic seed for each pair. Do not calibrate, warm, preflight, batch, or divide measurements. Validate the P135 schema and argv against the source/executable/fixture hashes, settings, oracle result, requested and actual calls, fixture counter, uninstrumented flag, and nonnegative integer `total_ns`, `prepare_ns`, `instantiate_ns`, and `invoke_ns`. Preserve the untouched raw JSON and report the metric as `entry_total` using `total_ns`; keep phase values as separate raw observations. Do not report `ns_per_operation` or scale by N.\n\nThe collector normally requires a distinct archived-core adapter and current-core candidate executable/source record. A `--same-source-smoke` mode may run one exact adapter binary on both sides only with an explicit same-source alias in the receipt and `timing_evidence:false`; reject this mode for non-smoke collection and reject its report as input to P066. Smoke uses two complete pairs per explicitly requested row in each of two independent runs. It checks settings forwarding and receipt integrity only. It does not choose workloads or adaptive thresholds. P066 later supplies a frozen row selection, source-bound candidate, and its full two-run, 30-pair-per-row candidate gate; smoke receipts cannot satisfy that gate.\n\nCreate reports and JSONL checkpoints only under the requested output root, reject path escapes/collisions before guest launch, and bind every row to both executable/source identities, fixture hash, settings, pair order, run seed and exact argv. Reject stale or partial pair joins, duplicate pair IDs, changed source or binary identities, missing rows and malformed JSON. Run existing checkpoints through the crash-safe `checkpoint.Journal` contract; do not route `entry_total` through the existing `ns_per_operation` stage validator.",
+      "implementation_steps": [
+        "Add `entry_batch_adapter.py`: verify any accepted Register archive and its source manifest, copy the complete archived source-role closure into an isolated workspace, refresh copied Rust mtimes, overlay and hash the current P135 protocol/driver dependency set, build the runtime-only Register adapter with no Wasmtime dependency, and write/verify an immutable source and executable manifest. The `build_current` API makes a distinct current-workspace candidate with the same generated harness/manifest/overlay and its own verified core source map. Preserve configured Cargo target behavior and locate each executable from Cargo's actual build output.",
+        "Add `entry_batch_compare.py`: validate the distinct archived adapter and current-core candidate build records, common protocol/driver/settings/toolchain identities, explicit fixture row and P135 accepted settings before guest work; its CLI takes the archive with `--archive` and the adapter/candidate source outputs with `--adapter` and `--candidate`, never guessed Cargo output paths. Run each side as a fresh process with deterministic randomized order; validate every P135 response; and preserve exact raw pairs in a source/settings-bound checkpoint and report.",
+        "Add the producer and declarative contract for freezing P136-before, adapter attestation, candidate build record, smoke rows and receipts. Reject stale or foreign inputs before copying/building/launching and verify source stability again after collection. Make smoke output explicitly non-promoting and disallow same-binary/source aliases in candidate runs.",
+        "Add focused synthetic and CLI checks for archive/overlay identity, settings forwarding, exact N behavior, paired joins, and receipt recovery. Synthetic tests use a fresh temporary root and prove resolved output paths remain inside it before writing. Record helper sources before running them and disable bytecode writes when reading archived sources.",
+        "Run the two-run smoke on explicit P135 counter rows for 1, 10, 100, and 10000 calls, with caller-supplied eager/adaptive settings. Preserve actual argv, raw responses, pair order, fixtures, source maps, archived adapter/current candidate build records, lockfile, output journal and verifier receipts. Leave runtime semantics and all performance decisions to P066/P137."
+      ],
+      "fixture_cases": [
+        "`p136_source_bound_register_adapter_rejects_foreign_or_stale_inputs`: reject a changed archive manifest/source, protocol/driver/leaf overlay, workspace/lockfile, required P134 API or executable hash; prove the verified archive bytes and mtimes remain unchanged.",
+        "`p136_candidate_and_adapter_share_protocol_driver_config_and_toolchain`: reject candidate records with different protocol, entry driver, compiled leaf, register feature, instrumentation, MVP/fuel settings or Rust/Cargo identity; retain the two distinct source maps and executable hashes.",
+        "`p136_register_settings_forward_to_both_distinct_sides`: require both commands to use Register mode with exactly matching fixture/input/expected/calls/strategy/threshold; accept only eager-zero and caller-supplied positive adaptive settings; reject decoded or legacy adapter labeling.",
+        "`p136_fixed_fresh_batch_rows_keep_exact_calls_without_calibration`: for each explicit accepted N, validate actual calls and fixture counter equal N, every result equals its oracle, raw timings are integer nanoseconds, and no warmup/calibration commands occur; reject divided timings and instrumented binaries.",
+        "`p136_pairs_join_only_identical_fixture_and_settings`: reject side observations with different Wasm hash, input, expected result, N, strategy, threshold, mode, profile or run identity; retain randomized side order and unique pair IDs.",
+        "`p136_receipts_reject_stale_duplicate_missing_or_smoke_only_pairs`: reject changed binary/source hashes, duplicate or missing sides, conflicting seeds, and same-source smoke aliases when the caller requests candidate evidence; preserve complete accepted raw records on resume."
+      ],
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C6",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "python3 -B tools/wtime-bench/entry_batch_adapter.py build --core-archive target/performance/P136-before --harness tools/wtime-bench --output target/verification/P136-adapter",
+        "python3 -B tools/wtime-bench/entry_batch_adapter.py build-current --repo . --harness tools/wtime-bench --output target/verification/P136-candidate",
+        "python3 -B tools/wtime-bench/tests/test_entry_batch_adapter.py -v",
+        "python3 -B tools/wtime-bench/tests/test_p136_entry_batch.py -v",
+        "python3 -B tools/verification/tests/test_p136_entry_batch.py -v",
+        "python3 -B tools/verification/producers/p136.py freeze --archive target/performance/P136-before --output target/verification/P136-freeze",
+        "python3 -B tools/verification/producers/p136.py verify --freeze target/verification/P136-freeze/report.json --output target/verification/P136-smoke --smoke"
+      ],
+      "path": "05-register-executor/P136-register-entry-paired-collection.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P136/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "138a7b9629ad4b29d805599deaccb3891405cfcf41a127867795e5db8d8fc4d1",
+          "bytes": 1545
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One integrator owns the source-bound archived-core adapter, candidate build-record binding, entry-batch pair collector and verification registration.",
+      "minimum_focused_cases": 6,
+      "evidence_contract": "Record the P136-before archive identity, complete archived-core and overlaid-harness source maps, generated workspace/lock hashes, Cargo target and compiler-artifact path, toolchain/features, adapter and candidate executable/source identities, common protocol/driver/config/toolchain proof, fixture hash, exact argv/raw JSON/exit status, pair order/seeds, checkpoint and smoke receipt. Smoke is timing_evidence:false, carries no decision, and cannot satisfy P066.",
+      "external_constraints": [
+        "original pinned core/proposal snapshot and exclusions",
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [
+        "python3 -B tools/wtime-bench/baseline.py --output target/performance/P136-before --mode register"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P136/shared-finalization/attempt-0001/evidence.json": "138a7b9629ad4b29d805599deaccb3891405cfcf41a127867795e5db8d8fc4d1"
+        },
+        "evidence": [
+          {
+            "bytes": 1545,
+            "path": "/workspace/wtime/target/performance/P136/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "138a7b9629ad4b29d805599deaccb3891405cfcf41a127867795e5db8d8fc4d1"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P136"
       }
     }
   ]

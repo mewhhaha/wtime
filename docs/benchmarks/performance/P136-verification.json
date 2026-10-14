@@ -1,0 +1,491 @@
+{
+  "schema_version": 1,
+  "task": "P136",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P136-before/manifest.json",
+        "target/performance/P136-before/source/**/*",
+        "target/performance/P136-before/binary/**/*",
+        "target/performance/P136-before/fixtures/**/*",
+        "target/performance/P136-before/runs/**/*",
+        "target/performance/P136-before/historical_reports/**/*"
+      ],
+      "settings": {
+        "manifest_sha256": "9fe9882d9c7e23b833d769a8edddabcfe92bf04c0633d153c1e5e532e7537335",
+        "mode": "register",
+        "repository_commit": "d2bcb28107d56f7c321312f82b4bfee8a11e970e"
+      }
+    },
+    "runtime": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml"
+      ],
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "crates/**/*",
+        "tools/wtime-conformance/**/*",
+        ".cargo/config",
+        ".cargo/config.toml"
+      ]
+    },
+    "bench_harness": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/wtime-bench/entry_batch_compare.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/fixtures/p135/**",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {
+        "protocol": "entry-batch-v1",
+        "call_counts": [
+          1,
+          10,
+          100,
+          10000
+        ],
+        "rows": [
+          "eager:0",
+          "adaptive:3"
+        ],
+        "pairs_per_run_per_row": 2,
+        "run_seeds": [
+          136001,
+          136002
+        ],
+        "instrumented": false,
+        "feature_profile": "mvp",
+        "source_fuel": null
+      }
+    },
+    "verification": {
+      "paths": [
+        "tools/verification/producers/p136.py",
+        "tools/verification/producers/p135.py",
+        "tools/checks/build_budget.py",
+        "docs/benchmarks/performance/P134-completion.json",
+        "docs/benchmarks/performance/P134-evidence.json",
+        "docs/benchmarks/performance/P135-proof.json",
+        "docs/benchmarks/performance/P136-contract.json",
+        "docs/benchmarks/performance/P134-proof.json",
+        "docs/benchmarks/performance/P134-default-build.json",
+        "docs/benchmarks/performance/P134-register-build.json",
+        "target/performance/P134/shared-finalization/attempt-0001/evidence.json"
+      ]
+    },
+    "adapter_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_entry_batch_adapter.py"
+      ]
+    },
+    "collector_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p136_entry_batch.py"
+      ]
+    },
+    "checker_tests": {
+      "paths": [
+        "tools/verification/tests/test_p136_entry_batch.py"
+      ]
+    },
+    "task_plan": {
+      "paths": [
+        "task-plans/performance/05-register-executor/P136-register-entry-paired-collection.md"
+      ]
+    },
+    "freeze_helpers": {
+      "paths": [
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/verification/producers/p135.py"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "p136-adapter-checks",
+        "uses": [
+          "bench_harness",
+          "adapter_tests"
+        ],
+        "commands": [
+          {
+            "name": "p136-adapter-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_entry_batch_adapter.py",
+              "-b",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p136-adapter-tests",
+            "kind": "unittest",
+            "minimum_passed": 8,
+            "required_names": [
+              "test_build_verify_is_source_bound_and_preserves_archive",
+              "test_verify_rejects_stale_overlay_dirty_copy_and_extra_file",
+              "test_foreign_archive_mode_and_missing_constructor_reject_before_output",
+              "test_archive_symlink_members_and_harness_symlink_leaves_reject",
+              "test_generated_entrypoint_manifest_and_command_log_are_bound",
+              "test_failed_build_keeps_executed_helper_and_command_evidence",
+              "test_current_verification_survives_unrelated_commit_but_rejects_source_change",
+              "test_current_candidate_binds_live_workspace_and_rejects_stale_sources"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "p136-collector-checks",
+        "uses": [
+          "bench_harness",
+          "collector_tests"
+        ],
+        "commands": [
+          {
+            "name": "p136-collector-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p136_entry_batch.py",
+              "-b",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p136-collector-tests",
+            "kind": "unittest",
+            "minimum_passed": 7,
+            "required_names": [
+              "test_p136_fixed_fresh_batch_rows_keep_exact_calls_without_calibration",
+              "test_p136_candidate_and_adapter_share_protocol_driver_config_and_toolchain",
+              "test_p136_source_bound_adapter_rejects_foreign_or_stale_inputs_before_guest_launch",
+              "test_p136_register_settings_forward_and_reject_invalid_rows",
+              "test_p136_pairs_join_only_identical_fixture_settings_and_run_identity",
+              "test_p136_receipts_resume_without_overwriting_raw_and_reject_duplicate_or_conflicting_seed",
+              "test_p136_same_source_alias_is_smoke_only"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "p136-source-bound-checker",
+        "uses": [
+          "verification",
+          "checker_tests"
+        ],
+        "commands": [
+          {
+            "name": "p136-source-bound-checker",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-b",
+              "-v",
+              "tools.verification.tests.test_p136_entry_batch"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p136-source-bound-checker",
+            "kind": "unittest",
+            "minimum_passed": 4,
+            "required_names": [
+              "test_rejects_foreign_adapter_identity",
+              "test_rejects_candidate_binary_or_source_identity_change",
+              "test_rejects_smoke_only_or_incomplete_pair_receipts",
+              "test_rejects_checkpoint_or_raw_record_mutation"
+            ]
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/runtime.json",
+    "pointer": "/runtime_source_map",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "runtime",
+        "freeze_helpers",
+        "task_plan"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p136.py",
+            "freeze",
+            "--archive",
+            "{repo}/target/performance/P136-before",
+            "--output",
+            "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json",
+        "runtime_map": "{stage}/freeze/runtime.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/mode",
+          "op": "equal",
+          "value": "register"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/repository_commit",
+          "op": "equal",
+          "value": "d2bcb28107d56f7c321312f82b4bfee8a11e970e"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "bench_harness",
+        "verification",
+        "adapter_tests",
+        "collector_tests",
+        "checker_tests",
+        "task_plan"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "adapter-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_entry_batch_adapter.py",
+            "-b",
+            "-v"
+          ]
+        },
+        {
+          "name": "collector-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p136_entry_batch.py",
+            "-b",
+            "-v"
+          ]
+        },
+        {
+          "name": "source-bound-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-b",
+            "-v",
+            "tools.verification.tests.test_p136_entry_batch"
+          ]
+        },
+        {
+          "name": "source-bound-smoke",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p136.py",
+            "verify",
+            "--freeze",
+            "{freeze_dir}/freeze/report.json",
+            "--output",
+            "{stage}/proof",
+            "--smoke"
+          ]
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof/report.json",
+        "evidence": "{stage}/proof/evidence.json",
+        "adapter": "{stage}/proof/archived-adapter/adapter.json",
+        "adapter_binary": "{stage}/proof/archived-adapter/binary/wtime-register-entry-adapter",
+        "candidate": "{stage}/proof/candidate-adapter/adapter.json",
+        "candidate_binary": "{stage}/proof/candidate-adapter/binary/wtime-register-entry-adapter",
+        "collection": "{stage}/proof/collection/report.json",
+        "checkpoint": "{stage}/proof/collection/checkpoint.jsonl"
+      },
+      "tests": [
+        {
+          "command": "adapter-tests",
+          "kind": "unittest",
+          "minimum_passed": 8,
+          "required_names": [
+            "test_build_verify_is_source_bound_and_preserves_archive",
+            "test_verify_rejects_stale_overlay_dirty_copy_and_extra_file",
+            "test_foreign_archive_mode_and_missing_constructor_reject_before_output",
+            "test_archive_symlink_members_and_harness_symlink_leaves_reject",
+            "test_generated_entrypoint_manifest_and_command_log_are_bound",
+            "test_failed_build_keeps_executed_helper_and_command_evidence",
+            "test_current_verification_survives_unrelated_commit_but_rejects_source_change",
+            "test_current_candidate_binds_live_workspace_and_rejects_stale_sources"
+          ]
+        },
+        {
+          "command": "collector-tests",
+          "kind": "unittest",
+          "minimum_passed": 7,
+          "required_names": [
+            "test_p136_fixed_fresh_batch_rows_keep_exact_calls_without_calibration",
+            "test_p136_candidate_and_adapter_share_protocol_driver_config_and_toolchain",
+            "test_p136_source_bound_adapter_rejects_foreign_or_stale_inputs_before_guest_launch",
+            "test_p136_register_settings_forward_and_reject_invalid_rows",
+            "test_p136_pairs_join_only_identical_fixture_settings_and_run_identity",
+            "test_p136_receipts_resume_without_overwriting_raw_and_reject_duplicate_or_conflicting_seed",
+            "test_p136_same_source_alias_is_smoke_only"
+          ]
+        },
+        {
+          "command": "source-bound-tests",
+          "kind": "unittest",
+          "minimum_passed": 4,
+          "required_names": [
+            "test_rejects_foreign_adapter_identity",
+            "test_rejects_candidate_binary_or_source_identity_change",
+            "test_rejects_smoke_only_or_incomplete_pair_receipts",
+            "test_rejects_checkpoint_or_raw_record_mutation"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/decision",
+          "op": "equal",
+          "value": "integrity"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/rows",
+          "op": "equal",
+          "value": 8
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/pairs",
+          "op": "equal",
+          "value": 32
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/runs",
+          "op": "equal",
+          "value": 2
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/core_build_budgets_reused",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Source-bound paired Register entry protocol foundation and non-promoting smoke only; no timing decision, threshold selection, or performance claim."
+    ]
+  }
+}

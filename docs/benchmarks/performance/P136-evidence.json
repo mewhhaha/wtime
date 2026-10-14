@@ -1,0 +1,40 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 14492,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P136-verification.json",
+    "sha256": "4a47fd358d7b4dc65b4830d9606127f3bf793615738b233d7ba4169e44ad0386"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Source-bound paired Register entry protocol foundation and non-promoting smoke only; no timing decision, threshold selection, or performance claim."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "freeze": {
+      "bytes": 697329,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/12/12999110c7d9ccba4ef3c3f2b6c07255d0921badb055db5058444af20cf9de37",
+      "sha256": "12999110c7d9ccba4ef3c3f2b6c07255d0921badb055db5058444af20cf9de37",
+      "stored_bytes": 697329,
+      "stored_sha256": "12999110c7d9ccba4ef3c3f2b6c07255d0921badb055db5058444af20cf9de37"
+    },
+    "verify": {
+      "bytes": 615374,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/9f/9f6d079d0f51fc911cc7dc26706b90ebc7f67f57fc86aad188913233b3c2edde",
+      "sha256": "9f6d079d0f51fc911cc7dc26706b90ebc7f67f57fc86aad188913233b3c2edde",
+      "stored_bytes": 615374,
+      "stored_sha256": "9f6d079d0f51fc911cc7dc26706b90ebc7f67f57fc86aad188913233b3c2edde"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P136"
+}
