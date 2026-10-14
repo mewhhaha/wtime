@@ -468,10 +468,8 @@
         ]
       },
       {
-        "name": "p056-simd-regression-tests",
         "commands": [
           {
-            "name": "p026-calibration-regression",
             "argv": [
               "{python}",
               "-B",
@@ -484,10 +482,10 @@
               "test_p026_calibration.py",
               "-v",
               "-b"
-            ]
+            ],
+            "name": "p026-calibration-regression"
           },
           {
-            "name": "p010-simd-regression",
             "argv": [
               "{python}",
               "-B",
@@ -500,10 +498,10 @@
               "test_p010_simd.py",
               "-v",
               "-b"
-            ]
+            ],
+            "name": "p010-simd-regression"
           },
           {
-            "name": "fast-simd-candidate-regression",
             "argv": [
               "{python}",
               "-B",
@@ -516,9 +514,11 @@
               "test_fast_simd_candidate.py",
               "-v",
               "-b"
-            ]
+            ],
+            "name": "fast-simd-candidate-regression"
           }
         ],
+        "name": "p056-simd-regression-tests",
         "outputs": {},
         "tests": [
           {
@@ -1139,7 +1139,6 @@
       ],
       "commands": [
         {
-          "name": "calibration-preflight",
           "argv": [
             "{python}",
             "-B",
@@ -1150,7 +1149,8 @@
             "{freeze_dir}/report.json",
             "--output",
             "{stage}/calibration"
-          ]
+          ],
+          "name": "calibration-preflight"
         },
         {
           "argv": [
@@ -1196,10 +1196,10 @@
         "verify"
       ],
       "outputs": {
+        "calibration": "{stage}/calibration/report.json",
         "individual": "{stage}/individual/report.json",
         "inventory": "{stage}/inventory.json",
-        "matrix": "{stage}/matrix/report.json",
-        "calibration": "{stage}/calibration/report.json"
+        "matrix": "{stage}/matrix/report.json"
       },
       "uses": [
         "compilation",
@@ -1664,7 +1664,9 @@
             "--output",
             "{stage}",
             "--frozen",
-            "{freeze_dir}/report.json"
+            "{freeze_dir}/report.json",
+            "--reuse-baselines",
+            "{repo}/target/verification/runs/P056/verify/attempt-0005"
           ],
           "name": "baseline-builds"
         },
@@ -1815,7 +1817,6 @@
           "name": "p121-coverage-validate"
         },
         {
-          "name": "p056-calibration-preflight-tests",
           "argv": [
             "{python}",
             "-B",
@@ -1824,10 +1825,10 @@
             "-v",
             "-b",
             "tools.verification.tests.test_p056_calibration_preflight"
-          ]
+          ],
+          "name": "p056-calibration-preflight-tests"
         },
         {
-          "name": "p056-typed-capacity-tests",
           "argv": [
             "{python}",
             "-B",
@@ -1836,10 +1837,10 @@
             "-v",
             "-b",
             "tools.wtime-bench.tests.test_p056_typed_capacity"
-          ]
+          ],
+          "name": "p056-typed-capacity-tests"
         },
         {
-          "name": "p055-batch-capacity-tests",
           "argv": [
             "{python}",
             "-B",
@@ -1848,10 +1849,10 @@
             "-v",
             "-b",
             "tools.wtime-bench.tests.test_p055_batch_capacity"
-          ]
+          ],
+          "name": "p055-batch-capacity-tests"
         },
         {
-          "name": "p026-calibration-regression",
           "argv": [
             "{python}",
             "-B",
@@ -1864,10 +1865,10 @@
             "test_p026_calibration.py",
             "-v",
             "-b"
-          ]
+          ],
+          "name": "p026-calibration-regression"
         },
         {
-          "name": "p010-simd-regression",
           "argv": [
             "{python}",
             "-B",
@@ -1880,10 +1881,10 @@
             "test_p010_simd.py",
             "-v",
             "-b"
-          ]
+          ],
+          "name": "p010-simd-regression"
         },
         {
-          "name": "fast-simd-candidate-regression",
           "argv": [
             "{python}",
             "-B",
@@ -1896,7 +1897,8 @@
             "test_fast_simd_candidate.py",
             "-v",
             "-b"
-          ]
+          ],
+          "name": "fast-simd-candidate-regression"
         },
         {
           "argv": [

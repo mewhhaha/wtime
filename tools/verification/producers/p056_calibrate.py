@@ -57,6 +57,23 @@ def group_key(group):
     return '/'.join((group['route'], group['selection'], group['entry']['id'], 'warm_call'))
 
 
+def unique_entries(groups):
+    entries = {}
+    for group in groups:
+        entry = group['entry']
+        if entry['id'] in entries:
+            old = entries[entry['id']]
+            need(old['source'] == entry['source']
+                 and old.get('oracle_arguments') == entry.get('oracle_arguments')
+                 and old['oracle']['module'] == entry['oracle']['module']
+                 and focused.input_value(old) == focused.input_value(entry)
+                 and focused.profile(old) == focused.profile(entry)
+                 and focused.batch_limit(old) == focused.batch_limit(entry),
+                 'workload identity differs between selections: ' + entry['id'])
+        entries[entry['id']] = entry
+    return entries
+
+
 def calibrate_groups(groups, observer, emit):
     """Collect diagnostic confirmations only, preserving every failed group."""
     expected = [group_key(group) for group in groups]
@@ -257,14 +274,7 @@ def run(args):
         encoder = original / 'binary/wtime-conformance'
         refs.append(ref(encoder))
         groups = warm_groups()
-        entries = {}
-        for group in groups:
-            entry = group['entry']
-            if entry['id'] in entries:
-                old = entries[entry['id']]
-                need(old['source'] == entry['source'] and old['oracle_arguments'] == entry['oracle_arguments'],
-                     'workload identity differs between selections: ' + entry['id'])
-            entries[entry['id']] = entry
+        entries = unique_entries(groups)
         fixtures_dir = output / 'fixtures'
         fixtures_dir.mkdir()
         fixtures = focused.prepare_fixtures(list(entries.values()), archive, fixtures_dir, encoder)

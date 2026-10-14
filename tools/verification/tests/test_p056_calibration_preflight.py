@@ -42,6 +42,10 @@ class P056CalibrationPreflightTests(unittest.TestCase):
         self.assertEqual(len(expected), 490)
         self.assertEqual(actual, expected)
         self.assertEqual(len(actual), len(set(actual)))
+        entries = producer.unique_entries(producer.warm_groups())
+        self.assertIn('call_overhead', entries)
+        self.assertNotIn('oracle_arguments', entries['call_overhead'])
+        self.assertEqual(set(entries), {group['entry']['id'] for group in producer.warm_groups()})
 
     def test_fast_numeric_calibration_exceeds_100k_on_both_sides(self):
         entry = {'id': 'synthetic-numeric', 'oracle': {'module': 'run.py'}}
