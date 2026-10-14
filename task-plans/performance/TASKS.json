@@ -81879,13 +81879,14 @@
         "P014",
         "P016",
         "P040",
-        "P058"
+        "P058",
+        "P061"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/register/control.rs",
         "crates/wtime-runtime/tests/performance/p060.rs"
       ],
-      "input_output_contract": "Register branch plans perform simultaneous edge-result moves with one bounded scratch slot for cycles; original block/loop/if/end/br events and logical labels remain reconstructible.",
+      "input_output_contract": "Register branch plans perform simultaneous edge-result moves with one bounded scratch slot for cycles; original block/loop/if/end/br events and logical labels remain reconstructible. P130 and P061 establish the checked move-plan foundation and initial Jump/Branch consumer; P060 retains the full control-transfer candidate gate, including structured control, br_table/return, exact source interruption state, cancellation, fuel and operand limits, fallback accounting, paired measurement and promotion.",
       "implementation_steps": [
         "Before runtime edits, create docs/benchmarks/performance/P060-selection.json and docs/benchmarks/performance/P060-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
         "Generate checked move lists for block results/loop parameters, remove self moves and reject invalid source/destination/type plans.",
@@ -81961,14 +81962,14 @@
         "P028",
         "P057",
         "P058",
-        "P060"
+        "P130"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/register/execute.rs",
         "crates/wtime-runtime/src/numeric.rs",
         "crates/wtime-runtime/tests/performance/p061.rs"
       ],
-      "input_output_contract": "A safe initialized u64 slot bank executes i32/i64 register operations with explicit bit-width semantics and exact source accounting; division/conversion helpers retain current trap rules.",
+      "input_output_contract": "A safe initialized u64 slot bank executes i32/i64 register operations with explicit bit-width semantics and exact source accounting; division/conversion helpers retain current trap rules. For control transfers, P061 implements only initial Jump/Branch operations using P130 plans and proves exact source fuel, cancellation and operand-limit materialization for that eligible subset; P060 retains broader cases and the full candidate gate.",
       "implementation_steps": [
         "Before runtime edits, create docs/benchmarks/performance/P061-selection.json and docs/benchmarks/performance/P061-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
         "Implement constants/moves/common arithmetic first, using safe slot bounds and wrapping operations with explicit i32 masking and signed interpretations.",
@@ -88018,6 +88019,98 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P129"
+      }
+    },
+    {
+      "id": "P130",
+      "key": "bounded-parallel-edge-moves",
+      "title": "Prepare bounded parallel register edge moves",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P057",
+        "P058"
+      ],
+      "owned_paths": [
+        "crates/wtime-runtime/src/execution/register/control.rs",
+        "crates/wtime-runtime/tests/performance/p130_private.rs",
+        "crates/wtime-runtime/tests/performance/p130.rs",
+        "crates/wtime-runtime/tests/performance.rs"
+      ],
+      "input_output_contract": "A bounded planner accepts typed source/destination slot moves and returns an immutable deterministic schedule that has the same result as simultaneous assignment. Numeric types describe values at the original source boundary: reads of one original source slot must agree on type, but target slots may be reused with another numeric type after the edge. It rejects out-of-range original slots, duplicate destinations, conflicting types for reads of the same original source slot, and work or byte budget excess before publication. It removes self-moves, schedules acyclic moves without overwriting a still-needed source, and breaks cycles with a symbolic Scratch value whose Save step records the NumericType. Save occurs before scratch-dependent reads; the one scratch value is reused across disconnected cycles, including mixed-type cycles. All four numeric types fit the safe u64 value representation; no scratch slot index is synthesized. Failure publishes no partial plan. The planner and its private unit tests compile only with register-executor, remain safe Rust, and do not expose a public planner API or select register execution.",
+      "implementation_steps": [
+        "Define private checked move-request and immutable move-plan types using bounded slot indices and source-boundary NumericType values; validate original source/destination slot bounds, unique destinations, and consistent numeric types for reads of each original source slot before producing output. Permit destination slot type reuse across the edge.",
+        "Remove identity moves and construct a deterministic schedule for acyclic components, selecting only moves whose destination is no longer needed as a source; preserve simultaneous-assignment semantics for arbitrary input order.",
+        "Detect cycles and break each with one symbolic Scratch value; emit Save with the saved NumericType before scratch-dependent reads, then reuse that scratch value across disconnected cycles including mixed-type cycles. All four numeric types fit the safe u64 value representation, so do not synthesize a scratch slot index or reject a scratch type; account schedule steps and encoded bytes against shared work/byte limits with checked arithmetic.",
+        "Reserve and validate the complete bounded output before allocating/publishing it; every limit or arithmetic failure returns a decline without an observable partial plan.",
+        "Add the four private named planner unit cases and compare bounded generated schedules with a test-only simultaneous-assignment oracle; add a separate public integration policy guard proving register execution remains unavailable when the feature is disabled."
+      ],
+      "fixture_cases": [
+        "p130_identity_and_acyclic_moves_preserve_simultaneous_results: empty and self-only requests produce an empty plan, while acyclic chains and fanout preserve every original source value.",
+        "p130_two_and_three_slot_cycles_use_bounded_scratch: swaps and rotations match simultaneous assignment; mixed-type disconnected cycles reuse one symbolic scratch, and the real P058 edge_values fixture shifts i32/i64 values into earlier temporary heights where a slot changes from i32 to i64 after its old value is read.",
+        "p130_invalid_requests_and_budget_failures_publish_nothing: duplicate destinations, conflicting NumericTypes for reads of the same old source slot, out-of-bounds slots, arithmetic overflow, and work/byte limits reject transactionally, while destination type reuse is permitted.",
+        "p130_bounded_generated_graphs_match_simultaneous_oracle: 4096 deterministic bounded all-i32 move graphs with bit-distinct source values produce exactly the test-only simultaneous-assignment result."
+      ],
+      "measurement_selection": "scalar",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C3",
+        "C6",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p130_ -- --nocapture",
+        "cargo test --locked -p wtime-runtime --test performance p130_register_policy_stays_unavailable_without_execution -- --nocapture",
+        "cargo check --locked -p wtime-runtime",
+        "cargo check --locked -p wtime-runtime --features register-executor"
+      ],
+      "path": "05-register-executor/P130-bounded-parallel-edge-moves.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P130/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "ecb263457e4a29db3cf4b774e6040b9e6f027a3f580506805e3d7849a327fa43",
+          "bytes": 1563
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.",
+      "minimum_focused_cases": 3,
+      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes for the four private unit cases, public policy guard, and feature configurations. Keep status pending until implementation and checks are executed; this planning change is not implementation evidence.",
+      "external_constraints": [
+        "original pinned core/proposal snapshot and exclusions",
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [
+        "python3 -B tools/wtime-bench/baseline.py --output target/performance/baseline",
+        "python3 -B tools/wtime-bench/baseline.py --output target/performance/P130-before --mode decoded"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P130/shared-finalization/attempt-0001/evidence.json": "ecb263457e4a29db3cf4b774e6040b9e6f027a3f580506805e3d7849a327fa43"
+        },
+        "evidence": [
+          {
+            "bytes": 1563,
+            "path": "/workspace/wtime/target/performance/P130/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "ecb263457e4a29db3cf4b774e6040b9e6f027a3f580506805e3d7849a327fa43"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P130"
       }
     }
   ]

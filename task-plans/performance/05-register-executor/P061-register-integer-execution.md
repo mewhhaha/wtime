@@ -26,7 +26,7 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P058 — Translate numeric stack code into direct slot operands](P058-stack-to-register-lowering.md)
 
-[P060 — Implement safe parallel moves and register control transfers](P060-register-edge-moves.md)
+[P130 — Prepare bounded parallel register edge moves](P130-bounded-parallel-edge-moves.md)
 
 ## Scope and ownership
 
@@ -40,7 +40,7 @@ One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; l
 
 ## Input/output contract
 
-A safe initialized u64 slot bank executes i32/i64 register operations with explicit bit-width semantics and exact source accounting; division/conversion helpers retain current trap rules.
+A safe initialized u64 slot bank executes i32/i64 register operations with explicit bit-width semantics and exact source accounting; division/conversion helpers retain current trap rules. For control transfers, P061 implements only initial Jump/Branch operations using P130 plans and proves exact source fuel, cancellation and operand-limit materialization for that eligible subset; P060 retains broader cases and the full candidate gate.
 
 ## Implementation recipe
 

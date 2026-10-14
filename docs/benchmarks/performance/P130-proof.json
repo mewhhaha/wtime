@@ -1,0 +1,67 @@
+{
+  "build_budgets": {
+    "default": {
+      "bytes": 273694,
+      "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/default-build.json",
+      "sha256": "591a78ae5323e398d2bb004104a2519d542207cf650354c940021b62c8896167"
+    },
+    "register": {
+      "bytes": 273857,
+      "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/register-build.json",
+      "sha256": "80bb01783f85b5a84148bb76a0a258827c9c4ceeaa5bb2210735cf9df8542c86"
+    }
+  },
+  "counts": {
+    "default_named_cases": 1,
+    "move_named_cases": 4,
+    "p057_compatibility_named_cases": 4,
+    "p058_compatibility_named_cases": 4
+  },
+  "move_marker": {
+    "charged_work": 2039355,
+    "graphs": 4096,
+    "retained_bytes": 851872,
+    "scheduled_steps": 18858,
+    "scratch_cycles": 2401
+  },
+  "move_stderr": {
+    "bytes": 788,
+    "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/move-tests.stderr",
+    "sha256": "d08c7437a3467597d2e52c9e5a22163ed5b9f7dfd50f903f3b427d0c3051edba"
+  },
+  "performance_candidate": false,
+  "schema": "wtime-p130-verification-v1",
+  "settings": {
+    "default_features": [],
+    "features": [
+      "register-executor",
+      "execution-reference"
+    ],
+    "instrumented": false
+  },
+  "speed_decision": null,
+  "status": "passed",
+  "test_logs": {
+    "default": {
+      "bytes": 188,
+      "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/default-tests.stdout",
+      "sha256": "3c86a24abe5704616485b95dee7641d1f2691969f11fa8ae1abd60e5b0dfbab4"
+    },
+    "moves": {
+      "bytes": 1293,
+      "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/move-tests.stdout",
+      "sha256": "49bb8648ca0fb07558a8f19de3f374dd4e771405b5bf1671499bb6ef1a29d789"
+    },
+    "p057_compatibility": {
+      "bytes": 1190,
+      "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/p057-compatibility.stdout",
+      "sha256": "ce89b601cdb6a92508d5ec545c44a50c528d4139f6c05e5979052bf857f974ae"
+    },
+    "p058_compatibility": {
+      "bytes": 1177,
+      "path": "/workspace/wtime/target/verification/runs/P130/verify/attempt-0001/p058-compatibility.stdout",
+      "sha256": "e7fddb1c6005fd334b5b45b6de66c391bcf91184ad0963a701986f1037fe3519"
+    }
+  },
+  "timing_evidence": false
+}

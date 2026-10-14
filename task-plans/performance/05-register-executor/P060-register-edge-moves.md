@@ -24,6 +24,8 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P058 — Translate numeric stack code into direct slot operands](P058-stack-to-register-lowering.md)
 
+[P061 — Execute checked integer register operations](P061-register-integer-execution.md)
+
 Optional results to review (do not block the portable path):
 
 [P059 — Try conservative temporary-slot reuse without global SSA](P059-bounded-slot-reuse.md)
@@ -35,11 +37,13 @@ Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and
 - `crates/wtime-runtime/src/execution/register/control.rs`
 - `crates/wtime-runtime/tests/performance/p060.rs`
 
+P130 supplies the checked immutable parallel-move planner and P061 establishes its initial Jump/Branch consumer. P060 remains responsible for the full control-transfer implementation and candidate gate: block/loop/if/end/br_table/return behavior, exact source-event and logical-height semantics, source-prefix interruption, fuel/cancellation/operand-limit materialization, optimized/fallback accounting, paired measurement, build budgets and promotion.
+
 One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.
 
 ## Input/output contract
 
-Register branch plans perform simultaneous edge-result moves with one bounded scratch slot for cycles; original block/loop/if/end/br events and logical labels remain reconstructible.
+Register branch plans perform simultaneous edge-result moves with one bounded scratch slot for cycles; original block/loop/if/end/br events and logical labels remain reconstructible. P130 and P061 establish the checked move-plan foundation and initial Jump/Branch consumer; P060 retains the full control-transfer candidate gate, including structured control, br_table/return, exact source interruption state, cancellation, fuel and operand limits, fallback accounting, paired measurement and promotion.
 
 ## Implementation recipe
 

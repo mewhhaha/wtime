@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=76, todo=53, in_progress=0, blocked=0, deferred=0 (129 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=77, todo=53, in_progress=0, blocked=0, deferred=0 (130 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -124,14 +124,15 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P057 — Define a small numeric register bytecode and eligibility rules](05-register-executor/P057-register-ir-contract.md) | foundation / portable | P018, P019, P020, P021, P056 |
 | [P058 — Translate numeric stack code into direct slot operands](05-register-executor/P058-stack-to-register-lowering.md) | foundation / portable | P037, P040, P057, P129 |
 | [P059 — Try conservative temporary-slot reuse without global SSA](05-register-executor/P059-bounded-slot-reuse.md) | experiment / optional | P002, P004, P005, P008, P014, P016, P058 |
-| [P060 — Implement safe parallel moves and register control transfers](05-register-executor/P060-register-edge-moves.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P040, P058 |
-| [P061 — Execute checked integer register operations](05-register-executor/P061-register-integer-execution.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P028, P057, P058, P060 |
+| [P060 — Implement safe parallel moves and register control transfers](05-register-executor/P060-register-edge-moves.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P040, P058, P061 |
+| [P061 — Execute checked integer register operations](05-register-executor/P061-register-integer-execution.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P028, P057, P058, P130 |
 | [P062 — Add strict floating-point register operations](05-register-executor/P062-register-float-execution.md) | candidate / portable | P002, P004, P005, P010, P014, P016, P039, P061 |
 | [P063 — Add direct checked unshared memory register operations](05-register-executor/P063-register-unshared-memory.md) | candidate / portable | P002, P004, P005, P009, P014, P016, P043, P061 |
 | [P064 — Exit register execution before calls and resume decoded state](05-register-executor/P064-register-call-exits.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P018, P022, P041, P061, P063 |
 | [P065 — Verify roots and captured state around register exits](05-register-executor/P065-register-root-and-capture-barriers.md) | gate / portable | P004, P005, P014, P022, P044, P062, P063, P064 |
 | [P066 — Compile register code lazily at bounded function thresholds](05-register-executor/P066-function-boundary-tiering.md) | candidate / portable | P002, P004, P005, P014, P015, P016, P057, P061, P062, P063, P064, P065 |
 | [P067 — Evaluate register execution and adaptive break-even](05-register-executor/P067-register-milestone.md) | gate / portable | P004, P005, P014, P015, P056, P057, P058, P060, P061, P062, P063, P064, P065, P066 |
+| [P130 — Prepare bounded parallel register edge moves](05-register-executor/P130-bounded-parallel-edge-moves.md) | foundation / portable | P057, P058 |
 
 ### 06-memory-gc-simd-and-continuations
 
