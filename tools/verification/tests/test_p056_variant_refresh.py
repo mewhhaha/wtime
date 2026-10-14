@@ -2,10 +2,11 @@
 from __future__ import annotations
 import hashlib
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[3]
@@ -13,6 +14,8 @@ SOURCE = ROOT / 'tools/verification/producers/p056_variants.py'
 spec = importlib.util.spec_from_file_location('p056_variants_under_test', SOURCE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+sys.path.insert(0, str(ROOT / 'tools/wtime-bench'))
+import focused_compare
 
 
 def digest(path):
@@ -20,23 +23,64 @@ def digest(path):
 
 
 class P056VariantRefreshTests(unittest.TestCase):
+    def test_prepare_observation_uses_zero_wire_oracle_and_null_result(self):
+        entry = {'id': 'prepare_large', 'oracle': {'module': 'run.py'},
+                 'driver': {'kind': 'legacy', 'profile': 'scalar'},
+                 'source': {'wasm_sha256': 'a' * 64}}
+        wire = {'schema_version': 2, 'case': 'prepare_large', 'stage': 'prepare',
+                'input': 0, 'expected': 0, 'result': None, 'mode': 'compact',
+                'ns_per_operation': 20.0, 'batch': 1}
+        with tempfile.TemporaryDirectory(prefix='p056-prepare-wire-') as temporary:
+            root = Path(temporary).resolve()
+            fixture = root / 'fixture.wasm'
+            self.assertTrue(fixture.resolve().is_relative_to(root))
+            with mock.patch.object(focused_compare.compare, 'process', return_value=wire) as process:
+                observation = focused_compare.observe(
+                    root / 'mock-bench', entry, fixture, 'prepare', 1, 'compact', 0, root)
+        process.assert_called_once()
+        self.assertTrue(module.validate_observation_identity(
+            observation, 'prepare_large', 'prepare', None))
+        self.assertEqual(observation['expected'], 0)
+        self.assertIsNone(observation['result'])
+
+        for changes in ({'stage': 'load_and_call'}, {'result': 0}, {'expected': None}):
+            forged = dict(observation)
+            forged.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                    ValueError, 'result or stage'):
+                module.validate_observation_identity(forged, 'prepare_large', 'prepare', None)
+
+    def test_nonprepare_observations_keep_strict_semantic_oracle(self):
+        observation = {'stage': 'load_and_call', 'expected': 17, 'result': 17}
+        self.assertTrue(module.validate_observation_identity(
+            observation, 'call_overhead', 'load_and_call', 17))
+        for changes in ({'stage': 'prepare'}, {'result': 18}, {'expected': 0}):
+            forged = dict(observation)
+            forged.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                    ValueError, 'result or stage'):
+                module.validate_observation_identity(
+                    forged, 'call_overhead', 'load_and_call', 17)
+
     def test_full_planned_groups_require_two_complete_pair_runs(self):
         plan = {'groups': [
             {'sample_workload': 'alpha', 'stage': 'prepare', 'product_sha256': 'a' * 64},
             {'sample_workload': 'beta', 'stage': 'warm_call', 'product_sha256': 'b' * 64},
             {'sample_workload': 'gamma', 'stage': 'load_and_call', 'product_sha256': 'c' * 64},
+            {'sample_workload': 'prepare_large', 'stage': 'prepare', 'product_sha256': 'd' * 64},
         ]}
         runs = []
         for run_id in (0, 1):
             pairs = []
             for group in plan['groups']:
                 for sample in range(30):
-                    observation = {'result': 7, 'expected': 7, 'stage': group['stage'],
+                    expected = None if group['sample_workload'] == 'prepare_large' else 7
+                    observation = {'result': expected, 'expected': 0 if expected is None else expected, 'stage': group['stage'],
                                    'batch': 1, 'ns_per_operation': 12.0}
                     pairs.append({'pair_id': f'{run_id}:{group['sample_workload']}:{group['stage']}:{sample}',
                                   'workload': group['sample_workload'], 'stage': group['stage'],
                                   'product_sha256': group['product_sha256'], 'order': ['baseline', 'candidate'],
-                                  'expected': 7, 'baseline': observation, 'candidate': observation})
+                                  'expected': expected, 'baseline': observation, 'candidate': observation})
             runs.append({'run_id': run_id, 'pairs': pairs})
         self.assertTrue(module.validate_pair_groups(runs, plan))
         runs[1]['pairs'].pop()

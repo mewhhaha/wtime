@@ -234,8 +234,10 @@
           {
             "command": "p056-variant-refresh-tests",
             "kind": "unittest",
-            "minimum_passed": 3,
+            "minimum_passed": 5,
             "required_names": [
+              "test_prepare_observation_uses_zero_wire_oracle_and_null_result",
+              "test_nonprepare_observations_keep_strict_semantic_oracle",
               "test_full_planned_groups_require_two_complete_pair_runs",
               "test_source_hash_mutation_is_rejected_inside_fresh_temp_root",
               "test_old_fusion_core_remains_archive_bound"
@@ -2005,8 +2007,10 @@
         {
           "command": "p056-variant-refresh-tests",
           "kind": "unittest",
-          "minimum_passed": 3,
+          "minimum_passed": 5,
           "required_names": [
+            "test_prepare_observation_uses_zero_wire_oracle_and_null_result",
+            "test_nonprepare_observations_keep_strict_semantic_oracle",
             "test_full_planned_groups_require_two_complete_pair_runs",
             "test_source_hash_mutation_is_rejected_inside_fresh_temp_root",
             "test_old_fusion_core_remains_archive_bound"

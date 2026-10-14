@@ -73,6 +73,15 @@ def expected_result(entry):
         return focused._p128_scalar_row(entry,n,'load_and_call','compact',1)[1]
     raise ValueError('unsupported P056 oracle module: '+str(module))
 
+def validate_observation_identity(observation, workload, stage, expected):
+    # The legacy preparation-only protocol has a numeric wire placeholder,
+    # while its independent result oracle is null: no guest call is timed.
+    wire_expected = 0 if workload == 'prepare_large' and stage == 'prepare' and expected is None else expected
+    if (observation.get('result') != expected or observation.get('expected') != wire_expected
+            or observation.get('stage') != stage):
+        raise ValueError('pair observation result or stage differs from expected oracle')
+    return True
+
 def validate_pair_groups(runs, plan, pair_count=30, entries=None, warm_batches=None):
     import math
     expected={(g['sample_workload'],g['stage']):g for g in plan['groups']}
@@ -98,8 +107,7 @@ def validate_pair_groups(runs, plan, pair_count=30, entries=None, warm_batches=N
                 ns=obs.get('ns_per_operation'); batch=obs.get('batch')
                 if isinstance(ns,bool) or not isinstance(ns,(int,float)) or not math.isfinite(ns) or ns<=0 or type(batch) is not int or batch<1:
                     raise ValueError('pair observation lacks valid timing identity')
-                if obs.get('result')!=pair.get('expected') or obs.get('expected')!=pair.get('expected') or obs.get('stage')!=key[1]:
-                    raise ValueError('pair observation result or stage differs from expected oracle')
+                validate_observation_identity(obs, key[0], key[1], pair.get('expected'))
                 required_batch=warm_batches.get((run_id,key[0],key[1]),1)
                 if batch!=required_batch: raise ValueError('pair batch differs from calibrated or cold batch')
             if entries is not None:
@@ -177,8 +185,9 @@ def validate_raw_report(report, report_path, *, check_sources=True):
             raise ValueError('invalid correctness probe identity')
         stage='prepare' if entry['id']=='prepare_large' else 'load_and_call'
         observation=probe.get('observation',{})
-        if probe.get('stage')!=stage or observation.get('stage')!=stage or observation.get('result')!=expected_result(entry):
+        if probe.get('stage')!=stage:
             raise ValueError('correctness probe differs from selected oracle')
+        validate_observation_identity(observation,entry['id'],stage,expected_result(entry))
         found_probes.add((entry['id'],probe['side']))
     if found_probes!=expected_probes: raise ValueError('correctness probe coverage differs from selection')
     if doc['counts']!=cold_products.summarize(plan,{f"{g['sample_workload']}\0{g['stage']}":60 for g in plan['groups']}):
@@ -320,9 +329,14 @@ def _report(task,declaration,entries,left,right,output,semantic,seed,cpu,inputs,
     fpaths=focused.prepare_fixtures(entries,archive,fixtures,encoder)
     fixture_refs={k:ref(v['path'] if isinstance(v,dict) else v) for k,v in fpaths.items()}
     plan=cold_products.plan(focused.products(entries,declaration,settings)); byid={e['id']:e for e in entries}
+    expected_by_id={entry['id']:expected_result(entry) for entry in entries}
     def call(side,wid,stage,batch):
         e=be if side=='baseline' else ce; entry=byid[wid]; fp=fpaths[wid]['path'] if isinstance(fpaths[wid],dict) else fpaths[wid]
-        return focused.observe(e,entry,fp,stage,batch,'compact',cpu,output)
+        observation=focused.observe(e,entry,fp,stage,batch,'compact',cpu,output)
+        # Exercise the report contract during the correctness probes, before
+        # collecting either paired run, and retain the actual validated wire.
+        validate_observation_identity(observation,wid,stage,expected_by_id[wid])
+        return observation
     report={'schema':SCHEMA,'schema_version':2,'task':task,'selection':task,'status':'running','passed':False,
         'source_stable':False,'instrumented':False,'declaration':declaration,'selection_ref':ref(P047_SEL if task=='P047' else P050_SEL),
         'semantic_provenance':semantic,'counterpart':{'baseline':brow,'candidate':crow},
@@ -356,7 +370,7 @@ def _report(task,declaration,entries,left,right,output,semantic,seed,cpu,inputs,
                     with (output.parent/'journal.jsonl').open('a') as stream:
                         stream.write(json.dumps({'event':'pair_observation','task':task,'pair_id':pair['pair_id'],
                             'side':side,'observation':pair[side]},sort_keys=True,allow_nan=False)+'\n')
-                pair['expected']=pair['baseline']['result']
+                pair['expected']=expected_by_id[wid]
                 run['pairs'].append(pair)
                 with (output/'pairs.jsonl').open('a') as stream:
                     stream.write(json.dumps(pair,sort_keys=True,allow_nan=False)+'\n')
