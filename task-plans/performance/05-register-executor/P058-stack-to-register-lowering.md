@@ -14,6 +14,8 @@ Kind: `foundation` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P057 — Define a small numeric register bytecode and eligibility rules](P057-register-ir-contract.md)
 
+[P129 — Add bounded source-visit selection to execution diagnostics](../01-execution-contracts/P129-source-visit-diagnostics.md)
+
 ## Scope and ownership
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C6, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).
@@ -25,7 +27,7 @@ One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; l
 
 ## Input/output contract
 
-The first lowering pass assigns fixed local slots and source stack-height slots to numeric values, translating pop/push to explicit operand/destination indices and recording block-entry stack layouts.
+The first lowering pass assigns fixed local slots and source stack-height slots to numeric values, translating pop/push to explicit operand/destination indices and recording block-entry stack layouts. Its decoded-prefix comparison uses P129 bounded source-visit selection to inspect every dynamic loop prefix at a chosen original function/PC occurrence.
 
 ## Implementation recipe
 

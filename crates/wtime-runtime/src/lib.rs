@@ -397,7 +397,7 @@ pub struct Store {
     #[cfg(feature = "execution-reference")]
     reference_dispatches: u64,
     #[cfg(feature = "execution-reference")]
-    materialization_request: Option<(usize, usize, usize)>,
+    materialization_request: Option<(usize, usize, usize, usize)>,
     #[cfg(feature = "execution-reference")]
     execution_snapshot: Option<DiagnosticSnapshot>,
     #[cfg(feature = "execution-reference")]

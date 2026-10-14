@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=74, todo=54, in_progress=0, blocked=0, deferred=0 (128 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=75, todo=54, in_progress=0, blocked=0, deferred=0 (129 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -55,6 +55,7 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P020 — Centralize exact source instruction accounting](01-execution-contracts/P020-exact-execution-accounting.md) | foundation / portable | P018, P019 |
 | [P021 — Compute bounded per-function execution metadata](01-execution-contracts/P021-function-execution-plans.md) | foundation / portable | P016, P018 |
 | [P022 — Add adversarial state and interaction tier fixtures](01-execution-contracts/P022-state-differential-fixtures.md) | foundation / portable | P011, P012, P014, P021 |
+| [P129 — Add bounded source-visit selection to execution diagnostics](01-execution-contracts/P129-source-visit-diagnostics.md) | foundation / portable | P018, P020, P057 |
 
 ### 02-structural-wins
 
@@ -121,7 +122,7 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | Task | Kind / branch | Prerequisites |
 | --- | --- | --- |
 | [P057 — Define a small numeric register bytecode and eligibility rules](05-register-executor/P057-register-ir-contract.md) | foundation / portable | P018, P019, P020, P021, P056 |
-| [P058 — Translate numeric stack code into direct slot operands](05-register-executor/P058-stack-to-register-lowering.md) | foundation / portable | P037, P040, P057 |
+| [P058 — Translate numeric stack code into direct slot operands](05-register-executor/P058-stack-to-register-lowering.md) | foundation / portable | P037, P040, P057, P129 |
 | [P059 — Try conservative temporary-slot reuse without global SSA](05-register-executor/P059-bounded-slot-reuse.md) | experiment / optional | P002, P004, P005, P008, P014, P016, P058 |
 | [P060 — Implement safe parallel moves and register control transfers](05-register-executor/P060-register-edge-moves.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P040, P058 |
 | [P061 — Execute checked integer register operations](05-register-executor/P061-register-integer-execution.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P028, P057, P058, P060 |

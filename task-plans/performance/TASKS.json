@@ -81715,13 +81715,14 @@
       "dependencies": [
         "P037",
         "P040",
-        "P057"
+        "P057",
+        "P129"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/register/lower.rs",
         "crates/wtime-runtime/tests/performance/p058.rs"
       ],
-      "input_output_contract": "The first lowering pass assigns fixed local slots and source stack-height slots to numeric values, translating pop/push to explicit operand/destination indices and recording block-entry stack layouts.",
+      "input_output_contract": "The first lowering pass assigns fixed local slots and source stack-height slots to numeric values, translating pop/push to explicit operand/destination indices and recording block-entry stack layouts. Its decoded-prefix comparison uses P129 bounded source-visit selection to inspect every dynamic loop prefix at a chosen original function/PC occurrence.",
       "implementation_steps": [
         "Walk validated structured control with an abstract typed stack; assign locals first and each temporary by checked stack height, preserving parameter/result block shapes.",
         "Emit explicit source operations and branch result move requests, using conservative stable slots across joins rather than building global SSA.",
@@ -87911,6 +87912,91 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P128"
+      }
+    },
+    {
+      "id": "P129",
+      "key": "source-visit-diagnostics",
+      "title": "Add bounded source-visit selection to execution diagnostics",
+      "group": "01-execution-contracts",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P018",
+        "P020",
+        "P057"
+      ],
+      "owned_paths": [
+        "crates/wtime-runtime/src/lib.rs",
+        "crates/wtime-runtime/src/execution/cursor.rs",
+        "crates/wtime-runtime/tests/performance/p129.rs",
+        "crates/wtime-runtime/tests/performance.rs"
+      ],
+      "input_output_contract": "Keep request_materialization_roundtrip(f, pc) as the zero-skip convenience API and forward it to request_materialization_roundtrip_after_visits(f, pc, skip_visits: usize). The new API rejects skip counts above 100000 with ResourceLimit before guest work. For a validated handle, guest and original function/PC, it counts only matching dynamic occurrences; when the requested occurrence is reached it performs the existing take/snapshot/restore once at the charged-before-fetch boundary. Nonmatching source visits do not consume the selector. Existing handle, guest and PC validation, source accounting, cancellation polling and guest prefix remain unchanged. When the selector is not reached, execution completes normally without taking or restoring a snapshot.",
+      "implementation_steps": [
+        "Inspect the existing request, boundary matching, and snapshot/restore flow; preserve the current API by forwarding it to the new visit-counted request with skip_visits zero.",
+        "Add a usize skip counter to the execution-reference materialization request, enforce the 100000 cap before guest execution, and decrement only when the active original instance, function and PC all match; trigger the existing one-time roundtrip when the counter reaches zero.",
+        "Preserve all current handle/guest/PC rejection and charged-before-fetch behavior, and ensure an unreached request returns the ordinary full execution result without snapshot/restore or altered guest work.",
+        "Add the three named integration tests, including the P047 loop’s third matching visit with exact state/fuel assertions and bounded nonmatching/unreached paths; register them in the existing performance test target."
+      ],
+      "fixture_cases": [
+        "p129_zero_skip_preserves_first_visit: the existing API and explicit zero skip roundtrip at the first matching occurrence and retain current validation and state behavior.",
+        "p129_later_loop_visit_keeps_exact_state_and_fuel: for the P047 branch_loop PC 8, skip two matches and roundtrip on visit three; assert counter 2, sum 16, step 8, exact 35 charged prefix events, remaining fuel 0 and pending charged instruction true, then observe ResourceLimit on invocation.",
+        "p129_invalid_visit_bound_and_unreached_request_are_bounded: skip above 100000 rejects before guest work; skip five beyond the loop’s five visits returns full result 32 with no snapshot/restore."
+      ],
+      "measurement_selection": "scalar",
+      "execution_mode": "decoded",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C3",
+        "C6",
+        "C7"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "cargo test --locked -p wtime-runtime --features execution-reference p129_ -- --nocapture",
+        "cargo check --locked -p wtime-runtime"
+      ],
+      "path": "01-execution-contracts/P129-source-visit-diagnostics.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P129/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "0c3c659a972308ab7312091e62c3fa8568b7004a68040ef07adcecad02032060",
+          "bytes": 1526
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.",
+      "minimum_focused_cases": 3,
+      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes, all three named cases, and confirmation that the default build excludes the hooks. Keep status pending until implementation and checks are executed; this planning change is not implementation evidence.",
+      "external_constraints": [
+        "original pinned core/proposal snapshot and exclusions",
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P129/shared-finalization/attempt-0002/evidence.json": "0c3c659a972308ab7312091e62c3fa8568b7004a68040ef07adcecad02032060"
+        },
+        "evidence": [
+          {
+            "bytes": 1526,
+            "path": "/workspace/wtime/target/performance/P129/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "0c3c659a972308ab7312091e62c3fa8568b7004a68040ef07adcecad02032060"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P129"
       }
     }
   ]

@@ -291,6 +291,17 @@ impl Store {
         function: Func,
         source_pc: usize,
     ) -> Result<()> {
+        self.request_materialization_roundtrip_after_visits(function, source_pc, 0)
+    }
+    /// Skip a bounded number of matching dynamic source visits before the
+    /// one-shot roundtrip. A request remains pending until its visit is reached
+    /// or another request replaces it; skipped visits do not capture state.
+    pub fn request_materialization_roundtrip_after_visits(
+        &mut self,
+        function: Func,
+        source_pc: usize,
+        skip_visits: usize,
+    ) -> Result<()> {
         let k = self.check(function.0, &self.funcs)?;
         let fun = &self.funcs[k];
         if fun.host.is_some() {
@@ -305,7 +316,10 @@ impl Store {
         if source_pc >= code.instructions.len() {
             return Err(err(ErrorKind::Host, "source cursor out of bounds"));
         }
-        self.materialization_request = Some((fun.instance, fun.body, source_pc));
+        if skip_visits > 100_000 {
+            return Err(err(ErrorKind::ResourceLimit, "diagnostic source visit bound exceeded"));
+        }
+        self.materialization_request = Some((fun.instance, fun.body, source_pc, skip_visits));
         self.execution_snapshot = None;
         Ok(())
     }
@@ -325,9 +339,14 @@ impl Store {
         let Some(frame) = frames.last() else {
             return Ok(());
         };
-        if self.materialization_request
-            != Some((frame.function.instance, frame.function.body, frame.pc))
-        {
+        let Some((instance, body, pc, remaining)) = self.materialization_request.as_mut() else {
+            return Ok(());
+        };
+        if (*instance, *body, *pc) != (frame.function.instance, frame.function.body, frame.pc) {
+            return Ok(());
+        }
+        if *remaining > 0 {
+            *remaining -= 1;
             return Ok(());
         }
         self.materialization_request = None;
