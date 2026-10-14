@@ -17,7 +17,10 @@ two tasks awaiting native AArch64 evidence; the performance plan had 67 done
 and 61 pending tasks. P050 was done with an inconclusive performance gate and
 its inliner retained in opt-in Compact. Decoded remains the default. P128 is
 now complete as a workload foundation; its reviewed proof and completion
-records are under `docs/benchmarks/performance/P128-*.json`. P127 is pending.
+records are under `docs/benchmarks/performance/P128-*.json`. P127 is also
+complete: explicit source-fuel settings passed 38 named checks and 184 real
+Wasm observations. Its reviewed records are under
+`docs/benchmarks/performance/P127-*.json`; they do not claim a speedup.
 The current task snapshot records subsequent progress. These records do not
 claim full conformance.
 

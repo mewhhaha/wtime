@@ -1,4 +1,6 @@
 //! Stable single-observation protocol shared with the frozen-core adapter.
+#[path = "fuel_policy.rs"]
+mod fuel_policy;
 #[cfg(not(feature = "legacy-api"))]
 #[path = "integration_driver.rs"]
 mod integration_driver;
@@ -53,11 +55,16 @@ fn configured_engine(config: Config, mode: &str) -> Engine {
     }
 }
 fn engine(mode: &str) -> Engine {
+    engine_with_fuel(mode, fuel_policy::FuelArgument::OMITTED)
+}
+fn engine_with_fuel(mode: &str, fuel: fuel_policy::FuelArgument) -> Engine {
+    let mut config = Config {
+        features: FeatureSet::mvp(),
+        ..Config::default()
+    };
+    fuel.configure(&mut config);
     configured_engine(
-        Config {
-            features: FeatureSet::mvp(),
-            ..Config::default()
-        },
+        config,
         mode,
     )
 }
@@ -156,7 +163,7 @@ pub fn try_main(args: &[String]) -> bool {
     if args.first().map(String::as_str) == Some("--protocol") {
         assert_eq!(args.len(), 1);
         println!(
-            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{}}}",
+            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{}}}",
             available_modes(),
             available_types(),
             cfg!(not(feature = "legacy-api")),
@@ -166,18 +173,16 @@ pub fn try_main(args: &[String]) -> bool {
                     feature = "performance-counters",
                     feature = "execution-reference"
                 )
-            ))
+            )),
+            fuel_policy::CONTRACT,
         );
         return true;
     }
     if args.first().map(String::as_str) != Some("--single-case") {
         return false;
     }
-    assert_eq!(
-        args.len(),
-        8,
-        "--single-case FILE CASE INPUT EXPECTED STAGE BATCH MODE"
-    );
+    let fuel = fuel_policy::FuelArgument::parse(args, 8)
+        .expect("--single-case FILE CASE INPUT EXPECTED STAGE BATCH MODE [--source-fuel none|50000000]");
     let bytes = std::fs::read(&args[1]).unwrap();
     let case = &args[2];
     assert!(
@@ -207,7 +212,7 @@ pub fn try_main(args: &[String]) -> bool {
         .contains(&stage)
     );
     // Preflight is outside each timing boundary; prepare-only has no call oracle.
-    let e = engine(mode);
+    let e = engine_with_fuel(mode, fuel);
     let module = e.compile(&bytes).unwrap();
     if case != "prepare_large" {
         let mut store = Store::new(&e);
@@ -218,7 +223,7 @@ pub fn try_main(args: &[String]) -> bool {
     let mut batch = 1;
     let ns = match stage {
         "prepare" => {
-            let e = engine(mode);
+            let e = engine_with_fuel(mode, fuel);
             let start = Instant::now();
             let module = e.compile(black_box(&bytes)).unwrap();
             let ns = start.elapsed().as_nanos() as f64;
@@ -226,7 +231,7 @@ pub fn try_main(args: &[String]) -> bool {
             ns
         }
         "load_and_call" => {
-            let e = engine(mode);
+            let e = engine_with_fuel(mode, fuel);
             let start = Instant::now();
             let module = e.compile(&bytes).unwrap();
             let mut store = Store::new(&e);
@@ -273,7 +278,8 @@ pub fn try_main(args: &[String]) -> bool {
         expected.to_string()
     };
     println!(
-        "{{\"schema_version\":2,\"case\":\"{case}\",\"stage\":\"{stage}\",\"input\":{input},\"expected\":{expected},\"result\":{result},\"batch\":{batch},\"ns_per_operation\":{ns:.3},\"mode\":\"{mode}\"}}"
+        "{{\"schema_version\":2,\"case\":\"{case}\",\"stage\":\"{stage}\",\"input\":{input},\"expected\":{expected},\"result\":{result},\"batch\":{batch},\"ns_per_operation\":{ns:.3},\"mode\":\"{mode}\"{}}}",
+        fuel.json_suffix(),
     );
     true
 }
@@ -293,6 +299,31 @@ fn quote(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(all(test, feature = "execution-reference", not(feature = "legacy-api")))]
+mod p127_tests {
+    use super::*;
+
+    #[test]
+    fn p127_single_case_builder_uses_selected_fuel_at_guest_source_boundary() {
+        const ADD: &[u8] = &[0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,7,7,1,3,114,117,110,0,0,10,9,1,7,0,32,0,65,1,106,11];
+        for mode in ["decoded"].into_iter().chain(cfg!(feature = "compact-executor").then_some("compact")) {
+            for policy in [fuel_policy::SourceFuel::Unmetered, fuel_policy::SourceFuel::Metered] {
+                let argument = fuel_policy::FuelArgument { policy, explicit: true };
+                let engine = engine_with_fuel(mode, argument);
+                let module = engine.compile(ADD).unwrap();
+                let mut store = Store::new(&engine);
+                let instance = Linker::new(&engine).instantiate(&mut store, &module).unwrap();
+                let function = exported(&store, instance);
+                store.request_materialization_roundtrip(function, 0).unwrap();
+                assert_eq!(call(&mut store, function, 3), 4);
+                let snapshot = store.execution_snapshot().unwrap();
+                assert_eq!(snapshot.remaining_fuel, policy.budget().map(|n| n - 1));
+                assert!(snapshot.pending_boundary_charged);
+            }
+        }
+    }
 }
 fn typed_engine(mode: &str, profile: &str) -> Engine {
     let features = match profile {

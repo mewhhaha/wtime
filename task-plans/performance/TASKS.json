@@ -87217,8 +87217,8 @@
       "key": "metered-unmetered-benchmark-setting",
       "title": "Bind metered and unmetered settings to staged benchmark runs",
       "group": "04-specialization-and-fusion",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "contract_only",
       "kind": "foundation",
       "dependencies": [
         "P002",
@@ -87232,7 +87232,6 @@
       "owned_paths": [
         "tools/wtime-bench/compare.py",
         "tools/wtime-bench/focused_compare.py",
-        "tools/wtime-bench/src/main.rs",
         "tools/wtime-bench/src/protocol.rs",
         "tools/wtime-bench/src/scalar_driver.rs",
         "tools/wtime-bench/p127_fuel_policy.py",
@@ -87240,23 +87239,62 @@
         "tools/verification/producers/p127_fuel.py",
         "tools/verification/tests/test_p127_fuel.py",
         "docs/benchmarks/performance/P127-selection.json",
-        "docs/benchmarks/performance/P127-verification.json"
+        "docs/benchmarks/performance/P127-verification.json",
+        "tools/wtime-bench/src/fuel_policy.rs",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/tests/test_p127_comparison.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py",
+        "tools/verification/producers/p127_driver_tests.py",
+        "tools/verification/producers/p127_semantics.py",
+        "tools/verification/producers/p127_fuel_cases.rs",
+        "tools/verification/producers/p127_prerequisite.py"
       ],
-      "input_output_contract": "Keep workload inputs fixed and run each declared row under both `unmetered` (`fuel=None`) and `metered` (`fuel=50_000_000`) settings. The frozen rows are `scalar_accumulator_n0`, `_n17`, `_n32`, `_n10000`; `scalar_dependent_n0`, `_n17`, `_n32`, `_n10000`; `call_overhead`; and `prepare_large`. Run every registry-declared stage for each row, both `decoded` and `compact` modes, and both fuel settings. These stage sets produce **184 distinct real row/stage/mode/fuel observations and driver commands**: nine rows with five stages plus `prepare_large` with `prepare`, across four mode/setting combinations. Warm calls use a fixed batch of three and bind it into the record; P127 does no warm-batch calibration or paired comparison. P053 later owns its declared 20 ms paired calibration, passing the same selected fuel policy to both sides. No aggregate statistics, speed gate, or promotion decision is part of P127.\n\nThe independent fuel proof separately establishes that sufficient `Some(50_000_000)` and `None` return the same exact result/state for every scalar proof row, that low budgets preserve P020's exact first-unexecuted boundary and remaining-fuel semantics, and that the reference accounting path agrees. Cancellation, prompt retirement, operand-height behavior, fuel-error priority, and continuation resume transitions retain existing P020 semantics.",
+      "input_output_contract": "Keep workload inputs fixed and run each declared row under both `unmetered` (`fuel=None`) and `metered` (`fuel=50_000_000`) settings. The frozen rows are `scalar_accumulator_n0`, `_n17`, `_n32`, `_n10000`; `scalar_dependent_n0`, `_n17`, `_n32`, `_n10000`; `call_overhead`; and `prepare_large`. Run every registry-declared stage for each row, both `decoded` and `compact` modes, and both fuel settings. These stage sets produce **184 distinct real row/stage/mode/fuel observations and driver commands**: nine rows with five stages plus `prepare_large` with `prepare`, across four mode/setting combinations. Warm calls use a fixed batch of three and bind it into the record; P127 does no warm-batch calibration or paired comparison. P053 later owns its declared 20 ms paired calibration, passing the same selected fuel policy to both sides. No aggregate statistics, speed gate, or promotion decision is part of P127.\n\nThe independent fuel proof separately establishes that sufficient `Some(50_000_000)` and `None` return the same exact result/state for every scalar proof row, that low budgets preserve P020's exact first-unexecuted boundary and remaining-fuel semantics, and that the reference accounting path agrees. Cancellation, prompt retirement, operand-height behavior, fuel-error priority, and continuation resume transitions retain existing P020 semantics. It covers nine scalar rows × three modes (`decoded`, `compact`, `execution-reference`) × two policies × three repeats (162 guest calls), plus nine execution-reference source-event probes. Separate diagnostics cover 24 low-fuel prefixes, 12 captured cursor windows, 27 None/Some continuation tuples (54 guest calls), and five merge/three priority unit tuples using the accounting helper. The source-test-only Rust copy is diagnostic; the actual runtime tree is not edited.",
       "implementation_steps": [
         "Before editing the harness, preserve and validate the current workload registry/selection identities and existing P020 source-bound fuel evidence. Add a P127 selection containing only the ten fixed rows above, their unchanged stages and inputs, and the explicit two-value fuel-policy axis. Do not add rows to `workloads.json`.",
         "Extend the scalar harness protocol with a typed fuel setting. `None` means unmetered; `Some(50_000_000)` means metered. Reject booleans, negative values, unsupported values, missing setting fields, and settings that drift between stages or are absent from an observation. Preserve the setting in command argv, source-bound identity, fixed-batch identity, report metadata, and every raw observation.",
-        "Keep execution mode, feature profile, fuel policy, and stage as separate typed fields. For `prepare`, record the selected setting even though no guest call occurs. For warm calls, bind the single selected policy and fixed batch of three to the observation; do not calibrate in P127. Keep production binaries uninstrumented and use the existing `compact-executor` feature only to expose the compact mode; `execution-reference` is confined to semantic tests/proof.",
-        "Add a separate proof producer that checks every expected row/stage/mode/policy tuple, invokes the real scalar driver, archives command/stdout/stderr before oracle validation, and rejects missing, duplicate, mixed-setting, instrumented, or source-drifted records. Its full close must collect all 184 observations and the independent fuel proof without running statistics."
+        "Keep execution mode, feature profile, fuel policy, and stage as separate typed fields. For `prepare`, record the selected setting even though no guest call occurs. For warm calls, bind the single selected policy and fixed batch of three to the observation; do not calibrate in P127. Keep production binaries uninstrumented: runtime-only for Decoded and `compact-executor` for Compact. Unit driver checks use runtime-only, `compact-executor`, and `execution-reference` feature configurations. The separate private fuel proof uses instrumented `compact-executor` plus `execution-reference` only for semantic diagnostics, never as a production measurement binary.",
+        "Add a separate proof producer that checks every expected row/stage/mode/policy tuple, invokes the real scalar driver, archives command/stdout/stderr before oracle validation, and rejects missing, duplicate, mixed-setting, instrumented, or source-drifted records. Its full close collects all 184 observations and the independent fuel proof without running statistics. The independent proof covers nine scalar rows × three modes × two policies × three repeats (162 guest calls) plus nine reference source-event probes; separate diagnostics retain 24 low-fuel prefixes, 12 cursor windows, 27 continuation tuples/54 guest calls, and five merge/three priority unit tuples."
       ],
       "fixture_cases": [
-        "test_metering_policy_is_required_typed_and_source_bound",
-        "test_command_policy_is_explicit_and_stage_settings_cannot_drift",
-        "test_metered_and_unmetered_rows_keep_the_same_result_oracle",
-        "test_fuel_boundary_proof_preserves_prefix_and_remaining_budget",
-        "test_resume_fuel_reactivates_metering_without_stale_state",
-        "test_full_184_row_stage_mode_policy_matrix_is_required",
-        "test_instrumented_or_source_drifted_timing_input_fails_closed"
+        "test_cli_value_requires_exact_well_typed_policy_dict",
+        "test_dependent_oracle_matches_literal_recurrence_in_admitted_wat",
+        "test_exact_typed_policy_and_cli_contract",
+        "test_fixed_matrix_is_46_rows_times_four_policies_modes",
+        "test_oracles_are_independent_and_prepare_has_null",
+        "test_protocol_contract_encodes_null_vs_exact_budget",
+        "test_registry_drift_rejects_without_mutating_source",
+        "test_validate_wire_setting_requires_presence_and_exact_json_types",
+        "test_actual_scalar_driver_wire_requires_typed_strings_and_policy_keys",
+        "test_full_184_policy_mode_stage_matrix_accepts_only_exact_tuple_set",
+        "test_mock_prepare_large_fixture_is_generated_encoded_and_mvp_validated_inside_attempt",
+        "test_protocol_mutation_is_rejected_and_protocol_logs_are_retained",
+        "test_raw_command_logs_exist_before_response_mismatch_and_escape_is_blocked",
+        "test_single_case_route_and_wire_cover_call_overhead_and_prepare_large",
+        "test_source_maps_use_p128_closure_and_record_protocol_mutations_abort_pre_guest",
+        "test_truthful_p128_record_shape_and_core_record_protocol_staleness_fail_closed",
+        "test_compare_routes_reject_missing_wrong_float_and_boolean_wire_budget",
+        "test_explicit_metered_and_unmetered_policies_route_through_both_compare_helpers",
+        "test_focused_observe_shares_same_setting_for_simulated_paired_sides",
+        "test_focused_prepare_large_is_numeric_single_case_and_returns_null",
+        "test_legacy_single_case_and_scalar_argv_remain_byte_for_byte_unchanged",
+        "test_unsupported_focused_family_fails_before_process_command",
+        "test_adapter_archive_corruption_is_still_rejected",
+        "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+        "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+        "test_focused_producer_changes_stale_focused_pairs",
+        "test_membership_changes_and_unknown_python_modules_fail_closed",
+        "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+        "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+        "p127_omitted_and_explicit_unmetered_preserve_distinct_wire_identity",
+        "p127_fixed_metered_policy_sets_fuel_without_changing_other_limits",
+        "p127_malformed_or_unsupported_fuel_arguments_are_rejected",
+        "p127_single_case_builder_uses_selected_fuel_at_guest_source_boundary",
+        "p127_scalar_builder_uses_selected_fuel_at_guest_source_boundary",
+        "p127_actual_accounting_merges_saved_fuel_once_and_preserves_error_priority",
+        "p127_scalar_policies_match_reference_and_refill_each_invocation",
+        "p127_low_fuel_prefixes_bind_memory_cursor_and_remaining_budget",
+        "p127_real_continuations_preserve_none_some_fuel_transitions"
       ],
       "measurement_selection": "scalar",
       "execution_mode": "decoded,compact",
@@ -87276,25 +87314,125 @@
       "test_commands": [
         "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P127-verification.json",
         "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group policy-model --execute",
+        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group producer-tests --execute",
+        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group paired-policy-interface --execute",
+        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group execution-identity --execute",
         "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group driver-protocol --execute",
-        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group independent-fuel-proof --execute",
-        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P127-verification.json --group staged-runtime --execute",
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P127-verification.json --output target/performance/P127/complete --execute"
       ],
       "path": "04-specialization-and-fusion/P127-metered-unmetered-benchmark-setting.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "cd1c924fb67c6236108caa38241d9dc538c4b22820d2cc7aa14c74c4372c0ab5",
+          "bytes": 1468
+        }
+      ],
       "branch": "portable",
       "decision_rule": "integrity",
       "reviews_optional_tasks": [],
-      "integration_owner": "One benchmark-harness integrator owns fuel-policy parsing, propagation, source binding, and the verification producer; runtime/core owners do not edit runtime sources.",
-      "minimum_focused_cases": 7,
-      "evidence_contract": "Record unchanged registry/selection identity, explicit single-command fuel setting, all 184 observations by row/stage/mode/policy, fixed warm batch three, separate Decoded(no runtime features)/Compact(compact-executor) production records, independent result and fuel-boundary proof, named test counts, and limitations. No paired timing comparison, statistics, or speed claim.",
+      "integration_owner": "One benchmark-harness integrator owns typed fuel-policy parsing, propagation, identity, and verification proofs; `tools/wtime-bench/src/main.rs` is unchanged and not required. Runtime/core owners do not edit the actual runtime source tree.",
+      "minimum_focused_cases": 38,
+      "evidence_contract": "Record unchanged registry/selection identity, explicit single-command `--source-fuel none|50000000` policy and backward-compatible omitted-flag behavior, all 184 real observations by row/stage/mode/policy, fixed warm batch three, separate source-current Decoded(no runtime features)/Compact(compact-executor) production records, 38 named checks (29 Python and 9 Rust), the 162 guest calls plus nine reference source-event probes, 24 low-fuel prefixes, 12 captured cursor windows, 27 continuation tuples/54 guest calls, five merge and three priority unit tuples, 12 current P020/P018/T145 prerequisite cases from the P050 354-case receipt, and limitations. Full close contains staged and independent proof; no statistics, speed claim, or promotion.",
       "external_constraints": [
         "Runtime/core source files and runtime semantics remain unchanged.",
         "Preserve per-source cancellation, prompt retirement, limits, and current/resume fuel behavior.",
-        "No added dependencies, unsafe code, Wasmtime comparison, or speed promotion."
+        "No added dependencies, unsafe code, Wasmtime comparison, or speed promotion.",
+        "Keep `tools/wtime-bench/src/main.rs` unchanged; it is not required for the policy interface.",
+        "Keep the copied Rust fuel-accounting source-test diagnostic separate from the actual runtime tree."
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/evidence.json": "cd1c924fb67c6236108caa38241d9dc538c4b22820d2cc7aa14c74c4372c0ab5"
+        },
+        "evidence": [
+          {
+            "bytes": 1468,
+            "path": "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "cd1c924fb67c6236108caa38241d9dc538c4b22820d2cc7aa14c74c4372c0ab5"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P127"
+      },
+      "completion_notes": {
+        "status": "done",
+        "outcome": "contract_only",
+        "attempt": "attempt-0001",
+        "completion_record": "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/completion.json",
+        "evidence_path": "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/evidence.json",
+        "evidence_sha256": "cd1c924fb67c6236108caa38241d9dc538c4b22820d2cc7aa14c74c4372c0ab5",
+        "evidence_bytes": 1468,
+        "verification_run": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001",
+        "verification_counts": {
+          "named_checks": 38,
+          "python_checks": 29,
+          "driver_rust_checks": 5,
+          "private_rust_checks": 4,
+          "failed": 0,
+          "ignored": 0,
+          "staged_observations": 184,
+          "staged_total_commands": 195,
+          "by_mode": {
+            "decoded": 92,
+            "compact": 92
+          },
+          "by_policy": {
+            "unmetered": 92,
+            "metered": 92
+          },
+          "observation_commands": 184,
+          "warm_batch": 3,
+          "registry_rows": 459,
+          "selection_rows": 10,
+          "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+          "production_instrumented": false,
+          "runtime_core_source_files_unchanged": 113
+        },
+        "independent_fuel_proof": {
+          "scalar_rows": 9,
+          "modes": [
+            "decoded",
+            "compact",
+            "execution-reference"
+          ],
+          "policies": [
+            "unmetered",
+            "metered"
+          ],
+          "repeats_per_tuple": 3,
+          "scalar_guest_calls": 162,
+          "reference_source_event_probes": 9,
+          "low_fuel_prefixes": 24,
+          "cursor_and_remaining_budget_windows": 12,
+          "continuation_transition_tuples": 27,
+          "continuation_guest_calls": 54,
+          "accounting_merge_tuples": 5,
+          "error_priority_tuples": 3,
+          "private_diagnostic_instrumented": true,
+          "diagnostic_test_only_append": true,
+          "runtime_core_unchanged": true,
+          "timing_evidence": false
+        },
+        "prerequisites": {
+          "current_source_cases": 12,
+          "receipt": "/workspace/wtime/target/verification/runs/P050/verify/attempt-0002/receipt.json",
+          "p050_case_count": 354
+        },
+        "initial_workspace_compile_failure": {
+          "path": "/workspace/wtime/target/performance/P127/independent-fuel-proof/attempt-0001/diagnostic-tests.stderr",
+          "detail": "The copied private diagnostic workspace lacked required P113 integration-control and prepare_large Wasm fixtures; compilation stopped before any guest execution.",
+          "retry_path": "/workspace/wtime/target/performance/P127/independent-fuel-proof/attempt-0002/diagnostic-tests.stderr",
+          "retry_result": "The fixtures were staged into the private workspace and the diagnostic test compilation/execution passed."
+        },
+        "limitations": [
+          "contract_only; no timing statistics or speed claims",
+          "No candidate was promoted",
+          "P053 owns later accounting optimization, paired calibration, and performance decisions"
+        ]
+      }
     },
     {
       "id": "P128",

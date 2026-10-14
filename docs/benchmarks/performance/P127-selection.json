@@ -1,0 +1,350 @@
+{
+  "expected_commands": 184,
+  "expected_stage_rows": 46,
+  "fuel_policies": [
+    {
+      "name": "unmetered",
+      "source_fuel": null
+    },
+    {
+      "name": "metered",
+      "source_fuel": 50000000
+    }
+  ],
+  "modes": [
+    "decoded",
+    "compact"
+  ],
+  "p125_fixture_tools": {
+    "path": "docs/benchmarks/performance/P125-fixture-tools.json",
+    "sha256": "cbbec91d1a4b7f4b6379ac11c2ad37059cfefaa27480beff958c0e3eaa80ff38"
+  },
+  "registry": {
+    "append_rows": 0,
+    "path": "tools/wtime-bench/workloads.json",
+    "rows": 459,
+    "sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668"
+  },
+  "rows": [
+    {
+      "expected": 0,
+      "id": "scalar_accumulator_n0",
+      "input": 0,
+      "params": [
+        {
+          "baseline": 0,
+          "max": 0,
+          "min": 0,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/accumulator.wat",
+        "sha256": "61aaec7a86d481378f31f3e27b0c1413684065841fa5909297181fcad9bef10d",
+        "wasm_sha256": "ef61bf7afc44af7b71ef78eadcba48c0d85949d7d9096df8fbbbab53c05036b1"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": 136,
+      "id": "scalar_accumulator_n17",
+      "input": 17,
+      "params": [
+        {
+          "baseline": 17,
+          "max": 17,
+          "min": 17,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/accumulator.wat",
+        "sha256": "61aaec7a86d481378f31f3e27b0c1413684065841fa5909297181fcad9bef10d",
+        "wasm_sha256": "ef61bf7afc44af7b71ef78eadcba48c0d85949d7d9096df8fbbbab53c05036b1"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": 496,
+      "id": "scalar_accumulator_n32",
+      "input": 32,
+      "params": [
+        {
+          "baseline": 32,
+          "max": 32,
+          "min": 32,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/accumulator.wat",
+        "sha256": "61aaec7a86d481378f31f3e27b0c1413684065841fa5909297181fcad9bef10d",
+        "wasm_sha256": "ef61bf7afc44af7b71ef78eadcba48c0d85949d7d9096df8fbbbab53c05036b1"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": 49995000,
+      "id": "scalar_accumulator_n10000",
+      "input": 10000,
+      "params": [
+        {
+          "baseline": 10000,
+          "max": 10000,
+          "min": 10000,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/accumulator.wat",
+        "sha256": "61aaec7a86d481378f31f3e27b0c1413684065841fa5909297181fcad9bef10d",
+        "wasm_sha256": "ef61bf7afc44af7b71ef78eadcba48c0d85949d7d9096df8fbbbab53c05036b1"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": 1,
+      "id": "scalar_dependent_n0",
+      "input": 0,
+      "params": [
+        {
+          "baseline": 0,
+          "max": 0,
+          "min": 0,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/dependent.wat",
+        "sha256": "0dd5e9778eb09bac9ee432e5fece3f432d034ea9878d2302972142501f0c60c6",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": -597485380,
+      "id": "scalar_dependent_n17",
+      "input": 17,
+      "params": [
+        {
+          "baseline": 17,
+          "max": 17,
+          "min": 17,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/dependent.wat",
+        "sha256": "0dd5e9778eb09bac9ee432e5fece3f432d034ea9878d2302972142501f0c60c6",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": 761386273,
+      "id": "scalar_dependent_n32",
+      "input": 32,
+      "params": [
+        {
+          "baseline": 32,
+          "max": 32,
+          "min": 32,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/dependent.wat",
+        "sha256": "0dd5e9778eb09bac9ee432e5fece3f432d034ea9878d2302972142501f0c60c6",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": -205621359,
+      "id": "scalar_dependent_n10000",
+      "input": 10000,
+      "params": [
+        {
+          "baseline": 10000,
+          "max": 10000,
+          "min": 10000,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "encoding_status": "encoded",
+        "kind": "wat_file",
+        "path": "fixtures/scalar/dependent.wat",
+        "sha256": "0dd5e9778eb09bac9ee432e5fece3f432d034ea9878d2302972142501f0c60c6",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": 101,
+      "id": "call_overhead",
+      "input": 100,
+      "params": [
+        {
+          "baseline": 100,
+          "max": 2147483647,
+          "min": 0,
+          "name": "n",
+          "type": "i32"
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/call_overhead.wat",
+        "sha256": "9493b8f751690a2fd6e8b19dcee5e2c1d50b717253d292ce34d5692b306663a5",
+        "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746"
+      },
+      "stages": [
+        "prepare",
+        "instantiate",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ]
+    },
+    {
+      "expected": null,
+      "id": "prepare_large",
+      "input": null,
+      "params": [],
+      "result": {
+        "type": "none"
+      },
+      "source": {
+        "kind": "deterministic_generator",
+        "path": "workloads.py:generate_prepare_large",
+        "sha256": "aefc7237fa17bfbccd8c318bc104111c8e3296933a94017837d2c02130d638fd",
+        "wasm_sha256": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0"
+      },
+      "stages": [
+        "prepare"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "selection_ids": [
+    "scalar_accumulator_n0",
+    "scalar_accumulator_n17",
+    "scalar_accumulator_n32",
+    "scalar_accumulator_n10000",
+    "scalar_dependent_n0",
+    "scalar_dependent_n17",
+    "scalar_dependent_n32",
+    "scalar_dependent_n10000",
+    "call_overhead",
+    "prepare_large"
+  ],
+  "speed_decision": null,
+  "stages": [
+    "prepare",
+    "instantiate",
+    "first_call",
+    "warm_call",
+    "load_and_call"
+  ],
+  "task": "P127",
+  "timing_analysis": false,
+  "warm_batch": 3
+}

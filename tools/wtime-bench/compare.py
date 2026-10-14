@@ -411,9 +411,15 @@ def validate_observation(data, case, stage, input_value, expected, batch, mode):
     if 'result' not in data or data['result'] != oracle: raise ComparisonError('oracle mismatch')
     return data
 
-def observation(exe, fixture, case, input_value, expected, stage, batch, mode, cpu):
+def observation(exe, fixture, case, input_value, expected, stage, batch, mode, cpu, fuel_setting=None):
     args=['--single-case',fixture,case,input_value,expected,stage,batch,mode]
-    return validate_observation(process(exe,args,cpu),case,stage,input_value,expected,batch,mode)
+    if fuel_setting is not None:
+        import p127_fuel_policy
+        args.extend(['--source-fuel',p127_fuel_policy.cli_value(fuel_setting)])
+    result=validate_observation(process(exe,args,cpu),case,stage,input_value,expected,batch,mode)
+    if fuel_setting is not None:
+        p127_fuel_policy.validate_wire_setting(result,fuel_setting)
+    return result
 
 def _typed_i32(value):
     if type(value) is not int:
@@ -422,9 +428,15 @@ def _typed_i32(value):
         raise ComparisonError('scalar oracle result is outside signed i32 range')
     return f'i32:{value}'
 
-def scalar_observation(exe, fixture, entry, input_value, expected, stage, batch, mode, cpu):
+def scalar_observation(exe, fixture, entry, input_value, expected, stage, batch, mode, cpu, fuel_setting=None):
     case=entry['id']; driver=entry['driver']['kind']; profile=entry['driver']['profile']
-    data=process(exe,['--scalar-driver',fixture,case,input_value,expected,stage,batch,mode,profile,driver],cpu)
+    argv=['--scalar-driver',fixture,case,input_value,expected,stage,batch,mode,profile,driver]
+    if fuel_setting is not None:
+        import p127_fuel_policy
+        argv.extend(['--source-fuel',p127_fuel_policy.cli_value(fuel_setting)])
+    data=process(exe,argv,cpu)
+    if fuel_setting is not None:
+        p127_fuel_policy.validate_wire_setting(data,fuel_setting)
     wanted={'schema_version':2,'case':case,'stage':stage,'input':_typed_i32(input_value),
             'expected':_typed_i32(expected),'mode':mode,'profile':profile,'driver':driver,
             }

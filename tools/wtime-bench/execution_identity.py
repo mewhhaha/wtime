@@ -43,7 +43,7 @@ _LEGACY_TIMING = {
     "gc_scaling.py", "gc_warm_workloads.py", "gc_workloads.py",
     "integration_compare.py", "integration_workflow.py",
     "integration_workloads.py", "memory_scaling.py", "memory_workloads.py",
-    "p027_memory_workloads.py", "p043_fixtures.py", "p128_scalar_scaling.py",
+    "p027_memory_workloads.py", "p043_fixtures.py", "p127_fuel_policy.py", "p128_scalar_scaling.py",
     "representative_compare.py",
     "representative_scaling.py", "representative_workloads.py",
     "scalar_p128_workloads.py", "scalar_workloads.py", "scaling.py", "simd_scaling.py",

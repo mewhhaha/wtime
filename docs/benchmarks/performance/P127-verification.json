@@ -1,0 +1,1015 @@
+{
+  "completion": {
+    "limitations": [
+      "Fixed10rows/184stagedobservations and9scalarrows only. None andSome(50_000_000) are explicit source budgets; warmbatch3; no pairedstatistics/calibration/speedclaims.",
+      "Productionrecords are uninstrumented Decoded/Compact; independent guestfuelproof uses an exact current-core copy with a test-only appended diagnostic module.",
+      "No current runtime/core source changes. P053 owns later accounting optimization, pairedcalibration andperformance decision."
+    ],
+    "outcome": "contract_only",
+    "required_phases": [
+      "verify"
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p127_fuel_setting.py",
+              "-v",
+              "-b"
+            ],
+            "name": "policy-model"
+          }
+        ],
+        "name": "policy-model",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "policy-model",
+            "kind": "unittest",
+            "minimum_passed": 8,
+            "required_names": [
+              "test_exact_typed_policy_and_cli_contract",
+              "test_protocol_contract_encodes_null_vs_exact_budget",
+              "test_fixed_matrix_is_46_rows_times_four_policies_modes",
+              "test_oracles_are_independent_and_prepare_has_null",
+              "test_dependent_oracle_matches_literal_recurrence_in_admitted_wat",
+              "test_registry_drift_rejects_without_mutating_source",
+              "test_cli_value_requires_exact_well_typed_policy_dict",
+              "test_validate_wire_setting_requires_presence_and_exact_json_types"
+            ]
+          }
+        ],
+        "uses": [
+          "harness",
+          "producer",
+          "tests",
+          "selection"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_p127_fuel.py",
+              "-v",
+              "-b"
+            ],
+            "name": "producer-tests"
+          }
+        ],
+        "name": "producer-tests",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "producer-tests",
+            "kind": "unittest",
+            "minimum_passed": 8,
+            "required_names": [
+              "test_actual_scalar_driver_wire_requires_typed_strings_and_policy_keys",
+              "test_single_case_route_and_wire_cover_call_overhead_and_prepare_large",
+              "test_full_184_policy_mode_stage_matrix_accepts_only_exact_tuple_set",
+              "test_truthful_p128_record_shape_and_core_record_protocol_staleness_fail_closed",
+              "test_protocol_mutation_is_rejected_and_protocol_logs_are_retained",
+              "test_source_maps_use_p128_closure_and_record_protocol_mutations_abort_pre_guest",
+              "test_raw_command_logs_exist_before_response_mismatch_and_escape_is_blocked",
+              "test_mock_prepare_large_fixture_is_generated_encoded_and_mvp_validated_inside_attempt"
+            ]
+          }
+        ],
+        "uses": [
+          "harness",
+          "producer",
+          "tests",
+          "selection"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p127_comparison.py",
+              "-v",
+              "-b"
+            ],
+            "name": "paired-policy-interface"
+          }
+        ],
+        "name": "paired-policy-interface",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "paired-policy-interface",
+            "kind": "unittest",
+            "minimum_passed": 6,
+            "required_names": [
+              "test_legacy_single_case_and_scalar_argv_remain_byte_for_byte_unchanged",
+              "test_explicit_metered_and_unmetered_policies_route_through_both_compare_helpers",
+              "test_compare_routes_reject_missing_wrong_float_and_boolean_wire_budget",
+              "test_focused_observe_shares_same_setting_for_simulated_paired_sides",
+              "test_focused_prepare_large_is_numeric_single_case_and_returns_null",
+              "test_unsupported_focused_family_fails_before_process_command"
+            ]
+          }
+        ],
+        "uses": [
+          "harness",
+          "producer",
+          "tests",
+          "selection"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_execution_identity.py",
+              "-v",
+              "-b"
+            ],
+            "name": "execution-identity"
+          }
+        ],
+        "name": "execution-identity",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "execution-identity",
+            "kind": "unittest",
+            "minimum_passed": 7,
+            "required_names": [
+              "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+              "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+              "test_membership_changes_and_unknown_python_modules_fail_closed",
+              "test_focused_producer_changes_stale_focused_pairs",
+              "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+              "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+              "test_adapter_archive_corruption_is_still_rejected"
+            ]
+          }
+        ],
+        "uses": [
+          "harness",
+          "producer",
+          "tests",
+          "selection"
+        ]
+      },
+      {
+        "checks": [
+          {
+            "artifact": "driver_proof",
+            "op": "equal",
+            "pointer": "/status",
+            "value": "passed"
+          },
+          {
+            "artifact": "driver_proof",
+            "op": "equal",
+            "pointer": "/source_stable",
+            "value": true
+          },
+          {
+            "artifact": "driver_proof",
+            "op": "equal",
+            "pointer": "/tests/passed",
+            "value": 5
+          },
+          {
+            "artifact": "driver_proof",
+            "op": "equal",
+            "pointer": "/tests/failed",
+            "value": 0
+          },
+          {
+            "artifact": "driver_proof",
+            "op": "equal",
+            "pointer": "/tests/ignored",
+            "value": 0
+          },
+          {
+            "artifact": "driver_proof",
+            "op": "equal",
+            "pointer": "/features",
+            "value": [
+              "runtime-only",
+              "compact-executor",
+              "execution-reference"
+            ]
+          }
+        ],
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/p127_driver_tests.py",
+              "--output",
+              "{stage}/driver-protocol"
+            ],
+            "name": "driver-protocol"
+          }
+        ],
+        "name": "driver-protocol",
+        "outputs": {
+          "driver_proof": "{stage}/driver-protocol/report.json"
+        },
+        "tests": [],
+        "uses": [
+          "runtime",
+          "compilation",
+          "harness",
+          "producer",
+          "tests"
+        ]
+      }
+    ]
+  },
+  "identities": {
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**"
+      ]
+    },
+    "harness": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wat",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/fixtures/exceptions/**/*.wat",
+        "tools/wtime-bench/fixtures/gc/**/*.wasm",
+        "tools/wtime-bench/fixtures/gc/**/*.wat",
+        "tools/wtime-bench/fixtures/memory/**/*.wat",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/scalar/**/*.wat",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/**/Cargo.toml",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/p128_scalar_scaling.py"
+      ],
+      "settings": {
+        "foundation": true,
+        "fuel_policies": [
+          {
+            "name": "unmetered",
+            "source_fuel": null
+          },
+          {
+            "name": "metered",
+            "source_fuel": 50000000
+          }
+        ],
+        "modes": [
+          "decoded",
+          "compact"
+        ],
+        "profile": "mvp",
+        "warm_batch": 3
+      }
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P127/before/attempt-0001/receipt.json",
+        "target/performance/P127/before/attempt-0001/source/**",
+        "target/performance/P127/before/attempt-0001/production/**",
+        "target/verification/runs/P050/verify/attempt-0002/receipt.json"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p127_fuel.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "docs/benchmarks/performance/P125-fixture-tools.json",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/verification/artifacts.py",
+        "tools/verification/runner.py",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/producers/p127_prerequisite.py",
+        "tools/verification/producers/p127_driver_tests.py",
+        "tools/verification/producers/p127_semantics.py",
+        "tools/verification/producers/p127_fuel_cases.rs",
+        "tools/verification/contracts.py"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "selection": {
+      "paths": [
+        "docs/benchmarks/performance/P127-selection.json",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/p127_fuel_policy.py"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p127_fuel_setting.py",
+        "tools/wtime-bench/tests/test_p127_comparison.py",
+        "tools/verification/tests/test_p127_fuel.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py"
+      ]
+    }
+  },
+  "schema_version": 1,
+  "source_delta": {
+    "allowed_additions": [],
+    "allowed_changes": [],
+    "baseline": "target/performance/P127/before/attempt-0001/receipt.json",
+    "identity": "runtime",
+    "pointer": "/runtime_sources"
+  },
+  "stages": {
+    "verify": {
+      "checks": [
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "decoded"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": []
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/protocol/source_fuel_contract",
+          "value": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          }
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "compact"
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": [
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "compact_record",
+          "op": "equal",
+          "pointer": "/protocol/source_fuel_contract",
+          "value": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          }
+        },
+        {
+          "artifact": "driver_proof",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "prerequisite",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/timing_analysis",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/registry_rows",
+          "value": 459
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/registry_sha256",
+          "value": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668"
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/selection_count",
+          "value": 10
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/matrix_rows",
+          "value": 184
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/observations",
+          "value": 184
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/observation_commands",
+          "value": 184
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_mode/decoded",
+          "value": 92
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_mode/compact",
+          "value": 92
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_policy/unmetered",
+          "value": 92
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/counts/by_policy/metered",
+          "value": 92
+        },
+        {
+          "artifact": "proof",
+          "op": "equal",
+          "pointer": "/warm_batch",
+          "value": 3
+        },
+        {
+          "artifact": "driver_proof",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "driver_proof",
+          "op": "equal",
+          "pointer": "/tests/passed",
+          "value": 5
+        },
+        {
+          "artifact": "driver_proof",
+          "op": "equal",
+          "pointer": "/tests/failed",
+          "value": 0
+        },
+        {
+          "artifact": "driver_proof",
+          "op": "equal",
+          "pointer": "/tests/ignored",
+          "value": 0
+        },
+        {
+          "artifact": "driver_proof",
+          "op": "equal",
+          "pointer": "/features",
+          "value": [
+            "runtime-only",
+            "compact-executor",
+            "execution-reference"
+          ]
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/runtime_core_unchanged",
+          "value": true
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/tests/passed",
+          "value": 4
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/tests/failed",
+          "value": 0
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/tests/ignored",
+          "value": 0
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/features",
+          "value": [
+            "compact-executor",
+            "execution-reference"
+          ]
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/scalar_rows",
+          "value": 9
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/scalar_mode_policy_tuples",
+          "value": 54
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/scalar_guest_calls",
+          "value": 162
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/independent_reference_probes",
+          "value": 9
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/low_fuel_prefixes",
+          "value": 24
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/cursor_and_remaining_budget_windows",
+          "value": 12
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/continuation_transition_tuples",
+          "value": 27
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/continuation_guest_calls",
+          "value": 54
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/accounting_merge_tuples",
+          "value": 5
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/error_priority_tuples",
+          "value": 3
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/source_fuel_includes_implicit_end",
+          "value": true
+        },
+        {
+          "artifact": "independent_proof",
+          "op": "equal",
+          "pointer": "/diagnostic_test_only_append",
+          "value": true
+        },
+        {
+          "artifact": "prerequisite",
+          "op": "equal",
+          "pointer": "/required_case_count",
+          "value": 12
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p127_fuel_setting.py",
+            "-v",
+            "-b"
+          ],
+          "name": "policy-model"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p127_fuel.py",
+            "-v",
+            "-b"
+          ],
+          "name": "producer-tests"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p127_comparison.py",
+            "-v",
+            "-b"
+          ],
+          "name": "paired-policy-interface"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_execution_identity.py",
+            "-v",
+            "-b"
+          ],
+          "name": "execution-identity"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p127_prerequisite.py",
+            "--receipt",
+            "{repo}/target/verification/runs/P050/verify/attempt-0002/receipt.json",
+            "--output",
+            "{stage}/prerequisite.json"
+          ],
+          "name": "accounting-prerequisite"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/decoded"
+          ],
+          "name": "build-decoded"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "compact",
+            "--output",
+            "{stage}/compact"
+          ],
+          "name": "build-compact"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p127_driver_tests.py",
+            "--output",
+            "{stage}/driver-protocol"
+          ],
+          "name": "driver-protocol"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p127_fuel.py",
+            "--decoded-record",
+            "{stage}/decoded/build-record.json",
+            "--compact-record",
+            "{stage}/compact/build-record.json",
+            "--registry",
+            "{repo}/tools/wtime-bench/workloads.json",
+            "--lock",
+            "{repo}/docs/benchmarks/performance/P125-fixture-tools.json",
+            "--output",
+            "{stage}/staged-runtime"
+          ],
+          "name": "staged-runtime"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p127_semantics.py",
+            "--proof",
+            "{stage}/staged-runtime/report.json",
+            "--output",
+            "{stage}/independent-fuel-proof"
+          ],
+          "name": "independent-fuel-proof"
+        }
+      ],
+      "outputs": {
+        "compact_record": "{stage}/compact/build-record.json",
+        "decoded_record": "{stage}/decoded/build-record.json",
+        "driver_proof": "{stage}/driver-protocol/report.json",
+        "independent_proof": "{stage}/independent-fuel-proof/report.json",
+        "prerequisite": "{stage}/prerequisite.json",
+        "proof": "{stage}/staged-runtime/report.json"
+      },
+      "tests": [
+        {
+          "command": "policy-model",
+          "kind": "unittest",
+          "minimum_passed": 8,
+          "required_names": [
+            "test_exact_typed_policy_and_cli_contract",
+            "test_protocol_contract_encodes_null_vs_exact_budget",
+            "test_fixed_matrix_is_46_rows_times_four_policies_modes",
+            "test_oracles_are_independent_and_prepare_has_null",
+            "test_dependent_oracle_matches_literal_recurrence_in_admitted_wat",
+            "test_registry_drift_rejects_without_mutating_source",
+            "test_cli_value_requires_exact_well_typed_policy_dict",
+            "test_validate_wire_setting_requires_presence_and_exact_json_types"
+          ]
+        },
+        {
+          "command": "producer-tests",
+          "kind": "unittest",
+          "minimum_passed": 8,
+          "required_names": [
+            "test_actual_scalar_driver_wire_requires_typed_strings_and_policy_keys",
+            "test_single_case_route_and_wire_cover_call_overhead_and_prepare_large",
+            "test_full_184_policy_mode_stage_matrix_accepts_only_exact_tuple_set",
+            "test_truthful_p128_record_shape_and_core_record_protocol_staleness_fail_closed",
+            "test_protocol_mutation_is_rejected_and_protocol_logs_are_retained",
+            "test_source_maps_use_p128_closure_and_record_protocol_mutations_abort_pre_guest",
+            "test_raw_command_logs_exist_before_response_mismatch_and_escape_is_blocked",
+            "test_mock_prepare_large_fixture_is_generated_encoded_and_mvp_validated_inside_attempt"
+          ]
+        },
+        {
+          "command": "paired-policy-interface",
+          "kind": "unittest",
+          "minimum_passed": 6,
+          "required_names": [
+            "test_legacy_single_case_and_scalar_argv_remain_byte_for_byte_unchanged",
+            "test_explicit_metered_and_unmetered_policies_route_through_both_compare_helpers",
+            "test_compare_routes_reject_missing_wrong_float_and_boolean_wire_budget",
+            "test_focused_observe_shares_same_setting_for_simulated_paired_sides",
+            "test_focused_prepare_large_is_numeric_single_case_and_returns_null",
+            "test_unsupported_focused_family_fails_before_process_command"
+          ]
+        },
+        {
+          "command": "execution-identity",
+          "kind": "unittest",
+          "minimum_passed": 7,
+          "required_names": [
+            "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+            "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+            "test_membership_changes_and_unknown_python_modules_fail_closed",
+            "test_focused_producer_changes_stale_focused_pairs",
+            "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+            "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+            "test_adapter_archive_corruption_is_still_rejected"
+          ]
+        }
+      ],
+      "uses": [
+        "build_producer",
+        "compilation",
+        "harness",
+        "predecessor",
+        "producer",
+        "runtime",
+        "selection",
+        "tests"
+      ]
+    }
+  },
+  "task": "P127"
+}

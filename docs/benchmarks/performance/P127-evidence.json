@@ -1,0 +1,33 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 30174,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P127-verification.json",
+    "sha256": "1001491b35419962c5049e418296b33a390e9df9bc9e9ae05748be6b4459b2d4"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Fixed10rows/184stagedobservations and9scalarrows only. None andSome(50_000_000) are explicit source budgets; warmbatch3; no pairedstatistics/calibration/speedclaims.",
+    "Productionrecords are uninstrumented Decoded/Compact; independent guestfuelproof uses an exact current-core copy with a test-only appended diagnostic module.",
+    "No current runtime/core source changes. P053 owns later accounting optimization, pairedcalibration andperformance decision."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "verify": {
+      "bytes": 812508,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/6c/6ccea0409664f7729c7ba368e2f4ef667d8718329852f5b73dc9fca35ecc8e5e",
+      "sha256": "6ccea0409664f7729c7ba368e2f4ef667d8718329852f5b73dc9fca35ecc8e5e",
+      "stored_bytes": 812508,
+      "stored_sha256": "6ccea0409664f7729c7ba368e2f4ef667d8718329852f5b73dc9fca35ecc8e5e"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P127"
+}

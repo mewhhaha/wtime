@@ -75,6 +75,10 @@ mod current {
     }
 
     fn configured_engine(mode: &str, profile: &str, bounded_depth: bool) -> Result<Engine, String> {
+        configured_engine_with_fuel(mode, profile, bounded_depth, super::super::fuel_policy::FuelArgument::OMITTED)
+    }
+
+    fn configured_engine_with_fuel(mode: &str, profile: &str, bounded_depth: bool, fuel: super::super::fuel_policy::FuelArgument) -> Result<Engine, String> {
         #[cfg(not(feature = "legacy-api"))]
         let policy = match mode {
             "decoded" => ExecutionPolicy::Decoded,
@@ -101,6 +105,7 @@ mod current {
         if bounded_depth {
             config.limits.max_call_depth = 32;
         }
+        fuel.configure(&mut config);
         #[cfg(feature = "legacy-api")]
         {
             if mode != "decoded" { return Err(format!("unavailable P001 mode {mode}")); }
@@ -217,6 +222,7 @@ mod current {
         mode: &str,
         profile: &str,
         driver: Driver,
+        fuel: super::super::fuel_policy::FuelArgument,
     ) {
         let driver = match driver {
             Driver::Plain => "plain",
@@ -229,7 +235,7 @@ mod current {
             Driver::TailProbe => unreachable!(),
         };
         println!(
-            "{{\"schema_version\":2,\"case\":{},\"stage\":{},\"input\":{},\"expected\":{},\"result\":{},\"batch\":{},\"ns_per_operation\":{:.3},\"mode\":{},\"profile\":{},\"driver\":{},\"diagnostic\":false}}",
+            "{{\"schema_version\":2,\"case\":{},\"stage\":{},\"input\":{},\"expected\":{},\"result\":{},\"batch\":{},\"ns_per_operation\":{:.3},\"mode\":{},\"profile\":{},\"driver\":{},\"diagnostic\":false{}}}",
             quote(case),
             quote(stage),
             quote(&format!("i32:{input}")),
@@ -240,6 +246,7 @@ mod current {
             quote(mode),
             quote(profile),
             quote(driver),
+            fuel.json_suffix(),
         );
     }
 
@@ -555,11 +562,8 @@ mod current {
             Some("--scalar-driver") => {}
             _ => return false,
         }
-        assert_eq!(
-            args.len(),
-            10,
-            "--scalar-driver FILE CASE INPUT EXPECTED STAGE BATCH MODE PROFILE DRIVER"
-        );
+        let fuel = super::super::fuel_policy::FuelArgument::parse(args, 10)
+            .expect("--scalar-driver FILE CASE INPUT EXPECTED STAGE BATCH MODE PROFILE DRIVER [--source-fuel none|50000000]");
         let bytes = std::fs::read(&args[1]).unwrap();
         let case = args[2].as_str();
         assert!(
@@ -591,7 +595,8 @@ mod current {
         );
         if driver.is_probe() {
             let bounded_depth = matches!(driver, Driver::DepthProbe | Driver::TailProbe);
-            let engine = configured_engine(mode, profile, bounded_depth)
+            assert!(!fuel.explicit, "source-fuel timing option is not supported by probe drivers");
+            let engine = configured_engine_with_fuel(mode, profile, bounded_depth, fuel)
                 .unwrap_or_else(|reason| panic!("invalid scalar-driver configuration: {reason}"));
             let module = engine.compile(&bytes).unwrap();
             probe(
@@ -604,7 +609,7 @@ mod current {
                 || driver == Driver::HostTick
                 || driver.table_target().is_some()
         );
-        let engine = configured_engine(mode, profile, false)
+        let engine = configured_engine_with_fuel(mode, profile, false, fuel)
             .unwrap_or_else(|reason| panic!("invalid scalar-driver configuration: {reason}"));
         let module = engine.compile(&bytes).unwrap();
 
@@ -617,7 +622,7 @@ mod current {
             "prepare" => {
                 // A new Engine keeps canonical interning work out of the timed compile.
                 let prepare_engine =
-                    configured_engine(mode, profile, false).unwrap_or_else(|reason| {
+                    configured_engine_with_fuel(mode, profile, false, fuel).unwrap_or_else(|reason| {
                         panic!("invalid scalar-driver configuration: {reason}")
                     });
                 let start = Instant::now();
@@ -642,7 +647,7 @@ mod current {
             }
             "load_and_call" => {
                 let load_engine =
-                    configured_engine(mode, profile, false).unwrap_or_else(|reason| {
+                    configured_engine_with_fuel(mode, profile, false, fuel).unwrap_or_else(|reason| {
                         panic!("invalid scalar-driver configuration: {reason}")
                     });
                 let start = Instant::now();
@@ -683,9 +688,35 @@ mod current {
             _ => unreachable!(),
         };
         json_timing(
-            case, stage, input, expected, result, batch, elapsed, mode, profile, driver,
+            case, stage, input, expected, result, batch, elapsed, mode, profile, driver, fuel,
         );
         true
+    }
+
+    #[cfg(all(test, feature = "execution-reference", not(feature = "legacy-api")))]
+    mod fuel_tests {
+        use super::*;
+        use super::super::super::fuel_policy::{FuelArgument, SourceFuel};
+
+        const ADD: &[u8] = &[0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,7,7,1,3,114,117,110,0,0,10,9,1,7,0,32,0,65,1,106,11];
+
+        #[test]
+        fn p127_scalar_builder_uses_selected_fuel_at_guest_source_boundary() {
+            for mode in ["decoded"].into_iter().chain(cfg!(feature = "compact-executor").then_some("compact")) {
+                for policy in [SourceFuel::Unmetered, SourceFuel::Metered] {
+                    let fuel = FuelArgument { policy, explicit: true };
+                    let engine = configured_engine_with_fuel(mode, "mvp", false, fuel).unwrap();
+                    let module = engine.compile(ADD).unwrap();
+                    let (mut store, instance) = instantiate(&engine, &module, Driver::Plain);
+                    let function = export(&store, instance, "run");
+                    store.request_materialization_roundtrip(function, 0).unwrap();
+                    assert_eq!(returned_i32(&mut store, function, &[Value::I32(3)]), 4);
+                    let snapshot = store.execution_snapshot().unwrap();
+                    assert_eq!(snapshot.remaining_fuel, policy.budget().map(|n| n - 1));
+                    assert!(snapshot.pending_boundary_charged);
+                }
+            }
+        }
     }
 }
 

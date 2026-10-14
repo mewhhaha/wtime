@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "source": "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/completion.json",
+      "copy": "docs/benchmarks/performance/P127-completion.json",
+      "sha256": "c896610652ae7adfeb2b34191474c9cbe0cdad75ce192e2b79d9498c3283e86e",
+      "size_bytes": 503
+    },
+    {
+      "source": "/workspace/wtime/target/performance/P127/shared-finalization/attempt-0001/evidence.json",
+      "copy": "docs/benchmarks/performance/P127-evidence.json",
+      "sha256": "cd1c924fb67c6236108caa38241d9dc538c4b22820d2cc7aa14c74c4372c0ab5",
+      "size_bytes": 1468
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001/staged-runtime/report.json",
+      "copy": "docs/benchmarks/performance/P127-proof.json",
+      "sha256": "ad74dc502624f79da153d0a4e284a77bc51ef08452ca1c3df584744f4d551cff",
+      "size_bytes": 444897
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001/driver-protocol/report.json",
+      "copy": "docs/benchmarks/performance/P127-driver-proof.json",
+      "sha256": "6b524a15432e5cbeb3e9100ea9b035aa09aa21ecc97cc4abdd10cf3aceaf2960",
+      "size_bytes": 43136
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001/independent-fuel-proof/report.json",
+      "copy": "docs/benchmarks/performance/P127-independent-proof.json",
+      "sha256": "cfa29257bbc632915479b72f0638ae72979b1c97f773fdb960a22489cb753d3b",
+      "size_bytes": 23079
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001/prerequisite.json",
+      "copy": "docs/benchmarks/performance/P127-prerequisite.json",
+      "sha256": "53a9678f5471f3db71197523149e8b0643b4515e9d5b26a6c6c40ecdf792746a",
+      "size_bytes": 894
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001/decoded/build-record.json",
+      "copy": "docs/benchmarks/performance/P127-production-decoded.json",
+      "sha256": "39624937b60b1a93aa2d3dfadc6e07cffad8047a1c2e72c869ca720512192564",
+      "size_bytes": 213543
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P127/verify/attempt-0001/compact/build-record.json",
+      "copy": "docs/benchmarks/performance/P127-production-compact.json",
+      "sha256": "a465464b2e89005b30d7f4057bf6b7f7ef08d17672b12e9257dcdb191e8bea25",
+      "size_bytes": 213715
+    }
+  ],
+  "copied_original_bytes": true,
+  "referenced_binaries_and_datasets_are_not_included": true
+}
