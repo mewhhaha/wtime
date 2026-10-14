@@ -14,6 +14,7 @@ PRODUCERS = ROOT / "tools/verification/producers"
 sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(PRODUCERS))
 import p046_gate as gate
+import p046_measure
 
 CORE_CRATES = ("wtime-runtime", "wtime-types", "wtime-decode", "wtime-validate")
 
@@ -109,6 +110,63 @@ class P056PortfolioBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(gate.PortfolioError, "archive full core source map differs"):
             gate._load_structural_predecessor(
                 substituted_ref, current_core_source_map=current)
+
+    def test_complete_matrix_summary_counts_all_ten_datasets_without_retiming(self):
+        verify_dir = self.root / "verify"
+        (verify_dir / "production").mkdir(parents=True)
+        (verify_dir / "baselines").mkdir()
+        candidate = self.write_inside(self.root / "candidate.bin", b"synthetic production binary\n")
+        p001_manifest = self.write_inside(self.root / "p001/manifest.json", b"synthetic p001 adapter\n")
+        p001 = self.write_inside(self.root / "p001/reference.json", b"synthetic p001 reference\n")
+        structural_manifest = self.write_inside(self.root / "structural/manifest.json", b"synthetic structural adapter\n")
+        structural = self.write_inside(self.root / "structural/reference.json", b"synthetic structural reference\n")
+        production = {"binary_path": str(candidate), "binary_sha256": digest(candidate.read_bytes()),
+                      "source_stable": True}
+        baseline_report = {
+            "p001_adapter": {"path": str(p001), "sha256": digest(p001_manifest.read_bytes())},
+            "structural_adapter": {"path": str(structural), "sha256": digest(structural_manifest.read_bytes())},
+        }
+        self.write_inside(verify_dir / "production/build-record.json",
+                          (json.dumps(production) + "\n").encode())
+        self.write_inside(verify_dir / "baselines/report.json",
+                          (json.dumps(baseline_report) + "\n").encode())
+        declaration = self.write_inside(self.root / "predecessor.json", b"synthetic predecessor\n")
+        predecessor = {"path": str(declaration), "sha256": digest(declaration.read_bytes()),
+                       "bytes": declaration.stat().st_size}
+        output = self.root / "measurements"
+        calls = []
+
+        def fake_comparison(argv, destination, label, **_kwargs):
+            destination = Path(destination).resolve()
+            self.assertTrue(destination.is_relative_to(self.root), destination)
+            calls.append(label)
+            command_log = destination / "commands.jsonl"
+            if not command_log.exists():
+                self.write_inside(command_log, b"")
+            report_path = destination / label / "report.json"
+            self.write_inside(report_path, b'{"synthetic":true}\n')
+            return report_path
+
+        with patch.object(p046_measure, "_structural_reference", return_value=predecessor), \
+             patch.object(p046_measure, "_comparison", side_effect=fake_comparison):
+            summary = p046_measure.measure(verify_dir, output, cold=True,
+                                           structural_predecessor=predecessor,
+                                           cache=self.root / "cache")
+
+        self.assertEqual(len(calls), 10)
+        self.assertEqual(set(calls), {
+            f"{baseline}-{family}"
+            for baseline in ("p001", "structural")
+            for family in gate.FAMILIES
+        } | {"cold-p001-original-mvp", "cold-structural-original-mvp"})
+        self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["portfolio_pair_count"], 144720)
+        self.assertEqual(set(summary["reports"]), {"p001", "structural"})
+        for baseline in ("p001", "structural"):
+            self.assertEqual(set(summary["reports"][baseline]), set(gate.FAMILIES))
+        self.assertEqual(set(summary["cold_controls"]), {"p001", "structural"})
+        saved = json.loads((output / "report.json").read_text())
+        self.assertEqual(saved, summary)
 
     def test_default_p046_structural_binding_still_rejects_legacy_adapter(self):
         adapter = self.write_inside(self.root / "adapter/manifest.json", b"{}\n").parent

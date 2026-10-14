@@ -21,6 +21,7 @@ from p046_verify import (FAMILIES, _core_source_map, _production_sources,
                          read, ref, sha, write_new)
 import execution_identity
 import dataset_cache
+import p046_gate
 
 CACHE = ROOT/'target/verification/datasets/P046'
 P056_CACHE = ROOT/'target/verification/datasets/P056'

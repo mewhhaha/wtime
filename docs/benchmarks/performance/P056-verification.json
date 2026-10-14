@@ -157,11 +157,12 @@
           {
             "command": "p056-portfolio-binding-tests",
             "kind": "unittest",
-            "minimum_passed": 3,
+            "minimum_passed": 4,
             "required_names": [
               "test_current_declaration_and_archive_are_exactly_bound",
               "test_stale_reference_and_substituted_archive_manifest_reject",
-              "test_default_p046_structural_binding_still_rejects_legacy_adapter"
+              "test_default_p046_structural_binding_still_rejects_legacy_adapter",
+              "test_complete_matrix_summary_counts_all_ten_datasets_without_retiming"
             ]
           }
         ],
@@ -1983,11 +1984,12 @@
         {
           "command": "p056-portfolio-binding-tests",
           "kind": "unittest",
-          "minimum_passed": 3,
+          "minimum_passed": 4,
           "required_names": [
             "test_current_declaration_and_archive_are_exactly_bound",
             "test_stale_reference_and_substituted_archive_manifest_reject",
-            "test_default_p046_structural_binding_still_rejects_legacy_adapter"
+            "test_default_p046_structural_binding_still_rejects_legacy_adapter",
+            "test_complete_matrix_summary_counts_all_ten_datasets_without_retiming"
           ]
         },
         {
