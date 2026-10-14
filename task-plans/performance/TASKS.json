@@ -81709,8 +81709,8 @@
       "key": "stack-to-register-lowering",
       "title": "Translate numeric stack code into direct slot operands",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "contract_only",
       "kind": "foundation",
       "dependencies": [
         "P037",
@@ -81753,7 +81753,13 @@
         "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p058_ -- --nocapture"
       ],
       "path": "05-register-executor/P058-stack-to-register-lowering.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P058/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20",
+          "bytes": 1548
+        }
+      ],
       "branch": "portable",
       "decision_rule": "integrity",
       "reviews_optional_tasks": [],
@@ -81765,7 +81771,22 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P058/shared-finalization/attempt-0002/evidence.json": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20"
+        },
+        "evidence": [
+          {
+            "bytes": 1548,
+            "path": "/workspace/wtime/target/performance/P058/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P058"
+      }
     },
     {
       "id": "P059",

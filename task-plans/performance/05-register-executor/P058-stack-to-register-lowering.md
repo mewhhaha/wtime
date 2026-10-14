@@ -1,8 +1,8 @@
 # P058 — Translate numeric stack code into direct slot operands
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **contract_only**
 
 Kind: `foundation` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -60,4 +60,24 @@ This is a tooling/contract deliverable. Require correct nonzero checks and bound
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P058/shared-finalization/attempt-0002/evidence.json": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20"
+  },
+  "evidence": [
+    {
+      "bytes": 1548,
+      "path": "/workspace/wtime/target/performance/P058/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P058"
+}
+```

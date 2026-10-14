@@ -1,0 +1,549 @@
+{
+  "schema_version": 1,
+  "task": "P058",
+  "identities": {
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**"
+      ]
+    },
+    "test_sources": {
+      "paths": [
+        "crates/wtime-runtime/tests/**/*.rs"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/verification/producers/p058.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P058-before-visit-diagnostics/**",
+        "target/performance/baseline/manifest.json",
+        "target/performance/baseline/binary/wtime-bench",
+        "docs/benchmarks/performance/P057-completion.json",
+        "docs/benchmarks/performance/P057-evidence.json",
+        "target/performance/P057/shared-finalization/attempt-0001/evidence.json",
+        "tools/wtime-bench/baseline.py",
+        "docs/benchmarks/performance/P129-completion.json",
+        "docs/benchmarks/performance/P129-evidence.json",
+        "target/performance/P129/shared-finalization/attempt-0002/evidence.json"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "tooling"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p058.py",
+            "--output",
+            "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/runtime_source_file_count",
+          "op": "positive"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "fixtures",
+        "test_sources",
+        "tooling"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "lowering-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "register-executor,execution-reference",
+            "p058_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "p057-compatibility",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "register-executor,execution-reference",
+            "p057_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "p129-compatibility",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "register-executor,execution-reference",
+            "p129_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "default-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "p058_decoded_fixture_results_preserve_default_policy",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "default-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ]
+        },
+        {
+          "name": "register-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/register-build.json",
+            "--features",
+            "wtime-runtime/register-executor"
+          ]
+        },
+        {
+          "name": "proof",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p058.py",
+            "--output",
+            "{stage}/proof",
+            "--lower-log",
+            "{stage}/lowering-tests.stdout",
+            "--lower-stderr",
+            "{stage}/lowering-tests.stderr",
+            "--p057-log",
+            "{stage}/p057-compatibility.stdout",
+            "--p129-log",
+            "{stage}/p129-compatibility.stdout",
+            "--default-log",
+            "{stage}/default-tests.stdout",
+            "--default-build",
+            "{stage}/default-build.json",
+            "--register-build",
+            "{stage}/register-build.json"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "lowering-tests",
+          "features": [
+            "register-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p058_local_numeric_slots_match_every_decoded_prefix",
+            "p058_multivalue_edges_and_loop_visits_match_decoded_prefixes",
+            "p058_declines_invalid_joins_and_preserves_shared_budgets",
+            "p058_decoded_fixture_results_preserve_default_policy"
+          ],
+          "minimum_passed": 4
+        },
+        {
+          "command": "p057-compatibility",
+          "features": [
+            "register-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p057_numeric_loop_has_bounded_typed_slots_and_source_boundaries",
+            "p057_unsupported_types_and_effects_decline_without_guest_work",
+            "p057_bad_metadata_and_aggregate_budgets_are_transactional",
+            "p057_register_policy_stays_unavailable_until_execution_lands"
+          ],
+          "minimum_passed": 4
+        },
+        {
+          "command": "p129-compatibility",
+          "features": [
+            "register-executor",
+            "execution-reference"
+          ],
+          "required_names": [
+            "p129_zero_skip_preserves_first_visit",
+            "p129_later_loop_visit_keeps_exact_state_and_fuel",
+            "p129_invalid_visit_bound_and_unreached_request_are_bounded"
+          ],
+          "minimum_passed": 3
+        },
+        {
+          "command": "default-tests",
+          "features": [],
+          "required_names": [
+            "p058_decoded_fixture_results_preserve_default_policy"
+          ],
+          "minimum_passed": 1
+        }
+      ],
+      "outputs": {
+        "lowering_log": "{stage}/lowering-tests.stdout",
+        "lowering_stderr": "{stage}/lowering-tests.stderr",
+        "p057_log": "{stage}/p057-compatibility.stdout",
+        "p129_log": "{stage}/p129-compatibility.stdout",
+        "default_log": "{stage}/default-tests.stdout",
+        "default_build": "{stage}/default-build.json",
+        "register_build": "{stage}/register-build.json",
+        "proof": "{stage}/proof/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/performance_candidate",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/speed_decision",
+          "op": "equal",
+          "value": null
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/lowering_named_cases",
+          "op": "equal",
+          "value": 3
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/fixture_policy_named_cases",
+          "op": "equal",
+          "value": 1
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p057_compatibility_named_cases",
+          "op": "equal",
+          "value": 4
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p129_compatibility_named_cases",
+          "op": "equal",
+          "value": 3
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/default_named_cases",
+          "op": "equal",
+          "value": 1
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/lowering_marker/model_runs",
+          "op": "equal",
+          "value": 7
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/lowering_marker/dynamic_prefixes",
+          "op": "equal",
+          "value": 142
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/lowering_marker/source_events",
+          "op": "equal",
+          "value": 109
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/lowering_marker/retained_bytes",
+          "op": "positive"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/lowering_marker/work",
+          "op": "positive"
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/report.json",
+    "pointer": "/runtime_source_map",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/execution/register/ir.rs",
+      "crates/wtime-runtime/src/execution/register/mod.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/src/execution/register/lower.rs",
+      "crates/wtime-runtime/tests/performance/p058.rs",
+      "crates/wtime-runtime/tests/performance/p058_private.rs"
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Register lowering correctness and bounded source/build/dependency evidence only; no production register execution or performance promotion is claimed."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "lowering",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "lowering",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "register-executor,execution-reference",
+              "p058_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "lowering",
+            "features": [
+              "register-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p058_local_numeric_slots_match_every_decoded_prefix",
+              "p058_multivalue_edges_and_loop_visits_match_decoded_prefixes",
+              "p058_declines_invalid_joins_and_preserves_shared_budgets",
+              "p058_decoded_fixture_results_preserve_default_policy"
+            ],
+            "minimum_passed": 4
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "compatibility",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "p057",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "register-executor,execution-reference",
+              "p057_",
+              "--",
+              "--nocapture"
+            ]
+          },
+          {
+            "name": "p129",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "register-executor,execution-reference",
+              "p129_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p057",
+            "features": [
+              "register-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p057_numeric_loop_has_bounded_typed_slots_and_source_boundaries",
+              "p057_unsupported_types_and_effects_decline_without_guest_work",
+              "p057_bad_metadata_and_aggregate_budgets_are_transactional",
+              "p057_register_policy_stays_unavailable_until_execution_lands"
+            ],
+            "minimum_passed": 4
+          },
+          {
+            "command": "p129",
+            "features": [
+              "register-executor",
+              "execution-reference"
+            ],
+            "required_names": [
+              "p129_zero_skip_preserves_first_visit",
+              "p129_later_loop_visit_keeps_exact_state_and_fuel",
+              "p129_invalid_visit_bound_and_unreached_request_are_bounded"
+            ],
+            "minimum_passed": 3
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "default-safe",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "default-safe",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "p058_decoded_fixture_results_preserve_default_policy",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "default-safe",
+            "features": [],
+            "required_names": [
+              "p058_decoded_fixture_results_preserve_default_policy"
+            ],
+            "minimum_passed": 1
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}

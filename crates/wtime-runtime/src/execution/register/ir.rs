@@ -140,11 +140,23 @@ pub(super) struct Draft {
 
 /// Shared across a module's preparations. Commit only after all validation;
 /// allocation or verification failure leaves both budgets unchanged.
+#[derive(Clone)]
 pub(super) struct Budget {
     work: usize,
     bytes: usize,
 }
 impl Budget {
+    pub(super) fn remaining(&self) -> (usize, usize) {
+        (self.work, self.bytes)
+    }
+    pub(super) fn reserve(&mut self, work: usize, bytes: usize) -> Checked<()> {
+        if work > self.work || bytes > self.bytes {
+            return Err(Declined::Budget);
+        }
+        self.work -= work;
+        self.bytes -= bytes;
+        Ok(())
+    }
     pub(super) fn new(work: usize, bytes: usize) -> Self {
         Self {
             work: work.min(MAX_WORK),
@@ -378,6 +390,20 @@ pub(super) struct MaterializationRecipe<'a> {
     pub operands: &'a [StackSlot],
 }
 impl RegisterFunction {
+    pub(super) fn operation(&self, pc: usize) -> Option<&Operation> {
+        self.draft.operations.get(pc)
+    }
+    pub(super) fn constant(&self, index: u32) -> Option<Constant> {
+        self.draft.constants.get(index as usize).copied()
+    }
+    pub(super) fn result_slots(&self, range: Range<u32>) -> Option<&[u32]> {
+        self.draft
+            .results
+            .get(range.start as usize..range.end as usize)
+    }
+    pub(super) fn costs(&self) -> (usize, usize) {
+        (self.work, self.retained_bytes)
+    }
     pub(super) fn materialization(
         &self,
         module: &Module,
