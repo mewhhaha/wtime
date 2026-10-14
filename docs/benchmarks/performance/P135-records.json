@@ -1,0 +1,1106 @@
+{
+  "binaries": {
+    "diagnostic": {
+      "bytes": 17108768,
+      "path": "target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+      "sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42"
+    },
+    "production": {
+      "bytes": 17499768,
+      "path": "target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+      "sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7"
+    }
+  },
+  "build_budget_reuse": {
+    "core_build_budgets_reused": true,
+    "new_build_timing_recorded": false,
+    "reports": {
+      "default": {
+        "budget_pass": true,
+        "default_dependency_closure_pass": true,
+        "features": [],
+        "historical_build_reused": true,
+        "report": {
+          "bytes": 330120,
+          "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/default-build.json",
+          "sha256": "800490448cea73d37b80ef6cae11b84cbbb0ff5443ecf6f12fe53a3baa828c05"
+        },
+        "source_file_count": 730,
+        "source_sha256": "8daf832a4cbe4f63b4aba57254018343e88fd7bcc6013bc3cd9e8f93353158cb",
+        "stripped_bytes": 1000960
+      },
+      "register": {
+        "budget_pass": true,
+        "default_dependency_closure_pass": true,
+        "features": [
+          "wtime-runtime/register-executor"
+        ],
+        "historical_build_reused": true,
+        "report": {
+          "bytes": 330283,
+          "path": "/workspace/wtime/target/verification/runs/P134/verify/attempt-0001/register-build.json",
+          "sha256": "a7576f9e8c2abc64372833064a6802807ed73b9a4a9b073c00bd0ef9f13f7796"
+        },
+        "source_file_count": 730,
+        "source_sha256": "8daf832a4cbe4f63b4aba57254018343e88fd7bcc6013bc3cd9e8f93353158cb",
+        "stripped_bytes": 1090512
+      }
+    },
+    "source_file_count": 730,
+    "source_inputs_sha256": "71f313988ae1130c99950ca4a15d898920dc89987e9590c408812539a423bc0c"
+  },
+  "candidate_promoted": false,
+  "child_runs": {
+    "all_stdout_stderr_preserved_in_observations": true,
+    "argv_bindings": [
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "1",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 1,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 381,
+        "stdout_sha256": "9e45e92a42d6245aadcb97b9cd10ca1fa0cac0e264d0891d35ea06bb2933ad8f",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 10,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 384,
+        "stdout_sha256": "1c58b607e32e481c7023c4215e00b7ca2c2eb0fea2bc82ed72dfae64c3b95f22",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "100",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 100,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 389,
+        "stdout_sha256": "dc5ae176202ad60f750694285b44d7117bc62c35fb13de6aa24476e5ce2abd85",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10000",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 10000,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 398,
+        "stdout_sha256": "ea0696f938ea1b39f912d8c261b4714c2a7b688e27073e972d2f68366681fd39",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "1",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 1,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 381,
+        "stdout_sha256": "3c6e00f3f7138cd039ea163019ff7b87ae9df287e420b97e32d4d965a75f750e",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 10,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 385,
+        "stdout_sha256": "6b23e1b6d8b3e8c2a6a3f3b50d666386b0c84ce33647827fb081036a09adfebc",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "100",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 100,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 389,
+        "stdout_sha256": "201e97b9e0e84f396973c210f81ca05510dcfe684a69ab1a54b3fa6a9e0b3750",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10000",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "calls": 10000,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "timing",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 398,
+        "stdout_sha256": "113298322b9bef1e0ddac223ff5dbd14fa55e3403c48120753942ff2321481f8",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "1",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 1,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 408,
+        "stdout_sha256": "00cd780499558d17002c7860808b1a2089aa0f455203c1021df553a5997fec4a",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 10,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 1086,
+        "stdout_sha256": "a70affaeb9c58f424f93d78b936c19151fcecd93670483f1fb6ee74035574fe7",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "100",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 100,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 7929,
+        "stdout_sha256": "e2429ec9acbfd1f83cbb6205d61b76f7b236ec08c560550d281696d765117cc9",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10000",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 10000,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 779235,
+        "stdout_sha256": "ffd17325e3788089ddbcfc973eff1cc5e41729a8e376b2aef3e82d39aa3bbd54",
+        "strategy": "eager"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "1",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 1,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 410,
+        "stdout_sha256": "1e6f2cc07afbc052079ed2561b427476c9b335e0ad43719be76f7db01fb75cb1",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 10,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 1084,
+        "stdout_sha256": "080f5b944065afa2b810926c49ec81458361f43806709e204374dfc7f65c7b38",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "100",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 100,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 7927,
+        "stdout_sha256": "10fc97aedb0eb371d27be95931979908b2cbf542dedee37322947c9c827932e1",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10000",
+          "register",
+          "adaptive",
+          "3"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "calls": 10000,
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "diagnostic",
+        "returncode": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 779233,
+        "stdout_sha256": "96427f78fb7ee9d62c1508ec0bd6e9cf69ab89f099bfd3f5c3241a39bb971301",
+        "strategy": "adaptive"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "2",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-0",
+        "returncode": 2,
+        "stderr_bytes": 68,
+        "stderr_sha256": "4bb1b66116d3dff9368269f45f53b1da4c4da450e4002884b55c0da7c96b0117",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "portable",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-1",
+        "returncode": 2,
+        "stderr_bytes": 61,
+        "stderr_sha256": "b8fa76ca9d80641ab5425381282cac7ff4163f2b503d8d72f047e3fed8591a4d",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "eager",
+          "3"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-2",
+        "returncode": 2,
+        "stderr_bytes": 90,
+        "stderr_sha256": "bc1caec8b1db6b14ad8919fd8a8d41098f45c09a7f8ef22dc761825ad0943e7b",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "adaptive",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-3",
+        "returncode": 2,
+        "stderr_bytes": 90,
+        "stderr_sha256": "bc1caec8b1db6b14ad8919fd8a8d41098f45c09a7f8ef22dc761825ad0943e7b",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "oops",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-4",
+        "returncode": 2,
+        "stderr_bytes": 48,
+        "stderr_sha256": "868c60ddd5d87712915bccfe607e4919687e89b9662802bacdfe4ad072ab81bf",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "0",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-5",
+        "returncode": 2,
+        "stderr_bytes": 68,
+        "stderr_sha256": "4bb1b66116d3dff9368269f45f53b1da4c4da450e4002884b55c0da7c96b0117",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "-1",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-6",
+        "returncode": 2,
+        "stderr_bytes": 48,
+        "stderr_sha256": "868c60ddd5d87712915bccfe607e4919687e89b9662802bacdfe4ad072ab81bf",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/missing.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10001",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-7",
+        "returncode": 2,
+        "stderr_bytes": 68,
+        "stderr_sha256": "4bb1b66116d3dff9368269f45f53b1da4c4da450e4002884b55c0da7c96b0117",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/late_bad_result.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-8",
+        "returncode": 2,
+        "stderr_bytes": 72,
+        "stderr_sha256": "7b48f2f565e61a4de22ff93c1e342151cd9d760ca9105c8214a187a5b046faee",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+          "--entry-diagnostic",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-9",
+        "returncode": 2,
+        "stderr_bytes": 63,
+        "stderr_sha256": "ca7d13bccbaedf92717fa4e4df7df561b6e261d979eef6336e882750409714a1",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+          "--entry-batch",
+          "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+          "p135_counter",
+          "7",
+          "8",
+          "10",
+          "register",
+          "eager",
+          "0"
+        ],
+        "binary_sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42",
+        "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+        "kind": "negative-10",
+        "returncode": 2,
+        "stderr_bytes": 63,
+        "stderr_sha256": "aaed859dcd53d4f1c534a0d87fdc44bf12d3f7854a3054643afb14fae8d6319b",
+        "stdout_bytes": 0,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "diagnostic": 8,
+    "negative": 11,
+    "production": 8,
+    "total": 27
+  },
+  "completion": {
+    "bytes": 503,
+    "path": "target/performance/P135/shared-finalization/attempt-0002/completion.json",
+    "sha256": "7844180c45bfb71527f74a5a1ff63a9bf2c2236ef33fd302b723198ef4872903"
+  },
+  "contract": {
+    "bytes": 10907,
+    "path": "docs/benchmarks/performance/P135-verification.json",
+    "sha256": "c750b9b7743557abf5e5af2ac3cb021316377de327b13a90ae84d720ef9522ce"
+  },
+  "copies": [
+    {
+      "copy_bytes": 503,
+      "copy_path": "docs/benchmarks/performance/P135-completion.json",
+      "copy_sha256": "7844180c45bfb71527f74a5a1ff63a9bf2c2236ef33fd302b723198ef4872903",
+      "original_copy_bytes": true,
+      "source": {
+        "bytes": 503,
+        "path": "target/performance/P135/shared-finalization/attempt-0002/completion.json",
+        "sha256": "7844180c45bfb71527f74a5a1ff63a9bf2c2236ef33fd302b723198ef4872903"
+      }
+    },
+    {
+      "copy_bytes": 1539,
+      "copy_path": "docs/benchmarks/performance/P135-evidence.json",
+      "copy_sha256": "c62356a8b997bba379dfd39859676597e5f5379e3ebeac7c33cff5039c2bbc79",
+      "original_copy_bytes": true,
+      "source": {
+        "bytes": 1539,
+        "path": "target/performance/P135/shared-finalization/attempt-0002/evidence.json",
+        "sha256": "c62356a8b997bba379dfd39859676597e5f5379e3ebeac7c33cff5039c2bbc79"
+      }
+    },
+    {
+      "copy_bytes": 20069,
+      "copy_path": "docs/benchmarks/performance/P135-freeze.json",
+      "copy_sha256": "770aaec64afa3f6ead630852834bf205b96e53fbf07085f9388a279e81654356",
+      "original_copy_bytes": true,
+      "source": {
+        "bytes": 20069,
+        "path": "target/verification/runs/P135/freeze/attempt-0002/freeze/report.json",
+        "sha256": "770aaec64afa3f6ead630852834bf205b96e53fbf07085f9388a279e81654356"
+      }
+    },
+    {
+      "copy_bytes": 106679,
+      "copy_path": "docs/benchmarks/performance/P135-proof.json",
+      "copy_sha256": "0c7081bbb2948f7c2bb34da7933b46f141024a443c98ac770d13f1a7ab9477c0",
+      "original_copy_bytes": true,
+      "source": {
+        "bytes": 106679,
+        "path": "target/verification/runs/P135/verify/attempt-0002/proof/report.json",
+        "sha256": "0c7081bbb2948f7c2bb34da7933b46f141024a443c98ac770d13f1a7ab9477c0"
+      }
+    }
+  ],
+  "decision": "integrity",
+  "default_core": {
+    "added_sources": [],
+    "changed_sources": [],
+    "runtime_source_file_count": 150,
+    "runtime_source_map_sha256": "88bdcaa3e3acbfbc0a9443a59ae58131686c4809a73ef36b3a790c840866dca9",
+    "unchanged_source_count": 150
+  },
+  "evidence": {
+    "bytes": 1539,
+    "path": "target/performance/P135/shared-finalization/attempt-0002/evidence.json",
+    "sha256": "c62356a8b997bba379dfd39859676597e5f5379e3ebeac7c33cff5039c2bbc79"
+  },
+  "fixtures": {
+    "counter": {
+      "bytes": 84,
+      "path": "tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "late_bad_result": {
+      "bytes": 100,
+      "path": "tools/wtime-bench/fixtures/p135/late_bad_result.wasm",
+      "sha256": "71fb4bd0e45f07dd962b5513f36ef4c1bf4819820595585c872d0961df3763b3"
+    },
+    "license": {
+      "bytes": 1079,
+      "path": "tools/wtime-bench/fixtures/p135/LICENSE.txt",
+      "sha256": "c28998034a6eb55fc54c810c8fbf560449a43e4057600b77d5ff9aed1b4f7eca"
+    },
+    "provenance": {
+      "bytes": 3028,
+      "path": "tools/wtime-bench/fixtures/p135/provenance.json",
+      "sha256": "893200b8fb8df8edfac1a12f6e921f5f1543d4c539b74baef5d2be99ba481829"
+    }
+  },
+  "helper_archive": {
+    "bytes": 49978,
+    "command": {
+      "bytes": 187,
+      "path": "target/recovery/P135-export-0001/attempt-0002/command.json",
+      "sha256": "1d41dac8ed5146d6e6d25f937b31b643ba474d7c0c73256a6a06d91c8672952d"
+    },
+    "invocation": {
+      "bytes": 436,
+      "path": "target/recovery/P135-export-0001/attempt-0002/invocation.json",
+      "sha256": "ac8127698a1ae0b5d9bdbcc9e74453308f562e109045e1addee09d5b7c55e448"
+    },
+    "sha256": "cea72c11cbe2529bc9ef8624f752aaf6ffeff65e9660400e9bc1542e540cb63a",
+    "stderr_log": {
+      "bytes": 0,
+      "path": "target/recovery/P135-export-0001/attempt-0002/stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stdout_log": {
+      "bytes": 135,
+      "path": "target/recovery/P135-export-0001/attempt-0002/stdout.log",
+      "sha256": "973dddea9139aabd47fbf5449a345d44c51a73fdd292eb872b3f3f3e025259b4"
+    }
+  },
+  "interpretation": "CLI smoke protocol correctness only; no paired timings, threshold selection, or performance promotion",
+  "limitations": [
+    "Fresh compile, instantiation and exact-call batch protocol foundation only; no paired measurements, threshold selection or performance claim."
+  ],
+  "observations_archive": {
+    "compressed_bytes": 59359,
+    "compressed_sha256": "6658740121c5f73fafc27cb6850e84a11b8d1c274c2419f23cac4b6e8ce7f75a",
+    "copy_path": "docs/benchmarks/performance/P135-observations.json.gz",
+    "gzip_mtime": 0,
+    "source": {
+      "bytes": 1767354,
+      "path": "target/verification/runs/P135/verify/attempt-0002/proof/observations.json",
+      "sha256": "c6c26f3df5409cd90fd4417d82624e55b234c71afa2c6ade105bb2b9c192cb12"
+    },
+    "uncompressed_bytes": 1767354,
+    "uncompressed_sha256": "c6c26f3df5409cd90fd4417d82624e55b234c71afa2c6ade105bb2b9c192cb12"
+  },
+  "outcome": "contract_only",
+  "p001": {
+    "binary": {
+      "bytes": 16552416,
+      "path": "/workspace/wtime/target/performance/baseline/binary/wtime-bench",
+      "sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498"
+    },
+    "correctness_checked": true,
+    "manifest": {
+      "bytes": 22024,
+      "path": "/workspace/wtime/target/performance/baseline/manifest.json",
+      "sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472"
+    }
+  },
+  "p134_foundation": {
+    "archived_evidence": {
+      "bytes": 1570,
+      "path": "/workspace/wtime/target/performance/P134/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "e03bc0fa5d417a131158858f56739749b3fdf4eb4e4857db52f7b02c2bcd30c5"
+    },
+    "completion": {
+      "bytes": 503,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P134-completion.json",
+      "sha256": "855cdac4f67472c5a8552a4750278a0b48bf67f9f2adc91231be4a846248e3e1"
+    },
+    "evidence": {
+      "bytes": 1570,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P134-evidence.json",
+      "sha256": "e03bc0fa5d417a131158858f56739749b3fdf4eb4e4857db52f7b02c2bcd30c5"
+    },
+    "outcome": "contract_only",
+    "passed": true,
+    "timing_evidence": false
+  },
+  "phase_outputs": {
+    "freeze": {
+      "report": {
+        "bytes": 20069,
+        "path": "target/verification/runs/P135/freeze/attempt-0002/freeze/report.json",
+        "sha256": "770aaec64afa3f6ead630852834bf205b96e53fbf07085f9388a279e81654356"
+      },
+      "runtime_map": {
+        "bytes": 18184,
+        "path": "target/verification/runs/P135/freeze/attempt-0002/freeze/runtime.json",
+        "sha256": "c07f45226d20e02dcdb6ed12e7e7cd5dd6d74d650387e7d289351fe973a6f35c"
+      }
+    },
+    "verify": {
+      "diagnostic_binary": {
+        "bytes": 17108768,
+        "path": "target/verification/runs/P135/verify/attempt-0002/diagnostic-wtime-bench",
+        "sha256": "3bfadf9201c627909888c9b77e9384c8596b7f7e779b22a7dd1b0db8fa329c42"
+      },
+      "observations": {
+        "bytes": 1767354,
+        "path": "target/verification/runs/P135/verify/attempt-0002/proof/observations.json",
+        "sha256": "c6c26f3df5409cd90fd4417d82624e55b234c71afa2c6ade105bb2b9c192cb12"
+      },
+      "production_binary": {
+        "bytes": 17499768,
+        "path": "target/verification/runs/P135/verify/attempt-0002/production-wtime-bench",
+        "sha256": "9a8138721940cd362308ed671fd41f22d53dcd1a457250f3297fdc946b5fb7c7"
+      },
+      "proof": {
+        "bytes": 106679,
+        "path": "target/verification/runs/P135/verify/attempt-0002/proof/report.json",
+        "sha256": "0c7081bbb2948f7c2bb34da7933b46f141024a443c98ac770d13f1a7ab9477c0"
+      }
+    }
+  },
+  "phase_receipts": {
+    "freeze": {
+      "bytes": 394876,
+      "path": "target/verification/runs/P135/freeze/attempt-0002/receipt.json",
+      "sha256": "a66f6957cb5dc95afe9f60879371ab75e1aba9396f00b779357f8a0f06cc263c"
+    },
+    "verify": {
+      "bytes": 154612,
+      "path": "target/verification/runs/P135/verify/attempt-0002/receipt.json",
+      "sha256": "65132a83b9c73b041755ab6a1b7f6a911204e04f1ef7a18b7dc5541aacf31bc5"
+    }
+  },
+  "predecessor": {
+    "bytes": 102736,
+    "path": "/workspace/wtime/target/performance/P135-before/manifest.json",
+    "sha256": "4f7a9c969196dac91cb9053fbf098b63c7b4d37489ad2ab10424b3befcab884e"
+  },
+  "predecessor_mode": "register",
+  "predecessor_repository_commit": "4249c6d29def33b9ae40de8d8c524fb687513594",
+  "proof_counts": {
+    "cli_matrix_rows": 8,
+    "diagnostic_rows": 8,
+    "named_cases": 5,
+    "negative_rows": 11
+  },
+  "protocol": {
+    "call_counts": [
+      1,
+      10,
+      100,
+      10000
+    ],
+    "diagnostic_instrumented": true,
+    "diagnostic_timing_reported": false,
+    "mode": "register",
+    "per_operation_time_reported": false,
+    "strategies": {
+      "adaptive": {
+        "threshold": 3
+      },
+      "eager": {
+        "threshold": 0
+      }
+    },
+    "timed_lifetime": "fresh compile, Store instantiation, and exactly N checked calls; Engine construction precedes the timer",
+    "warmup_or_preflight": false
+  },
+  "schema": "wtime-p135-durable-records-v1",
+  "shared_finalization": {
+    "bytes": 1539,
+    "path": "target/performance/P135/shared-finalization/attempt-0002/evidence.json",
+    "sha256": "c62356a8b997bba379dfd39859676597e5f5379e3ebeac7c33cff5039c2bbc79"
+  },
+  "status": "done",
+  "task": "P135",
+  "test_commands": {
+    "diagnostic-tests": {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-j",
+        "4",
+        "--manifest-path",
+        "tools/wtime-bench/Cargo.toml",
+        "--no-default-features",
+        "--features",
+        "register-executor,execution-reference",
+        "p135_",
+        "--",
+        "--nocapture"
+      ],
+      "cwd": "/workspace/wtime",
+      "exit_code": 0,
+      "result": {
+        "bytes": 1083,
+        "path": "target/verification/runs/P135/verify/attempt-0002/diagnostic-tests.result.json",
+        "sha256": "1c552b439171ab90c336cd390cd38836f80d78b09ecb690abaeb4f79bc8b62b9"
+      },
+      "stderr": {
+        "bytes": 450,
+        "path": "target/verification/runs/P135/verify/attempt-0002/diagnostic-tests.stderr",
+        "sha256": "1a9b9d1fdb96230c12d2f73eb85c704ff49abab9940ef1ce8d819668415d2af7"
+      },
+      "stdout": {
+        "bytes": 567,
+        "path": "target/verification/runs/P135/verify/attempt-0002/diagnostic-tests.stdout",
+        "sha256": "a74d510bfc9e88c9a9390e0e0e605af6ee1ac52fa1982aa4ab8f70e722c8deb0"
+      }
+    },
+    "production-tests": {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-j",
+        "4",
+        "--manifest-path",
+        "tools/wtime-bench/Cargo.toml",
+        "--no-default-features",
+        "--features",
+        "register-executor",
+        "p135_",
+        "--",
+        "--nocapture"
+      ],
+      "cwd": "/workspace/wtime",
+      "exit_code": 0,
+      "result": {
+        "bytes": 1063,
+        "path": "target/verification/runs/P135/verify/attempt-0002/production-tests.result.json",
+        "sha256": "3041695de8695a280e8b1daba1864bd28ec4b0f5b290d9f05d1e07dcb9ecf06a"
+      },
+      "stderr": {
+        "bytes": 450,
+        "path": "target/verification/runs/P135/verify/attempt-0002/production-tests.stderr",
+        "sha256": "fcb670b54f38c8746a82fb4887cc1541d53b698287843c01bfd9d7b9fa0a6c8f"
+      },
+      "stdout": {
+        "bytes": 567,
+        "path": "target/verification/runs/P135/verify/attempt-0002/production-tests.stdout",
+        "sha256": "4c132d5a103e94d43ba56a5aebf7df90d5c633b8bcbadb42211984d8edd7ce1d"
+      }
+    },
+    "python-cli-tests": {
+      "argv": [
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+        "-B",
+        "/workspace/wtime/tools/wtime-bench/tests/test_p135_entry_batch.py",
+        "-b",
+        "-v",
+        "--observations",
+        "/workspace/wtime/target/verification/runs/P135/verify/attempt-0002/proof/observations.json"
+      ],
+      "cwd": "/workspace/wtime",
+      "exit_code": 0,
+      "result": {
+        "bytes": 1130,
+        "path": "target/verification/runs/P135/verify/attempt-0002/python-cli-tests.result.json",
+        "sha256": "ec3632e57f83791bf1d554d930879d379a699bc83a91c8003360ab64e6053e49"
+      },
+      "stderr": {
+        "bytes": 522,
+        "path": "target/verification/runs/P135/verify/attempt-0002/python-cli-tests.stderr",
+        "sha256": "d2d53b9752c37a0644e23ad1333a53ebdc269032a62850a0f2e50275e679305b"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "target/verification/runs/P135/verify/attempt-0002/python-cli-tests.stdout",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "source-bound-unit-tests": {
+      "argv": [
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+        "-B",
+        "-m",
+        "unittest",
+        "-b",
+        "-v",
+        "tools.verification.tests.test_p135_entry_batch"
+      ],
+      "cwd": "/workspace/wtime",
+      "exit_code": 0,
+      "result": {
+        "bytes": 1024,
+        "path": "target/verification/runs/P135/verify/attempt-0002/source-bound-unit-tests.result.json",
+        "sha256": "df7a337c8df5de1d9bcfc6a5019d2ea9202deb29a4bec335a2914af880b33b64"
+      },
+      "stderr": {
+        "bytes": 796,
+        "path": "target/verification/runs/P135/verify/attempt-0002/source-bound-unit-tests.stderr",
+        "sha256": "26ed0fb9b0c3000c393ec5252ea34c5b895d29aea96b1b527ff80581d2b0f249"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "target/verification/runs/P135/verify/attempt-0002/source-bound-unit-tests.stdout",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  "test_counts": {
+    "groups": {
+      "diagnostic-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 4
+      },
+      "production-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 4
+      },
+      "source-bound-unit-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 4
+      }
+    },
+    "python_cli": {
+      "failed": 0,
+      "ignored": 0,
+      "names": [
+        "test_p135_cli_matrix_proves_fresh_eager_and_adaptive_lifetimes",
+        "test_p135_fixture_bytes_are_bound_by_provenance",
+        "test_p135_fixture_profile_is_mvp_compatible"
+      ],
+      "passed": 3
+    },
+    "totals": {
+      "failed": 0,
+      "ignored": 0,
+      "passed": 15
+    }
+  },
+  "timing_evidence": false
+}

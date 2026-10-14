@@ -38,6 +38,8 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P134 — Integrate opt-in lazy Register entry](P134-opt-in-lazy-register-entry.md)
 
+[P135 — Add a fresh-entry Register batch protocol](P135-fresh-entry-batch-protocol.md)
+
 ## Scope and ownership
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).

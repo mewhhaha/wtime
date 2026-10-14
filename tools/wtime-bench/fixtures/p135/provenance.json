@@ -1,0 +1,89 @@
+{
+  "license": "MIT",
+  "license_file": "LICENSE.txt",
+  "license_sha256": "c28998034a6eb55fc54c810c8fbf560449a43e4057600b77d5ff9aed1b4f7eca",
+  "encoder": "cargo run --locked -p wtime-conformance -- encode SOURCE -o OUTPUT",
+  "official_validator": "wasm-tools validate BINARY --features mvp",
+  "wtime_validator": "target/debug/wtime-probe mvp BINARY (decoded core decoder)",
+  "decoder_listing": "wasm-tools print BINARY",
+  "profile": "strict MVP; both fixtures use only MVP memory and integer instructions",
+  "initial_archive": "target/recovery/P135-fixtures-0002/initial",
+  "execution_archive": "target/recovery/P135-fixtures-0002/executed",
+  "fixtures": {
+    "counter": {
+      "wat": "counter.wat",
+      "wat_sha256": "1e85bc224e08ce5a09e539c20bb347288383b7fac28e6dc260183aa5de3dd810",
+      "wasm": "counter.wasm",
+      "wasm_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+      "exports": {
+        "count": "memory (1 page, maximum 1 page; i32 at offset 0 initialized to 0)",
+        "run": "(i32)->i32"
+      },
+      "source_opcode_count": 10,
+      "dynamic_opcode_count_per_call": 10,
+      "decoded_source_pcs": [
+        "0 i32.const 0 (store address)",
+        "1 i32.const 0 (initial value)",
+        "2 i32.load",
+        "3 i32.const 1",
+        "4 i32.add",
+        "5 i32.store",
+        "6 local.get $arg",
+        "7 i32.const 1",
+        "8 i32.add",
+        "9 end (implicit function end)"
+      ],
+      "expected": {
+        "input": 7,
+        "result": 8,
+        "initial_i32_at_offset_0": 0,
+        "i32_at_offset_0_after_n_calls": "n"
+      }
+    },
+    "late_bad_result": {
+      "wat": "late_bad_result.wat",
+      "wat_sha256": "5a8672255e02cef9fcc074a11dbb41aac7bc16fe6e5f615a6c301509c8b311aa",
+      "wasm": "late_bad_result.wasm",
+      "wasm_sha256": "71fb4bd0e45f07dd962b5513f36ef4c1bf4819820595585c872d0961df3763b3",
+      "exports": {
+        "count": "memory (1 page, maximum 1 page; i32 at offset 0 initialized to 0)",
+        "run": "(i32)->i32"
+      },
+      "source_opcode_count": 18,
+      "dynamic_opcode_count_per_call": {
+        "first_and_third": 16,
+        "second": 14
+      },
+      "decoded_source_pcs": [
+        "0 i32.const 0 (store address)",
+        "1 i32.const 0 (initial value)",
+        "2 i32.load",
+        "3 i32.const 1",
+        "4 i32.add",
+        "5 i32.store",
+        "6 i32.const 0 (load address)",
+        "7 i32.load",
+        "8 i32.const 2",
+        "9 i32.eq",
+        "10 if (result i32)",
+        "11 i32.const 12345",
+        "12 else",
+        "13 local.get $arg",
+        "14 i32.const 1",
+        "15 i32.add",
+        "16 end-if",
+        "17 end (implicit function end)"
+      ],
+      "expected": {
+        "initial_i32_at_offset_0": 0,
+        "first_input_7_result": 8,
+        "first_i32_at_offset_0": 1,
+        "second_input_7_result": 12345,
+        "second_i32_at_offset_0": 2,
+        "third_input_7_result": 8,
+        "third_i32_at_offset_0": 3
+      }
+    }
+  },
+  "errors_count": 0
+}

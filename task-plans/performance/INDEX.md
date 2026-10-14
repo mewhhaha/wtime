@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=87, todo=47, in_progress=0, blocked=0, deferred=0 (134 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=88, todo=47, in_progress=0, blocked=0, deferred=0 (135 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -130,13 +130,14 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P063 — Add direct checked unshared memory register operations](05-register-executor/P063-register-unshared-memory.md) | candidate / portable | P002, P004, P005, P009, P014, P016, P043, P061 |
 | [P064 — Exit register execution before calls and resume decoded state](05-register-executor/P064-register-call-exits.md) | candidate / portable | P002, P004, P005, P008, P014, P016, P018, P022, P041, P061, P063, P131 |
 | [P065 — Verify roots and captured state around register exits](05-register-executor/P065-register-root-and-capture-barriers.md) | gate / portable | P004, P005, P014, P022, P044, P062, P063, P064 |
-| [P066 — Compile register code lazily at bounded function thresholds](05-register-executor/P066-function-boundary-tiering.md) | candidate / portable | P002, P004, P005, P014, P015, P016, P057, P061, P062, P063, P064, P065, P132, P133 |
+| [P066 — Compile register code lazily at bounded function thresholds](05-register-executor/P066-function-boundary-tiering.md) | candidate / portable | P002, P004, P005, P014, P015, P016, P057, P061, P062, P063, P064, P065, P132, P133, P134, P135 |
 | [P067 — Evaluate register execution and adaptive break-even](05-register-executor/P067-register-milestone.md) | gate / portable | P004, P005, P014, P015, P056, P057, P058, P060, P061, P062, P063, P064, P065, P066 |
 | [P130 — Prepare bounded parallel register edge moves](05-register-executor/P130-bounded-parallel-edge-moves.md) | foundation / portable | P057, P058 |
 | [P131 — Prepare bounded Register prefixes for decoded handoff](05-register-executor/P131-bounded-register-prefix.md) | foundation / portable | P057, P058, P063, P129 |
 | [P132 — Extract transactional per-function Register preparation](05-register-executor/P132-extract-transactional-register-preparation.md) | foundation / portable | P065, P130, P131 |
 | [P133 — Add a bounded lazy Register preparation cache](05-register-executor/P133-bounded-lazy-register-cache.md) | foundation / portable | P132 |
 | [P134 — Integrate opt-in lazy Register entry](05-register-executor/P134-opt-in-lazy-register-entry.md) | foundation / portable | P133 |
+| [P135 — Add a fresh-entry Register batch protocol](05-register-executor/P135-fresh-entry-batch-protocol.md) | foundation / portable | P134 |
 
 ### 06-memory-gc-simd-and-continuations
 

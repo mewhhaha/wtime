@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "task": "P135",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P135-before/manifest.json",
+        "target/performance/P135-before/source/**/*",
+        "target/performance/P135-before/binary/**/*",
+        "target/performance/P135-before/fixtures/**/*",
+        "target/performance/P135-before/runs/**/*",
+        "target/performance/P135-before/historical_reports/**/*"
+      ],
+      "settings": {"manifest_sha256": "4f7a9c969196dac91cb9053fbf098b63c7b4d37489ad2ab10424b3befcab884e", "mode": "register", "repository_commit": "4249c6d29def33b9ae40de8d8c524fb687513594"}
+    },
+    "p001": {
+      "paths": [
+        "target/performance/baseline/manifest.json",
+        "target/performance/baseline/binary/**/*",
+        "target/performance/baseline/source/**/*",
+        "target/performance/baseline/fixtures/**/*",
+        "target/performance/baseline/runs/**/*",
+        "target/performance/baseline/historical_reports/**/*"
+      ],
+      "settings": {"manifest_sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472", "binary_sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498"}
+    },
+    "p134_completion": {
+      "paths": [
+        "docs/benchmarks/performance/P134-completion.json",
+        "docs/benchmarks/performance/P134-evidence.json",
+        "docs/benchmarks/performance/P134-verification.json",
+        "docs/benchmarks/performance/P134-freeze.json",
+        "docs/benchmarks/performance/P134-proof.json",
+        "docs/benchmarks/performance/P134-default-build.json",
+        "docs/benchmarks/performance/P134-register-build.json",
+        "target/performance/P134/shared-finalization/attempt-0001/evidence.json"
+      ],
+      "settings": {"outcome": "contract_only", "status": "done", "task": "P134"}
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml", "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml", "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml", "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml", "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "bench_harness": {
+      "optional_paths": [".cargo/config", ".cargo/config.toml", "tools/wtime-bench/.cargo/config", "tools/wtime-bench/.cargo/config.toml"],
+      "paths": [
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+        "tools/wtime-bench/Cargo.toml", "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs", "tools/wtime-bench/fixtures/p135/**",
+        ".cargo/config", ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config", "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {"protocol": "entry-batch-v1", "call_counts": [1, 10, 100, 10000], "adaptive_threshold": 3}
+    },
+    "bench_tests": {
+      "paths": ["tools/wtime-bench/tests/test_p135_entry_batch.py"]
+    },
+    "verification": {
+      "paths": ["tools/verification/producers/p135.py", "tools/verification/tests/test_p135_entry_batch.py", "tools/checks/build_budget.py"]
+    },
+    "task_plan": {
+      "paths": ["task-plans/performance/05-register-executor/P135-fresh-entry-batch-protocol.md"]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "p135-batch-production",
+        "uses": ["runtime", "bench_harness"],
+        "commands": [{"name": "p135-batch-production", "argv": ["cargo", "test", "--locked", "-j", "4", "--manifest-path", "tools/wtime-bench/Cargo.toml", "--no-default-features", "--features", "register-executor", "p135_", "--", "--nocapture"]}],
+        "tests": [{"command": "p135-batch-production", "features": ["register-executor"], "minimum_passed": 4, "required_names": ["p135_entry_batch_parser_rejects_unsupported_counts_and_strategy_pairs", "p135_fresh_batch_times_compile_instantiation_and_exact_calls", "p135_oracle_checks_every_call_and_stops_on_mismatch", "p135_diagnostic_reports_dispatch_deltas_without_timing_or_promotion_claims"]}],
+        "outputs": {}
+      },
+      {
+        "name": "p135-batch-diagnostic",
+        "uses": ["runtime", "bench_harness"],
+        "commands": [{"name": "p135-batch-diagnostic", "argv": ["cargo", "test", "--locked", "-j", "4", "--manifest-path", "tools/wtime-bench/Cargo.toml", "--no-default-features", "--features", "register-executor,execution-reference", "p135_", "--", "--nocapture"]}],
+        "tests": [{"command": "p135-batch-diagnostic", "features": ["register-executor", "execution-reference"], "minimum_passed": 4, "required_names": ["p135_entry_batch_parser_rejects_unsupported_counts_and_strategy_pairs", "p135_fresh_batch_times_compile_instantiation_and_exact_calls", "p135_oracle_checks_every_call_and_stops_on_mismatch", "p135_diagnostic_reports_dispatch_deltas_without_timing_or_promotion_claims"]}],
+        "outputs": {}
+      },
+      {
+        "name": "p135-source-bound-checker",
+        "uses": ["verification"],
+        "commands": [{"name": "p135-source-bound-checker", "argv": ["{python}", "-B", "-m", "unittest", "-v", "tools.verification.tests.test_p135_entry_batch"]}],
+        "tests": [{"command": "p135-source-bound-checker", "kind": "unittest", "minimum_passed": 4, "required_names": ["test_accepts_complete_source_bound_probe_matrix", "test_rejects_wrong_binary_or_fixture_binding", "test_rejects_instrumented_or_malformed_timing_json", "test_rejects_bad_diagnostics_and_stale_observation"]}],
+        "outputs": {}
+      }
+    ]
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/runtime.json",
+    "pointer": "/runtime_source_map",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "stages": {
+    "freeze": {
+      "uses": ["predecessor", "p001", "p134_completion", "runtime", "verification", "task_plan"],
+      "commands": [{"name": "freeze", "argv": ["{python}", "-B", "{repo}/tools/verification/producers/p135.py", "freeze", "--output", "{stage}/freeze"]}],
+      "outputs": {"report": "{stage}/freeze/report.json", "runtime_map": "{stage}/freeze/runtime.json"},
+      "checks": [
+        {"artifact": "report", "pointer": "/status", "op": "equal", "value": "passed"},
+        {"artifact": "report", "pointer": "/timing_evidence", "op": "equal", "value": false},
+        {"artifact": "report", "pointer": "/predecessor_mode", "op": "equal", "value": "register"},
+        {"artifact": "report", "pointer": "/p134/outcome", "op": "equal", "value": "contract_only"},
+        {"artifact": "report", "pointer": "/p001/correctness_checked", "op": "equal", "value": true}
+      ]
+    },
+    "verify": {
+      "uses": ["runtime", "bench_harness", "bench_tests", "verification", "task_plan"],
+      "dependencies": ["freeze"],
+      "commands": [
+        {"name": "production-build", "argv": ["cargo", "build", "--locked", "-j", "4", "--release", "--manifest-path", "tools/wtime-bench/Cargo.toml", "--no-default-features", "--features", "register-executor"]},
+        {"name": "retain-production-binary", "argv": ["cp", "tools/wtime-bench/target/release/wtime-bench", "{stage}/production-wtime-bench"]},
+        {"name": "diagnostic-build", "argv": ["cargo", "build", "--locked", "-j", "4", "--release", "--manifest-path", "tools/wtime-bench/Cargo.toml", "--no-default-features", "--features", "register-executor,execution-reference"]},
+        {"name": "retain-diagnostic-binary", "argv": ["cp", "tools/wtime-bench/target/release/wtime-bench", "{stage}/diagnostic-wtime-bench"]},
+        {"name": "production-tests", "argv": ["cargo", "test", "--locked", "-j", "4", "--manifest-path", "tools/wtime-bench/Cargo.toml", "--no-default-features", "--features", "register-executor", "p135_", "--", "--nocapture"]},
+        {"name": "diagnostic-tests", "argv": ["cargo", "test", "--locked", "-j", "4", "--manifest-path", "tools/wtime-bench/Cargo.toml", "--no-default-features", "--features", "register-executor,execution-reference", "p135_", "--", "--nocapture"]},
+        {"name": "source-bound-unit-tests", "argv": ["{python}", "-B", "-m", "unittest", "-b", "-v", "tools.verification.tests.test_p135_entry_batch"]},
+        {"name": "source-bound-observations", "argv": ["{python}", "-B", "{repo}/tools/verification/producers/p135.py", "verify", "--output", "{stage}/proof", "--freeze-report", "{freeze_dir}/freeze/report.json", "--production-binary", "{stage}/production-wtime-bench", "--diagnostic-binary", "{stage}/diagnostic-wtime-bench"]},
+        {"name": "python-cli-tests", "argv": ["{python}", "-B", "{repo}/tools/wtime-bench/tests/test_p135_entry_batch.py", "-b", "-v", "--observations", "{stage}/proof/observations.json"]}
+      ],
+      "outputs": {"production_binary": "{stage}/production-wtime-bench", "diagnostic_binary": "{stage}/diagnostic-wtime-bench", "proof": "{stage}/proof/report.json", "observations": "{stage}/proof/observations.json"},
+      "tests": [
+        {"command": "production-tests", "features": ["register-executor"], "minimum_passed": 4, "required_names": ["p135_entry_batch_parser_rejects_unsupported_counts_and_strategy_pairs", "p135_fresh_batch_times_compile_instantiation_and_exact_calls", "p135_oracle_checks_every_call_and_stops_on_mismatch", "p135_diagnostic_reports_dispatch_deltas_without_timing_or_promotion_claims"]},
+        {"command": "diagnostic-tests", "features": ["register-executor", "execution-reference"], "minimum_passed": 4, "required_names": ["p135_entry_batch_parser_rejects_unsupported_counts_and_strategy_pairs", "p135_fresh_batch_times_compile_instantiation_and_exact_calls", "p135_oracle_checks_every_call_and_stops_on_mismatch", "p135_diagnostic_reports_dispatch_deltas_without_timing_or_promotion_claims"]},
+        {"command": "source-bound-unit-tests", "kind": "unittest", "minimum_passed": 4, "required_names": ["test_accepts_complete_source_bound_probe_matrix", "test_rejects_wrong_binary_or_fixture_binding", "test_rejects_instrumented_or_malformed_timing_json", "test_rejects_bad_diagnostics_and_stale_observation"]}
+      ],
+      "checks": [
+        {"artifact": "proof", "pointer": "/status", "op": "equal", "value": "passed"},
+        {"artifact": "proof", "pointer": "/timing_evidence", "op": "equal", "value": false},
+        {"artifact": "proof", "pointer": "/decision", "op": "equal", "value": "integrity"},
+        {"artifact": "proof", "pointer": "/counts/cli_matrix_rows", "op": "equal", "value": 8},
+        {"artifact": "proof", "pointer": "/counts/diagnostic_rows", "op": "equal", "value": 8},
+        {"artifact": "proof", "pointer": "/production_instrumented", "op": "equal", "value": false}
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": ["freeze", "verify"],
+    "outcome": "contract_only",
+    "limitations": ["Fresh compile, instantiation and exact-call batch protocol foundation only; no paired measurements, threshold selection or performance claim."]
+  }
+}

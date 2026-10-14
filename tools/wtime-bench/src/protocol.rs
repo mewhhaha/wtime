@@ -1,4 +1,7 @@
 //! Stable single-observation protocol shared with the frozen-core adapter.
+#[cfg(not(feature = "legacy-api"))]
+#[path = "entry_batch_driver.rs"]
+mod entry_batch_driver;
 #[path = "fuel_policy.rs"]
 mod fuel_policy;
 #[cfg(not(feature = "legacy-api"))]
@@ -119,6 +122,8 @@ fn measured(batch: usize, mut f: impl FnMut() -> i32, expected: i32) -> f64 {
     ns.max(1.0)
 }
 pub fn try_main(args: &[String]) -> bool {
+    #[cfg(not(feature = "legacy-api"))]
+    if entry_batch_driver::try_main(args) { return true; }
     #[cfg(not(feature = "legacy-api"))]
     if integration_driver::try_main(args) { return true; }
     if representative_driver::try_main(args) { return true; }
