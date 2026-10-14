@@ -32,6 +32,9 @@ use std::{hint::black_box, time::Instant};
 use wtime_runtime::{Config, Engine, External, Linker, RunOutcome, Store, Value};
 use wtime_types::FeatureSet;
 
+const TYPED_NUMERIC_MAX_BATCH: usize = 1_000_000;
+const TYPED_MEMORY_MAX_BATCH: usize = 100_000;
+
 fn configured_engine(config: Config, mode: &str) -> Engine {
     #[cfg(feature = "legacy-api")]
     {
@@ -163,7 +166,7 @@ pub fn try_main(args: &[String]) -> bool {
     if args.first().map(String::as_str) == Some("--protocol") {
         assert_eq!(args.len(), 1);
         println!(
-            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{}}}",
+            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{},\"batch_limits\":{{\"typed_numeric\":{},\"typed_memory\":{}}}}}",
             available_modes(),
             available_types(),
             cfg!(not(feature = "legacy-api")),
@@ -175,6 +178,8 @@ pub fn try_main(args: &[String]) -> bool {
                 )
             )),
             fuel_policy::CONTRACT,
+            TYPED_NUMERIC_MAX_BATCH,
+            TYPED_MEMORY_MAX_BATCH,
         );
         return true;
     }
@@ -520,7 +525,8 @@ fn typed_main(args: &[String]) -> bool {
     };
     let stage = &args[5];
     let requested = args[6].parse::<usize>().unwrap();
-    assert!(requested <= 100000);
+    let max_batch = if memory { TYPED_MEMORY_MAX_BATCH } else { TYPED_NUMERIC_MAX_BATCH };
+    assert!(requested <= max_batch, "typed batch exceeds driver capacity {max_batch}");
     let mode = &args[7];
     let profile = &args[8];
     assert!(
@@ -608,7 +614,7 @@ fn typed_main(args: &[String]) -> bool {
                         accepts(&format_values(&store, &v)),
                         "typed calibration oracle mismatch"
                     );
-                    (20000000.0 / ns.max(1.0)).ceil().clamp(1.0, 100000.0) as usize
+                    (20000000.0 / ns.max(1.0)).ceil().clamp(1.0, max_batch as f64) as usize
                 } else {
                     requested
                 };

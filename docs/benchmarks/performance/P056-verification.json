@@ -360,6 +360,216 @@
         "uses": [
           "compilation"
         ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-v",
+              "-b",
+              "tools.verification.tests.test_p056_calibration_preflight"
+            ],
+            "name": "p056-calibration-preflight-tests"
+          }
+        ],
+        "name": "p056-calibration-preflight-tests",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p056-calibration-preflight-tests",
+            "kind": "unittest",
+            "minimum_passed": 7,
+            "required_names": [
+              "test_exact_full_warm_membership",
+              "test_fast_numeric_calibration_exceeds_100k_on_both_sides",
+              "test_capacity_failure_records_group_before_any_pairs",
+              "test_batch_mismatch_and_nonfinite_timing_fail_closed",
+              "test_stale_file_identity_rejected",
+              "test_result_requires_exact_membership_and_confirmation",
+              "test_real_driver_boundaries_preserve_memory_cap"
+            ]
+          }
+        ],
+        "uses": [
+          "harness"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-v",
+              "-b",
+              "tools.wtime-bench.tests.test_p056_typed_capacity"
+            ],
+            "name": "p056-typed-capacity-tests"
+          }
+        ],
+        "name": "p056-typed-capacity-tests",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p056-typed-capacity-tests",
+            "kind": "unittest",
+            "minimum_passed": 4,
+            "required_names": [
+              "test_typed_simd_calibration_grows_above_100k_and_reaches_twenty_ms",
+              "test_typed_simd_observation_accepts_requested_100001_and_rejects_overflow",
+              "test_memory_simd_keeps_100k_cap_and_fails_when_timing_is_too_short",
+              "test_simd_observation_rejects_requested_batch_mismatch_and_nonfinite_timing"
+            ]
+          }
+        ],
+        "uses": [
+          "harness"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-v",
+              "-b",
+              "tools.wtime-bench.tests.test_p055_batch_capacity"
+            ],
+            "name": "p055-batch-capacity-tests"
+          }
+        ],
+        "name": "p055-batch-capacity-tests",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p055-batch-capacity-tests",
+            "kind": "unittest",
+            "minimum_passed": 5,
+            "required_names": [
+              "test_run_single_case_calibration_can_exceed_100k_and_reaches_target_on_both_sides",
+              "test_single_case_validation_accepts_one_million_and_reports_overflow_details",
+              "test_single_case_cap_failure_names_workload_batch_and_both_side_totals",
+              "test_scalar_calibration_uses_one_million_while_memory_simd_stays_100k",
+              "test_typed_scalar_validation_accepts_one_million_and_legacy_wire_is_unchanged"
+            ]
+          }
+        ],
+        "uses": [
+          "harness"
+        ]
+      },
+      {
+        "name": "p056-simd-regression-tests",
+        "commands": [
+          {
+            "name": "p026-calibration-regression",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p026_calibration.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "p010-simd-regression",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p010_simd.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "fast-simd-candidate-regression",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_simd_candidate.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p026-calibration-regression",
+            "kind": "unittest",
+            "minimum_passed": 5,
+            "required_names": [
+              "test_grows_requested_batch_until_measured_target",
+              "test_fails_explicitly_at_batch_ceiling",
+              "test_initial_batch_is_used_when_target_already_met",
+              "test_rejects_response_batch_that_ignores_explicit_request",
+              "test_invalid_timing_is_rejected_before_calibration_can_accept_it"
+            ]
+          },
+          {
+            "command": "p010-simd-regression",
+            "kind": "unittest",
+            "minimum_passed": 12,
+            "required_names": [
+              "test_entries_bind_sources_features_and_encoded_binary_hashes",
+              "test_wrapping_lane_oracle_and_memory_effects",
+              "test_saturation_and_strict_float_edge_allowed_results",
+              "test_relaxed_swizzle_has_a_singleton_allowed_set",
+              "test_typed_float_and_vector_controls",
+              "test_scalar_and_vector_kernels_have_equal_explicit_work",
+              "test_lane_memory_exports_and_checks_full_memory_state",
+              "test_relaxed_swizzle_records_complete_out_of_range_set",
+              "test_seeded_randomized_lane_inputs_have_independent_vector_and_scalar_rows",
+              "test_f64_vector_and_scalar_arithmetic_use_exact_finite_values",
+              "test_memory_footprint_fixtures_cover_16b_4kib_and_64kib",
+              "test_added_fixtures_encode_to_pinned_hashes"
+            ]
+          },
+          {
+            "command": "fast-simd-candidate-regression",
+            "kind": "unittest",
+            "minimum_passed": 7,
+            "required_names": [
+              "test_logical_input_prefers_baseline_then_value_then_zero",
+              "test_randomized_multi_param_row_routes_typed_wire_input_and_logical_value",
+              "test_valid_strict_zero_and_relaxed_multiple_allowed_results",
+              "test_simd_observation_rejects_forged_wire_settings_and_numeric_types",
+              "test_simd_cold_observation_requires_batch_one",
+              "test_memory_proof_is_rechecked_from_hashes_without_claiming_raw_bytes",
+              "test_memory_proof_rejects_each_forged_oracle_dimension"
+            ]
+          }
+        ],
+        "uses": [
+          "harness"
+        ]
       }
     ]
   },
@@ -383,7 +593,11 @@
         "tools/verification/producers/p056_variants.py",
         "docs/benchmarks/performance/P124-contract.json",
         "docs/benchmarks/performance/P046-verification-before-fast-path.json",
-        "docs/benchmarks/performance/P121-verification.json"
+        "docs/benchmarks/performance/P121-verification.json",
+        "tools/verification/producers/p056_calibrate.py",
+        "tools/verification/tests/test_p056_calibration_preflight.py",
+        "tools/wtime-bench/tests/test_p056_typed_capacity.py",
+        "tools/wtime-bench/tests/test_p055_batch_capacity.py"
       ]
     },
     "compilation": {
@@ -454,7 +668,11 @@
         "tools/wtime-conformance/tests/test_p121*.py",
         "tools/verification/tests/test_p056*.py",
         "tools/verification/tests/test_runner.py",
-        "tools/verification/tests/test_artifacts.py"
+        "tools/verification/tests/test_artifacts.py",
+        "tools/verification/producers/p056_calibrate.py",
+        "tools/verification/tests/test_p056_calibration_preflight.py",
+        "tools/wtime-bench/tests/test_p056_typed_capacity.py",
+        "tools/wtime-bench/tests/test_p055_batch_capacity.py"
       ]
     },
     "history": {
@@ -501,7 +719,8 @@
         "tools/wtime-bench/focused_compare.py",
         "tools/wtime-bench/selection_manifest.py",
         "tools/wtime-bench/semantic_receipt.py",
-        "tools/wtime-bench/cold_products.py"
+        "tools/wtime-bench/cold_products.py",
+        "tools/verification/producers/p056_calibrate.py"
       ]
     },
     "predecessors": {
@@ -798,6 +1017,54 @@
     "measure": {
       "checks": [
         {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/paired_sample_events",
+          "value": 0
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/statistics_computations",
+          "value": 0
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/expected_group_count",
+          "value": 490
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/attempted_group_count",
+          "value": 490
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/passed_group_count",
+          "value": 490
+        },
+        {
+          "artifact": "calibration",
+          "op": "equal",
+          "pointer": "/failure_count",
+          "value": 0
+        },
+        {
           "artifact": "matrix",
           "op": "equal",
           "pointer": "/status",
@@ -872,6 +1139,20 @@
       ],
       "commands": [
         {
+          "name": "calibration-preflight",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p056_calibrate.py",
+            "--verify-dir",
+            "{verify_dir}",
+            "--frozen",
+            "{freeze_dir}/report.json",
+            "--output",
+            "{stage}/calibration"
+          ]
+        },
+        {
           "argv": [
             "{python}",
             "-B",
@@ -917,7 +1198,8 @@
       "outputs": {
         "individual": "{stage}/individual/report.json",
         "inventory": "{stage}/inventory.json",
-        "matrix": "{stage}/matrix/report.json"
+        "matrix": "{stage}/matrix/report.json",
+        "calibration": "{stage}/calibration/report.json"
       },
       "uses": [
         "compilation",
@@ -1533,6 +1815,90 @@
           "name": "p121-coverage-validate"
         },
         {
+          "name": "p056-calibration-preflight-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-v",
+            "-b",
+            "tools.verification.tests.test_p056_calibration_preflight"
+          ]
+        },
+        {
+          "name": "p056-typed-capacity-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-v",
+            "-b",
+            "tools.wtime-bench.tests.test_p056_typed_capacity"
+          ]
+        },
+        {
+          "name": "p055-batch-capacity-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-v",
+            "-b",
+            "tools.wtime-bench.tests.test_p055_batch_capacity"
+          ]
+        },
+        {
+          "name": "p026-calibration-regression",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p026_calibration.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "p010-simd-regression",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p010_simd.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "fast-simd-candidate-regression",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_simd_candidate.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
           "argv": [
             "{python}",
             "-B",
@@ -1747,6 +2113,88 @@
             "p046_retained_tracks_real_allocation_and_release",
             "p046_retained_tracks_reallocation_growth_and_shrink",
             "p046_retained_compiled_graph_releases_in_both_policies"
+          ]
+        },
+        {
+          "command": "p056-calibration-preflight-tests",
+          "kind": "unittest",
+          "minimum_passed": 7,
+          "required_names": [
+            "test_exact_full_warm_membership",
+            "test_fast_numeric_calibration_exceeds_100k_on_both_sides",
+            "test_capacity_failure_records_group_before_any_pairs",
+            "test_batch_mismatch_and_nonfinite_timing_fail_closed",
+            "test_stale_file_identity_rejected",
+            "test_result_requires_exact_membership_and_confirmation",
+            "test_real_driver_boundaries_preserve_memory_cap"
+          ]
+        },
+        {
+          "command": "p056-typed-capacity-tests",
+          "kind": "unittest",
+          "minimum_passed": 4,
+          "required_names": [
+            "test_typed_simd_calibration_grows_above_100k_and_reaches_twenty_ms",
+            "test_typed_simd_observation_accepts_requested_100001_and_rejects_overflow",
+            "test_memory_simd_keeps_100k_cap_and_fails_when_timing_is_too_short",
+            "test_simd_observation_rejects_requested_batch_mismatch_and_nonfinite_timing"
+          ]
+        },
+        {
+          "command": "p055-batch-capacity-tests",
+          "kind": "unittest",
+          "minimum_passed": 5,
+          "required_names": [
+            "test_run_single_case_calibration_can_exceed_100k_and_reaches_target_on_both_sides",
+            "test_single_case_validation_accepts_one_million_and_reports_overflow_details",
+            "test_single_case_cap_failure_names_workload_batch_and_both_side_totals",
+            "test_scalar_calibration_uses_one_million_while_memory_simd_stays_100k",
+            "test_typed_scalar_validation_accepts_one_million_and_legacy_wire_is_unchanged"
+          ]
+        },
+        {
+          "command": "p026-calibration-regression",
+          "kind": "unittest",
+          "minimum_passed": 5,
+          "required_names": [
+            "test_grows_requested_batch_until_measured_target",
+            "test_fails_explicitly_at_batch_ceiling",
+            "test_initial_batch_is_used_when_target_already_met",
+            "test_rejects_response_batch_that_ignores_explicit_request",
+            "test_invalid_timing_is_rejected_before_calibration_can_accept_it"
+          ]
+        },
+        {
+          "command": "p010-simd-regression",
+          "kind": "unittest",
+          "minimum_passed": 12,
+          "required_names": [
+            "test_entries_bind_sources_features_and_encoded_binary_hashes",
+            "test_wrapping_lane_oracle_and_memory_effects",
+            "test_saturation_and_strict_float_edge_allowed_results",
+            "test_relaxed_swizzle_has_a_singleton_allowed_set",
+            "test_typed_float_and_vector_controls",
+            "test_scalar_and_vector_kernels_have_equal_explicit_work",
+            "test_lane_memory_exports_and_checks_full_memory_state",
+            "test_relaxed_swizzle_records_complete_out_of_range_set",
+            "test_seeded_randomized_lane_inputs_have_independent_vector_and_scalar_rows",
+            "test_f64_vector_and_scalar_arithmetic_use_exact_finite_values",
+            "test_memory_footprint_fixtures_cover_16b_4kib_and_64kib",
+            "test_added_fixtures_encode_to_pinned_hashes"
+          ]
+        },
+        {
+          "command": "fast-simd-candidate-regression",
+          "kind": "unittest",
+          "minimum_passed": 7,
+          "required_names": [
+            "test_logical_input_prefers_baseline_then_value_then_zero",
+            "test_randomized_multi_param_row_routes_typed_wire_input_and_logical_value",
+            "test_valid_strict_zero_and_relaxed_multiple_allowed_results",
+            "test_simd_observation_rejects_forged_wire_settings_and_numeric_types",
+            "test_simd_cold_observation_requires_batch_one",
+            "test_memory_proof_is_rechecked_from_hashes_without_claiming_raw_bytes",
+            "test_memory_proof_rejects_each_forged_oracle_dimension"
           ]
         }
       ],

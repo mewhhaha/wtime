@@ -307,9 +307,8 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
 
 
-def calibrate(entry, observer):
-    """Confirm the same requested batch reaches 20 ms on BOTH actual sides."""
-    workload_id = entry.get('id', '<unknown>')
+def batch_limit(entry):
+    """Driver-specific capacity, including each resource-sensitive work bound."""
     maximum = 100_000
     if entry['oracle'].get('module') in ('run.py', 'scalar_workloads.py', 'scalar_p128_workloads.py'):
         maximum = compare.SCALAR_MAX_BATCH
@@ -321,6 +320,16 @@ def calibrate(entry, observer):
     if entry['oracle'].get('module') == 'root_workloads.py':
         import root_workloads
         maximum = root_workloads.max_batch(entry['gc_expectation']['bank_slots'], input_value(entry))
+    if entry['oracle'].get('module') == 'simd_workloads.py':
+        import simd_scaling
+        maximum = simd_scaling.batch_limit(entry)
+    return maximum
+
+
+def calibrate(entry, observer):
+    """Confirm the same requested batch reaches 20 ms on BOTH actual sides."""
+    workload_id = entry.get('id', '<unknown>')
+    maximum = batch_limit(entry)
     batch = 1
     audit = []
     for _ in range(8):

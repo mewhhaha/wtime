@@ -162,8 +162,9 @@ def _simd_observation(exe, fixture, entry, input_value, raw_value, allowed, stag
     ns=row.get('ns_per_operation'); actual_batch=row.get('batch')
     if isinstance(ns,bool) or not isinstance(ns,(int,float)) or not math.isfinite(ns) or ns<=0:
         raise ComparisonError(f'{entry["id"]}/{stage}: timing must be finite and positive')
-    if isinstance(actual_batch,bool) or not isinstance(actual_batch,int) or not 1<=actual_batch<=100000:
-        raise ComparisonError(f'{entry["id"]}/{stage}: batch must be in 1..100000')
+    limit = simd_scaling.batch_limit(entry)
+    if isinstance(actual_batch,bool) or not isinstance(actual_batch,int) or not 1<=actual_batch<=limit:
+        raise ComparisonError(f'{entry["id"]}/{stage}: batch must be in 1..{limit}')
     if stage!='warm_call' and actual_batch!=1:
         raise ComparisonError(f'{entry["id"]}/{stage}: cold stage must run exactly one call')
     if expected_batch is not None and actual_batch!=expected_batch:
@@ -188,14 +189,23 @@ def _simd_observation(exe, fixture, entry, input_value, raw_value, allowed, stag
 
 
 def _calibrate_simd(exe, fixture, entry, input_value, raw_value, allowed, mode,
-                    profile, cpu, *, model, target_ns=20_000_000, max_batch=100000,
+                    profile, cpu, *, model, target_ns=20_000_000, max_batch=None,
                     max_attempts=8):
     """Grow typed warm-call batches until measured duration reaches target_ns."""
+    import simd_scaling
+    limit = simd_scaling.batch_limit(entry)
+    max_batch = limit if max_batch is None else max_batch
+    if (type(max_batch) is not int or not 1 <= max_batch <= limit
+            or type(target_ns) is not int or target_ns <= 0
+            or type(max_attempts) is not int or not 1 <= max_attempts <= 8):
+        raise ComparisonError('invalid SIMD calibration limits')
     requested=0
     for attempt in range(max_attempts):
         row=_simd_observation(exe,fixture,entry,input_value,raw_value,allowed,
                               'warm_call',requested,mode,profile,cpu,model=model)
         actual=row['batch']
+        if type(actual) is not int or not 1 <= actual <= max_batch:
+            raise ComparisonError(f'{entry["id"]}: warm calibration response exceeds capacity {max_batch}')
         if requested and actual!=requested:
             raise ComparisonError(f'{entry["id"]}: warm calibration response batch differs from request')
         duration=actual*row['ns_per_operation']
@@ -349,8 +359,9 @@ def _run_simd(args, growth_explanation=None):
                                 fixture['input'],fixture['raw_input'],fixture['allowed'],mode,
                                 fixture['profile'],cpu,model=simd_workloads))
                         batch=max(row['batch'] for row in calibrations)
-                        if not 1<=batch<=100000:
-                            raise ComparisonError(f'{case}: paired SIMD warm batch outside 1..100000')
+                        limit = simd_scaling.batch_limit(entry)
+                        if not 1<=batch<=limit:
+                            raise ComparisonError(f'{case}: paired SIMD warm batch outside 1..{limit}')
                         report['warm_calibrations'].append({'run_id':run_index,'workload':case,
                             'stage':stage,'target_ns':20_000_000,'paired_batch':batch,
                             'sides':[{'side':side,'batch':row['batch'],

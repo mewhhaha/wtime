@@ -26,6 +26,11 @@ MODE = "decoded"
 MAX_MEMORY_SNAPSHOT_BYTES = 1 << 20
 
 
+def batch_limit(entry):
+    """Match the generic numeric and snapshot-memory Rust typed endpoints."""
+    return 100_000 if isinstance(entry.get('memory_expectation'), dict) else 1_000_000
+
+
 class MeasurementError(ValueError):
     pass
 
@@ -233,7 +238,7 @@ def _call_candidate(executable: Path, wasm: Path, entry: dict[str, Any], args: s
     if isinstance(ns, bool) or not isinstance(ns, (int, float)) or not math.isfinite(ns) or ns <= 0:
         raise MeasurementError(f"{entry['id']}/{stage}: timing must be finite and positive")
     if (isinstance(actual_batch, bool) or not isinstance(actual_batch, int)
-            or not 1 <= actual_batch <= 100000 or (stage != "warm_call" and actual_batch != 1)):
+            or not 1 <= actual_batch <= batch_limit(entry) or (stage != "warm_call" and actual_batch != 1)):
         raise MeasurementError(f"{entry['id']}/{stage}: batch must be a positive integer")
     result_row = {"ns_per_operation": float(ns), "batch": actual_batch, "result": result}
     if is_memory:

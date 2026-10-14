@@ -77,23 +77,36 @@ class P055BatchCapacityTests(unittest.TestCase):
             focused_compare.calibrate(
                 {'id': 'call_overhead', 'oracle': {'module': 'run.py'}}, observe)
 
-    def test_scalar_and_simd_calibration_caps_remain_100k(self):
+    def test_scalar_calibration_uses_one_million_while_memory_simd_stays_100k(self):
         def observe(_side, batch):
             return {'batch': batch, 'ns_per_operation': 1.0}
 
-        for module, workload in (('scalar_workloads.py', 'scalar_accumulator_n17'),
-                                 ('simd_workloads.py', 'simd_integer_lanes')):
-            with self.subTest(module=module), self.assertRaisesRegex(
-                    ValueError, rf'{workload}: calibration reached batch cap 100000; final batch 100000'):
-                focused_compare.calibrate({'id': workload, 'oracle': {'module': module}}, observe)
+        scalar = {'id': 'scalar_accumulator_n17',
+                  'oracle': {'module': 'scalar_workloads.py'}}
+        with self.assertRaisesRegex(
+                ValueError,
+                r'scalar_accumulator_n17: calibration reached batch cap 1000000; final batch 1000000'):
+            focused_compare.calibrate(scalar, observe)
+        with self.assertRaisesRegex(
+                ValueError,
+                r'simd_lane_memory_n0: calibration reached batch cap 100000; final batch 100000'):
+            focused_compare.calibrate(
+                {'id': 'simd_lane_memory_n0',
+                 'oracle': {'module': 'simd_workloads.py'},
+                 'memory_expectation': {}}, observe)
 
-    def test_typed_scalar_validation_keeps_100k_and_legacy_single_case_wire_unchanged(self):
+    def test_typed_scalar_validation_accepts_one_million_and_legacy_wire_is_unchanged(self):
         entry = {'id': 'scalar_accumulator_n17',
                  'driver': {'profile': 'mvp', 'kind': 'plain'}}
         with tempfile.TemporaryDirectory() as td:
             root = Path(td).resolve()
             scalar_fixture = root / 'scalar.wasm'
-            with patch.object(compare, 'process', return_value=scalar_wire(entry, 100_001)):
+            with patch.object(compare, 'process', return_value=scalar_wire(entry, 1_000_000)):
+                observed_scalar = compare.scalar_observation(
+                    'candidate', str(scalar_fixture), entry, 17, 136,
+                    'warm_call', 1_000_000, 'decoded', 0)
+            self.assertEqual(observed_scalar['batch'], 1_000_000)
+            with patch.object(compare, 'process', return_value=scalar_wire(entry, 1_000_001)):
                 with self.assertRaisesRegex(compare.ComparisonError, 'invalid scalar batch'):
                     compare.scalar_observation('candidate', str(scalar_fixture), entry,
                                                17, 136, 'warm_call', 0, 'decoded', 0)

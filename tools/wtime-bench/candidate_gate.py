@@ -86,8 +86,9 @@ def check_observation(entry, observation, mode, root, stage=None, thread_cpus=No
         need(type(observation.get('wire_result')) is int
              and observation['wire_result'] in allowed_values,
              'typed SIMD wire result differs from the independent allowed result set')
-        need(type(observation.get('batch')) is int and 1 <= observation['batch'] <= 100000,
-             'typed SIMD batch must be an integer in 1..100000')
+        limit = simd_scaling.batch_limit(entry)
+        need(type(observation.get('batch')) is int and 1 <= observation['batch'] <= limit,
+             f'typed SIMD batch must be an integer in 1..{limit}')
         if stage is not None:
             need(stage in entry.get('stages', []), 'typed SIMD stage is not declared for the selected row')
             if stage != 'warm_call':
