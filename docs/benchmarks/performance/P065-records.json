@@ -1,0 +1,256 @@
+{
+  "schema": "wtime-p065-durable-records-v1",
+  "task": "P065",
+  "status": "done",
+  "outcome": "contract_only",
+  "timing_evidence": false,
+  "candidate_promoted": false,
+  "copies": [
+    {
+      "source": {
+        "path": "target/performance/P065/shared-finalization/attempt-0004/completion.json",
+        "sha256": "b83fa7c6dce5dfd0f37eacf872fcb5163553ff6de860b48bf1d04fb7b9cd46cb",
+        "bytes": 503
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-completion.json",
+        "sha256": "b83fa7c6dce5dfd0f37eacf872fcb5163553ff6de860b48bf1d04fb7b9cd46cb",
+        "bytes": 503
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/performance/P065/shared-finalization/attempt-0004/evidence.json",
+        "sha256": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118",
+        "bytes": 1644
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-evidence.json",
+        "sha256": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118",
+        "bytes": 1644
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P065/freeze/attempt-0001/freeze/report.json",
+        "sha256": "2321fd92edafe5bd77a4b2fd9194f51f6892199e6d2e96d5bb2e06c60c8eedcb",
+        "bytes": 20116
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-freeze.json",
+        "sha256": "2321fd92edafe5bd77a4b2fd9194f51f6892199e6d2e96d5bb2e06c60c8eedcb",
+        "bytes": 20116
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P065/verify/attempt-0004/proof/report.json",
+        "sha256": "3f813ccd1dab4410f7fb07ef3d008f6df2ba1451c12464dd322e3a6b0e999924",
+        "bytes": 5845
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-proof.json",
+        "sha256": "3f813ccd1dab4410f7fb07ef3d008f6df2ba1451c12464dd322e3a6b0e999924",
+        "bytes": 5845
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P065/verify/attempt-0004/default-build.json",
+        "sha256": "20e5e25b5738d6a6758533831268017854f45a64f3df1f3b1750984d16c4dc6c",
+        "bytes": 327434
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-default-build.json",
+        "sha256": "20e5e25b5738d6a6758533831268017854f45a64f3df1f3b1750984d16c4dc6c",
+        "bytes": 327434
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P065/verify/attempt-0004/register-build.json",
+        "sha256": "c60f6adbbd5492faf261e73acc9902d116ebd012210cae0d9ff1312f0c6ed695",
+        "bytes": 327599
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-register-build.json",
+        "sha256": "c60f6adbbd5492faf261e73acc9902d116ebd012210cae0d9ff1312f0c6ed695",
+        "bytes": 327599
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P065/verify/attempt-0004/tier-check/report.json",
+        "sha256": "fdf58fb6fa0de15e45bc36c1b16336aa397cfcbf94d09c699bdbe3eda0633ec9",
+        "bytes": 120321
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P065-tier-report.json",
+        "sha256": "fdf58fb6fa0de15e45bc36c1b16336aa397cfcbf94d09c699bdbe3eda0633ec9",
+        "bytes": 120321
+      },
+      "original_copy_bytes": true
+    }
+  ],
+  "phase_receipts": {
+    "freeze": {
+      "path": "target/verification/runs/P065/freeze/attempt-0001/receipt.json",
+      "sha256": "a1fdd67bb19bd865f9ffc1747229e6cb66586d20c4b15eeb9fcd038def1a0e9b",
+      "bytes": 285310
+    },
+    "verify": {
+      "path": "target/verification/runs/P065/verify/attempt-0004/receipt.json",
+      "sha256": "d67323afef45da3db227f2fe0558f9d75596bd9f9ac887a7d7d72815d94412d7",
+      "bytes": 1054275
+    }
+  },
+  "counts": {
+    "verification_tests": {
+      "groups": {
+        "combined-p065": {
+          "passed": 406,
+          "failed": 0,
+          "ignored": 0
+        },
+        "conformance-forwarding": {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        "default-policy": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "register-semantics": {
+          "passed": 300,
+          "failed": 0,
+          "ignored": 0
+        },
+        "tier-policy-tests": {
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "totals": {
+        "passed": 713,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "proof": {
+      "combined_p065_named_cases": 6,
+      "default_named_cases": 1,
+      "p065_named_cases": 5,
+      "p065_private_named_cases": 1,
+      "register_named_cases": 48,
+      "tier_check": {
+        "all_checks_attempted": 89,
+        "all_checks_executed": 89,
+        "all_checks_expected": 89,
+        "conformance_mode_runs_executed": 4,
+        "conformance_mode_runs_expected": 4,
+        "cursor_checks_executed": 1,
+        "failed": 0,
+        "mode_runs_executed": 6,
+        "mode_runs_expected": 6,
+        "selected_cases": 3,
+        "skipped": 0,
+        "state_fuel_probes_executed": 68,
+        "state_fuel_probes_expected": 68,
+        "state_mode_runs_executed": 6,
+        "state_mode_runs_expected": 6,
+        "unsupported": 0
+      }
+    },
+    "register_p065_cases": [
+      "p065_capture_retains_numeric_state_and_source_cursor",
+      "p065_cross_module_exact_suspend_and_resource_controls",
+      "p065_exception_unwind_preserves_numeric_payload",
+      "p065_outer_reference_survives_reentrant_collection",
+      "p065_reference_and_vector_frames_decline",
+      "p065_root_barrier_recipes_are_complete"
+    ],
+    "combined_p065_cases": [
+      "p065_capture_retains_numeric_state_and_source_cursor",
+      "p065_cross_module_exact_suspend_and_resource_controls",
+      "p065_exception_unwind_preserves_numeric_payload",
+      "p065_outer_reference_survives_reentrant_collection",
+      "p065_reference_and_vector_frames_decline",
+      "p065_root_barrier_recipes_are_complete"
+    ],
+    "p064_compatibility_cases": [
+      "p064_direct_call_and_store_prefix_execute_once",
+      "p064_every_prefix_and_fallback_preserve_accounting",
+      "p064_host_reentry_keeps_state_and_fuel",
+      "p064_prefix_preparation_limits_and_owner_guards",
+      "p064_tail_indirect_and_depth_errors_match"
+    ],
+    "tier_check": {
+      "all_checks_attempted": 89,
+      "all_checks_executed": 89,
+      "all_checks_expected": 89,
+      "conformance_mode_runs_executed": 4,
+      "conformance_mode_runs_expected": 4,
+      "cursor_checks_executed": 1,
+      "failed": 0,
+      "mode_runs_executed": 6,
+      "mode_runs_expected": 6,
+      "selected_cases": 3,
+      "skipped": 0,
+      "state_fuel_probes_executed": 68,
+      "state_fuel_probes_expected": 68,
+      "state_mode_runs_executed": 6,
+      "state_mode_runs_expected": 6,
+      "unsupported": 0
+    }
+  },
+  "markers": {
+    "p065": [
+      "P065: sole outer root survives collection across a Register call exit",
+      "P065: numeric local=13 and operand=99 captured at suspend source_pc=5",
+      "P065: cross-module exact suspension preserves one-shot fuel cancellation and byte budgets",
+      "P065: reference and vector layouts take whole-function fallback",
+      "P065: numeric exception payload=20 unwinds after a Register exit"
+    ],
+    "p064_compatibility": "P064: 11 caller source snapshots across pending call and decoded continuation; exact source fuel, callback and memory checks"
+  },
+  "logs": {
+    "register_log": {
+      "path": "target/verification/runs/P065/verify/attempt-0004/register-semantics.stdout",
+      "sha256": "0864c3f84a92b0267a5811d146c9d7338f67cbf8cf68f7e72e2a63e72a60bdba",
+      "bytes": 21381
+    },
+    "register_stderr": {
+      "path": "target/verification/runs/P065/verify/attempt-0004/register-semantics.stderr",
+      "sha256": "8e5a80930bf659573a796249a0ec73d4471a59e7f903c3b25cd34ff8ef2993a8",
+      "bytes": 2928
+    },
+    "combined_log": {
+      "path": "target/verification/runs/P065/verify/attempt-0004/combined-p065.stdout",
+      "sha256": "95de2f3db8511501ae69021573a0d785f2a91806e612cf5371869405619b0267",
+      "bytes": 473108
+    }
+  },
+  "source_hashes": {
+    "runtime_source_map_sha256": "e33a62e0c543c43904807ec0eb9a8ed3d161c195b45afb74d55514c8a6226e61",
+    "runtime_source_file_count": 141,
+    "tier_implementation_sources_sha256": "3665aca7def1a794d6197c3a625a9db035737c284d44cb93574ba6b77fe8e683"
+  },
+  "freeze_runtime_map": {
+    "path": "target/verification/runs/P065/freeze/attempt-0001/freeze/runtime.json",
+    "sha256": "826ce6d46f58c3e63aa93477356fb94922547916fda6342b39190fd534967430",
+    "bytes": 16627
+  },
+  "tier_report_compression_threshold_bytes": 1000000,
+  "limitations": [
+    "Correctness, root/capture semantics, source-bound integration and hard default/optional build budgets only; no timing or performance promotion is claimed. tier_check per-operation observations are diagnostic and excluded from the proof summary."
+  ]
+}

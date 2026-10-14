@@ -684,4 +684,5 @@ mod tests {
     include!("../../../tests/performance/p060_private.rs");
     include!("../../../tests/performance/p062_private.rs");
     include!("../../../tests/performance/p064_private.rs");
+    include!("../../../tests/performance/p065_private.rs");
 }

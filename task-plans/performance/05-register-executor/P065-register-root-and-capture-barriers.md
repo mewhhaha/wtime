@@ -1,8 +1,8 @@
 # P065 — Verify roots and captured state around register exits
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **contract_only**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -70,4 +70,30 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+This contract-only close records correctness, root/capture semantics, source-bound integration, and default/optional build budgets. It makes no timing, speed, promotion, or broad portfolio claim; Register remains nondefault and reference/vector frames still take whole-function fallback.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P065/shared-finalization/attempt-0004/evidence.json": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118"
+  },
+  "evidence": [
+    {
+      "bytes": 1644,
+      "path": "/workspace/wtime/target/performance/P065/shared-finalization/attempt-0004/evidence.json",
+      "sha256": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P065"
+}
+```
+
+The full contract closed successfully with freeze attempt 0001, verify attempt 0004, and close attempt 0083; publication attempt 0001 recorded `done/contract_only`. Verification executed 713 checks: 300 Register semantic tests, 406 unfiltered combined Compact/Register/reference tests, one default-policy test, two conformance-forwarding checks, and four Python tier-policy tests. Every check passed. The integration tier report completed all 89 checks, including 68 fuel probes, six full-state runs, four conformance-mode runs, and three selected cases; it reported zero failures, skips, or unsupported cases. Reference-types conformance ran 105 directives in each mode and interactions ran 15 in each mode (240 directives total).
+
+The new root-transition and source-barrier verifier checks confirm outer-root collection across Register exits and instance growth, capture of local 13 and operand 99 at source PC 5 with normal resume value 112, exact cross-module suspension and nominal-tag rejection without consuming the continuation, exception payload 20 across unwind, and whole-function fallback for reference/vector frames. Fuel, cancellation, one-shot resume, foreign references, frame limits, and byte budgets were exercised. A byte-budget check exposed that spare `Vec` capacity and the common-context header were underestimated; accounting now uses exact `continuation::type_ids` capacity. No semantic assertion was weakened. The first close attempts also corrected missing prerequisites in the Register mapping state validator and conformance feature/parser/replay setup before the final full verification passed.
+
+The immutable predecessor is `target/performance/P065-before`, Register mode, commit `602d2c9`. Default clean and optional Register build sizes were 2.607499 and 2.974204 MB-equivalent; stripped sizes were 1,000,960 and 1,078,632 bytes. All hard budgets passed, and the default core retains zero external dependencies. Durable artifacts are `docs/benchmarks/performance/P065*`; export attempt `target/recovery/P065-export-0002` produced seven report copies plus hash records. The architectural writeup is `docs/architecture/register-root-barriers.md`. The gate establishes no timing evidence or performance promotion; subsequent performance decisions remain with P067.

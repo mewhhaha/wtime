@@ -661,6 +661,7 @@ impl RegisterFunction {
         {
             let barrier = prefix == Some(pc);
             if barrier != matches!(operation, Operation::ExitToDecoded)
+                || barrier && prefix_instruction(module, source)
                 || prefix.is_some() && !barrier && !prefix_instruction(module, source)
             {
                 return Err(Declined::Metadata);

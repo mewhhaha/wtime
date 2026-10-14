@@ -1,0 +1,40 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 28288,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P065-verification.json",
+    "sha256": "e2ddeec25999ec7dc4e967528d5f8d882f4a1743cbb716c7c8769c269af72b0b"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Correctness, root/capture semantics, source-bound integration and hard default/optional build budgets only; no timing or performance promotion is claimed. tier_check per-operation observations are diagnostic and excluded from the proof summary."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "freeze": {
+      "bytes": 285310,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/a1/a1fdd67bb19bd865f9ffc1747229e6cb66586d20c4b15eeb9fcd038def1a0e9b",
+      "sha256": "a1fdd67bb19bd865f9ffc1747229e6cb66586d20c4b15eeb9fcd038def1a0e9b",
+      "stored_bytes": 285310,
+      "stored_sha256": "a1fdd67bb19bd865f9ffc1747229e6cb66586d20c4b15eeb9fcd038def1a0e9b"
+    },
+    "verify": {
+      "bytes": 1054275,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/d6/d67323afef45da3db227f2fe0558f9d75596bd9f9ac887a7d7d72815d94412d7",
+      "sha256": "d67323afef45da3db227f2fe0558f9d75596bd9f9ac887a7d7d72815d94412d7",
+      "stored_bytes": 1054275,
+      "stored_sha256": "d67323afef45da3db227f2fe0558f9d75596bd9f9ac887a7d7d72815d94412d7"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P065"
+}

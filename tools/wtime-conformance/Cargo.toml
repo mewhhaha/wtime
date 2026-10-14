@@ -15,6 +15,7 @@ default = []
 opcode-coverage = ["wtime-runtime/opcode-coverage"]
 execution-reference = ["wtime-runtime/execution-reference"]
 compact-executor = ["wtime-runtime/compact-executor"]
+register-executor = ["wtime-runtime/register-executor"]
 performance-counters = ["wtime-runtime/performance-counters"]
 
 [build-dependencies]

@@ -1,0 +1,168 @@
+{
+  "build_budgets": {
+    "default": {
+      "artifact": {
+        "bytes": 327434,
+        "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/default-build.json",
+        "sha256": "20e5e25b5738d6a6758533831268017854f45a64f3df1f3b1750984d16c4dc6c"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [],
+      "mode": "default",
+      "stripped_bytes": 1000960
+    },
+    "register": {
+      "artifact": {
+        "bytes": 327599,
+        "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/register-build.json",
+        "sha256": "c60f6adbbd5492faf261e73acc9902d116ebd012210cae0d9ff1312f0c6ed695"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [
+        "wtime-runtime/register-executor"
+      ],
+      "mode": "optional-feature",
+      "stripped_bytes": 1078632
+    }
+  },
+  "counts": {
+    "combined_p065_named_cases": 6,
+    "default_named_cases": 1,
+    "p065_named_cases": 5,
+    "p065_private_named_cases": 1,
+    "register_named_cases": 48,
+    "tier_check": {
+      "all_checks_attempted": 89,
+      "all_checks_executed": 89,
+      "all_checks_expected": 89,
+      "conformance_mode_runs_executed": 4,
+      "conformance_mode_runs_expected": 4,
+      "cursor_checks_executed": 1,
+      "failed": 0,
+      "mode_runs_executed": 6,
+      "mode_runs_expected": 6,
+      "selected_cases": 3,
+      "skipped": 0,
+      "state_fuel_probes_executed": 68,
+      "state_fuel_probes_expected": 68,
+      "state_mode_runs_executed": 6,
+      "state_mode_runs_expected": 6,
+      "unsupported": 0
+    }
+  },
+  "freeze_report": {
+    "bytes": 20116,
+    "path": "/workspace/wtime/target/verification/runs/P065/freeze/attempt-0001/freeze/report.json",
+    "sha256": "2321fd92edafe5bd77a4b2fd9194f51f6892199e6d2e96d5bb2e06c60c8eedcb"
+  },
+  "p065_markers": [
+    "P065: sole outer root survives collection across a Register call exit",
+    "P065: numeric local=13 and operand=99 captured at suspend source_pc=5",
+    "P065: cross-module exact suspension preserves one-shot fuel cancellation and byte budgets",
+    "P065: reference and vector layouts take whole-function fallback",
+    "P065: numeric exception payload=20 unwinds after a Register exit"
+  ],
+  "performance_candidate": false,
+  "runtime_source_map_sha256": "e33a62e0c543c43904807ec0eb9a8ed3d161c195b45afb74d55514c8a6226e61",
+  "schema": "wtime-p065-verification-v1",
+  "settings": {
+    "combined_features": [
+      "compact-executor",
+      "register-executor",
+      "execution-reference"
+    ],
+    "default_features": [],
+    "register_features": [
+      "register-executor",
+      "execution-reference"
+    ],
+    "selection": "integration",
+    "tier": "register",
+    "tier_check_observations_are_diagnostic_only": true
+  },
+  "speed_decision": null,
+  "status": "passed",
+  "test_logs": {
+    "combined_p065": {
+      "bytes": 473108,
+      "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/combined-p065.stdout",
+      "sha256": "95de2f3db8511501ae69021573a0d785f2a91806e612cf5371869405619b0267"
+    },
+    "default": {
+      "bytes": 170,
+      "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/default-policy.stdout",
+      "sha256": "eef27ed686f5800d37b92f2b5a25a0cdd3f6e6c4cd6821d4f4e1bb87499da83c"
+    },
+    "register": {
+      "bytes": 21381,
+      "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/register-semantics.stdout",
+      "sha256": "0864c3f84a92b0267a5811d146c9d7338f67cbf8cf68f7e72e2a63e72a60bdba"
+    },
+    "register_stderr": {
+      "bytes": 2928,
+      "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/register-semantics.stderr",
+      "sha256": "8e5a80930bf659573a796249a0ec73d4471a59e7f903c3b25cd34ff8ef2993a8"
+    }
+  },
+  "tier_check": {
+    "baseline_tier": "reference",
+    "binary": {
+      "path": "tools/wtime-bench/target/release/wtime-bench",
+      "sha256": "e58fd397839fa598eb09172ee4e5f4e119c212e8e08f75bfb8e94f68bd526e9c"
+    },
+    "conformance_binary": {
+      "path": "target/release/wtime-conformance",
+      "sha256": "58cbe74e6a204e029e964109b9495cae5475ce7a86281f69481cae6da0e76486"
+    },
+    "conformance_source_count": 22,
+    "counts": {
+      "all_checks_attempted": 89,
+      "all_checks_executed": 89,
+      "all_checks_expected": 89,
+      "conformance_mode_runs_executed": 4,
+      "conformance_mode_runs_expected": 4,
+      "cursor_checks_executed": 1,
+      "failed": 0,
+      "mode_runs_executed": 6,
+      "mode_runs_expected": 6,
+      "selected_cases": 3,
+      "skipped": 0,
+      "state_fuel_probes_executed": 68,
+      "state_fuel_probes_expected": 68,
+      "state_mode_runs_executed": 6,
+      "state_mode_runs_expected": 6,
+      "unsupported": 0
+    },
+    "diagnostic_instrumentation": {
+      "binary_sha256": "bd88fea75a271afb89779aa7a416ee0be3cc6bb989b8c220bdcded16fae17580",
+      "enabled": true,
+      "feature": "performance-counters"
+    },
+    "errors": [],
+    "fixture_identities_sha256": "dc51677f11f9cddc35dfdb4cf25e4cbb9aa10bb951227108518905c1874618f9",
+    "implementation_sources_sha256": "3665aca7def1a794d6197c3a625a9db035737c284d44cb93574ba6b77fe8e683",
+    "modes": [
+      "decoded",
+      "portable",
+      "reference",
+      "register"
+    ],
+    "passed": true,
+    "requested_tier": "register",
+    "selection": "integration",
+    "semantic_case_ids": [
+      "branch_calls",
+      "call_overhead",
+      "integer_loop"
+    ],
+    "source_stable": true
+  },
+  "tier_check_report": {
+    "bytes": 120321,
+    "path": "/workspace/wtime/target/verification/runs/P065/verify/attempt-0004/tier-check/report.json",
+    "sha256": "fdf58fb6fa0de15e45bc36c1b16336aa397cfcbf94d09c699bdbe3eda0633ec9"
+  },
+  "timing_evidence": false
+}

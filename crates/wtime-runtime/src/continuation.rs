@@ -43,9 +43,11 @@ fn args(s: &mut Vec<Value>, count: usize) -> Result<Vec<Value>> {
     Ok(s.split_off(base))
 }
 fn type_ids(types: &[ValType], module: Option<&Module>) -> Result<Vec<Option<CanonicalTypeId>>> {
-    types
-        .iter()
-        .map(|ty| match ty {
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(types.len())
+        .map_err(|_| err(ErrorKind::ResourceLimit, "continuation type allocation"))?;
+    for ty in types {
+        ids.push(match ty {
             ValType::Ref(RefType {
                 heap: HeapType::Defined(i) | HeapType::ExactDefined(i),
                 ..
@@ -55,8 +57,11 @@ fn type_ids(types: &[ValType], module: Option<&Module>) -> Result<Vec<Option<Can
                 .map(Some)
                 .ok_or_else(|| err(ErrorKind::Host, "missing continuation type context")),
             _ => Ok(None),
-        })
-        .collect()
+        }?);
+    }
+    // Header admission charges one context entry per declared value. Retain
+    // exactly that capacity even if the allocator over-reserved the draft.
+    Ok(ids.into_boxed_slice().into_vec())
 }
 fn signature_bytes(signature: &FuncType) -> usize {
     signature

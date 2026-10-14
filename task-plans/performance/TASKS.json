@@ -82374,8 +82374,8 @@
       "key": "register-root-and-capture-barriers",
       "title": "Verify roots and captured state around register exits",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "contract_only",
       "kind": "gate",
       "dependencies": [
         "P004",
@@ -82425,7 +82425,13 @@
         "python3 tools/wtime-bench/tier_check.py --tier register --selection integration --output target/performance/P065/conformance"
       ],
       "path": "05-register-executor/P065-register-root-and-capture-barriers.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P065/shared-finalization/attempt-0004/evidence.json",
+          "sha256": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118",
+          "bytes": 1644
+        }
+      ],
       "branch": "portable",
       "decision_rule": "gate",
       "reviews_optional_tasks": [],
@@ -82437,7 +82443,22 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P065/shared-finalization/attempt-0004/evidence.json": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118"
+        },
+        "evidence": [
+          {
+            "bytes": 1644,
+            "path": "/workspace/wtime/target/performance/P065/shared-finalization/attempt-0004/evidence.json",
+            "sha256": "5bf93a86a64a5a6a902b1ddb2944bd95c59b4c527705254c1eadbaeafdee6118"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P065"
+      }
     },
     {
       "id": "P066",

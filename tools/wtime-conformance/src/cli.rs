@@ -13,6 +13,7 @@ fn execution_policy(mode: &str) -> Result<wtime_runtime::ExecutionPolicy, String
         "portable" => Ok(wtime_runtime::ExecutionPolicy::Portable),
         "reference" => Ok(wtime_runtime::ExecutionPolicy::Reference),
         "compact" => Ok(wtime_runtime::ExecutionPolicy::Compact),
+        "register" => Ok(wtime_runtime::ExecutionPolicy::Register),
         _ => Err(format!("unknown execution mode {mode}")),
     }
 }
@@ -21,6 +22,7 @@ fn replay_feature_args(
     opcode_coverage: bool,
     execution_reference: bool,
     compact_executor: bool,
+    register_executor: bool,
     performance_counters: bool,
 ) -> String {
     let mut features = Vec::new();
@@ -32,6 +34,9 @@ fn replay_feature_args(
     }
     if compact_executor {
         features.push("compact-executor");
+    }
+    if register_executor {
+        features.push("register-executor");
     }
     if performance_counters {
         features.push("performance-counters");
@@ -52,7 +57,7 @@ pub fn run() -> Result<(), String> {
         return encode(Path::new(&args[1]), Path::new(&args[3]));
     }
     if args.first().is_none_or(|s| s != "run") {
-        return Err("usage: run --mode decoded|portable|reference|compact --profile mvp|stable-core|all-phase3-core --suite name --filter prefix|all --report path".into());
+        return Err("usage: run --mode decoded|portable|reference|compact|register --profile mvp|stable-core|all-phase3-core --suite name --filter prefix|all --report path".into());
     }
     let mut mode = "decoded";
     let mut profile = None;
@@ -164,6 +169,7 @@ pub fn run() -> Result<(), String> {
             cfg!(feature = "opcode-coverage"),
             cfg!(feature = "execution-reference"),
             cfg!(feature = "compact-executor"),
+            cfg!(feature = "register-executor"),
             cfg!(feature = "performance-counters"),
         ),
         args.iter()
@@ -215,6 +221,14 @@ mod tests {
     }
 
     #[test]
+    fn register_mode_selects_register_execution_policy() {
+        assert!(matches!(
+            execution_policy("register"),
+            Ok(wtime_runtime::ExecutionPolicy::Register)
+        ));
+    }
+
+    #[test]
     fn unknown_mode_is_rejected() {
         assert_eq!(
             execution_policy("missing").unwrap_err(),
@@ -225,14 +239,26 @@ mod tests {
     #[test]
     fn replay_features_preserve_existing_features_and_add_compact() {
         assert_eq!(
-            replay_feature_args(true, true, true, false),
+            replay_feature_args(true, true, true, false, false),
             "--features opcode-coverage,execution-reference,compact-executor "
         );
         assert_eq!(
-            replay_feature_args(false, false, true, false),
+            replay_feature_args(false, false, true, false, false),
             "--features compact-executor "
         );
-        assert_eq!(replay_feature_args(false, false, false, false), "");
+        assert_eq!(replay_feature_args(false, false, false, false, false), "");
+    }
+
+    #[test]
+    fn register_replay_features_preserve_optional_tiers() {
+        assert_eq!(
+            replay_feature_args(true, true, true, true, true),
+            "--features opcode-coverage,execution-reference,compact-executor,register-executor,performance-counters "
+        );
+        assert_eq!(
+            replay_feature_args(false, true, false, true, false),
+            "--features execution-reference,register-executor "
+        );
     }
 }
 

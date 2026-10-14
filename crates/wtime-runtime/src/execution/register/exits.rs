@@ -1,6 +1,13 @@
 //! One-way handoff of a numeric prefix to the original decoded instruction.
 use super::{execute, ir::Budget, lower::LoweredFunction};
 use crate::{Module, Result, Store, Value, execution::Frame};
+// These transitions may create, publish, trace or capture reference state.
+// They always execute in Decoded after the verified numeric prefix ends.
+pub(super) fn transition(opcode: u16) -> bool {
+    matches!(opcode,
+        0x08 | 0x0a | 0x10..=0x15 | 0x1f |
+        0xd0..=0xd6 | 0xe0..=0xe6 | 0xfb00..=0xfbff)
+}
 pub(super) fn prepare(
     module: &Module,
     body: usize,
@@ -12,7 +19,7 @@ pub(super) fn prepare(
     transaction.reserve(code.len(), 0).ok()?;
     if !code
         .iter()
-        .any(|instruction| matches!(instruction.opcode, 0x10..=0x15))
+        .any(|instruction| transition(instruction.opcode))
     {
         return None;
     }

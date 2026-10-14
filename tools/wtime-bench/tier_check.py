@@ -424,7 +424,8 @@ def _state_run(binary: Path, case: str, mode: str, expected: dict[str, Any],
             or value.get("values") != values):
         raise TierCheckError(f"{case} ({mode}): outcome/result protocol mismatch")
     expected_policy = {"reference": "Reference", "decoded": "Decoded",
-                       "portable": "Portable", "compact": "Compact"}.get(mode)
+                       "portable": "Portable", "compact": "Compact",
+                       "register": "Register"}.get(mode)
     if expected_policy is None:
         raise TierCheckError(f"unsupported state-driver mode {mode!r}")
     if value.get("resolved_policy") != expected_policy:
@@ -475,7 +476,7 @@ def _state_fuel_probe(binary: Path, case: str, mode: str, fuel: int,
     value = _run_json(binary, ["--tier-state-driver", str(wasm), case, mode,
                                "all-phase3-core", str(fuel), "none"], runner)
     policy = {"reference": "Reference", "decoded": "Decoded", "portable": "Portable",
-              "compact": "Compact"}.get(mode)
+              "compact": "Compact", "register": "Register"}.get(mode)
     outcome = value.get("outcome")
     if (policy is None or value.get("schema_version") != 1 or value.get("diagnostic") is not True
             or value.get("instrumented") is not False or value.get("case") != case
