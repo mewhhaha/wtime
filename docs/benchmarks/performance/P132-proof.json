@@ -1,0 +1,139 @@
+{
+  "build_budgets": {
+    "default": {
+      "artifact": {
+        "bytes": 328589,
+        "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/default-build.json",
+        "sha256": "9438fd451079344375a1af18628978ae123c30a98b0ac19f1749df7e651590b4"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [],
+      "mode": "default",
+      "stripped_bytes": 1000960
+    },
+    "register": {
+      "artifact": {
+        "bytes": 328753,
+        "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/register-build.json",
+        "sha256": "dfa864eda443feea6b6522908dd92bdb4371bb9aef9cdf6a4110615406e28c60"
+      },
+      "budget_pass": true,
+      "default_dependency_closure_pass": true,
+      "features": [
+        "wtime-runtime/register-executor"
+      ],
+      "mode": "optional-feature",
+      "stripped_bytes": 1078880
+    }
+  },
+  "counts": {
+    "body": 196,
+    "constant": 68,
+    "constant_line_count": 68,
+    "default_named_cases": 1,
+    "edge": 10,
+    "edge_line_count": 10,
+    "fixture": 20,
+    "fixture_count": 20,
+    "fixture_total_declined": 15,
+    "fixture_total_prepared": 181,
+    "inventory_lines": 1133,
+    "memory_argument": 33,
+    "memory_argument_line_count": 33,
+    "p132_named_cases": 4,
+    "pc": 805,
+    "pc_line_count": 805,
+    "prepared_fixture_count": 19,
+    "summary": 1,
+    "total_body_count": 196,
+    "total_declined": 15,
+    "total_prepared": 181
+  },
+  "decision": "contract_only",
+  "freeze_report": {
+    "bytes": 28094,
+    "path": "/workspace/wtime/target/verification/runs/P132/freeze/attempt-0003/freeze/report.json",
+    "sha256": "ab7495497fb2469d3502dd3a0757aac8874ed0d913048387db13e7fb201f180c"
+  },
+  "inventory": {
+    "byte_for_byte_match": true,
+    "counts": {
+      "body": 196,
+      "constant": 68,
+      "constant_line_count": 68,
+      "edge": 10,
+      "edge_line_count": 10,
+      "fixture": 20,
+      "fixture_count": 20,
+      "fixture_total_declined": 15,
+      "fixture_total_prepared": 181,
+      "memory_argument": 33,
+      "memory_argument_line_count": 33,
+      "pc": 805,
+      "pc_line_count": 805,
+      "prepared_fixture_count": 19,
+      "summary": 1,
+      "total_body_count": 196,
+      "total_declined": 15,
+      "total_prepared": 181
+    },
+    "fixture_source_pin_count": 20,
+    "fixture_source_pins_sha256": "e03b8a0b1f3a4678cc7233bf188dfe9bd3cc48b5cc572a880983b963ddeafbff",
+    "golden": {
+      "bytes": 166970,
+      "path": "/workspace/wtime/target/performance/P132-inventory-before/golden-inventory.txt",
+      "sha256": "78f2c13525bcd4f4989307589321436badad713f53e4561cbd367c78df965f07"
+    },
+    "matched_line_count": 1133,
+    "matched_sha256": "78f2c13525bcd4f4989307589321436badad713f53e4561cbd367c78df965f07",
+    "source_log": {
+      "bytes": 170004,
+      "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/register-semantics.stderr",
+      "sha256": "d9a661f27cd882e03d7cb290cc2b189a6e137311d4712c73da1002b1d2cc1c24"
+    }
+  },
+  "limitations": [
+    "Preparation semantics, exact archived inventory, policy neutrality, and build budgets only; no timing or performance promotion is claimed."
+  ],
+  "performance_candidate": false,
+  "runtime_source_map_sha256": "f8cb558ab058dfbfa69e2d1bdad2ce4b6a23b56e41d4e804243b34b42a135bc5",
+  "schema": "wtime-p132-verification-v1",
+  "settings": {
+    "combined_features": [
+      "compact-executor",
+      "register-executor",
+      "execution-reference"
+    ],
+    "default_features": [],
+    "immediate_predecessor": "register",
+    "register_features": [
+      "register-executor",
+      "execution-reference"
+    ]
+  },
+  "status": "passed",
+  "test_logs": {
+    "combined": {
+      "bytes": 473502,
+      "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/combined-semantics.stdout",
+      "sha256": "54d36ad44b5cb708830f711b3ed4ab6588188e81298402c6f3fad5b2f64c8441"
+    },
+    "default": {
+      "bytes": 178,
+      "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/default-policy.stdout",
+      "sha256": "ad9540fa17914a08152b7ac03fb02e8df6057309f11fe3f624a9b1ac3baf386b"
+    },
+    "register": {
+      "bytes": 21775,
+      "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/register-semantics.stdout",
+      "sha256": "47d1a375cdb81194ff5409f0721b72fd7673bf5edb888aa5cee48a915d2fbe4b"
+    },
+    "register_inventory": {
+      "bytes": 170004,
+      "path": "/workspace/wtime/target/verification/runs/P132/verify/attempt-0003/register-semantics.stderr",
+      "sha256": "d9a661f27cd882e03d7cb290cc2b189a6e137311d4712c73da1002b1d2cc1c24"
+    }
+  },
+  "timing_evidence": false
+}

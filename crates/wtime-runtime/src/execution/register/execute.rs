@@ -56,7 +56,7 @@ impl PreparedModule {
         self.functions.get(body)?.as_ref()
     }
     pub(crate) fn prepare(module: &Module) -> Option<Self> {
-        let plans = module.data.plans.as_ref()?;
+        module.data.plans.as_ref()?;
         let count = module.data.inner.decoded().code.len();
         let index_bytes = count
             .checked_mul(size_of::<Option<PreparedFunction>>())?
@@ -77,170 +77,197 @@ impl PreparedModule {
         // transactional retained metadata. This bounds scans of declined bodies.
         let mut attempted_work = MAX_WORK.checked_sub(count)?;
         for (body, entry) in functions.iter_mut().enumerate() {
-            let code = &module.data.inner.decoded().code[body].instructions;
-            let n = code.len();
-            let peak = plans.functions.get(body)?.stack_peak;
-            let layout = module.function_layout(body)?;
-            let locals = layout.params.len().checked_add(layout.locals.len())?;
-            let table_extra =
-                code.iter().try_fold(0usize, |total, instruction| {
-                    match &instruction.immediate {
-                        Immediate::BrTable(targets, _) => {
-                            total.checked_add(targets.len().checked_add(1)?)
-                        }
-                        _ => Some(total),
-                    }
-                })?;
-            let memory_count = code
-                .iter()
-                .filter(|instruction| matches!(instruction.opcode, 0x28..=0x3e))
-                .count();
-            let per_edge = peak
-                .checked_mul(peak)?
-                .checked_mul(peak)?
-                .checked_mul(2)?
-                .checked_add(peak.checked_mul(peak)?.checked_mul(3)?)?
-                .checked_add(peak.checked_mul(8)?)?
-                .checked_add(1)?;
-            let charge =
-                n.checked_mul(20)?
-                    .checked_add(n.checked_mul(peak)?.checked_mul(10)?)?
-                    .checked_add(n.checked_mul(per_edge)?)?
-                    .checked_add(table_extra.checked_mul(
-                        per_edge.checked_add(peak.checked_mul(8)?)?.checked_add(8)?,
-                    )?)?
-                    .checked_add(locals.checked_mul(2)?)?
-                    .checked_add(layout.results.len().checked_mul(2)?)?
-                    .checked_add(
-                        memory_count.checked_mul(
-                            module
-                                .data
-                                .inner
-                                .decoded()
-                                .imports
-                                .len()
-                                .checked_mul(5)?
-                                .checked_add(8)?,
-                        )?,
-                    )?;
-            let Some(remaining) = attempted_work.checked_sub(charge) else {
-                break;
-            };
-            attempted_work = remaining;
-            if !layout
-                .params
-                .iter()
-                .chain(layout.locals)
-                .chain(layout.results)
-                .all(|ty| {
-                    matches!(
-                        ty,
-                        ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
-                    )
-                })
-            {
-                continue;
-            }
-            let activation_bytes = locals
-                .checked_add(peak)?
-                .checked_mul(size_of::<u64>())?
-                .checked_add(n.checked_mul(size_of::<Label>())?)?;
-            if activation_bytes > MAX_ACTIVATION_BYTES {
-                continue;
-            }
-            let mut transaction = budget.clone();
-            let lowered = match LoweredFunction::lower(module, body, &mut transaction) {
-                Ok(lowered) => lowered,
-                Err(_) => {
-                    let Some(lowered) = exits::prepare(module, body, &mut transaction) else {
-                        continue;
-                    };
-                    lowered
-                }
-            };
-            let n = lowered.program.instruction_count();
-            if (0..n).any(|pc| {
-                !lowered
-                    .program
-                    .operation(pc)
-                    .is_some_and(|op| valid_operation(op, &lowered))
-            }) {
-                continue;
-            }
-            let extra = n
-                .checked_mul(size_of::<Vec<EdgePlan>>())?
-                .checked_add(size_of::<PreparedFunction>() - size_of::<LoweredFunction>())?;
-            if transaction.reserve(n, extra).is_err() {
-                continue;
-            }
-            let mut edges = Vec::new();
-            if edges.try_reserve_exact(n).is_err() {
-                continue;
-            }
-            let actual = edges
-                .capacity()
-                .checked_mul(size_of::<Vec<EdgePlan>>())?
-                .checked_add(size_of::<PreparedFunction>() - size_of::<LoweredFunction>())?;
-            if actual > extra && transaction.reserve(0, actual - extra).is_err() {
-                continue;
-            }
-            edges.resize_with(n, Vec::new);
-            let mut valid = true;
-            let mut offset = 0;
-            while offset < lowered.edges.len() {
-                let pc = lowered.edges[offset].source_pc;
-                if pc >= n || !edges[pc].is_empty() {
-                    valid = false;
-                    break;
-                }
-                let first = offset;
-                while offset < lowered.edges.len() && lowered.edges[offset].source_pc == pc {
-                    offset += 1;
-                }
-                let group = &lowered.edges[first..offset];
-                let Some(bytes) = group.len().checked_mul(size_of::<EdgePlan>()) else {
-                    valid = false;
-                    break;
-                };
-                if transaction.reserve(group.len(), bytes).is_err()
-                    || edges[pc].try_reserve_exact(group.len()).is_err()
-                {
-                    valid = false;
-                    break;
-                }
-                let Some(actual_bytes) = edges[pc].capacity().checked_mul(size_of::<EdgePlan>())
-                else {
-                    valid = false;
-                    break;
-                };
-                if actual_bytes > bytes && transaction.reserve(0, actual_bytes - bytes).is_err() {
-                    valid = false;
-                    break;
-                }
-                for edge in group {
-                    match MovePlan::prepare(&edge.moves, lowered.program.slots(), &mut transaction)
-                    {
-                        Ok(moves) => edges[pc].push(EdgePlan {
-                            target: edge.target,
-                            moves,
-                        }),
-                        Err(_) => {
-                            valid = false;
-                            break;
-                        }
-                    }
-                }
-                if !valid {
-                    break;
-                }
-            }
-            if valid {
-                *entry = Some(PreparedFunction { lowered, edges });
-                budget = transaction;
+            match prepare_function(module, body, &mut budget, &mut attempted_work) {
+                Preparation::Complete(function) => *entry = Some(function),
+                Preparation::Declined => {}
+                Preparation::Exhausted => break,
+                Preparation::Invalid => return None,
             }
         }
         Some(Self { functions })
     }
+}
+
+/// One bounded attempt. Failed attempts spend attempted work, while retained
+/// metadata commits only with a complete independently admitted function.
+enum Preparation {
+    Complete(PreparedFunction),
+    Declined,
+    Exhausted,
+    Invalid,
+}
+fn prepare_function(
+    module: &Module,
+    body: usize,
+    budget: &mut Budget,
+    attempted_work: &mut usize,
+) -> Preparation {
+    prepare_checked(module, body, budget, attempted_work).unwrap_or(Preparation::Invalid)
+}
+fn prepare_checked(
+    module: &Module,
+    body: usize,
+    budget: &mut Budget,
+    attempted_work: &mut usize,
+) -> Option<Preparation> {
+    let plans = module.data.plans.as_ref()?;
+    let code = &module.data.inner.decoded().code.get(body)?.instructions;
+    let n = code.len();
+    let peak = plans.functions.get(body)?.stack_peak;
+    let layout = module.function_layout(body)?;
+    let locals = layout.params.len().checked_add(layout.locals.len())?;
+    let table_extra =
+        code.iter()
+            .try_fold(0usize, |total, instruction| match &instruction.immediate {
+                Immediate::BrTable(targets, _) => total.checked_add(targets.len().checked_add(1)?),
+                _ => Some(total),
+            })?;
+    let memory_count = code
+        .iter()
+        .filter(|instruction| matches!(instruction.opcode, 0x28..=0x3e))
+        .count();
+    let per_edge = peak
+        .checked_mul(peak)?
+        .checked_mul(peak)?
+        .checked_mul(2)?
+        .checked_add(peak.checked_mul(peak)?.checked_mul(3)?)?
+        .checked_add(peak.checked_mul(8)?)?
+        .checked_add(1)?;
+    let charge = n
+        .checked_mul(20)?
+        .checked_add(n.checked_mul(peak)?.checked_mul(10)?)?
+        .checked_add(n.checked_mul(per_edge)?)?
+        .checked_add(
+            table_extra.checked_mul(per_edge.checked_add(peak.checked_mul(8)?)?.checked_add(8)?)?,
+        )?
+        .checked_add(locals.checked_mul(2)?)?
+        .checked_add(layout.results.len().checked_mul(2)?)?
+        .checked_add(
+            memory_count.checked_mul(
+                module
+                    .data
+                    .inner
+                    .decoded()
+                    .imports
+                    .len()
+                    .checked_mul(5)?
+                    .checked_add(8)?,
+            )?,
+        )?;
+    let Some(remaining) = attempted_work.checked_sub(charge) else {
+        return Some(Preparation::Exhausted);
+    };
+    *attempted_work = remaining;
+    if !layout
+        .params
+        .iter()
+        .chain(layout.locals)
+        .chain(layout.results)
+        .all(|ty| {
+            matches!(
+                ty,
+                ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+            )
+        })
+    {
+        return Some(Preparation::Declined);
+    }
+    let activation_bytes = locals
+        .checked_add(peak)?
+        .checked_mul(size_of::<u64>())?
+        .checked_add(n.checked_mul(size_of::<Label>())?)?;
+    if activation_bytes > MAX_ACTIVATION_BYTES {
+        return Some(Preparation::Declined);
+    }
+    let mut transaction = budget.clone();
+    let lowered = match LoweredFunction::lower(module, body, &mut transaction) {
+        Ok(lowered) => lowered,
+        Err(_) => {
+            let Some(lowered) = exits::prepare(module, body, &mut transaction) else {
+                return Some(Preparation::Declined);
+            };
+            lowered
+        }
+    };
+    let n = lowered.program.instruction_count();
+    if (0..n).any(|pc| {
+        !lowered
+            .program
+            .operation(pc)
+            .is_some_and(|op| valid_operation(op, &lowered))
+    }) {
+        return Some(Preparation::Declined);
+    }
+    let extra = n
+        .checked_mul(size_of::<Vec<EdgePlan>>())?
+        .checked_add(size_of::<PreparedFunction>() - size_of::<LoweredFunction>())?;
+    if transaction.reserve(n, extra).is_err() {
+        return Some(Preparation::Declined);
+    }
+    let mut edges = Vec::new();
+    if edges.try_reserve_exact(n).is_err() {
+        return Some(Preparation::Declined);
+    }
+    let actual = edges
+        .capacity()
+        .checked_mul(size_of::<Vec<EdgePlan>>())?
+        .checked_add(size_of::<PreparedFunction>() - size_of::<LoweredFunction>())?;
+    if actual > extra && transaction.reserve(0, actual - extra).is_err() {
+        return Some(Preparation::Declined);
+    }
+    edges.resize_with(n, Vec::new);
+    let mut valid = true;
+    let mut offset = 0;
+    while offset < lowered.edges.len() {
+        let pc = lowered.edges[offset].source_pc;
+        if pc >= n || !edges[pc].is_empty() {
+            valid = false;
+            break;
+        }
+        let first = offset;
+        while offset < lowered.edges.len() && lowered.edges[offset].source_pc == pc {
+            offset += 1;
+        }
+        let group = &lowered.edges[first..offset];
+        let Some(bytes) = group.len().checked_mul(size_of::<EdgePlan>()) else {
+            valid = false;
+            break;
+        };
+        if transaction.reserve(group.len(), bytes).is_err()
+            || edges[pc].try_reserve_exact(group.len()).is_err()
+        {
+            valid = false;
+            break;
+        }
+        let Some(actual_bytes) = edges[pc].capacity().checked_mul(size_of::<EdgePlan>()) else {
+            valid = false;
+            break;
+        };
+        if actual_bytes > bytes && transaction.reserve(0, actual_bytes - bytes).is_err() {
+            valid = false;
+            break;
+        }
+        for edge in group {
+            match MovePlan::prepare(&edge.moves, lowered.program.slots(), &mut transaction) {
+                Ok(moves) => edges[pc].push(EdgePlan {
+                    target: edge.target,
+                    moves,
+                }),
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if !valid {
+            break;
+        }
+    }
+    if valid {
+        *budget = transaction;
+        return Some(Preparation::Complete(PreparedFunction { lowered, edges }));
+    }
+    Some(Preparation::Declined)
 }
 #[derive(Clone)]
 pub(crate) struct Activation {
@@ -685,4 +712,6 @@ mod tests {
     include!("../../../tests/performance/p062_private.rs");
     include!("../../../tests/performance/p064_private.rs");
     include!("../../../tests/performance/p065_private.rs");
+    include!("../../../tests/performance/p132_inventory.rs");
+    include!("../../../tests/performance/p132_private.rs");
 }

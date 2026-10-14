@@ -1,0 +1,40 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 17389,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P132-verification.json",
+    "sha256": "da41e2b7f8853700355717a60e4301c8b29bdf3c69c8bca74ede9f35aa3aa53d"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Transactional preparation semantics, exact archived inventory, policy neutrality, and default/optional build budgets only; no timing or performance promotion is claimed."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "freeze": {
+      "bytes": 318020,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/b8/b89dd44984b1dcc8df7e1c1aa5f3e617fc3a5218e7d631e5ab055a6db8d8bac2",
+      "sha256": "b89dd44984b1dcc8df7e1c1aa5f3e617fc3a5218e7d631e5ab055a6db8d8bac2",
+      "stored_bytes": 318020,
+      "stored_sha256": "b89dd44984b1dcc8df7e1c1aa5f3e617fc3a5218e7d631e5ab055a6db8d8bac2"
+    },
+    "verify": {
+      "bytes": 806179,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/75/754e5ca5eed48129c5b83100165bcd65e2d4bec6fa7c54261b61e6aea3859cd7",
+      "sha256": "754e5ca5eed48129c5b83100165bcd65e2d4bec6fa7c54261b61e6aea3859cd7",
+      "stored_bytes": 806179,
+      "stored_sha256": "754e5ca5eed48129c5b83100165bcd65e2d4bec6fa7c54261b61e6aea3859cd7"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P132"
+}

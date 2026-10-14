@@ -1,0 +1,182 @@
+{
+  "archive_commit": "4e333ac7890b5325ca80d8940e0d5a89ee0d4938",
+  "archive_manifest_sha256": "8a4aebc05209ec9fa9a77c6fcb2b229e17820271779661473698c523aa672374",
+  "archived_execute_injected_sha256": "e7ee54460120e7ab1fc231210d7e1ee56edd946630264e3bcefe6a2513511d74",
+  "archived_execute_original_sha256": "0d2bccf36877a52c8182ee515cd0ccbf9f42260bf65de9e84536e254434fe6b3",
+  "cargo_command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "wtime-runtime",
+    "--features",
+    "register-executor,execution-reference",
+    "--lib",
+    "p132_inventory_prepared_functions",
+    "--",
+    "--nocapture"
+  ],
+  "cargo_features": [
+    "register-executor",
+    "execution-reference"
+  ],
+  "cargo_returncode": 0,
+  "cargo_stderr_sha256": "d8ac3eafd7c2f9b2cbe1f9a381238580c194c4b3e89ec7f85fa14b52bd063752",
+  "constant_line_count": 68,
+  "declined_body_count": 15,
+  "edge_line_count": 10,
+  "fixture_count": 20,
+  "fixture_identity_path": "/workspace/wtime/target/performance/P132-inventory-before/fixture-identities-before.json",
+  "fixture_identity_sha256": "36c54de2f75e62e1fb492715ea0cc9a7a8cb4e4255e3f4ea378d7b12dc29d394",
+  "fixture_source_pins": {
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_caller.wasm": {
+      "fixture": "control_caller_p060",
+      "sha256": "03ffdc2041ae8ba0c8d078422d36152cf1d35f1293c94a4074fe7e83791743ae",
+      "size_bytes": 199
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p060/multivalue_table.wasm": {
+      "fixture": "control_table_p060",
+      "sha256": "82cfdef74e7dfae3083dc2b42df63e1bc56e0979d59060f333d22f92e138a836",
+      "size_bytes": 80
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p060/table_caller.wasm": {
+      "fixture": "control_target_p060",
+      "sha256": "5bc52bc4cacd57fd02776d5a82cc828bffa621db3c49a6ca1aa1af5ee03ce84b",
+      "size_bytes": 113
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p061/integer_ops.wasm": {
+      "fixture": "integer_p061",
+      "sha256": "ef2618cb1433be43801e0e5ed09950f29bfef567c94f0eea58c6c461df83d1df",
+      "size_bytes": 1874
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p062/double_loop.wasm": {
+      "fixture": "double_loop_p062",
+      "sha256": "6f5956a62e16a5298cb1297d0691bfb26e50bc92243198413748b82580d2f5ac",
+      "size_bytes": 179
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p062/float_loop.wasm": {
+      "fixture": "float_loop_p062",
+      "sha256": "9a866ed614814bc74a36aad06d6adefc51cd9bf914c8cd7901ee19a13649ce92",
+      "size_bytes": 221
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p062/float_ops.wasm": {
+      "fixture": "float_ops_p062",
+      "sha256": "8172c4a372ec6bffa409472aa9d520230f0dd515178ec46cce4411ff25586b3a",
+      "size_bytes": 2213
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p062/mixed_slots.wasm": {
+      "fixture": "mixed_slots_p062",
+      "sha256": "82b79a2138ab3a07645e957bb0ec0bde50c74e96db3bae8adfc6fde88574a9a6",
+      "size_bytes": 134
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p063/prior-effects.wasm": {
+      "fixture": "memory_prior_effects_p063",
+      "sha256": "48565e561c8e34ae3ba3f979331ae798ffcb727964eeebf3e8453b8ac484fdbd",
+      "size_bytes": 72
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p063/scalar-widths.wasm": {
+      "fixture": "memory_widths_p063",
+      "sha256": "74c3cc962eb02ab0b412d0f5b67b45928c590e9634265fffa18ec69ec9b8601c",
+      "size_bytes": 375
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p063/scalar_loads.wasm": {
+      "fixture": "memory_loads_p063",
+      "sha256": "aa4b1fb525ec63f94eb2be538286b723b39033a4e16004c02b5a2d6dfdd9558c",
+      "size_bytes": 580
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p063/scalar_stores.wasm": {
+      "fixture": "memory_stores_p063",
+      "sha256": "8fb9253a5c3536b7d6d2b147e0fbfe5a07ac5b5f50ef60a253936b6cd4fe93a4",
+      "size_bytes": 208
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p063/unshared-bindings.wasm": {
+      "fixture": "memory_bindings_p063",
+      "sha256": "c39869a051360abd447ad657dd604039e27247f03f62fe958737075cc1e448c4",
+      "size_bytes": 330
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p064/calls.wasm": {
+      "fixture": "call_multi_p064",
+      "sha256": "b5a3f112d419a748ec19a11eccb788a2643c83c343cc1dcad5e001157ca7109c",
+      "size_bytes": 260
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p064/direct_call.wasm": {
+      "fixture": "call_direct_p064",
+      "sha256": "537ff9e2446e6b3fb94c6969115aa1abeb8a4dc67e9c4c42b8583981358f6f47",
+      "size_bytes": 124
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p064/host_call.wasm": {
+      "fixture": "call_host_p064",
+      "sha256": "146dd2620ec941b909fec956ac228ffc208c979c7991387eb0a7428774eed46e",
+      "size_bytes": 147
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p065/barrier_guards.wasm": {
+      "fixture": "unsupported_guards_p065",
+      "sha256": "459de6d81e355592eeaddc4daca45835b85c55fceb23b45609bfcc9158399f05",
+      "size_bytes": 143
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p065/exact_capture.wasm": {
+      "fixture": "capture_exact_p065",
+      "sha256": "b44bd1a20ec10088a7c11928f9b634a80c775d7d6d1009ed2fabe58acf5ebb2a",
+      "size_bytes": 247
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p065/numeric_capture.wasm": {
+      "fixture": "capture_numeric_p065",
+      "sha256": "2cc602e6f4ec6de3ae45bb20c988191b2c4a137d962243cce54db8a8edb0582f",
+      "size_bytes": 244
+    },
+    "/workspace/wtime/crates/wtime-runtime/tests/fixtures/performance/p065/numeric_exception.wasm": {
+      "fixture": "capture_exception_p065",
+      "sha256": "2b9633260b2e1475e209ffe193715c2e448698ac440af75e0f52cd64cf300edf",
+      "size_bytes": 107
+    }
+  },
+  "fixture_summary_expected": "fixture_count=20; prepared_fixture_count=19; total_prepared=181; total_declined=15",
+  "golden_line_count": 1133,
+  "golden_path": "/workspace/wtime/target/performance/P132-inventory-before/golden-inventory.txt",
+  "golden_sha256": "78f2c13525bcd4f4989307589321436badad713f53e4561cbd367c78df965f07",
+  "kind": "corrected-golden-reader-reference",
+  "memory_argument_line_count": 33,
+  "observer_sha256": "462b0955b636e6742d5276d2dcdafbb0c83564cea259a95d195975abba0319a5",
+  "ordered_fixture_membership": [
+    "integer_p061",
+    "float_ops_p062",
+    "float_loop_p062",
+    "double_loop_p062",
+    "mixed_slots_p062",
+    "memory_loads_p063",
+    "memory_stores_p063",
+    "memory_widths_p063",
+    "memory_prior_effects_p063",
+    "memory_bindings_p063",
+    "control_caller_p060",
+    "control_table_p060",
+    "control_target_p060",
+    "call_direct_p064",
+    "call_multi_p064",
+    "call_host_p064",
+    "capture_numeric_p065",
+    "capture_exact_p065",
+    "capture_exception_p065",
+    "unsupported_guards_p065"
+  ],
+  "pc_line_count": 805,
+  "prepared_body_count": 181,
+  "reader_command": [
+    "python3",
+    "-B",
+    "/workspace/wtime/target/recovery/P132-inventory-0001/validate_golden_reader.py"
+  ],
+  "reader_source_sha256": "0371993805e1cb9c6899b0015508931b1ea27728e5da7532bc56592abaa69b93",
+  "reusable_candidate_private_test_path": "/workspace/wtime/target/recovery/P132-inventory-0001/p132_private.rs",
+  "reusable_candidate_private_test_sha256": "ee93f2cc18317c73707f11b33df7853b34809835b2f8877016dd11bdff578751",
+  "schema": 1,
+  "total_body_count": 196,
+  "validation": {
+    "golden_unchanged": true,
+    "memory_coverage_positive": true,
+    "per_prepared_body_pc_count": true,
+    "strict_membership": true,
+    "summary_consistent": true,
+    "typed_record_kinds_counted_by_exact_prefix": true
+  }
+}

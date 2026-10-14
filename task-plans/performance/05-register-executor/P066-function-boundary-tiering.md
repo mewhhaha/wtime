@@ -32,6 +32,8 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P065 — Verify roots and captured state around register exits](P065-register-root-and-capture-barriers.md)
 
+[P132 — Extract transactional per-function Register preparation](P132-extract-transactional-register-preparation.md)
+
 ## Scope and ownership
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).

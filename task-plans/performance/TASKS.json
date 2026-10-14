@@ -82480,7 +82480,8 @@
         "P062",
         "P063",
         "P064",
-        "P065"
+        "P065",
+        "P132"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -88340,6 +88341,100 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P131"
+      }
+    },
+    {
+      "id": "P132",
+      "key": "transactional-register-preparation",
+      "title": "Extract transactional per-function Register preparation",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P065",
+        "P130",
+        "P131"
+      ],
+      "owned_paths": [
+        "crates/wtime-runtime/src/execution/register/execute.rs",
+        "crates/wtime-runtime/src/execution/register/preparation.rs",
+        "crates/wtime-runtime/tests/performance/p132_private.rs",
+        "crates/wtime-runtime/tests/performance/p132.rs"
+      ],
+      "input_output_contract": "Extract the existing per-function preparation transaction from PreparedModule::prepare into a private helper returning Complete(PreparedFunction, Budget), Declined, Exhausted, or Invalid. Preserve ordered eager module preparation and the current Vec<Option<PreparedFunction>> output. Complete publishes a fully validated bounded function and tentative retained-budget state; Declined publishes nothing, leaves retained budget unchanged, and retains the attempt-work charge; Exhausted preserves the current loop break; Invalid preserves the current whole-module None. Use safe body/layout/plan indexing and never panic on invalid indices. Preserve all preparation, activation, admission, fallback, edge-plan, capacity-accounting, fuel, trap, memory, call-exit, and execution-policy semantics. The helper returns PreparedFunction without Arc allocation or lazy/cache policy APIs.",
+      "implementation_steps": [
+        "Extract the per-body portion of PreparedModule::prepare in execute.rs or a private preparation.rs helper. Keep module index allocation and the ordered module loop in PreparedModule::prepare.",
+        "Make the helper own safe body/layout/plan lookup, layout and activation bound checks, checked worst-case charge calculation, transactional Budget cloning, LoweredFunction::lower / exits::prepare fallback, valid_operation checks, and complete edge/move-plan construction. Return Complete, Declined, Exhausted, or Invalid explicitly and never publish a partial artifact.",
+        "Preserve MAX_WORK=100000, MAX_BYTES=1 MiB, MAX_ACTIVATION_BYTES=2 MiB, attempted-work charging before eligibility declines, and transactional retained-budget commit only after full validation. Map Exhausted to the current loop break and Invalid to the current whole-module None.",
+        "Add focused semantic regression cases against the immutable P065-successor predecessor and refactored source. Compare exact preparation outcomes and selected prepared-artifact fields/hashes, not timings; retain default and combined-feature checks.",
+        "Keep the change to at most two focused patches: helper extraction, then focused tests and test registration. Move broader semantic or policy changes into a child task."
+      ],
+      "fixture_cases": [
+        "p132_eligible_functions_preserve_prepared_artifacts: eligible integer, float, unshared-memory, and call-prefix/decoded-exit functions preserve admission and selected artifact fields.",
+        "p132_unsupported_and_overbudget_functions_decline_without_publication: unsupported types/operations and huge work or activation bounds publish no function and spend no retained budget.",
+        "p132_module_attempts_and_aggregate_budget_match_predecessor: multiple functions preserve order and aggregate behavior; failed attempts retain attempted-work charges and successful functions alone commit retained metadata budget.",
+        "p132_module_preparation_remains_policy_neutral: default and combined builds preserve eager module output and policy selection without lazy/cache behavior."
+      ],
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C6",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p132_ -- --nocapture",
+        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p131_ -- --nocapture",
+        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p065_ -- --nocapture",
+        "cargo check --locked -p wtime-runtime",
+        "cargo check --locked -p wtime-runtime --features register-executor,execution-reference"
+      ],
+      "path": "05-register-executor/P132-extract-transactional-register-preparation.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P132/shared-finalization/attempt-0003/evidence.json",
+          "sha256": "8c5fccf8198bb7a79ba730957998cf6465d379d6e47497a69d3b9130eeb692f9",
+          "bytes": 1567
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded test-registration hunk.",
+      "minimum_focused_cases": 4,
+      "evidence_contract": "Record P001 and immutable P065-successor archive identities, exact commands and feature settings, per-case counts, source/test/artifact hashes, exact per-function admission outcomes, selected artifact-field hashes, module prepared-function counts, and attempted-work/retained-budget outcomes. Do not report timing as acceptance evidence.",
+      "external_constraints": [
+        "original pinned core/proposal snapshot and exclusions",
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [
+        "python3 -B tools/wtime-bench/baseline.py --output target/performance/P132-before --mode register"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P132/shared-finalization/attempt-0003/evidence.json": "8c5fccf8198bb7a79ba730957998cf6465d379d6e47497a69d3b9130eeb692f9"
+        },
+        "evidence": [
+          {
+            "bytes": 1567,
+            "path": "/workspace/wtime/target/performance/P132/shared-finalization/attempt-0003/evidence.json",
+            "sha256": "8c5fccf8198bb7a79ba730957998cf6465d379d6e47497a69d3b9130eeb692f9"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P132"
       }
     }
   ]
