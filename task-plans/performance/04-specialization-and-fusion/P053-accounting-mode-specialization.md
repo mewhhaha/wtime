@@ -1,8 +1,8 @@
 # P053 — Separate metered and unmetered dispatch without weaker defaults
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -31,10 +31,12 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C2, C3, C4, C6, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).
 
 - `crates/wtime-runtime/src/execution/accounting.rs`
-- `crates/wtime-runtime/src/execution/compact/execute.rs`
+- `crates/wtime-runtime/src/execution.rs`
+- `crates/wtime-runtime/src/lib.rs`
+- `crates/wtime-runtime/src/performance.rs`
 - `crates/wtime-runtime/tests/performance/p053.rs`
 
-One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.
+The compact tier selects a small function-pointer accounting variant once at invocation. The default no-`compact-executor` path keeps its original static accounting. `execution/compact/execute.rs` is unchanged and is not owned by this task.
 
 ## Input/output contract
 
@@ -42,19 +44,17 @@ Dispatch selects fuel-present versus fuel-absent accounting once at invocation/t
 
 ## Implementation recipe
 
-0. Before runtime edits, create docs/benchmarks/performance/P053-selection.json and docs/benchmarks/performance/P053-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.
-
-1. Create two small accounting variants or a bounded monomorphized policy, avoiding a variant for every feature combination.
-2. Keep default cancellation polling at every source boundary and preserve current/resume fuel transitions; reselect the metered path when resumed saved fuel requires it.
-3. Exclude opcode-coverage/counter builds from production measurements and prove disabled instrumentation has no runtime branch.
-4. Measure unmetered/metered families separately and inspect code-size/build cost before adding further modes.
-5. Forward the explicit `compact` setting through the harness/policy integrator and record actual optimized/fallback counts. Persistent research selectors are nondefault; reversible changes to an existing tier use before/after artifacts and are selected only by their gate.
+1. In the opt-in compact invocation, select a small function-pointer accounting variant once for metered or unmetered execution; retain the original static accounting in the default no-compact path and share the dispatcher body.
+2. Preserve per-source cancellation and logical operand limits. On resumed saved fuel changing from None to Some, reselect metered accounting before charging the next source instruction.
+3. Keep opcode-coverage instrumentation out of production measurements and prove the disabled path has no runtime branch.
+4. Measure the two distinct paired-fuel datasets separately and calculate statistics once for each; aggregate their producer output without reanalysis. Inspect code-size/build cost before adding modes.
+5. Forward explicit compact policy through the harness/integrator and record actual optimized/fallback counts; persistent selectors remain nondefault.
 
 ## Meaningful cases
 
-- Fuel None versus Some produces identical results until expected exhaustion.
-- Saved continuation fuel reactivates the correct metered behavior.
-- Cancellation and operand limits remain enforced in the unmetered variant.
+- p053_scalar_results_and_source_prefixes_preserve_accounting: public partial-fuel prefixes and independent scalar results exercise actual dispatch-variant counts.
+- p053_unmetered_cancellation_and_operand_limits_still_apply: host cancellation at a source prefix and the None-fuel operand-stack limit.
+- p053_resumed_saved_fuel_switches_to_metered_once: private saved-fuel boundary merge and error priority.
 
 ## Verification
 
@@ -80,6 +80,25 @@ Its `analyze` phase calls `tools/verify.py statistics` once, supplying that
 selection manifest as `--contract`, the paired report, and all build attestations.
 Do not run an exhaustive comparison or a separate raw analyzer during this candidate gate.
 See the [exact workflow](../../../wtime/docs/verification/fast-performance.md).
+
+## Completion notes
+
+The P053 candidate completed its full close and was published as **done / rejected**. It was not adopted. The canonical completion record is [`completion.json`](../../../wtime/target/performance/P053/shared-finalization/attempt-0001/completion.json); its evidence SHA256 is `0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee`. The evidence records passed verification and rejected measurement; a passed verification phase does not imply promotion.
+
+The candidate verification ran 357 Rust tests, 25 Python tooling unit tests, and four private Rust fuel-proof tests: 386 total, with zero failures or ignored tests. The 184-observation staged proof and both build budgets passed. The private tests checked P127 fuel transitions; the retained P053 tooling tests include five fuel-gate tests and five dual-policy decision tests. The candidate verification contract and evidence describe historical candidate sources only.
+
+The two policy measurement reports each contain 2,400 distinct physical pairs and 2,760 logical pair references across 40 physical groups and 46 logical groups; aliases add no independent samples. Each has two runs with 30 complete pairs per physical group. Across both reports there are 4,800 distinct pairs. Statistics were computed once for each distinct policy report, twice total, and the aggregate producer performed zero reanalyses. Both policies regressed on the targeted warm-call aggregate in both runs (ratio above 1 means slower):
+
+- Unmetered: run 1 median ratio **1.1085296423** (95% CI **1.0957726352–1.1157650338**); run 2 **1.1048786828** (95% CI **1.0959269140–1.1185939920**). Supported regressions: **27**.
+- Metered: run 1 median ratio **1.1013268324** (95% CI **1.0863213270–1.1162405506**); run 2 **1.0860421332** (95% CI **1.0689245810–1.1184738723**). Supported regressions: **14**.
+
+The candidate patch is preserved at [`candidate.patch`](../../../wtime/target/performance/P053/rollback/attempt-0001/candidate.patch), and `git apply --check` passed. Rollback restored all four Rust source files with fresh modification times, removed the new P053 Rust test, and verified the live 113-file runtime core matches the frozen predecessor. A real Cargo rebuild of restored sources passed the unfiltered suite: **354 passed, 0 failed, 0 ignored** ([restored report](../../../wtime/target/performance/P053/restored-verification/attempt-0001/report.json)). The P053-specific candidate Rust tests are therefore historical close evidence; they are not in the restored live tree. The typed fuel gate and dual-decision tooling tests remain.
+
+The default and compact build budgets both passed. Recorded profile output: default clean build **2.486 s**, release **5.119 s**, runtime leaf **0.403 s**, stripped binary **1,000,712 bytes**; compact clean build **2.945 s**, release **5.956 s**, runtime leaf **0.498 s**, stripped binary **1,093,056 bytes**. These profile values are not a causal before/after speed claim.
+
+Earlier setup failures are retained separately from the passing candidate checks: the first freeze invocation used unsupported `--output` syntax and stopped before execution; a first root integration patch used an ambiguous `impl Store` anchor and failed compilation before guest checks; and an early dev run had unknown identity and required-unittest-binding schema errors, corrected before the full close. The corrected freeze and integration ran successfully. The candidate close had no semantic test failures.
+
+The frozen baseline had 113 core source files. Candidate-only integration added one test file, producing 114 files during candidate verification; rollback removed that file and restored the exact 113-file predecessor. The selection covered four accumulator/dependent targeted rows, with held-out and protected controls as declared in the selection manifest. No candidate adoption or broad portfolio claim is made.
 
 ## Measurement and decision
 
@@ -109,4 +128,24 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P053/shared-finalization/attempt-0001/evidence.json": "0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee"
+  },
+  "evidence": [
+    {
+      "bytes": 2528,
+      "path": "/workspace/wtime/target/performance/P053/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P053"
+}
+```

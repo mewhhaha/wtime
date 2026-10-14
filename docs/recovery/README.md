@@ -20,7 +20,10 @@ now complete as a workload foundation; its reviewed proof and completion
 records are under `docs/benchmarks/performance/P128-*.json`. P127 is also
 complete: explicit source-fuel settings passed 38 named checks and 184 real
 Wasm observations. Its reviewed records are under
-`docs/benchmarks/performance/P127-*.json`; they do not claim a speedup.
+`docs/benchmarks/performance/P127-*.json`; they do not claim a speedup. P053
+is complete as a rejected experiment: its slower accounting variant was
+removed and the restored core passed all 354 runtime tests. See
+`docs/benchmarks/performance/P053-result.md` for the evidence and retained patch.
 The current task snapshot records subsequent progress. These records do not
 claim full conformance.
 

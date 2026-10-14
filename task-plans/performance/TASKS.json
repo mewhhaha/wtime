@@ -80974,8 +80974,8 @@
       "key": "accounting-mode-specialization",
       "title": "Separate metered and unmetered dispatch without weaker defaults",
       "group": "04-specialization-and-fusion",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -80991,22 +80991,23 @@
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/accounting.rs",
-        "crates/wtime-runtime/src/execution/compact/execute.rs",
+        "crates/wtime-runtime/src/execution.rs",
+        "crates/wtime-runtime/src/lib.rs",
+        "crates/wtime-runtime/src/performance.rs",
         "crates/wtime-runtime/tests/performance/p053.rs"
       ],
       "input_output_contract": "Dispatch selects fuel-present versus fuel-absent accounting once at invocation/tier entry; both retain default per-source cancellation, logical limits and source coverage policy.",
       "implementation_steps": [
-        "Before runtime edits, create docs/benchmarks/performance/P053-selection.json and docs/benchmarks/performance/P053-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
-        "Create two small accounting variants or a bounded monomorphized policy, avoiding a variant for every feature combination.",
-        "Keep default cancellation polling at every source boundary and preserve current/resume fuel transitions; reselect the metered path when resumed saved fuel requires it.",
-        "Exclude opcode-coverage/counter builds from production measurements and prove disabled instrumentation has no runtime branch.",
-        "Measure unmetered/metered families separately and inspect code-size/build cost before adding further modes.",
-        "Forward the explicit `compact` setting through the harness/policy integrator and record actual optimized/fallback counts. Persistent research selectors are nondefault; reversible changes to an existing tier use before/after artifacts and are selected only by their gate."
+        "In the opt-in compact invocation, select a small function-pointer accounting variant once for metered or unmetered execution; retain the original static accounting in the default no-compact path and share the dispatcher body.",
+        "Preserve per-source cancellation and logical operand limits. On resumed saved fuel changing from None to Some, reselect metered accounting before charging the next source instruction.",
+        "Keep opcode-coverage instrumentation out of production measurements and prove the disabled path has no runtime branch.",
+        "Measure the two distinct paired-fuel datasets separately and calculate statistics once for each; aggregate their producer output without reanalysis. Inspect code-size/build cost before adding modes.",
+        "Forward explicit compact policy through the harness/integrator and record actual optimized/fallback counts; persistent selectors remain nondefault."
       ],
       "fixture_cases": [
-        "Fuel None versus Some produces identical results until expected exhaustion.",
-        "Saved continuation fuel reactivates the correct metered behavior.",
-        "Cancellation and operand limits remain enforced in the unmetered variant."
+        "p053_scalar_results_and_source_prefixes_preserve_accounting: public partial-fuel prefixes and independent scalar results exercise actual dispatch-variant counts.",
+        "p053_unmetered_cancellation_and_operand_limits_still_apply: host cancellation at a source prefix and the None-fuel operand-stack limit.",
+        "p053_resumed_saved_fuel_switches_to_metered_once: private saved-fuel boundary merge and error priority."
       ],
       "measurement_selection": "scalar",
       "execution_mode": "compact",
@@ -81032,7 +81033,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P053-verification.json --output target/performance/P053/complete --execute"
       ],
       "path": "04-specialization-and-fusion/P053-accounting-mode-specialization.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P053/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee",
+          "bytes": 2528
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -81047,7 +81054,176 @@
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P053-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P053-selection.json target/performance/P053-before/manifest.json --output target/performance/P053/selection-freeze.json"
-      ]
+      ],
+      "implementation_record": {
+        "status_note": "The candidate completed full close and was rejected by its paired measurements; rollback restored the frozen predecessor. Details and limits are documented in completion_notes.",
+        "accounting_design": "Opt-in compact invocation selects a small function-pointer accounting variant once. Saved None-to-Some continuation fuel reselects metered before the next source charge. Default no-compact path remains original static accounting; dispatcher body is shared, without duplicated large loops.",
+        "owned_paths": [
+          "crates/wtime-runtime/src/execution/accounting.rs",
+          "crates/wtime-runtime/src/execution.rs",
+          "crates/wtime-runtime/src/lib.rs",
+          "crates/wtime-runtime/src/performance.rs",
+          "crates/wtime-runtime/tests/performance/p053.rs"
+        ],
+        "unmodified_path": "crates/wtime-runtime/src/execution/compact/execute.rs",
+        "focused_cases": [
+          "p053_scalar_results_and_source_prefixes_preserve_accounting: public partial-fuel prefixes and independent scalar results exercise actual dispatch-variant counts.",
+          "p053_unmetered_cancellation_and_operand_limits_still_apply: host cancellation at a source prefix and the None-fuel operand-stack limit.",
+          "p053_resumed_saved_fuel_switches_to_metered_once: private saved-fuel boundary merge and error priority."
+        ],
+        "semantic_helper": "Fresh P127 semantics helper checks cover 27 None/Some continuation tuples and source-accounting counts, using candidate core 114.",
+        "candidate_core": {
+          "frozen_source_files": 113,
+          "added_focused_integration_test": 1,
+          "current_source_files": 114
+        },
+        "foundation": {
+          "fresh_uninstrumented_observations": 184,
+          "scalar_reference_probes": 9,
+          "modes": 3,
+          "policies": 2,
+          "repeats": 3
+        },
+        "selection": {
+          "rows": 10,
+          "logical_stage_groups": 46,
+          "accumulator_dependent_iterations": "32 accumulators/dependent workload at 10000 iterations",
+          "held_out_rows": 17,
+          "protected_rows": 0,
+          "required_controls": [
+            "call_overhead",
+            "prepare_large"
+          ]
+        },
+        "paired_protocol": {
+          "distinct_datasets": 2,
+          "statistics_computations_per_dataset": 1,
+          "aggregate_producer_reanalysis": false,
+          "physical_groups_per_policy": 40,
+          "runs": 2,
+          "complete_pairs_per_row_per_run": 30,
+          "bootstrap_resamples": 10000
+        },
+        "freeze_cli": "Output is positional. Attempt 1 using --output was rejected before execution; positional attempt 2 succeeded.",
+        "integration_attempts": "Root integration attempt 1 used an ambiguous impl Store anchor, retained a partial patch, and failed compilation before guest checks. The partial attempt is archived. Source was restored with fresh modification times at the 113-file baseline before narrow integration attempt 2.",
+        "claims": "No candidate adoption or causal speed claim. Profile build values are recorded as diagnostics only; the paired candidate reports support rejection."
+      },
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P053/shared-finalization/attempt-0001/evidence.json": "0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee"
+        },
+        "evidence": [
+          {
+            "bytes": 2528,
+            "path": "/workspace/wtime/target/performance/P053/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P053"
+      },
+      "completion_notes": {
+        "canonical_completion": "/workspace/wtime/target/performance/P053/shared-finalization/attempt-0001/completion.json",
+        "evidence_sha256": "0b064760b030e71b7c4a35bc88d97d8ea5700b7837453f838da6212c33d7d5ee",
+        "verification": {
+          "rust_tests": 357,
+          "tooling_unit_tests": 25,
+          "private_rust_fuel_tests": 4,
+          "total_checks": 386,
+          "failed": 0,
+          "ignored": 0,
+          "staged_observations": 184,
+          "build_budgets_passed": 2
+        },
+        "paired_measurement": {
+          "policy_reports": 2,
+          "distinct_pairs_per_report": 2400,
+          "logical_pair_references_per_report": 2760,
+          "physical_groups_per_report": 40,
+          "logical_groups_per_report": 46,
+          "runs_per_report": 2,
+          "pairs_per_physical_group_per_run": 30,
+          "distinct_pairs_total": 4800,
+          "statistics_computations": 2,
+          "aggregate_reanalyses": 0,
+          "unmetered": {
+            "supported_regressions": 27,
+            "runs": [
+              {
+                "median_ratio": 1.1085296423,
+                "ci95": [
+                  1.0957726352,
+                  1.1157650338
+                ]
+              },
+              {
+                "median_ratio": 1.1048786828,
+                "ci95": [
+                  1.095926914,
+                  1.118593992
+                ]
+              }
+            ]
+          },
+          "metered": {
+            "supported_regressions": 14,
+            "runs": [
+              {
+                "median_ratio": 1.1013268324,
+                "ci95": [
+                  1.086321327,
+                  1.1162405506
+                ]
+              },
+              {
+                "median_ratio": 1.0860421332,
+                "ci95": [
+                  1.068924581,
+                  1.1184738723
+                ]
+              }
+            ]
+          },
+          "decision": "rejected; candidate not adopted"
+        },
+        "rollback": {
+          "candidate_patch": "/workspace/wtime/target/performance/P053/rollback/attempt-0001/candidate.patch",
+          "patch_check": "git apply --check passed",
+          "restored_core_files": 113,
+          "matches_frozen_predecessor": true,
+          "candidate_p053_rust_test_removed": true,
+          "restored_verification": "/workspace/wtime/target/performance/P053/restored-verification/attempt-0001/report.json",
+          "restored_tests": {
+            "passed": 354,
+            "failed": 0,
+            "ignored": 0
+          }
+        },
+        "profile_build_values_not_causal_speed_claim": {
+          "default": {
+            "clean_seconds": 2.486,
+            "release_seconds": 5.119,
+            "runtime_leaf_seconds": 0.403,
+            "stripped_bytes": 1000712
+          },
+          "compact": {
+            "clean_seconds": 2.945,
+            "release_seconds": 5.956,
+            "runtime_leaf_seconds": 0.498,
+            "stripped_bytes": 1093056
+          },
+          "default_budget_pass": true,
+          "compact_budget_pass": true
+        },
+        "retained_tooling_tests": [
+          "5 P053 fuel-gate tests",
+          "5 P053 dual-policy decision tests"
+        ],
+        "historical_candidate_tests_only": "The 357-test full candidate receipt includes P053-specific candidate Rust tests; rollback restored the predecessor and removed the P053 Rust test file. Candidate verification artifacts are historical evidence, not a claim about current source.",
+        "early_failures": "First freeze syntax rejected before execution; first root integration patch failed compile before guest checks due ambiguous impl Store anchor; early dev run had unknown identity and required-unittest-binding schema errors, corrected before full close. Corrected freeze/integration and full candidate close passed, with no semantic failures.",
+        "scope": "No candidate adoption and no broad portfolio claim."
+      }
     },
     {
       "id": "P054",

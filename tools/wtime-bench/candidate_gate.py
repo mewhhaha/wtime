@@ -40,8 +40,11 @@ def expected(entry):
     return value['result'] if module == 'representative_workloads' else value
 
 
-def check_observation(entry, observation, mode, root, stage=None, thread_cpus=None):
+def check_observation(entry, observation, mode, root, stage=None, thread_cpus=None, fuel_setting=None):
     need(observation.get('mode') == mode and observation.get('result') == expected(entry), 'observation mode/oracle differs')
+    if fuel_setting is not None:
+        import p127_fuel_policy
+        p127_fuel_policy.validate_wire_setting(observation, fuel_setting)
     module = entry['oracle']['module']
     if module == 'root_workloads.py':
         import root_compare
@@ -159,6 +162,28 @@ def validate_semantics(path, declaration, current_sources):
     return semantic_receipt.validate(path, declaration, current_sources, focused_compare.ROOT)
 
 
+def validate_fuel_setting(setting, entries, identities, capabilities):
+    """Validate explicit P127 fuel policy bindings; False is the legacy wire form."""
+    if setting is False:
+        return None
+    import p127_fuel_policy
+    token = p127_fuel_policy.cli_value(setting)
+    need(all(entry['oracle'].get('module') in ('scalar_workloads.py', 'run.py')
+             or entry['id'] == 'prepare_large' for entry in entries),
+         'explicit source fuel is supported only by scalar or single-case drivers')
+    command_ref = identities.get('command')
+    need(isinstance(command_ref, dict), 'explicit source fuel command identity is missing')
+    command = json.loads(Path(command_ref['path']).read_text())
+    argv = command.get('argv')
+    index = argv.index('--source-fuel') if isinstance(argv, list) and '--source-fuel' in argv else -1
+    need(index >= 0 and index + 1 < len(argv) and argv[index + 1] == token,
+         'archived command lacks the exact source-fuel setting')
+    for side in ('baseline', 'candidate'):
+        need(capabilities[side].get('source_fuel_contract') == p127_fuel_policy.protocol_contract(),
+             'both paired sides require the same explicit source-fuel contract')
+    return setting
+
+
 def validate(path):
     path = Path(path).resolve(strict=True)
     report = json.loads(path.read_text())
@@ -199,8 +224,11 @@ def validate(path):
         thread_cpus = None
     need('semantic_receipt' in identities, 'candidate semantic receipt is missing')
     validate_semantics(identities['semantic_receipt']['path'],declaration,focused_compare.sources())
+    explicit_fuel = validate_fuel_setting(settings.get('fuel_policy'), entries, identities,
+                                          report['metadata']['capabilities'])
     need(settings.get('profile') == 'release' and settings.get('instrumented') is False
-         and settings.get('fuel_policy') is False and settings.get('cancellation_policy') == 1
+         and (settings.get('fuel_policy') is False or explicit_fuel == settings.get('fuel_policy'))
+         and settings.get('cancellation_policy') == 1
          and settings.get('workload_profiles') == {entry['id']:focused_compare.profile(entry) for entry in entries},
          'candidate changed production/fuel/cancellation settings')
     for side in ('baseline','candidate'):
@@ -248,7 +276,7 @@ def validate(path):
                 need(pair['baseline']['batch'] == pair['candidate']['batch'], 'unequal paired batches')
                 for side in ('baseline','candidate'):
                     check_observation(entry,pair[side],settings[side+'_mode'],path.parent,stage=stage,
-                                      thread_cpus=thread_cpus)
+                                      thread_cpus=thread_cpus, fuel_setting=explicit_fuel)
                     if (stage not in ('warm_call','run_after_setup')
                             and not (entry['oracle']['module'] == 'thread_workloads.py'
                                      and stage == 'steady_state_group')):
@@ -274,7 +302,8 @@ def validate(path):
         need(row.get('timing_excluded') is True and row['observation']['result'] == expected(by_id[row['workload']]),
              'untimed input oracle differs')
         check_observation(by_id[row['workload']],row['observation'],settings[row['side']+'_mode'],
-                          path.parent,stage=row.get('stage'),thread_cpus=thread_cpus)
+                          path.parent,stage=row.get('stage'),thread_cpus=thread_cpus,
+                          fuel_setting=explicit_fuel)
     needed_calibrations = {(run['run_id'],wid,stage) for run in report['runs']
                            for wid,stage in required if stage in ('warm_call','run_after_setup')
                            or (by_id[wid]['oracle']['module'] == 'thread_workloads.py'
@@ -294,7 +323,8 @@ def validate(path):
         for attempt in row['attempts']:
             for side in ('baseline','candidate'):
                 check_observation(by_id[row['workload']],attempt['observations'][side],settings[side+'_mode'],
-                                  path.parent,stage=row['stage'],thread_cpus=thread_cpus)
+                                  path.parent,stage=row['stage'],thread_cpus=thread_cpus,
+                                  fuel_setting=explicit_fuel)
         raw_run = next(run for run in report['runs'] if run['run_id'] == row['run_id'])
         need(all(pair['candidate']['batch'] == row['batch'] for pair in raw_run['pairs']
                  if pair['workload'] == row['workload'] and pair['stage'] == row['stage']),

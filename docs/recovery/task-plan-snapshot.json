@@ -1974,9 +1974,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/04-specialization-and-fusion/P053-accounting-mode-specialization.md",
-      "sha256": "16c8d1528b5cda1dc70e9a34b89e5b14a8afd5856be13cc6840a2aff70e0b38b",
-      "size_bytes": 8224,
-      "snapshot_sha256": "16c8d1528b5cda1dc70e9a34b89e5b14a8afd5856be13cc6840a2aff70e0b38b"
+      "sha256": "b18f031283bb6335cf0b13aae593323bcbbed24ebb325cf6337ce3b067f8ac30",
+      "size_bytes": 12804,
+      "snapshot_sha256": "b18f031283bb6335cf0b13aae593323bcbbed24ebb325cf6337ce3b067f8ac30"
     },
     {
       "byte_equal": true,
@@ -2518,9 +2518,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/INDEX.md",
-      "sha256": "f1455714977e812e47959b4a497ce3a11614aec00652d9127d73f342a2c5697b",
+      "sha256": "d4db1c54f9c714b977f944d8a56d334e9270c1051696c0699fc0504d6f0ba4b0",
       "size_bytes": 27744,
-      "snapshot_sha256": "f1455714977e812e47959b4a497ce3a11614aec00652d9127d73f342a2c5697b"
+      "snapshot_sha256": "d4db1c54f9c714b977f944d8a56d334e9270c1051696c0699fc0504d6f0ba4b0"
     },
     {
       "byte_equal": true,
@@ -2550,9 +2550,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/TASKS.json",
-      "sha256": "f3a0b358e7db6abf19e8148117b8f7b0aeb237442f372d4005c857a18970ff51",
-      "size_bytes": 4199217,
-      "snapshot_sha256": "f3a0b358e7db6abf19e8148117b8f7b0aeb237442f372d4005c857a18970ff51"
+      "sha256": "f7aa1f12335f523fc8146b1ecc505b6f998364b468a4d885e00d8055c80e0769",
+      "size_bytes": 4207393,
+      "snapshot_sha256": "f7aa1f12335f523fc8146b1ecc505b6f998364b468a4d885e00d8055c80e0769"
     },
     {
       "byte_equal": true,
@@ -2796,7 +2796,7 @@
         ],
         "exit_code": 1,
         "plan_manifest_sha256": "5d707789e082592c576184c3452797f5860d0cd7b1d5204cb9917c4d548bdb49",
-        "stderr": "ERROR: P127: implementation step missing or drifted: Add a separate proof producer that checks every expected row/stage/mode/policy tuple, invokes the real scalar driver, archives command/stdout/stderr before oracle validation, and rejects missing, duplicate, mixed-setting, instrumented, or source-drifted records. Its full close collects all 184 observations and the independent fuel proof without running statistics. The independent proof covers nine scalar rows \u00d7 three modes (`decoded`, `compact`, `execution-reference`) \u00d7 two policies \u00d7 three repeats (162 guest calls) plus nine reference source-event probes; separate diagnostics retain 24 low-fuel prefixes, 12 cursor windows, 27 continuation tuples/54 guest calls, and five merge/three priority unit tuples.\n",
+        "stderr": "ERROR: P127: implementation step missing or drifted: Add a separate proof producer that checks every expected row/stage/mode/policy tuple, invokes the real scalar driver, archives command/stdout/stderr before oracle validation, and rejects missing, duplicate, mixed-setting, instrumented, or source-drifted records. Its full close collects all 184 observations and the independent fuel proof without running statistics. The independent proof covers nine scalar rows × three modes (`decoded`, `compact`, `execution-reference`) × two policies × three repeats (162 guest calls) plus nine reference source-event probes; separate diagnostics retain 24 low-fuel prefixes, 12 cursor windows, 27 continuation tuples/54 guest calls, and five merge/three priority unit tuples.\n",
         "stdout": "plan: 128 tasks; statuses: done=68, todo=60\nchecker: 1 error(s), 0 warning(s)\n",
         "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
       }
@@ -2852,6 +2852,58 @@
         "stdout": "plan: 128 tasks; statuses: done=68, todo=60\nchecker: 0 error(s), 0 warning(s)\n",
         "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
       }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "301d7eb8ed3aa6a05c13f46a39a9fc60bdb3d9bab6bd92841eb7cb4e9a3e203e",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=69, todo=59\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "f7aa1f12335f523fc8146b1ecc505b6f998364b468a4d885e00d8055c80e0769",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=70, todo=58\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
     ]
   ],
   "validators": [
@@ -2874,9 +2926,9 @@
         "/workspace/tasks/performance/check_plan.py"
       ],
       "exit_code": 0,
-      "plan_manifest_sha256": "f3a0b358e7db6abf19e8148117b8f7b0aeb237442f372d4005c857a18970ff51",
+      "plan_manifest_sha256": "f7aa1f12335f523fc8146b1ecc505b6f998364b468a4d885e00d8055c80e0769",
       "stderr": "",
-      "stdout": "plan: 128 tasks; statuses: done=69, todo=59\nchecker: 0 error(s), 0 warning(s)\n",
+      "stdout": "plan: 128 tasks; statuses: done=70, todo=58\nchecker: 0 error(s), 0 warning(s)\n",
       "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
     }
   ]

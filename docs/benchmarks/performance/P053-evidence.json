@@ -1,0 +1,60 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 58174,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P053-verification.json",
+    "sha256": "afe9aa7f440117728782466e2f3128195b057ae75f8c21aeebf49b38bd7a9c13"
+  },
+  "decision": "rejected",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Focused P053 evidence covers four scalar accumulator/dependent workload sizes and protected controls; it is not a P001-relative portfolio claim.",
+    "Compact remains opt-in and Decoded remains the default.",
+    "Metered and unmetered policies are evaluated as separate candidate datasets; conclusions apply only to these declared workloads and settings."
+  ],
+  "outcome": "rejected",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 261506,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/ce/cebd5b8383af94aabe142f5d730bbad0124beb3c6cff454590ea58153b3ef44e",
+      "sha256": "cebd5b8383af94aabe142f5d730bbad0124beb3c6cff454590ea58153b3ef44e",
+      "stored_bytes": 261506,
+      "stored_sha256": "cebd5b8383af94aabe142f5d730bbad0124beb3c6cff454590ea58153b3ef44e"
+    },
+    "freeze": {
+      "bytes": 217637,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/bf/bf0cffae241cfbcd07686958c9f12a32523486554d078a5e9e743cc89feeb19e",
+      "sha256": "bf0cffae241cfbcd07686958c9f12a32523486554d078a5e9e743cc89feeb19e",
+      "stored_bytes": 217637,
+      "stored_sha256": "bf0cffae241cfbcd07686958c9f12a32523486554d078a5e9e743cc89feeb19e"
+    },
+    "measure": {
+      "bytes": 594353,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/bd/bd92414b8fe80848df7419bf44395398dc191f34294c2238a9ff6a1b208b5cf3",
+      "sha256": "bd92414b8fe80848df7419bf44395398dc191f34294c2238a9ff6a1b208b5cf3",
+      "stored_bytes": 594353,
+      "stored_sha256": "bd92414b8fe80848df7419bf44395398dc191f34294c2238a9ff6a1b208b5cf3"
+    },
+    "verify": {
+      "bytes": 780533,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/c1/c1483db74d9c8e8a91e97ee5fa67cec345d3b81505cd995597d4b8644ef6c3ba",
+      "sha256": "c1483db74d9c8e8a91e97ee5fa67cec345d3b81505cd995597d4b8644ef6c3ba",
+      "stored_bytes": 780533,
+      "stored_sha256": "c1483db74d9c8e8a91e97ee5fa67cec345d3b81505cd995597d4b8644ef6c3ba"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P053"
+}

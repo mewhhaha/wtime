@@ -1,0 +1,1627 @@
+{
+  "completion": {
+    "decision": {
+      "artifact": "decision",
+      "phase": "analyze",
+      "pointer": "/decision/decision"
+    },
+    "limitations": [
+      "Focused P053 evidence covers four scalar accumulator/dependent workload sizes and protected controls; it is not a P001-relative portfolio claim.",
+      "Compact remains opt-in and Decoded remains the default.",
+      "Metered and unmetered policies are evaluated as separate candidate datasets; conclusions apply only to these declared workloads and settings."
+    ],
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "commands": [
+          {
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "compact-executor,execution-reference",
+              "p053_",
+              "--",
+              "--nocapture"
+            ],
+            "name": "p053-compact-semantics"
+          }
+        ],
+        "name": "p053-compact-semantics",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p053-compact-semantics",
+            "features": [
+              "compact-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 3,
+            "required_names": [
+              "p053_scalar_results_and_source_prefixes_preserve_accounting",
+              "p053_unmetered_cancellation_and_operand_limits_still_apply",
+              "p053_resumed_saved_fuel_switches_to_metered_once"
+            ]
+          }
+        ],
+        "uses": [
+          "runtime",
+          "compilation"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p053_fuel_gate.py",
+              "-v",
+              "-b"
+            ],
+            "name": "p053-fuel-gate"
+          }
+        ],
+        "name": "p053-fuel-gate",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p053-fuel-gate",
+            "kind": "unittest",
+            "minimum_passed": 5,
+            "required_names": [
+              "test_archived_command_requires_exact_source_fuel_token",
+              "test_both_protocol_capabilities_must_advertise_contract",
+              "test_legacy_false_and_both_explicit_policies",
+              "test_paired_probe_and_calibration_observations_reject_policy_drift",
+              "test_unsupported_family_and_malformed_or_typed_budget_rejected"
+            ]
+          }
+        ],
+        "uses": [
+          "analysis",
+          "tool_checks",
+          "harness"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_fast_candidate.py",
+              "-v",
+              "-b"
+            ],
+            "name": "fast-candidate"
+          }
+        ],
+        "name": "fast-candidate",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "fast-candidate",
+            "kind": "unittest",
+            "minimum_passed": 15,
+            "required_names": [
+              "test_aliased_cold_pairs_are_counted_once_without_alias_pair_rows",
+              "test_altered_stored_log_artifact_is_rejected",
+              "test_calibration_fails_when_workload_cap_cannot_reach_target",
+              "test_calibration_reaches_twenty_ms_on_both_sides_at_shared_batch",
+              "test_calibration_rejects_a_side_that_changes_the_requested_batch",
+              "test_candidate_decision_adopts_supported_small_and_large_target_win",
+              "test_candidate_report_rejects_development_lane_before_other_dependencies",
+              "test_crossing_protected_tiny_regression_interval_is_inconclusive",
+              "test_development_and_synthetic_receipts_are_rejected",
+              "test_large_target_regression_cannot_be_masked_by_small_target_win",
+              "test_missing_required_semantic_case_is_rejected",
+              "test_protected_tiny_supported_regression_rejects_candidate",
+              "test_stale_core_source_hash_is_rejected",
+              "test_target_warm_and_cold_stages_keep_warm_as_primary",
+              "test_valid_full_receipt_parses_real_stored_test_logs"
+            ]
+          }
+        ],
+        "uses": [
+          "tool_checks",
+          "selection",
+          "harness"
+        ]
+      },
+      {
+        "commands": [
+          {
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_p053_decision.py",
+              "-v",
+              "-b"
+            ],
+            "name": "p053-decision-tests"
+          }
+        ],
+        "name": "p053-decision",
+        "outputs": {},
+        "tests": [
+          {
+            "command": "p053-decision-tests",
+            "kind": "unittest",
+            "minimum_passed": 5,
+            "required_names": [
+              "test_different_candidate_build_or_declaration_inputs_reject",
+              "test_missing_statistics_field_rejected",
+              "test_rejected_policy_takes_precedence_over_other_verdicts",
+              "test_two_distinct_typed_policy_datasets_aggregate_mixed_verdict",
+              "test_wrong_policy_missing_statistics_and_stale_consumed_input_reject"
+            ]
+          }
+        ],
+        "uses": [
+          "tool_checks",
+          "p053_decision_producer"
+        ]
+      }
+    ]
+  },
+  "identities": {
+    "analysis": {
+      "paths": [
+        "docs/verification/build-final.json",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/verification/producers/p053_decision.py",
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/verification/statistics.py",
+        "tools/verify.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/wtime-bench/gates.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/semantic_receipt.py"
+      ]
+    },
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "candidate_freeze_producer": {
+      "paths": [
+        "tools/verification/producers/candidate_freeze.py",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/src/memory_driver.rs",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/scalar_workloads.py"
+      ]
+    },
+    "harness": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/wtime-cli/Cargo.toml",
+        "crates/wtime-cli/src/main.rs",
+        "crates/wtime-cli/tests/metadata.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/src/instructions.rs",
+        "crates/wtime-decode/src/lib.rs",
+        "crates/wtime-decode/src/metadata.rs",
+        "crates/wtime-decode/src/module.rs",
+        "crates/wtime-decode/src/reader.rs",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/examples/embedding.rs",
+        "crates/wtime-runtime/examples/suspension.rs",
+        "crates/wtime-runtime/src/arena.rs",
+        "crates/wtime-runtime/src/canonical.rs",
+        "crates/wtime-runtime/src/continuation.rs",
+        "crates/wtime-runtime/src/coverage.rs",
+        "crates/wtime-runtime/src/exceptions.rs",
+        "crates/wtime-runtime/src/execution.rs",
+        "crates/wtime-runtime/src/execution/accounting.rs",
+        "crates/wtime-runtime/src/execution/compact/calls.rs",
+        "crates/wtime-runtime/src/execution/compact/execute.rs",
+        "crates/wtime-runtime/src/execution/compact/fuse.rs",
+        "crates/wtime-runtime/src/execution/compact/indirect.rs",
+        "crates/wtime-runtime/src/execution/compact/inline.rs",
+        "crates/wtime-runtime/src/execution/compact/ir.rs",
+        "crates/wtime-runtime/src/execution/compact/lower_control.rs",
+        "crates/wtime-runtime/src/execution/compact/lower_numeric.rs",
+        "crates/wtime-runtime/src/execution/compact/lower_scalar.rs",
+        "crates/wtime-runtime/src/execution/compact/memory.rs",
+        "crates/wtime-runtime/src/execution/compact/mod.rs",
+        "crates/wtime-runtime/src/execution/compact/prefix.rs",
+        "crates/wtime-runtime/src/execution/compact/source_map.rs",
+        "crates/wtime-runtime/src/execution/compact/verify.rs",
+        "crates/wtime-runtime/src/execution/cursor.rs",
+        "crates/wtime-runtime/src/execution/effects.rs",
+        "crates/wtime-runtime/src/execution/plan.rs",
+        "crates/wtime-runtime/src/gc.rs",
+        "crates/wtime-runtime/src/gc_exec.rs",
+        "crates/wtime-runtime/src/lib.rs",
+        "crates/wtime-runtime/src/linker.rs",
+        "crates/wtime-runtime/src/numeric.rs",
+        "crates/wtime-runtime/src/perf.rs",
+        "crates/wtime-runtime/src/reference.rs",
+        "crates/wtime-runtime/src/shared_memory.rs",
+        "crates/wtime-runtime/src/simd.rs",
+        "crates/wtime-runtime/src/wide.rs",
+        "crates/wtime-runtime/tests/core.rs",
+        "crates/wtime-runtime/tests/exception_root_safety.rs",
+        "crates/wtime-runtime/tests/exceptions.rs",
+        "crates/wtime-runtime/tests/feature_profiles.rs",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/canonical_seed.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/canonical_seed.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/changed_indirect_target.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/changed_indirect_target.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/equal_heap_fields_256.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/equal_heap_fields_256.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/nominal_exact_casts.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/nominal_exact_casts.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_1024.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_1024.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_16.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_16.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_256.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_256.wat",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/typed_function_refs.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/typed_function_refs.wat",
+        "crates/wtime-runtime/tests/performance.rs",
+        "crates/wtime-runtime/tests/performance/p016.rs",
+        "crates/wtime-runtime/tests/performance/p017.rs",
+        "crates/wtime-runtime/tests/performance/p018.rs",
+        "crates/wtime-runtime/tests/performance/p019.rs",
+        "crates/wtime-runtime/tests/performance/p020.rs",
+        "crates/wtime-runtime/tests/performance/p021.rs",
+        "crates/wtime-runtime/tests/performance/p022.rs",
+        "crates/wtime-runtime/tests/performance/p023.rs",
+        "crates/wtime-runtime/tests/performance/p024.rs",
+        "crates/wtime-runtime/tests/performance/p025.rs",
+        "crates/wtime-runtime/tests/performance/p026.rs",
+        "crates/wtime-runtime/tests/performance/p027.rs",
+        "crates/wtime-runtime/tests/performance/p028.rs",
+        "crates/wtime-runtime/tests/performance/p029.rs",
+        "crates/wtime-runtime/tests/performance/p030.rs",
+        "crates/wtime-runtime/tests/performance/p031.rs",
+        "crates/wtime-runtime/tests/performance/p032.rs",
+        "crates/wtime-runtime/tests/performance/p033.rs",
+        "crates/wtime-runtime/tests/performance/p034.rs",
+        "crates/wtime-runtime/tests/performance/p036.rs",
+        "crates/wtime-runtime/tests/performance/p036_private.rs",
+        "crates/wtime-runtime/tests/performance/p037.rs",
+        "crates/wtime-runtime/tests/performance/p037_private.rs",
+        "crates/wtime-runtime/tests/performance/p038.rs",
+        "crates/wtime-runtime/tests/performance/p039.rs",
+        "crates/wtime-runtime/tests/performance/p040.rs",
+        "crates/wtime-runtime/tests/performance/p040_private.rs",
+        "crates/wtime-runtime/tests/performance/p041.rs",
+        "crates/wtime-runtime/tests/performance/p041_private.rs",
+        "crates/wtime-runtime/tests/performance/p042.rs",
+        "crates/wtime-runtime/tests/performance/p042_private.rs",
+        "crates/wtime-runtime/tests/performance/p043.rs",
+        "crates/wtime-runtime/tests/performance/p043_private.rs",
+        "crates/wtime-runtime/tests/performance/p045.rs",
+        "crates/wtime-runtime/tests/performance/p045_private.rs",
+        "crates/wtime-runtime/tests/performance/p047.rs",
+        "crates/wtime-runtime/tests/performance/p050.rs",
+        "crates/wtime-runtime/tests/performance/p114_private.rs",
+        "crates/wtime-runtime/tests/performance/p115.rs",
+        "crates/wtime-runtime/tests/performance/p116.rs",
+        "crates/wtime-runtime/tests/performance/p117.rs",
+        "crates/wtime-runtime/tests/performance/p118.rs",
+        "crates/wtime-runtime/tests/performance/p119.rs",
+        "crates/wtime-runtime/tests/performance/p120.rs",
+        "crates/wtime-runtime/tests/performance/p121.rs",
+        "crates/wtime-runtime/tests/proposals.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/src/error.rs",
+        "crates/wtime-types/src/features.rs",
+        "crates/wtime-types/src/indices.rs",
+        "crates/wtime-types/src/lib.rs",
+        "crates/wtime-types/src/types.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/src/acceptance.rs",
+        "crates/wtime-validate/src/atomics.rs",
+        "crates/wtime-validate/src/continuations.rs",
+        "crates/wtime-validate/src/exceptions.rs",
+        "crates/wtime-validate/src/gc.rs",
+        "crates/wtime-validate/src/lib.rs",
+        "crates/wtime-validate/src/types.rs",
+        "crates/wtime-validate/tests/exceptions.rs",
+        "crates/wtime-validate/tests/policy.rs",
+        "docs/benchmarks/performance/P033-contract.json",
+        "docs/benchmarks/performance/P034-contract.json",
+        "docs/benchmarks/performance/P034-measurement-contract.json",
+        "docs/benchmarks/performance/P034-registry-preservation.json",
+        "rust-toolchain.toml",
+        "tools/verification/producers/p128_scalar.py",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/continuation_scaling.py",
+        "tools/wtime-bench/continuation_workloads.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/fixtures/exceptions/**/*.wat",
+        "tools/wtime-bench/fixtures/exceptions/caught_throw.wat",
+        "tools/wtime-bench/fixtures/exceptions/cross_call_catch.wat",
+        "tools/wtime-bench/fixtures/exceptions/host_throw_catch.wat",
+        "tools/wtime-bench/fixtures/exceptions/normal_path.wat",
+        "tools/wtime-bench/fixtures/exceptions/throw_ref_unwind.wat",
+        "tools/wtime-bench/fixtures/exceptions/uncaught_throw.wat",
+        "tools/wtime-bench/fixtures/gc/**/*.wasm",
+        "tools/wtime-bench/fixtures/gc/**/*.wat",
+        "tools/wtime-bench/fixtures/gc/continuation_root.wat",
+        "tools/wtime-bench/fixtures/gc/descriptor_consumer.wat",
+        "tools/wtime-bench/fixtures/gc/descriptor_graph.wat",
+        "tools/wtime-bench/fixtures/gc/descriptor_provider.wat",
+        "tools/wtime-bench/fixtures/gc/host_reentry_collect.wasm",
+        "tools/wtime-bench/fixtures/gc/host_reentry_collect.wat",
+        "tools/wtime-bench/fixtures/gc/nominal_exact_casts.wasm",
+        "tools/wtime-bench/fixtures/gc/nominal_exact_casts.wat",
+        "tools/wtime-bench/fixtures/gc/packed_array.wat",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_1024.wasm",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_1024.wat",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_16.wasm",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_16.wat",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_256.wasm",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_256.wat",
+        "tools/wtime-bench/fixtures/gc/root_lifecycle.wasm",
+        "tools/wtime-bench/fixtures/gc/root_lifecycle.wat",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_256.wasm",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_256.wat",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_512.wasm",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_512.wat",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_64.wasm",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_64.wat",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_256.wasm",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_256.wat",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_512.wasm",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_512.wat",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_64.wasm",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_64.wat",
+        "tools/wtime-bench/fixtures/gc/struct_graph.wat",
+        "tools/wtime-bench/fixtures/gc/type_churn_1024.wasm",
+        "tools/wtime-bench/fixtures/gc/type_churn_1024.wat",
+        "tools/wtime-bench/fixtures/gc/type_churn_256.wasm",
+        "tools/wtime-bench/fixtures/gc/type_churn_256.wat",
+        "tools/wtime-bench/fixtures/gc/type_churn_64.wasm",
+        "tools/wtime-bench/fixtures/gc/type_churn_64.wat",
+        "tools/wtime-bench/fixtures/gc/type_repeat_128.wasm",
+        "tools/wtime-bench/fixtures/gc/type_repeat_128.wat",
+        "tools/wtime-bench/fixtures/gc/typed_function_refs.wasm",
+        "tools/wtime-bench/fixtures/gc/typed_function_refs.wat",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_entry_control.wasm",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_entry_control.wat",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_prefix.wasm",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_prefix.wat",
+        "tools/wtime-bench/fixtures/integration_p113/integration_eh_prefix.wasm",
+        "tools/wtime-bench/fixtures/integration_p113/integration_eh_prefix.wat",
+        "tools/wtime-bench/fixtures/integration_p113/integration_gc_prefix.wasm",
+        "tools/wtime-bench/fixtures/integration_p113/integration_gc_prefix.wat",
+        "tools/wtime-bench/fixtures/integration_p113/integration_numeric_control.wasm",
+        "tools/wtime-bench/fixtures/integration_p113/integration_numeric_control.wat",
+        "tools/wtime-bench/fixtures/integration_p113/integration_ref_entry_control.wasm",
+        "tools/wtime-bench/fixtures/integration_p113/integration_ref_entry_control.wat",
+        "tools/wtime-bench/fixtures/integration_p113/provenance.json",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/fixtures/memory/bulk_copy_aliased.wat",
+        "tools/wtime-bench/fixtures/memory/bulk_copy_backward.wat",
+        "tools/wtime-bench/fixtures/memory/bulk_copy_forward.wat",
+        "tools/wtime-bench/fixtures/memory/bulk_fill.wat",
+        "tools/wtime-bench/fixtures/memory/custom_page_one_byte.wat",
+        "tools/wtime-bench/fixtures/memory/effective_address_overflow.wat",
+        "tools/wtime-bench/fixtures/memory/growth.wat",
+        "tools/wtime-bench/fixtures/memory/memory64.wat",
+        "tools/wtime-bench/fixtures/memory/memory_copy_distinct_seeded.wat",
+        "tools/wtime-bench/fixtures/memory/memory_fill_seeded.wat",
+        "tools/wtime-bench/fixtures/memory/multi_memory_second.wat",
+        "tools/wtime-bench/fixtures/memory/oob_order.wat",
+        "tools/wtime-bench/fixtures/memory/read_scan.wat",
+        "tools/wtime-bench/fixtures/memory/widths.wat",
+        "tools/wtime-bench/fixtures/memory/widths_shuffled.wat",
+        "tools/wtime-bench/fixtures/representative/graph_bfs.wasm",
+        "tools/wtime-bench/fixtures/representative/graph_bfs.wat",
+        "tools/wtime-bench/fixtures/representative/image_filter.wasm",
+        "tools/wtime-bench/fixtures/representative/image_filter.wat",
+        "tools/wtime-bench/fixtures/representative/parser_hash.wasm",
+        "tools/wtime-bench/fixtures/representative/parser_hash.wat",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/fixtures/scalar/**/*.wat",
+        "tools/wtime-bench/fixtures/scalar/accumulator.wat",
+        "tools/wtime-bench/fixtures/scalar/br_table.wat",
+        "tools/wtime-bench/fixtures/scalar/branch_entropy.wat",
+        "tools/wtime-bench/fixtures/scalar/call_ref.wat",
+        "tools/wtime-bench/fixtures/scalar/dependent.wat",
+        "tools/wtime-bench/fixtures/scalar/direct_calls.wat",
+        "tools/wtime-bench/fixtures/scalar/dynamic_api.wat",
+        "tools/wtime-bench/fixtures/scalar/host_call.wat",
+        "tools/wtime-bench/fixtures/scalar/indirect_calls.wat",
+        "tools/wtime-bench/fixtures/scalar/multivalue_branch.wat",
+        "tools/wtime-bench/fixtures/scalar/ordinary_recursion.wat",
+        "tools/wtime-bench/fixtures/scalar/p042/table-between-calls.wat",
+        "tools/wtime-bench/fixtures/scalar/p042/table-indirect-2targets.wat",
+        "tools/wtime-bench/fixtures/scalar/p042/table-indirect-3targets.wat",
+        "tools/wtime-bench/fixtures/scalar/p042/typed-call-ref-2targets.wat",
+        "tools/wtime-bench/fixtures/scalar/p042/typed-call-ref-3targets.wat",
+        "tools/wtime-bench/fixtures/scalar/p128_identity_copy.wat",
+        "tools/wtime-bench/fixtures/scalar/p128_literal_bitwise.wat",
+        "tools/wtime-bench/fixtures/scalar/p128_literal_wrap_add.wat",
+        "tools/wtime-bench/fixtures/scalar/table_controls.wat",
+        "tools/wtime-bench/fixtures/scalar/tail_calls.wat",
+        "tools/wtime-bench/fixtures/scalar/try_table_normal.wat",
+        "tools/wtime-bench/fixtures/simd/f64_arithmetic.wat",
+        "tools/wtime-bench/fixtures/simd/f64_minmax.wat",
+        "tools/wtime-bench/fixtures/simd/float_arithmetic.wat",
+        "tools/wtime-bench/fixtures/simd/float_edges.wat",
+        "tools/wtime-bench/fixtures/simd/integer_lanes.wat",
+        "tools/wtime-bench/fixtures/simd/integer_lanes_typed.wat",
+        "tools/wtime-bench/fixtures/simd/lane_memory.wat",
+        "tools/wtime-bench/fixtures/simd/lane_memory_footprint.wat",
+        "tools/wtime-bench/fixtures/simd/relaxed_swizzle.wat",
+        "tools/wtime-bench/fixtures/simd/relaxed_swizzle_oob.wat",
+        "tools/wtime-bench/fixtures/simd/saturating_select.wat",
+        "tools/wtime-bench/fixtures/simd/scalar_f64_arithmetic.wat",
+        "tools/wtime-bench/fixtures/simd/scalar_float_arithmetic.wat",
+        "tools/wtime-bench/fixtures/simd/scalar_float_edges.wat",
+        "tools/wtime-bench/fixtures/simd/scalar_integer_lanes.wat",
+        "tools/wtime-bench/fixtures/simd/scalar_integer_lanes_typed.wat",
+        "tools/wtime-bench/fixtures/simd/scalar_shuffle.wat",
+        "tools/wtime-bench/fixtures/simd/shuffle.wat",
+        "tools/wtime-bench/fixtures/simd/typed_f64.wat",
+        "tools/wtime-bench/fixtures/simd/typed_v128.wat",
+        "tools/wtime-bench/fixtures/threads/atomic_add.wat",
+        "tools/wtime-bench/fixtures/threads/atomic_load_store.wat",
+        "tools/wtime-bench/fixtures/threads/ordinary_rw.wat",
+        "tools/wtime-bench/fixtures/threads/sc_store_buffering.wat",
+        "tools/wtime-bench/fixtures/threads/wait_notify.wat",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/gc_cold_adapter.py",
+        "tools/wtime-bench/gc_compare.py",
+        "tools/wtime-bench/gc_layout_workloads.py",
+        "tools/wtime-bench/gc_scaling.py",
+        "tools/wtime-bench/gc_warm_workloads.py",
+        "tools/wtime-bench/gc_workloads.py",
+        "tools/wtime-bench/integration_compare.py",
+        "tools/wtime-bench/integration_workflow.py",
+        "tools/wtime-bench/integration_workloads.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/p043_fixtures.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/root_compare.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/simd_scaling.py",
+        "tools/wtime-bench/simd_workloads.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/src/continuation_driver.rs",
+        "tools/wtime-bench/src/fuel_policy.rs",
+        "tools/wtime-bench/src/gc_exception_driver.rs",
+        "tools/wtime-bench/src/gc_roots_driver.rs",
+        "tools/wtime-bench/src/gc_warm_driver.rs",
+        "tools/wtime-bench/src/integration_driver.rs",
+        "tools/wtime-bench/src/main.rs",
+        "tools/wtime-bench/src/memory_driver.rs",
+        "tools/wtime-bench/src/protocol.rs",
+        "tools/wtime-bench/src/representative_driver.rs",
+        "tools/wtime-bench/src/scalar_driver.rs",
+        "tools/wtime-bench/src/thread_driver.rs",
+        "tools/wtime-bench/src/tier_state_driver.rs",
+        "tools/wtime-bench/thread_compare.py",
+        "tools/wtime-bench/thread_scaling.py",
+        "tools/wtime-bench/thread_workloads.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/**/Cargo.toml",
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/build.rs",
+        "tools/wtime-conformance/src/adapter.rs",
+        "tools/wtime-conformance/src/bin/wtime-allocation-check.rs",
+        "tools/wtime-conformance/src/bin/wtime-probe.rs",
+        "tools/wtime-conformance/src/cli.rs",
+        "tools/wtime-conformance/src/corpus.rs",
+        "tools/wtime-conformance/src/main.rs",
+        "tools/wtime-conformance/src/report.rs",
+        "tools/wtime-conformance/src/script.rs",
+        "tools/wtime-conformance/src/spectest.rs",
+        "tools/wtime-conformance/tests/annotations.rs",
+        "tools/wtime-conformance/tests/interactions.rs",
+        "tools/wtime-conformance/tests/p121_compact_counts.rs"
+      ],
+      "settings": {
+        "bootstrap_resamples": 10000,
+        "candidate_mode": "compact",
+        "pairs_per_run": 30,
+        "runs": 2,
+        "selected_cpu": 1
+      }
+    },
+    "p053_decision_producer": {
+      "paths": [
+        "tools/verification/producers/p053_decision.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/wtime-bench/gates.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/semantic_receipt.py"
+      ]
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P053-before/manifest.json",
+        "target/performance/P053-before/source/**",
+        "target/performance/P053-before/binary/**"
+      ],
+      "settings": {
+        "required_state": "current finalized P128/P127 small-workload foundation with P050 inliner opt-in; fresh archive of actual immediate predecessor before P053 runtime edits"
+      }
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p127_fuel.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "docs/benchmarks/performance/P125-fixture-tools.json",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/verification/artifacts.py",
+        "tools/verification/runner.py",
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/production_attestation.py",
+        "tools/verification/producers/p127_semantics.py",
+        "tools/verification/producers/p127_fuel_cases.rs",
+        "tools/verification/contracts.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "crates/wtime-runtime/tests/fixtures/performance/cursor/store_successor.wasm",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/verification/producers/p128_scalar.py",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/fixtures/scalar/p128_identity_copy.wat",
+        "tools/wtime-bench/fixtures/scalar/p128_literal_wrap_add.wat",
+        "tools/wtime-bench/fixtures/scalar/p128_literal_bitwise.wat"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "selection": {
+      "paths": [
+        "docs/benchmarks/performance/P053-selection.json",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "tool_checks": {
+      "paths": [
+        "tools/verification/tests/test_runtime_production.py",
+        "tools/verification/tests/test_production_attestation.py",
+        "tools/wtime-bench/tests/test_fast_candidate.py",
+        "tools/wtime-bench/tests/test_fast_selection.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py",
+        "tools/wtime-bench/tests/test_p053_fuel_gate.py",
+        "tools/verification/tests/test_p053_decision.py",
+        "tools/verification/producers/p053_decision.py"
+      ]
+    }
+  },
+  "schema_version": 1,
+  "source_delta": {
+    "allowed_additions": [
+      "crates/wtime-runtime/tests/performance/p053.rs"
+    ],
+    "allowed_changes": [
+      "crates/wtime-runtime/src/execution/accounting.rs",
+      "crates/wtime-runtime/src/execution.rs",
+      "crates/wtime-runtime/src/lib.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "baseline": "{freeze_dir}/selection.json",
+    "identity": "runtime",
+    "pointer": "/runtime_sources"
+  },
+  "stages": {
+    "analyze": {
+      "checks": [
+        {
+          "artifact": "unmetered_statistics",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "unmetered_statistics",
+          "op": "equal",
+          "pointer": "/task",
+          "value": "P053"
+        },
+        {
+          "artifact": "unmetered_statistics",
+          "op": "equal",
+          "pointer": "/statistics_computations",
+          "value": 1
+        },
+        {
+          "artifact": "metered_statistics",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "metered_statistics",
+          "op": "equal",
+          "pointer": "/task",
+          "value": "P053"
+        },
+        {
+          "artifact": "metered_statistics",
+          "op": "equal",
+          "pointer": "/statistics_computations",
+          "value": 1
+        },
+        {
+          "artifact": "decision",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "decision",
+          "op": "equal",
+          "pointer": "/task",
+          "value": "P053"
+        },
+        {
+          "artifact": "decision",
+          "op": "equal",
+          "pointer": "/statistics_computations",
+          "value": 2
+        },
+        {
+          "artifact": "decision",
+          "op": "equal",
+          "pointer": "/additional_statistics_computations",
+          "value": 0
+        },
+        {
+          "artifact": "decision",
+          "op": "length",
+          "pointer": "/policy_records",
+          "value": 2
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verify.py",
+            "statistics",
+            "--task",
+            "P053",
+            "--comparison",
+            "{measure_dir}/comparison-unmetered",
+            "--build",
+            "{verify_dir}/default-build.json",
+            "--optional-build",
+            "{verify_dir}/compact-build.json",
+            "--candidate-build-record",
+            "{verify_dir}/production-compact/build-record.json",
+            "--contract",
+            "{repo}/docs/benchmarks/performance/P053-selection.json",
+            "--output",
+            "{stage}/unmetered-statistics.json",
+            "--execute"
+          ],
+          "name": "unmetered-statistics"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verify.py",
+            "statistics",
+            "--task",
+            "P053",
+            "--comparison",
+            "{measure_dir}/comparison-metered",
+            "--build",
+            "{verify_dir}/default-build.json",
+            "--optional-build",
+            "{verify_dir}/compact-build.json",
+            "--candidate-build-record",
+            "{verify_dir}/production-compact/build-record.json",
+            "--contract",
+            "{repo}/docs/benchmarks/performance/P053-selection.json",
+            "--output",
+            "{stage}/metered-statistics.json",
+            "--execute"
+          ],
+          "name": "metered-statistics"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p053_decision.py",
+            "--unmetered",
+            "{stage}/unmetered-statistics.json",
+            "--metered",
+            "{stage}/metered-statistics.json",
+            "--output",
+            "{stage}/decision.json"
+          ],
+          "name": "decision"
+        }
+      ],
+      "dependencies": [
+        "freeze",
+        "verify",
+        "measure"
+      ],
+      "outputs": {
+        "decision": "{stage}/decision.json",
+        "metered_statistics": "{stage}/metered-statistics.json",
+        "unmetered_statistics": "{stage}/unmetered-statistics.json"
+      },
+      "uses": [
+        "analysis",
+        "selection",
+        "tool_checks",
+        "harness",
+        "p053_decision_producer"
+      ]
+    },
+    "freeze": {
+      "checks": [
+        {
+          "artifact": "selection",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-candidate-selection-freeze-v1"
+        },
+        {
+          "artifact": "selection",
+          "op": "equal",
+          "pointer": "/selection_count",
+          "value": 10
+        },
+        {
+          "artifact": "selection",
+          "op": "length",
+          "pointer": "/selection_groups",
+          "value": 46
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_freeze.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P053-selection.json",
+            "--predecessor",
+            "{repo}/target/performance/P053-before/manifest.json",
+            "--frozen",
+            "{repo}/target/performance/P053/selection-freeze.json",
+            "--output",
+            "{stage}/selection.json"
+          ],
+          "name": "revalidate-selection-freeze"
+        }
+      ],
+      "outputs": {
+        "selection": "{stage}/selection.json"
+      },
+      "uses": [
+        "predecessor",
+        "selection",
+        "candidate_freeze_producer"
+      ]
+    },
+    "measure": {
+      "checks": [
+        {
+          "artifact": "unmetered",
+          "op": "equal",
+          "pointer": "/passed",
+          "value": true
+        },
+        {
+          "artifact": "metered",
+          "op": "equal",
+          "pointer": "/passed",
+          "value": true
+        },
+        {
+          "artifact": "unmetered",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "unmetered",
+          "op": "equal",
+          "pointer": "/metadata/settings/fuel_policy",
+          "value": {
+            "name": "unmetered",
+            "source_fuel": null
+          }
+        },
+        {
+          "artifact": "metered",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "metered",
+          "op": "equal",
+          "pointer": "/metadata/settings/fuel_policy",
+          "value": {
+            "name": "metered",
+            "source_fuel": 50000000
+          }
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/focused_compare.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P053-selection.json",
+            "--frozen",
+            "{freeze_dir}/selection.json",
+            "--semantic-receipt",
+            "{verify_dir}/receipt.json",
+            "--baseline",
+            "{repo}/target/performance/P053-before",
+            "--candidate",
+            "{verify_dir}/production-compact/bin/wtime-bench",
+            "--candidate-mode",
+            "compact",
+            "--cpu",
+            "1",
+            "--output",
+            "{stage}/comparison-unmetered",
+            "--source-fuel",
+            "none"
+          ],
+          "name": "focused-unmetered"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/focused_compare.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P053-selection.json",
+            "--frozen",
+            "{freeze_dir}/selection.json",
+            "--semantic-receipt",
+            "{verify_dir}/receipt.json",
+            "--baseline",
+            "{repo}/target/performance/P053-before",
+            "--candidate",
+            "{verify_dir}/production-compact/bin/wtime-bench",
+            "--candidate-mode",
+            "compact",
+            "--cpu",
+            "1",
+            "--output",
+            "{stage}/comparison-metered",
+            "--source-fuel",
+            "50000000"
+          ],
+          "name": "focused-metered"
+        }
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "outputs": {
+        "metered": "{stage}/comparison-metered/report.json",
+        "unmetered": "{stage}/comparison-unmetered/report.json"
+      },
+      "timing_evidence": true,
+      "uses": [
+        "compilation",
+        "selection",
+        "harness"
+      ]
+    },
+    "verify": {
+      "checks": [
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "compact"
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "production_record",
+          "op": "exact_set",
+          "pointer": "/runtime_features",
+          "value": [
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "production_record",
+          "op": "exact_set",
+          "pointer": "/cargo_features",
+          "value": [
+            "runtime-only",
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "default_build",
+          "op": "equal",
+          "pointer": "/budget_pass",
+          "value": true
+        },
+        {
+          "artifact": "default_build",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "compact_build",
+          "op": "equal",
+          "pointer": "/budget_pass",
+          "value": true
+        },
+        {
+          "artifact": "compact_build",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/schema",
+          "value": "wtime-runtime-only-production-v1"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/mode",
+          "value": "decoded"
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": []
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "decoded_record",
+          "op": "equal",
+          "pointer": "/protocol/source_fuel_contract",
+          "value": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          }
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/runtime_features",
+          "value": [
+            "compact-executor"
+          ]
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/harness_features",
+          "value": [
+            "runtime-only"
+          ]
+        },
+        {
+          "artifact": "production_record",
+          "op": "equal",
+          "pointer": "/protocol/source_fuel_contract",
+          "value": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          }
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/status",
+          "value": "passed"
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/source_stable",
+          "value": true
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/instrumented",
+          "value": false
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/timing_analysis",
+          "value": false
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/registry_rows",
+          "value": 459
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/registry_sha256",
+          "value": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668"
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/selection_count",
+          "value": 10
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/matrix_rows",
+          "value": 184
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/counts/observations",
+          "value": 184
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/counts/observation_commands",
+          "value": 184
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/counts/by_mode/decoded",
+          "value": 92
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/counts/by_mode/compact",
+          "value": 92
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/counts/by_policy/unmetered",
+          "value": 92
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/counts/by_policy/metered",
+          "value": 92
+        },
+        {
+          "artifact": "fuel_proof",
+          "op": "equal",
+          "pointer": "/warm_batch",
+          "value": 3
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/runtime_core_unchanged",
+          "value": true
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/tests/passed",
+          "value": 4
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/tests/failed",
+          "value": 0
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/tests/ignored",
+          "value": 0
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/features",
+          "value": [
+            "compact-executor",
+            "execution-reference"
+          ]
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/scalar_rows",
+          "value": 9
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/scalar_mode_policy_tuples",
+          "value": 54
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/scalar_guest_calls",
+          "value": 162
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/independent_reference_probes",
+          "value": 9
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/low_fuel_prefixes",
+          "value": 24
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/cursor_and_remaining_budget_windows",
+          "value": 12
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/continuation_transition_tuples",
+          "value": 27
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/continuation_guest_calls",
+          "value": 54
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/accounting_merge_tuples",
+          "value": 5
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/error_priority_tuples",
+          "value": 3
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/source_fuel_includes_implicit_end",
+          "value": true
+        },
+        {
+          "artifact": "private_proof",
+          "op": "equal",
+          "pointer": "/diagnostic_test_only_append",
+          "value": true
+        },
+        {
+          "artifact": "private_proof",
+          "op": "length",
+          "pointer": "/current_core",
+          "value": 114
+        }
+      ],
+      "commands": [
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p053_decision.py",
+            "-v",
+            "-b"
+          ],
+          "name": "p053-decision-tests"
+        },
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,execution-reference",
+            "--",
+            "--nocapture"
+          ],
+          "name": "compact-semantics"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "compact",
+            "--output",
+            "{stage}/production-compact"
+          ],
+          "name": "compact-production-build"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/production-decoded"
+          ],
+          "name": "decoded-production-build"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p127_fuel.py",
+            "--decoded-record",
+            "{stage}/production-decoded/build-record.json",
+            "--compact-record",
+            "{stage}/production-compact/build-record.json",
+            "--registry",
+            "{repo}/tools/wtime-bench/workloads.json",
+            "--lock",
+            "{repo}/docs/benchmarks/performance/P125-fixture-tools.json",
+            "--output",
+            "{stage}/staged-runtime"
+          ],
+          "name": "staged-runtime-fuel"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p127_semantics.py",
+            "--proof",
+            "{stage}/staged-runtime/report.json",
+            "--output",
+            "{stage}/private-fuel-proof"
+          ],
+          "name": "private-fuel-semantics"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ],
+          "name": "default-build-budget"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/compact-executor",
+            "--output",
+            "{stage}/compact-build.json"
+          ],
+          "name": "compact-build-budget"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p053_fuel_gate.py",
+            "-v",
+            "-b"
+          ],
+          "name": "p053-fuel-gate"
+        },
+        {
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_candidate.py",
+            "-v",
+            "-b"
+          ],
+          "name": "fast-candidate"
+        }
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "outputs": {
+        "binary": "{stage}/production-compact/bin/wtime-bench",
+        "compact_build": "{stage}/compact-build.json",
+        "decoded_record": "{stage}/production-decoded/build-record.json",
+        "default_build": "{stage}/default-build.json",
+        "fuel_proof": "{stage}/staged-runtime/report.json",
+        "private_proof": "{stage}/private-fuel-proof/report.json",
+        "production_record": "{stage}/production-compact/build-record.json"
+      },
+      "tests": [
+        {
+          "command": "compact-semantics",
+          "features": [
+            "compact-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 357,
+          "required_names": [
+            "p050_low_logical_call_depth_fails_without_physical_frame",
+            "p050_fuel_stop_in_inline_leaf_reconstructs_arguments_and_return_point",
+            "p050_recursive_imported_effectful_leaves_decline_and_expansion_bounded",
+            "p050_direct_leaf_results_and_wrapping_match",
+            "p050_all_leaf_boundaries_cancel_and_fuel_restore_logical_activation",
+            "p050_retained_operands_keep_global_peak_and_source_limits",
+            "p050_leaf_plan_corruption_and_budget_bounds_decline",
+            "p053_scalar_results_and_source_prefixes_preserve_accounting",
+            "p053_unmetered_cancellation_and_operand_limits_still_apply",
+            "p053_resumed_saved_fuel_switches_to_metered_once"
+          ],
+          "unfiltered": true
+        },
+        {
+          "command": "p053-fuel-gate",
+          "kind": "unittest",
+          "minimum_passed": 5,
+          "required_names": [
+            "test_archived_command_requires_exact_source_fuel_token",
+            "test_both_protocol_capabilities_must_advertise_contract",
+            "test_legacy_false_and_both_explicit_policies",
+            "test_paired_probe_and_calibration_observations_reject_policy_drift",
+            "test_unsupported_family_and_malformed_or_typed_budget_rejected"
+          ]
+        },
+        {
+          "command": "fast-candidate",
+          "kind": "unittest",
+          "minimum_passed": 15,
+          "required_names": [
+            "test_aliased_cold_pairs_are_counted_once_without_alias_pair_rows",
+            "test_altered_stored_log_artifact_is_rejected",
+            "test_calibration_fails_when_workload_cap_cannot_reach_target",
+            "test_calibration_reaches_twenty_ms_on_both_sides_at_shared_batch",
+            "test_calibration_rejects_a_side_that_changes_the_requested_batch",
+            "test_candidate_decision_adopts_supported_small_and_large_target_win",
+            "test_candidate_report_rejects_development_lane_before_other_dependencies",
+            "test_crossing_protected_tiny_regression_interval_is_inconclusive",
+            "test_development_and_synthetic_receipts_are_rejected",
+            "test_large_target_regression_cannot_be_masked_by_small_target_win",
+            "test_missing_required_semantic_case_is_rejected",
+            "test_protected_tiny_supported_regression_rejects_candidate",
+            "test_stale_core_source_hash_is_rejected",
+            "test_target_warm_and_cold_stages_keep_warm_as_primary",
+            "test_valid_full_receipt_parses_real_stored_test_logs"
+          ]
+        },
+        {
+          "command": "p053-decision-tests",
+          "kind": "unittest",
+          "minimum_passed": 5,
+          "required_names": [
+            "test_different_candidate_build_or_declaration_inputs_reject",
+            "test_missing_statistics_field_rejected",
+            "test_rejected_policy_takes_precedence_over_other_verdicts",
+            "test_two_distinct_typed_policy_datasets_aggregate_mixed_verdict",
+            "test_wrong_policy_missing_statistics_and_stale_consumed_input_reject"
+          ]
+        }
+      ],
+      "uses": [
+        "build_producer",
+        "compilation",
+        "harness",
+        "producer",
+        "runtime",
+        "selection",
+        "tool_checks"
+      ]
+    }
+  },
+  "task": "P053"
+}
