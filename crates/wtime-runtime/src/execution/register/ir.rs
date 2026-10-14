@@ -250,11 +250,22 @@ impl Admission {
             NumericType::admitted(*ty)?;
         }
         for instruction in &code.instructions {
-            if !matches!(instruction.opcode, 1..=5 | 0xb..=0xf | 0x1a | 0x20..=0x22 | 0x41..=0xc4 | 0xfc00..=0xfc07)
+            if !matches!(instruction.opcode, 1..=5 | 0xb..=0xf | 0x1a | 0x20..=0x22 | 0x28..=0x3e | 0x41..=0xc4 | 0xfc00..=0xfc07)
             {
                 return Err(Declined::Unsupported);
             }
             match &instruction.immediate {
+                Immediate::MemArg { memory, .. } => {
+                    work = plus(work, module.data.inner.decoded().imports.len())?;
+                    if work > budget.work {
+                        return Err(Declined::Budget);
+                    }
+                    if !super::memory::declared(module, *memory)
+                        .is_some_and(super::memory::eligible)
+                    {
+                        return Err(Declined::Unsupported);
+                    }
+                }
                 Immediate::BrTable(targets, _) => {
                     work = plus(work, plus(targets.len(), 1)?)?;
                     if work > budget.work {
@@ -409,6 +420,12 @@ impl RegisterFunction {
     pub(super) fn constant(&self, index: u32) -> Option<Constant> {
         self.draft.constants.get(index as usize).copied()
     }
+    pub(super) fn memory_argument(&self, index: u32) -> Option<&MemoryArgument> {
+        self.draft.memory.get(index as usize)
+    }
+    pub(super) fn memory_arguments(&self) -> &[MemoryArgument] {
+        &self.draft.memory
+    }
     pub(super) fn result_slots(&self, range: Range<u32>) -> Option<&[u32]> {
         self.draft
             .results
@@ -436,7 +453,7 @@ impl RegisterFunction {
         self.boundary(prepared_pc)
     }
     /// Private entry certificate: activate() checks the immutable source owner.
-    /// Pure whole functions cannot replace their module/context during execution.
+    /// No-call whole functions cannot replace module/context during execution.
     pub(super) fn boundary(&self, prepared_pc: usize) -> Checked<MaterializationRecipe<'_>> {
         let event = self
             .draft
@@ -467,7 +484,7 @@ impl RegisterFunction {
         }
         let code = &module.data.inner.decoded().code[admission.body];
         let n = code.instructions.len();
-        if draft.events.len() != n || draft.operations.len() != n || !draft.memory.is_empty() {
+        if draft.events.len() != n || draft.operations.len() != n {
             return Err(Declined::Metadata);
         }
         let mut bytes = plus(
@@ -498,6 +515,14 @@ impl RegisterFunction {
                 )?,
             )?,
         )?;
+        let work = plus(
+            work,
+            draft
+                .memory
+                .len()
+                .checked_mul(module.data.inner.decoded().imports.len())
+                .ok_or(Declined::Budget)?,
+        )?;
         // Include temporary control labels in the preparation peak.
         let peak = plus(bytes, vector_bytes::<Label>(n)?)?;
         if work > budget.work || peak > budget.bytes {
@@ -513,6 +538,7 @@ impl RegisterFunction {
         }
         let mut stack_end = 0u32;
         let mut edge_end = 0u32;
+        let mut memory_end = 0usize;
         for (pc, ((event, operation), source)) in draft
             .events
             .iter()
@@ -720,7 +746,52 @@ impl RegisterFunction {
                         && input(*selector, NumericType::I32)
                         && !targets.is_empty()
                 }
-                Operation::Memory { .. } => false,
+                Operation::Memory {
+                    argument,
+                    address,
+                    value,
+                } => {
+                    let Some((ty, _, store)) = super::memory::signature(source.opcode) else {
+                        return Err(Declined::Metadata);
+                    };
+                    let Immediate::MemArg {
+                        memory,
+                        offset,
+                        align,
+                    } = source.immediate
+                    else {
+                        return Err(Declined::Metadata);
+                    };
+                    let arg = draft
+                        .memory
+                        .get(*argument as usize)
+                        .ok_or(Declined::Metadata)?;
+                    let identity = *argument as usize == memory_end
+                        && *arg
+                            == MemoryArgument {
+                                memory,
+                                offset,
+                                align,
+                            }
+                        && super::memory::declared(module, memory)
+                            .is_some_and(super::memory::eligible);
+                    memory_end = plus(memory_end, 1)?;
+                    identity
+                        && if store {
+                            stack.len().checked_sub(2).is_some_and(|height| {
+                                stack[height].slot == *address
+                                    && stack[height + 1].slot == *value
+                                    && input(*address, NumericType::I32)
+                                    && input(*value, ty)
+                            })
+                        } else {
+                            stack
+                                .last()
+                                .is_some_and(|top| top.slot == *address && *address == *value)
+                                && input(*address, NumericType::I32)
+                                && output(*value, ty)
+                        }
+                }
                 Operation::Exit { results } => {
                     (source.opcode == 0xf || pc + 1 == n && source.opcode == 0xb)
                         && results.start <= results.end
@@ -744,6 +815,7 @@ impl RegisterFunction {
         }
         if stack_end as usize != draft.stack_slots.len()
             || edge_end as usize != draft.targets.len()
+            || memory_end != draft.memory.len()
             || !labels.is_empty()
         {
             return Err(Declined::Metadata);
@@ -764,4 +836,5 @@ mod tests {
     use super::*;
     use crate::{Config, Engine};
     include!("../../../tests/performance/p057_private.rs");
+    include!("../../../tests/performance/p063_private.rs");
 }

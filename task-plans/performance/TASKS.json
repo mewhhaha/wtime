@@ -82170,8 +82170,8 @@
       "key": "register-unshared-memory",
       "title": "Add direct checked unshared memory register operations",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -82227,7 +82227,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P063-verification.json --output target/performance/P063/complete --execute"
       ],
       "path": "05-register-executor/P063-register-unshared-memory.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P063/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "783f7cb4d1259f72ddc3ac2fd8bd2dc70ca4f691efa8bcaf77b05cd36e52a016",
+          "bytes": 2594
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -82240,9 +82246,24 @@
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
       "before_edit_commands": [
-        "python3 tools/wtime-bench/baseline.py --output target/performance/P063-before",
+        "python3 tools/wtime-bench/baseline.py --mode register --output target/performance/P063-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P063-selection.json target/performance/P063-before/manifest.json --output target/performance/P063/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P063/shared-finalization/attempt-0001/evidence.json": "783f7cb4d1259f72ddc3ac2fd8bd2dc70ca4f691efa8bcaf77b05cd36e52a016"
+        },
+        "evidence": [
+          {
+            "bytes": 2594,
+            "path": "/workspace/wtime/target/performance/P063/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "783f7cb4d1259f72ddc3ac2fd8bd2dc70ca4f691efa8bcaf77b05cd36e52a016"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P063"
+      }
     },
     {
       "id": "P064",

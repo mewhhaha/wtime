@@ -99,7 +99,7 @@ impl Store {
         #[allow(unused_mut)]
         let mut labels = vec![];
         #[cfg(feature = "register-executor")]
-        let register = if self.engine.policy == ExecutionPolicy::Register { register::activate(module, fun.body, &locals, &mut labels) } else { None };
+        let register = if self.engine.policy == ExecutionPolicy::Register && register::bindings_admitted(self, fun.instance, fun.body) { register::activate(module, fun.body, &locals, &mut labels) } else { None };
         #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
         if self.engine.policy == ExecutionPolicy::Register && register.is_none() { self.register_fallback_frames.set(self.register_fallback_frames.get().saturating_add(1)); }
         #[cfg(all(feature = "register-executor", feature = "performance-counters"))]

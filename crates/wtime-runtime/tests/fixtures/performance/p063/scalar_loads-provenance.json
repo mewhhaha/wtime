@@ -1,0 +1,249 @@
+{
+  "task": "P063",
+  "baseline_freeze_id": "e0f2f64",
+  "fixture": "scalar_loads.wat",
+  "license": "MIT",
+  "license_file": "LICENSE.txt",
+  "source_seed": {
+    "source": "P043/scalar-widths.wat",
+    "source_sha256": "1c484b060533d1e8eb7bef78cf9a01d610a428b2cffc0acaa1789bbed6af6926",
+    "seed_bytes_hex": "807f01800203048001808001028001020304050607080000803f000000000000f03f",
+    "seed_length": 34,
+    "initial_memory_length": 65536,
+    "initial_memory_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012"
+  },
+  "memory": {
+    "export": "memory",
+    "minimum_pages": 1,
+    "maximum_pages": 1,
+    "shared": false,
+    "page_size_bytes": 65536
+  },
+  "exports": [
+    {
+      "export": "i32_load",
+      "opcode": "i32.load",
+      "opcode_hex": "0x28",
+      "params": [
+        "i32"
+      ],
+      "result": "i32",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load",
+      "opcode": "i64.load",
+      "opcode_hex": "0x29",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "f32_load",
+      "opcode": "f32.load",
+      "opcode_hex": "0x2a",
+      "params": [
+        "i32"
+      ],
+      "result": "f32",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "f64_load",
+      "opcode": "f64.load",
+      "opcode_hex": "0x2b",
+      "params": [
+        "i32"
+      ],
+      "result": "f64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i32_load8_s",
+      "opcode": "i32.load8_s",
+      "opcode_hex": "0x2c",
+      "params": [
+        "i32"
+      ],
+      "result": "i32",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i32_load8_u",
+      "opcode": "i32.load8_u",
+      "opcode_hex": "0x2d",
+      "params": [
+        "i32"
+      ],
+      "result": "i32",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i32_load16_s",
+      "opcode": "i32.load16_s",
+      "opcode_hex": "0x2e",
+      "params": [
+        "i32"
+      ],
+      "result": "i32",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i32_load16_u",
+      "opcode": "i32.load16_u",
+      "opcode_hex": "0x2f",
+      "params": [
+        "i32"
+      ],
+      "result": "i32",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load8_s",
+      "opcode": "i64.load8_s",
+      "opcode_hex": "0x30",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load8_u",
+      "opcode": "i64.load8_u",
+      "opcode_hex": "0x31",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load16_s",
+      "opcode": "i64.load16_s",
+      "opcode_hex": "0x32",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load16_u",
+      "opcode": "i64.load16_u",
+      "opcode_hex": "0x33",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load32_s",
+      "opcode": "i64.load32_s",
+      "opcode_hex": "0x34",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    },
+    {
+      "export": "i64_load32_u",
+      "opcode": "i64.load32_u",
+      "opcode_hex": "0x35",
+      "params": [
+        "i32"
+      ],
+      "result": "i64",
+      "source_events": 3,
+      "static_pcs": {
+        "local.get_address": 0,
+        "load": 1,
+        "implicit_function_end": 2
+      }
+    }
+  ],
+  "address_cases": "Supplied by the P063 runtime harness; each export accepts an i32 address. No argument or expected result is frozen in this fixture packet.",
+  "fixture_sha256": "bf7b5e3a63fd714b9cd5c5057d04ef548effa4ea5bbdea74eb729d6cae79f948",
+  "wasm_sha256": "aa4b1fb525ec63f94eb2be538286b723b39033a4e16004c02b5a2d6dfdd9558c",
+  "encoder": {
+    "path": "target/performance/baseline/binary/wtime-conformance",
+    "sha256": "36bede285fc5a1ad57b35566abf4bb68d3acf4e015944ff07e8dc6fb76e3bc14",
+    "command": "wtime-conformance encode scalar_loads.wat -o scalar_loads.wasm"
+  },
+  "validation": {
+    "decoder": "target/recovery/P063-load-fixtures-0001/decode-audit.py",
+    "decoder_status": "passed",
+    "stable_core_probe": "target/recovery/P063-load-fixtures-0001/probe-helper.sh",
+    "probe_status": "valid",
+    "probe_binary_sha256": "599737ef728292106e4c4e06da11a7288f0297d367fd35ea41b340dfde72ba53"
+  }
+}

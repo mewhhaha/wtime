@@ -1,0 +1,61 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 21026,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P063-verification.json",
+    "sha256": "8deb0d0f68eb1d406fa5f6878867df72c283cdc5b6c88f6b19107273970d34df"
+  },
+  "decision": "rejected",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Register remains opt-in; this task does not change decoded defaults.",
+    "Focused scalar memory results do not constitute P001 or portfolio/milestone evidence.",
+    "The immediate predecessor is the frozen register-mode P063-before archive bound by the selection receipt.",
+    "The statistics producer separately binds and rechecks the sibling performance TASKS.json; it is outside repository component identity paths."
+  ],
+  "outcome": "rejected",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 101700,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/55/55d135de94d15dc7fc2902b01f4e5270ea9e546c08c2348c41a8963c5f446365",
+      "sha256": "55d135de94d15dc7fc2902b01f4e5270ea9e546c08c2348c41a8963c5f446365",
+      "stored_bytes": 101700,
+      "stored_sha256": "55d135de94d15dc7fc2902b01f4e5270ea9e546c08c2348c41a8963c5f446365"
+    },
+    "freeze": {
+      "bytes": 231100,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/c9/c93bd1366c9ae0b4f0f497f12febd79e8d088616a2ab25d5455d5611f4c79e44",
+      "sha256": "c93bd1366c9ae0b4f0f497f12febd79e8d088616a2ab25d5455d5611f4c79e44",
+      "stored_bytes": 231100,
+      "stored_sha256": "c93bd1366c9ae0b4f0f497f12febd79e8d088616a2ab25d5455d5611f4c79e44"
+    },
+    "measure": {
+      "bytes": 476273,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/6f/6fc640fff6e79583b70cdbe0c2b361f5eaf85ad54671bbaffc915b5bbe4a24ce",
+      "sha256": "6fc640fff6e79583b70cdbe0c2b361f5eaf85ad54671bbaffc915b5bbe4a24ce",
+      "stored_bytes": 476273,
+      "stored_sha256": "6fc640fff6e79583b70cdbe0c2b361f5eaf85ad54671bbaffc915b5bbe4a24ce"
+    },
+    "verify": {
+      "bytes": 535600,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/84/84ef4699427c55f0572a22619c716e252921f55d03aab234d382dd6a65f2a811",
+      "sha256": "84ef4699427c55f0572a22619c716e252921f55d03aab234d382dd6a65f2a811",
+      "stored_bytes": 535600,
+      "stored_sha256": "84ef4699427c55f0572a22619c716e252921f55d03aab234d382dd6a65f2a811"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P063"
+}

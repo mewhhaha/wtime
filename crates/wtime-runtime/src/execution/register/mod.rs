@@ -6,6 +6,9 @@ mod float;
 mod integer;
 mod ir;
 mod lower;
+mod memory;
 #[cfg(feature = "execution-reference")]
 pub(crate) use execute::materialize;
-pub(crate) use execute::{Activation, PreparedModule, Step, activate, logical_height, step};
+pub(crate) use execute::{
+    Activation, PreparedModule, Step, activate, bindings_admitted, logical_height, step,
+};

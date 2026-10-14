@@ -4,6 +4,7 @@ use super::{
     float, integer,
     ir::{Budget, Constant, NumericType, Operation},
     lower::LoweredFunction,
+    memory,
 };
 use crate::execution::{Frame, Label, arity};
 use crate::{Immediate, Module, Result, Store, ValType, Value, trap};
@@ -40,7 +41,7 @@ fn valid_operation(op: &Operation, function: &LoweredFunction) -> bool {
         | Operation::Branch { .. }
         | Operation::Table { .. }
         | Operation::Exit { .. } => true,
-        Operation::Memory { .. } => false,
+        Operation::Memory { argument, .. } => function.program.memory_argument(*argument).is_some(),
     }
 }
 impl PreparedModule {
@@ -89,6 +90,10 @@ impl PreparedModule {
                         _ => Some(total),
                     }
                 })?;
+            let memory_count = code
+                .iter()
+                .filter(|instruction| matches!(instruction.opcode, 0x28..=0x3e))
+                .count();
             let per_edge = peak
                 .checked_mul(peak)?
                 .checked_mul(peak)?
@@ -104,7 +109,19 @@ impl PreparedModule {
                         per_edge.checked_add(peak.checked_mul(8)?)?.checked_add(8)?,
                     )?)?
                     .checked_add(locals.checked_mul(2)?)?
-                    .checked_add(layout.results.len().checked_mul(2)?)?;
+                    .checked_add(layout.results.len().checked_mul(2)?)?
+                    .checked_add(
+                        memory_count.checked_mul(
+                            module
+                                .data
+                                .inner
+                                .decoded()
+                                .imports
+                                .len()
+                                .checked_mul(3)?
+                                .checked_add(8)?,
+                        )?,
+                    )?;
             let Some(remaining) = attempted_work.checked_sub(charge) else {
                 break;
             };
@@ -302,6 +319,35 @@ pub(crate) fn activate(
     *labels = prepared_labels;
     Some(Activation { slots })
 }
+pub(crate) fn bindings_admitted(store: &Store, instance: usize, body: usize) -> bool {
+    let Some(instance) = store.instances.get(instance) else {
+        return false;
+    };
+    let Some(function) = instance
+        .module
+        .data
+        .register
+        .as_ref()
+        .and_then(|program| program.function(body))
+    else {
+        return false;
+    };
+    function
+        .lowered
+        .program
+        .memory_arguments()
+        .iter()
+        .all(|argument| {
+            let Some(handle) = instance.mems.get(argument.memory as usize) else {
+                return false;
+            };
+            let Ok(index) = store.check(handle.0, &store.mems) else {
+                return false;
+            };
+            let memory = &store.mems[index];
+            memory::eligible(memory.ty) && memory.shared.is_none()
+        })
+}
 pub(crate) fn logical_height(frame: &Frame, store: &Store) -> Result<usize> {
     let (_, function) = function(frame, store)?;
     let recipe = function
@@ -392,8 +438,15 @@ fn results(
     }
     Ok(())
 }
-pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> Result<Step> {
-    let (module, function) = function(frame, store)?;
+pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store) -> Result<Step> {
+    let instance = &store.instances[frame.function.instance];
+    let module = &instance.module;
+    let function = module
+        .data
+        .register
+        .as_ref()
+        .and_then(|program| program.function(frame.function.body))
+        .ok_or_else(|| trap("missing admitted register function"))?;
     let program = &function.lowered.program;
     let pc = frame.pc;
     let recipe = program
@@ -516,7 +569,23 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &Store) -> 
             )?;
             return Ok(Step::Return);
         }
-        Operation::Memory { .. } => return Err(trap("unverified register memory")),
+        Operation::Memory {
+            argument,
+            address,
+            value,
+        } => {
+            let argument = program
+                .memory_argument(*argument)
+                .ok_or_else(|| trap("register memory metadata"))?;
+            let address = read(bank, *address)?;
+            let stored = read(bank, *value)?;
+            if let Some(loaded) =
+                memory::access(instance, &mut store.mems, argument, opcode, address, stored)?
+            {
+                write(bank, *value, loaded)?;
+            }
+            pc + 1
+        }
     };
     if let Some(edge) = function
         .edges

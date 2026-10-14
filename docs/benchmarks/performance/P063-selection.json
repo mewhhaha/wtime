@@ -1,0 +1,88 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P063",
+  "lane": "candidate",
+  "rationale": "Target scalar memory width loops at n17 and n1024, hold out the zero-iteration predictable and shuffled rows, and protect a read-scan workload plus required cold controls. The target WAT modules use numeric locals, integer arithmetic/control, and scalar load/store operations only; they contain no calls, growth, bulk memory, shared memory, memory64, or custom page size. The existing register whole-function admission now includes float arithmetic, while these rows exercise the integer path and all scalar memory widths. P063 remains eligible only where the entire function is admitted and its instance memory is unshared; unsupported shapes must fall back before execution. This focused selection does not alter the benchmark protocol.",
+  "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+  "rows": [
+    {
+      "family": "memory",
+      "id": "memory_widths_predictable_17",
+      "role": "targeted",
+      "scale": "small",
+      "stages": ["prepare", "first_call", "warm_call", "load_and_call"],
+      "row_sha256": "534e4e455f815ab227a9009b0b0b7be56b7893676d6b76a942d2d2291a3413a6"
+    },
+    {
+      "family": "memory",
+      "id": "memory_widths_predictable_1024",
+      "role": "targeted",
+      "scale": "large",
+      "stages": ["prepare", "first_call", "warm_call", "load_and_call"],
+      "row_sha256": "16f4b36ff0ebc66e74644d89f3a25bb2d6aa58d38c11742de66113ce7b03efb1"
+    },
+    {
+      "family": "memory",
+      "id": "memory_widths_shuffled_17",
+      "role": "targeted",
+      "scale": "small",
+      "stages": ["prepare", "first_call", "warm_call", "load_and_call"],
+      "row_sha256": "549670d2f360edc4b5896b3d4e9c4632279089179f6203ae4812e1f94dd81a1f"
+    },
+    {
+      "family": "memory",
+      "id": "memory_widths_shuffled_1024",
+      "role": "targeted",
+      "scale": "large",
+      "stages": ["prepare", "first_call", "warm_call", "load_and_call"],
+      "row_sha256": "4191776ef9a99401f775e4ca6ea599dfcd24e28d2c668baaeeb052bc97940d26"
+    },
+    {
+      "family": "memory",
+      "id": "memory_widths_predictable_0",
+      "role": "held_out",
+      "scale": "other",
+      "stages": ["prepare", "first_call", "warm_call", "load_and_call"],
+      "row_sha256": "de3d4cc84c72f6fc430e6dfed78e688c2269d962c1df25032e12b971f7f0bc47"
+    },
+    {
+      "family": "memory",
+      "id": "memory_widths_shuffled_0",
+      "role": "held_out",
+      "scale": "other",
+      "stages": ["prepare", "first_call", "warm_call", "load_and_call"],
+      "row_sha256": "58acc4d7e2c449930ec8bc856561d6600f6336ad48163b91f2986888a0f92d96"
+    },
+    {
+      "family": "memory",
+      "id": "memory_widths_read_scan_17",
+      "role": "protected",
+      "scale": "other",
+      "stages": ["warm_call"],
+      "row_sha256": "93c59110857f3caf12c027211261ec8b3a089c332d301afe76de1ee31475ab09"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": ["prepare", "first_call", "load_and_call"],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": ["prepare"],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p063_all_load_widths_and_signed_bits_match",
+    "p063_all_store_widths_and_fuel_images_match",
+    "p063_traps_preserve_prior_effects_and_boundary_priority",
+    "p063_shared_wide_and_custom_pages_decline",
+    "p063_bindings_growth_and_aliases_use_current_bytes"
+  ]
+}

@@ -1,0 +1,401 @@
+{
+  "task": "P063",
+  "baseline_freeze_id": "e0f2f64",
+  "license": "MIT (P043 packet dual-licensed MIT OR Apache-2.0; MIT terms selected)",
+  "atomic_promote_retained": true,
+  "sources": {
+    "scalar-widths.wat": {
+      "source": "P043/scalar-widths.wat",
+      "source_sha256": "1c484b060533d1e8eb7bef78cf9a01d610a428b2cffc0acaa1789bbed6af6926",
+      "fixture_sha256": "1c484b060533d1e8eb7bef78cf9a01d610a428b2cffc0acaa1789bbed6af6926",
+      "byte_identical": true,
+      "changes": "Byte-exact copy; P043 already declares unshared memory. Preserve 12 integer load kinds, f32/f64 loads, nine stores, raw-float export, seed, and atomic_promote."
+    },
+    "unshared-bindings.wat": {
+      "source": "P043/shared-multi-memory.wat",
+      "source_sha256": "1841ed98e97bcb52bd8a08525c4624b4cdd6375124b4f5e34d2388a120bd5314",
+      "fixture_sha256": "33928ed65f4931f14566284bb520ce0177e5a596401c7959c51e41500ac738d7",
+      "changes": "Remove shared flags from both imported memory32 declarations, preserving normal 64KiB pages and min/max."
+    },
+    "growth-caller.wat": {
+      "source": "P043/growth-caller.wat",
+      "source_sha256": "a24dca67d35b1dbb7e83fc49804677b8bc66e820af9071095494ae90c5a1ed10",
+      "fixture_sha256": "09204911f4312c061317c59c6805ff5226a8b97efad4091c0416cfd96c52a0de",
+      "changes": "Remove shared from the imported memory32 declaration; host callback behavior is retained."
+    },
+    "prior-effects.wat": {
+      "fixture_sha256": "f9b68e823d7bcc513a215632f927ea3b422f73d0ff57a8e6548237981574776f",
+      "oracle": {
+        "first_store_offset": 8,
+        "first_store_byte_hex": "aa",
+        "fuel_3": "first store has committed before resource stop",
+        "oob_load_offset": 65535,
+        "oob_load_width": 2,
+        "trap_source_pc": 4,
+        "source_events_through_oob": 5,
+        "later_store_offset": 9,
+        "later_store_byte_hex": "bb",
+        "later_store": "not executed after the out-of-bounds load traps"
+      }
+    }
+  },
+  "inherited_expected_memory": {
+    "source_directory": "P043/expected-memory/store-kinds",
+    "images": {
+      "fuel-00.bin": {
+        "source_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+        "fixture_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+        "byte_identical": true
+      },
+      "fuel-01.bin": {
+        "source_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+        "fixture_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+        "byte_identical": true
+      },
+      "fuel-02.bin": {
+        "source_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+        "fixture_sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+        "byte_identical": true
+      },
+      "fuel-03.bin": {
+        "source_sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+        "fixture_sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+        "byte_identical": true
+      },
+      "fuel-04.bin": {
+        "source_sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+        "fixture_sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+        "byte_identical": true
+      },
+      "fuel-05.bin": {
+        "source_sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+        "fixture_sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+        "byte_identical": true
+      },
+      "fuel-06.bin": {
+        "source_sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+        "fixture_sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+        "byte_identical": true
+      },
+      "fuel-07.bin": {
+        "source_sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+        "fixture_sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+        "byte_identical": true
+      },
+      "fuel-08.bin": {
+        "source_sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+        "fixture_sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+        "byte_identical": true
+      },
+      "fuel-09.bin": {
+        "source_sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+        "fixture_sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+        "byte_identical": true
+      },
+      "fuel-10.bin": {
+        "source_sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+        "fixture_sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+        "byte_identical": true
+      },
+      "fuel-11.bin": {
+        "source_sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+        "fixture_sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+        "byte_identical": true
+      },
+      "fuel-12.bin": {
+        "source_sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+        "fixture_sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+        "byte_identical": true
+      },
+      "fuel-13.bin": {
+        "source_sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+        "fixture_sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+        "byte_identical": true
+      },
+      "fuel-14.bin": {
+        "source_sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+        "fixture_sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+        "byte_identical": true
+      },
+      "fuel-15.bin": {
+        "source_sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+        "fixture_sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+        "byte_identical": true
+      },
+      "fuel-16.bin": {
+        "source_sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+        "fixture_sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+        "byte_identical": true
+      },
+      "fuel-17.bin": {
+        "source_sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+        "fixture_sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+        "byte_identical": true
+      },
+      "fuel-18.bin": {
+        "source_sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+        "fixture_sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+        "byte_identical": true
+      },
+      "fuel-19.bin": {
+        "source_sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+        "fixture_sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+        "byte_identical": true
+      },
+      "fuel-20.bin": {
+        "source_sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+        "fixture_sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+        "byte_identical": true
+      },
+      "fuel-21.bin": {
+        "source_sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+        "fixture_sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+        "byte_identical": true
+      },
+      "fuel-22.bin": {
+        "source_sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+        "fixture_sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+        "byte_identical": true
+      },
+      "fuel-23.bin": {
+        "source_sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+        "fixture_sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+        "byte_identical": true
+      },
+      "fuel-24.bin": {
+        "source_sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+        "fixture_sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+        "byte_identical": true
+      },
+      "fuel-25.bin": {
+        "source_sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+        "fixture_sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+        "byte_identical": true
+      },
+      "fuel-26.bin": {
+        "source_sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+        "fixture_sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+        "byte_identical": true
+      },
+      "fuel-27.bin": {
+        "source_sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+        "fixture_sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+        "byte_identical": true
+      },
+      "fuel-28.bin": {
+        "source_sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+        "fixture_sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+        "byte_identical": true
+      },
+      "fuel-29.bin": {
+        "source_sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+        "fixture_sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+        "byte_identical": true
+      }
+    }
+  },
+  "prior_effect_expected_memory": {
+    "fuel-03.bin": {
+      "sha256": "e595990b37e0dc9c589f03f84e297e4dd2bd2771800585708b7eafb12590590d",
+      "length": 65536,
+      "writes": {
+        "offset_8": "aa"
+      },
+      "offset_9": "00"
+    },
+    "trap-oob.bin": {
+      "sha256": "e595990b37e0dc9c589f03f84e297e4dd2bd2771800585708b7eafb12590590d",
+      "length": 65536,
+      "writes": {
+        "offset_8": "aa"
+      },
+      "offset_9": "00"
+    }
+  },
+  "validation": {
+    "decoder": "target/recovery/P063-fixtures-0001/decode-audit.py",
+    "decoder_result": "passed; export types, memory import flags/limits, scalar load/store counts, atomic opcode, and prior-effects PC sequence independently decoded",
+    "stable_core_probes": {
+      "scalar-widths": "unsupported: DisabledFeature for atomic at byte 294",
+      "unshared-bindings": "valid",
+      "growth-caller": "valid",
+      "prior-effects": "valid"
+    },
+    "all_phase3_core_probe": {
+      "scalar-widths": "valid"
+    },
+    "probe_binary_sha256": "599737ef728292106e4c4e06da11a7288f0297d367fd35ea41b340dfde72ba53",
+    "status": "decoded and all-phase3 validated; scalar-widths intentionally retains an atomic export and is unsupported in stable-core"
+  },
+  "encoded": {
+    "scalar-widths": {
+      "wat_sha256": "1c484b060533d1e8eb7bef78cf9a01d610a428b2cffc0acaa1789bbed6af6926",
+      "wasm_sha256": "74c3cc962eb02ab0b412d0f5b67b45928c590e9634265fffa18ec69ec9b8601c"
+    },
+    "unshared-bindings": {
+      "wat_sha256": "33928ed65f4931f14566284bb520ce0177e5a596401c7959c51e41500ac738d7",
+      "wasm_sha256": "c39869a051360abd447ad657dd604039e27247f03f62fe958737075cc1e448c4"
+    },
+    "growth-caller": {
+      "wat_sha256": "09204911f4312c061317c59c6805ff5226a8b97efad4091c0416cfd96c52a0de",
+      "wasm_sha256": "3e9f965b284fa76046efdc6c3e1bd9843bda1595b86f53a07cbf812a7814e2c5"
+    },
+    "prior-effects": {
+      "wat_sha256": "f9b68e823d7bcc513a215632f927ea3b422f73d0ff57a8e6548237981574776f",
+      "wasm_sha256": "48565e561c8e34ae3ba3f979331ae798ffcb727964eeebf3e8453b8ac484fdbd"
+    }
+  },
+  "memory_images": {
+    "expected-memory/prior-effects/fuel-03.bin": {
+      "sha256": "e595990b37e0dc9c589f03f84e297e4dd2bd2771800585708b7eafb12590590d",
+      "length": 65536
+    },
+    "expected-memory/prior-effects/trap-oob.bin": {
+      "sha256": "e595990b37e0dc9c589f03f84e297e4dd2bd2771800585708b7eafb12590590d",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-00.bin": {
+      "sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-01.bin": {
+      "sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-02.bin": {
+      "sha256": "56dad7749b2b2c3b2b44ec4a288839f2a91250b412df29f0f249438f73e6c012",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-03.bin": {
+      "sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-04.bin": {
+      "sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-05.bin": {
+      "sha256": "207b4794d6d954a0d2b0d864685e872fea6274eee6df66343e8300cb9a59c955",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-06.bin": {
+      "sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-07.bin": {
+      "sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-08.bin": {
+      "sha256": "a2d17005f73758fc4531d4e7ed16bd83c80030083f883d8d722c4c7f5fb18e4e",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-09.bin": {
+      "sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-10.bin": {
+      "sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-11.bin": {
+      "sha256": "7e26bee5b956f2507d78fd396a49ffcef8e5860bfb5b016ba0e9b92faf8e876c",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-12.bin": {
+      "sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-13.bin": {
+      "sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-14.bin": {
+      "sha256": "306926289937661fe7552885aabacc8bda10393deebb7837cf09619b8cd84014",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-15.bin": {
+      "sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-16.bin": {
+      "sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-17.bin": {
+      "sha256": "3fd61ad09afcd6409dbaa4a15e60423f7a6b937edd47abba196afc074a585bac",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-18.bin": {
+      "sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-19.bin": {
+      "sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-20.bin": {
+      "sha256": "b5901986cbe705a542010c953d54fb7d58f923fb628b9c87077f619974b22f0f",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-21.bin": {
+      "sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-22.bin": {
+      "sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-23.bin": {
+      "sha256": "8b1a3ee12635f63ae37ccdeb5850abc3c892c75cab4ce48f9536e5715c61f9b9",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-24.bin": {
+      "sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-25.bin": {
+      "sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-26.bin": {
+      "sha256": "810d1dc14830b4bbe09ec919a9b92a536d6759b4084080fb599e6fc62ec42d1f",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-27.bin": {
+      "sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-28.bin": {
+      "sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+      "length": 65536
+    },
+    "expected-memory/store-kinds/fuel-29.bin": {
+      "sha256": "1742fcac93db44ff1174931020885ca726082c225a75de3b0d24a01715f0addb",
+      "length": 65536
+    }
+  },
+  "encoder": {
+    "path": "target/performance/baseline/binary/wtime-conformance",
+    "sha256": "36bede285fc5a1ad57b35566abf4bb68d3acf4e015944ff07e8dc6fb76e3bc14",
+    "command": "wtime-conformance encode {source} -o {output}"
+  },
+  "license_sha256": "0455d985e6a7be74518e74974f16293540540c74c62265f790efbe4db40e9ba8",
+  "source_event_oracles": {
+    "scalar-widths": {
+      "run": 29,
+      "store_kinds": 28,
+      "float_raw_bits": 7,
+      "atomic_promote": 3,
+      "includes_implicit_function_end": true
+    },
+    "prior-effects": {
+      "store8_pc": 2,
+      "fuel_3_prior_store_committed": true,
+      "oob_load16_u_pc": 4,
+      "source_events_through_trap": 5,
+      "future_store_pc": 8,
+      "future_store_executed_after_trap": false
+    }
+  }
+}

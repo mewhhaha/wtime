@@ -193,7 +193,11 @@ impl LoweredFunction {
             .instructions;
         let n = code.len();
         let mut table_extra = 0;
+        let mut memory_count = 0usize;
         for instruction in code {
+            if matches!(instruction.opcode, 0x28..=0x3e) {
+                memory_count = add(memory_count, 1)?;
+            }
             if let Immediate::BrTable(targets, _) = &instruction.immediate {
                 table_extra = add(table_extra, add(targets.len(), 1)?)?;
             }
@@ -218,6 +222,10 @@ impl LoweredFunction {
             add(mul(n, per_instruction)?, mul(pool, per_height)?)?,
             size_of::<Self>(),
         )?;
+        let planned_tables = add(
+            planned_tables,
+            mul(memory_count, size_of::<MemoryArgument>())?,
+        )?;
         let planned = add(
             add(
                 planned_tables,
@@ -238,6 +246,13 @@ impl LoweredFunction {
             add(mul(n, 8)?, mul(pool, 4)?)?,
             mul(table_extra, add(mul(peak, 4)?, 4)?)?,
         )?;
+        let analysis_work = add(
+            analysis_work,
+            mul(
+                memory_count,
+                add(module.data.inner.decoded().imports.len(), 4)?,
+            )?,
+        )?;
         if planned > transaction.remaining().1 || analysis_work > transaction.remaining().0 {
             return Err(Declined::Budget);
         }
@@ -253,7 +268,7 @@ impl LoweredFunction {
             stack_slots: reserved(pool)?,
             targets: reserved(edge_capacity)?,
             constants: reserved(n)?,
-            memory: vec![],
+            memory: reserved(memory_count)?,
             results: reserved(pool)?,
         };
         let mut stack = reserved(peak)?;
@@ -325,6 +340,37 @@ impl LoweredFunction {
                     Operation::Const {
                         constant: constant_index,
                         to,
+                    }
+                }
+                (
+                    Immediate::MemArg {
+                        memory,
+                        offset,
+                        align,
+                    },
+                    0x28..=0x3e,
+                ) => {
+                    let (ty, _, store) = super::memory::signature(instruction.opcode)
+                        .ok_or(Declined::Unsupported)?;
+                    let value = if store {
+                        Some(narrow(add(locals, pop(&mut stack, ty)?)?)?)
+                    } else {
+                        None
+                    };
+                    let address = narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?;
+                    if !store {
+                        push_type(&mut stack, ty, peak)?;
+                    }
+                    let argument = narrow(draft.memory.len())?;
+                    draft.memory.push(MemoryArgument {
+                        memory: *memory,
+                        offset: *offset,
+                        align: *align,
+                    });
+                    Operation::Memory {
+                        argument,
+                        address,
+                        value: value.unwrap_or(address),
                     }
                 }
                 (_, 0x45..=0xc4 | 0xfc00..=0xfc07) => {
