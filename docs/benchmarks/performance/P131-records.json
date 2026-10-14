@@ -1,0 +1,260 @@
+{
+  "schema": "wtime-p131-durable-records-v1",
+  "task": "P131",
+  "status": "done",
+  "outcome": "contract_only",
+  "copies": [
+    {
+      "source": {
+        "path": "target/performance/P131/shared-finalization/attempt-0001/completion.json",
+        "sha256": "ec2d44410b640798665329668508edf260cc50ea2126cbc7e5da3ad9873f3041",
+        "bytes": 503
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P131-completion.json",
+        "sha256": "ec2d44410b640798665329668508edf260cc50ea2126cbc7e5da3ad9873f3041",
+        "bytes": 503
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/performance/P131/shared-finalization/attempt-0001/evidence.json",
+        "sha256": "b1d0e3e58c7cd0891f9772fcff71f16e26d314029c27d98db1705484b2a2a1fc",
+        "bytes": 1640
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P131-evidence.json",
+        "sha256": "b1d0e3e58c7cd0891f9772fcff71f16e26d314029c27d98db1705484b2a2a1fc",
+        "bytes": 1640
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P131/freeze/attempt-0001/freeze/report.json",
+        "sha256": "ef9af9426a35727c5c506a65b36107990138851d20510586717672c15496bb0c",
+        "bytes": 20534
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P131-freeze.json",
+        "sha256": "ef9af9426a35727c5c506a65b36107990138851d20510586717672c15496bb0c",
+        "bytes": 20534
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P131/verify/attempt-0001/proof/report.json",
+        "sha256": "7c23e149193383a997fb029f87adad2962fadba780e8cc3ca739cdcd0a2c13d4",
+        "bytes": 2128
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P131-proof.json",
+        "sha256": "7c23e149193383a997fb029f87adad2962fadba780e8cc3ca739cdcd0a2c13d4",
+        "bytes": 2128
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P131/verify/attempt-0001/default-build.json",
+        "sha256": "2289cedb6c37c27c5f3320a9a22d8e022a02aa7488f9d04c29c1608b933e3439",
+        "bytes": 315992
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P131-default-build.json",
+        "sha256": "2289cedb6c37c27c5f3320a9a22d8e022a02aa7488f9d04c29c1608b933e3439",
+        "bytes": 315992
+      },
+      "original_copy_bytes": true
+    },
+    {
+      "source": {
+        "path": "target/verification/runs/P131/verify/attempt-0001/register-build.json",
+        "sha256": "41a3dd45f45295803377702e16d275c4ce4bb78c42b09c262c85f7c69b3cc405",
+        "bytes": 316155
+      },
+      "copy": {
+        "path": "docs/benchmarks/performance/P131-register-build.json",
+        "sha256": "41a3dd45f45295803377702e16d275c4ce4bb78c42b09c262c85f7c69b3cc405",
+        "bytes": 316155
+      },
+      "original_copy_bytes": true
+    }
+  ],
+  "phase_receipts": {
+    "freeze": {
+      "path": "target/verification/runs/P131/freeze/attempt-0001/receipt.json",
+      "sha256": "a07638066d0950f257a6ed78de4de8139a6a37289d953e3cd9dd6be2968b5a0a",
+      "bytes": 292105
+    },
+    "verify": {
+      "path": "target/verification/runs/P131/verify/attempt-0001/receipt.json",
+      "sha256": "bf31e213696e86cd4c53ab5ebf61c687f3d133dc9441dc6a48a5be451f94342e",
+      "bytes": 853122
+    }
+  },
+  "counts": {
+    "verification_tests": {
+      "groups": {
+        "default-policy": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        "register-semantics": {
+          "passed": 289,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      "totals": {
+        "passed": 290,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "proof": {
+      "default_named_cases": 1,
+      "p131_named_cases": 3,
+      "register_compatibility_named_cases": 37
+    },
+    "register_p131_cases": [
+      "execution::register::lower::tests::p131_invalid_barriers_and_budgets_decline",
+      "execution::register::lower::tests::p131_prefix_values_and_source_boundaries_match",
+      "execution::register::lower::tests::p131_open_labels_and_memory_prefixes_match"
+    ],
+    "aggregate_prefix_marker": {
+      "max_bytes": 2179,
+      "max_work": 259,
+      "memory_prefixes": 2,
+      "open_labels": 2,
+      "prefixes": 26
+    },
+    "additional_private_case": {
+      "name": "p131_prefix_values_and_source_boundaries_match",
+      "prefixes_from_source_attested_assertions": 26,
+      "source": {
+        "path": "crates/wtime-runtime/tests/performance/p131_private.rs",
+        "sha256": "775e71c8f0ae18997fe079a2f3210f8ef59a784a143c15d8a05bb8e39669b70f",
+        "bytes": 10479
+      }
+    },
+    "confirmed_source_boundary_assertions": {
+      "total": 52,
+      "marker_contribution": 26,
+      "additional_private_case_contribution": 26,
+      "aggregate_marker_is_not_52": true
+    }
+  },
+  "decision": "contract_only",
+  "timing_evidence": false,
+  "candidate_promoted": false,
+  "comparison_scope": {
+    "predecessor_commit": "bdbf60e2eec4295b58d0fb9c342a77d840066f03",
+    "predecessor_mode": "register",
+    "predecessor_manifest": {
+      "path": "target/performance/P131-before/manifest.json",
+      "sha256": "3b7c089fe2fd3161e5063bc97698fd38b4865f6750a20b7183cae1fb5caea41f",
+      "bytes": 98755
+    },
+    "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+    "adapter_used": false
+  },
+  "pinned_prerequisites": {
+    "p057": {
+      "completion": {
+        "path": "docs/benchmarks/performance/P057-completion.json",
+        "sha256": "4ee850eeaeac86b302acd543eaace6b0fa96d02d2655cc112fb00c01b703d481",
+        "bytes": 503
+      },
+      "evidence": {
+        "path": "docs/benchmarks/performance/P057-evidence.json",
+        "sha256": "8061225076d2226e948b23d51f951ef90a5443edf17aa0a685ab08e2cd716264",
+        "bytes": 1519
+      },
+      "final_evidence": {
+        "path": "target/performance/P057/shared-finalization/attempt-0001/evidence.json",
+        "sha256": "8061225076d2226e948b23d51f951ef90a5443edf17aa0a685ab08e2cd716264",
+        "bytes": 1519
+      }
+    },
+    "p058": {
+      "completion": {
+        "path": "docs/benchmarks/performance/P058-completion.json",
+        "sha256": "83e4626cecf912026f5bba6b34da49a8c49e53963e9d5e0d2a05d3e08e3b0443",
+        "bytes": 503
+      },
+      "evidence": {
+        "path": "docs/benchmarks/performance/P058-evidence.json",
+        "sha256": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20",
+        "bytes": 1548
+      },
+      "final_evidence": {
+        "path": "target/performance/P058/shared-finalization/attempt-0002/evidence.json",
+        "sha256": "d77c102b292744889128bf4b1e4f1f66767e0a9681d063f0aa0841b4e2bc3a20",
+        "bytes": 1548
+      }
+    },
+    "p063": {
+      "completion": {
+        "path": "docs/benchmarks/performance/P063-completion.json",
+        "sha256": "bb8662140ffb606ac073be4479dbd21394a36b57101602a4f2f49dbd26686b6d",
+        "bytes": 498
+      },
+      "evidence": {
+        "path": "docs/benchmarks/performance/P063-evidence.json",
+        "sha256": "783f7cb4d1259f72ddc3ac2fd8bd2dc70ca4f691efa8bcaf77b05cd36e52a016",
+        "bytes": 2594
+      },
+      "final_evidence": {
+        "path": "target/performance/P063/shared-finalization/attempt-0001/evidence.json",
+        "sha256": "783f7cb4d1259f72ddc3ac2fd8bd2dc70ca4f691efa8bcaf77b05cd36e52a016",
+        "bytes": 2594
+      }
+    },
+    "p129": {
+      "completion": {
+        "path": "docs/benchmarks/performance/P129-completion.json",
+        "sha256": "60779adf995091d41083b94615a76612770c4d4f20e0d11a8771feeae465270f",
+        "bytes": 503
+      },
+      "evidence": {
+        "path": "docs/benchmarks/performance/P129-evidence.json",
+        "sha256": "0c3c659a972308ab7312091e62c3fa8568b7004a68040ef07adcecad02032060",
+        "bytes": 1526
+      },
+      "final_evidence": {
+        "path": "target/performance/P129/shared-finalization/attempt-0002/evidence.json",
+        "sha256": "0c3c659a972308ab7312091e62c3fa8568b7004a68040ef07adcecad02032060",
+        "bytes": 1526
+      }
+    },
+    "p001": {
+      "manifest": {
+        "path": "target/performance/baseline/manifest.json",
+        "sha256": "7349596fc806c96c74cb9c40f1c08402589c1683660b0b152c713264f5808472",
+        "bytes": 22024
+      },
+      "binary": {
+        "path": "target/performance/baseline/binary/wtime-bench",
+        "sha256": "735e595f3a625da89401fdee298781b752fbe071e3d3d793df196c9e68b8e498",
+        "bytes": 16552416
+      }
+    }
+  },
+  "foundation_scope": {
+    "guest_barrier_executed": false,
+    "guest_barrier_charged": false,
+    "production_selector": "deferred to P064",
+    "speed_claim": false
+  },
+  "retention_justification": "Retain this contract-only register-prefix foundation for P064. It validates planning, limits, open labels and memory-prefix state; it does not select prefixes in production or claim guest execution, source-barrier charging, or speedup.",
+  "limitations": [
+    "Static source-prefix planning, work/byte limits, open-label and memory-prefix correctness only; no production selector, execution-path activation, timing, or performance promotion is claimed. The production selection remains deferred to P064.",
+    "Foundation model only: no guest barrier is executed or charged.",
+    "Prefix production selection is deferred to P064; no timing or speed claim is made.",
+    "The aggregate marker covers 26 boundaries in one case; a separate source-attested private case adds 26 assertions, for 52 confirmed assertions total."
+  ]
+}

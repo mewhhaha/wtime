@@ -183,7 +183,7 @@ fn compare_prefixes(
                 assert_eq!(outcome.unwrap(), RunOutcome::Returned(results.clone()));
                 break results;
             }
-            Operation::Memory { .. } | Operation::Table { .. } => panic!("unsupported operation admitted in P058 fixture model"),
+            Operation::Memory { .. } | Operation::Table { .. } | Operation::ExitToDecoded => panic!("unsupported operation admitted in P058 fixture model"),
         };
         assert_eq!(outcome.unwrap_err().kind, ErrorKind::ResourceLimit);
         if let Some(edge) = lowered.edge(pc, next) {

@@ -57,6 +57,8 @@ impl Constant {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Operation {
+    /// Metadata for a pending original opcode; never an executed guest return.
+    ExitToDecoded,
     Move {
         from: u32,
         to: u32,
@@ -206,6 +208,22 @@ impl Admission {
         self.slots
     }
     pub(super) fn inspect(module: &Module, body: usize, budget: &Budget) -> Checked<Self> {
+        Self::inspect_range(module, body, budget, None)
+    }
+    pub(super) fn inspect_prefix(
+        module: &Module,
+        body: usize,
+        budget: &Budget,
+        end: usize,
+    ) -> Checked<Self> {
+        Self::inspect_range(module, body, budget, Some(end))
+    }
+    fn inspect_range(
+        module: &Module,
+        body: usize,
+        budget: &Budget,
+        prefix: Option<usize>,
+    ) -> Checked<Self> {
         let plan = module
             .data
             .plans
@@ -221,12 +239,13 @@ impl Admission {
             .get(body)
             .ok_or(Declined::Metadata)?;
         let local_count = plus(layout.params.len(), layout.locals.len())?;
+        if prefix.is_some_and(|end| end == 0 || end >= code.instructions.len()) {
+            return Err(Declined::Metadata);
+        }
+        let source_count = prefix.map_or(code.instructions.len(), |end| end + 1);
         let mut work = plus(
             plus(
-                code.instructions
-                    .len()
-                    .checked_mul(4)
-                    .ok_or(Declined::Budget)?,
+                source_count.checked_mul(4).ok_or(Declined::Budget)?,
                 local_count,
             )?,
             layout.results.len(),
@@ -249,7 +268,11 @@ impl Admission {
         {
             NumericType::admitted(*ty)?;
         }
-        for instruction in &code.instructions {
+        for instruction in code
+            .instructions
+            .iter()
+            .take(prefix.unwrap_or(code.instructions.len()))
+        {
             if !matches!(instruction.opcode, 1..=5 | 0xb..=0xf | 0x1a | 0x20..=0x22 | 0x28..=0x3e | 0x41..=0xc4 | 0xfc00..=0xfc07)
             {
                 return Err(Declined::Unsupported);
@@ -434,6 +457,45 @@ impl RegisterFunction {
     pub(super) fn costs(&self) -> (usize, usize) {
         (self.work, self.retained_bytes)
     }
+    #[cfg(test)]
+    pub(super) fn p131_revalidate(
+        self,
+        module: &Module,
+        end: usize,
+        corruption: usize,
+        budget: &mut Budget,
+    ) -> Checked<Self> {
+        let Self {
+            admission,
+            mut draft,
+            ..
+        } = self;
+        match corruption {
+            0 => {
+                draft.operations[end] = Operation::Jump {
+                    target: end as u32 + 1,
+                }
+            }
+            1 => draft.events[end].source_pc = end - 1,
+            2 => {
+                let slot = draft.events[end].stack.start as usize;
+                draft.stack_slots[slot].ty = NumericType::F64;
+            }
+            3 => {
+                draft.events.remove(0);
+            }
+            4 => {
+                let Operation::Const { to, .. } = &mut draft.operations[0] else {
+                    return Err(Declined::Metadata);
+                };
+                *to = u32::MAX;
+            }
+            5 => draft.events[end].fuel_charge = 0,
+            6 => return Self::from_draft(module, admission, draft, budget),
+            _ => {}
+        }
+        Self::from_prefix_draft(module, admission, draft, budget, end)
+    }
     pub(super) fn targets(&self, range: Range<u32>) -> Option<&[u32]> {
         self.draft
             .targets
@@ -479,11 +541,33 @@ impl RegisterFunction {
         draft: Draft,
         budget: &mut Budget,
     ) -> Checked<Self> {
+        Self::check_draft(module, admission, draft, budget, None)
+    }
+    #[allow(dead_code)] // P064 consumes this separately admitted artifact.
+    pub(super) fn from_prefix_draft(
+        module: &Module,
+        admission: Admission,
+        draft: Draft,
+        budget: &mut Budget,
+        end: usize,
+    ) -> Checked<Self> {
+        Self::check_draft(module, admission, draft, budget, Some(end))
+    }
+    fn check_draft(
+        module: &Module,
+        admission: Admission,
+        draft: Draft,
+        budget: &mut Budget,
+        prefix: Option<usize>,
+    ) -> Checked<Self> {
         if !admission.matches(module) {
             return Err(Declined::Metadata);
         }
         let code = &module.data.inner.decoded().code[admission.body];
-        let n = code.instructions.len();
+        if prefix.is_some_and(|end| end == 0 || end >= code.instructions.len()) {
+            return Err(Declined::Metadata);
+        }
+        let n = prefix.map_or(code.instructions.len(), |end| end + 1);
         if draft.events.len() != n || draft.operations.len() != n {
             return Err(Declined::Metadata);
         }
@@ -524,7 +608,20 @@ impl RegisterFunction {
                 .ok_or(Declined::Budget)?,
         )?;
         // Include temporary control labels in the preparation peak.
-        let peak = plus(bytes, vector_bytes::<Label>(n)?)?;
+        let work = plus(
+            work,
+            if prefix.is_some() {
+                draft.stack_slots.len()
+            } else {
+                0
+            },
+        )?;
+        let shape_bytes = if prefix.is_some() {
+            vector_bytes::<NumericType>(admission.stack_peak)?
+        } else {
+            0
+        };
+        let peak = plus(plus(bytes, vector_bytes::<Label>(n)?)?, shape_bytes)?;
         if work > budget.work || peak > budget.bytes {
             return Err(Declined::Budget);
         }
@@ -537,6 +634,19 @@ impl RegisterFunction {
             return Err(Declined::Budget);
         }
         let mut stack_end = 0u32;
+        let mut prefix_shape = Vec::new();
+        if prefix.is_some() {
+            prefix_shape
+                .try_reserve_exact(admission.stack_peak)
+                .map_err(|_| Declined::Allocation)?;
+            if plus(
+                plus(bytes, vector_bytes::<Label>(labels.capacity())?)?,
+                vector_bytes::<NumericType>(prefix_shape.capacity())?,
+            )? > budget.bytes
+            {
+                return Err(Declined::Budget);
+            }
+        }
         let mut edge_end = 0u32;
         let mut memory_end = 0usize;
         for (pc, ((event, operation), source)) in draft
@@ -546,6 +656,12 @@ impl RegisterFunction {
             .zip(&code.instructions)
             .enumerate()
         {
+            let barrier = prefix == Some(pc);
+            if barrier != matches!(operation, Operation::ExitToDecoded)
+                || prefix.is_some() && !barrier && !prefix_instruction(module, source)
+            {
+                return Err(Declined::Metadata);
+            }
             if event.source_pc != pc
                 || event.opcode != source.opcode
                 || event.effect != classify(source.opcode)
@@ -567,6 +683,15 @@ impl RegisterFunction {
             if stack.len() > admission.stack_peak {
                 return Err(Declined::Metadata);
             }
+            if prefix.is_some()
+                && (stack.len() != prefix_shape.len()
+                    || stack
+                        .iter()
+                        .zip(&prefix_shape)
+                        .any(|(slot, ty)| slot.ty != *ty))
+            {
+                return Err(Declined::Metadata);
+            }
             for (height, slot) in stack.iter().enumerate() {
                 if usize::try_from(slot.slot).map_err(|_| Declined::Metadata)?
                     != plus(admission.locals.len(), height)?
@@ -575,71 +700,76 @@ impl RegisterFunction {
                 }
             }
             let next = u32::try_from(pc + 1).map_err(|_| Declined::Budget)?;
-            let expected: [Option<u32>; 2] = match source.opcode {
-                2..=4 => {
-                    let (end, other) = module
-                        .data
-                        .control
-                        .get(admission.body)
-                        .and_then(|v| v.get(pc))
-                        .copied()
-                        .flatten()
-                        .ok_or(Declined::Metadata)?;
-                    let end = u32::try_from(end).map_err(|_| Declined::Budget)?;
-                    labels.push(Label {
-                        start: next,
-                        end,
-                        loop_: source.opcode == 3,
-                    });
-                    [
-                        Some(next),
-                        if source.opcode == 4 {
-                            Some(
-                                u32::try_from(other.map_or(end as usize, |x| x + 1))
-                                    .map_err(|_| Declined::Budget)?,
-                            )
-                        } else {
-                            None
-                        },
-                    ]
-                }
-                5 => [Some(labels.last().ok_or(Declined::Metadata)?.end), None],
-                0xb => {
-                    labels.pop();
-                    [Some(next), None]
-                }
-                0xc | 0xd => {
-                    let Immediate::Index(depth) = source.immediate else {
-                        return Err(Declined::Metadata);
-                    };
-                    let target = branch(&labels, depth, terminal)?;
-                    if source.opcode == 0xd {
-                        [Some(target), Some(next)]
-                    } else {
-                        [Some(target), None]
+            let expected: [Option<u32>; 2] = if barrier {
+                [None, None]
+            } else {
+                match source.opcode {
+                    2..=4 => {
+                        let (end, other) = module
+                            .data
+                            .control
+                            .get(admission.body)
+                            .and_then(|v| v.get(pc))
+                            .copied()
+                            .flatten()
+                            .ok_or(Declined::Metadata)?;
+                        let end = u32::try_from(end).map_err(|_| Declined::Budget)?;
+                        labels.push(Label {
+                            start: next,
+                            end,
+                            loop_: source.opcode == 3,
+                        });
+                        [
+                            Some(next),
+                            if source.opcode == 4 {
+                                Some(
+                                    u32::try_from(other.map_or(end as usize, |x| x + 1))
+                                        .map_err(|_| Declined::Budget)?,
+                                )
+                            } else {
+                                None
+                            },
+                        ]
                     }
-                }
-                0xe => {
-                    let Immediate::BrTable(depths, default) = &source.immediate else {
-                        return Err(Declined::Metadata);
-                    };
-                    if targets.len() != plus(depths.len(), 1)? {
-                        return Err(Declined::Metadata);
+                    5 => [Some(labels.last().ok_or(Declined::Metadata)?.end), None],
+                    0xb => {
+                        labels.pop();
+                        [Some(next), None]
                     }
-                    for (target, depth) in targets
-                        .iter()
-                        .zip(depths.iter().chain(std::iter::once(default)))
-                    {
-                        if *target != branch(&labels, *depth, terminal)? {
+                    0xc | 0xd => {
+                        let Immediate::Index(depth) = source.immediate else {
                             return Err(Declined::Metadata);
+                        };
+                        let target = branch(&labels, depth, terminal)?;
+                        if source.opcode == 0xd {
+                            [Some(target), Some(next)]
+                        } else {
+                            [Some(target), None]
                         }
                     }
-                    [None, None]
+                    0xe => {
+                        let Immediate::BrTable(depths, default) = &source.immediate else {
+                            return Err(Declined::Metadata);
+                        };
+                        if targets.len() != plus(depths.len(), 1)? {
+                            return Err(Declined::Metadata);
+                        }
+                        for (target, depth) in targets
+                            .iter()
+                            .zip(depths.iter().chain(std::iter::once(default)))
+                        {
+                            if *target != branch(&labels, *depth, terminal)? {
+                                return Err(Declined::Metadata);
+                            }
+                        }
+                        [None, None]
+                    }
+                    0xf => [Some(terminal), None],
+                    _ => [Some(next), None],
                 }
-                0xf => [Some(terminal), None],
-                _ => [Some(next), None],
             };
-            if (source.opcode != 0xe && targets.iter().copied().ne(expected.into_iter().flatten()))
+            if ((source.opcode != 0xe || barrier)
+                && targets.iter().copied().ne(expected.into_iter().flatten()))
                 || targets.iter().any(|x| *x > terminal)
             {
                 return Err(Declined::Metadata);
@@ -661,6 +791,7 @@ impl RegisterFunction {
                         .is_none_or(|local| *local == ty)
             };
             let valid = match operation {
+                Operation::ExitToDecoded => barrier && targets.is_empty(),
                 Operation::Move { from, to, ty } => {
                     let Immediate::Index(local) = source.immediate else {
                         return Err(Declined::Metadata);
@@ -810,13 +941,61 @@ impl RegisterFunction {
             if !valid {
                 return Err(Declined::Metadata);
             }
+            if prefix.is_some() && !barrier {
+                match source.opcode {
+                    1..=3 | 0xb | 0x22 => {}
+                    0x1a | 0x21 => {
+                        prefix_shape.pop().ok_or(Declined::Metadata)?;
+                    }
+                    0x20 => {
+                        let Immediate::Index(index) = source.immediate else {
+                            return Err(Declined::Metadata);
+                        };
+                        prefix_shape.push(
+                            *admission
+                                .locals
+                                .get(index as usize)
+                                .ok_or(Declined::Metadata)?,
+                        );
+                    }
+                    0x41..=0x44 => {
+                        let ty = match source.immediate {
+                            Immediate::I32(_) => NumericType::I32,
+                            Immediate::I64(_) => NumericType::I64,
+                            Immediate::F32(_) => NumericType::F32,
+                            Immediate::F64(_) => NumericType::F64,
+                            _ => return Err(Declined::Metadata),
+                        };
+                        prefix_shape.push(ty);
+                    }
+                    0x28..=0x3e => {
+                        let (ty, _, store) =
+                            super::memory::signature(source.opcode).ok_or(Declined::Metadata)?;
+                        prefix_shape.pop().ok_or(Declined::Metadata)?;
+                        if store {
+                            prefix_shape.pop().ok_or(Declined::Metadata)?;
+                        } else {
+                            prefix_shape.push(ty);
+                        }
+                    }
+                    _ => {
+                        let (_, result, binary) =
+                            numeric_signature(source.opcode).ok_or(Declined::Metadata)?;
+                        prefix_shape.pop().ok_or(Declined::Metadata)?;
+                        if binary {
+                            prefix_shape.pop().ok_or(Declined::Metadata)?;
+                        }
+                        prefix_shape.push(result);
+                    }
+                }
+            }
             stack_end = event.stack.end;
             edge_end = event.successors.end;
         }
         if stack_end as usize != draft.stack_slots.len()
             || edge_end as usize != draft.targets.len()
             || memory_end != draft.memory.len()
-            || !labels.is_empty()
+            || prefix.is_none() && !labels.is_empty()
         {
             return Err(Declined::Metadata);
         }
@@ -828,6 +1007,21 @@ impl RegisterFunction {
             retained_bytes: bytes,
             work,
         })
+    }
+}
+
+/// The first unsupported operation becomes a pending decoded boundary.
+/// No nonlocal transfer executes inside this initial prefix subset.
+pub(super) fn prefix_instruction(module: &Module, instruction: &crate::Instruction) -> bool {
+    if !matches!(instruction.opcode, 1..=3 | 0xb | 0x1a | 0x20..=0x22 | 0x28..=0x3e | 0x41..=0xc4 | 0xfc00..=0xfc07)
+    {
+        return false;
+    }
+    match instruction.immediate {
+        Immediate::MemArg { memory, .. } => {
+            super::memory::declared(module, memory).is_some_and(super::memory::eligible)
+        }
+        _ => true,
     }
 }
 

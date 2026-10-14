@@ -32,6 +32,7 @@ impl std::fmt::Debug for PreparedModule {
 }
 fn valid_operation(op: &Operation, function: &LoweredFunction) -> bool {
     match op {
+        Operation::ExitToDecoded => false,
         Operation::Move { .. } => true,
         Operation::Const { constant, .. } => function.program.constant(*constant).is_some(),
         Operation::Unary { opcode, .. } | Operation::Binary { opcode, .. } => {
@@ -481,6 +482,7 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
         .operation(pc)
         .ok_or_else(|| trap("register operation pc"))?
     {
+        Operation::ExitToDecoded => return Err(trap("unselected register prefix")),
         Operation::Move { from, to, .. } => {
             let v = read(bank, *from)?;
             write(bank, *to, v)?;

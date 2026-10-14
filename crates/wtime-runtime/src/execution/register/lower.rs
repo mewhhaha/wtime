@@ -178,8 +178,53 @@ fn edge_request(
 
 impl LoweredFunction {
     pub(super) fn lower(module: &Module, body: usize, budget: &mut Budget) -> Checked<Self> {
+        Self::translate(module, body, budget, None)
+    }
+    #[allow(dead_code)] // Preparation foundation; P064 selects it separately.
+    pub(super) fn lower_prefix(module: &Module, body: usize, budget: &mut Budget) -> Checked<Self> {
+        let code = &module
+            .data
+            .inner
+            .decoded()
+            .code
+            .get(body)
+            .ok_or(Declined::Metadata)?
+            .instructions;
+        let mut scan = 0usize;
+        let mut end = None;
+        for (pc, instruction) in code.iter().enumerate() {
+            scan = add(scan, 1)?;
+            if matches!(instruction.immediate, Immediate::MemArg { .. }) {
+                scan = add(scan, module.data.inner.decoded().imports.len())?;
+            }
+            if scan > budget.remaining().0 {
+                return Err(Declined::Budget);
+            }
+            if !prefix_instruction(module, instruction) {
+                end = Some(pc);
+                break;
+            }
+        }
+        let end = end.filter(|end| *end > 0).ok_or(Declined::Unsupported)?;
         let mut transaction = budget.clone();
-        let admission = Admission::inspect(module, body, &transaction)?;
+        transaction.reserve(scan, 0)?;
+        let mut lowered = Self::translate(module, body, &mut transaction, Some(end))?;
+        lowered.work = add(lowered.work, scan)?;
+        *budget = transaction;
+        Ok(lowered)
+    }
+    fn translate(
+        module: &Module,
+        body: usize,
+        budget: &mut Budget,
+        prefix: Option<usize>,
+    ) -> Checked<Self> {
+        let mut transaction = budget.clone();
+        let admission = if let Some(end) = prefix {
+            Admission::inspect_prefix(module, body, &transaction, end)?
+        } else {
+            Admission::inspect(module, body, &transaction)?
+        };
         let locals = admission.local_types().len();
         let peak = admission.slot_count() as usize - locals;
         let layout = module.function_layout(body).ok_or(Declined::MissingPlan)?;
@@ -191,10 +236,10 @@ impl LoweredFunction {
             .get(body)
             .ok_or(Declined::Metadata)?
             .instructions;
-        let n = code.len();
+        let n = prefix.map_or(code.len(), |end| end + 1);
         let mut table_extra = 0;
         let mut memory_count = 0usize;
-        for instruction in code {
+        for instruction in code.iter().take(n) {
             if matches!(instruction.opcode, 0x28..=0x3e) {
                 memory_count = add(memory_count, 1)?;
             }
@@ -276,7 +321,7 @@ impl LoweredFunction {
         let mut edges: Vec<EdgeRequest> = reserved(edge_capacity)?;
         let mut block_entries = reserved(mul(n, 2)?)?;
         let mut dead = false;
-        for (pc, instruction) in code.iter().enumerate() {
+        for (pc, instruction) in code.iter().take(n).enumerate() {
             // Unreachable structural ends have a declared polymorphic result
             // shape. No executable edge observes uninitialized virtual values.
             if instruction.opcode == 0xb && dead {
@@ -301,295 +346,300 @@ impl LoweredFunction {
             let mut targets = [pc + 1, 0];
             let mut target_count = 1;
             let mut table_targets = None;
-            let operation = match (&instruction.immediate, instruction.opcode) {
-                (Immediate::Index(index), 0x20) => {
-                    let ty = *local_types.get(*index as usize).ok_or(Declined::Metadata)?;
-                    let to = narrow(add(locals, stack.len())?)?;
-                    push_type(&mut stack, ty, peak)?;
-                    Operation::Move {
-                        from: *index,
-                        to,
-                        ty,
-                    }
-                }
-                (Immediate::Index(index), 0x21 | 0x22) => {
-                    let ty = *local_types.get(*index as usize).ok_or(Declined::Metadata)?;
-                    let height = pop(&mut stack, ty)?;
-                    let from = narrow(add(locals, height)?)?;
-                    if instruction.opcode == 0x22 {
+            let operation = if prefix == Some(pc) {
+                target_count = 0;
+                Operation::ExitToDecoded
+            } else {
+                match (&instruction.immediate, instruction.opcode) {
+                    (Immediate::Index(index), 0x20) => {
+                        let ty = *local_types.get(*index as usize).ok_or(Declined::Metadata)?;
+                        let to = narrow(add(locals, stack.len())?)?;
                         push_type(&mut stack, ty, peak)?;
+                        Operation::Move {
+                            from: *index,
+                            to,
+                            ty,
+                        }
                     }
-                    Operation::Move {
-                        from,
-                        to: *index,
-                        ty,
+                    (Immediate::Index(index), 0x21 | 0x22) => {
+                        let ty = *local_types.get(*index as usize).ok_or(Declined::Metadata)?;
+                        let height = pop(&mut stack, ty)?;
+                        let from = narrow(add(locals, height)?)?;
+                        if instruction.opcode == 0x22 {
+                            push_type(&mut stack, ty, peak)?;
+                        }
+                        Operation::Move {
+                            from,
+                            to: *index,
+                            ty,
+                        }
                     }
-                }
-                (_, 0x41..=0x44) => {
-                    let (constant, ty) = match instruction.immediate {
-                        Immediate::I32(v) => (Constant::I32(v as u32), NumericType::I32),
-                        Immediate::I64(v) => (Constant::I64(v as u64), NumericType::I64),
-                        Immediate::F32(v) => (Constant::F32(v), NumericType::F32),
-                        Immediate::F64(v) => (Constant::F64(v), NumericType::F64),
-                        _ => return Err(Declined::Metadata),
-                    };
-                    let to = narrow(add(locals, stack.len())?)?;
-                    push_type(&mut stack, ty, peak)?;
-                    let constant_index = narrow(draft.constants.len())?;
-                    draft.constants.push(constant);
-                    Operation::Const {
-                        constant: constant_index,
-                        to,
-                    }
-                }
-                (
-                    Immediate::MemArg {
-                        memory,
-                        offset,
-                        align,
-                    },
-                    0x28..=0x3e,
-                ) => {
-                    let (ty, _, store) = super::memory::signature(instruction.opcode)
-                        .ok_or(Declined::Unsupported)?;
-                    let value = if store {
-                        Some(narrow(add(locals, pop(&mut stack, ty)?)?)?)
-                    } else {
-                        None
-                    };
-                    let address = narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?;
-                    if !store {
+                    (_, 0x41..=0x44) => {
+                        let (constant, ty) = match instruction.immediate {
+                            Immediate::I32(v) => (Constant::I32(v as u32), NumericType::I32),
+                            Immediate::I64(v) => (Constant::I64(v as u64), NumericType::I64),
+                            Immediate::F32(v) => (Constant::F32(v), NumericType::F32),
+                            Immediate::F64(v) => (Constant::F64(v), NumericType::F64),
+                            _ => return Err(Declined::Metadata),
+                        };
+                        let to = narrow(add(locals, stack.len())?)?;
                         push_type(&mut stack, ty, peak)?;
-                    }
-                    let argument = narrow(draft.memory.len())?;
-                    draft.memory.push(MemoryArgument {
-                        memory: *memory,
-                        offset: *offset,
-                        align: *align,
-                    });
-                    Operation::Memory {
-                        argument,
-                        address,
-                        value: value.unwrap_or(address),
-                    }
-                }
-                (_, 0x45..=0xc4 | 0xfc00..=0xfc07) => {
-                    let (input, result, binary) =
-                        numeric_signature(instruction.opcode).ok_or(Declined::Unsupported)?;
-                    let right = narrow(add(locals, pop(&mut stack, input)?)?)?;
-                    let operation = if binary {
-                        let left = narrow(add(locals, pop(&mut stack, input)?)?)?;
-                        Operation::Binary {
-                            opcode: instruction.opcode,
-                            left,
-                            right,
-                            to: left,
-                            input,
-                            result,
+                        let constant_index = narrow(draft.constants.len())?;
+                        draft.constants.push(constant);
+                        Operation::Const {
+                            constant: constant_index,
+                            to,
                         }
-                    } else {
-                        Operation::Unary {
-                            opcode: instruction.opcode,
-                            from: right,
-                            to: right,
-                            input,
-                            result,
+                    }
+                    (
+                        Immediate::MemArg {
+                            memory,
+                            offset,
+                            align,
+                        },
+                        0x28..=0x3e,
+                    ) => {
+                        let (ty, _, store) = super::memory::signature(instruction.opcode)
+                            .ok_or(Declined::Unsupported)?;
+                        let value = if store {
+                            Some(narrow(add(locals, pop(&mut stack, ty)?)?)?)
+                        } else {
+                            None
+                        };
+                        let address = narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?;
+                        if !store {
+                            push_type(&mut stack, ty, peak)?;
                         }
-                    };
-                    push_type(&mut stack, result, peak)?;
-                    operation
-                }
-                (_, 1) => Operation::Jump {
-                    target: narrow(pc + 1)?,
-                },
-                (_, 0x1a) => {
-                    stack.pop().ok_or(Declined::Metadata)?;
-                    Operation::Jump {
+                        let argument = narrow(draft.memory.len())?;
+                        draft.memory.push(MemoryArgument {
+                            memory: *memory,
+                            offset: *offset,
+                            align: *align,
+                        });
+                        Operation::Memory {
+                            argument,
+                            address,
+                            value: value.unwrap_or(address),
+                        }
+                    }
+                    (_, 0x45..=0xc4 | 0xfc00..=0xfc07) => {
+                        let (input, result, binary) =
+                            numeric_signature(instruction.opcode).ok_or(Declined::Unsupported)?;
+                        let right = narrow(add(locals, pop(&mut stack, input)?)?)?;
+                        let operation = if binary {
+                            let left = narrow(add(locals, pop(&mut stack, input)?)?)?;
+                            Operation::Binary {
+                                opcode: instruction.opcode,
+                                left,
+                                right,
+                                to: left,
+                                input,
+                                result,
+                            }
+                        } else {
+                            Operation::Unary {
+                                opcode: instruction.opcode,
+                                from: right,
+                                to: right,
+                                input,
+                                result,
+                            }
+                        };
+                        push_type(&mut stack, result, peak)?;
+                        operation
+                    }
+                    (_, 1) => Operation::Jump {
                         target: narrow(pc + 1)?,
-                    }
-                }
-                (_, 2..=4) => {
-                    let condition = if instruction.opcode == 4 {
-                        Some(narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?)
-                    } else {
-                        None
-                    };
-                    let (params, results) = signature(module, &instruction.immediate, peak)?;
-                    let base = tail(&stack, &params)?;
-                    let (end, otherwise) = module
-                        .data
-                        .control
-                        .get(body)
-                        .and_then(|v| v.get(pc))
-                        .copied()
-                        .flatten()
-                        .ok_or(Declined::Metadata)?;
-                    if end <= pc
-                        || end >= n
-                        || code[end].opcode != 0xb
-                        || otherwise.is_some_and(|other| {
-                            instruction.opcode != 4
-                                || other <= pc
-                                || other >= end
-                                || code[other].opcode != 5
-                        })
-                    {
-                        return Err(Declined::Metadata);
-                    }
-                    let mut prefix = reserved(base)?;
-                    prefix.extend(&stack[..base]);
-                    labels.push(Label {
-                        start: pc + 1,
-                        end,
-                        loop_: instruction.opcode == 3,
-                        prefix,
-                        params,
-                        results,
-                        parent_dead: dead,
-                    });
-                    block_entries.push(pc + 1);
-                    if let Some(condition) = condition {
-                        let no = otherwise.map_or(end, |v| v + 1);
-                        targets[1] = no;
-                        target_count = 2;
-                        block_entries.push(no);
-                        Operation::Branch {
-                            condition,
-                            yes: narrow(pc + 1)?,
-                            no: narrow(no)?,
-                        }
-                    } else {
+                    },
+                    (_, 0x1a) => {
+                        stack.pop().ok_or(Declined::Metadata)?;
                         Operation::Jump {
                             target: narrow(pc + 1)?,
                         }
                     }
-                }
-                (_, 5) => {
-                    let label = labels.last().ok_or(Declined::Metadata)?;
-                    if !dead
-                        && (stack.len() != label.prefix.len() + label.results.len()
-                            || tail(&stack, &label.results)? != label.prefix.len())
-                    {
-                        return Err(Declined::Metadata);
-                    }
-                    targets[0] = label.end;
-                    replace_shape(&mut stack, &label.prefix, &label.params, peak)?;
-                    dead = label.parent_dead;
-                    Operation::Jump {
-                        target: narrow(label.end)?,
-                    }
-                }
-                (Immediate::Index(depth), 0xc | 0xd) => {
-                    let condition = if instruction.opcode == 0xd {
-                        Some(narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?)
-                    } else {
-                        None
-                    };
-                    let depth = *depth as usize;
-                    let (target, base, args) = if depth == labels.len() {
-                        (n, 0, returns.as_slice())
-                    } else {
-                        let index = labels
-                            .len()
-                            .checked_sub(add(depth, 1)?)
+                    (_, 2..=4) => {
+                        let condition = if instruction.opcode == 4 {
+                            Some(narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?)
+                        } else {
+                            None
+                        };
+                        let (params, results) = signature(module, &instruction.immediate, peak)?;
+                        let base = tail(&stack, &params)?;
+                        let (end, otherwise) = module
+                            .data
+                            .control
+                            .get(body)
+                            .and_then(|v| v.get(pc))
+                            .copied()
+                            .flatten()
                             .ok_or(Declined::Metadata)?;
-                        let label = &labels[index];
-                        (
-                            if label.loop_ {
-                                label.start
-                            } else {
-                                label.end + 1
-                            },
-                            label.prefix.len(),
-                            if label.loop_ {
-                                label.params.as_slice()
-                            } else {
-                                label.results.as_slice()
-                            },
-                        )
-                    };
-                    let from = tail(&stack, args)?;
-                    let mut moves = reserved(args.len())?;
-                    for (index, ty) in args.iter().enumerate() {
-                        moves.push(EdgeMove {
-                            from: narrow(add(locals, from + index)?)?,
-                            to: narrow(add(locals, base + index)?)?,
-                            ty: *ty,
+                        if end <= pc
+                            || end >= code.len()
+                            || code[end].opcode != 0xb
+                            || otherwise.is_some_and(|other| {
+                                instruction.opcode != 4
+                                    || other <= pc
+                                    || other >= end
+                                    || code[other].opcode != 5
+                            })
+                        {
+                            return Err(Declined::Metadata);
+                        }
+                        let mut prefix = reserved(base)?;
+                        prefix.extend(&stack[..base]);
+                        labels.push(Label {
+                            start: pc + 1,
+                            end,
+                            loop_: instruction.opcode == 3,
+                            prefix,
+                            params,
+                            results,
+                            parent_dead: dead,
                         });
-                    }
-                    edges.push(EdgeRequest {
-                        source_pc: pc,
-                        target,
-                        moves,
-                    });
-                    targets[0] = target;
-                    if let Some(condition) = condition {
-                        targets[1] = pc + 1;
-                        target_count = 2;
-                        Operation::Branch {
-                            condition,
-                            yes: narrow(target)?,
-                            no: narrow(pc + 1)?,
+                        block_entries.push(pc + 1);
+                        if let Some(condition) = condition {
+                            let no = otherwise.map_or(end, |v| v + 1);
+                            targets[1] = no;
+                            target_count = 2;
+                            block_entries.push(no);
+                            Operation::Branch {
+                                condition,
+                                yes: narrow(pc + 1)?,
+                                no: narrow(no)?,
+                            }
+                        } else {
+                            Operation::Jump {
+                                target: narrow(pc + 1)?,
+                            }
                         }
-                    } else {
-                        dead = true;
+                    }
+                    (_, 5) => {
+                        let label = labels.last().ok_or(Declined::Metadata)?;
+                        if !dead
+                            && (stack.len() != label.prefix.len() + label.results.len()
+                                || tail(&stack, &label.results)? != label.prefix.len())
+                        {
+                            return Err(Declined::Metadata);
+                        }
+                        targets[0] = label.end;
+                        replace_shape(&mut stack, &label.prefix, &label.params, peak)?;
+                        dead = label.parent_dead;
                         Operation::Jump {
-                            target: narrow(target)?,
+                            target: narrow(label.end)?,
                         }
                     }
-                }
-                (Immediate::BrTable(depths, default), 0xe) => {
-                    let selector = narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?;
-                    let mut resolved = reserved(add(depths.len(), 1)?)?;
-                    for depth in depths.iter().chain(std::iter::once(default)) {
-                        let edge = edge_request(
-                            pc,
-                            *depth as usize,
-                            n,
-                            locals,
-                            &stack,
-                            &labels,
-                            &returns,
-                        )?;
-                        resolved.push(edge.target);
-                        edges.push(edge);
+                    (Immediate::Index(depth), 0xc | 0xd) => {
+                        let condition = if instruction.opcode == 0xd {
+                            Some(narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?)
+                        } else {
+                            None
+                        };
+                        let depth = *depth as usize;
+                        let (target, base, args) = if depth == labels.len() {
+                            (n, 0, returns.as_slice())
+                        } else {
+                            let index = labels
+                                .len()
+                                .checked_sub(add(depth, 1)?)
+                                .ok_or(Declined::Metadata)?;
+                            let label = &labels[index];
+                            (
+                                if label.loop_ {
+                                    label.start
+                                } else {
+                                    label.end + 1
+                                },
+                                label.prefix.len(),
+                                if label.loop_ {
+                                    label.params.as_slice()
+                                } else {
+                                    label.results.as_slice()
+                                },
+                            )
+                        };
+                        let from = tail(&stack, args)?;
+                        let mut moves = reserved(args.len())?;
+                        for (index, ty) in args.iter().enumerate() {
+                            moves.push(EdgeMove {
+                                from: narrow(add(locals, from + index)?)?,
+                                to: narrow(add(locals, base + index)?)?,
+                                ty: *ty,
+                            });
+                        }
+                        edges.push(EdgeRequest {
+                            source_pc: pc,
+                            target,
+                            moves,
+                        });
+                        targets[0] = target;
+                        if let Some(condition) = condition {
+                            targets[1] = pc + 1;
+                            target_count = 2;
+                            Operation::Branch {
+                                condition,
+                                yes: narrow(target)?,
+                                no: narrow(pc + 1)?,
+                            }
+                        } else {
+                            dead = true;
+                            Operation::Jump {
+                                target: narrow(target)?,
+                            }
+                        }
                     }
-                    let range = edge_start..narrow(add(draft.targets.len(), resolved.len())?)?;
-                    table_targets = Some(resolved);
-                    dead = true;
-                    Operation::Table {
-                        selector,
-                        targets: range,
-                    }
-                }
-                (_, 0xb) if !labels.is_empty() => {
-                    let label = labels.pop().ok_or(Declined::Metadata)?;
-                    if pc != label.end
-                        || stack.len() != label.prefix.len() + label.results.len()
-                        || tail(&stack, &label.results)? != label.prefix.len()
-                    {
-                        return Err(Declined::Metadata);
-                    }
-                    dead = label.parent_dead;
-                    Operation::Jump {
-                        target: narrow(pc + 1)?,
-                    }
-                }
-                (_, 0xb | 0xf) => {
-                    let start = tail(&stack, &returns)?;
-                    let first = narrow(draft.results.len())?;
-                    for height in start..stack.len() {
-                        draft.results.push(narrow(add(locals, height)?)?);
-                    }
-                    targets[0] = n;
-                    if instruction.opcode == 0xf {
+                    (Immediate::BrTable(depths, default), 0xe) => {
+                        let selector = narrow(add(locals, pop(&mut stack, NumericType::I32)?)?)?;
+                        let mut resolved = reserved(add(depths.len(), 1)?)?;
+                        for depth in depths.iter().chain(std::iter::once(default)) {
+                            let edge = edge_request(
+                                pc,
+                                *depth as usize,
+                                n,
+                                locals,
+                                &stack,
+                                &labels,
+                                &returns,
+                            )?;
+                            resolved.push(edge.target);
+                            edges.push(edge);
+                        }
+                        let range = edge_start..narrow(add(draft.targets.len(), resolved.len())?)?;
+                        table_targets = Some(resolved);
                         dead = true;
+                        Operation::Table {
+                            selector,
+                            targets: range,
+                        }
                     }
-                    Operation::Exit {
-                        results: first..narrow(draft.results.len())?,
+                    (_, 0xb) if !labels.is_empty() => {
+                        let label = labels.pop().ok_or(Declined::Metadata)?;
+                        if pc != label.end
+                            || stack.len() != label.prefix.len() + label.results.len()
+                            || tail(&stack, &label.results)? != label.prefix.len()
+                        {
+                            return Err(Declined::Metadata);
+                        }
+                        dead = label.parent_dead;
+                        Operation::Jump {
+                            target: narrow(pc + 1)?,
+                        }
                     }
+                    (_, 0xb | 0xf) => {
+                        let start = tail(&stack, &returns)?;
+                        let first = narrow(draft.results.len())?;
+                        for height in start..stack.len() {
+                            draft.results.push(narrow(add(locals, height)?)?);
+                        }
+                        targets[0] = n;
+                        if instruction.opcode == 0xf {
+                            dead = true;
+                        }
+                        Operation::Exit {
+                            results: first..narrow(draft.results.len())?,
+                        }
+                    }
+                    _ => return Err(Declined::Unsupported),
                 }
-                _ => return Err(Declined::Unsupported),
             };
             if stack.len() > peak || draft.stack_slots.len() > pool || draft.results.len() > pool {
                 return Err(Declined::Metadata);
@@ -609,7 +659,7 @@ impl LoweredFunction {
             });
             draft.operations.push(operation);
         }
-        if !labels.is_empty() {
+        if prefix.is_none() && !labels.is_empty() {
             return Err(Declined::Metadata);
         }
         let mut extra_bytes = add(
@@ -625,7 +675,11 @@ impl LoweredFunction {
                 mul(edge.moves.capacity(), size_of::<EdgeMove>())?,
             )?;
         }
-        let program = RegisterFunction::from_draft(module, admission, draft, &mut transaction)?;
+        let program = if let Some(end) = prefix {
+            RegisterFunction::from_prefix_draft(module, admission, draft, &mut transaction, end)?
+        } else {
+            RegisterFunction::from_draft(module, admission, draft, &mut transaction)?
+        };
         transaction.reserve(analysis_work, extra_bytes)?;
         let (program_work, program_bytes) = program.costs();
         let work = add(program_work, analysis_work)?;
@@ -651,4 +705,5 @@ mod tests {
     use super::*;
     use crate::*;
     include!("../../../tests/performance/p058_private.rs");
+    include!("../../../tests/performance/p131_private.rs");
 }

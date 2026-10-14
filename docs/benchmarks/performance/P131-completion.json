@@ -1,0 +1,15 @@
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P131/shared-finalization/attempt-0001/evidence.json": "b1d0e3e58c7cd0891f9772fcff71f16e26d314029c27d98db1705484b2a2a1fc"
+  },
+  "evidence": [
+    {
+      "bytes": 1640,
+      "path": "/workspace/wtime/target/performance/P131/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "b1d0e3e58c7cd0891f9772fcff71f16e26d314029c27d98db1705484b2a2a1fc"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P131"
+}

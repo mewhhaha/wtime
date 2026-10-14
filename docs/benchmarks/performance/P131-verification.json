@@ -1,0 +1,478 @@
+{
+  "schema_version": 1,
+  "task": "P131",
+  "identities": {
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/**"
+      ]
+    },
+    "test_sources": {
+      "paths": [
+        "crates/wtime-runtime/tests/**/*.rs"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/verification/producers/p131.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/checks/build_budget.py"
+      ]
+    },
+    "predecessor": {
+      "paths": [
+        "target/performance/P131-before/manifest.json",
+        "target/performance/P131-before/source/**",
+        "target/performance/P131-before/binary/**",
+        "target/performance/baseline/**",
+        "docs/benchmarks/performance/P057-completion.json",
+        "docs/benchmarks/performance/P057-evidence.json",
+        "target/performance/P057/shared-finalization/attempt-0001/evidence.json",
+        "docs/benchmarks/performance/P058-completion.json",
+        "docs/benchmarks/performance/P058-evidence.json",
+        "target/performance/P058/shared-finalization/attempt-0002/evidence.json",
+        "docs/benchmarks/performance/P063-completion.json",
+        "docs/benchmarks/performance/P063-evidence.json",
+        "target/performance/P063/shared-finalization/attempt-0001/evidence.json",
+        "docs/benchmarks/performance/P129-completion.json",
+        "docs/benchmarks/performance/P129-evidence.json",
+        "target/performance/P129/shared-finalization/attempt-0002/evidence.json"
+      ],
+      "settings": {
+        "repository_commit": "bdbf60e2eec4295b58d0fb9c342a77d840066f03",
+        "mode": "register",
+        "protocol_sha256": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c",
+        "manifest_sha256": "3b7c089fe2fd3161e5063bc97698fd38b4865f6750a20b7183cae1fb5caea41f"
+      }
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "tooling"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p131.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/predecessor_mode",
+          "op": "equal",
+          "value": "register"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/predecessor_commit",
+          "op": "equal",
+          "value": "bdbf60e2eec4295b58d0fb9c342a77d840066f03"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/predecessor_manifest_sha256_pinned",
+          "op": "equal",
+          "value": "3b7c089fe2fd3161e5063bc97698fd38b4865f6750a20b7183cae1fb5caea41f"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/protocol_sha256",
+          "op": "equal",
+          "value": "ac7b9ce0d12a0a17b38acbfb964f8704c8f85c1927d89385a055b612f77b848c"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/runtime_source_file_count",
+          "op": "positive"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "fixtures",
+        "test_sources",
+        "tooling"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "register-semantics",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "register-executor,execution-reference",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "default-policy",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "p131_default_policy_remains_decoded",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "default-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ]
+        },
+        {
+          "name": "register-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/register-executor",
+            "--output",
+            "{stage}/register-build.json"
+          ]
+        },
+        {
+          "name": "prefix-proof",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p131.py",
+            "verify",
+            "--output",
+            "{stage}/proof",
+            "--register-log",
+            "{stage}/register-semantics.stdout",
+            "--register-stderr",
+            "{stage}/register-semantics.stderr",
+            "--default-log",
+            "{stage}/default-policy.stdout",
+            "--default-build",
+            "{stage}/default-build.json",
+            "--register-build",
+            "{stage}/register-build.json",
+            "--freeze-report",
+            "{freeze_dir}/freeze/report.json"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "register-semantics",
+          "features": [
+            "register-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 37,
+          "unfiltered": true,
+          "required_names": [
+            "p131_prefix_values_and_source_boundaries_match",
+            "p131_open_labels_and_memory_prefixes_match",
+            "p131_invalid_barriers_and_budgets_decline",
+            "p057_numeric_loop_has_bounded_typed_slots_and_source_boundaries",
+            "p057_unsupported_types_and_effects_decline_without_guest_work",
+            "p057_bad_metadata_and_aggregate_budgets_are_transactional",
+            "p057_register_policy_stays_unavailable_until_execution_lands",
+            "p058_local_numeric_slots_match_every_decoded_prefix",
+            "p058_multivalue_edges_and_loop_visits_match_decoded_prefixes",
+            "p058_declines_invalid_joins_and_preserves_shared_budgets",
+            "p129_zero_skip_preserves_first_visit",
+            "p129_later_loop_visit_keeps_exact_state_and_fuel",
+            "p129_invalid_visit_bound_and_unreached_request_are_bounded",
+            "p130_identity_and_acyclic_moves_preserve_simultaneous_results",
+            "p130_two_and_three_slot_cycles_use_bounded_scratch",
+            "p130_invalid_requests_and_budget_failures_publish_nothing",
+            "p130_bounded_generated_graphs_match_simultaneous_oracle",
+            "p060_swaps_rotations_and_backedges",
+            "p060_each_br_table_target_and_function_return",
+            "p060_structural_fuel_cancel_and_operand_limits",
+            "p060_invalid_or_oversized_control_declines",
+            "p061_integer_boundaries_and_source_traps",
+            "p061_every_source_prefix_and_logical_limits",
+            "p061_control_edges_and_repeated_visits",
+            "p061_whole_function_fallback_and_owner_guards",
+            "p061_cancel_before_entry",
+            "p062_raw_bits_and_strict_float_rules",
+            "p062_trapping_and_saturating_conversion_boundaries",
+            "p062_mixed_numeric_prefixes_and_vector_fallback",
+            "p062_opcode_boundaries_match_decoded",
+            "p062_float_preparation_and_activation_guards",
+            "p063_all_load_widths_and_signed_bits_match",
+            "p063_all_store_widths_and_fuel_images_match",
+            "p063_traps_preserve_prior_effects_and_boundary_priority",
+            "p063_shared_wide_and_custom_pages_decline",
+            "p063_bindings_growth_and_aliases_use_current_bytes",
+            "p063_invalid_memory_metadata_and_binding_declines"
+          ]
+        },
+        {
+          "command": "default-policy",
+          "features": [],
+          "minimum_passed": 1,
+          "required_names": [
+            "p131_default_policy_remains_decoded"
+          ]
+        }
+      ],
+      "outputs": {
+        "register_log": "{stage}/register-semantics.stdout",
+        "register_stderr": "{stage}/register-semantics.stderr",
+        "default_log": "{stage}/default-policy.stdout",
+        "default_build": "{stage}/default-build.json",
+        "register_build": "{stage}/register-build.json",
+        "proof": "{stage}/proof/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/performance_candidate",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/speed_decision",
+          "op": "equal",
+          "value": null
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/register_compatibility_named_cases",
+          "op": "equal",
+          "value": 37
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p131_named_cases",
+          "op": "equal",
+          "value": 3
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/default_named_cases",
+          "op": "equal",
+          "value": 1
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/prefix_marker/prefixes",
+          "op": "positive"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/prefix_marker/max_work",
+          "op": "positive"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/prefix_marker/max_bytes",
+          "op": "positive"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/prefix_marker/open_labels",
+          "op": "positive"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/prefix_marker/memory_prefixes",
+          "op": "positive"
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/report.json",
+    "pointer": "/runtime_source_map",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/execution/register/ir.rs",
+      "crates/wtime-runtime/src/execution/register/lower.rs",
+      "crates/wtime-runtime/src/execution/register/execute.rs",
+      "crates/wtime-runtime/tests/performance/p058_private.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/tests/performance/p131.rs",
+      "crates/wtime-runtime/tests/performance/p131_private.rs"
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Static source-prefix planning, work/byte limits, open-label and memory-prefix correctness only; no production selector, execution-path activation, timing, or performance promotion is claimed. The production selection remains deferred to P064."
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "prefixes",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "prefixes",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--features",
+              "register-executor,execution-reference",
+              "p131_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "prefixes",
+            "features": [
+              "register-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 4,
+            "required_names": [
+              "p131_prefix_values_and_source_boundaries_match",
+              "p131_open_labels_and_memory_prefixes_match",
+              "p131_invalid_barriers_and_budgets_decline",
+              "p131_default_policy_remains_decoded"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "default-policy",
+        "uses": [
+          "runtime",
+          "compilation",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "default-policy",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "p131_default_policy_remains_decoded",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "default-policy",
+            "features": [],
+            "minimum_passed": 1,
+            "required_names": [
+              "p131_default_policy_remains_decoded"
+            ]
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  }
+}
