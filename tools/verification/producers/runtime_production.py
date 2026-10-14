@@ -37,6 +37,9 @@ MODES = {
     "compact": {"harness_features": ["runtime-only"],
                 "runtime_features": ["compact-executor"],
                 "cargo_features": ["runtime-only", "compact-executor"]},
+    "register": {"harness_features": ["runtime-only"],
+                 "runtime_features": ["register-executor"],
+                 "cargo_features": ["runtime-only", "register-executor"]},
 }
 SCHEMA = "wtime-runtime-only-production-v1"
 
@@ -189,6 +192,8 @@ def _package_manifest(root: Path, mode: str) -> bytes:
     feature_lines = ["default = []", "runtime-only = []"]
     if "compact-executor" in features:
         feature_lines.append('compact-executor = ["wtime-runtime/compact-executor"]')
+    if "register-executor" in features:
+        feature_lines.append('register-executor = ["wtime-runtime/register-executor"]')
     return ("[package]\nname = \"wtime-production-protocol\"\nversion = \"0.1.0\"\n"
             "edition = \"2024\"\npublish = false\n\n[workspace]\n\n[features]\n"
             + "\n".join(feature_lines) + "\n\n[dependencies]\n"

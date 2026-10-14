@@ -212,7 +212,7 @@ pub(crate) fn try_leaf(
     #[cfg(feature = "execution-reference")]
     if store
         .materialization_request
-        .is_some_and(|(instance, body, _)| instance == caller_instance && body == leaf.body)
+        .is_some_and(|(instance, body, _, _)| instance == caller_instance && body == leaf.body)
     {
         return decline(store);
     }

@@ -35,7 +35,7 @@ impl Pattern {
             || stack.len().checked_add(2).is_none_or(|peak|
                 peak > store.engine.config.limits.max_stack_height) { return false; }
         #[cfg(feature = "execution-reference")]
-        if store.materialization_request.is_some_and(|(instance, body, pc)|
+        if store.materialization_request.is_some_and(|(instance, body, pc, _)|
             instance == frame.function.instance && body == frame.function.body
                 && pc > self.first() && pc < self.first()+self.len()) { return false; }
         frame.pc == self.first()+1

@@ -390,6 +390,7 @@ pub(super) struct MaterializationRecipe<'a> {
     pub operands: &'a [StackSlot],
 }
 impl RegisterFunction {
+    pub(super) fn slots(&self) -> u32 { self.admission.slot_count() }
     pub(super) fn operation(&self, pc: usize) -> Option<&Operation> {
         self.draft.operations.get(pc)
     }

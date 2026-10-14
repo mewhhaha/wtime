@@ -289,6 +289,8 @@ pub(crate) fn guest_frame(
         }
     }
     Ok(Frame {
+        #[cfg(feature = "register-executor")]
+        register: None,
         compact,
         function: function.clone(),
         pc: 0,

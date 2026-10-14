@@ -21,6 +21,9 @@ MODES = {
     "compact": {"harness_features": ["runtime-only"],
                 "runtime_features": ["compact-executor"],
                 "cargo_features": ["runtime-only", "compact-executor"]},
+    "register": {"harness_features": ["runtime-only"],
+                 "runtime_features": ["register-executor"],
+                 "cargo_features": ["runtime-only", "register-executor"]},
 }
 ENTRYPOINT = (
     "#![forbid(unsafe_code)]\n"
@@ -113,6 +116,8 @@ def _manifest_bytes(root: Path, mode: str) -> bytes:
     lines = ["default = []", "runtime-only = []"]
     if "compact-executor" in features:
         lines.append('compact-executor = ["wtime-runtime/compact-executor"]')
+    if "register-executor" in features:
+        lines.append('register-executor = ["wtime-runtime/register-executor"]')
     return (
         '[package]\nname = "wtime-production-protocol"\nversion = "0.1.0"\n'
         'edition = "2024"\npublish = false\n\n[workspace]\n\n[features]\n'
@@ -542,7 +547,8 @@ def validate_runtime_record(record_path: str | Path, metadata: dict[str, Any],
         return {"record": {"path": str(record_file), "sha256": _sha(record_file),
                            "bytes": record_file.stat().st_size},
                 "command_features": MODES[mode]["runtime_features"],
-                "runtime_features": ([] if mode == "decoded" else ["wtime-runtime/compact-executor"]),
+                "runtime_features": [f"wtime-runtime/{feature}"
+                                     for feature in MODES[mode]["runtime_features"]],
                 "binary_sha256": binary_sha,
                 "runtime_source_sha256": _sha_bytes(json.dumps(
                     runtime_sources, sort_keys=True, separators=(",", ":")).encode()),

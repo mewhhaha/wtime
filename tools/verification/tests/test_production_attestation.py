@@ -58,7 +58,7 @@ class SyntheticBuild:
             safe_write(self.boundary, self.tool_dir / name, (name + " synthetic executable").encode())
         self.output = None
         self.protocol = {"schema_version": 2, "engine": "wtime",
-                         "modes": ["decoded", "compact"], "instrumented": False}
+                         "modes": ["decoded", "compact", "register"], "instrumented": False}
 
     def which(self, name, path=None):
         return str(self.tool_dir / name)
@@ -84,7 +84,8 @@ class SyntheticBuild:
                          "manifest_path": str(manifest)})
         if workspace == self.root:
             rows = [row for row in rows if row["name"] in producer.CORE_CRATES]
-        runtime_features = ["compact-executor"] if "compact-executor" in features else []
+        runtime_features = [feature for feature in ("compact-executor", "register-executor")
+                            if feature in features]
         nodes = []
         for row in rows:
             name = row["name"]
@@ -147,13 +148,13 @@ class ProductionAttestationTests(unittest.TestCase):
         self.assertEqual(result["binary_sha256"], record["binary_sha256"])
         self.assertEqual(result["protocol"], record["protocol"])
         self.assertEqual(result["lane"], "runtime-only-production")
-        expected_runtime = ([] if record["mode"] == "decoded"
-                            else ["wtime-runtime/compact-executor"])
+        expected_runtime = [f"wtime-runtime/{feature}"
+                            for feature in record["runtime_features"]]
         self.assertEqual(result["runtime_features"], expected_runtime)
         return result
 
-    def test_decoded_and_compact_receipts_validate(self):
-        for mode in ("decoded", "compact"):
+    def test_decoded_compact_and_register_receipts_validate(self):
+        for mode in ("decoded", "compact", "register"):
             with self.subTest(mode=mode):
                 case = self.create_case(mode)
                 try:
@@ -166,7 +167,7 @@ class ProductionAttestationTests(unittest.TestCase):
                     self.assertIn(
                         'wtime-types = { path = "' + str(case[1] / "crates/wtime-types")
                         + '", default-features = false }', wrapper)
-                    if mode == "compact":
+                    if mode in ("compact", "register"):
                         _temporary, root, record_path, record, metadata, report = case
                         workspace = Path(record["workspace_manifest"]["workspace_path"]).parent
                         self.assertTrue(workspace.resolve().is_relative_to(root.resolve()))

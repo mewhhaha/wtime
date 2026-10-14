@@ -1,8 +1,8 @@
 # P061 — Execute checked integer register operations
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -111,4 +111,24 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P061/shared-finalization/attempt-0002/evidence.json": "91d90f2445300c3ad46105ab86b6f33f500f84feda6b452cd276673933e13e2f"
+  },
+  "evidence": [
+    {
+      "bytes": 2573,
+      "path": "/workspace/wtime/target/performance/P061/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "91d90f2445300c3ad46105ab86b6f33f500f84feda6b452cd276673933e13e2f"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P061"
+}
+```

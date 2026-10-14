@@ -71,17 +71,21 @@ fn engine_with_fuel(mode: &str, fuel: fuel_policy::FuelArgument) -> Engine {
         mode,
     )
 }
-fn available_modes() -> &'static str {
+fn available_modes() -> String {
     #[cfg(feature = "legacy-api")]
-    { "\"decoded\"" }
-    #[cfg(all(not(feature = "legacy-api"), feature = "execution-reference", not(feature = "compact-executor")))]
-    { "\"decoded\",\"portable\",\"reference\"" }
-    #[cfg(all(not(feature = "legacy-api"), feature = "execution-reference", feature = "compact-executor"))]
-    { "\"decoded\",\"portable\",\"reference\",\"compact\"" }
-    #[cfg(all(not(feature = "legacy-api"), not(feature = "execution-reference"), not(feature = "compact-executor")))]
-    { "\"decoded\",\"portable\"" }
-    #[cfg(all(not(feature = "legacy-api"), not(feature = "execution-reference"), feature = "compact-executor"))]
-    { "\"decoded\",\"portable\",\"compact\"" }
+    { "\"decoded\"".to_owned() }
+    #[cfg(not(feature = "legacy-api"))]
+    {
+        #[allow(unused_mut)]
+        let mut modes = vec!["\"decoded\"", "\"portable\""];
+        #[cfg(feature = "execution-reference")]
+        modes.push("\"reference\"");
+        #[cfg(feature = "compact-executor")]
+        modes.push("\"compact\"");
+        #[cfg(feature = "register-executor")]
+        modes.push("\"register\"");
+        modes.join(",")
+    }
 }
 fn available_types() -> &'static str {
     #[cfg(feature = "legacy-api")]

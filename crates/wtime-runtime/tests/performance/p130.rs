@@ -1,10 +1,13 @@
-use wtime_runtime::{Config, Engine, ErrorKind, ExecutionPolicy};
+use wtime_runtime::{Config, Engine, ExecutionPolicy};
+#[cfg(not(feature = "register-executor"))]
+use wtime_runtime::ErrorKind;
 #[test]
 fn p130_register_policy_stays_unavailable_without_execution() {
     assert_eq!(
         Engine::new(Config::default()).unwrap().execution_policy(),
         ExecutionPolicy::Decoded
     );
+    #[cfg(not(feature = "register-executor"))]
     assert_eq!(
         Engine::with_execution_policy(Config::default(), ExecutionPolicy::Register)
             .unwrap_err()

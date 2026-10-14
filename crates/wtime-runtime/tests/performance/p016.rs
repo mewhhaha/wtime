@@ -29,6 +29,7 @@ fn p016_absent_tiers_fail_at_configuration() {
     for policy in [
         #[cfg(not(feature = "compact-executor"))]
         ExecutionPolicy::Compact,
+        #[cfg(not(feature = "register-executor"))]
         ExecutionPolicy::Register,
         ExecutionPolicy::Experimental,
         ExecutionPolicy::Native,

@@ -1,7 +1,7 @@
 mod accounting;
 #[cfg(feature = "register-executor")]
 #[allow(dead_code)]
-mod register;
+pub(super) mod register;
 #[cfg(feature = "compact-executor")]
 #[allow(dead_code)]
 pub(super) mod compact;
@@ -24,6 +24,8 @@ pub(super) struct Label {
 }
 #[derive(Clone)]
 pub(super) struct Frame {
+    #[cfg(feature = "register-executor")]
+    pub(super) register: Option<register::Activation>,
     #[cfg(feature = "compact-executor")]
     pub(super) compact: bool,
     pub(super) function: Function,
@@ -94,14 +96,24 @@ impl Store {
         if self.engine.policy == ExecutionPolicy::Compact && !compact {
             self.perf.record(perf::Event::CompactFallbackFrame, 1);
         }
+        #[allow(unused_mut)]
+        let mut labels = vec![];
+        #[cfg(feature = "register-executor")]
+        let register = if self.engine.policy == ExecutionPolicy::Register { register::activate(module, fun.body, &locals, &mut labels) } else { None };
+        #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+        if self.engine.policy == ExecutionPolicy::Register && register.is_none() { self.register_fallback_frames.set(self.register_fallback_frames.get().saturating_add(1)); }
+        #[cfg(all(feature = "register-executor", feature = "performance-counters"))]
+        if self.engine.policy == ExecutionPolicy::Register && register.is_none() { self.perf.record(perf::Event::RegisterFallbackFrame, 1); }
         Ok(Frame {
+            #[cfg(feature = "register-executor")]
+            register,
             #[cfg(feature = "compact-executor")]
             compact,
             function: fun,
             pc: 0,
             locals,
             base,
-            labels: vec![],
+            labels,
         })
     }
     pub fn invoke(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
@@ -165,13 +177,38 @@ impl Store {
         let mut fuel = self.engine.config.limits.fuel;
         let mut prompts = Vec::new();
         loop {
-            accounting::next_source(self, &mut fuel, frames.len(), stack.len(), &mut prompts)?;
+            #[cfg(feature = "register-executor")]
+            let operand_height = if frames.last().is_some_and(|frame| frame.register.is_some()) { register::logical_height(frames.last().unwrap(), self)? } else { stack.len() };
+            #[cfg(not(feature = "register-executor"))]
+            let operand_height = stack.len();
+            accounting::next_source(self, &mut fuel, frames.len(), operand_height, &mut prompts)?;
+            #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+            if self.materialization_request.is_some() && frames.last().is_some_and(|frame| frame.register.is_some()) {
+                register::materialize(frames.last_mut().unwrap(), &mut stack, self)?;
+            }
             #[cfg(feature = "execution-reference")]
             self.materialization_boundary(&mut frames, &mut stack, &mut prompts, &mut fuel)?;
             #[cfg(feature = "compact-executor")]
             let frame_depth = frames.len();
             let frame = frames.last_mut().unwrap();
             let inst_id = frame.function.instance;
+            #[cfg(feature = "register-executor")]
+            if frame.register.is_some() {
+                #[cfg(feature = "execution-reference")]
+                { self.register_dispatches = self.register_dispatches.saturating_add(1); }
+                match register::step(frame, &mut stack, self)? {
+                    register::Step::Continue => continue,
+                    register::Step::Return => {
+                        frames.pop();
+                        if frames.is_empty() {
+                            for value in &stack { self.validate_value(*value)?; }
+                            self.publish_values(&stack);
+                            return Ok(RunOutcome::Returned(stack));
+                        }
+                        continue;
+                    }
+                }
+            }
             #[cfg(feature = "compact-executor")]
             let mut prepared_instruction = None;
             #[cfg(feature = "compact-executor")]

@@ -81949,8 +81949,8 @@
       "key": "register-integer-execution",
       "title": "Execute checked integer register operations",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -82007,7 +82007,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P061-verification.json --output target/performance/P061/complete --execute"
       ],
       "path": "05-register-executor/P061-register-integer-execution.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P061/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "91d90f2445300c3ad46105ab86b6f33f500f84feda6b452cd276673933e13e2f",
+          "bytes": 2573
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -82022,7 +82028,22 @@
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P061-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P061-selection.json target/performance/P061-before/manifest.json --output target/performance/P061/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P061/shared-finalization/attempt-0002/evidence.json": "91d90f2445300c3ad46105ab86b6f33f500f84feda6b452cd276673933e13e2f"
+        },
+        "evidence": [
+          {
+            "bytes": 2573,
+            "path": "/workspace/wtime/target/performance/P061/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "91d90f2445300c3ad46105ab86b6f33f500f84feda6b452cd276673933e13e2f"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P061"
+      }
     },
     {
       "id": "P062",

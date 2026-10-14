@@ -4,6 +4,8 @@ use crate::Immediate;
 use std::cell::Cell;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CounterSnapshot {
+    pub register_steps: u64,
+    pub register_fallback_frames: u64,
     pub source_dispatches: u64,
     pub compact_steps: u64,
     pub compact_bound_calls: u64,
@@ -34,13 +36,16 @@ impl CounterSnapshot {
     pub fn to_json(self) -> String {
         format!(
             concat!(
-                "{{\"compact_indirect_hits\":{},\"compact_indirect_misses\":{},\"compact_indirect_evictions\":{},\"compact_memory_accesses\":{},\"compact_shared_memory_accesses\":{},\"compact_bound_calls\":{},\"compact_steps\":{},\"compact_fallback_frames\":{},\"compact_result_moves\":{},\"source_dispatches\":{},\"module_deep_copy_events\":{},",
+                "{{\"register_steps\":{},\"register_fallback_frames\":{},",
+                "\"compact_indirect_hits\":{},\"compact_indirect_misses\":{},\"compact_indirect_evictions\":{},\"compact_memory_accesses\":{},\"compact_shared_memory_accesses\":{},\"compact_bound_calls\":{},\"compact_steps\":{},\"compact_fallback_frames\":{},\"compact_result_moves\":{},\"source_dispatches\":{},\"module_deep_copy_events\":{},",
                 "\"module_deep_copy_bytes\":{},\"instruction_clone_events\":{},\"instruction_clone_bytes\":{},",
                 "\"read_vec_operations\":{},\"read_fixed_operations\":{},\"frame_entries\":{},",
                 "\"argument_allocations\":{},\"root_snapshot_allocations\":{},\"subtype_probes\":{},",
                 "\"continuation_scan_entries\":{},\"branch_result_allocations\":{},",
                 "\"table_copy_snapshot_chunks\":{},\"bulk_slice_chunks\":{}}}"
             ),
+            self.register_steps,
+            self.register_fallback_frames,
             self.compact_indirect_hits,
             self.compact_indirect_misses,
             self.compact_indirect_evictions,
@@ -70,6 +75,10 @@ impl CounterSnapshot {
 }
 #[derive(Clone, Copy)]
 pub(super) enum Event {
+    #[allow(dead_code)]
+    RegisterStep,
+    #[allow(dead_code)]
+    RegisterFallbackFrame,
     Dispatch,
     #[allow(dead_code)]
     CompactStep,
@@ -121,6 +130,8 @@ impl Counters {
     pub(super) fn record(&self, event: Event, n: u64) {
         let mut s = self.0.get();
         let field = match event {
+            Event::RegisterStep => &mut s.register_steps,
+            Event::RegisterFallbackFrame => &mut s.register_fallback_frames,
             Event::Dispatch => &mut s.source_dispatches,
             Event::CompactStep => &mut s.compact_steps,
             Event::CompactBoundCall => &mut s.compact_bound_calls,

@@ -98,6 +98,8 @@ impl Engine {
             ExecutionPolicy::Decoded => {}
             #[cfg(feature = "compact-executor")]
             ExecutionPolicy::Compact => {}
+            #[cfg(feature = "register-executor")]
+            ExecutionPolicy::Register => {}
             #[cfg(feature = "execution-reference")]
             ExecutionPolicy::Reference => {}
             _ => {
@@ -142,6 +144,8 @@ impl Engine {
                 plans,
                 #[cfg(feature = "compact-executor")]
                 compact: None,
+                #[cfg(feature = "register-executor")]
+                register: None,
                 control,
                 canonical: ids,
                 inner: validated,
@@ -159,6 +163,15 @@ impl Engine {
             }
             module
         };
+        #[cfg(feature = "register-executor")]
+        let module = {
+            let mut module = module;
+            if self.policy == ExecutionPolicy::Register {
+                let prepared = execution::register::PreparedModule::prepare(&module);
+                if let Some(data) = Arc::get_mut(&mut module.data) { data.register = prepared; }
+            }
+            module
+        };
         Ok(module)
     }
 }
@@ -170,6 +183,8 @@ struct ModuleData {
     plans: Option<execution::plan::FunctionPlans>,
     #[cfg(feature = "compact-executor")]
     compact: Option<execution::compact::PreparedModule>,
+    #[cfg(feature = "register-executor")]
+    register: Option<execution::register::PreparedModule>,
     control: ControlMap,
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,
@@ -370,6 +385,10 @@ impl ValueRootToken {
 }
 
 pub struct Store {
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    register_dispatches: u64,
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    register_fallback_frames: std::cell::Cell<u64>,
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
     compact_dispatches: u64,
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
@@ -431,6 +450,10 @@ pub struct Store {
     instances: arena::Arena<Inst>,
 }
 impl Store {
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    pub fn register_dispatches(&self) -> u64 { self.register_dispatches }
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    pub fn register_fallback_frames(&self) -> u64 { self.register_fallback_frames.get() }
     /// Development-only proof of executed compact source events.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
     pub fn compact_dispatches(&self) -> u64 { self.compact_dispatches }
@@ -476,6 +499,10 @@ impl Store {
                 e.config.limits.max_gc_mark_work,
             );
             Self {
+                #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+                register_dispatches: 0,
+                #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+                register_fallback_frames: std::cell::Cell::new(0),
                 #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
                 compact_dispatches: 0,
                 #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]

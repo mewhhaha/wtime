@@ -23,7 +23,7 @@ class SyntheticBuild:
         self.root = root.resolve()
         self.protocol = protocol or {
             "schema_version": 2, "engine": "wtime",
-            "modes": ["decoded", "compact"], "instrumented": False,
+            "modes": ["decoded", "compact", "register"], "instrumented": False,
         }
         self.metadata_fault = metadata_fault
         self.drift = drift
@@ -73,7 +73,8 @@ class SyntheticBuild:
         rows = self.package_rows(wrapper)
         if wrapper == self.root:
             rows = [row for row in rows if row["name"] in producer.CORE_CRATES]
-        runtime_features = ["compact-executor"] if "compact-executor" in features else []
+        runtime_features = [feature for feature in ("compact-executor", "register-executor")
+                            if feature in features]
         if self.metadata_fault == "runtime-features":
             runtime_features = ["execution-reference"]
         node_features = {
@@ -165,10 +166,11 @@ class RuntimeProductionTests(unittest.TestCase):
         for path in root.rglob("*"):
             self.assertTrue(path.resolve().is_relative_to(root.resolve()), str(path))
 
-    def test_decoded_and_compact_have_separate_exact_feature_roles(self):
+    def test_each_mode_has_separate_exact_feature_roles(self):
         for mode, runtime_features, cargo_features in (
             ("decoded", [], ["runtime-only"]),
             ("compact", ["compact-executor"], ["runtime-only", "compact-executor"]),
+            ("register", ["register-executor"], ["runtime-only", "register-executor"]),
         ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="runtime-prod-") as temp:
                 root = Path(temp).resolve() / "repo"
@@ -192,8 +194,10 @@ class RuntimeProductionTests(unittest.TestCase):
                 self.assertEqual(record["metadata"]["summary"]["packages"],
                                  sorted(set(producer.CORE_CRATES) | {"wtime-production-protocol"}))
                 self.assertEqual(record["metadata"]["summary"]["external_dependencies"], 0)
+                self.assertEqual(record["metadata"]["summary"]["runtime_features"], runtime_features)
+                self.assertEqual(record["metadata"]["summary"]["wrapper_features"], cargo_features)
                 self.assertEqual(record["protocol"]["instrumented"], False)
-                self.assertEqual(record["protocol"]["modes"], ["decoded", "compact"])
+                self.assertIn(mode, record["protocol"]["modes"])
                 metadata_call = next(call for call in synth.calls if "metadata" in call
                                      and str(root / "Cargo.toml") not in call)
                 self.assertIn("--no-default-features", metadata_call)
@@ -219,6 +223,9 @@ class RuntimeProductionTests(unittest.TestCase):
                 self.assertIn('wtime-runtime = { path = ', generated_manifest)
                 self.assertIn(', default-features = false }', generated_manifest)
                 self.assertEqual(generated_manifest.count('default-features = false'), 2)
+                if mode == "register":
+                    self.assertIn('register-executor = ["wtime-runtime/register-executor"]',
+                                  generated_manifest)
                 self.assertTrue(record["stdout_log"]["path"].endswith("/stdout.log"))
                 self.assertIn("generated:src/main.rs", record["compiled_inputs"])
                 self.assertNotIn("tools/wtime-bench/src/main.rs", record["compiled_inputs"])
@@ -276,26 +283,28 @@ class RuntimeProductionTests(unittest.TestCase):
                 self.assert_tree_contained(root)
 
     def test_wrong_resolved_runtime_feature_is_rejected_before_build(self):
-        with tempfile.TemporaryDirectory(prefix="runtime-features-") as temp:
-            root = Path(temp).resolve() / "repo"
-            synth = self.make_root(root)
-            synth.metadata_fault = "runtime-features"
-            output = root / "target/verification/runs/task/production"
-            synth.output = output
-            with mock.patch.object(producer, "_source_identity", side_effect=lambda _: synth.source_map()), \
-                 mock.patch.object(producer.shutil, "which", side_effect=synth.which):
-                with self.assertRaisesRegex(ValueError, "resolved runtime features"):
-                    producer.build(output, "decoded", root=root, runner=synth.run)
-            self.assertFalse(any("build" in call for call in synth.calls))
-            self.assert_tree_contained(root)
+        for mode in ("decoded", "compact", "register"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="runtime-features-") as temp:
+                root = Path(temp).resolve() / "repo"
+                synth = self.make_root(root)
+                synth.metadata_fault = "runtime-features"
+                output = root / "target/verification/runs/task/production"
+                synth.output = output
+                with mock.patch.object(producer, "_source_identity", side_effect=lambda _: synth.source_map()), \
+                         mock.patch.object(producer.shutil, "which", side_effect=synth.which):
+                    with self.assertRaisesRegex(ValueError, "resolved runtime features"):
+                        producer.build(output, mode, root=root, runner=synth.run)
+                self.assertFalse(any("build" in call for call in synth.calls))
+                self.assert_tree_contained(root)
 
     def test_protocol_must_match_mode_and_be_uninstrumented(self):
         protocols = [
-            {"schema_version": 2, "engine": "wtime", "modes": ["decoded"], "instrumented": True},
-            {"schema_version": 2, "engine": "wtime", "modes": ["compact"], "instrumented": False},
+            ("decoded", {"schema_version": 2, "engine": "wtime", "modes": ["decoded"], "instrumented": True}),
+            ("decoded", {"schema_version": 2, "engine": "wtime", "modes": ["compact"], "instrumented": False}),
+            ("register", {"schema_version": 2, "engine": "wtime", "modes": ["decoded", "compact"], "instrumented": False}),
         ]
-        for protocol in protocols:
-            with self.subTest(protocol=protocol), tempfile.TemporaryDirectory(prefix="runtime-protocol-") as temp:
+        for mode, protocol in protocols:
+            with self.subTest(mode=mode, protocol=protocol), tempfile.TemporaryDirectory(prefix="runtime-protocol-") as temp:
                 root = Path(temp).resolve() / "repo"
                 synth = self.make_root(root)
                 synth.protocol = protocol
@@ -304,7 +313,7 @@ class RuntimeProductionTests(unittest.TestCase):
                 with mock.patch.object(producer, "_source_identity", side_effect=lambda _: synth.source_map()), \
                      mock.patch.object(producer.shutil, "which", side_effect=synth.which):
                     with self.assertRaisesRegex(ValueError, "does not prove uninstrumented"):
-                        producer.build(output, "decoded", root=root, runner=synth.run)
+                        producer.build(output, mode, root=root, runner=synth.run)
                 self.assert_tree_contained(root)
 
     def test_source_drift_during_build_fails_closed(self):
