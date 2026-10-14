@@ -1,4 +1,7 @@
 mod accounting;
+#[cfg(feature = "register-executor")]
+#[allow(dead_code)]
+mod register;
 #[cfg(feature = "compact-executor")]
 #[allow(dead_code)]
 pub(super) mod compact;

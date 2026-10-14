@@ -1,8 +1,8 @@
 # P057 — Define a small numeric register bytecode and eligibility rules
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **contract_only**
 
 Kind: `foundation` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -63,4 +63,24 @@ This is a tooling/contract deliverable. Require correct nonzero checks and bound
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P057/shared-finalization/attempt-0001/evidence.json": "8061225076d2226e948b23d51f951ef90a5443edf17aa0a685ab08e2cd716264"
+  },
+  "evidence": [
+    {
+      "bytes": 1519,
+      "path": "/workspace/wtime/target/performance/P057/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "8061225076d2226e948b23d51f951ef90a5443edf17aa0a685ab08e2cd716264"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P057"
+}
+```

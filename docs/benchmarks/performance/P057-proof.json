@@ -1,0 +1,54 @@
+{
+  "bounded_ir_marker": {
+    "bytes": 2480,
+    "events": 25,
+    "logical": 2,
+    "slots": 5,
+    "work": 252
+  },
+  "build_budgets": {
+    "default": {
+      "bytes": 269294,
+      "path": "/workspace/wtime/target/verification/runs/P057/verify/attempt-0001/default-build.json",
+      "sha256": "f394cc7d5f450666e418d001f29fe1b0ea327e5879a4851bd6892a22234e6e4c"
+    },
+    "register": {
+      "bytes": 269457,
+      "path": "/workspace/wtime/target/verification/runs/P057/verify/attempt-0001/register-build.json",
+      "sha256": "2c37d24ae028200ff8bc38c58c50ab7831cfaed929fa0c65a45330f485f03769"
+    }
+  },
+  "counts": {
+    "default_named_cases": 1,
+    "feature_named_cases": 4
+  },
+  "feature_stderr": {
+    "bytes": 745,
+    "path": "/workspace/wtime/target/verification/runs/P057/verify/attempt-0001/feature-tests.stderr",
+    "sha256": "5a973c2f45f4f398f5fa496c6bf314086a461f49b88c13d628379773804b5a2f"
+  },
+  "performance_candidate": false,
+  "schema": "wtime-p057-verification-v1",
+  "settings": {
+    "features": [
+      "register-executor",
+      "execution-reference"
+    ],
+    "instrumented": false
+  },
+  "speed_decision": null,
+  "status": "passed",
+  "test_logs": {
+    "default": {
+      "bytes": 192,
+      "path": "/workspace/wtime/target/verification/runs/P057/verify/attempt-0001/default-tests.stdout",
+      "sha256": "56057937c757d26fa35d5687e68bf139e064ca7bac5edd997bb239d641d24005"
+    },
+    "feature": {
+      "bytes": 1190,
+      "path": "/workspace/wtime/target/verification/runs/P057/verify/attempt-0001/feature-tests.stdout",
+      "sha256": "66311da68855c28e316f38a2dcbcc671330bc49fbc7d70840b426c9f6e341d92"
+    }
+  },
+  "timing_evidence": false
+}
