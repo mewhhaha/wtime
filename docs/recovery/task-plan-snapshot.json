@@ -2022,9 +2022,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/04-specialization-and-fusion/P128-minimal-scalar-workloads.md",
-      "sha256": "6fb7369187b9f2547f38c0f119eaf1a733b7fab133d204ff52e843ea6b98dd6c",
-      "size_bytes": 9797,
-      "snapshot_sha256": "6fb7369187b9f2547f38c0f119eaf1a733b7fab133d204ff52e843ea6b98dd6c"
+      "sha256": "894c27be4e8d3df8863ea2db59271e4916737fb2951685dca997d366b1e81dee",
+      "size_bytes": 14550,
+      "snapshot_sha256": "894c27be4e8d3df8863ea2db59271e4916737fb2951685dca997d366b1e81dee"
     },
     {
       "byte_equal": true,
@@ -2518,9 +2518,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/INDEX.md",
-      "sha256": "f8a35fd3c574a0616e9f7e44c38c08e7f13bc6dcb52ba6c67499cd64d0fecf28",
+      "sha256": "7413a8077eb03cce3e3bdb9bfe2bdc55139d7b96250ae04b8815a75cb998c48d",
       "size_bytes": 27744,
-      "snapshot_sha256": "f8a35fd3c574a0616e9f7e44c38c08e7f13bc6dcb52ba6c67499cd64d0fecf28"
+      "snapshot_sha256": "7413a8077eb03cce3e3bdb9bfe2bdc55139d7b96250ae04b8815a75cb998c48d"
     },
     {
       "byte_equal": true,
@@ -2550,9 +2550,9 @@
       "byte_equal": true,
       "mode_octal": "0600",
       "path": "performance/TASKS.json",
-      "sha256": "f431e023f5b72c725b0832332db366e7930af3fdf7d47721e140a5ea81c694d4",
-      "size_bytes": 4187929,
-      "snapshot_sha256": "f431e023f5b72c725b0832332db366e7930af3fdf7d47721e140a5ea81c694d4"
+      "sha256": "a3e4429e9c7e1bb7da22f4c73d94a3e4b0dde37257b1617805851c7832efedbd",
+      "size_bytes": 4190458,
+      "snapshot_sha256": "a3e4429e9c7e1bb7da22f4c73d94a3e4b0dde37257b1617805851c7832efedbd"
     },
     {
       "byte_equal": true,
@@ -2586,12 +2586,144 @@
     },
     "performance": {
       "status_counts": {
-        "done": 67,
-        "todo": 61
+        "done": 68,
+        "todo": 60
       },
       "task_total": 128
     }
   },
+  "validator_history": [
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "f431e023f5b72c725b0832332db366e7930af3fdf7d47721e140a5ea81c694d4",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=67, todo=61\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 1,
+        "plan_manifest_sha256": "2d3ae348000bcc36055370ca8f6b879e8314b205606c93f4b521203c75f6c431",
+        "stderr": "ERROR: P128: owned path missing from Scope and ownership: tools/wtime-bench/execution_identity.py\nERROR: P128: owned path missing from Scope and ownership: tools/wtime-bench/tests/test_fast_execution_identity.py\nERROR: P128: owned path missing from Scope and ownership: tools/verification/producers/p128_evidence.py\nERROR: P128: owned path missing from Scope and ownership: tools/verification/tests/data/admitted_wasm/p128_identity_copy.wasm\nERROR: P128: owned path missing from Scope and ownership: tools/verification/tests/data/admitted_wasm/p128_literal_wrap_add.wasm\nERROR: P128: owned path missing from Scope and ownership: tools/verification/tests/data/admitted_wasm/p128_literal_bitwise.wasm\nERROR: P128: input/output contract differs from task file\nERROR: P128: implementation step missing or drifted: Add selection and verification contracts that bind the 18 fixture model rows, frozen WAT/Wasm hashes, exact stage list, oracle implementation, executable/source identities, mode, stage, and warm batch. The proof producer archives raw output and command records before oracle checks, independently checks result and modulo arithmetic, and requires every one of the 180 observations.\nERROR: P128: test command missing or drifted: python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P128-verification.json\nERROR: P128: test command missing or drifted: python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P128-verification.json --group fixture-model --execute\nERROR: P128: test command missing or drifted: python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P128-verification.json --group independent-oracle --execute\nERROR: P128: test command missing or drifted: python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P128-verification.json --group staged-runtime --execute\nERROR: P128: test command missing or drifted: python3 -B tools/verify.py close --contract docs/benchmarks/performance/P128-verification.json --output target/performance/P128/complete --execute\n",
+        "stdout": "plan: 128 tasks; statuses: done=67, todo=61\nchecker: 13 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 1,
+        "plan_manifest_sha256": "313bbe26217b1b6de6ddf9f292bfe9e989140a578d94fce29a3dc66ccb03964d",
+        "stderr": "ERROR: P128: input/output contract differs from task file\n",
+        "stdout": "plan: 128 tasks; statuses: done=67, todo=61\nchecker: 1 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 1,
+        "plan_manifest_sha256": "313bbe26217b1b6de6ddf9f292bfe9e989140a578d94fce29a3dc66ccb03964d",
+        "stderr": "ERROR: P128: input/output contract differs from task file\n",
+        "stdout": "plan: 128 tasks; statuses: done=67, todo=61\nchecker: 1 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ],
+    [
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "ce5b1ea0fc1af8f112def79538076cf2325cd624195dc56492c7c69eeb035907",
+        "stderr": "",
+        "stdout": "PASS: 169 tasks; acyclic dependencies; links and statuses match\nPASS: 24 included proposals covered; 5 excluded\nReady tasks: \n",
+        "validator_source_sha256": "34067d9cbdcebeba36773bfd49b3ec3efdc291c9141b819c75219ffb50a0dab4"
+      },
+      {
+        "command": [
+          "python3",
+          "-B",
+          "/workspace/tasks/performance/check_plan.py"
+        ],
+        "exit_code": 0,
+        "plan_manifest_sha256": "313bbe26217b1b6de6ddf9f292bfe9e989140a578d94fce29a3dc66ccb03964d",
+        "stderr": "",
+        "stdout": "plan: 128 tasks; statuses: done=67, todo=61\nchecker: 0 error(s), 0 warning(s)\n",
+        "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
+      }
+    ]
+  ],
   "validators": [
     {
       "command": [
@@ -2612,9 +2744,9 @@
         "/workspace/tasks/performance/check_plan.py"
       ],
       "exit_code": 0,
-      "plan_manifest_sha256": "f431e023f5b72c725b0832332db366e7930af3fdf7d47721e140a5ea81c694d4",
+      "plan_manifest_sha256": "a3e4429e9c7e1bb7da22f4c73d94a3e4b0dde37257b1617805851c7832efedbd",
       "stderr": "",
-      "stdout": "plan: 128 tasks; statuses: done=67, todo=61\nchecker: 0 error(s), 0 warning(s)\n",
+      "stdout": "plan: 128 tasks; statuses: done=68, todo=60\nchecker: 0 error(s), 0 warning(s)\n",
       "validator_source_sha256": "7afc7a7091f0b11a3e8a3f5098e3be7fb1856ad0e812998f99584ab0d7ea28d6"
     }
   ]

@@ -1,0 +1,1 @@
+{"validator_commands":[["python3","-B","/workspace/tasks/check_plan.py"],["python3","-B","/workspace/tasks/performance/check_plan.py"]]}

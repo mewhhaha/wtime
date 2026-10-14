@@ -12,12 +12,14 @@ On a fresh clone, restore it only when the sibling directory is absent, using
 the commands in the repository README. Future plan changes should update this
 tracked backup before a push.
 
-Implementation is still in progress: the original plan has 167 done tasks and
-two tasks awaiting native AArch64 evidence; the performance plan has 67 done
-and 61 pending tasks. P050 is done with an inconclusive performance gate and
+At the initial recovery checkpoint, the original plan had 167 done tasks and
+two tasks awaiting native AArch64 evidence; the performance plan had 67 done
+and 61 pending tasks. P050 was done with an inconclusive performance gate and
 its inliner retained in opt-in Compact. Decoded remains the default. P128 is
-integrated but awaits its verification retry; P127 is pending. This checkpoint
-does not promote either task or claim full conformance.
+now complete as a workload foundation; its reviewed proof and completion
+records are under `docs/benchmarks/performance/P128-*.json`. P127 is pending.
+The current task snapshot records subsequent progress. These records do not
+claim full conformance.
 
 `/tmp` drafts did not survive reconnection. The archived sources and evidence
 under the existing `target/performance` and `target/verification` directories

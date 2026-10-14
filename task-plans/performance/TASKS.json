@@ -5644,7 +5644,7 @@
           "Evidence is integrity-only: batch size is one and five samples per input are not calibrated comparison evidence.",
           "No Wasmtime-relative timing ratio or speedup is claimed.",
           "The report preserves all 135 raw observations, including full memory payloads; this summary deliberately omits them.",
-          "Source stability is the runner\u2019s within-run result. Later workspace changes are listed separately and do not rewrite the historical report."
+          "Source stability is the runner’s within-run result. Later workspace changes are listed separately and do not rewrite the historical report."
         ],
         "outcome": "integrity_only",
         "passed": true,
@@ -6518,7 +6518,7 @@
           "Function bounds are per-body validation high-water allocation hints, including the implicit function control. Unreachable polymorphism and cumulative caller operands prevent using these bounds to remove source resource checks. P019 per-source transient peaks remain unknown; no optimized tier is enabled.",
           "Layouts and exact nominal types, effects, control and catch/resume handler views borrow original immutable Module-owned storage; plans contain no Store handles. Analysis is capped at 100,000 conservative work units and 1 MiB, declines transactionally, and frame setup uses original decoded locals when unavailable.",
           "Capacity accounting includes plan storage and validator bounds payload, excludes allocator overhead and fixed ModuleData headers; Module clones share one payload, per-activation Vecs remain separate.",
-          "Cold preparation median ratios ranged approximately 0.99\u20131.25 across two runs; memory preparation run two had a broad CI (upper 3.06), so performance is inconclusive. No runtime speedup is claimed for this foundation. Default build passed absolute budgets at 8.10s clean, 0.34s CLI leaf, 1.13s runtime leaf, 14.94s release, 1,000,264 stripped bytes, zero external core dependencies. Relative clean build vs P020 5.74s is 1.41; foundation adds validation bounds and plan/effect metadata, while cloud variation prevents attributing the entire delta to code. Future integration gates must evaluate combined costs.",
+          "Cold preparation median ratios ranged approximately 0.99–1.25 across two runs; memory preparation run two had a broad CI (upper 3.06), so performance is inconclusive. No runtime speedup is claimed for this foundation. Default build passed absolute budgets at 8.10s clean, 0.34s CLI leaf, 1.13s runtime leaf, 14.94s release, 1,000,264 stripped bytes, zero external core dependencies. Relative clean build vs P020 5.74s is 1.41; foundation adds validation bounds and plan/effect metadata, while cloud variation prevents attributing the entire delta to code. Future integration gates must evaluate combined costs.",
           "Preparation subphases were executed in a byte-verified isolated source copy with an injected private test-only diagnostic helper, not the production timing binary. Debug single observations cover validation/control/plans on three fixtures; they are not production latency estimates.",
           "Five private P021 cases run in the existing library unit-test target via include from tests/performance/p021.rs to preserve the private planning boundary; broader runtime tests include planned GC-local initialization and host reentrant collection."
         ]
@@ -72561,7 +72561,7 @@
         "crates/wtime-runtime/tests/performance/p036.rs",
         "crates/wtime-runtime/tests/fixtures/performance/compact/"
       ],
-      "input_output_contract": "`CompactFunction` is private, immutable metadata built only from a validated `FunctionPlan`; decoded execution remains the default and fallback. `CompactOp` is a safe fixed-size record with a compile-time maximum of 24 bytes. Narrow inline forms preserve all bits; checked side indices retain every wider or compound immediate without truncation.\n\nConstruction has absolute ceilings of 100,000 work units and 1 MiB retained metadata even when a caller supplies `usize::MAX`. Work is charged as six visits per source instruction plus three per nested side-table element. Size every retained vector and nested payload with checked arithmetic, account actual capacities, and reject over-budget input before reserving/publishing metadata. Allocation or verification failure publishes no partial function. Verify source/module/engine identity and reject tampered op tags, side indices, origins, work, and retained-byte counts.\n\nThis task establishes factory metadata and decoded fallback only. It does not execute CompactOp, change Engine defaults, claim compact fuel/trap/next-PC behavior, or claim a speedup; live-path correctness belongs to P038\u2013P045 and selection to P046.",
+      "input_output_contract": "`CompactFunction` is private, immutable metadata built only from a validated `FunctionPlan`; decoded execution remains the default and fallback. `CompactOp` is a safe fixed-size record with a compile-time maximum of 24 bytes. Narrow inline forms preserve all bits; checked side indices retain every wider or compound immediate without truncation.\n\nConstruction has absolute ceilings of 100,000 work units and 1 MiB retained metadata even when a caller supplies `usize::MAX`. Work is charged as six visits per source instruction plus three per nested side-table element. Size every retained vector and nested payload with checked arithmetic, account actual capacities, and reject over-budget input before reserving/publishing metadata. Allocation or verification failure publishes no partial function. Verify source/module/engine identity and reject tampered op tags, side indices, origins, work, and retained-byte counts.\n\nThis task establishes factory metadata and decoded fallback only. It does not execute CompactOp, change Engine defaults, claim compact fuel/trap/next-PC behavior, or claim a speedup; live-path correctness belongs to P038–P045 and selection to P046.",
       "implementation_steps": [
         "Record current `Instruction`, `Immediate`, `Value`, and compact record sizes. Use safe Rust and a compile-time `size_of::<CompactOp>() <= 24` assertion; encode narrow indices and numeric bit patterns losslessly.",
         "Cover every admitted inline form (`None`, index, pair, block type, i32/i64 and f32/f64 bits) and every side-table class (`BlockType`, branches, catches, resume handlers, V128 bytes, memory/lane operands, type vectors, heap types, and cast metadata). Unknown shapes return `Declined::Unsupported`.",
@@ -73283,7 +73283,7 @@
         "crates/wtime-runtime/tests/fixtures/performance/p037/control-edges.wasm",
         "crates/wtime-runtime/tests/fixtures/performance/p037/LICENSE-fixture.txt"
       ],
-      "input_output_contract": "`SourceMap` is private metadata for an admitted `CompactFunction`, not an executable dispatcher. Begin with one compact event per original decoded instruction and explicit source-to-compact / compact-to-source entries including terminal `n`; terminal has no event. Preserve original source PC, opcode coverage identity, and span lookup through the immutable source module. Derive ordinary sequential, if/else/end, loop, block branch, `br_if`, `br_table`, return, and tail-transfer successors only from the validated decoded instruction and control tables. Reject branches outside the function or malformed spans.\n\nKeep absolute aggregate ceilings of 100,000 work units and 1 MiB for CompactFunction retention, SourceMap retention, construction labels, and verification scratch, clamped even if callers request `usize::MAX`. Use checked arithmetic, fallible reserves and actual capacity accounting. Verify engine/module/source identity and reconstructed map contents; decline the entire function before publication when budgets, ownership, control structure, or supported-origin requirements fail.\n\nException/catch/delegate/throw, continuation resume/suspend/switch, reference branches (`d5/d6`), and GC cast branches (`fb18/fb19`, `fb25/fb26`) remain explicit whole-function declines. P037 proves metadata targets and original-event associations only. It does not connect source-prefix accounting, coverage dispatch, trap attribution, fuel/cancellation stops, or materialization to a compact fetch; those live-path claims wait for P038\u2013P045.",
+      "input_output_contract": "`SourceMap` is private metadata for an admitted `CompactFunction`, not an executable dispatcher. Begin with one compact event per original decoded instruction and explicit source-to-compact / compact-to-source entries including terminal `n`; terminal has no event. Preserve original source PC, opcode coverage identity, and span lookup through the immutable source module. Derive ordinary sequential, if/else/end, loop, block branch, `br_if`, `br_table`, return, and tail-transfer successors only from the validated decoded instruction and control tables. Reject branches outside the function or malformed spans.\n\nKeep absolute aggregate ceilings of 100,000 work units and 1 MiB for CompactFunction retention, SourceMap retention, construction labels, and verification scratch, clamped even if callers request `usize::MAX`. Use checked arithmetic, fallible reserves and actual capacity accounting. Verify engine/module/source identity and reconstructed map contents; decline the entire function before publication when budgets, ownership, control structure, or supported-origin requirements fail.\n\nException/catch/delegate/throw, continuation resume/suspend/switch, reference branches (`d5/d6`), and GC cast branches (`fb18/fb19`, `fb25/fb26`) remain explicit whole-function declines. P037 proves metadata targets and original-event associations only. It does not connect source-prefix accounting, coverage dispatch, trap attribution, fuel/cancellation stops, or materialization to a compact fetch; those live-path claims wait for P038–P045.",
       "implementation_steps": [
         "Build one-to-one source/compact arrays with a terminal sentinel and a compact source-event coverage entry for each real original instruction. Keep spans resolvable from the validated source module; do not synthesize origins.",
         "Construct successor spans from validated control metadata. Test if-false with/without else, reached else, fallthrough end, block exit, loop back-edge, both `br_if` alternatives, every `br_table` arm/default, return, tail transfer, and terminal no-event behavior.",
@@ -80004,17 +80004,17 @@
         "docs/benchmarks/performance/P044-verification.json",
         "docs/benchmarks/performance/P044-contract.json"
       ],
-      "input_output_contract": "A bounded straight-line numeric/local/numeric-call prefix over canonical Values may execute compactly and exits one-way before the first control, memory or complex operation. The handoff recovers the original prepared (Instruction, pc), clears compact frame state at the already-charged boundary and executes the decoded suffix. Existing whole numeric/control functions retain their unchanged path. GC/EH/continuation helpers keep existing semantics after exact source-state/root materialization; no whole EH/prompt CFG certificate is introduced. P113\u2013P120 are contract foundations; this parent retains the combined measured_promotion acceptance gate.",
+      "input_output_contract": "A bounded straight-line numeric/local/numeric-call prefix over canonical Values may execute compactly and exits one-way before the first control, memory or complex operation. The handoff recovers the original prepared (Instruction, pc), clears compact frame state at the already-charged boundary and executes the decoded suffix. Existing whole numeric/control functions retain their unchanged path. GC/EH/continuation helpers keep existing semantics after exact source-state/root materialization; no whole EH/prompt CFG certificate is introduced. P113–P120 are contract foundations; this parent retains the combined measured_promotion acceptance gate.",
       "implementation_steps": [
         "Preserve the P044-before immediate-P043 Compact archive and the P001 historical baseline. Use the shared P044 verification contract to bind the predecessor, source tree, fixtures, harness, build tools and promotion inputs.",
         "Keep the bounded straight-line integer/local/numeric-call prefix over canonical `Value` state and its permanent one-way decoded exit before the first control, memory or complex operation. Existing whole numeric/control Compact functions remain unchanged; no whole EH/prompt CFG certificate is added.",
         "Preserve the original source instruction and `pc` at the already-charged handoff, clear compact frame state, and enter the decoded handler once. A branch-over-barrier executes the decoded suffix. Keep references visible to GC roots and preserve contexts, fuel, continuation bytes and cleanup.",
-        "Retain the P114\u2013P120 correctness work, including P119's bounded shared `Store.resume_fuel` cleanup when resumed invocation termination abandons a segment during initial exception unwind or a catch-to-function-label returns with empty frames. Preserve consumed-handle ordering for the next independent invocation.",
-        "Run the full default runtime suite and the unfiltered `compact-executor,execution-reference` suite. The compact suite must execute all 21 named P114\u2013P120 cases plus all eight named P022 interactions; require the contract's minimum totals (228 default, 334 compact) and no filtered tests.",
+        "Retain the P114–P120 correctness work, including P119's bounded shared `Store.resume_fuel` cleanup when resumed invocation termination abandons a segment during initial exception unwind or a catch-to-function-label returns with empty frames. Preserve consumed-handle ordering for the next independent invocation.",
+        "Run the full default runtime suite and the unfiltered `compact-executor,execution-reference` suite. The compact suite must execute all 21 named P114–P120 cases plus all eight named P022 interactions; require the contract's minimum totals (228 default, 334 compact) and no filtered tests.",
         "Build the production benchmark binary, run all six independent integration probes, and pass both default and optional compact build budgets. Keep these checks in `verify` before any timed comparisons.",
         "Run `measure` once with the contract's two runs and 30 pairs per group per run; require exactly 1800 pair events with source-stable fixtures and binaries. Keep instrumentation disabled and use the frozen immediate predecessor.",
         "Run `analyze` once through the shared statistics producer, which computes paired statistics and the gate decision together, then records the relative build decision. Do not run a second statistics or gate calculation on the same comparison.",
-        "After reviewing the completion record and all four phase receipts, finalize the contract and publish its completion record. Keep this parent as the combined measured_promotion gate; P113\u2013P120 are correctness foundations and make no independent speed claims."
+        "After reviewing the completion record and all four phase receipts, finalize the contract and publish its completion record. Keep this parent as the combined measured_promotion gate; P113–P120 are correctness foundations and make no independent speed claims."
       ],
       "fixture_cases": [
         "Fuel interruption at each admitted prefix source operation matches decoded state and charges exactly once.",
@@ -80023,7 +80023,7 @@
         "try_table/throw, unhandled throw and nested unwind preserve original source pc, contexts and fuel.",
         "Suspend/bind/resume/resume_throw/switch preserve exact contexts, roots, continuation bytes, fuel and one-shot cleanup.",
         "Explicit Compact runs all eight P022 interaction cases with positive eligible prefix proof and visible fallback reporting.",
-        "The unfiltered compact suite executes all 21 named P114\u2013P120 tests plus all eight P022 tests; the unfiltered default runtime suite also passes its required total.",
+        "The unfiltered compact suite executes all 21 named P114–P120 tests plus all eight P022 tests; the unfiltered default runtime suite also passes its required total.",
         "P119 unhandled resume_throw and empty-frame function-label return clear saved resume fuel so a later independent invocation reaches consumed-handle validation without stale fuel preempting it.",
         "Production build and six integration probes pass; both default and optional compact build budgets pass before measurement.",
         "Paired measure records exactly 1800 source-stable pair events; the analyze phase computes paired statistics and the single gate decision once."
@@ -80068,7 +80068,7 @@
       "reviews_optional_tasks": [],
       "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.",
       "minimum_focused_cases": 3,
-      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass. Child P113\u2013P120 contract foundations make no independent speed claims; P044 retains combined paired measured_promotion evidence.",
+      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass. Child P113–P120 contract foundations make no independent speed claims; P044 retains combined paired measured_promotion evidence.",
       "external_constraints": [
         "original pinned core/proposal snapshot and exclusions",
         "default zero external dependencies and forbid-unsafe boundary",
@@ -80338,7 +80338,7 @@
       ],
       "input_output_contract": "A compact-tier decision contains complete supported/fallback coverage, two paired runs, full pinned corpus/interaction evidence and build/cold/retained-code gates; default selection changes only after this decision.",
       "implementation_steps": [
-        "Complete P121\u2013P124 tooling foundations first: full Compact corpus/preparation counts, actual-mode representative timer, frozen-P001 adapter capability proof, and one portfolio producer. Reuse source-current foundation evidence; the parent retains every original acceptance requirement.",
+        "Complete P121–P124 tooling foundations first: full Compact corpus/preparation counts, actual-mode representative timer, frozen-P001 adapter capability proof, and one portfolio producer. Reuse source-current foundation evidence; the parent retains every original acceptance requirement.",
         "Run full pinned MVP/Core3/Phase3/interactions through compact selection and preserve executed optimized/fallback source counts; full semantic support can use explicit decoded fallback.",
         "Compare predeclared scalar/memory/SIMD/representative families against archived and structural baselines without diagnostic features.",
         "Measure preparation/first-use, all build budgets, retained module/code bytes and dependency closure; inspect any 1.25 relative build/cold growth.",
@@ -86366,7 +86366,7 @@
       ],
       "input_output_contract": "The final interaction contract covers switch context transfer, stale/foreign refs, frame/byte boundary cleanup and explicitCompact across all eight P022 cases, with positive-path proof and fallback reporting.",
       "implementation_steps": [
-        "Integrate under the shared performance target only after serial P116\u2013P119 registration changes; retain one owner for tests/performance.rs registration.",
+        "Integrate under the shared performance target only after serial P116–P119 registration changes; retain one owner for tests/performance.rs registration.",
         "Exercise switch after a positive prefix and compare exact module/type/function context, pc, roots, fuel and cleanup with decoded execution.",
         "Test stale/foreign references and frame/continuation-byte boundary refusal after prefix entry; verify failure happens at the same original source point and resources return to zero.",
         "Run explicitCompact over all eight P022 interaction cases, prove at least one eligible positive path per intended family, and report fallback/decline reasons for unsupported cases.",
@@ -87301,8 +87301,8 @@
       "key": "minimal-scalar-identity-literal-workloads",
       "title": "Add minimal scalar identity and literal-folding workloads",
       "group": "04-specialization-and-fusion",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "contract_only",
       "kind": "foundation",
       "dependencies": [
         "P003",
@@ -87325,26 +87325,44 @@
         "tools/verification/producers/p128_scalar.py",
         "tools/verification/tests/test_p128_scalar.py",
         "docs/benchmarks/performance/P128-selection.json",
-        "docs/benchmarks/performance/P128-verification.json"
+        "docs/benchmarks/performance/P128-verification.json",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py",
+        "tools/verification/producers/p128_evidence.py",
+        "tools/verification/tests/data/admitted_wasm/p128_identity_copy.wasm",
+        "tools/verification/tests/data/admitted_wasm/p128_literal_wrap_add.wasm",
+        "tools/verification/tests/data/admitted_wasm/p128_literal_bitwise.wasm"
       ],
-      "input_output_contract": "Define exactly three MVP i32 loop fixtures: one identity local-copy sequence, one literal-only wrapping `i32.add`, and one literal-only integer bitwise identity (`i32.and`). The loop count aliases are fixed at `n=0,1,17,32,1024,10000`, producing 18 model rows, never arbitrary ranges. Each fixture's work count is exactly `n` opportunities of its named shape. The identity fixture includes a separate observable increment so the loop remains meaningful while the copy itself is neutral. The literal-add and bitwise fixtures feed each folded literal result into an accumulator, so the result depends on the repeated operation while each candidate expression remains literal-only.\n\nThe oracle independently performs explicit modulo-2^32 arithmetic and signed-i32 normalization. Expected results are `n` for identity-copy, signed-i32 of `n * 0x80000000` for wrapping-add (`0x7fffffff + 1`), and signed-i32 of `n * 0x13579bdf` for bitwise AND (`0x13579bdf & 0xffffffff`). No fixture contains multiply, divide, floating point, memory, calls, reference operations, traps, or control-flow exits from the single loop body. Keep all **459 existing registry rows, their IDs/hashes, and every selection membership unchanged**; the 18 rows exist only in the P128 fixture model/selection contract until P054 proposes a separately reviewed append.\n\nNormalize every workload at all five stages (`prepare`, `instantiate`, `first_call`, `warm_call`, `load_and_call`) in `decoded` and `compact` modes using source-current uninstrumented runtime-only binaries. This is exactly **180 real observations/driver commands** (18 shape/input rows \u00d7 5 stages \u00d7 2 modes). Warm calls bind bounded batch size three; no statistics or timing comparison is required.",
+      "input_output_contract": "Define exactly three MVP i32 loop fixtures: one identity local-copy sequence, one literal-only wrapping `i32.add`, and one literal-only integer bitwise identity (`i32.and`). The loop count aliases are fixed at `n=0,1,17,32,1024,10000`, producing 18 model rows, never arbitrary ranges. Exact dynamic source events, including the implicit function end, follow `9 + 14*n`; the source proof requires 18 rows and 126 source-event/fuel/reference commands (one event command plus six fuel probes per row). Each fixture's work count is exactly `n` opportunities of its named shape. The identity fixture includes a separate observable increment so the loop remains meaningful while the copy itself is neutral. The literal-add and bitwise fixtures feed each folded literal result into an accumulator, so the result depends on the repeated operation while each candidate expression remains literal-only.\n\nThe oracle independently performs explicit modulo-2^32 arithmetic and signed-i32 normalization. Expected results are `n` for identity-copy, signed-i32 of `n * 0x80000000` for wrapping-add (`0x7fffffff + 1`), and signed-i32 of `n * 0x13579bdf` for bitwise AND (`0x13579bdf & 0xffffffff`). No fixture contains multiply, divide, floating point, memory, calls, reference operations, traps, or control-flow exits from the single loop body. Keep all **459 existing registry rows, their IDs/hashes, and every selection membership unchanged**; the 18 rows exist only in the P128 fixture model/selection contract until P054 proposes a separately reviewed append.\n\nNormalize every workload at all five stages (`prepare`, `instantiate`, `first_call`, `warm_call`, `load_and_call`) in `decoded` and `compact` modes using source-current uninstrumented runtime-only binaries. This is exactly **180 real observations/driver commands** (18 shape/input rows × 5 stages × 2 modes). Warm calls bind bounded batch size three; no statistics or timing comparison is required.",
       "implementation_steps": [
         "Before adding fixtures, snapshot and validate the full 459-row registry, every selection's membership, the existing scalar model, stage-driver interface, and P047 named tests. Do not rewrite or reformat registry/workload data.",
         "Add the three minimal WAT inputs. Encode each through the repository's admitted encoder into an isolated evidence directory; bind both source and Wasm hashes in the P128 selection. Review decoded instruction order to confirm the copy pair and literal-only add/bitwise operation are present exactly as described. Reject a fixture if its actual opcode order or loop work count differs from the contract.",
         "Add `scalar_p128_workloads.py` with only the three fixed shapes and six exact n values, independent result oracles, fixed work-unit metadata, five stages, and MVP profile. Make all other suffixes/operations invalid. `p128_scalar_scaling.py` validates generated rows and converts them into exact task-owned staged-driver invocations without editing `workloads.json` or the shared registry.",
-        "Add selection and verification contracts that bind the 18 fixture model rows, frozen WAT/Wasm hashes, exact stage list, oracle implementation, executable/source identities, mode, stage, and warm batch. The proof producer archives raw output and command records before oracle checks, independently checks result and modulo arithmetic, and requires every one of the 180 observations.",
+        "Add selection and verification contracts that bind the 18 fixture model rows, frozen WAT/Wasm hashes, exact stage list, oracle implementation, executable/source identities, mode, stage, and warm batch. The proof producer archives raw output and command records before oracle checks, independently checks result and modulo arithmetic, validates the 18-row source-event/fuel proof and its 126 source-event/fuel/reference commands, and requires every one of the 180 staged observations.",
         "Keep P054's candidate freeze separate: its eventual selection may choose n32 and n10000 as small/large targets, n17 as held out, and n0/n1/n1024 as protected rows, while retaining `call_overhead` and `prepare_large` cold controls and P047 checks. P128 does not freeze or preapprove that candidate selection."
       ],
       "fixture_cases": [
+        "test_admitted_wat_and_wasm_bytes_match_frozen_hashes",
         "test_fixed_alias_grid_is_exact_and_registry_stays_459_rows",
+        "test_fixture_work_count_is_exactly_n_and_invalid_aliases_fail",
+        "test_frozen_registry_rows_and_selections_survive_model_generation",
         "test_identity_copy_fixture_has_an_independent_n_oracle",
         "test_literal_add_wraps_as_i32_without_float_or_trapping_ops",
         "test_literal_bitwise_fixture_matches_independent_mask_oracle",
-        "test_fixture_work_count_is_exactly_n_and_invalid_aliases_fail",
+        "test_rows_bind_profile_modes_stages_oracle_and_mvp_work_units",
         "test_wat_opcode_shape_rejects_multiply_divide_float_memory_or_calls",
-        "test_all_five_stages_and_both_modes_are_required",
-        "test_warm_call_batch_three_is_bound_and_oracle_checked",
-        "test_source_and_fixture_drift_fails_before_close"
+        "test_complete_matrix_and_all_outputs_are_contained",
+        "test_nonzero_command_output_and_status_are_retained",
+        "test_oracle_mismatch_preserves_raw_output_before_failure",
+        "test_output_escape_is_rejected_before_any_write",
+        "test_stale_record_rejected_before_guest_commands",
+        "test_adapter_archive_corruption_is_still_rejected",
+        "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+        "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+        "test_focused_producer_changes_stale_focused_pairs",
+        "test_membership_changes_and_unknown_python_modules_fail_closed",
+        "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+        "test_verify_inputs_uses_live_sources_without_running_a_comparison"
       ],
       "measurement_selection": "scalar",
       "execution_mode": "decoded,compact",
@@ -87369,19 +87387,40 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P128-verification.json --output target/performance/P128/complete --execute"
       ],
       "path": "04-specialization-and-fusion/P128-minimal-scalar-workloads.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P128/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "abe68e19068eb70dfbc771c9e063e270ebf8743b514313500aecf69e4d5ddedf",
+          "bytes": 1518
+        }
+      ],
       "branch": "portable",
       "decision_rule": "integrity",
       "reviews_optional_tasks": [],
       "integration_owner": "One fixture/model integrator owns the three WAT fixtures, fixed workload model, independent oracle, staged adapter, and proof producer; runtime/core and shared registry ownership are excluded.",
-      "minimum_focused_cases": 9,
-      "evidence_contract": "Record unchanged 459-row registry and selection identities; three WAT/Wasm hashes; 18 fixed shape/input rows and exact work counts; independent modulo-i32 oracle; all 180 observations by stage/mode; batch-three identity; MVP feature profile; source-current mode-specific runtime-only binary identities; P047 prerequisite results and limitations. No statistics or speed claim.",
+      "minimum_focused_cases": 21,
+      "evidence_contract": "Record unchanged 459-row registry and selection identities; three WAT/Wasm hashes; 18 fixed shape/input rows and exact work counts; independent modulo-i32 oracle; all 180 observations by stage/mode; the 18-row `9 + 14*n` source-event proof and 126 source-event/fuel/reference commands including implicit function end; batch-three identity; MVP feature profile; source-current mode-specific runtime-only binary identities; P047 prerequisite results and limitations. No statistics or speed claim.",
       "external_constraints": [
         "Do not edit workloads.json, shared selection membership, runtime core, or P054 candidate contract.",
         "Only three fixed fixture shapes and six validated integer inputs; no arbitrary expansion API.",
         "No multiply, divide, floating point, memory, calls, reference effects, external dependencies, or unsafe code."
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P128/shared-finalization/attempt-0002/evidence.json": "abe68e19068eb70dfbc771c9e063e270ebf8743b514313500aecf69e4d5ddedf"
+        },
+        "evidence": [
+          {
+            "bytes": 1518,
+            "path": "/workspace/wtime/target/performance/P128/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "abe68e19068eb70dfbc771c9e063e270ebf8743b514313500aecf69e4d5ddedf"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P128"
+      }
     }
   ]
 }

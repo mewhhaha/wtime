@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "source": "/workspace/wtime/target/performance/P128/shared-finalization/attempt-0002/completion.json",
+      "copy": "docs/benchmarks/performance/P128-completion.json",
+      "sha256": "da2318e02f23842264790cdda2c0701cbd1d53031d059229f68ea3f9cbe9e5fd",
+      "size_bytes": 503
+    },
+    {
+      "source": "/workspace/wtime/target/performance/P128/shared-finalization/attempt-0002/evidence.json",
+      "copy": "docs/benchmarks/performance/P128-evidence.json",
+      "sha256": "abe68e19068eb70dfbc771c9e063e270ebf8743b514313500aecf69e4d5ddedf",
+      "size_bytes": 1518
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P128/verify/attempt-0002/scalar-proof/report.json",
+      "copy": "docs/benchmarks/performance/P128-proof.json",
+      "sha256": "07778f37ff6b41d2e8e10ef88abecd07823a5887bb558e3e4b544cf4680cad6d",
+      "size_bytes": 488572
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P128/verify/attempt-0002/prerequisite.json",
+      "copy": "docs/benchmarks/performance/P128-prerequisite.json",
+      "sha256": "d203eca62693f104926b6e3328c135f85b5a013d2cb593704ede644a7f9d10d6",
+      "size_bytes": 14531
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P128/verify/attempt-0002/decoded/build-record.json",
+      "copy": "docs/benchmarks/performance/P128-production-decoded.json",
+      "sha256": "9dbfffaa25dc47aff0a5685677f2d9622b7629975d1eff792e848dbf97cf91a7",
+      "size_bytes": 211827
+    },
+    {
+      "source": "/workspace/wtime/target/verification/runs/P128/verify/attempt-0002/compact/build-record.json",
+      "copy": "docs/benchmarks/performance/P128-production-compact.json",
+      "sha256": "2bcc043adfb397a01aa0b6e9ac9d0e043a6764596e18e910065751c34574da61",
+      "size_bytes": 211999
+    }
+  ],
+  "copied_original_bytes": true,
+  "referenced_binaries_and_datasets_are_not_included": true
+}
