@@ -47,9 +47,17 @@ def cap(entry):
     return min(MAX_BATCH, MAX_PRODUCT // size)
 
 
-def validate_observation(entry, wire, model, scaling, batch, *, expected_mode='decoded', diagnostic=False):
+def validate_observation(entry, wire, model, scaling, batch, *, expected_mode='decoded', diagnostic=False, register_entry_threshold=None):
     need(type(batch) is int and 1 <= batch <= cap(entry), 'batch outside checked size/product bound')
-    need(expected_mode in ('decoded', 'compact'), 'unsupported expected representative mode')
+    need(expected_mode in ('decoded', 'compact', 'register'), 'unsupported expected representative mode')
+    need(not diagnostic or expected_mode != 'register', 'Register representative diagnostics are unsupported')
+    if register_entry_threshold is not None:
+        need(expected_mode == 'register' and not diagnostic, 'adaptive policy requires production Register timing')
+    if register_entry_threshold is None:
+        need(isinstance(wire, dict) and 'register_entry_threshold' not in wire, 'undeclared adaptive policy')
+    else:
+        import p140_entry_policy
+        p140_entry_policy.validate_wire(wire, register_entry_threshold)
     need(isinstance(wire, dict) and wire.get('error') is None, 'invalid or failed representative wire')
     need(wire.get('batch') == batch and type(wire.get('batch')) is int, 'actual batch differs from request')
     need(wire.get('calls_checked') == batch and type(wire.get('calls_checked')) is int, 'each batch invocation must be checked')

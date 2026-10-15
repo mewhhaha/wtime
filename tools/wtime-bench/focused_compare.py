@@ -299,10 +299,14 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         import representative_scaling as scaling
         import representative_compare as timer
         expected = model.oracle(entry['id'], n)
-        wire = compare.process(executable, ['--representative-staged', wasm, entry['id'], n,
-            'i32:'+str(expected['result']), expected['output_sha256'], stage, batch, mode, profile(entry)], cpu)
+        argv = ['--representative-staged', wasm, entry['id'], n,
+            'i32:'+str(expected['result']), expected['output_sha256'], stage, batch, mode, profile(entry)]
+        if register_entry_threshold is not None:
+            import p140_entry_policy
+            argv += ['--register-entry-threshold', str(p140_entry_policy.positive_threshold(register_entry_threshold))]
+        wire = compare.process(executable, argv, cpu)
         return timer.retain_memory_image(timer.validate_observation(entry, wire, model, scaling,
-            batch, expected_mode=mode), output)
+            batch, expected_mode=mode, register_entry_threshold=register_entry_threshold), output)
     need(module == 'run.py' or entry['id'] == 'prepare_large', 'unsupported candidate oracle: '+str(module))
     import run as model
     expected = model.oracle(entry['id'], n) if entry['id'] != 'prepare_large' else 0
@@ -358,6 +362,17 @@ def calibrate(entry, observer):
     raise ValueError('calibration failed to reach 20 ms on both sides')
 
 
+def run_seeds(base, explicit=None, smoke=False):
+    if explicit is not None:
+        need(isinstance(explicit, (list, tuple)) and len(explicit) == 2
+             and all(type(value) is int and 0 <= value < 2**64 for value in explicit)
+             and explicit[0] != explicit[1], 'two distinct unsigned run seeds are required')
+        values = explicit
+    else:
+        values = [base, base + 1_000_003]
+    return {run: values[run] for run in ((0,) if smoke else (0, 1))}
+
+
 def run(args):
     need(args.smoke or args.frozen is not None, 'candidate timings require a frozen selection')
     need(args.smoke or getattr(args,'semantic_receipt',None) is not None,
@@ -370,8 +385,10 @@ def run(args):
                                              getattr(args, 'register_entry_threshold', None))
     if entry_setting is not None:
         need(all(entry['oracle'].get('module') in ('scalar_workloads.py', 'scalar_p128_workloads.py', 'run.py')
-                 or entry['id'] == 'prepare_large' for entry in entries),
-             'adaptive entry requires scalar or single-case rows')
+                 or entry['id'] == 'prepare_large'
+                 or (entry['oracle'].get('module') == 'representative_workloads.py'
+                     and next(row['stages'] for row in declaration['rows'] if row['id'] == entry['id']) == ['run_after_setup']) for entry in entries),
+             'adaptive entry requires scalar, single-case or staged representative rows')
     fuel_token = getattr(args, 'source_fuel', None)
     fuel_setting = None
     if fuel_token is not None:
@@ -380,6 +397,7 @@ def run(args):
         need(all(entry['oracle'].get('module') in ('scalar_workloads.py','run.py')
                  or entry['id']=='prepare_large' for entry in entries),
              'explicit source fuel requires a scalar-only declaration')
+    seeds = run_seeds(args.seed, getattr(args, 'run_seeds', None), args.smoke)
     allowed = sorted(os.sched_getaffinity(0))
     cpu = args.cpu if args.cpu is not None else allowed[0]
     need(cpu in allowed, 'CPU outside permitted affinity')
@@ -485,7 +503,6 @@ def run(args):
         'correctness_probes':[], 'warm_calibrations':[], 'runs':[]}
     run_ids = (0,) if args.smoke else (0,1)
     pair_count = 1 if args.smoke else 30
-    seeds = {run:args.seed+run*1_000_003 for run in run_ids}
     journal = checkpoint.Journal(args.output, {'identities':identities, 'sources':before, 'settings':settings,
         'seed':args.seed, 'pairs':pair_count}, seeds, prepared=True)
     try:
@@ -566,6 +583,7 @@ def main():
                         help='explicit scalar policy, applied identically to both paired sides')
     parser.add_argument('--thread-cpus', help='explicit comma-separated affinity mask for thread rows (at least two permitted CPUs)')
     parser.add_argument('--seed', type=int, default=20261013)
+    parser.add_argument('--run-seeds', nargs=2, type=int, help='two explicit independent run seeds')
     parser.add_argument('--cpu', type=int)
     parser.add_argument('--smoke', action='store_true', help='one pair, one run; never promotion evidence')
     args = parser.parse_args()

@@ -1,0 +1,520 @@
+{
+  "candidate_promoted": false,
+  "decision": "rejected",
+  "focused_decision": "adopted",
+  "focused_statistics": {
+    "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/focused-statistics.json",
+    "sha256": "29dbf754ad0df1298a6c1fd5d7f2b4aaa7b08d1303661c90d96de712a63975bf"
+  },
+  "freeze": {
+    "path": "/workspace/wtime/target/verification/runs/P066/freeze/attempt-0002/freeze/report.json",
+    "sha256": "5bd1936e21069bd3cb374f4a270dd9444030c2ad202c36492c22a94d3959c162"
+  },
+  "gate_eligible": true,
+  "guest_or_build_launched": false,
+  "helpers": {
+    "p066.py": {
+      "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0002/proof/helpers/p066.py",
+      "sha256": "5a375d281b42f611d4fbe2bfc3141fb85e40b447f1544005a3032df01d06c55f"
+    },
+    "p066_gate.py": {
+      "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0002/proof/helpers/p066_gate.py",
+      "sha256": "fcc25aa7a700a611a4f628b83c0c8346ef099aa9f6a03d61e036abf4deb34843"
+    }
+  },
+  "invocation": {
+    "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0002/proof/invocation.json",
+    "sha256": "edc169d4bcdeb86ee19fa7544b877a38c66e4aa077f23138a0eb9d9195d0c2d9"
+  },
+  "policy": {
+    "path": "/workspace/wtime/docs/benchmarks/performance/P066-contract.json",
+    "sha256": "0955e9529f335dea0fa660ccda21fb0e668ea97daba2c43316df203335204ac9"
+  },
+  "schema": "wtime-p066-combined-gate-v1",
+  "sequences": {
+    "analysis": {
+      "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/sequence/report.json",
+      "sha256": "c673785cd274e71a63dd7fef9b6bc63cd11b02556b9047e288c0eac65d08f93a"
+    },
+    "collection": {
+      "path": "/workspace/wtime/target/verification/runs/P066/measure/attempt-0002/sequence/report.json",
+      "sha256": "913dbd9158dc4c546ab824a51e26c60072bcbfcab70987af653089252e1a8960"
+    },
+    "invocation": {
+      "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/sequence/invocation.json",
+      "sha256": "a1e5adc0adb8b15499054becd2d0799aba344dba6cdae842e9235166a99f4067"
+    }
+  },
+  "source_stable": true,
+  "statistics_recomputed": false,
+  "statistics_reuse": {
+    "commands": {
+      "p066-focused-statistics": {
+        "result": {
+          "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/p066-focused-statistics.result.json",
+          "sha256": "0fd93479f78cacc7162f608ee65805126b0daa782d1f49db3a05844286cbb2ac"
+        },
+        "stderr": {
+          "bytes": 0,
+          "encoding": "raw",
+          "mode": "0o600",
+          "path": "objects/e3/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stored_bytes": 0,
+          "stored_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 149,
+          "encoding": "raw",
+          "mode": "0o600",
+          "path": "objects/2b/2b37592ae97021b46d5ab98377562c1fb71ddf1ea2b2822e2811248077369d1e",
+          "sha256": "2b37592ae97021b46d5ab98377562c1fb71ddf1ea2b2822e2811248077369d1e",
+          "stored_bytes": 149,
+          "stored_sha256": "2b37592ae97021b46d5ab98377562c1fb71ddf1ea2b2822e2811248077369d1e"
+        }
+      },
+      "p066-sequence-analysis": {
+        "result": {
+          "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/p066-sequence-analysis.result.json",
+          "sha256": "6065fe9db4589686a16468fd383493d320cce46c123a5e43eab9229b99019a82"
+        },
+        "stderr": {
+          "bytes": 0,
+          "encoding": "raw",
+          "mode": "0o600",
+          "path": "objects/e3/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stored_bytes": 0,
+          "stored_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 126,
+          "encoding": "raw",
+          "mode": "0o600",
+          "path": "objects/eb/eb7af8778370ba4392b56e707b739665cf4a6524412c8159ec60a7210839e08c",
+          "sha256": "eb7af8778370ba4392b56e707b739665cf4a6524412c8159ec60a7210839e08c",
+          "stored_bytes": 126,
+          "stored_sha256": "eb7af8778370ba4392b56e707b739665cf4a6524412c8159ec60a7210839e08c"
+        }
+      },
+      "p066-totals-analysis": {
+        "result": {
+          "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/p066-totals-analysis.result.json",
+          "sha256": "20eef3e2d6e9f706a506884a82285a2c6d05437247c561b6c9841325368c00c1"
+        },
+        "stderr": {
+          "bytes": 0,
+          "encoding": "raw",
+          "mode": "0o600",
+          "path": "objects/e3/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stored_bytes": 0,
+          "stored_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 112,
+          "encoding": "raw",
+          "mode": "0o600",
+          "path": "objects/6e/6e97b1abc1d830e7f66168e6665a6a2ffa75fe25bfcd0e122baf70cfe5653907",
+          "sha256": "6e97b1abc1d830e7f66168e6665a6a2ffa75fe25bfcd0e122baf70cfe5653907",
+          "stored_bytes": 112,
+          "stored_sha256": "6e97b1abc1d830e7f66168e6665a6a2ffa75fe25bfcd0e122baf70cfe5653907"
+        }
+      }
+    },
+    "guest_or_build_launched": false,
+    "reports": {
+      "focused-statistics.json": {
+        "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/focused-statistics.json",
+        "sha256": "29dbf754ad0df1298a6c1fd5d7f2b4aaa7b08d1303661c90d96de712a63975bf"
+      },
+      "inputs.json": {
+        "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/inputs.json",
+        "sha256": "fbe9091872ffeeff8c611eb75324df05b1f68315aadec8f9409b8e335ecf40a0"
+      },
+      "sequence/report.json": {
+        "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/sequence/report.json",
+        "sha256": "c673785cd274e71a63dd7fef9b6bc63cd11b02556b9047e288c0eac65d08f93a"
+      },
+      "totals/report.json": {
+        "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/totals/report.json",
+        "sha256": "65c579c4416bbdcfc9bc6098afc20622e589ce3d815d755707f7c506171bf9d7"
+      }
+    },
+    "statistics_recomputed": false,
+    "status": "passed"
+  },
+  "status": "passed",
+  "supplementary": {
+    "inconclusive": [
+      "entry_total calls=10 run=1 upper=1.1421879530216366",
+      "entry_total calls=10 run=2 upper=1.1363753376082242",
+      "entry_total calls=100 run=2 upper=1.0541836123186903"
+    ],
+    "limits": {
+      "bootstrap_resamples": 10000,
+      "ci95_upper_max": 1.05,
+      "pairs_per_row_min": 30
+    },
+    "rejections": [
+      "cold_initial/p99 run=1 lower=2.6345272515656957",
+      "cold_initial/max run=1 lower=1.1326936299220747",
+      "compile_initial/p99 run=1 lower=14.744387313861033",
+      "compile_initial/max run=1 lower=17.25452640088048",
+      "warm_initial/p99 run=1 lower=1.3179869269485203",
+      "warm_initial/max run=1 lower=1.3743784643037718",
+      "cold_revisit/p99 run=1 lower=1.5767796396438838",
+      "cold_revisit/max run=1 lower=1.5794926108076681",
+      "recompile/p99 run=1 lower=4.450053165983148",
+      "recompile/max run=1 lower=4.450053165983148",
+      "warm_revisit/p99 run=1 lower=1.2217391304347827",
+      "warm_revisit/max run=1 lower=1.2217391304347827",
+      "cold_initial/p99 run=2 lower=2.6279478976234016",
+      "cold_initial/max run=2 lower=1.0771367786793653",
+      "compile_initial/p99 run=2 lower=14.646097001784229",
+      "compile_initial/max run=2 lower=17.949873954474974",
+      "warm_initial/p99 run=2 lower=1.342877045037098",
+      "warm_initial/max run=2 lower=1.3567347444016706",
+      "cold_revisit/p99 run=2 lower=1.526296982629124",
+      "cold_revisit/max run=2 lower=1.5309051454323137",
+      "recompile/p99 run=2 lower=4.506249518415754",
+      "recompile/max run=2 lower=4.506249518415754",
+      "warm_revisit/p99 run=2 lower=1.2152579363459644",
+      "warm_revisit/max run=2 lower=1.2152579363459644"
+    ],
+    "sequence_rows": [
+      {
+        "ci95": [
+          2.6345272515656957,
+          3.073537264276265
+        ],
+        "event_class": "cold_initial",
+        "metric": "p99",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.1326936299220747,
+          1.4665396704606752
+        ],
+        "event_class": "cold_initial",
+        "metric": "max",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          14.744387313861033,
+          17.671084930268133
+        ],
+        "event_class": "compile_initial",
+        "metric": "p99",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          17.25452640088048,
+          25.729356707812013
+        ],
+        "event_class": "compile_initial",
+        "metric": "max",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.3179869269485203,
+          1.4356831611425316
+        ],
+        "event_class": "warm_initial",
+        "metric": "p99",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.3743784643037718,
+          1.5324471414758478
+        ],
+        "event_class": "warm_initial",
+        "metric": "max",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.5767796396438838,
+          1.675624781100991
+        ],
+        "event_class": "cold_revisit",
+        "metric": "p99",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.5794926108076681,
+          1.681698496750206
+        ],
+        "event_class": "cold_revisit",
+        "metric": "max",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          4.450053165983148,
+          4.640336398742135
+        ],
+        "event_class": "recompile",
+        "metric": "p99",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          4.450053165983148,
+          4.640336398742135
+        ],
+        "event_class": "recompile",
+        "metric": "max",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.2217391304347827,
+          1.3278008298755186
+        ],
+        "event_class": "warm_revisit",
+        "metric": "p99",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.2217391304347827,
+          1.3278008298755186
+        ],
+        "event_class": "warm_revisit",
+        "metric": "max",
+        "run": 1,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          2.6279478976234016,
+          2.991645197816085
+        ],
+        "event_class": "cold_initial",
+        "metric": "p99",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.0771367786793653,
+          1.3990729143306915
+        ],
+        "event_class": "cold_initial",
+        "metric": "max",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          14.646097001784229,
+          17.693199032013048
+        ],
+        "event_class": "compile_initial",
+        "metric": "p99",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          17.949873954474974,
+          23.548759783174404
+        ],
+        "event_class": "compile_initial",
+        "metric": "max",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.342877045037098,
+          1.4816770663278171
+        ],
+        "event_class": "warm_initial",
+        "metric": "p99",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.3567347444016706,
+          1.5406677483774327
+        ],
+        "event_class": "warm_initial",
+        "metric": "max",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.526296982629124,
+          1.627686929613874
+        ],
+        "event_class": "cold_revisit",
+        "metric": "p99",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.5309051454323137,
+          1.6326789010974172
+        ],
+        "event_class": "cold_revisit",
+        "metric": "max",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          4.506249518415754,
+          4.745651675994318
+        ],
+        "event_class": "recompile",
+        "metric": "p99",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          4.506249518415754,
+          4.745651675994318
+        ],
+        "event_class": "recompile",
+        "metric": "max",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.2152579363459644,
+          1.3478260869565217
+        ],
+        "event_class": "warm_revisit",
+        "metric": "p99",
+        "run": 2,
+        "state": "rejected"
+      },
+      {
+        "ci95": [
+          1.2152579363459644,
+          1.3478260869565217
+        ],
+        "event_class": "warm_revisit",
+        "metric": "max",
+        "run": 2,
+        "state": "rejected"
+      }
+    ],
+    "threshold": 3,
+    "total_rows": [
+      {
+        "calls": 1,
+        "ci95": [
+          0.8226540211273036,
+          1.0161106217931966
+        ],
+        "run": 1,
+        "state": "passed"
+      },
+      {
+        "calls": 10,
+        "ci95": [
+          1.0088907173438932,
+          1.1421879530216366
+        ],
+        "run": 1,
+        "state": "inconclusive"
+      },
+      {
+        "calls": 100,
+        "ci95": [
+          0.9851715739603585,
+          1.039147287933439
+        ],
+        "run": 1,
+        "state": "passed"
+      },
+      {
+        "calls": 10000,
+        "ci95": [
+          0.9324535781772192,
+          0.9812703943837076
+        ],
+        "run": 1,
+        "state": "passed"
+      },
+      {
+        "calls": 1,
+        "ci95": [
+          0.8592879987715343,
+          0.9046252758254874
+        ],
+        "run": 2,
+        "state": "passed"
+      },
+      {
+        "calls": 10,
+        "ci95": [
+          1.043588482348935,
+          1.1363753376082242
+        ],
+        "run": 2,
+        "state": "inconclusive"
+      },
+      {
+        "calls": 100,
+        "ci95": [
+          1.0079621065255757,
+          1.0541836123186903
+        ],
+        "run": 2,
+        "state": "inconclusive"
+      },
+      {
+        "calls": 10000,
+        "ci95": [
+          0.9150121964878227,
+          0.9826147042410984
+        ],
+        "run": 2,
+        "state": "passed"
+      }
+    ]
+  },
+  "task": "P066",
+  "threshold_selection": null,
+  "timing_evidence": true,
+  "totals": {
+    "analysis": {
+      "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/totals/report.json",
+      "sha256": "65c579c4416bbdcfc9bc6098afc20622e589ce3d815d755707f7c506171bf9d7"
+    },
+    "collection": {
+      "path": "/workspace/wtime/target/verification/runs/P066/measure/attempt-0002/totals/report.json",
+      "sha256": "22a6921e9e638a76040ac9235c1fe6dc9c774aba7117a3e6d402f2ebcfb5111f"
+    },
+    "invocation": {
+      "path": "/workspace/wtime/target/verification/runs/P066/analyze/attempt-0001/totals/invocation.json",
+      "sha256": "bfe52903858bd1e70076222502da2eeb8ff60734a7cc7183e2ff358bb6b34a27"
+    }
+  }
+}

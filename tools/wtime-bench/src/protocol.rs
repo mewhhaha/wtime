@@ -356,6 +356,9 @@ mod p127_tests {
     }
 }
 fn typed_engine(mode: &str, profile: &str) -> Engine {
+    typed_engine_with_fuel(mode, profile, fuel_policy::FuelArgument::OMITTED)
+}
+fn typed_engine_with_fuel(mode: &str, profile: &str, fuel: fuel_policy::FuelArgument) -> Engine {
     let features = match profile {
         "mvp" => FeatureSet::mvp(),
         "stable-core" => FeatureSet::stable_core(),
@@ -374,13 +377,14 @@ fn typed_engine(mode: &str, profile: &str) -> Engine {
         }
         _ => panic!("unknown feature profile"),
     };
-    configured_engine(
-        Config {
-            features,
-            ..Config::default()
-        },
-        mode,
-    )
+    let mut config = Config { features, ..Config::default() };
+    fuel.configure(&mut config);
+    fuel.validate_mode(mode).expect("invalid register entry setting");
+    #[cfg(all(feature = "register-executor", not(feature = "legacy-api")))]
+    if let Some(threshold) = fuel.register_entry_threshold {
+        return Engine::with_register_entry_threshold(config, threshold).unwrap();
+    }
+    configured_engine(config, mode)
 }
 fn parse_values(encoded: &str) -> Vec<Value> {
     if encoded == "-" {

@@ -187,8 +187,9 @@ fn execute_staged(
     mode: &str,
     profile: &str,
     batch: usize,
+    fuel: super::fuel_policy::FuelArgument,
 ) -> (Observation, usize, f64) {
-    let engine = super::typed_engine(mode, profile);
+    let engine = super::typed_engine_with_fuel(mode, profile, fuel);
     let module = engine
         .compile(bytes)
         .expect("representative module compile failed");
@@ -300,11 +301,25 @@ pub fn try_main(args: &[String]) -> bool {
         );
     }
     let expected_arg_count = if staged || staged_diagnostic { 10 } else { 9 };
-    assert_eq!(
-        args.len(),
-        expected_arg_count,
-        "--representative-staged FILE CASE SIZE EXPECTED OUTPUT_SHA256 STAGE BATCH MODE PROFILE; legacy: --representative-case FILE CASE SIZE EXPECTED OUTPUT_SHA256 STAGE MODE PROFILE"
-    );
+    let fuel = if staged {
+        let fuel = super::fuel_policy::FuelArgument::parse(args, expected_arg_count)
+            .expect("invalid representative timing options");
+        fuel.validate_mode(&args[8])
+            .expect("invalid register entry setting");
+        assert!(
+            matches!(args[8].as_str(), "decoded" | "compact")
+                || (args[8] == "register" && cfg!(feature = "register-executor")),
+            "unsupported representative timing mode"
+        );
+        fuel
+    } else {
+        assert_eq!(
+            args.len(),
+            expected_arg_count,
+            "invalid representative argument count"
+        );
+        super::fuel_policy::FuelArgument::OMITTED
+    };
     let bytes = std::fs::read(&args[1]).expect("cannot read representative fixture");
     assert!(
         bytes.len() <= MAX_MEMORY_BYTES,
@@ -398,10 +413,10 @@ pub fn try_main(args: &[String]) -> bool {
     }
     let (actual, calls_checked, measured_guest_ns) = if staged {
         assert!(
-            matches!(mode.as_str(), "decoded" | "compact"),
-            "staged representative timing supports decoded or compact execution"
+            matches!(mode.as_str(), "decoded" | "compact" | "register"),
+            "staged representative timing supports decoded, compact or register execution"
         );
-        execute_staged(&bytes, size, expected, mode, profile, batch)
+        execute_staged(&bytes, size, expected, mode, profile, batch, fuel)
     } else if wasmtime {
         assert_eq!(mode, "wasmtime");
         #[cfg(not(feature = "runtime-only"))]
@@ -426,7 +441,7 @@ pub fn try_main(args: &[String]) -> bool {
     );
     if staged {
         println!(
-            "{{\"schema_version\":2,\"case\":{},\"stage\":{},\"input\":{},\"expected\":{},\"result\":{},\"batch\":{},\"calls_checked\":{},\"report_complete\":true,\"setup_reset_before_each_call\":true,\"setup_excluded_from_timing\":true,\"instrumented\":false,\"measured_guest_ns\":{:.3},\"ns_per_operation\":{:.3},\"mode\":{},\"profile\":{},\"memory_pages\":{},\"memory_page_size_log2\":{},\"memory_hex\":{},\"expected_output_sha256\":{}}}",
+            "{{\"schema_version\":2,\"case\":{},\"stage\":{},\"input\":{},\"expected\":{},\"result\":{},\"batch\":{},\"calls_checked\":{},\"report_complete\":true,\"setup_reset_before_each_call\":true,\"setup_excluded_from_timing\":true,\"instrumented\":false,\"measured_guest_ns\":{:.3},\"ns_per_operation\":{:.3},\"mode\":{},\"profile\":{},\"memory_pages\":{},\"memory_page_size_log2\":{},\"memory_hex\":{},\"expected_output_sha256\":{}{}}}",
             super::quote(case),
             super::quote(stage),
             super::quote(&size.to_string()),
@@ -442,6 +457,7 @@ pub fn try_main(args: &[String]) -> bool {
             actual.page_size_log2,
             super::quote(&actual.memory_hex),
             super::quote(output_sha256),
+            fuel.json_suffix(),
         );
     } else {
         println!(

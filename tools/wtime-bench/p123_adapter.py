@@ -20,6 +20,13 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 KIND = 'frozen-typed-adapter'
 CORE = ('wtime-types', 'wtime-decode', 'wtime-validate', 'wtime-runtime')
+REGISTER_ENTRY_CONTRACT = {
+    'schema_version': 1,
+    'argument': '--register-entry-threshold',
+    'mode': 'register',
+    'minimum': 1,
+    'maximum': 18446744073709551615,
+}
 ENTRYPOINT = ('#![forbid(unsafe_code)]\nmod protocol;\nfn main() {\n'
     ' let args=std::env::args().skip(1).collect::<Vec<_>>();\n'
     ' if !protocol::try_main(&args) { std::process::exit(2); }\n}\n')
@@ -48,6 +55,50 @@ def compiled_harness_identities():
     paths.extend((HERE / 'src').rglob('*.rs'))
     return {path.relative_to(ROOT).as_posix(): sha(path)
             for path in sorted(set(paths)) if path.is_file()}
+
+
+def adapter_features(mode, legacy_api):
+    if type(legacy_api) is not bool:
+        raise ValueError('typed adapter legacy-api flag must be boolean')
+    if mode not in ('decoded', 'compact', 'register'):
+        raise ValueError('unsupported adapter mode')
+    if legacy_api and mode != 'decoded':
+        raise ValueError('legacy API supports decoded mode only')
+    return ['runtime-only'] + (['legacy-api'] if legacy_api else []) + (
+        ['compact-executor'] if mode == 'compact' else []) + (
+        ['register-executor'] if mode == 'register' else [])
+
+
+def validate_mode_contract(record, cargo_manifest, smoke):
+    mode, legacy = record.get('mode'), record.get('legacy_api')
+    try:
+        features = adapter_features(mode, legacy)
+    except ValueError as exc:
+        raise ValueError('typed adapter mode/feature contract differs') from exc
+    cargo_features = cargo_manifest.get('features', {})
+    expected_definitions = {'default': features, 'runtime-only': [], 'legacy-api': []}
+    if not legacy:
+        expected_definitions.update({
+            'compact-executor': ['wtime-runtime/compact-executor'],
+            'register-executor': ['wtime-runtime/register-executor'],
+        })
+    historical = {k: v for k, v in expected_definitions.items() if k != 'register-executor'}
+    allowed_definitions = [expected_definitions] if mode == 'register' else [expected_definitions, historical]
+    if (record.get('build', {}).get('features') != features
+            or cargo_features not in allowed_definitions):
+        raise ValueError('typed adapter mode/feature contract differs')
+    if (not isinstance(smoke, dict) or smoke.get('instrumented') is not False
+            or mode not in smoke.get('modes', []) or smoke.get('engine') != 'wtime'):
+        raise ValueError('typed adapter production mode was not probed')
+    if mode == 'register':
+        capability = smoke.get('register_entry_threshold_contract')
+        if (not isinstance(capability, dict) or capability != REGISTER_ENTRY_CONTRACT
+                or any(type(capability.get(key)) is not int for key in ('schema_version', 'minimum', 'maximum'))):
+            raise ValueError('typed adapter Register threshold capability was not probed')
+
+
+def _cargo_target_args(target):
+    return ['--target-dir', str(target)]
 
 
 def verify(path, baseline=None, *, check_current=True):
@@ -103,14 +154,9 @@ def verify(path, baseline=None, *, check_current=True):
         raise ValueError('typed adapter entrypoint differs')
     if record.get('protocol_sha256') != sha(source_root/'protocol.rs'):
         raise ValueError('typed adapter protocol identity differs')
-    mode = record.get('mode')
-    legacy = record.get('legacy_api')
-    features = ['runtime-only'] + (['legacy-api'] if legacy else []) + (
-        ['compact-executor'] if mode == 'compact' else [])
-    if (type(legacy) is not bool or mode not in ('decoded', 'compact')
-            or (legacy and mode != 'decoded') or record['build']['features'] != features):
-        raise ValueError('typed adapter mode/feature contract differs')
     manifest = tomllib.loads((path/'Cargo.toml').read_text())
+    mode = record.get('mode')
+    validate_mode_contract(record, manifest, record.get('protocol'))
     for name in ('wtime-runtime', 'wtime-types'):
         expected = str(frozen_path/'source/crates'/name)
         if manifest['dependencies'][name]['path'] != expected:
@@ -125,10 +171,6 @@ def verify(path, baseline=None, *, check_current=True):
     if (record.get('binary') != 'binary/wtime-bench' or not os.access(binary, os.X_OK)
             or sha(binary) != record.get('binary_sha256')):
         raise ValueError('typed adapter executable identity differs')
-    smoke = record.get('protocol')
-    if (not isinstance(smoke, dict) or smoke.get('instrumented') is not False
-            or mode not in smoke.get('modes', []) or smoke.get('engine') != 'wtime'):
-        raise ValueError('typed adapter production mode was not probed')
     return record
 
 
@@ -153,18 +195,14 @@ def create(baseline, output, *, mode='decoded', legacy_api=True):
     before_core = core_identities(frozen)
     before_harness = harness_identities()
     before_manifest = sha(baseline/'manifest.json')
-    if legacy_api and mode != 'decoded':
-        raise ValueError('P001 supports decoded only')
-    if mode not in ('decoded', 'compact'):
-        raise ValueError('unsupported adapter mode')
+    features = adapter_features(mode, legacy_api)
     output.mkdir(parents=True, exist_ok=False)
     shutil.copy2(__file__, output/'helper.executed.py')
     logs = output/'logs'; logs.mkdir()
-    features = ['runtime-only'] + (['legacy-api'] if legacy_api else []) + (
-        ['compact-executor'] if mode == 'compact' else [])
     feature_lines = 'default = '+json.dumps(features)+'\nruntime-only = []\nlegacy-api = []\n'
     if not legacy_api:
         feature_lines += 'compact-executor = ["wtime-runtime/compact-executor"]\n'
+        feature_lines += 'register-executor = ["wtime-runtime/register-executor"]\n'
     runtime = baseline/'source/crates/wtime-runtime'
     types = baseline/'source/crates/wtime-types'
     cargo = ('[package]\nname = "wtime-frozen-typed"\nversion = "0.1.0"\n'
@@ -188,11 +226,10 @@ def create(baseline, output, *, mode='decoded', legacy_api=True):
             shutil.copy2(source, dest)
     # A fresh target prevents old archive timestamps reusing candidate objects.
     with tempfile.TemporaryDirectory(prefix='p123-build-', dir=output.parent) as target:
-        env = dict(os.environ, CARGO_TARGET_DIR=target)
         manifest = str(output/'Cargo.toml')
-        _run(['cargo','generate-lockfile','--offline','--manifest-path',manifest], ROOT, logs, 'lock', env)
+        _run(['cargo','generate-lockfile','--offline','--manifest-path',manifest], ROOT, logs, 'lock')
         metadata = json.loads(_run(['cargo','metadata','--locked','--offline','--format-version','1',
-                                  '--manifest-path',manifest], ROOT, logs, 'metadata', env))
+                                  '--manifest-path',manifest], ROOT, logs, 'metadata'))
         packages = metadata['packages']
         if {p['name'] for p in packages} != {*CORE, 'wtime-frozen-typed'} or any(p['source'] is not None for p in packages):
             raise ValueError('typed adapter resolved external/substituted dependencies')
@@ -200,7 +237,8 @@ def create(baseline, output, *, mode='decoded', legacy_api=True):
         for name, path in resolution.items():
             if path != str(baseline/'source/crates'/name/'Cargo.toml'):
                 raise ValueError('typed adapter resolved a current core crate')
-        _run(['cargo','build','--locked','--offline','--release','--manifest-path',manifest,'-j','4'], ROOT, logs, 'build', env)
+        _run(['cargo','build','--locked','--offline','--release','--manifest-path',manifest,
+              '-j','4',*_cargo_target_args(target)], ROOT, logs, 'build')
         (output/'binary').mkdir()
         shutil.copy2(Path(target)/'release/wtime-frozen-typed', output/'binary/wtime-bench')
     protocol = json.loads(_run([str(output/'binary/wtime-bench'),'--protocol'], ROOT, logs, 'protocol'))
@@ -232,7 +270,7 @@ def main():
     parser.add_argument('operation', choices=['build','verify'])
     parser.add_argument('--baseline', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--mode', choices=['decoded','compact'], default='decoded')
+    parser.add_argument('--mode', choices=['decoded','compact','register'], default='decoded')
     parser.add_argument('--current-api', action='store_true')
     args=parser.parse_args()
     record = create(args.baseline,args.output,mode=args.mode,legacy_api=not args.current_api) if args.operation=='build' else verify(args.output,args.baseline)

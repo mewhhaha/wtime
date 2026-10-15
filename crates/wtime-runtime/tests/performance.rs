@@ -1,5 +1,7 @@
 #[path = "performance/p016.rs"]
 mod p016;
+#[path = "performance/p066.rs"]
+mod p066;
 #[path = "performance/p017.rs"]
 mod p017;
 #[path = "performance/p018.rs"]

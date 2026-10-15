@@ -154,7 +154,8 @@ def check_observation(entry, observation, mode, root, stage=None, thread_cpus=No
         need(len(raw) == reference.get('raw_bytes') and hashlib.sha256(raw).hexdigest() == reference.get('raw_sha256'),
              'representative raw image changed')
         wire = dict(observation['raw_wire_observation'],memory_hex=raw.hex())
-        verified = timer.validate_observation(entry,wire,model,scaling,observation['batch'],expected_mode=mode)
+        verified = timer.validate_observation(entry,wire,model,scaling,observation['batch'],expected_mode=mode,
+            register_entry_threshold=observation.get('register_entry_threshold'))
         need(verified['validated_memory_proof'] == observation['validated_memory_proof'], 'representative image oracle differs')
 
 
@@ -183,6 +184,14 @@ def validate_fuel_setting(setting, entries, identities, capabilities):
         need(capabilities[side].get('source_fuel_contract') == p127_fuel_policy.protocol_contract(),
              'both paired sides require the same explicit source-fuel contract')
     return setting
+
+
+def validate_entry_observation(observation, threshold):
+    import p140_entry_policy
+    p140_entry_policy.validate_wire(observation, threshold)
+    for key in ('wire_observation', 'raw_wire_observation'):
+        if key in observation:
+            p140_entry_policy.validate_wire(observation[key], threshold)
 
 
 def validate_entry_setting(declaration, settings, identities, capabilities):
@@ -305,8 +314,7 @@ def validate(path):
                 need(pair['baseline']['batch'] == pair['candidate']['batch'], 'unequal paired batches')
                 for side in ('baseline','candidate'):
                     threshold = entry_setting[side] if entry_setting is not None else None
-                    p140_entry_policy.validate_wire(pair[side], threshold)
-                    p140_entry_policy.validate_wire(pair[side].get('wire_observation', pair[side]), threshold)
+                    validate_entry_observation(pair[side], threshold)
                     check_observation(entry,pair[side],settings[side+'_mode'],path.parent,stage=stage,
                                       thread_cpus=thread_cpus, fuel_setting=explicit_fuel)
                     if (stage not in ('warm_call','run_after_setup')
@@ -331,6 +339,7 @@ def validate(path):
     need(len(probes) == len(needed_probes) and {(row['workload'],row['side']) for row in probes} == needed_probes,
          'selected input correctness probes are incomplete')
     for row in probes:
+        validate_entry_observation(row['observation'], entry_setting[row['side']] if entry_setting is not None else None)
         need(row.get('timing_excluded') is True and row['observation']['result'] == expected(by_id[row['workload']]),
              'untimed input oracle differs')
         check_observation(by_id[row['workload']],row['observation'],settings[row['side']+'_mode'],
@@ -354,6 +363,7 @@ def validate(path):
                  'calibration did not actually reach 20 ms on both sides')
         for attempt in row['attempts']:
             for side in ('baseline','candidate'):
+                validate_entry_observation(attempt['observations'][side], entry_setting[side] if entry_setting is not None else None)
                 check_observation(by_id[row['workload']],attempt['observations'][side],settings[side+'_mode'],
                                   path.parent,stage=row['stage'],thread_cpus=thread_cpus,
                                   fuel_setting=explicit_fuel)

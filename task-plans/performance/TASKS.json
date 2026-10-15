@@ -82465,8 +82465,8 @@
       "key": "function-boundary-tiering",
       "title": "Compile register code lazily at bounded function thresholds",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -82495,15 +82495,27 @@
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
         "crates/wtime-runtime/src/lib.rs",
-        "crates/wtime-runtime/tests/performance/p066.rs"
+        "crates/wtime-runtime/tests/performance/p066.rs",
+        "docs/benchmarks/performance/P066-selection.json",
+        "docs/benchmarks/performance/P066-contract.json",
+        "docs/benchmarks/performance/P066-verification.json",
+        "tools/verification/producers/p066.py",
+        "tools/verification/producers/p066_driver_tests.py",
+        "tools/verification/producers/p066_freeze.py",
+        "tools/verification/producers/p066_protocol.py",
+        "tools/verification/producers/p066_gate.py",
+        "tools/wtime-bench/tests/test_p066_adapter.py",
+        "tools/wtime-bench/tests/test_p066_representative.py",
+        "tools/verification/tests/test_p066_gate.py"
       ],
-      "input_output_contract": "An opt-in adaptive policy counts bounded function entries and promotes at an invocation/call boundary using measured thresholds. No mid-loop OSR is attempted; failed/unsupported compilation keeps portable execution.",
+      "input_output_contract": "An opt-in adaptive policy counts bounded function entries and promotes at an invocation/call boundary at the predeclared threshold 3. Eager threshold 0 is the baseline. No mid-loop OSR is attempted; failed/unsupported compilation keeps portable execution. P139 totals and P142 cold/churn evidence supplement but do not replace focused measurements or existing semantic and budget gates.",
       "implementation_steps": [
-        "Before runtime edits, create docs/benchmarks/performance/P066-selection.json and docs/benchmarks/performance/P066-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
-        "Keep saturating hotness counters bounded per retained function, choose thresholds from measured preparation/savings and record tier transitions diagnostically.",
+        "Before runtime edits, freeze the immediate-predecessor P066-before archive, docs/benchmarks/performance/P066-selection.json, and P066-contract.json. Threshold 3 versus eager 0 is predeclared and is not tuned from results; retain protected cold controls and the frozen P135/P138 protocols.",
+        "Keep saturating hotness counters bounded per retained function, implement the predeclared threshold policy, and record tier transitions diagnostically.",
         "Compile/publish immutable register artifacts transactionally outside canonical/cache locks; synchronize duplicate attempts and account optimizer work/code bytes.",
-        "Use a deterministic negative-result/cooldown policy for ineligible or transient-failed compilation, with bounded cache eviction and no retry on every call.",
-        "Measure 1/10/100/10000-call totals, cold-code distributions and eviction/recompile spikes, retaining explicit policy settings in reports.",
+        "Measure frozen 1/10/100/10000-call counter rows and the uniform66 cold/churn schedule at threshold 3 using two independent runs, 30 complete pairs per row/run, seeds 66001 and 66002, and 10,000 deterministic paired bootstrap resamples.",
+        "Run the shared four-phase P066 verification contract. Compute focused statistics once and combine the source-bound entry-total and cold/churn analyses in one final proof; preserve all semantic, focused-stage, control, build/dependency, provenance, and promotion gates.",
+        "Forward the explicit `register` setting through the harness/policy integrator and record actual optimized/fallback counts. Persistent research selectors are nondefault; reversible changes to an existing tier use before/after artifacts and are selected only by their gate.",
         "Forward the explicit `register` setting through the harness/policy integrator and record actual optimized/fallback counts. Persistent research selectors are nondefault; reversible changes to an existing tier use before/after artifacts and are selected only by their gate."
       ],
       "fixture_cases": [
@@ -82527,15 +82539,17 @@
         "reasoning_effort": "low"
       },
       "test_commands": [
-        "cargo test --locked -p wtime-runtime --features register-executor,execution-reference p066_ -- --nocapture",
-        "cargo build --locked --release --manifest-path tools/wtime-bench/Cargo.toml --features register-executor -j 4",
-        "python3 tools/checks/build_budget.py --output target/performance/P066/build.json",
-        "python3 tools/checks/build_budget.py --features wtime-runtime/register-executor --output target/performance/P066/optional-build.json",
         "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P066-verification.json",
-        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P066-verification.json --output target/performance/P066/complete --execute"
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P066-verification.json --output target/performance/P066/shared-finalization --execute"
       ],
       "path": "05-register-executor/P066-function-boundary-tiering.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P066/shared-finalization/attempt-0004/evidence.json",
+          "sha256": "d5a337a5ad6fac7868ae7fda541c4654c13b61a9e92ddb94cf3202ec6869040e",
+          "bytes": 2493
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -82548,9 +82562,23 @@
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
       "before_edit_commands": [
-        "python3 tools/wtime-bench/baseline.py --output target/performance/P066-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P066-selection.json target/performance/P066-before/manifest.json --output target/performance/P066/selection-freeze.json"
-      ]
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P066-verification.json"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P066/shared-finalization/attempt-0004/evidence.json": "d5a337a5ad6fac7868ae7fda541c4654c13b61a9e92ddb94cf3202ec6869040e"
+        },
+        "evidence": [
+          {
+            "bytes": 2493,
+            "path": "/workspace/wtime/target/performance/P066/shared-finalization/attempt-0004/evidence.json",
+            "sha256": "d5a337a5ad6fac7868ae7fda541c4654c13b61a9e92ddb94cf3202ec6869040e"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P066"
+      }
     },
     {
       "id": "P067",

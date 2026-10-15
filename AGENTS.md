@@ -38,6 +38,12 @@ packaging changes; rerun only phases whose consumed inputs changed. Preserve
 all task-required semantic cases. Publish status through the shared publisher
 after reviewing its concrete completion record.
 
+Run quick Python and protocol checks before expensive builds in a new contract.
+When a selection requires named Cargo tests, make `cargo test` a direct phase
+command so the semantic receipt can see its results. A helper may first prepare
+an isolated Cargo manifest; keep the test command explicit. Nested Cargo output
+inside a Python helper does not satisfy the semantic receipt's named-test set.
+
 Iterate with `tools/verify.py dev` and task-owned `development.groups`; use
 locked incremental tests/checks and exact feature configurations. Development
 receipts cannot satisfy full phases or publish completion. Run `tools/verify.py
