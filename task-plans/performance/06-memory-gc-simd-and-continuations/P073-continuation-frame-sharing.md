@@ -1,8 +1,8 @@
 # P073 — Share immutable continuation metadata and bound snapshot copies
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -34,25 +34,29 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C6, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).
 
+- `crates/wtime-runtime/src/lib.rs`
+- `crates/wtime-runtime/src/linker.rs`
+- `crates/wtime-runtime/src/execution.rs`
+- `crates/wtime-runtime/src/reference.rs`
+- `crates/wtime-runtime/src/execution/cursor.rs`
+- `crates/wtime-runtime/src/execution/register/execute.rs`
+- `crates/wtime-runtime/src/execution/compact/lower_control.rs`
 - `crates/wtime-runtime/src/continuation.rs`
-- `crates/wtime-runtime/src/execution/activation.rs`
 - `crates/wtime-runtime/tests/performance/p073.rs`
 
 One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.
 
 ## Input/output contract
 
-Continuation capture moves owned activation segments and shares immutable function/catch metadata; reference edge snapshots stay complete and numeric values are not duplicated solely for tracing.
+Continuation capture moves detached segments, shares immutable function and catch metadata, and snapshots every reference edge without duplicating numeric tracing state. Preserve owned public API return types, continuation-owned signatures and arguments, and all existing fuel, one-shot, exactness, and byte-budget semantics.
 
 ## Implementation recipe
 
-0. Before runtime edits, create docs/benchmarks/performance/P073-selection.json and docs/benchmarks/performance/P073-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.
-
-1. Confirm current capture already moves frame/operand vectors, then target only remaining signature/catch/root duplication rather than promising a nonexistent full-frame copy elimination.
-2. Use retained immutable handles and typed reference-only root snapshots while keeping prompts and captured operands owned and detached.
-3. Update retained-byte ledger and resume ownership transitions; do not add copy-on-write mutable locals or lazy root discovery in this task.
-4. Measure capture depth/value/root scaling and collection of captured references, comparing physical retained bytes as well as latency.
-5. Record the changed path with focused assertions/diagnostic counts and exact source/binary identities; compare the pre-edit archive, and revert a rejected structural optimization rather than adding a permanent toggle solely for testing.
+0. Complete and validate a paired adapter for the existing P012 continuation rows against the immutable baseline. This is harness foundation work; do not invent or synthesize timing evidence. Only then create docs/benchmarks/performance/P073-selection.json and docs/benchmarks/performance/P073-verification.json, and freeze the exact target small/large, held-out, protected and cold rows with all semantic cases bound to successful full receipts.
+1. Metadata sharing: confirm capture already moves its frame/operand vectors; change Function.ty to shared Arc<FuncType> metadata while preserving public APIs that return owned function types. Replace per-label copied catch vectors with a catch count and resolve immutable catch data from the defining module/body at Label.start - 1 during unwind, with bounds and type checks. Remove only per-frame owned signature/catch capacity from capture_bytes; retain inline frame/label sizes and all signatures/arguments owned by the continuation.
+2. Reference-only tracing snapshots: filter captured-root snapshots and bound-argument GC fields to every Value::Ref variant, while retaining the complete numeric resume state separately. Keep prompts and captured operands owned and detached; do not introduce copy-on-write mutable state or lazy root discovery.
+3. Preserve all existing fuel, one-shot, exactness, byte-budget, and resume ownership behavior. Measure capture depth/value/root scaling and collection of captured references, comparing physical retained bytes as well as latency.
+4. Record the changed paths with focused assertions/diagnostic counts and exact source/binary identities; compare the pre-edit archive, and revert a rejected structural optimization rather than adding a permanent toggle solely for testing.
 
 ## Meaningful cases
 
@@ -112,4 +116,34 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Final result
+
+P073 completed with a **rejected** performance decision. The candidate close passed 458 tests (426 in verification and 32 in analysis), with zero failures or ignored tests. The measurement contains 1,200 pairs across 20 groups and eight rows, with two 30-pair runs (seeds 73001 and 73002) on CPU 1 in decoded, uninstrumented mode. The primary ratios were 0.905544845 [0.864489835, 0.963826801] and 0.935793463 [0.909572262, 0.999599596]. A supported setup regression at `continuation_depth_0` and uncertain protected/cold controls prevented adoption.
+
+At depth 32, prototype accounting changed continuation bytes from 16,816 to 13,848 and GC bytes from 2,128 to 80; those prototype changes were removed. The entire candidate runtime was restored across eight files and its one added test was removed. Current compiled runtime sources match the predecessor; the harness/fixture/protocol foundation remains. Restoration close 0131 passed 357 unit tests (101 default runtime, 173 combined-feature runtime, and 83 validator), verified all 176 archived crate/root inputs, and built a fresh production executable bound to those restored inputs. These are unit suites; exhaustive conformance remains part of the later milestone gates. The P073 budget report is a validated, unpaired comparison: five added and eight changed inputs against the P066 same-core report with an older harness. It does not support a causal build-speed claim.
+
+Analysis attempts 1 and 2 failed at the statistics stage and remain preserved. After fixing stage binding in the analyzer, analysis attempt 3 computed the decision once. Measurement attempt 2 revalidated the original 1,200-pair measurement from attempt 1 without starting guest processes; it collected no new timings.
+
+Candidate result artifacts: [completion](../../../wtime/docs/benchmarks/performance/P073-completion.json), [evidence](../../../wtime/docs/benchmarks/performance/P073-evidence.json), [freeze](../../../wtime/docs/benchmarks/performance/P073-freeze.json), [proof](../../../wtime/docs/benchmarks/performance/P073-proof.json), [statistics](../../../wtime/docs/benchmarks/performance/P073-statistics.json), [build-comparison](../../../wtime/docs/benchmarks/performance/P073-build-comparison.json), [restoration](../../../wtime/docs/benchmarks/performance/P073-restoration.json), [records.json](../../../wtime/docs/benchmarks/performance/P073-records.json.gz). Full failed-attempt history remains available in the retained P073 records.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P073/shared-finalization/attempt-0003/evidence.json": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f"
+  },
+  "evidence": [
+    {
+      "bytes": 2166,
+      "path": "/workspace/wtime/target/performance/P073/shared-finalization/attempt-0003/evidence.json",
+      "sha256": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P073"
+}
+```

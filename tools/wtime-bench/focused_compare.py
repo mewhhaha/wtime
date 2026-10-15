@@ -19,6 +19,7 @@ import baseline
 import checkpoint
 import cold_products
 import compare
+import continuation_pairing
 import execution_identity
 import selection_manifest
 
@@ -79,13 +80,15 @@ def sources():
         source_map[str(path.relative_to(ROOT))] = compare.sha(path)
     # The live-continuation driver reuses the immutable P012 depth-zero WAT
     # and encoded Wasm as production inputs, so bind both fixture bytes too.
-    for path in (HERE/'fixtures'/'continuations').glob('depth_0.*'):
+    for path in (HERE/'fixtures'/'continuations').glob('*'):
         if path.suffix in ('.wat', '.wasm'):
             source_map[str(path.relative_to(ROOT))] = compare.sha(path)
     return execution_identity.project(source_map, focused=True)
 
 
 def profile(entry):
+    if continuation_pairing.matches(entry):
+        return 'all-phase3-core'
     module = entry['oracle'].get('module')
     if module in ('gc_workloads.py', 'gc_collect_workloads.py'):
         return 'all-phase3-core'
@@ -173,6 +176,19 @@ def products(entries, declaration, settings):
                      'protocol_sha256': compare.sha(HERE/'src/protocol.rs'),
                      'scalar_sha256': compare.sha(HERE/'src/scalar_driver.rs'),
                      'memory_sha256': compare.sha(HERE/'src/memory_driver.rs')}
+            if continuation_pairing.matches(entry):
+                need(stage in entry['stages'] and stage in ('setup', 'capture', 'bind', 'resume'),
+                     'unsupported paired continuation timer stage')
+                need(settings.get('baseline_mode') == 'decoded'
+                     and settings.get('candidate_mode') == 'decoded',
+                     'paired continuation products require decoded mode')
+                timer.update({'model_sha256': compare.sha(HERE/'continuation_workloads.py'),
+                              'validator_sha256': compare.sha(HERE/'continuation_pairing.py'),
+                              'lifecycle_validator_sha256': compare.sha(HERE/'continuation_scaling.py'),
+                              'driver_sha256': compare.sha(HERE/'src/continuation_driver.rs'),
+                              'fixture_wat_sha256': entry['source']['sha256'],
+                              'fixture_wasm_sha256': entry['source']['wasm_sha256'],
+                              'measurement_policy': 'decoded; exact selected lifecycle interval; fresh process; batch one'})
             if module == 'gc_workloads.py':
                 timer.update({'adapter_sha256': compare.sha(HERE/'gc_cold_adapter.py'),
                               'gc_validator_sha256': compare.sha(HERE/'gc_scaling.py'),
@@ -251,6 +267,16 @@ def prepare_fixtures(entries, frozen, output, encoder):
     import subprocess
     for entry in entries:
         source = entry['source']
+        if continuation_pairing.matches(entry):
+            continuation_pairing.expected(entry)
+            wat = HERE/source['path']
+            wasm = wat.with_suffix('.wasm')
+            need(wat.is_file() and compare.sha(wat) == source['sha256'],
+                 'continuation WAT source changed: '+entry['id'])
+            need(wasm.is_file() and compare.sha(wasm) == source['wasm_sha256'],
+                 'continuation immutable Wasm fixture changed: '+entry['id'])
+            fixtures[entry['id']] = wasm
+            continue
         if entry['oracle'].get('module') == 'gc_workloads.py':
             import gc_workloads
             wat = HERE/source['path']
@@ -361,6 +387,12 @@ def prepare_fixtures(entries, frozen, output, encoder):
 def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
             thread_cpus=None, fuel_setting=None, register_entry_threshold=None):
     module = entry['oracle'].get('module')
+    if continuation_pairing.matches(entry):
+        need(register_entry_threshold is None and fuel_setting is None,
+             'paired continuation driver has fixed fuel and entry policy')
+        wire = compare.process(executable, continuation_pairing.argv(entry, wasm, mode), cpu)
+        return continuation_pairing.validate_observation(
+            entry, wire, batch, expected_mode=mode, expected_stage=stage)
     n = input_value(entry)
     entry_options = ({'register_entry_threshold': register_entry_threshold}
                      if register_entry_threshold is not None else {})
@@ -742,7 +774,7 @@ def run(args):
                 stage = 'prepare'
             elif module == 'representative_workloads.py':
                 stage = 'run_after_setup'
-            elif module == 'continuation_live_workloads.py':
+            elif module == 'continuation_live_workloads.py' or continuation_pairing.matches(entry):
                 stage = 'setup'
             else:
                 stage = 'load_and_call'
@@ -765,7 +797,8 @@ def run(args):
                 thread_stage = entry['oracle'].get('module') == 'thread_workloads.py' and stage == 'steady_state_group'
                 shared_bulk_stage = entry['oracle'].get('module') == 'shared_bulk_workloads.py' and stage == 'steady_state_group'
                 wait_queue_stage = entry['oracle'].get('module') == 'wait_queue_workloads.py' and stage == 'steady_state_group'
-                live_stage = entry['oracle'].get('module') == 'continuation_live_workloads.py'
+                live_stage = (entry['oracle'].get('module') == 'continuation_live_workloads.py'
+                              or continuation_pairing.matches(entry))
                 if not args.smoke and not live_stage and (stage in ('warm_call', 'run_after_setup') or thread_stage or shared_bulk_stage or wait_queue_stage):
                     cal_seed = seed_for('calibration', run_id, wid, stage)
                     batch, audit = calibrate(entry, lambda side, n:call(side, wid, stage, n, seed=cal_seed))
@@ -785,6 +818,8 @@ def run(args):
                     elif entry['oracle'].get('module') == 'continuation_live_workloads.py':
                         import continuation_live_workloads as model
                         pair['expected'] = model.oracle(entry['id'], input_value(entry))
+                    elif continuation_pairing.matches(entry):
+                        pair['expected'] = continuation_pairing.expected(entry)
                     else:
                         pair['expected'] = pair['baseline']['result']
                     if entry['oracle'].get('module') != 'continuation_live_workloads.py':

@@ -1,0 +1,107 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P073",
+  "lane": "candidate",
+  "rationale": "Predeclare small/large continuation depth capture targets, a held-out captured-reference lifecycle, zero-wrapper and bound-chain controls, scalar warm calls and mandatory tiny/large preparation controls. Each continuation observation is an unbatched fresh-process full lifecycle with a separately selected setup/capture/bind/resume interval. Capture is primary. Two decoded runs use seeds 73001/73002 on CPU 1.",
+  "registry_sha256": "474b1fce96ce1302fe78885c8385eb592b1111ff912fd7f1b2c56763683ed0d9",
+  "rows": [
+    {
+      "family": "continuations",
+      "id": "continuation_depth_4",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "24205b858a520d88051a9b4f84211f5f9258923c890a8fc075ae48d6f060713d"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_depth_32",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "e19d63163ba230d76f6ffb71cd852f8f97cefc8fd5e58fa92ac0e377b5086b58"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_captured_reference",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "01385435a0937eeef0878d0c4bdb1185b48a11c53bfa671ad81de52af1de2281"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_depth_0",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "862e7337f25a4e4dd289d85b96ed8166cf8bfeaf8c01dea105311e00b5faf4e8"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_bound_nested",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "bind",
+        "resume"
+      ],
+      "row_sha256": "f53f2368bd29a3c535a40e3aebaf92c9cc0ea66056f47839cb739f2447986b31"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_dynamic_api_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "97fac9834e628c16f08a914017be980f202e89942695bab37de43495c221887f"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p073_frames_share_immutable_function_metadata",
+    "p073_catches_survive_module_handles_drop",
+    "p073_captured_and_bound_roots_preserve_reference_values",
+    "p073_capture_retains_exact_fuel_and_budget_limits"
+  ]
+}

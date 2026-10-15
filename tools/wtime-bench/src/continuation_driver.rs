@@ -127,6 +127,7 @@ fn capture_resume(
     let setup_ns = ns_since(setup_start);
 
     let before_capture_bytes = store.continuation_bytes();
+    let before_capture_gc_bytes = store.gc_payload_bytes();
     let capture_start = Instant::now();
     let captured = store
         .invoke(run, black_box(&[]))
@@ -146,6 +147,7 @@ fn capture_resume(
     );
     let payload_wire = wire_values(&payload);
     let after_capture_bytes = store.continuation_bytes();
+    let after_capture_gc_bytes = store.gc_payload_bytes();
     assert!(
         after_capture_bytes > before_capture_bytes,
         "capture retained no continuation bytes"
@@ -158,6 +160,7 @@ fn capture_resume(
     store.release_published(&payload);
     store.release_published(&[Value::Ref(wtime_runtime::RefValue::Gc(continuation))]);
     let after_root_transfer_bytes = store.continuation_bytes();
+    let after_root_transfer_gc_bytes = store.gc_payload_bytes();
     assert_eq!(after_root_transfer_bytes, after_capture_bytes);
     let collect_with_root = store
         .collect()
@@ -183,10 +186,12 @@ fn capture_resume(
     let result_wire = wire_values(&results);
     store.release_published(&results);
     let after_resume_bytes = store.continuation_bytes();
+    let after_resume_gc_bytes = store.gc_payload_bytes();
 
     drop(root);
     let collect_after_drop = store.collect().expect("collection after root drop failed");
     let after_drop_and_collect_bytes = store.continuation_bytes();
+    let after_drop_and_collect_gc_bytes = store.gc_payload_bytes();
     assert_eq!(
         after_drop_and_collect_bytes, 0,
         "consumed continuation storage was retained"
@@ -194,7 +199,7 @@ fn capture_resume(
     assert_eq!(collect_after_drop.live, 0);
 
     format!(
-        "{{\"schema_version\":2,\"case\":{},\"driver\":{},\"mode\":{},\"profile\":{},\"instrumented\":false,\"setup_ns\":{setup_ns:.3},\"capture_ns\":{capture_ns:.3},\"resume_ns\":{resume_ns:.3},\"payload\":{},\"result\":{},\"logical_frames\":{logical_frames},\"bytes_per_captured_frame\":{},\"numeric_locals\":{numeric_locals},\"continuation_bytes\":{{\"before_capture\":{before_capture_bytes},\"after_capture\":{after_capture_bytes},\"after_root_transfer\":{after_root_transfer_bytes},\"after_resume\":{after_resume_bytes},\"after_drop_and_collect\":{after_drop_and_collect_bytes}}},\"collection_with_root\":{{\"live\":{},\"reclaimed\":{}}},\"collection_after_drop\":{{\"live\":{},\"reclaimed\":{}}}}}",
+        "{{\"schema_version\":2,\"case\":{},\"driver\":{},\"mode\":{},\"profile\":{},\"instrumented\":false,\"measurement_boundary\":\"Store::gc_payload_bytes sampled outside named timed intervals\",\"setup_ns\":{setup_ns:.3},\"capture_ns\":{capture_ns:.3},\"resume_ns\":{resume_ns:.3},\"payload\":{},\"result\":{},\"logical_frames\":{logical_frames},\"bytes_per_captured_frame\":{},\"numeric_locals\":{numeric_locals},\"continuation_bytes\":{{\"before_capture\":{before_capture_bytes},\"after_capture\":{after_capture_bytes},\"after_root_transfer\":{after_root_transfer_bytes},\"after_resume\":{after_resume_bytes},\"after_drop_and_collect\":{after_drop_and_collect_bytes}}},\"gc_payload_bytes\":{{\"before_capture\":{before_capture_gc_bytes},\"after_capture\":{after_capture_gc_bytes},\"after_root_transfer\":{after_root_transfer_gc_bytes},\"after_resume\":{after_resume_gc_bytes},\"after_drop_and_collect\":{after_drop_and_collect_gc_bytes}}},\"collection_with_root\":{{\"live\":{},\"reclaimed\":{}}},\"collection_after_drop\":{{\"live\":{},\"reclaimed\":{}}}}}",
         super::quote(case),
         super::quote(driver),
         super::quote(mode),
@@ -280,10 +285,12 @@ fn run_bound(bytes: &[u8], case: &str, mode: &str, profile: &str) -> String {
     let clear = exported_func(instance, &store, "clear");
     let setup_ns = ns_since(start);
     let before = store.continuation_bytes();
+    let before_gc = store.gc_payload_bytes();
     let start = Instant::now();
     plain(&mut store, bind, &[Value::I32(0)]);
     let bind_ns = ns_since(start);
     let after_bind = store.continuation_bytes();
+    let after_bind_gc = store.gc_payload_bytes();
     assert!(after_bind > 0);
     plain(&mut store, calls, &[Value::I32(0)]);
     let start = Instant::now();
@@ -291,13 +298,15 @@ fn run_bound(bytes: &[u8], case: &str, mode: &str, profile: &str) -> String {
     let resume_ns = ns_since(start);
     plain(&mut store, calls, &[Value::I32(1)]);
     let after_run = store.continuation_bytes();
+    let after_run_gc = store.gc_payload_bytes();
     plain(&mut store, clear, &[Value::I32(0)]);
     let collect = store.collect().unwrap();
     let after_collect = store.continuation_bytes();
+    let after_collect_gc = store.gc_payload_bytes();
     assert_eq!(after_collect, 0);
     assert_eq!(collect.live, 0);
     format!(
-        "{{\"schema_version\":2,\"case\":{},\"driver\":\"bind\",\"mode\":{},\"profile\":{},\"instrumented\":false,\"setup_ns\":{setup_ns},\"bind_ns\":{bind_ns},\"resume_ns\":{resume_ns},\"bind_result\":\"i32:0\",\"result\":{},\"worker_calls\":1,\"continuation_bytes\":{{\"before\":{before},\"after_bind\":{after_bind},\"after_run\":{after_run},\"after_collect\":{after_collect}}},\"collection\":{{\"live\":{},\"reclaimed\":{}}}}}",
+        "{{\"schema_version\":2,\"case\":{},\"driver\":\"bind\",\"mode\":{},\"profile\":{},\"instrumented\":false,\"measurement_boundary\":\"Store::gc_payload_bytes sampled outside named timed intervals\",\"setup_ns\":{setup_ns},\"bind_ns\":{bind_ns},\"resume_ns\":{resume_ns},\"bind_result\":\"i32:0\",\"result\":{},\"worker_calls\":1,\"continuation_bytes\":{{\"before\":{before},\"after_bind\":{after_bind},\"after_run\":{after_run},\"after_collect\":{after_collect}}},\"gc_payload_bytes\":{{\"before_bind\":{before_gc},\"after_bind\":{after_bind_gc},\"after_run\":{after_run_gc},\"after_collect\":{after_collect_gc}}},\"collection\":{{\"live\":{},\"reclaimed\":{}}}}}",
         super::quote(case),
         super::quote(mode),
         super::quote(profile),
@@ -329,10 +338,12 @@ fn run_one_shot(bytes: &[u8], case: &str, mode: &str, profile: &str) -> String {
     let clear = exported_func(instance, &store, "clear");
     let setup_ns = ns_since(start);
     let before = store.continuation_bytes();
+    let before_gc = store.gc_payload_bytes();
     let start = Instant::now();
     plain(&mut store, capture, &[Value::I32(0)]);
     let capture_ns = ns_since(start);
     let after_capture = store.continuation_bytes();
+    let after_capture_gc = store.gc_payload_bytes();
     assert!(after_capture > 0);
     let start = Instant::now();
     plain(&mut store, first, &[Value::I32(1)]);
@@ -346,13 +357,15 @@ fn run_one_shot(bytes: &[u8], case: &str, mode: &str, profile: &str) -> String {
     assert_eq!(error.kind, ErrorKind::Trap);
     assert!(error.message.contains("continuation"));
     let after_trap = store.continuation_bytes();
+    let after_trap_gc = store.gc_payload_bytes();
     plain(&mut store, clear, &[Value::I32(0)]);
     let collect = store.collect().unwrap();
     let after_collect = store.continuation_bytes();
+    let after_collect_gc = store.gc_payload_bytes();
     assert_eq!(after_collect, 0);
     assert_eq!(collect.live, 0);
     format!(
-        "{{\"schema_version\":2,\"case\":{},\"driver\":\"oneshot\",\"mode\":{},\"profile\":{},\"instrumented\":false,\"setup_ns\":{setup_ns},\"capture_ns\":{capture_ns},\"resume_once_ns\":{resume_once_ns},\"resume_reuse_ns\":{resume_reuse_ns},\"first_result\":\"i32:1\",\"result\":\"trap\",\"error_kind\":\"Trap\",\"error_message\":{},\"continuation_bytes\":{{\"before\":{before},\"after_capture\":{after_capture},\"after_trap\":{after_trap},\"after_collect\":{after_collect}}},\"collection\":{{\"live\":{},\"reclaimed\":{}}}}}",
+        "{{\"schema_version\":2,\"case\":{},\"driver\":\"oneshot\",\"mode\":{},\"profile\":{},\"instrumented\":false,\"measurement_boundary\":\"Store::gc_payload_bytes sampled outside named timed intervals\",\"setup_ns\":{setup_ns},\"capture_ns\":{capture_ns},\"resume_once_ns\":{resume_once_ns},\"resume_reuse_ns\":{resume_reuse_ns},\"first_result\":\"i32:1\",\"result\":\"trap\",\"error_kind\":\"Trap\",\"error_message\":{},\"continuation_bytes\":{{\"before\":{before},\"after_capture\":{after_capture},\"after_trap\":{after_trap},\"after_collect\":{after_collect}}},\"gc_payload_bytes\":{{\"before_capture\":{before_gc},\"after_capture\":{after_capture_gc},\"after_trap\":{after_trap_gc},\"after_collect\":{after_collect_gc}}},\"collection\":{{\"live\":{},\"reclaimed\":{}}}}}",
         super::quote(case),
         super::quote(mode),
         super::quote(profile),
@@ -403,6 +416,7 @@ fn run_cross_module(
     let setup_ns = ns_since(setup_start);
 
     let before = store.continuation_bytes();
+    let before_gc = store.gc_payload_bytes();
     let start = Instant::now();
     let captured = store
         .invoke(run, black_box(&[]))
@@ -421,10 +435,12 @@ fn run_cross_module(
         "cross-module suspension payload must be empty"
     );
     let after_capture = store.continuation_bytes();
+    let after_capture_gc = store.gc_payload_bytes();
     assert!(after_capture > before);
     let root = store.root(continuation).expect("cross-module root failed");
     store.release_published(&[Value::Ref(wtime_runtime::RefValue::Gc(continuation))]);
     let after_transfer = store.continuation_bytes();
+    let after_transfer_gc = store.gc_payload_bytes();
     assert_eq!(after_transfer, after_capture);
     let collection = store
         .collect()
@@ -448,11 +464,13 @@ fn run_cross_module(
         store.release_published(values);
     }
     let after_resume = store.continuation_bytes();
+    let after_resume_gc = store.gc_payload_bytes();
     drop(root);
     let cleanup = store
         .collect()
         .expect("cross-module cleanup collection failed");
     let after_cleanup = store.continuation_bytes();
+    let after_cleanup_gc = store.gc_payload_bytes();
     assert_eq!(after_cleanup, 0);
     let mut negative_store = Store::new(&engine);
     let negative_provider = Linker::new(&engine)
@@ -483,7 +501,7 @@ fn run_cross_module(
     assert_eq!(rejected.kind, ErrorKind::Host);
     negative_store.collect().unwrap();
     format!(
-        "{{\"schema_version\":2,\"case\":\"continuation_cross_module_consumer\",\"driver\":\"cross_module\",\"exact_host_result_rejected\":true,\"exact_host_error_kind\":\"Host\",\"mode\":{},\"profile\":{},\"instrumented\":false,\"setup_ns\":{setup_ns:.3},\"capture_ns\":{capture_ns:.3},\"resume_ns\":{resume_ns:.3},\"payload\":[],\"result\":[\"i32:77\"],\"continuation_bytes\":{{\"before_capture\":{before},\"after_capture\":{after_capture},\"after_root_transfer\":{after_transfer},\"after_resume\":{after_resume},\"after_drop_and_collect\":{after_cleanup}}},\"collection_with_root\":{{\"live\":{},\"reclaimed\":{}}},\"collection_after_drop\":{{\"live\":{},\"reclaimed\":{}}}}}",
+        "{{\"schema_version\":2,\"case\":\"continuation_cross_module_consumer\",\"driver\":\"cross_module\",\"exact_host_result_rejected\":true,\"exact_host_error_kind\":\"Host\",\"mode\":{},\"profile\":{},\"instrumented\":false,\"measurement_boundary\":\"Store::gc_payload_bytes sampled outside named timed intervals\",\"setup_ns\":{setup_ns:.3},\"capture_ns\":{capture_ns:.3},\"resume_ns\":{resume_ns:.3},\"payload\":[],\"result\":[\"i32:77\"],\"continuation_bytes\":{{\"before_capture\":{before},\"after_capture\":{after_capture},\"after_root_transfer\":{after_transfer},\"after_resume\":{after_resume},\"after_drop_and_collect\":{after_cleanup}}},\"gc_payload_bytes\":{{\"before_capture\":{before_gc},\"after_capture\":{after_capture_gc},\"after_root_transfer\":{after_transfer_gc},\"after_resume\":{after_resume_gc},\"after_drop_and_collect\":{after_cleanup_gc}}},\"collection_with_root\":{{\"live\":{},\"reclaimed\":{}}},\"collection_after_drop\":{{\"live\":{},\"reclaimed\":{}}}}}",
         super::quote(mode),
         super::quote(profile),
         collection.live,

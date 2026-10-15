@@ -29,6 +29,7 @@ _ANALYSIS_ONLY = {
 # These are new fast-path planning/execution tools. They are not dependencies
 # of legacy reports; focused reports bind them below.
 _KNOWN_FAST_PATH = {
+    "continuation_pairing.py",
     "cold_products.py", "execution_identity.py", "focused_compare.py",
     "selection_manifest.py", "dataset_cache.py", "candidate_gate.py", "semantic_receipt.py",
     "root_workloads.py", "root_compare.py", "gc_collect_workloads.py", "gc_collect_compare.py", "thread_compare.py",
@@ -58,6 +59,7 @@ _LEGACY_TIMING = {
 }
 
 _FOCUSED_TIMING = {
+    "continuation_pairing.py",
     "cold_products.py", "execution_identity.py", "focused_compare.py",
     "selection_manifest.py", "semantic_receipt.py", "root_workloads.py", "root_compare.py",
     "gc_collect_workloads.py", "gc_collect_compare.py",

@@ -65,6 +65,7 @@ def source_map():
         "tools/wtime-bench/wait_queue_workloads.py": "8" * 64,
         "tools/wtime-bench/gc_collect_workloads.py": "9" * 64,
         "tools/wtime-bench/gc_collect_compare.py": "a" * 64,
+        "tools/wtime-bench/continuation_pairing.py": "b" * 64,
     }
 
 

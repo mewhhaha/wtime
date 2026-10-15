@@ -185,6 +185,29 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
             raise ReportError("live-continuation report omits or substitutes a selected registry row")
         if selected_ids and any(str(pair.get("workload")) not in selected_ids for pair in raw_pairs):
             raise ReportError("P072 report contains a workload outside its frozen selection")
+    continuation_ids = {str(pair.get("workload")) for pair in raw_pairs
+                        if str(pair.get("workload", "")).startswith("continuation_")
+                        and not str(pair.get("workload", "")).startswith("continuation_live_")}
+    continuation_entries = {}
+    continuation_stages = {}
+    if continuation_ids:
+        import continuation_pairing
+        import selection_manifest
+        declaration = report.get("declaration")
+        if (report.get("schema") != "wtime-focused-comparison-v1"
+                or not isinstance(declaration, dict) or declaration.get("task") != report.get("selection")):
+            raise ReportError("paired continuations require their focused selection declaration")
+        try:
+            selected = selection_manifest.rows(declaration)
+            continuation_entries = {entry['id']: entry for entry in selected if continuation_pairing.matches(entry)}
+            for entry in continuation_entries.values():
+                continuation_pairing.expected(entry)
+            continuation_stages = {row['id']: tuple(row['stages']) for row in declaration['rows']
+                                   if row['id'] in continuation_entries}
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ReportError(f"invalid paired-continuation selection: {exc}") from exc
+        if continuation_ids != set(continuation_entries):
+            raise ReportError("paired-continuation rows differ from their selection")
     seen_seeds: set[int] = set()
     result_runs = []
     reference_groups: set[tuple[str, str, str, str]] | None = None
@@ -217,13 +240,23 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
             if live_entry is not None:
                 import continuation_live_workloads as live_model
                 live_stages = live_model.STAGES
+            continuation_entry = continuation_entries.get(str(pair.get("workload")))
+            if continuation_entry is not None:
+                live_stages = continuation_stages[continuation_entry['id']]
             key = _pair_key(pair, run_index, live_stages)
+            if continuation_entry is not None:
+                if key[1] not in live_stages or pair.get('input') != 0 or type(pair.get('input')) is not int:
+                    raise ReportError("paired-continuation stage/input differs from its selection")
+                if key[3] != continuation_entry['source']['wasm_sha256']:
+                    raise ReportError("paired-continuation fixture differs from its selection")
             if key in indexed and any(item["pair_id"] == pair_id for item in indexed[key]):
                 raise ReportError(f"run {run_index} has duplicate pair_id {pair_id!r}")
             expected = pair.get("expected")
             if "expected" not in pair:
                 raise ReportError(f"pair {pair_id!r} is missing expected oracle result")
             _canonical(expected)
+            if continuation_entry is not None and _canonical(expected) != _canonical(continuation_pairing.expected(continuation_entry)):
+                raise ReportError("paired-continuation expected lifecycle differs from its oracle")
             if live_entry is not None:
                 import continuation_live_workloads as live_model
                 input_value = pair.get("input")
@@ -246,6 +279,13 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
                     raise ReportError(f"pair {pair_id!r} is missing {side_name} observation")
                 _finite_number(side.get("ns_per_operation"), f"{side_name} ns_per_operation", positive=True)
                 _positive_int(side.get("batch"), f"{side_name} batch")
+                if continuation_entry is not None:
+                    try:
+                        continuation_pairing.revalidate_observation(continuation_entry, side)
+                    except (ValueError, KeyError, TypeError) as exc:
+                        raise ReportError(f"paired-continuation observation is invalid: {exc}") from exc
+                    if side.get('stage') != key[1]:
+                        raise ReportError("paired-continuation observation stage differs")
                 if live_entry is not None:
                     import continuation_live_workloads as live_model
                     wire = side.get("raw_wire_observation")
@@ -289,6 +329,12 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
         if len(pair_ids) == 0:
             raise ReportError(f"run {run_index} has no observations")
         groups = set(indexed)
+        if continuation_entries:
+            wanted_groups = {(entry['id'], stage, '0', entry['source']['wasm_sha256'])
+                             for entry in continuation_entries.values()
+                             for stage in continuation_stages[entry['id']]}
+            if {group for group in groups if group[0] in continuation_entries} != wanted_groups:
+                raise ReportError("paired-continuation groups differ from their declared schedule")
         if focused_p072 or legacy_live_selection:
             expected_live_groups = {
                 (entry["id"], stage,

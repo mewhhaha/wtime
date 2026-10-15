@@ -83345,8 +83345,8 @@
       "key": "continuation-frame-sharing",
       "title": "Share immutable continuation metadata and bound snapshot copies",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -83362,18 +83362,23 @@
         "P072"
       ],
       "owned_paths": [
+        "crates/wtime-runtime/src/lib.rs",
+        "crates/wtime-runtime/src/linker.rs",
+        "crates/wtime-runtime/src/execution.rs",
+        "crates/wtime-runtime/src/reference.rs",
+        "crates/wtime-runtime/src/execution/cursor.rs",
+        "crates/wtime-runtime/src/execution/register/execute.rs",
+        "crates/wtime-runtime/src/execution/compact/lower_control.rs",
         "crates/wtime-runtime/src/continuation.rs",
-        "crates/wtime-runtime/src/execution/activation.rs",
         "crates/wtime-runtime/tests/performance/p073.rs"
       ],
-      "input_output_contract": "Continuation capture moves owned activation segments and shares immutable function/catch metadata; reference edge snapshots stay complete and numeric values are not duplicated solely for tracing.",
+      "input_output_contract": "Continuation capture moves detached segments, shares immutable function and catch metadata, and snapshots every reference edge without duplicating numeric tracing state. Preserve owned public API return types, continuation-owned signatures and arguments, and all existing fuel, one-shot, exactness, and byte-budget semantics.",
       "implementation_steps": [
-        "Before runtime edits, create docs/benchmarks/performance/P073-selection.json and docs/benchmarks/performance/P073-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
-        "Confirm current capture already moves frame/operand vectors, then target only remaining signature/catch/root duplication rather than promising a nonexistent full-frame copy elimination.",
-        "Use retained immutable handles and typed reference-only root snapshots while keeping prompts and captured operands owned and detached.",
-        "Update retained-byte ledger and resume ownership transitions; do not add copy-on-write mutable locals or lazy root discovery in this task.",
-        "Measure capture depth/value/root scaling and collection of captured references, comparing physical retained bytes as well as latency.",
-        "Record the changed path with focused assertions/diagnostic counts and exact source/binary identities; compare the pre-edit archive, and revert a rejected structural optimization rather than adding a permanent toggle solely for testing."
+        "Complete and validate a paired adapter for the existing P012 continuation rows against the immutable baseline. This is harness foundation work; do not invent or synthesize timing evidence. Only then create docs/benchmarks/performance/P073-selection.json and docs/benchmarks/performance/P073-verification.json, and freeze the exact target small/large, held-out, protected and cold rows with all semantic cases bound to successful full receipts.",
+        "Metadata sharing: confirm capture already moves its frame/operand vectors; change Function.ty to shared Arc<FuncType> metadata while preserving public APIs that return owned function types. Replace per-label copied catch vectors with a catch count and resolve immutable catch data from the defining module/body at Label.start - 1 during unwind, with bounds and type checks. Remove only per-frame owned signature/catch capacity from capture_bytes; retain inline frame/label sizes and all signatures/arguments owned by the continuation.",
+        "Reference-only tracing snapshots: filter captured-root snapshots and bound-argument GC fields to every Value::Ref variant, while retaining the complete numeric resume state separately. Keep prompts and captured operands owned and detached; do not introduce copy-on-write mutable state or lazy root discovery.",
+        "Preserve all existing fuel, one-shot, exactness, byte-budget, and resume ownership behavior. Measure capture depth/value/root scaling and collection of captured references, comparing physical retained bytes as well as latency.",
+        "Record the changed paths with focused assertions/diagnostic counts and exact source/binary identities; compare the pre-edit archive, and revert a rejected structural optimization rather than adding a permanent toggle solely for testing."
       ],
       "fixture_cases": [
         "Captured frames are not recycled into invocation pools early.",
@@ -83404,7 +83409,53 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P073-verification.json --output target/performance/P073/complete --execute"
       ],
       "path": "06-memory-gc-simd-and-continuations/P073-continuation-frame-sharing.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P073/shared-finalization/attempt-0003/evidence.json",
+          "sha256": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f",
+          "bytes": 2166
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-completion.json",
+          "sha256": "6888f9a75e90e7daece1aad4f07078e64569468b36d619861033c66a13e6529f",
+          "bytes": 498
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-evidence.json",
+          "sha256": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f",
+          "bytes": 2166
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-freeze.json",
+          "sha256": "04bc18a7dc94d079b7d3e7ceb8654820318f9a7b99703702723e42ec7bc84cfa",
+          "bytes": 21035
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-proof.json",
+          "sha256": "c21b8ce5a536a4dafbf19b56e68b0a26a55f910c931981c3b45a92d78229cb0b",
+          "bytes": 184377
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-statistics.json",
+          "sha256": "7775aad079d56935027ec048bf3f3040470b36aa2b5c5af42ac53bb4280def2a",
+          "bytes": 109194
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-build-comparison.json",
+          "sha256": "55411360ae483544c8a1d910f786de95dbe8de62cd0506c91342e2f1a7e35d1a",
+          "bytes": 7497
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-restoration.json",
+          "sha256": "7204dd418e28b3898c6e80123c1a3c67628546e6e3539ff68e69e20ffdb11b9e",
+          "bytes": 23405
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P073-records.json.gz",
+          "sha256": "f469d4dec51607d8a400b8017c2c894e0da2f2870479c0abcbb6f6d6c5424234",
+          "bytes": 5663026
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -83419,7 +83470,70 @@
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P073-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P073-selection.json target/performance/P073-before/manifest.json target/performance/P073/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P073/shared-finalization/attempt-0003/evidence.json": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f",
+          "/workspace/wtime/docs/benchmarks/performance/P073-completion.json": "6888f9a75e90e7daece1aad4f07078e64569468b36d619861033c66a13e6529f",
+          "/workspace/wtime/docs/benchmarks/performance/P073-evidence.json": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f",
+          "/workspace/wtime/docs/benchmarks/performance/P073-freeze.json": "04bc18a7dc94d079b7d3e7ceb8654820318f9a7b99703702723e42ec7bc84cfa",
+          "/workspace/wtime/docs/benchmarks/performance/P073-proof.json": "c21b8ce5a536a4dafbf19b56e68b0a26a55f910c931981c3b45a92d78229cb0b",
+          "/workspace/wtime/docs/benchmarks/performance/P073-statistics.json": "7775aad079d56935027ec048bf3f3040470b36aa2b5c5af42ac53bb4280def2a",
+          "/workspace/wtime/docs/benchmarks/performance/P073-build-comparison.json": "55411360ae483544c8a1d910f786de95dbe8de62cd0506c91342e2f1a7e35d1a",
+          "/workspace/wtime/docs/benchmarks/performance/P073-restoration.json": "7204dd418e28b3898c6e80123c1a3c67628546e6e3539ff68e69e20ffdb11b9e",
+          "/workspace/wtime/docs/benchmarks/performance/P073-records.json.gz": "f469d4dec51607d8a400b8017c2c894e0da2f2870479c0abcbb6f6d6c5424234"
+        },
+        "evidence": [
+          {
+            "path": "/workspace/wtime/target/performance/P073/shared-finalization/attempt-0003/evidence.json",
+            "sha256": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f",
+            "bytes": 2166
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-completion.json",
+            "sha256": "6888f9a75e90e7daece1aad4f07078e64569468b36d619861033c66a13e6529f",
+            "bytes": 498
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-evidence.json",
+            "sha256": "d279f9c24261fe9587b3a312a252bd83defe68df77f3fba386bc608c3f45c51f",
+            "bytes": 2166
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-freeze.json",
+            "sha256": "04bc18a7dc94d079b7d3e7ceb8654820318f9a7b99703702723e42ec7bc84cfa",
+            "bytes": 21035
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-proof.json",
+            "sha256": "c21b8ce5a536a4dafbf19b56e68b0a26a55f910c931981c3b45a92d78229cb0b",
+            "bytes": 184377
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-statistics.json",
+            "sha256": "7775aad079d56935027ec048bf3f3040470b36aa2b5c5af42ac53bb4280def2a",
+            "bytes": 109194
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-build-comparison.json",
+            "sha256": "55411360ae483544c8a1d910f786de95dbe8de62cd0506c91342e2f1a7e35d1a",
+            "bytes": 7497
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-restoration.json",
+            "sha256": "7204dd418e28b3898c6e80123c1a3c67628546e6e3539ff68e69e20ffdb11b9e",
+            "bytes": 23405
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P073-records.json.gz",
+            "sha256": "f469d4dec51607d8a400b8017c2c894e0da2f2870479c0abcbb6f6d6c5424234",
+            "bytes": 5663026
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P073"
+      }
     },
     {
       "id": "P074",

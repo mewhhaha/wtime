@@ -25,8 +25,11 @@ def need(ok, message):
 
 
 def expected(entry):
+    import continuation_pairing
+    if continuation_pairing.matches(entry):
+        return continuation_pairing.expected(entry)
     import importlib
-    module = entry['oracle']['module'].removesuffix('.py')
+    module = entry['oracle'].get('module').removesuffix('.py')
     model = importlib.import_module(module)
     if entry['id'] == 'prepare_large':
         return None
@@ -41,7 +44,13 @@ def expected(entry):
 
 
 def check_observation(entry, observation, mode, root, stage=None, thread_cpus=None, fuel_setting=None):
-    module = entry['oracle']['module']
+    import continuation_pairing
+    if continuation_pairing.matches(entry):
+        need(observation.get('mode') == mode and observation.get('stage') == stage,
+             'paired continuation mode/stage differs')
+        continuation_pairing.revalidate_observation(entry, observation)
+        return
+    module = entry['oracle'].get('module')
     if module == 'continuation_live_workloads.py':
         import continuation_live_workloads as model
         need(mode == model.MODE and stage in model.STAGES,
@@ -294,13 +303,13 @@ def validate(path):
     by_id = {entry['id']:entry for entry in entries}
     settings = report['metadata']['settings']
     validate_wait_queue_capability(entries, report['metadata'].get('capabilities'))
-    thread_selected = any(entry['oracle']['module'] in
+    thread_selected = any(entry['oracle'].get('module') in
                           ('thread_workloads.py', 'shared_bulk_workloads.py', 'wait_queue_workloads.py')
                           for entry in entries)
     if thread_selected:
         import thread_compare
         thread_cpus = thread_compare.validate_cpu_affinity(settings.get('thread_cpu_affinity'))
-        if any(entry['oracle']['module'] == 'wait_queue_workloads.py' for entry in entries):
+        if any(entry['oracle'].get('module') == 'wait_queue_workloads.py' for entry in entries):
             need(thread_cpus == [1, 2, 3, 4],
                  'wait-queue timing requires the predeclared CPU mask [1, 2, 3, 4]')
         need(report['metadata'].get('hardware', {}).get('thread_cpu_affinity') == thread_cpus,
@@ -378,18 +387,18 @@ def validate(path):
                     check_observation(entry,pair[side],settings[side+'_mode'],path.parent,stage=stage,
                                       thread_cpus=thread_cpus, fuel_setting=explicit_fuel)
                     if (stage not in ('warm_call','run_after_setup')
-                            and not (entry['oracle']['module'] in
+                            and not (entry['oracle'].get('module') in
                                      ('thread_workloads.py', 'shared_bulk_workloads.py', 'wait_queue_workloads.py')
                                      and stage == 'steady_state_group')):
                         need(pair[side]['batch'] == 1, 'cold stage is batched')
-                    if entry['oracle']['module'] == 'memory_workloads.py':
+                    if entry['oracle'].get('module') == 'memory_workloads.py':
                         import memory_workloads
                         exp = memory_workloads.expected_memory(wid, pair['input'])
                         proof = pair[side].get('memory',{})
                         need(proof.get('full_memory_sha256') == exp['full_memory_sha256']
                              and proof.get('all_memory_sha256') == exp.get('all_memory_sha256'),
                              'memory oracle proof differs')
-                if entry['oracle']['module'] == 'thread_workloads.py':
+                if entry['oracle'].get('module') == 'thread_workloads.py':
                     import thread_compare
                     need(thread_compare.paired_worker_identities_match(pair['baseline'], pair['candidate']),
                          'paired thread groups differ in effective worker count or quota')
@@ -405,7 +414,7 @@ def validate(path):
                           path.parent,stage=row.get('stage'),thread_cpus=thread_cpus,
                           fuel_setting=explicit_fuel)
         probe_entry = by_id[row['workload']]
-        if probe_entry['oracle']['module'] == 'continuation_live_workloads.py':
+        if probe_entry['oracle'].get('module') == 'continuation_live_workloads.py':
             lifecycle = expected(probe_entry)
             wire = row['observation']['raw_wire_observation']
             need(row.get('timing_excluded') is True
@@ -469,7 +478,7 @@ def decision(report):
         elif selected[wid].get('family') == 'wait-queues' and declared == ['steady_state_group']:
             target_stages[wid] = 'steady_state_group'
         elif (selected[wid].get('family') == 'continuations'
-              and declared == ['setup', 'capture']):
+              and declared in (['setup', 'capture'], ['setup', 'capture', 'resume'])):
             target_stages[wid] = 'capture'
         else:
             need(selected[wid].get('family') == 'gc-exceptions' and declared == ['load_and_call'],
