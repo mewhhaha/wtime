@@ -1,0 +1,262 @@
+{
+  "schema_version": 1,
+  "task": "P108",
+  "identities": {
+    "runtime_sources": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "plan": {
+      "paths": [
+        "task-plans/performance/TASKS.json"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p108.py",
+        "tools/verification/*.py",
+        "tools/verify.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    },
+    "tiers": {
+      "paths": [
+        "tools/wtime-bench/tier_check.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/fixtures/**",
+        "tools/wtime-conformance/**/*.rs",
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/run.py"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p108_selection.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "runtime_sources",
+        "plan",
+        "producer"
+      ],
+      "commands": [
+        {
+          "name": "select",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p108.py",
+            "--plan",
+            "{repo}/task-plans/performance/TASKS.json",
+            "--output",
+            "{stage}/policy.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "policy": "{stage}/policy.json"
+      },
+      "checks": [
+        {
+          "artifact": "policy",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime_sources",
+        "producer",
+        "tiers",
+        "tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "policy-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p108_selection.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "dependency-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/dependency_budget.py"
+          ]
+        },
+        {
+          "name": "selected-tiers",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/tier_check.py",
+            "--tier",
+            "selected",
+            "--decisions",
+            "{freeze_dir}/policy.json",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/selected"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "policy-tests",
+          "kind": "unittest",
+          "minimum_passed": 7,
+          "required_names": [
+            "test_complete_policy_keeps_decoded_default_and_only_explicit_experimental_opt_ins",
+            "test_duplicate_or_unexplained_unselected_rows_are_rejected",
+            "test_missing_or_pending_required_milestones_are_rejected",
+            "test_native_and_aot_branches_cannot_be_enabled",
+            "test_optional_tier_feature_mode_threshold_tuples_are_exact",
+            "test_rejected_experimental_tier_cannot_become_default",
+            "test_stale_milestone_proof_and_source_identity_are_rejected"
+          ]
+        }
+      ],
+      "outputs": {
+        "selected": "{stage}/selected/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "selected",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "runtime_sources",
+        "producer",
+        "tiers"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "finalize-policy",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p108.py",
+            "--policy",
+            "{freeze_dir}/policy.json",
+            "--verify-dir",
+            "{verify_dir}",
+            "--output",
+            "{stage}/proof.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime_sources",
+    "baseline": "{freeze_dir}/policy.json",
+    "pointer": "/sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "policy-tests",
+        "uses": [
+          "producer",
+          "tests"
+        ],
+        "commands": [
+          {
+            "name": "policy-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p108_selection.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "policy-tests",
+            "kind": "unittest",
+            "minimum_passed": 7,
+            "required_names": [
+              "test_complete_policy_keeps_decoded_default_and_only_explicit_experimental_opt_ins",
+              "test_duplicate_or_unexplained_unselected_rows_are_rejected",
+              "test_missing_or_pending_required_milestones_are_rejected",
+              "test_native_and_aot_branches_cannot_be_enabled",
+              "test_optional_tier_feature_mode_threshold_tuples_are_exact",
+              "test_rejected_experimental_tier_cannot_become_default",
+              "test_stale_milestone_proof_and_source_identity_are_rejected"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "analyze"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "No new timing or native/AOT promotion; explicit experimental opt-ins remain experimental."
+    ]
+  }
+}

@@ -1,0 +1,392 @@
+{
+  "schema_version": 1,
+  "task": "P109",
+  "identities": {
+    "runtime_sources": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p109.py",
+        "tools/verification/*.py",
+        "tools/verify.py",
+        "tools/checks/fuzz_decode.py",
+        "tools/checks/differential.py",
+        "tools/checks/allocation_failure.py",
+        "tools/checks/hardening.py"
+      ]
+    },
+    "conformance": {
+      "paths": [
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/build.rs",
+        "tools/wtime-conformance/src/**/*.rs",
+        "tools/wtime-conformance/tests/**/*.rs",
+        "target/performance/P109-corpus-0002/summary.json",
+        "docs/architecture/spec-lock.json"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p109_selected_conformance.py"
+      ]
+    },
+    "policy": {
+      "paths": [
+        "docs/benchmarks/performance/decisions.json"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "runtime_sources",
+        "producer",
+        "conformance"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p109.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "freeze": "{stage}/freeze.json"
+      },
+      "checks": [
+        {
+          "artifact": "freeze",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime_sources",
+        "producer",
+        "conformance",
+        "tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "validator-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p109_selected_conformance.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "runtime-default",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-j",
+            "1",
+            "-p",
+            "wtime-runtime",
+            "--tests"
+          ]
+        },
+        {
+          "name": "runtime-tiers",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-j",
+            "1",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,register-executor,execution-reference",
+            "--tests"
+          ]
+        },
+        {
+          "name": "cli",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "-j",
+            "1",
+            "-p",
+            "wtime-cli",
+            "--tests"
+          ]
+        },
+        {
+          "name": "probe-build",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--release",
+            "-j",
+            "1",
+            "--target-dir",
+            "{repo}/target/performance/P109-corpus-build",
+            "-p",
+            "wtime-conformance",
+            "--features",
+            "opcode-coverage,execution-reference,compact-executor,register-executor",
+            "--bin",
+            "wtime-probe",
+            "--bin",
+            "wtime-allocation-check"
+          ]
+        },
+        {
+          "name": "fuzz",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/fuzz_decode.py",
+            "--seed",
+            "164",
+            "--iterations",
+            "1000",
+            "--profile",
+            "stable-core",
+            "--target",
+            "{repo}/target/performance/P109-corpus-build/release/wtime-probe",
+            "--output",
+            "{stage}/fuzz"
+          ]
+        },
+        {
+          "name": "differential",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/differential.py",
+            "--seed",
+            "165",
+            "--count",
+            "1000",
+            "--target",
+            "{repo}/target/performance/P109-corpus-build/release/wtime-probe",
+            "--output",
+            "{stage}/differential"
+          ]
+        },
+        {
+          "name": "allocation",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/allocation_failure.py",
+            "--worker",
+            "{repo}/target/performance/P109-corpus-build/release/wtime-allocation-check",
+            "--report",
+            "{stage}/allocation.json"
+          ]
+        },
+        {
+          "name": "validate-controls",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p109.py",
+            "verify",
+            "--verify-dir",
+            "{stage}",
+            "--output",
+            "{stage}/controls.json"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "validator-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": [
+            "test_all_suite_profile_and_four_mode_threshold_strategy_bindings",
+            "test_counts_require_nonzero_exact_execution_and_zero_strict_integer_errors",
+            "test_source_map_accepts_current_contained_files_and_rejects_missing_stale_or_escaping"
+          ]
+        },
+        {
+          "command": "runtime-default",
+          "kind": "cargo",
+          "minimum_passed": 3,
+          "required_names": [
+            "t040_wrong_host_result_shape_is_host_failure",
+            "t046_cancel_during_bulk_after_committed_first_chunk",
+            "t162_case_02"
+          ],
+          "features": []
+        },
+        {
+          "command": "runtime-tiers",
+          "kind": "cargo",
+          "minimum_passed": 3,
+          "required_names": [
+            "p144_eager_and_threshold_three_report_capacity_high_water_per_invoke",
+            "p134_host_effect_fuel_and_foreign_refusal",
+            "p065_capture_retains_numeric_state_and_source_cursor"
+          ],
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference"
+          ]
+        },
+        {
+          "command": "cli",
+          "kind": "cargo",
+          "minimum_passed": 1,
+          "required_names": [
+            "t057_argument_types_and_errors"
+          ],
+          "features": []
+        }
+      ],
+      "outputs": {
+        "controls": "{stage}/controls.json",
+        "allocation": "{stage}/allocation.json",
+        "fuzz": "{stage}/fuzz/report.json",
+        "differential": "{stage}/differential/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "controls",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "runtime_sources",
+        "producer",
+        "policy"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "selected-proof",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p109.py",
+            "analyze",
+            "--verify-dir",
+            "{verify_dir}",
+            "--output",
+            "{stage}/proof.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime_sources",
+    "baseline": "{freeze_dir}/freeze.json",
+    "pointer": "/core_sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "validator-tests",
+        "uses": [
+          "runtime_sources",
+          "producer",
+          "tests"
+        ],
+        "commands": [
+          {
+            "name": "validator-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p109_selected_conformance.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "validator-tests",
+            "kind": "unittest",
+            "minimum_passed": 3,
+            "required_names": [
+              "test_all_suite_profile_and_four_mode_threshold_strategy_bindings",
+              "test_counts_require_nonzero_exact_execution_and_zero_strict_integer_errors",
+              "test_source_map_accepts_current_contained_files_and_rejects_missing_stale_or_escaping"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "analyze"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Native AArch64 release execution is unrun.",
+      "External differential oracle is unrun; deterministic independent vectors are checked."
+    ]
+  }
+}

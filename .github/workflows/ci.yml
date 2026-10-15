@@ -27,6 +27,19 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: python3 tools/checks/dependency_budget.py
+      - name: Build the default CLI for the performance correctness smoke
+        run: cargo build --locked --offline -j 1 -p wtime-cli
+      - name: Bind and execute the performance correctness smoke
+        run: |
+          python3 -B tools/verification/producers/p111.py bind --binary target/debug/wtime-cli --output target/performance/P111/build.json
+          python3 -B tools/checks/performance_ci.py --lane smoke --output target/performance/P111/smoke.json
+          python3 -B tools/checks/performance_ci.py --lane reference --output target/performance/P111/reference.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-smoke-${{ runner.arch }}
+          path: target/performance/P111/*.json
+          retention-days: 14
       - run: python3 -m unittest discover -s tools/checks/tests -v
       - run: python3 tools/checks/hardening.py --native-report target/native-${{ runner.arch }}.json
       - uses: actions/upload-artifact@v4

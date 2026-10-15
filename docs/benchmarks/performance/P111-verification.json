@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "task": "P111",
+  "identities": {
+    "runtime_sources": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p111.py",
+        "tools/checks/performance_ci.py",
+        "tools/checks/dependency_budget.py",
+        "tools/verification/*.py",
+        "tools/verify.py",
+        ".github/workflows/ci.yml",
+        ".github/workflows/performance-reference.yml",
+        "docs/benchmarks/performance/ci.md"
+      ]
+    },
+    "fixtures": {
+      "paths": [
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/fixtures/integer_loop.*",
+        "tools/wtime-bench/fixtures/call_overhead.*",
+        "tools/wtime-bench/fixtures/branch_calls.*"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/checks/tests/test_p111_performance_ci.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "runtime_sources",
+        "producer"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p111.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "freeze": "{stage}/freeze.json"
+      },
+      "checks": [
+        {
+          "artifact": "freeze",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime_sources",
+        "producer",
+        "fixtures",
+        "tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "ci-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/checks/tests",
+            "-p",
+            "test_p111_performance_ci.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "default-cli",
+          "argv": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "-j",
+            "1",
+            "-p",
+            "wtime-cli"
+          ]
+        },
+        {
+          "name": "bind",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p111.py",
+            "bind",
+            "--binary",
+            "{repo}/target/debug/wtime-cli",
+            "--output",
+            "{stage}/build.json"
+          ]
+        },
+        {
+          "name": "smoke",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/performance_ci.py",
+            "--lane",
+            "smoke",
+            "--binary",
+            "{repo}/target/debug/wtime-cli",
+            "--build-binding",
+            "{stage}/build.json",
+            "--output",
+            "{stage}/smoke.json"
+          ]
+        },
+        {
+          "name": "reference",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/performance_ci.py",
+            "--lane",
+            "reference",
+            "--output",
+            "{stage}/reference.json"
+          ]
+        },
+        {
+          "name": "trend",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/performance_ci.py",
+            "--lane",
+            "trend",
+            "--output",
+            "{stage}/trend.json"
+          ]
+        },
+        {
+          "name": "dependencies",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/dependency_budget.py"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "ci-tests",
+          "kind": "unittest",
+          "minimum_passed": 9,
+          "required_names": [
+            "test_bound_reference_carries_stored_decision_without_recomputing_statistics",
+            "test_finalized_statistics_rejects_synthetic_evidence_before_loading_contract",
+            "test_missing_stable_reference_configuration_is_explicitly_unrun",
+            "test_reference_rejects_mismatched_measured_hardware",
+            "test_reference_requires_config_hash_and_measured_runner_identity",
+            "test_shared_worker_trend_never_promotes_a_stored_adopted_decision",
+            "test_smoke_rejects_fixture_hash_tampering_and_malformed_value_shape",
+            "test_smoke_rejects_zero_work_bad_stdout_and_stale_build_inputs",
+            "test_smoke_runs_three_fixed_cases_and_checks_exact_oracle_results"
+          ]
+        }
+      ],
+      "outputs": {
+        "build": "{stage}/build.json",
+        "smoke": "{stage}/smoke.json",
+        "reference": "{stage}/reference.json",
+        "trend": "{stage}/trend.json"
+      },
+      "checks": [
+        {
+          "artifact": "smoke",
+          "pointer": "/nonzero_invocations",
+          "op": "equal",
+          "value": 3
+        },
+        {
+          "artifact": "reference",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "unrun"
+        },
+        {
+          "artifact": "trend",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "unrun"
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "runtime_sources",
+        "producer"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "summarize",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p111.py",
+            "finalize",
+            "--verify-dir",
+            "{verify_dir}",
+            "--output",
+            "{stage}/proof.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime_sources",
+    "baseline": "{freeze_dir}/freeze.json",
+    "pointer": "/core_sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "ci-tests",
+        "uses": [
+          "producer",
+          "tests",
+          "fixtures"
+        ],
+        "commands": [
+          {
+            "name": "ci-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/checks/tests",
+              "-p",
+              "test_p111_performance_ci.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "ci-tests",
+            "kind": "unittest",
+            "minimum_passed": 9,
+            "required_names": [
+              "test_bound_reference_carries_stored_decision_without_recomputing_statistics",
+              "test_finalized_statistics_rejects_synthetic_evidence_before_loading_contract",
+              "test_missing_stable_reference_configuration_is_explicitly_unrun",
+              "test_reference_rejects_mismatched_measured_hardware",
+              "test_reference_requires_config_hash_and_measured_runner_identity",
+              "test_shared_worker_trend_never_promotes_a_stored_adopted_decision",
+              "test_smoke_rejects_fixture_hash_tampering_and_malformed_value_shape",
+              "test_smoke_rejects_zero_work_bad_stdout_and_stale_build_inputs",
+              "test_smoke_runs_three_fixed_cases_and_checks_exact_oracle_results"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "analyze"
+    ],
+    "outcome": "contract_only"
+  }
+}
