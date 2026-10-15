@@ -6,8 +6,18 @@ from typing import Any
 
 
 SCHEMA = "wtime-entry-sequence-v1"
+ACTIVATION_SCHEMA = "wtime-entry-sequence-activation-v1"
+ACTIVATION_DRIVER = "entry_sequence_activation"
+ACTIVATION_CAPACITY_BASIS = "slots_capacity_u64_plus_labels_capacity"
 MAX_U128 = (1 << 128) - 1
+MAX_U64 = (1 << 64) - 1
 MAX_RESIDENT_BYTES = 1_048_576
+MAX_ACTIVATION_BYTES = 2 * 1_048_576
+ACTIVATION_ROW_FIELDS = {
+    "activation_peak_bytes", "activation_peak_frames", "activation_current_bytes",
+    "activation_current_frames", "activation_active_scopes", "activation_capacity_samples",
+    "activation_overflowed",
+}
 
 
 def schedule(n: int) -> list[dict[str, Any]]:
@@ -161,6 +171,70 @@ def validate_payload(
     if not diagnostic:
         _u128(payload["prepare_ns"], "prepare_ns")
         _u128(payload["instantiate_ns"], "instantiate_ns")
+    return payload
+
+
+def validate_activation_payload(
+    payload: Any,
+    schedule_threshold: int,
+    strategy: str,
+    threshold: int,
+    input: int,
+) -> dict[str, Any]:
+    """Validate the activation-capacity extension to P141's diagnostic wire format."""
+    import copy
+
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    if payload.get("schema") != ACTIVATION_SCHEMA or payload.get("driver") != ACTIVATION_DRIVER:
+        raise ValueError("payload is not an activation diagnostic")
+    if payload.get("activation_capacity_basis") != ACTIVATION_CAPACITY_BASIS:
+        raise ValueError("invalid activation_capacity_basis")
+    rows = payload.get("per_call")
+    if not isinstance(rows, list):
+        raise ValueError("per_call must be a list")
+
+    normalized = copy.deepcopy(payload)
+    normalized["schema"] = SCHEMA
+    normalized["driver"] = "entry_sequence"
+    del normalized["activation_capacity_basis"]
+    hot_peak_bytes: int | None = None
+    for index, row in enumerate(normalized["per_call"]):
+        if not isinstance(row, dict):
+            raise ValueError(f"per_call row {index} must be an object")
+        missing = ACTIVATION_ROW_FIELDS - set(row)
+        if missing:
+            raise ValueError(f"per_call row {index} is missing activation fields")
+        for name in ACTIVATION_ROW_FIELDS - {"activation_overflowed"}:
+            value = row[name]
+            if type(value) is not int or not 0 <= value <= MAX_U64:
+                raise ValueError(f"per_call[{index}].{name} must be a u64 integer")
+        if type(row["activation_overflowed"]) is not bool or row["activation_overflowed"]:
+            raise ValueError(f"per_call row {index} reports activation overflow")
+        if row["activation_current_bytes"] != 0 or row["activation_current_frames"] != 0 or row["activation_active_scopes"] != 0:
+            raise ValueError(f"per_call row {index} activation scopes were not reset")
+        if row["activation_capacity_samples"] == 0:
+            raise ValueError(f"per_call row {index} has no activation capacity samples")
+
+        dispatches = row.get("register_dispatches")
+        if type(dispatches) is not int:
+            raise ValueError(f"per_call row {index} has invalid register_dispatches")
+        peak_bytes = row["activation_peak_bytes"]
+        peak_frames = row["activation_peak_frames"]
+        if dispatches > 0:
+            if peak_frames != 1 or not 0 < peak_bytes <= MAX_ACTIVATION_BYTES:
+                raise ValueError(f"per_call row {index} has invalid hot activation peak")
+            if hot_peak_bytes is None:
+                hot_peak_bytes = peak_bytes
+            elif peak_bytes != hot_peak_bytes:
+                raise ValueError("hot activation peak bytes drift across uniform rows")
+        elif peak_bytes != 0 or peak_frames != 0:
+            raise ValueError(f"per_call row {index} has a nonzero cold activation peak")
+
+        for name in ACTIVATION_ROW_FIELDS:
+            del row[name]
+
+    validate_payload(normalized, schedule_threshold, strategy, threshold, input, diagnostic=True)
     return payload
 
 

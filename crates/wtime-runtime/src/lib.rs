@@ -18,6 +18,10 @@ pub use perf::CounterSnapshot;
 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
 mod register_cache_diagnostics;
 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+mod register_activation_diagnostics;
+#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+pub use register_activation_diagnostics::RegisterActivationSnapshot;
+#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
 pub use register_cache_diagnostics::{
     RegisterCacheEntrySnapshot, RegisterCacheEntryState, RegisterCacheLifecycle,
     RegisterCacheSnapshot,
@@ -418,6 +422,8 @@ impl ValueRootToken {
 
 pub struct Store {
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    register_activation: register_activation_diagnostics::Diagnostics,
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     register_dispatches: u64,
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     register_exits: u64,
@@ -484,6 +490,17 @@ pub struct Store {
     instances: arena::Arena<Inst>,
 }
 impl Store {
+    /// Working-vector capacity sampled at source and callback boundaries.
+    /// Excludes compiled code, generic frame locals, and allocator overhead.
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    pub fn register_activation_snapshot(&self) -> RegisterActivationSnapshot {
+        self.register_activation.snapshot()
+    }
+    /// Start a new observation only when no decoded invocation scope is active.
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    pub fn reset_register_activation_snapshot(&mut self) -> Result<()> {
+        self.register_activation.reset()
+    }
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     pub fn register_dispatches(&self) -> u64 { self.register_dispatches }
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
@@ -535,6 +552,8 @@ impl Store {
                 e.config.limits.max_gc_mark_work,
             );
             Self {
+                #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+                register_activation: register_activation_diagnostics::Diagnostics::default(),
                 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
                 register_dispatches: 0,
                 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]

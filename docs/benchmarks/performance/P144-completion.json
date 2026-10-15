@@ -1,0 +1,15 @@
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P144/shared-finalization/attempt-0004/evidence.json": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6"
+  },
+  "evidence": [
+    {
+      "bytes": 1878,
+      "path": "/workspace/wtime/target/performance/P144/shared-finalization/attempt-0004/evidence.json",
+      "sha256": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P144"
+}

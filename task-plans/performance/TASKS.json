@@ -90408,8 +90408,8 @@
       "key": "register-activation-capacity-diagnostics",
       "title": "Report Register activation capacity high-water",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "contract_only",
       "kind": "foundation",
       "dependencies": [
         "P065",
@@ -90433,18 +90433,19 @@
         "tools/verification/tests/test_p144.py",
         "docs/benchmarks/performance/P144-verification.json"
       ],
-      "input_output_contract": "Add a separate no-timer activation-capacity diagnostic to the P141 entry-sequence driver. Leave both P141 timing records and its existing cache-lifecycle diagnostic schema unchanged. For each `Store::invoke`, reset the invocation-local diagnostic high-water immediately before invocation, sample actual capacities at source and callback boundaries, and return the maximum concurrent sum after the invocation. A later top-level invocation starts from zero; completed activation storage is not reported as retained capacity. A diagnostic-only scope guard must restore outer active counts on every success, error, and unwind, including nested guest/host reentry. Reset is valid only while no invocation scope is active; an attempted reset during active or nested execution must fail without disturbing the current high-water.\n\nFor each active frame with a Register `Activation`, compute owned bytes exactly as `activation.slots.capacity() * size_of::<u64>() + frame.labels.capacity() * size_of::<Label>()`. Sum these values across all simultaneously active Register frames, including nested guest/host reentry, using checked arithmetic. Report the maximum observed live sum at the declared source/callback boundaries for that invocation, plus enough typed frame/count data for the private oracle to verify the formula. This is an observed live-vector-capacity high-water, not the process allocator's transient peak or allocation overhead. A declined/fallback invocation with no Register activation reports zero. Vector length, prepared code size, cache retained-byte charge, continuation payload, allocator padding, and process RSS are not substitutes for these capacities.\n\nThe diagnostic is gated by `execution-reference`, has no timestamp or duration fields, and is independently validated from timing observations. Report cache artifact bytes only in their existing P138 field; never add them to activation capacity. The diagnostic must not affect source fuel, calls, fallback decisions, cache eviction/pinning, cancellation, or guest results.",
+      "input_output_contract": "Add a separate no-timer activation-capacity diagnostic to the P141 entry-sequence driver. Leave both P141 timing records and its existing cache-lifecycle diagnostic schema unchanged. For each `Store::invoke`, reset the invocation-local diagnostic high-water immediately before invocation, sample actual capacities at source and callback boundaries, and return the maximum checked sum across currently live diagnostic scopes. A later top-level invocation starts from zero; completed activation storage is not reported as retained capacity. A diagnostic-only scope guard must restore the saved scope counts on every success, error, and unwind. Reset is valid only while no invocation scope is active; an attempted reset during active or nested execution must fail without disturbing the current high-water.\n\nFor each active frame with a Register `Activation`, compute owned bytes exactly as `activation.slots.capacity() * size_of::<u64>() + frame.labels.capacity() * size_of::<Label>()`, and sum across the currently live Register frames with checked arithmetic. The current Register call handoff materializes and releases the caller Activation before nested execution, so real guest/host reentry must show those outer vectors released and the current activation sum at zero during nested execution, then prove scope counts are balanced on return. Do not claim that real reentry keeps two Register activations live simultaneously. Separately, a private constructed two-frame oracle verifies checked additive capacity arithmetic. Report the maximum observed live sum at declared source/callback boundaries, with enough typed frame/count data for these checks. This is an observed live-vector-capacity high-water, not the process allocator's transient peak or allocation overhead. A declined/fallback invocation with no Register activation reports zero. Vector length, prepared code size, cache retained-byte charge, continuation payload, allocator padding, and process RSS are not substitutes for these capacities.\n\nThe diagnostic is gated by `execution-reference`, has no timestamp or duration fields, and is independently validated from timing observations. Report cache artifact bytes only in their existing P138 field; never add them to activation capacity. The diagnostic must not affect source fuel, calls, fallback decisions, cache eviction/pinning, cancellation, or guest results.",
       "implementation_steps": [
         "Confirm P065/P066/P138/P141 source identities and inspect `Activation`, `Frame`, active frame-stack transitions, and P141's strict diagnostic parser before adding instrumentation.",
-        "Add feature-gated, Store-local invocation high-water state and the smallest execution hooks needed to sample the exact checked capacity sum at source/callback boundaries across active and nested Register frames. Use a diagnostic-only scope guard to restore parent counts on every exit; reject resets while any scope is active. Keep the state absent when `execution-reference` is disabled and reset it before each top-level diagnostic invocation.",
+        "Add feature-gated, Store-local invocation high-water state and the smallest execution hooks needed to sample the exact checked capacity sum at source/callback boundaries across currently live Register frames and diagnostic scopes. Account for the existing call handoff that releases the caller Activation before nested execution; use a diagnostic-only scope guard to restore saved scope counts on every exit and reject resets while any scope is active. Keep the state absent when `execution-reference` is disabled and reset it before each top-level diagnostic invocation.",
         "Add a separate no-timer entry-sequence diagnostic route and wire field for invocation high-water. Preserve P141 timing and cache-diagnostic schemas; keep P138 retained-code bytes separate and report zero when the invocation used no Register activation.",
-        "Add private capacity-formula, nested-frame, reset, fallback, eviction, pinned-frame, and cancellation cleanup checks. Ensure high-water never accumulates across invocations and inactive activation vectors are not represented as retained Store memory.",
+        "Add a private constructed two-frame capacity-formula oracle and a real nested guest/host reentry check proving the caller vectors are released, the nested current sum is zero, and scope counts restore correctly. Also check reset, fallback, eviction, pinned-frame, and cancellation cleanup. Ensure high-water never accumulates across invocations and inactive activation vectors are not represented as retained Store memory.",
         "Add the named Rust and Python tests below, compile the default and exact diagnostic feature configurations, and close the source-bound P144 contract with no timing or promotion claim."
       ],
       "fixture_cases": [
         "`p144_eager_and_threshold_three_report_capacity_high_water_per_invoke` verifies actual slot/label vector capacities for eager Register and threshold-3 activations, with a fresh high-water for every invocation.",
         "`p144_declined_fallback_reports_zero_register_activation_capacity` proves unsupported or declined frames report zero activation bytes while preserving their existing fallback result and reason.",
-        "`p144_nested_active_frames_sum_owned_vec_capacities_and_reset_per_invoke` compares reported high-water against the independent sum of each live nested Register frame's slot and label Vec capacities, then proves the next invocation starts at zero.",
+        "`p144_nested_reentry_restores_scope_and_rejects_reset` proves real call handoff releases caller vectors before nested execution, the nested current activation sum is zero, scope counts balance on return, and reset is rejected while active.",
+        "The private constructed two-frame capacity oracle checks the additive checked sum of each frame's slot and label Vec capacities; it does not claim real nested reentry has simultaneous Register vectors.",
         "`p144_eviction_pin_and_cancel_cleanup_keep_capacity_diagnostic_bounded` checks cache eviction/pinning and cancellation do not inflate activation high-water, leak invocation state, or merge it with P138 artifact bytes."
       ],
       "measurement_selection": "register",
@@ -90468,7 +90469,58 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P144-verification.json --output target/performance/P144/complete --execute"
       ],
       "path": "05-register-executor/P144-register-activation-capacity-diagnostics.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P144/shared-finalization/attempt-0004/evidence.json",
+          "sha256": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6",
+          "bytes": 1878
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-completion.json",
+          "sha256": "8e0a199be3f07fc4e26f2b91fb90aa26b6d871074ac3c85307cdc6386c3e2bb7",
+          "bytes": 503
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-evidence.json",
+          "sha256": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6",
+          "bytes": 1878
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-freeze.json",
+          "sha256": "771ddc1c3383196dd50bed366cdc1e27dd33aa2f67fa4a5761761c80d8d13aa3",
+          "bytes": 19595
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-proof.json",
+          "sha256": "ff47cc0a0cd89a67a756f8b000e923cd6f810cbb49d5d229eb0d84d812624621",
+          "bytes": 3514
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-eager-activation.json",
+          "sha256": "bf004f7788d8aa1c707313691595bd0b36f81f1ed37a35e1fade8e5c73cc0cfe",
+          "bytes": 111647
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-adaptive-activation.json",
+          "sha256": "b0494f66a6bffa744b67a307c97d8d22197013087ea9da7c6fc6659b13d6d360",
+          "bytes": 168195
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-eager-cache.json",
+          "sha256": "67fdb93982b71ded7e7867e06f8a3a3d080de9a39e73137828908b55224c2f83",
+          "bytes": 41603
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-adaptive-cache.json",
+          "sha256": "c06ecc742ed794ce1bdef809885f37efb241984e031db1da7c6604fac481935b",
+          "bytes": 98419
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P144-records.json.gz",
+          "sha256": "8e7a656c91cae253b93a671dbebb099289459449b73baba34972de944f5a8f1e",
+          "bytes": 2782463
+        }
+      ],
       "branch": "portable",
       "decision_rule": "integrity",
       "reviews_optional_tasks": [],
@@ -90480,7 +90532,76 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "source fuel, resource limits, fallback, cancellation, and guest semantics remain unchanged"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P144/shared-finalization/attempt-0004/evidence.json": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6",
+          "/workspace/wtime/docs/benchmarks/performance/P144-completion.json": "8e0a199be3f07fc4e26f2b91fb90aa26b6d871074ac3c85307cdc6386c3e2bb7",
+          "/workspace/wtime/docs/benchmarks/performance/P144-evidence.json": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6",
+          "/workspace/wtime/docs/benchmarks/performance/P144-freeze.json": "771ddc1c3383196dd50bed366cdc1e27dd33aa2f67fa4a5761761c80d8d13aa3",
+          "/workspace/wtime/docs/benchmarks/performance/P144-proof.json": "ff47cc0a0cd89a67a756f8b000e923cd6f810cbb49d5d229eb0d84d812624621",
+          "/workspace/wtime/docs/benchmarks/performance/P144-eager-activation.json": "bf004f7788d8aa1c707313691595bd0b36f81f1ed37a35e1fade8e5c73cc0cfe",
+          "/workspace/wtime/docs/benchmarks/performance/P144-adaptive-activation.json": "b0494f66a6bffa744b67a307c97d8d22197013087ea9da7c6fc6659b13d6d360",
+          "/workspace/wtime/docs/benchmarks/performance/P144-eager-cache.json": "67fdb93982b71ded7e7867e06f8a3a3d080de9a39e73137828908b55224c2f83",
+          "/workspace/wtime/docs/benchmarks/performance/P144-adaptive-cache.json": "c06ecc742ed794ce1bdef809885f37efb241984e031db1da7c6604fac481935b",
+          "/workspace/wtime/docs/benchmarks/performance/P144-records.json.gz": "8e7a656c91cae253b93a671dbebb099289459449b73baba34972de944f5a8f1e"
+        },
+        "evidence": [
+          {
+            "path": "/workspace/wtime/target/performance/P144/shared-finalization/attempt-0004/evidence.json",
+            "sha256": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6",
+            "bytes": 1878
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-completion.json",
+            "sha256": "8e0a199be3f07fc4e26f2b91fb90aa26b6d871074ac3c85307cdc6386c3e2bb7",
+            "bytes": 503
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-evidence.json",
+            "sha256": "895359c4c1978329ee801bcdbc4bf331517ca4f808612984029edea7e91f63c6",
+            "bytes": 1878
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-freeze.json",
+            "sha256": "771ddc1c3383196dd50bed366cdc1e27dd33aa2f67fa4a5761761c80d8d13aa3",
+            "bytes": 19595
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-proof.json",
+            "sha256": "ff47cc0a0cd89a67a756f8b000e923cd6f810cbb49d5d229eb0d84d812624621",
+            "bytes": 3514
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-eager-activation.json",
+            "sha256": "bf004f7788d8aa1c707313691595bd0b36f81f1ed37a35e1fade8e5c73cc0cfe",
+            "bytes": 111647
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-adaptive-activation.json",
+            "sha256": "b0494f66a6bffa744b67a307c97d8d22197013087ea9da7c6fc6659b13d6d360",
+            "bytes": 168195
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-eager-cache.json",
+            "sha256": "67fdb93982b71ded7e7867e06f8a3a3d080de9a39e73137828908b55224c2f83",
+            "bytes": 41603
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-adaptive-cache.json",
+            "sha256": "c06ecc742ed794ce1bdef809885f37efb241984e031db1da7c6604fac481935b",
+            "bytes": 98419
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P144-records.json.gz",
+            "sha256": "8e7a656c91cae253b93a671dbebb099289459449b73baba34972de944f5a8f1e",
+            "bytes": 2782463
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P144"
+      }
     }
   ]
 }

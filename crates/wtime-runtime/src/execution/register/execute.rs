@@ -1,4 +1,7 @@
 //! Whole-function numeric tier. The caller charges the original source boundary.
+#[cfg(all(test, feature = "execution-reference"))]
+#[path = "../../../tests/performance/p144_private.rs"]
+mod p144_private;
 use super::cache::CachedFunction;
 use super::{
     control::{MovePlan, MoveSource, MoveStep},
@@ -284,6 +287,12 @@ pub(crate) struct Activation {
     slots: Vec<u64>,
     // One entry-time pin. Dispatch borrows it without per-instruction Arc clones.
     artifact: Option<Arc<CachedFunction>>,
+}
+#[cfg(feature = "execution-reference")]
+impl Activation {
+    pub(crate) fn slot_capacity_bytes(&self) -> Option<usize> {
+        self.slots.capacity().checked_mul(size_of::<u64>())
+    }
 }
 fn bits(value: Value) -> Option<u64> {
     match value {

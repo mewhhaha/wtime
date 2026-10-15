@@ -124,6 +124,8 @@ impl Store {
         self.invoke_decoded(f, args)
     }
     pub(super) fn invoke_decoded(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
+        #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+        let register_capacity_scope = self.register_activation.scope();
         if self.cancellation.is_cancelled() {
             return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
         }
@@ -177,6 +179,8 @@ impl Store {
         let mut fuel = self.engine.config.limits.fuel;
         let mut prompts = Vec::new();
         loop {
+            #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+            register_capacity_scope.observe(&frames);
             #[cfg(feature = "register-executor")]
             let operand_height = if frames.last().is_some_and(|frame| frame.register.is_some()) { register::logical_height(frames.last().unwrap(), self)? } else { stack.len() };
             #[cfg(not(feature = "register-executor"))]
@@ -208,6 +212,13 @@ impl Store {
                     }
                 }
             }
+            // A Register call barrier may have released its vectors. Refresh
+            // before a host callback can enter another invocation scope.
+            #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+            let frame = {
+                register_capacity_scope.observe(&frames);
+                frames.last_mut().unwrap()
+            };
             #[cfg(feature = "compact-executor")]
             let mut prepared_instruction = None;
             #[cfg(feature = "compact-executor")]

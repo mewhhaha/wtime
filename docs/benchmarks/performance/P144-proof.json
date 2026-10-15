@@ -1,0 +1,118 @@
+{
+  "candidate_promoted": false,
+  "capacity_basis": "slots.capacity() * size_of::<u64>() + labels.capacity() * size_of::<Label>()",
+  "default_execution": "decoded",
+  "diagnostic_binary": {
+    "bytes": 17138344,
+    "path": "/workspace/wtime/target/verification/runs/P144/verify/attempt-0001/diagnostics/diagnostic-bench",
+    "sha256": "d27d3e75d26246d186def87c35fa4e91b4f38ce6e4db9df35839176988eb1d9d"
+  },
+  "entry_sequences": {
+    "adaptive": {
+      "calls": 268,
+      "cold_calls": 134,
+      "max_code_bytes": 86904,
+      "max_working_bytes": 312,
+      "report": {
+        "bytes": 120419,
+        "path": "/workspace/wtime/target/verification/runs/P144/verify/attempt-0001/diagnostics/adaptive-activation.json",
+        "sha256": "d63d7684acb2cccc032de8b7554321c23301a3d55953e25dfb60adcf1c5a9d92"
+      }
+    },
+    "eager": {
+      "calls": 268,
+      "cold_calls": 0,
+      "max_code_bytes": 0,
+      "max_working_bytes": 312,
+      "report": {
+        "bytes": 81023,
+        "path": "/workspace/wtime/target/verification/runs/P144/verify/attempt-0001/diagnostics/eager-activation.json",
+        "sha256": "42a22fabd07330c6df1f628f70d39bf65c3b6b0916fa9e986edc3a35bc12ffac"
+      }
+    }
+  },
+  "freeze": {
+    "bytes": 19595,
+    "path": "/workspace/wtime/target/verification/runs/P144/freeze/attempt-0002/freeze.json",
+    "sha256": "771ddc1c3383196dd50bed366cdc1e27dd33aa2f67fa4a5761761c80d8d13aa3"
+  },
+  "limitations": [
+    "Sampled live vector capacities, not allocator transient peaks, padding, generic frame locals, continuation payloads or process RSS.",
+    "Current call handoff releases the caller Register activation; two-frame sum is a constructed private scope oracle, while real reentry reaches one live Register frame.",
+    "All diagnostic storage and sampling require both register-executor and execution-reference; no default-build instrumentation."
+  ],
+  "physical_oracles": [
+    {
+      "after": 5656,
+      "before": 312,
+      "capacity_not_length": true,
+      "case": "capacity_oracle"
+    },
+    {
+      "case": "nested_oracle",
+      "first": 312,
+      "reset_preserved_active": true,
+      "second": 24,
+      "sum": 336
+    },
+    {
+      "case": "pinned_eviction",
+      "cleanup": true,
+      "code_bytes": 88218,
+      "evictions": 2,
+      "working_bytes": 312
+    },
+    {
+      "case": "entry_peaks",
+      "peaks": [
+        312,
+        312,
+        312,
+        312,
+        0,
+        0,
+        312,
+        312
+      ],
+      "per_invoke_reset": true
+    },
+    {
+      "cancel_peak": 0,
+      "case": "bounded_churn",
+      "code_bytes": 86904,
+      "evictions": 3,
+      "working_peak": 312
+    },
+    {
+      "cancel": false,
+      "case": "reentry",
+      "cleanup": true,
+      "outer_released_before_callback": true,
+      "peak_frames": 1
+    },
+    {
+      "cancel": true,
+      "case": "reentry",
+      "cleanup": true,
+      "outer_released_before_callback": true,
+      "peak_frames": 1
+    }
+  ],
+  "schema": "wtime-p144-activation-capacity-v1",
+  "status": "passed",
+  "task": "P144",
+  "tests": {
+    "activation-policy": 3,
+    "capacity-gate": 6,
+    "old-sequence-policy": 4,
+    "performance-diagnostic": 147,
+    "runtime-default": 104,
+    "runtime-diagnostic": 139
+  },
+  "timing_evidence": false,
+  "verification_receipt": {
+    "bytes": 815316,
+    "path": "/workspace/wtime/target/verification/runs/P144/verify/attempt-0001/receipt.json",
+    "sha256": "2d933d6a7aa4aba4f063f19e753a1269430002a463ec5bf602c720f3360516d8"
+  }
+}

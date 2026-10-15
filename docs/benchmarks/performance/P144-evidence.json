@@ -1,0 +1,49 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 19969,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P144-verification.json",
+    "sha256": "3c91e4b11215a466243e64cfed9c23f38372d14a8e46057eac7b23cc886e3913"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Diagnostic foundation only; no guest performance, policy selection or process RSS claim."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 741614,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/88/88181f70c667624817135c9b4458c0332b3e02f5e5f6ea3db46b07261b45600e",
+      "sha256": "88181f70c667624817135c9b4458c0332b3e02f5e5f6ea3db46b07261b45600e",
+      "stored_bytes": 741614,
+      "stored_sha256": "88181f70c667624817135c9b4458c0332b3e02f5e5f6ea3db46b07261b45600e"
+    },
+    "freeze": {
+      "bytes": 268721,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/12/124ed1d886f776d8e70233d02600023cfc04197c476f3d5c06e7ae1bac55cf0d",
+      "sha256": "124ed1d886f776d8e70233d02600023cfc04197c476f3d5c06e7ae1bac55cf0d",
+      "stored_bytes": 268721,
+      "stored_sha256": "124ed1d886f776d8e70233d02600023cfc04197c476f3d5c06e7ae1bac55cf0d"
+    },
+    "verify": {
+      "bytes": 815316,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/2d/2d933d6a7aa4aba4f063f19e753a1269430002a463ec5bf602c720f3360516d8",
+      "sha256": "2d933d6a7aa4aba4f063f19e753a1269430002a463ec5bf602c720f3360516d8",
+      "stored_bytes": 815316,
+      "stored_sha256": "2d933d6a7aa4aba4f063f19e753a1269430002a463ec5bf602c720f3360516d8"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P144"
+}

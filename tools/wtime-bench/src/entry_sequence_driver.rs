@@ -16,15 +16,17 @@ struct Request {
     schedule_threshold: usize,
     strategy: Strategy,
     diagnostic: bool,
+    activation: bool,
 }
 impl Request {
     fn parse(args: &[String]) -> Result<Self, String> {
         if args.len() != 7 {
-            return Err("usage: --entry-sequence|--entry-sequence-diagnostic FILE INPUT SCHEDULE_THRESHOLD register eager|adaptive THRESHOLD".into());
+            return Err("usage: --entry-sequence|--entry-sequence-diagnostic|--entry-sequence-activation-diagnostic FILE INPUT SCHEDULE_THRESHOLD register eager|adaptive THRESHOLD".into());
         }
-        let diagnostic = match args[0].as_str() {
-            "--entry-sequence" => false,
-            "--entry-sequence-diagnostic" => true,
+        let (diagnostic, activation) = match args[0].as_str() {
+            "--entry-sequence" => (false, false),
+            "--entry-sequence-diagnostic" => (true, false),
+            "--entry-sequence-activation-diagnostic" => (true, true),
             _ => return Err("unknown sequence command".into()),
         };
         if args[4] != "register" || !cfg!(feature = "register-executor") {
@@ -56,6 +58,7 @@ impl Request {
             schedule_threshold: schedule as usize,
             strategy,
             diagnostic,
+            activation,
         })
     }
     fn engine(&self) -> Result<Engine, String> {
@@ -141,6 +144,12 @@ fn run(request: &Request, bytes: &[u8]) -> Result<String, String> {
         })
         .collect::<Result<Vec<Func>, String>>()?;
     for (body, visit, phase) in schedule(request.schedule_threshold) {
+        #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+        if request.activation {
+            store
+                .reset_register_activation_snapshot()
+                .map_err(|error| error.to_string())?;
+        }
         let args = black_box([Value::I32(request.input)]);
         #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
         let dispatch_before = store.register_dispatches();
@@ -220,6 +229,20 @@ fn run(request: &Request, bytes: &[u8]) -> Result<String, String> {
                 ",\"register_dispatches\":{dispatches},\"fallback_frames\":{fallback}"
             )
             .unwrap();
+            if request.activation {
+                let snapshot = store.register_activation_snapshot();
+                if snapshot.current_bytes != 0
+                    || snapshot.current_frames != 0
+                    || snapshot.active_scopes != 0
+                    || snapshot.overflowed
+                {
+                    return Err("activation scope did not finish cleanly".into());
+                }
+                write!(row, ",\"activation_peak_bytes\":{},\"activation_peak_frames\":{},\"activation_current_bytes\":{},\"activation_current_frames\":{},\"activation_active_scopes\":{},\"activation_capacity_samples\":{},\"activation_overflowed\":{}",
+                    snapshot.peak_bytes, snapshot.peak_frames, snapshot.current_bytes,
+                    snapshot.current_frames, snapshot.active_scopes, snapshot.capacity_samples,
+                    snapshot.overflowed).unwrap();
+            }
         }
         row.push('}');
         rows.push(row);
@@ -228,14 +251,26 @@ fn run(request: &Request, bytes: &[u8]) -> Result<String, String> {
         Strategy::Eager => ("eager", "null".to_owned()),
         Strategy::Adaptive(value) => ("adaptive", value.to_string()),
     };
+    let (schema, driver) = if request.activation {
+        (
+            "wtime-entry-sequence-activation-v1",
+            "entry_sequence_activation",
+        )
+    } else {
+        ("wtime-entry-sequence-v1", "entry_sequence")
+    };
     let mut output = format!(
-        "{{\"schema\":\"wtime-entry-sequence-v1\",\"schema_version\":1,\"driver\":\"entry_sequence\",\"case\":\"uniform66\",\"mode\":\"register\",\"feature_profile\":\"mvp\",\"source_fuel\":null,\"input\":{},\"strategy\":\"{strategy}\",\"threshold\":{threshold},\"schedule_threshold\":{},\"requested_calls\":{calls},\"actual_calls\":{},\"instrumented\":{},\"diagnostic\":{}",
+        "{{\"schema\":\"{schema}\",\"schema_version\":1,\"driver\":\"{driver}\",\"case\":\"uniform66\",\"mode\":\"register\",\"feature_profile\":\"mvp\",\"source_fuel\":null,\"input\":{},\"strategy\":\"{strategy}\",\"threshold\":{threshold},\"schedule_threshold\":{},\"requested_calls\":{calls},\"actual_calls\":{},\"instrumented\":{},\"diagnostic\":{}",
         request.input,
         request.schedule_threshold,
         rows.len(),
         request.diagnostic,
         request.diagnostic
     );
+    if request.activation {
+        output
+            .push_str(",\"activation_capacity_basis\":\"slots_capacity_u64_plus_labels_capacity\"");
+    }
     if let (Some(prepare), Some(instantiate)) = (prepare_ns, instantiate_ns) {
         write!(
             output,
@@ -256,7 +291,11 @@ fn run_args(args: &[String]) -> Result<String, String> {
 pub(super) fn try_main(args: &[String]) -> bool {
     if !matches!(
         args.first().map(String::as_str),
-        Some("--entry-sequence" | "--entry-sequence-diagnostic")
+        Some(
+            "--entry-sequence"
+                | "--entry-sequence-diagnostic"
+                | "--entry-sequence-activation-diagnostic"
+        )
     ) {
         return false;
     }
