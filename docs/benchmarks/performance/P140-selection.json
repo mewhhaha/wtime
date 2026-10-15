@@ -1,0 +1,73 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P140",
+  "lane": "candidate",
+  "rationale": "Freeze the explicit adaptive Register stage interface and mandatory controls. P140 executes only one protected warm-call smoke, does not run this complete selection, and cannot promote a candidate. P066 retains its own full selection and performance gates.",
+  "registry_sha256": "8917f14d06b2dd69d1abb1885d8186cdc11191924aef8ee073e356cec5cfd668",
+  "rows": [
+    {
+      "family": "scalar",
+      "id": "scalar_accumulator_n32",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "e170921225c53db35a5c2e059c80583aa0871c5ffd816ea6b85d89c5be58118e"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_accumulator_n10000",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "f054339b75a92f5b463d4b1aac1180624c6997bd6cfc11b5eecf7919d633630e"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_accumulator_n17",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "0458b3b8adf3a40910d3d77cf9dad653dd5eaabdf39fed193677b58e43a294d3"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "first_call",
+        "load_and_call",
+        "warm_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p140_parser_composes_entry_threshold_and_source_fuel",
+    "p140_actual_adaptive_engines_preserve_threshold_and_fuel",
+    "p140_bad_entry_settings_are_rejected_before_fixture_io",
+    "p140_omitted_threshold_preserves_legacy_wire"
+  ],
+  "execution_settings": {
+    "register_entry_threshold": {
+      "baseline": null,
+      "candidate": 3
+    }
+  }
+}

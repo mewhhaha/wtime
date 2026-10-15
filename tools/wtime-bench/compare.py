@@ -428,12 +428,18 @@ def validate_observation(data, case, stage, input_value, expected, batch, mode):
     if 'result' not in data or data['result'] != oracle: raise ComparisonError('oracle mismatch')
     return data
 
-def observation(exe, fixture, case, input_value, expected, stage, batch, mode, cpu, fuel_setting=None):
+def observation(exe, fixture, case, input_value, expected, stage, batch, mode, cpu, fuel_setting=None,
+                register_entry_threshold=None):
     args=['--single-case',fixture,case,input_value,expected,stage,batch,mode]
     if fuel_setting is not None:
         import p127_fuel_policy
         args.extend(['--source-fuel',p127_fuel_policy.cli_value(fuel_setting)])
+    if register_entry_threshold is not None:
+        import p140_entry_policy
+        args.extend(['--register-entry-threshold',p140_entry_policy.positive_threshold(register_entry_threshold)])
     result=validate_observation(process(exe,args,cpu),case,stage,input_value,expected,batch,mode)
+    import p140_entry_policy
+    p140_entry_policy.validate_wire(result,register_entry_threshold)
     if fuel_setting is not None:
         p127_fuel_policy.validate_wire_setting(result,fuel_setting)
     return result
@@ -445,13 +451,19 @@ def _typed_i32(value):
         raise ComparisonError('scalar oracle result is outside signed i32 range')
     return f'i32:{value}'
 
-def scalar_observation(exe, fixture, entry, input_value, expected, stage, batch, mode, cpu, fuel_setting=None):
+def scalar_observation(exe, fixture, entry, input_value, expected, stage, batch, mode, cpu, fuel_setting=None,
+                       register_entry_threshold=None):
     case=entry['id']; driver=entry['driver']['kind']; profile=entry['driver']['profile']
     argv=['--scalar-driver',fixture,case,input_value,expected,stage,batch,mode,profile,driver]
     if fuel_setting is not None:
         import p127_fuel_policy
         argv.extend(['--source-fuel',p127_fuel_policy.cli_value(fuel_setting)])
+    if register_entry_threshold is not None:
+        import p140_entry_policy
+        argv.extend(['--register-entry-threshold',p140_entry_policy.positive_threshold(register_entry_threshold)])
     data=process(exe,argv,cpu)
+    import p140_entry_policy
+    p140_entry_policy.validate_wire(data,register_entry_threshold)
     if fuel_setting is not None:
         p127_fuel_policy.validate_wire_setting(data,fuel_setting)
     wanted={'schema_version':2,'case':case,'stage':stage,'input':_typed_i32(input_value),

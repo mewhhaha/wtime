@@ -185,6 +185,31 @@ def validate_fuel_setting(setting, entries, identities, capabilities):
     return setting
 
 
+def validate_entry_setting(declaration, settings, identities, capabilities):
+    """Bind the selected adaptive policy to its frozen value and actual CLI."""
+    import p140_entry_policy
+    entry_setting = p140_entry_policy.declaration(declaration)
+    if entry_setting is None:
+        need('register_entry_threshold' not in settings, 'undeclared adaptive entry setting')
+    else:
+        p140_entry_policy.validate_metadata(settings.get('register_entry_threshold'), entry_setting)
+        p140_entry_policy.request(declaration, settings.get('candidate_mode'), entry_setting['candidate'])
+        p140_entry_policy.capability(capabilities['candidate'].get('register_entry_threshold_contract'))
+        need('command' in identities, 'adaptive entry command identity is missing')
+    if 'command' in identities:
+        command = json.loads(Path(identities['command']['path']).read_text())
+        argv = command.get('argv')
+        need(isinstance(argv, list), 'candidate command argv is missing')
+        positions = [i for i, value in enumerate(argv) if value == '--register-entry-threshold']
+        if entry_setting is None:
+            need(not positions, 'undeclared adaptive entry command')
+        else:
+            need(len(positions) == 1 and positions[0] + 1 < len(argv)
+                 and argv[positions[0] + 1] == str(entry_setting['candidate']),
+                 'adaptive entry command differs from frozen selection')
+    return entry_setting
+
+
 def validate(path):
     path = Path(path).resolve(strict=True)
     report = json.loads(path.read_text())
@@ -226,6 +251,9 @@ def validate(path):
     need('semantic_receipt' in identities, 'candidate semantic receipt is missing')
     validate_semantics(identities['semantic_receipt']['path'],declaration,focused_compare.sources())
     explicit_fuel = validate_fuel_setting(settings.get('fuel_policy'), entries, identities,
+                                          report['metadata']['capabilities'])
+    import p140_entry_policy
+    entry_setting = validate_entry_setting(declaration, settings, identities,
                                           report['metadata']['capabilities'])
     need(settings.get('profile') == 'release' and settings.get('instrumented') is False
          and (settings.get('fuel_policy') is False or explicit_fuel == settings.get('fuel_policy'))
@@ -276,6 +304,9 @@ def validate(path):
                      'candidate input substitution')
                 need(pair['baseline']['batch'] == pair['candidate']['batch'], 'unequal paired batches')
                 for side in ('baseline','candidate'):
+                    threshold = entry_setting[side] if entry_setting is not None else None
+                    p140_entry_policy.validate_wire(pair[side], threshold)
+                    p140_entry_policy.validate_wire(pair[side].get('wire_observation', pair[side]), threshold)
                     check_observation(entry,pair[side],settings[side+'_mode'],path.parent,stage=stage,
                                       thread_cpus=thread_cpus, fuel_setting=explicit_fuel)
                     if (stage not in ('warm_call','run_after_setup')

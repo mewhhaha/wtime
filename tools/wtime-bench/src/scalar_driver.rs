@@ -78,7 +78,8 @@ mod current {
         configured_engine_with_fuel(mode, profile, bounded_depth, super::super::fuel_policy::FuelArgument::OMITTED)
     }
 
-    fn configured_engine_with_fuel(mode: &str, profile: &str, bounded_depth: bool, fuel: super::super::fuel_policy::FuelArgument) -> Result<Engine, String> {
+    pub(super) fn configured_engine_with_fuel(mode: &str, profile: &str, bounded_depth: bool, fuel: super::super::fuel_policy::FuelArgument) -> Result<Engine, String> {
+        fuel.validate_mode(mode).map_err(str::to_owned)?;
         #[cfg(not(feature = "legacy-api"))]
         let policy = match mode {
             "decoded" => ExecutionPolicy::Decoded,
@@ -106,6 +107,10 @@ mod current {
             config.limits.max_call_depth = 32;
         }
         fuel.configure(&mut config);
+        #[cfg(feature = "register-executor")]
+        if let Some(threshold) = fuel.register_entry_threshold {
+            return Engine::with_register_entry_threshold(config, threshold).map_err(|error| error.to_string());
+        }
         #[cfg(feature = "legacy-api")]
         {
             if mode != "decoded" { return Err(format!("unavailable P001 mode {mode}")); }
@@ -564,6 +569,7 @@ mod current {
         }
         let fuel = super::super::fuel_policy::FuelArgument::parse(args, 10)
             .expect("--scalar-driver FILE CASE INPUT EXPECTED STAGE BATCH MODE PROFILE DRIVER [--source-fuel none|50000000]");
+        fuel.validate_mode(&args[7]).expect("invalid register entry setting");
         let bytes = std::fs::read(&args[1]).unwrap();
         let case = args[2].as_str();
         assert!(
@@ -704,7 +710,7 @@ mod current {
         fn p127_scalar_builder_uses_selected_fuel_at_guest_source_boundary() {
             for mode in ["decoded"].into_iter().chain(cfg!(feature = "compact-executor").then_some("compact")) {
                 for policy in [SourceFuel::Unmetered, SourceFuel::Metered] {
-                    let fuel = FuelArgument { policy, explicit: true };
+                    let fuel = FuelArgument { policy, explicit: true, ..FuelArgument::OMITTED };
                     let engine = configured_engine_with_fuel(mode, "mvp", false, fuel).unwrap();
                     let module = engine.compile(ADD).unwrap();
                     let (mut store, instance) = instantiate(&engine, &module, Driver::Plain);
@@ -721,3 +727,8 @@ mod current {
 }
 
 pub use current::try_main;
+
+#[cfg(all(test, feature = "register-executor", feature = "execution-reference", not(feature = "legacy-api")))]
+pub(super) fn p140_engine(mode: &str, fuel: super::fuel_policy::FuelArgument) -> wtime_runtime::Engine {
+    current::configured_engine_with_fuel(mode, "mvp", false, fuel).unwrap()
+}

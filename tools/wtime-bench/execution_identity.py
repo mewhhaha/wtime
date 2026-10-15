@@ -32,6 +32,7 @@ _KNOWN_FAST_PATH = {
     "cold_products.py", "execution_identity.py", "focused_compare.py",
     "selection_manifest.py", "dataset_cache.py", "candidate_gate.py", "semantic_receipt.py",
     "root_workloads.py", "root_compare.py", "thread_compare.py",
+    "entry_batch_adapter.py", "entry_batch_compare.py", "entry_batch_analyze.py",
 }
 
 # Explicit legacy execution inputs. The non-Python portion of compare.sources
@@ -43,7 +44,7 @@ _LEGACY_TIMING = {
     "gc_scaling.py", "gc_warm_workloads.py", "gc_workloads.py",
     "integration_compare.py", "integration_workflow.py",
     "integration_workloads.py", "memory_scaling.py", "memory_workloads.py",
-    "p027_memory_workloads.py", "p043_fixtures.py", "p127_fuel_policy.py", "p128_scalar_scaling.py",
+    "p027_memory_workloads.py", "p043_fixtures.py", "p127_fuel_policy.py", "p128_scalar_scaling.py", "p140_entry_policy.py",
     "representative_compare.py",
     "representative_scaling.py", "representative_workloads.py",
     "scalar_p128_workloads.py", "scalar_workloads.py", "scaling.py", "simd_scaling.py",

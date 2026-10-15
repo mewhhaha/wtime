@@ -1,0 +1,702 @@
+{
+  "schema_version": 1,
+  "task": "P140",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P140-before/manifest.json",
+        "target/performance/P140-before/source/**/*",
+        "target/performance/P140-before/binary/**/*",
+        "target/performance/P140-before/fixtures/**/*",
+        "target/performance/P140-before/runs/**/*",
+        "target/performance/P140-before/historical_reports/**/*"
+      ],
+      "settings": {
+        "repository_commit": "95b5e89756bfc9612aff3057aaa494c74cc67c30",
+        "manifest_sha256": "2b5adfc824b1e1ac3dbab65e3b1cef369e2267d2116b9cb803db7bc1242f7010",
+        "mode": "register"
+      }
+    },
+    "prerequisites": {
+      "paths": [
+        "docs/benchmarks/performance/P127-completion.json",
+        "docs/benchmarks/performance/P127-evidence.json",
+        "docs/benchmarks/performance/P127-proof.json",
+        "docs/benchmarks/performance/P127-verification.json",
+        "docs/benchmarks/performance/P138-completion.json",
+        "docs/benchmarks/performance/P138-evidence.json",
+        "docs/benchmarks/performance/P138-proof.json",
+        "docs/benchmarks/performance/P138-verification.json",
+        "target/verification/runs/P138/verify/attempt-0002/default-build.json",
+        "target/verification/runs/P138/verify/attempt-0002/register-build.json",
+        "target/verification/runs/P138/verify/attempt-0002/proof/report.json",
+        "target/verification/runs/P138/verify/attempt-0002/receipt.json",
+        "docs/benchmarks/performance/P139-completion.json",
+        "docs/benchmarks/performance/P139-evidence.json",
+        "docs/benchmarks/performance/P139-proof.json",
+        "docs/benchmarks/performance/P139-verification.json",
+        "target/verification/runs/P139/verify/attempt-0002/proof/report.json"
+      ]
+    },
+    "runtime": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml"
+      ],
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*",
+        "tools/wtime-conformance/**/*",
+        ".cargo/config",
+        ".cargo/config.toml"
+      ],
+      "settings": {
+        "core_source_must_match_predecessor": true,
+        "runtime_features": [
+          "register-executor"
+        ],
+        "external_core_dependencies": 0
+      }
+    },
+    "harness_and_fixtures": {
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/**/*.py",
+        "tools/wtime-bench/fixtures/**/*",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/representative_workloads.py",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {
+        "mode": "register",
+        "threshold": 3,
+        "source_fuel": "P127-composable",
+        "instrumented": false,
+        "timing_evidence": false
+      }
+    },
+    "producer_and_helpers": {
+      "paths": [
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/verification/artifacts.py",
+        "tools/verification/context.py",
+        "tools/verification/contracts.py",
+        "tools/verification/producers/p127_driver_tests.py",
+        "tools/verification/producers/p127_fuel.py",
+        "tools/verification/producers/p127_prerequisite.py",
+        "tools/verification/producers/p138.py",
+        "tools/verification/producers/p139.py",
+        "tools/verification/producers/p140.py",
+        "tools/verification/producers/p140_driver_tests.py",
+        "tools/verification/producers/runtime_production.py",
+        "tools/verification/runner.py",
+        "tools/verify.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p140_entry_policy.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/tests/test_p140_bindings.py"
+      ]
+    },
+    "selection_and_contracts": {
+      "paths": [
+        "docs/benchmarks/performance/P127-prerequisite.json",
+        "docs/benchmarks/performance/P127-selection.json",
+        "docs/benchmarks/performance/P138-contract.json",
+        "docs/benchmarks/performance/P138-verification.json",
+        "docs/benchmarks/performance/P139-contract.json",
+        "docs/benchmarks/performance/P139-verification.json",
+        "docs/benchmarks/performance/P140-contract.json",
+        "docs/benchmarks/performance/P140-selection.json",
+        "docs/benchmarks/performance/P140-verification.json",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "policy_tests": {
+      "paths": [
+        "target/recovery/P140-python-check-0001/check.py",
+        "tools/wtime-bench/p140_entry_policy.py",
+        "tools/wtime-bench/tests/test_p140_entry_policy.py",
+        "tools/wtime-bench/tests/test_p140_bindings.py",
+        "tools/wtime-bench/tests/test_fast_candidate.py",
+        "tools/wtime-bench/tests/test_fast_selection.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py",
+        "tools/wtime-bench/tests/test_p127_fuel_setting.py",
+        "tools/wtime-bench/tests/test_p127_comparison.py",
+        "tools/verification/tests/test_runtime_production.py",
+        "tools/verification/tests/test_production_attestation.py"
+      ]
+    },
+    "driver_tests": {
+      "paths": [
+        "tools/verification/producers/p140_driver_tests.py",
+        "tools/wtime-bench/src/p140_tests.rs",
+        "tools/wtime-bench/src/fuel_policy.rs",
+        "tools/wtime-bench/src/protocol.rs",
+        "tools/wtime-bench/src/scalar_driver.rs"
+      ]
+    },
+    "task_plan": {
+      "paths": [
+        "task-plans/performance/05-register-executor/P140-register-entry-threshold.md",
+        "task-plans/performance/05-register-executor/P066-function-boundary-tiering.md",
+        "task-plans/performance/TASKS.json",
+        "task-plans/performance/INDEX.md"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "rust-harness",
+        "uses": [
+          "harness_and_fixtures",
+          "driver_tests",
+          "runtime",
+          "producer_and_helpers"
+        ],
+        "commands": [
+          {
+            "name": "p140-driver-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "{repo}/tools/verification/producers/p140_driver_tests.py",
+              "--features",
+              "runtime-only,compact-executor,register-executor,execution-reference",
+              "--output",
+              "{stage}/driver"
+            ]
+          }
+        ],
+        "outputs": {
+          "driver": "{stage}/driver/report.json"
+        },
+        "checks": [
+          {
+            "artifact": "driver",
+            "pointer": "/status",
+            "op": "equal",
+            "value": "passed"
+          },
+          {
+            "artifact": "driver",
+            "pointer": "/source_stable",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "driver",
+            "pointer": "/features",
+            "op": "exact_set",
+            "value": [
+              "runtime-only",
+              "compact-executor",
+              "register-executor",
+              "execution-reference"
+            ]
+          },
+          {
+            "artifact": "driver",
+            "pointer": "/instrumented",
+            "op": "equal",
+            "value": true
+          },
+          {
+            "artifact": "driver",
+            "pointer": "/timing_evidence",
+            "op": "equal",
+            "value": false
+          },
+          {
+            "artifact": "driver",
+            "pointer": "/tests/passed",
+            "op": "at_least",
+            "value": 15
+          },
+          {
+            "artifact": "driver",
+            "pointer": "/tests/required_names",
+            "op": "exact_set",
+            "value": [
+              "p140_parser_composes_entry_threshold_and_source_fuel",
+              "p140_actual_adaptive_engines_preserve_threshold_and_fuel",
+              "p140_bad_entry_settings_are_rejected_before_fixture_io",
+              "p140_omitted_threshold_preserves_legacy_wire"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "python-policy",
+        "uses": [
+          "harness_and_fixtures",
+          "producer_and_helpers",
+          "selection_and_contracts",
+          "policy_tests"
+        ],
+        "commands": [
+          {
+            "name": "p140-policy-model",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p140_entry_policy.py",
+              "-v"
+            ]
+          },
+          {
+            "name": "p140-binding-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p140_bindings.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p140-policy-model",
+            "kind": "unittest",
+            "minimum_passed": 4,
+            "required_names": [
+              "test_threshold_contract_and_integer_domain_are_exact",
+              "test_declaration_accepts_only_exact_candidate_only_shape",
+              "test_request_enforces_mode_frozen_match_and_omission_distinction",
+              "test_wire_candidate_only_legacy_and_capability_tamper"
+            ]
+          },
+          {
+            "command": "p140-binding-tests",
+            "kind": "unittest",
+            "minimum_passed": 4,
+            "required_names": [
+              "test_compare_forwards_threshold_after_fuel_and_keeps_baseline_legacy",
+              "test_focused_request_rejects_mismatch_omission_and_nonregister_before_process",
+              "test_selection_manifest_and_gate_binding_reject_setting_command_and_wire_drift",
+              "test_runtime_attestation_requires_adaptive_register_capability"
+            ]
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "prerequisites",
+        "runtime",
+        "harness_and_fixtures",
+        "producer_and_helpers",
+        "selection_and_contracts",
+        "task_plan"
+      ],
+      "environment": [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "PATH",
+        "RUSTUP_TOOLCHAIN"
+      ],
+      "commands": [
+        {
+          "name": "p140-freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p140.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json",
+        "selection_freeze": "{stage}/freeze/selection-freeze.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "predecessor",
+        "prerequisites",
+        "runtime",
+        "harness_and_fixtures",
+        "producer_and_helpers",
+        "selection_and_contracts",
+        "policy_tests",
+        "driver_tests",
+        "task_plan"
+      ],
+      "environment": [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "PATH",
+        "RUSTUP_TOOLCHAIN"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "p140-python-policy-suite",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-b",
+            "-v",
+            "tools/wtime-bench/tests/test_p140_entry_policy.py",
+            "tools/wtime-bench/tests/test_fast_candidate.py",
+            "tools/wtime-bench/tests/test_fast_selection.py",
+            "tools/wtime-bench/tests/test_fast_execution_identity.py",
+            "tools/wtime-bench/tests/test_p127_fuel_setting.py",
+            "tools/wtime-bench/tests/test_p127_comparison.py",
+            "tools/verification/tests/test_runtime_production.py",
+            "tools/verification/tests/test_production_attestation.py",
+            "tools/wtime-bench/tests/test_p140_bindings.py"
+          ]
+        },
+        {
+          "name": "p140-driver-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p140_driver_tests.py",
+            "--features",
+            "runtime-only,compact-executor,register-executor,execution-reference",
+            "--output",
+            "{stage}/driver"
+          ]
+        },
+        {
+          "name": "p140-production",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/runtime_production.py",
+            "--mode",
+            "register",
+            "--output",
+            "{stage}/production"
+          ]
+        },
+        {
+          "name": "p140-smoke",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p140.py",
+            "smoke",
+            "--freeze",
+            "{freeze_dir}/freeze/report.json",
+            "--production",
+            "{stage}/production/build-record.json",
+            "--register-entry-threshold",
+            "3",
+            "--output",
+            "{stage}/smoke"
+          ]
+        },
+        {
+          "name": "p140-check",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p140.py",
+            "check",
+            "--report",
+            "{stage}/smoke/report.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "production": "{stage}/production/build-record.json",
+        "driver": "{stage}/driver/report.json",
+        "smoke": "{stage}/smoke/report.json",
+        "invocation": "{stage}/smoke/invocation.json"
+      },
+      "tests": [
+        {
+          "command": "p140-python-policy-suite",
+          "kind": "unittest",
+          "minimum_passed": 71,
+          "required_names": [
+            "test_declaration_accepts_only_exact_candidate_only_shape",
+            "test_request_enforces_mode_frozen_match_and_omission_distinction",
+            "test_threshold_contract_and_integer_domain_are_exact",
+            "test_wire_candidate_only_legacy_and_capability_tamper",
+            "test_altered_stored_log_artifact_is_rejected",
+            "test_candidate_report_rejects_development_lane_before_other_dependencies",
+            "test_development_and_synthetic_receipts_are_rejected",
+            "test_missing_required_semantic_case_is_rejected",
+            "test_stale_core_source_hash_is_rejected",
+            "test_valid_full_receipt_parses_real_stored_test_logs",
+            "test_aliased_cold_pairs_are_counted_once_without_alias_pair_rows",
+            "test_calibration_fails_when_workload_cap_cannot_reach_target",
+            "test_calibration_reaches_twenty_ms_on_both_sides_at_shared_batch",
+            "test_calibration_rejects_a_side_that_changes_the_requested_batch",
+            "test_candidate_decision_adopts_supported_small_and_large_target_win",
+            "test_crossing_protected_tiny_regression_interval_is_inconclusive",
+            "test_large_target_regression_cannot_be_masked_by_small_target_win",
+            "test_protected_tiny_supported_regression_rejects_candidate",
+            "test_target_warm_and_cold_stages_keep_warm_as_primary",
+            "test_freeze_binds_manifest_registry_predecessor_and_groups",
+            "test_freeze_rejects_live_core_source_changed_before_predeclaration",
+            "test_freeze_rejects_new_core_source_missing_from_predecessor",
+            "test_frozen_manifest_change_is_rejected",
+            "test_frozen_predecessor_change_is_rejected",
+            "test_missing_held_out_workload_is_rejected",
+            "test_missing_protected_prepare_control_is_rejected",
+            "test_missing_stage_is_rejected",
+            "test_missing_targeted_large_scale_is_rejected",
+            "test_substituted_full_registry_row_is_rejected",
+            "test_supplied_runtime_sources_must_match_archive_subset",
+            "test_threads_family_accepts_only_declared_steady_state_group_rows",
+            "test_valid_focused_selection_returns_original_rows_and_groups",
+            "test_verify_allows_current_core_source_to_change_after_freeze",
+            "test_verify_rejects_tampered_frozen_runtime_source_map",
+            "test_adapter_archive_corruption_is_still_rejected",
+            "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+            "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+            "test_focused_producer_changes_stale_focused_pairs",
+            "test_membership_changes_and_unknown_python_modules_fail_closed",
+            "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+            "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+            "test_cli_value_requires_exact_well_typed_policy_dict",
+            "test_dependent_oracle_matches_literal_recurrence_in_admitted_wat",
+            "test_exact_typed_policy_and_cli_contract",
+            "test_fixed_matrix_is_46_rows_times_four_policies_modes",
+            "test_oracles_are_independent_and_prepare_has_null",
+            "test_protocol_contract_encodes_null_vs_exact_budget",
+            "test_registry_drift_rejects_without_mutating_source",
+            "test_validate_wire_setting_requires_presence_and_exact_json_types",
+            "test_compare_routes_reject_missing_wrong_float_and_boolean_wire_budget",
+            "test_explicit_metered_and_unmetered_policies_route_through_both_compare_helpers",
+            "test_focused_observe_shares_same_setting_for_simulated_paired_sides",
+            "test_focused_prepare_large_is_numeric_single_case_and_returns_null",
+            "test_legacy_single_case_and_scalar_argv_remain_byte_for_byte_unchanged",
+            "test_unsupported_focused_family_fails_before_process_command",
+            "test_bad_core_resolution_and_external_package_fail_before_build",
+            "test_each_mode_has_separate_exact_feature_roles",
+            "test_output_escape_is_rejected_before_any_write",
+            "test_protocol_must_match_mode_and_be_uninstrumented",
+            "test_source_drift_during_build_fails_closed",
+            "test_stable_workspace_preserves_unchanged_mtime_and_reuses_target",
+            "test_workspace_compiled_input_drift_fails_closed",
+            "test_wrong_resolved_runtime_feature_is_rejected_before_build",
+            "test_decoded_compact_and_register_receipts_validate",
+            "test_rejects_external_packages_and_wrong_core_paths_in_cargo_metadata",
+            "test_rejects_mode_protocol_binary_and_metadata_tampering",
+            "test_rejects_tampered_record_and_archives",
+            "test_compare_forwards_threshold_after_fuel_and_keeps_baseline_legacy",
+            "test_focused_request_rejects_mismatch_omission_and_nonregister_before_process",
+            "test_selection_manifest_and_gate_binding_reject_setting_command_and_wire_drift",
+            "test_runtime_attestation_requires_adaptive_register_capability"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "driver",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "driver",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "driver",
+          "pointer": "/features",
+          "op": "exact_set",
+          "value": [
+            "runtime-only",
+            "compact-executor",
+            "register-executor",
+            "execution-reference"
+          ]
+        },
+        {
+          "artifact": "driver",
+          "pointer": "/instrumented",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "driver",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "driver",
+          "pointer": "/tests/passed",
+          "op": "at_least",
+          "value": 15
+        },
+        {
+          "artifact": "driver",
+          "pointer": "/tests/required_names",
+          "op": "exact_set",
+          "value": [
+            "p140_parser_composes_entry_threshold_and_source_fuel",
+            "p140_actual_adaptive_engines_preserve_threshold_and_fuel",
+            "p140_bad_entry_settings_are_rejected_before_fixture_io",
+            "p140_omitted_threshold_preserves_legacy_wire"
+          ]
+        },
+        {
+          "artifact": "production",
+          "pointer": "/mode",
+          "op": "equal",
+          "value": "register"
+        },
+        {
+          "artifact": "production",
+          "pointer": "/phase",
+          "op": "equal",
+          "value": "build"
+        },
+        {
+          "artifact": "production",
+          "pointer": "/exit_code",
+          "op": "equal",
+          "value": 0
+        },
+        {
+          "artifact": "production",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "production",
+          "pointer": "/instrumented",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "production",
+          "pointer": "/runtime_features",
+          "op": "exact_set",
+          "value": [
+            "register-executor"
+          ]
+        },
+        {
+          "artifact": "production",
+          "pointer": "/protocol/register_entry_threshold_contract",
+          "op": "equal",
+          "value": {
+            "schema_version": 1,
+            "argument": "--register-entry-threshold",
+            "mode": "register",
+            "minimum": 1,
+            "maximum": 18446744073709551615
+          }
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/outcome",
+          "op": "equal",
+          "value": "contract_only"
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/gate_eligible",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/candidate_promoted",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "smoke",
+          "pointer": "/threshold",
+          "op": "equal",
+          "value": 3
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "One source-bound standard Register focused-stage smoke at threshold 3 establishes configuration, capability, and output binding only. It makes no timing claim or threshold recommendation and satisfies no P066 semantic, selection, control, cold/churn, build/dependency, statistical, or promotion gate."
+    ]
+  }
+}

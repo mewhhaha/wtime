@@ -82488,7 +82488,8 @@
         "P136",
         "P137",
         "P138",
-        "P139"
+        "P139",
+        "P140"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -89382,6 +89383,117 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P139"
+      }
+    },
+    {
+      "id": "P140",
+      "key": "register-entry-threshold-attestation",
+      "title": "Freeze and attest the adaptive Register entry threshold",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P127",
+        "P139"
+      ],
+      "owned_paths": [
+        "tools/wtime-bench/src/fuel_policy.rs",
+        "tools/wtime-bench/src/protocol.rs",
+        "tools/wtime-bench/src/scalar_driver.rs",
+        "tools/wtime-bench/src/p140_tests.rs",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/p140_entry_policy.py",
+        "tools/wtime-bench/tests/test_p140_entry_policy.py",
+        "tools/wtime-bench/tests/test_p140_bindings.py",
+        "tools/verification/production_attestation.py",
+        "tools/verification/producers/p140.py",
+        "tools/verification/producers/p140_driver_tests.py",
+        "docs/benchmarks/performance/P140-contract.json",
+        "docs/benchmarks/performance/P140-verification.json",
+        "docs/benchmarks/performance/P140-selection.json"
+      ],
+      "input_output_contract": "Add optional positive-u64 --register-entry-threshold N to the standard scalar and --single-case focused-stage protocols, composable with --source-fuel in either order. Reject zero, malformed, duplicate, overflow, and non-Register combinations before fixture I/O. Apply the value only to the candidate; preserve baseline argv/wire and all omitted-threshold bytes. Freeze optional selection_manifest execution_settings {register_entry_threshold:{baseline:null,candidate:N}}; bind and revalidate the setting in the freeze receipt, candidate-only focused argv/wire/report, candidate gate, and uninstrumented Register production capability/attestation. Preserve fuel semantics, legacy manifests, P136/P137 entry-batch schema, and all P066 gates. No Rust core/runtime edits, environment/global setting, timing decision, or threshold promotion. P140 is prerequisite to P066.",
+      "implementation_steps": [
+        "Verify and preserve the immutable P140-before archive and prerequisite receipts; inspect the actual Rust parser/protocol/scalar-driver path and Python selection/focused-comparison/gate/attestation path before editing.",
+        "Extend the Rust harness argument value to parse source fuel and positive-u64 Register entry threshold in either order, at most once each. Apply the threshold only through the existing Engine::with_register_entry_threshold API on standard Register focused paths; reject unsupported modes before reading fixtures.",
+        "Preserve byte-identical omitted-threshold output and the existing P127 source-fuel-only output. Add an explicit candidate wire field only when a threshold was requested and advertise a strict Register threshold capability contract in production --protocol output.",
+        "Add optional, exact-shape execution_settings to selection manifests and frozen receipts. Existing manifests without that key remain valid and retain their legacy identity behavior; threshold values reject booleans, zero, overflow and unknown fields.",
+        "Forward the frozen threshold only to candidate scalar/single-case observations, validate candidate capability/argv/raw wire/report setting against it, and retain baseline effective setting as null without changing baseline command or output.",
+        "Extend candidate_gate and production_attestation to bind the frozen setting, production protocol/capability and every candidate observation. Do not weaken semantic, protected/held-out, cold, build/dependency, sample-count, statistical, or promotion checks.",
+        "Add at least three Rust harness cases and three contained Python identity/gate/attestation cases. Run a source-bound one-stage Register smoke as contract_only evidence with timing_evidence:false and gate_eligible:false; do not analyze or claim performance."
+      ],
+      "fixture_cases": [
+        "p140_parser_composes_entry_threshold_and_source_fuel: both option orders preserve typed values and old omitted/fuel-only representations.",
+        "p140_actual_adaptive_engines_preserve_threshold_and_fuel: a tiny real scalar module exposes the requested threshold in its module cache snapshot and proves actual Register dispatch with an independent result oracle.",
+        "p140_bad_entry_settings_are_rejected_before_fixture_io: zero, malformed, duplicate, overflow and unsupported-mode inputs fail before a missing fixture is opened.",
+        "p140_omitted_threshold_preserves_legacy_wire: omitted threshold is byte-identical, source-fuel-only JSON remains unchanged, and fuel composes with threshold without semantic change.",
+        "test_compare_forwards_threshold_after_fuel_and_keeps_baseline_legacy: threshold is appended after source fuel only to candidate argv and candidate wire; baseline argv/wire remain legacy.",
+        "test_focused_request_rejects_mismatch_omission_and_nonregister_before_process: mismatch, omission, and non-Register selection fail before archive work or process launch.",
+        "test_selection_manifest_and_gate_binding_reject_setting_command_and_wire_drift: frozen settings, CLI, report, command, raw wire, and capability must agree.",
+        "test_runtime_attestation_requires_adaptive_register_capability: retained uninstrumented Register production must advertise the exact threshold capability.",
+        "test_threshold_contract_and_integer_domain_are_exact: accept the inclusive positive-u64 domain and reject booleans, zero, negatives, overflow, strings, floats, and null.",
+        "test_declaration_accepts_only_exact_candidate_only_shape: accept absent settings or the exact baseline-null/candidate-positive shape and reject unknown keys and invalid values.",
+        "test_request_enforces_mode_frozen_match_and_omission_distinction: enforce Register mode, frozen-value equality, and the distinction between omitted and explicitly configured thresholds.",
+        "test_wire_candidate_only_legacy_and_capability_tamper: preserve legacy wire when omitted and reject candidate wire or protocol capability drift."
+      ],
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P140-verification.json",
+        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P140-verification.json --group rust-harness --execute",
+        "python3 -B tools/verify.py dev --contract docs/benchmarks/performance/P140-verification.json --group python-policy --execute",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P140-verification.json --output target/performance/P140/complete --execute"
+      ],
+      "path": "05-register-executor/P140-register-entry-threshold.md",
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One tooling integrator owns the Rust harness and Python freeze/compare/gate/attestation patches; the P066 integrator owns selection and candidate promotion.",
+      "minimum_focused_cases": 12,
+      "evidence_contract": "Bind the immutable P140-before archive, actual harness/core feature set, exact positive-u64 capability contract, all four required Cargo parser/engine/wire cases, all eight P140 helper and binding Python cases plus the seven P127/P129 compatibility groups (71 tests total), frozen per-side setting, candidate-only argv/wire, baseline legacy identity, retained protocol/report/production attestation and source/binary/fixture hashes. Require the real one-stage Register smoke to remain contract_only, timing_evidence:false, gate_eligible:false and candidate_promoted:false. P066 retains every existing correctness, build/dependency, focused-stage, mandatory-control, cold/churn, statistical and promotion gate.",
+      "external_constraints": [
+        "default Rust core remains free of external dependencies and unsafe code",
+        "no Rust runtime/core edits or environment/global threshold setting",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P140/shared-finalization/attempt-0003/evidence.json",
+          "sha256": "fc46c0df6192000b7c9013a50a585774a00ab67ed814567b779d0e45a4d9af1d",
+          "bytes": 1698
+        }
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P140/shared-finalization/attempt-0003/evidence.json": "fc46c0df6192000b7c9013a50a585774a00ab67ed814567b779d0e45a4d9af1d"
+        },
+        "evidence": [
+          {
+            "bytes": 1698,
+            "path": "/workspace/wtime/target/performance/P140/shared-finalization/attempt-0003/evidence.json",
+            "sha256": "fc46c0df6192000b7c9013a50a585774a00ab67ed814567b779d0e45a4d9af1d"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P140"
       }
     }
   ]

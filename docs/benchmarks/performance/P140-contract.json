@@ -1,0 +1,76 @@
+{
+  "schema": "wtime-performance-task-contract-v1",
+  "task": "P140",
+  "kind": "foundation",
+  "selection": "register",
+  "protocol": "source-bound candidate-only Register entry threshold for focused scalar/single-case stages",
+  "predecessor": {
+    "archive": "target/performance/P140-before",
+    "repository_commit": "95b5e89756bfc9612aff3057aaa494c74cc67c30",
+    "manifest_sha256": "2b5adfc824b1e1ac3dbab65e3b1cef369e2267d2116b9cb803db7bc1242f7010",
+    "mode": "register"
+  },
+  "prerequisites": {
+    "P127": "docs/benchmarks/performance/P127-completion.json",
+    "P138": "docs/benchmarks/performance/P138-completion.json",
+    "P139": "docs/benchmarks/performance/P139-completion.json",
+    "all_done_contract_only": true
+  },
+  "selection_manifest": {
+    "path": "docs/benchmarks/performance/P140-selection.json",
+    "execution_settings": {
+      "register_entry_threshold": {
+        "baseline": null,
+        "candidate": 3
+      }
+    },
+    "mode": "register",
+    "lane": "standard scalar and single-case focused stages"
+  },
+  "threshold_capability": {
+    "schema_version": 1,
+    "argument": "--register-entry-threshold",
+    "mode": "register",
+    "minimum": 1,
+    "maximum": 18446744073709551615
+  },
+  "source_fuel": {
+    "contract": "P127",
+    "composable": true,
+    "argument_order": "either"
+  },
+  "smoke": {
+    "fixture": "target/performance/P140-before/fixtures/call_overhead.wasm",
+    "case": "call_overhead",
+    "stage": "warm_call",
+    "input": 100,
+    "expected": 101,
+    "batch": 8,
+    "candidate_mode": "register",
+    "register_entry_threshold": 3,
+    "timing_evidence": false,
+    "gate_eligible": false,
+    "candidate_promoted": false
+  },
+  "acceptance": {
+    "positive_u64_threshold_only": true,
+    "threshold_candidate_only": true,
+    "baseline_argv_and_wire_unchanged": true,
+    "omitted_threshold_wire_byte_compatible": true,
+    "source_fuel_semantics_unchanged": true,
+    "legacy_selection_manifests_unchanged": true,
+    "selection_freeze_binds_execution_settings": true,
+    "focused_report_binds_per_side_settings": true,
+    "candidate_gate_revalidates_command_and_observations": true,
+    "production_protocol_advertises_uninstrumented_capability": true,
+    "p138_current_core_build_budgets_revalidated_and_reused": true,
+    "current_core_source_unchanged_from_predecessor": true,
+    "timing_evidence": false,
+    "gate_eligible": false,
+    "candidate_promoted": false
+  },
+  "decision": "integrity",
+  "outcome": "contract_only",
+  "timing_evidence": false,
+  "performance_claim": false
+}

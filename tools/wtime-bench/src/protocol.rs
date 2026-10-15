@@ -1,4 +1,7 @@
 //! Stable single-observation protocol shared with the frozen-core adapter.
+#[cfg(all(test, feature = "register-executor", feature = "execution-reference", not(feature = "legacy-api")))]
+#[path = "p140_tests.rs"]
+mod p140_tests;
 #[cfg(not(feature = "legacy-api"))]
 #[path = "entry_batch_driver.rs"]
 mod entry_batch_driver;
@@ -69,6 +72,11 @@ fn engine_with_fuel(mode: &str, fuel: fuel_policy::FuelArgument) -> Engine {
         ..Config::default()
     };
     fuel.configure(&mut config);
+    fuel.validate_mode(mode).expect("invalid register entry setting");
+    #[cfg(all(feature = "register-executor", not(feature = "legacy-api")))]
+    if let Some(threshold) = fuel.register_entry_threshold {
+        return Engine::with_register_entry_threshold(config, threshold).unwrap();
+    }
     configured_engine(
         config,
         mode,
@@ -175,7 +183,7 @@ pub fn try_main(args: &[String]) -> bool {
     if args.first().map(String::as_str) == Some("--protocol") {
         assert_eq!(args.len(), 1);
         println!(
-            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{},\"batch_limits\":{{\"typed_numeric\":{},\"typed_memory\":{}}}}}",
+            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{},\"batch_limits\":{{\"typed_numeric\":{},\"typed_memory\":{}}}{}}}",
             available_modes(),
             available_types(),
             cfg!(not(feature = "legacy-api")),
@@ -189,6 +197,7 @@ pub fn try_main(args: &[String]) -> bool {
             fuel_policy::CONTRACT,
             TYPED_NUMERIC_MAX_BATCH,
             TYPED_MEMORY_MAX_BATCH,
+            fuel_policy::entry_capability_suffix(),
         );
         return true;
     }
@@ -197,6 +206,7 @@ pub fn try_main(args: &[String]) -> bool {
     }
     let fuel = fuel_policy::FuelArgument::parse(args, 8)
         .expect("--single-case FILE CASE INPUT EXPECTED STAGE BATCH MODE [--source-fuel none|50000000]");
+    fuel.validate_mode(&args[7]).expect("invalid register entry setting");
     let bytes = std::fs::read(&args[1]).unwrap();
     let case = &args[2];
     assert!(
@@ -325,7 +335,7 @@ mod p127_tests {
         const ADD: &[u8] = &[0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,7,7,1,3,114,117,110,0,0,10,9,1,7,0,32,0,65,1,106,11];
         for mode in ["decoded"].into_iter().chain(cfg!(feature = "compact-executor").then_some("compact")) {
             for policy in [fuel_policy::SourceFuel::Unmetered, fuel_policy::SourceFuel::Metered] {
-                let argument = fuel_policy::FuelArgument { policy, explicit: true };
+                let argument = fuel_policy::FuelArgument { policy, explicit: true, ..fuel_policy::FuelArgument::OMITTED };
                 let engine = engine_with_fuel(mode, argument);
                 let module = engine.compile(ADD).unwrap();
                 let mut store = Store::new(&engine);

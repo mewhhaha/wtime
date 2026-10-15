@@ -17,7 +17,7 @@ SCHEMA = "wtime-candidate-selection-v1"
 FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads"}
 ROW_FIELDS = {"family", "id", "role", "scale", "stages", "row_sha256"}
 MANIFEST_FIELDS = {"schema", "task", "lane", "rationale", "registry_sha256", "rows", "semantic_cases"}
-OPTIONAL_MANIFEST_FIELDS = {"fixture_models"}
+OPTIONAL_MANIFEST_FIELDS = {"fixture_models", "execution_settings"}
 _TASK = re.compile(r"P\d{3}\Z")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _CORE_CRATES = ("wtime-runtime", "wtime-types", "wtime-decode", "wtime-validate")
@@ -84,6 +84,8 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
         raise ValueError("invalid schema or task")
     if manifest["lane"] != "candidate" or not isinstance(manifest["rationale"], str) or not manifest["rationale"].strip():
         raise ValueError("lane must be candidate and rationale nonempty")
+    import p140_entry_policy
+    p140_entry_policy.declaration(manifest)
     registry, registry_hash, by_id = _registry(registry_path)
     if manifest["registry_sha256"] != registry_hash:
         raise ValueError("manifest registry_sha256 does not match registry bytes")

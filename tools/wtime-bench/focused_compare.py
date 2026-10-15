@@ -242,9 +242,11 @@ def prepare_fixtures(entries, frozen, output, encoder):
 
 
 def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
-            thread_cpus=None, fuel_setting=None):
+            thread_cpus=None, fuel_setting=None, register_entry_threshold=None):
     module = entry['oracle'].get('module')
     n = input_value(entry)
+    entry_options = ({'register_entry_threshold': register_entry_threshold}
+                     if register_entry_threshold is not None else {})
     if fuel_setting is not None:
         import p127_fuel_policy
         p127_fuel_policy.cli_value(fuel_setting)
@@ -273,12 +275,13 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
     if module == 'scalar_workloads.py':
         import scalar_workloads as model
         return compare.scalar_observation(executable, wasm, entry, n, model.oracle(entry['id'], n),
-            stage, batch, mode, cpu, **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
+            stage, batch, mode, cpu, **entry_options,
+            **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
     if module == 'scalar_p128_workloads.py':
         need(fuel_setting is None, 'explicit source fuel is unsupported for P128 scalar rows')
         driver_entry, expected = _p128_scalar_row(entry, n, stage, mode, batch)
         return compare.scalar_observation(executable, wasm, driver_entry, n, expected,
-            stage, batch, mode, cpu)
+            stage, batch, mode, cpu, **entry_options)
     if module == 'memory_workloads.py':
         import memory_workloads as model
         return compare.memory_observation(executable, wasm, entry, n, model.expected_memory(entry['id'], n),
@@ -304,7 +307,7 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
     import run as model
     expected = model.oracle(entry['id'], n) if entry['id'] != 'prepare_large' else 0
     return compare.observation(executable, wasm, entry['id'], n, expected, stage, batch, mode, cpu,
-        **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
+        **entry_options, **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
 
 
 def batch_limit(entry):
@@ -362,6 +365,13 @@ def run(args):
     declaration = (selection_manifest.verify_frozen(args.manifest, args.frozen) if args.frozen
                    else selection_manifest.load(args.manifest))
     entries = selection_manifest.rows(declaration)
+    import p140_entry_policy
+    entry_setting = p140_entry_policy.request(declaration, args.candidate_mode,
+                                             getattr(args, 'register_entry_threshold', None))
+    if entry_setting is not None:
+        need(all(entry['oracle'].get('module') in ('scalar_workloads.py', 'scalar_p128_workloads.py', 'run.py')
+                 or entry['id'] == 'prepare_large' for entry in entries),
+             'adaptive entry requires scalar or single-case rows')
     fuel_token = getattr(args, 'source_fuel', None)
     fuel_setting = None
     if fuel_token is not None:
@@ -405,6 +415,9 @@ def run(args):
                 'workload_profiles':{entry['id']:profile(entry) for entry in entries}}
     if fuel_setting is not None:
         settings['fuel_policy'] = fuel_setting
+    if entry_setting is not None:
+        settings['register_entry_threshold'] = entry_setting
+        p140_entry_policy.capability(capabilities['candidate'].get('register_entry_threshold_contract'))
     for side, cap in capabilities.items():
         need(cap.get('schema_version') == 2 and cap.get('instrumented') is False
              and settings[side+'_mode'] in cap.get('modes', []), 'unsupported production mode: '+side)
@@ -454,6 +467,7 @@ def run(args):
             seed = seed_for('observation', wid, stage, batch)
         return observe(exe, by_id[wid], fixture_paths[wid], stage, batch, settings[side+'_mode'], cpu,
                        args.output, seed=seed, thread_cpus=thread_cpus,
+                       **({'register_entry_threshold': entry_setting[side]} if entry_setting is not None else {}),
                        **({'fuel_setting':fuel_setting} if fuel_setting is not None else {}))
     report = {'schema': SCHEMA, 'schema_version':2, 'selection':declaration['task'],
         'lane':'development' if args.smoke else 'candidate', 'passed':False, 'source_stable':False,
@@ -546,6 +560,8 @@ def main():
     parser.add_argument('--frozen',type=Path)
     parser.add_argument('--semantic-receipt',type=Path)
     parser.add_argument('--candidate-mode', choices=('decoded','compact','register'), required=True)
+    parser.add_argument('--register-entry-threshold', type=int,
+                        help='explicit candidate Register threshold, bound to the frozen selection')
     parser.add_argument('--source-fuel', choices=('none','50000000'),
                         help='explicit scalar policy, applied identically to both paired sides')
     parser.add_argument('--thread-cpus', help='explicit comma-separated affinity mask for thread rows (at least two permitted CPUs)')

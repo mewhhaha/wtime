@@ -6,6 +6,7 @@ executes Cargo, a probe binary, or any other subprocess.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -442,6 +443,20 @@ def validate_runtime_record(record_path: str | Path, metadata: dict[str, Any],
                 or mode not in protocol.get("modes", []) or protocol.get("instrumented") is not False
                 or protocol != record.get("protocol") or protocol != reported_protocol):
             _fail("retained protocol does not exactly match uninstrumented comparison capability")
+        if ("register_entry_threshold" in settings
+                or "execution_settings" in report.get("declaration", {})):
+            helper = root / "tools/wtime-bench/p140_entry_policy.py"
+            spec = importlib.util.spec_from_file_location("production_entry_policy", helper)
+            if spec is None or spec.loader is None:
+                _fail("adaptive entry policy helper is missing")
+            entry_policy = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(entry_policy)
+            frozen = entry_policy.declaration(report.get("declaration"))
+            if frozen is None:
+                _fail("adaptive entry production setting differs from its frozen declaration")
+            entry_policy.validate_metadata(settings.get("register_entry_threshold"), frozen)
+            entry_policy.request(report["declaration"], mode, frozen["candidate"])
+            entry_policy.capability(protocol.get("register_entry_threshold_contract"))
         protocol_stdout = _inside(record.get("protocol_stdout"), output, "protocol stdout")
         protocol_stderr = _inside(record.get("protocol_stderr"), output, "protocol stderr")
         if not protocol_stdout.is_file() or protocol_stdout.read_bytes() != protocol_path.read_bytes():
