@@ -40,7 +40,8 @@
     },
     "tests": {
       "paths": [
-        "tools/wtime-bench/tests/test_p108_selection.py"
+        "tools/wtime-bench/tests/test_p108_selection.py",
+        "tools/wtime-bench/tests/test_p108_selected_tiers.py"
       ]
     }
   },
@@ -113,6 +114,22 @@
           ]
         },
         {
+          "name": "selected-tier-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p108_selected_tiers.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
           "name": "selected-tiers",
           "argv": [
             "{python}",
@@ -146,6 +163,16 @@
             "test_rejected_experimental_tier_cannot_become_default",
             "test_stale_milestone_proof_and_source_identity_are_rejected",
             "test_incomplete_source_maps_or_partial_and_boolean_counts_are_rejected"
+          ]
+        },
+        {
+          "command": "selected-tier-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": [
+            "test_selected_expansion_matches_the_exact_four_portfolio_configurations",
+            "test_selected_expansion_rejects_stale_policy_and_source_drift",
+            "test_retained_executable_hashes_survive_overwritten_shared_cargo_outputs"
           ]
         }
       ],

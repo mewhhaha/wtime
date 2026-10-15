@@ -72,7 +72,7 @@ def path_coverage():
 def analyze(verify_dir,measure_dir,output):
     import analyze as paired
     import build_budget
-    import candidate_gate
+    import p067_candidate_gate as candidate_gate
     import entry_batch_analyze
     import entry_sequence_analyze
     import execution_identity
@@ -84,6 +84,12 @@ def analyze(verify_dir,measure_dir,output):
     collection=read_json(measure_dir/'report.json')
     need(collection.get('schema')=='wtime-p067-measurements-v1' and collection.get('status')=='passed'
          and collection.get('timing_evidence') is True and collection.get('source_stable') is True,'milestone measurements incomplete')
+    resumed=collection.get('partial_collection_resume')
+    if resumed is not None:
+        resumption=read_json(verify_normal(resumed))
+        need(resumption.get('status')=='passed' and resumption.get('source_current') is True
+             and resumption.get('original_failed_attempt_preserved') is True
+             and resumption.get('retimed_comparisons')==[], 'invalid partial collection reuse')
     context_path=ROOT/'target/recovery/P080-isolate-0001/runs/attempt-0001/result.json'
     context=read_json(context_path)
     need(context.get('status')=='passed' and context.get('shared_encoder_restored') is True,
@@ -131,13 +137,14 @@ def analyze(verify_dir,measure_dir,output):
         stats[name]=normal(destination)
         raw_counts[name]={'runs':len(runs),'workloads':len(expected_ids),'pairs':sum(len(rows) for run in runs for rows in run['groups'].values())}
     entry_batch_analyze.run_analysis(verify_normal(collection['reports']['entry-totals']),output.parent/'entry-totals')
-    entry_sequence_analyze.run_analysis(verify_normal(collection['reports']['entry-sequence']),output.parent/'entry-sequence')
+    entry_sequence_analyze.run_analysis(verify_normal(collection['reports']['entry-sequence']).parent,output.parent/'entry-sequence')
     outcome=choose(decisions,hard_gates=True)
     write_new(output,{'schema':'wtime-p067-milestone-v1','task':'P067','status':'passed',**outcome,
         'coverage':coverage,'execution_paths':paths,'tier_checks':counts,'runtime_controls':normal(verify_dir/'prior-controls.json'),
         'measurements':normal(measure_dir/'report.json'),'statistics':stats,'sample_counts':raw_counts,'builds':builds,
         'register_comparisons':decisions,'timing_evidence':True,
         'collection_context':{'encoder_restoration':normal(context_path),
+            'partial_collection_resume':resumed,
             'environment_smoke':normal(ROOT/'docs/benchmarks/performance/P067-background-context.json'),
             'background_work':'Other benchmarks were pinned to CPUs 1, 2 and 3. Untimed verification, build, archive and status work ran concurrently, including CPU 4 helpers and some unpinned inspection/chore processes. Two reported short overlaps are retained in the background-context artifact; exact overlap intervals were not fully captured.',
             'fixture_encoder_event':'An unrelated Cargo test replaced the shared preparation encoder after the first comparison had encoded its fixtures. Its hash-verified original bytes were restored before the final integrity check. Retained Wasm fixtures and timed runtime executables were unchanged.',

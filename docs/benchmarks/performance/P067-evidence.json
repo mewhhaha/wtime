@@ -1,0 +1,58 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 22780,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P067-verification.json",
+    "sha256": "fbb9be04824427a3f14a40067f4d23b9c5b1462f5a1066bad42fc32104e5d6d9"
+  },
+  "decision": "rejected",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Register milestone; default-policy selection is finalized by P108. No native AArch64 claim."
+  ],
+  "outcome": "rejected",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 3048286,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/26/26ced43b82619fe89dd51110aad1caff83a08d54e09f708793db5c8479069623",
+      "sha256": "26ced43b82619fe89dd51110aad1caff83a08d54e09f708793db5c8479069623",
+      "stored_bytes": 3048286,
+      "stored_sha256": "26ced43b82619fe89dd51110aad1caff83a08d54e09f708793db5c8479069623"
+    },
+    "freeze": {
+      "bytes": 2449537,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/ca/ca99c487968af0ffb9d5d6d107c9e0e5684cec6cba0be0ea99821fb90ffff949",
+      "sha256": "ca99c487968af0ffb9d5d6d107c9e0e5684cec6cba0be0ea99821fb90ffff949",
+      "stored_bytes": 2449537,
+      "stored_sha256": "ca99c487968af0ffb9d5d6d107c9e0e5684cec6cba0be0ea99821fb90ffff949"
+    },
+    "measure": {
+      "bytes": 3689274,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/38/38ba636c3753e1bd7153df1021421d4e4e19dfc2d2f1bce4b4cddb7a601105c3",
+      "sha256": "38ba636c3753e1bd7153df1021421d4e4e19dfc2d2f1bce4b4cddb7a601105c3",
+      "stored_bytes": 3689274,
+      "stored_sha256": "38ba636c3753e1bd7153df1021421d4e4e19dfc2d2f1bce4b4cddb7a601105c3"
+    },
+    "verify": {
+      "bytes": 2432748,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/ee/ee74c0fd7f4bba7401488864f9acfe4b8bfe4299a17e7bc07aba7cfd18d9540b",
+      "sha256": "ee74c0fd7f4bba7401488864f9acfe4b8bfe4299a17e7bc07aba7cfd18d9540b",
+      "stored_bytes": 2432748,
+      "stored_sha256": "ee74c0fd7f4bba7401488864f9acfe4b8bfe4299a17e7bc07aba7cfd18d9540b"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P067"
+}

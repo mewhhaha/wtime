@@ -895,9 +895,124 @@ class _RegisterThresholdAction(argparse.Action):
         setattr(namespace, self.dest, value)
 
 
+def _selected_policy(decisions: Path, *, output: Path, selection: str,
+                     runner: Callable[..., Any], builder: Callable[..., Any]) -> dict[str, Any]:
+    """Run each exact P108 tier through check_tier and retain normal report refs."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import shutil
+    from verification.artifacts import normal, verify_normal
+    from verification.producers import p108
+
+    decisions = Path(decisions).resolve(strict=True)
+    try:
+        policy = json.loads(decisions.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TierCheckError(f"cannot read P108 decisions policy: {exc}") from exc
+    if (policy.get("task") != "P108" or policy.get("status") != "passed"
+            or policy.get("timing_evidence") is not False):
+        raise TierCheckError("--decisions must name a completed non-timing P108 policy")
+    try:
+        tier_specs = p108.validate_policy(policy, sources=p108.source_identity())
+    except (ValueError, OSError) as exc:
+        raise TierCheckError(f"P108 policy is invalid or stale: {exc}") from exc
+
+    output = Path(output)
+    if output.exists() or output.is_symlink():
+        raise TierCheckError(f"refusing to overwrite existing output directory: {output}")
+    output.mkdir(parents=True, exist_ok=False)
+    tier_root = output / "tiers"
+    tier_root.mkdir()
+    tier_refs: dict[str, dict[str, Any]] = {}
+    executable_refs: dict[str, dict[str, dict[str, Any]]] = {}
+    tier_configs: list[dict[str, Any]] = []
+    reports: list[dict[str, Any]] = []
+    for spec in tier_specs:
+        name = spec["name"]
+        mode = spec["mode"]
+        threshold = spec["register_entry_threshold"]
+        if mode == "selected":
+            raise TierCheckError("P108 tier policy cannot recursively select itself")
+        tier_output = tier_root / name
+        report = check_tier(tier=mode, selection=selection, output=tier_output,
+                            runner=runner, builder=builder,
+                            register_entry_threshold=threshold)
+        counts = report.get("counts", {})
+        if (report.get("passed") is not True or report.get("source_stable") is not True
+                or report.get("requested_tier") != mode
+                or report.get("register_entry_threshold") != threshold
+                or any(type(counts.get(key)) is not int or counts[key] != 0
+                       for key in ("failed", "skipped", "unsupported"))
+                or counts.get("all_checks_executed") != 89):
+            raise TierCheckError(f"P108 tier {name} did not pass its exact source-current check")
+
+        # check_tier verifies these executable identities before/after the run.
+        # Keep immutable copies before the next configuration rebuilds shared Cargo paths.
+        binary_inputs = {
+            "benchmark": (report["binary"].get("path"), report["binary"].get("sha256")),
+            "conformance": (report["conformance_binary"].get("path"),
+                            report["conformance_binary"].get("sha256")),
+            "diagnostic": (report["diagnostic_instrumentation"].get("binary"),
+                           report["diagnostic_instrumentation"].get("binary_sha256")),
+        }
+        binaries_dir = tier_output / "binaries"
+        binaries_dir.mkdir()
+        retained: dict[str, dict[str, Any]] = {}
+        for logical, (path_value, digest) in binary_inputs.items():
+            if not isinstance(path_value, str) or not isinstance(digest, str):
+                raise TierCheckError(f"P108 tier {name} has an incomplete executable identity")
+            executable = Path(path_value)
+            if not executable.is_absolute():
+                executable = ROOT / executable
+            if _sha(executable) != digest:
+                raise TierCheckError(f"P108 tier {name} executable changed after its check: {path_value}")
+            destination = binaries_dir / logical / executable.name
+            destination.parent.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(executable, destination)
+            if _sha(destination) != digest:
+                raise TierCheckError(f"P108 tier {name} retained executable hash differs: {logical}")
+            retained[logical] = normal(destination)
+        executable_refs[name] = retained
+
+        report_path = tier_output / "report.json"
+        reference = normal(report_path)
+        verify_normal(reference)
+        tier_refs[name] = reference
+        tier_configs.append({"name": name, "mode": mode,
+                             "register_entry_threshold": threshold,
+                             "features": spec["features"], "support": spec["support"]})
+        reports.append(report)
+
+    for name, executables in executable_refs.items():
+        for logical, reference in executables.items():
+            try:
+                retained_path = verify_normal(reference)
+            except ValueError as exc:
+                raise TierCheckError(f"P108 retained {name}/{logical} executable is stale: {exc}") from exc
+            if _sha(retained_path) != reference["sha256"]:
+                raise TierCheckError(f"P108 retained {name}/{logical} executable changed")
+
+    value = {"schema": "wtime-selected-tier-check-v1", "task": "P108",
+             "passed": True, "source_stable": all(row["source_stable"] is True for row in reports),
+             "selection": selection, "decisions": normal(decisions),
+             "tiers": tier_refs, "executables": executable_refs,
+             "configurations": tier_configs,
+             "counts": {
+                 "selected_tiers": len(tier_refs),
+                 "selected_cases": sum(row["counts"]["selected_cases"] for row in reports),
+                 "mode_runs_executed": sum(row["counts"]["mode_runs_executed"] for row in reports),
+                 "failed": sum(row["counts"]["failed"] for row in reports),
+                 "skipped": sum(row["counts"]["skipped"] for row in reports),
+                 "unsupported": sum(row["counts"]["unsupported"] for row in reports)},
+             "timing_evidence": False}
+    (output / "report.json").write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tier", default="decoded", help="requested candidate execution mode")
+    parser.add_argument("--tier", default="decoded", help="requested candidate execution mode or selected portfolio")
+    parser.add_argument("--decisions", type=Path, help="completed P108 decisions policy required for --tier selected")
     parser.add_argument("--selection", default="integration", choices=["integration"])
     parser.add_argument("--register-entry-threshold", type=int, action=_RegisterThresholdAction,
                         help="use the optional adaptive Register policy at this positive u64 threshold")
@@ -910,19 +1025,36 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"use a separate performance-counters benchmark (default: {DEFAULT_COUNTERS_BINARY})")
     args = parser.parse_args(argv)
     try:
-        report = check_tier(tier=args.tier, selection=args.selection,
-                            output=args.output, binary=args.binary,
-                            conformance_binary=args.conformance_binary,
-                            diagnostic_binary=args.diagnostic_binary,
-                            register_entry_threshold=args.register_entry_threshold)
+        if args.tier == "selected":
+            if args.decisions is None:
+                raise TierCheckError("--tier selected requires --decisions PATH")
+            if args.binary is not None or args.conformance_binary is not None or args.diagnostic_binary is not None:
+                raise TierCheckError("--tier selected builds each exact policy configuration; explicit binary overrides are unsupported")
+            if args.register_entry_threshold is not None:
+                raise TierCheckError("--tier selected takes the Register threshold from the validated P108 policy")
+            report = _selected_policy(args.decisions, output=args.output,
+                                      selection=args.selection, runner=subprocess.run,
+                                      builder=subprocess.run)
+            counts = report["counts"]
+            print("passed={} tiers={} selected={} executed={} failed={} skipped={} unsupported={}".format(
+                str(report["passed"]).lower(), counts["selected_tiers"], counts["selected_cases"],
+                counts["mode_runs_executed"], counts["failed"], counts["skipped"], counts["unsupported"]))
+        else:
+            if args.decisions is not None:
+                raise TierCheckError("--decisions is only valid with --tier selected")
+            report = check_tier(tier=args.tier, selection=args.selection,
+                                output=args.output, binary=args.binary,
+                                conformance_binary=args.conformance_binary,
+                                diagnostic_binary=args.diagnostic_binary,
+                                register_entry_threshold=args.register_entry_threshold)
+            counts = report["counts"]
+            print("passed={} selected={} executed={} failed={} skipped={} unsupported={}".format(
+                str(report["passed"]).lower(), counts["selected_cases"], counts["mode_runs_executed"],
+                counts["failed"], counts["skipped"], counts["unsupported"],
+            ))
     except TierCheckError as exc:
         print(f"tier_check: error: {exc}", file=sys.stderr)
         return 2
-    counts = report["counts"]
-    print("passed={} selected={} executed={} failed={} skipped={} unsupported={}".format(
-        str(report["passed"]).lower(), counts["selected_cases"], counts["mode_runs_executed"],
-        counts["failed"], counts["skipped"], counts["unsupported"],
-    ))
     print(f"report={args.output / 'report.json'}")
     return 0 if report["passed"] else 1
 

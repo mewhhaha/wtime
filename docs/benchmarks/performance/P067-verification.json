@@ -162,7 +162,10 @@
         "tools/wtime-bench/gates.py",
         "tools/wtime-bench/candidate_gate.py",
         "tools/wtime-bench/entry_batch_analyze.py",
-        "tools/wtime-bench/entry_sequence_analyze.py"
+        "tools/wtime-bench/entry_sequence_analyze.py",
+        "docs/benchmarks/performance/P067-background-context.json",
+        "tools/verification/producers/p067_candidate_gate.py",
+        "tools/wtime-bench/tests/test_p067_memory_gate.py"
       ]
     },
     "paths_diagnostics": {
@@ -182,6 +185,22 @@
     "path_checker": {
       "paths": [
         "tools/verification/producers/p067_path_checks.py"
+      ]
+    },
+    "measurement_reuse": {
+      "paths": [
+        "tools/verification/producers/p067_retain.py",
+        "tools/wtime-bench/tests/test_p067_measurement_reuse.py",
+        "tools/verification/artifacts.py",
+        "target/verification/runs/P067/measure/attempt-0001/inputs.json",
+        "target/verification/runs/P067/measure/attempt-0001/failure.json",
+        "target/verification/runs/P067/measure/attempt-0001/measure.*",
+        "target/verification/runs/P067/measure/attempt-0001/measure/**",
+        "tools/verification/producers/p067_resume.py",
+        "tools/wtime-bench/tests/test_p067_partial_resume.py",
+        "target/recovery/P067-representative-rebind-0001/rebind.py",
+        "target/recovery/P067-representative-rebind-0001/rebind-result.json",
+        "target/performance/P067-p001-representative-adapter-0001/**"
       ]
     }
   },
@@ -421,7 +440,8 @@
         "harness",
         "selections",
         "builds",
-        "workflow"
+        "workflow",
+        "measurement_reuse"
       ],
       "dependencies": [
         "freeze",
@@ -429,12 +449,29 @@
       ],
       "commands": [
         {
-          "name": "measure",
+          "name": "measurement-reuse-tests",
           "argv": [
             "{python}",
             "-B",
-            "{repo}/tools/verification/producers/p067_workflow.py",
-            "measure",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p067_partial_resume.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "resume-missing-milestone-comparisons",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p067_resume.py",
+            "--completed",
+            "{repo}/target/verification/runs/P067/measure/attempt-0001",
             "--freeze",
             "{freeze_dir}/freeze.json",
             "--verify-dir",
@@ -446,8 +483,35 @@
       ],
       "outputs": {
         "measurements": "{stage}/measure/report.json",
-        "artifacts": "{stage}/measure/artifacts.json"
-      }
+        "artifacts": "{stage}/measure/artifacts.json",
+        "reuse": "{stage}/measure/reuse.json"
+      },
+      "checks": [
+        {
+          "artifact": "measurements",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "reuse",
+          "pointer": "/retimed_comparisons",
+          "op": "exact_set",
+          "value": []
+        }
+      ],
+      "tests": [
+        {
+          "command": "measurement-reuse-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": [
+            "test_only_the_recorded_pre_sampling_metadata_failure_is_eligible",
+            "test_semantic_failures_wrong_commands_and_duplicate_results_are_rejected",
+            "test_boolean_exit_status_or_any_different_collector_error_is_rejected"
+          ]
+        }
+      ]
     },
     "analyze": {
       "uses": [
@@ -466,6 +530,22 @@
         "measure"
       ],
       "commands": [
+        {
+          "name": "memory-proof-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p067_memory_gate.py",
+            "-v",
+            "-b"
+          ]
+        },
         {
           "name": "milestone-tests",
           "argv": [
@@ -511,6 +591,20 @@
             "test_hard_gate_must_be_explicitly_passed"
           ],
           "minimum_passed": 7
+        },
+        {
+          "command": "memory-proof-tests",
+          "kind": "unittest",
+          "minimum_passed": 7,
+          "required_names": [
+            "test_valid_seeded_copy_and_fill_validate_every_image",
+            "test_rejects_bad_full_images_ranges_record_order_and_omissions",
+            "test_rejects_wrong_record_count_driver_and_selected_shape",
+            "test_ordinary_memory_proof_and_complete_entry_cache",
+            "test_declared_memory_cold_primary_retains_both_run_decisions",
+            "test_memory_cold_regression_remains_rejected",
+            "test_unknown_cold_primary_fails_before_statistics"
+          ]
         }
       ],
       "outputs": {

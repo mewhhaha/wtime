@@ -1,8 +1,8 @@
 # P067 — Evaluate register execution and adaptive break-even
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -99,4 +99,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P067/shared-finalization/attempt-0006/evidence.json": "4b46babd7b04f800bdf7def1bce73372e3fb13efda6911a75921a501120a6c6c"
+  },
+  "evidence": [
+    {
+      "bytes": 2271,
+      "path": "/workspace/wtime/target/performance/P067/shared-finalization/attempt-0006/evidence.json",
+      "sha256": "4b46babd7b04f800bdf7def1bce73372e3fb13efda6911a75921a501120a6c6c"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P067"
+}
+```

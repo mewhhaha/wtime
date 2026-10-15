@@ -5644,7 +5644,7 @@
           "Evidence is integrity-only: batch size is one and five samples per input are not calibrated comparison evidence.",
           "No Wasmtime-relative timing ratio or speedup is claimed.",
           "The report preserves all 135 raw observations, including full memory payloads; this summary deliberately omits them.",
-          "Source stability is the runner\u2019s within-run result. Later workspace changes are listed separately and do not rewrite the historical report."
+          "Source stability is the runner’s within-run result. Later workspace changes are listed separately and do not rewrite the historical report."
         ],
         "outcome": "integrity_only",
         "passed": true,
@@ -6518,7 +6518,7 @@
           "Function bounds are per-body validation high-water allocation hints, including the implicit function control. Unreachable polymorphism and cumulative caller operands prevent using these bounds to remove source resource checks. P019 per-source transient peaks remain unknown; no optimized tier is enabled.",
           "Layouts and exact nominal types, effects, control and catch/resume handler views borrow original immutable Module-owned storage; plans contain no Store handles. Analysis is capped at 100,000 conservative work units and 1 MiB, declines transactionally, and frame setup uses original decoded locals when unavailable.",
           "Capacity accounting includes plan storage and validator bounds payload, excludes allocator overhead and fixed ModuleData headers; Module clones share one payload, per-activation Vecs remain separate.",
-          "Cold preparation median ratios ranged approximately 0.99\u20131.25 across two runs; memory preparation run two had a broad CI (upper 3.06), so performance is inconclusive. No runtime speedup is claimed for this foundation. Default build passed absolute budgets at 8.10s clean, 0.34s CLI leaf, 1.13s runtime leaf, 14.94s release, 1,000,264 stripped bytes, zero external core dependencies. Relative clean build vs P020 5.74s is 1.41; foundation adds validation bounds and plan/effect metadata, while cloud variation prevents attributing the entire delta to code. Future integration gates must evaluate combined costs.",
+          "Cold preparation median ratios ranged approximately 0.99–1.25 across two runs; memory preparation run two had a broad CI (upper 3.06), so performance is inconclusive. No runtime speedup is claimed for this foundation. Default build passed absolute budgets at 8.10s clean, 0.34s CLI leaf, 1.13s runtime leaf, 14.94s release, 1,000,264 stripped bytes, zero external core dependencies. Relative clean build vs P020 5.74s is 1.41; foundation adds validation bounds and plan/effect metadata, while cloud variation prevents attributing the entire delta to code. Future integration gates must evaluate combined costs.",
           "Preparation subphases were executed in a byte-verified isolated source copy with an injected private test-only diagnostic helper, not the production timing binary. Debug single observations cover validation/control/plans on three fixtures; they are not production latency estimates.",
           "Five private P021 cases run in the existing library unit-test target via include from tests/performance/p021.rs to preserve the private planning boundary; broader runtime tests include planned GC-local initialization and host reentrant collection."
         ]
@@ -72561,7 +72561,7 @@
         "crates/wtime-runtime/tests/performance/p036.rs",
         "crates/wtime-runtime/tests/fixtures/performance/compact/"
       ],
-      "input_output_contract": "`CompactFunction` is private, immutable metadata built only from a validated `FunctionPlan`; decoded execution remains the default and fallback. `CompactOp` is a safe fixed-size record with a compile-time maximum of 24 bytes. Narrow inline forms preserve all bits; checked side indices retain every wider or compound immediate without truncation.\n\nConstruction has absolute ceilings of 100,000 work units and 1 MiB retained metadata even when a caller supplies `usize::MAX`. Work is charged as six visits per source instruction plus three per nested side-table element. Size every retained vector and nested payload with checked arithmetic, account actual capacities, and reject over-budget input before reserving/publishing metadata. Allocation or verification failure publishes no partial function. Verify source/module/engine identity and reject tampered op tags, side indices, origins, work, and retained-byte counts.\n\nThis task establishes factory metadata and decoded fallback only. It does not execute CompactOp, change Engine defaults, claim compact fuel/trap/next-PC behavior, or claim a speedup; live-path correctness belongs to P038\u2013P045 and selection to P046.",
+      "input_output_contract": "`CompactFunction` is private, immutable metadata built only from a validated `FunctionPlan`; decoded execution remains the default and fallback. `CompactOp` is a safe fixed-size record with a compile-time maximum of 24 bytes. Narrow inline forms preserve all bits; checked side indices retain every wider or compound immediate without truncation.\n\nConstruction has absolute ceilings of 100,000 work units and 1 MiB retained metadata even when a caller supplies `usize::MAX`. Work is charged as six visits per source instruction plus three per nested side-table element. Size every retained vector and nested payload with checked arithmetic, account actual capacities, and reject over-budget input before reserving/publishing metadata. Allocation or verification failure publishes no partial function. Verify source/module/engine identity and reject tampered op tags, side indices, origins, work, and retained-byte counts.\n\nThis task establishes factory metadata and decoded fallback only. It does not execute CompactOp, change Engine defaults, claim compact fuel/trap/next-PC behavior, or claim a speedup; live-path correctness belongs to P038–P045 and selection to P046.",
       "implementation_steps": [
         "Record current `Instruction`, `Immediate`, `Value`, and compact record sizes. Use safe Rust and a compile-time `size_of::<CompactOp>() <= 24` assertion; encode narrow indices and numeric bit patterns losslessly.",
         "Cover every admitted inline form (`None`, index, pair, block type, i32/i64 and f32/f64 bits) and every side-table class (`BlockType`, branches, catches, resume handlers, V128 bytes, memory/lane operands, type vectors, heap types, and cast metadata). Unknown shapes return `Declined::Unsupported`.",
@@ -73283,7 +73283,7 @@
         "crates/wtime-runtime/tests/fixtures/performance/p037/control-edges.wasm",
         "crates/wtime-runtime/tests/fixtures/performance/p037/LICENSE-fixture.txt"
       ],
-      "input_output_contract": "`SourceMap` is private metadata for an admitted `CompactFunction`, not an executable dispatcher. Begin with one compact event per original decoded instruction and explicit source-to-compact / compact-to-source entries including terminal `n`; terminal has no event. Preserve original source PC, opcode coverage identity, and span lookup through the immutable source module. Derive ordinary sequential, if/else/end, loop, block branch, `br_if`, `br_table`, return, and tail-transfer successors only from the validated decoded instruction and control tables. Reject branches outside the function or malformed spans.\n\nKeep absolute aggregate ceilings of 100,000 work units and 1 MiB for CompactFunction retention, SourceMap retention, construction labels, and verification scratch, clamped even if callers request `usize::MAX`. Use checked arithmetic, fallible reserves and actual capacity accounting. Verify engine/module/source identity and reconstructed map contents; decline the entire function before publication when budgets, ownership, control structure, or supported-origin requirements fail.\n\nException/catch/delegate/throw, continuation resume/suspend/switch, reference branches (`d5/d6`), and GC cast branches (`fb18/fb19`, `fb25/fb26`) remain explicit whole-function declines. P037 proves metadata targets and original-event associations only. It does not connect source-prefix accounting, coverage dispatch, trap attribution, fuel/cancellation stops, or materialization to a compact fetch; those live-path claims wait for P038\u2013P045.",
+      "input_output_contract": "`SourceMap` is private metadata for an admitted `CompactFunction`, not an executable dispatcher. Begin with one compact event per original decoded instruction and explicit source-to-compact / compact-to-source entries including terminal `n`; terminal has no event. Preserve original source PC, opcode coverage identity, and span lookup through the immutable source module. Derive ordinary sequential, if/else/end, loop, block branch, `br_if`, `br_table`, return, and tail-transfer successors only from the validated decoded instruction and control tables. Reject branches outside the function or malformed spans.\n\nKeep absolute aggregate ceilings of 100,000 work units and 1 MiB for CompactFunction retention, SourceMap retention, construction labels, and verification scratch, clamped even if callers request `usize::MAX`. Use checked arithmetic, fallible reserves and actual capacity accounting. Verify engine/module/source identity and reconstructed map contents; decline the entire function before publication when budgets, ownership, control structure, or supported-origin requirements fail.\n\nException/catch/delegate/throw, continuation resume/suspend/switch, reference branches (`d5/d6`), and GC cast branches (`fb18/fb19`, `fb25/fb26`) remain explicit whole-function declines. P037 proves metadata targets and original-event associations only. It does not connect source-prefix accounting, coverage dispatch, trap attribution, fuel/cancellation stops, or materialization to a compact fetch; those live-path claims wait for P038–P045.",
       "implementation_steps": [
         "Build one-to-one source/compact arrays with a terminal sentinel and a compact source-event coverage entry for each real original instruction. Keep spans resolvable from the validated source module; do not synthesize origins.",
         "Construct successor spans from validated control metadata. Test if-false with/without else, reached else, fallthrough end, block exit, loop back-edge, both `br_if` alternatives, every `br_table` arm/default, return, tail transfer, and terminal no-event behavior.",
@@ -80004,17 +80004,17 @@
         "docs/benchmarks/performance/P044-verification.json",
         "docs/benchmarks/performance/P044-contract.json"
       ],
-      "input_output_contract": "A bounded straight-line numeric/local/numeric-call prefix over canonical Values may execute compactly and exits one-way before the first control, memory or complex operation. The handoff recovers the original prepared (Instruction, pc), clears compact frame state at the already-charged boundary and executes the decoded suffix. Existing whole numeric/control functions retain their unchanged path. GC/EH/continuation helpers keep existing semantics after exact source-state/root materialization; no whole EH/prompt CFG certificate is introduced. P113\u2013P120 are contract foundations; this parent retains the combined measured_promotion acceptance gate.",
+      "input_output_contract": "A bounded straight-line numeric/local/numeric-call prefix over canonical Values may execute compactly and exits one-way before the first control, memory or complex operation. The handoff recovers the original prepared (Instruction, pc), clears compact frame state at the already-charged boundary and executes the decoded suffix. Existing whole numeric/control functions retain their unchanged path. GC/EH/continuation helpers keep existing semantics after exact source-state/root materialization; no whole EH/prompt CFG certificate is introduced. P113–P120 are contract foundations; this parent retains the combined measured_promotion acceptance gate.",
       "implementation_steps": [
         "Preserve the P044-before immediate-P043 Compact archive and the P001 historical baseline. Use the shared P044 verification contract to bind the predecessor, source tree, fixtures, harness, build tools and promotion inputs.",
         "Keep the bounded straight-line integer/local/numeric-call prefix over canonical `Value` state and its permanent one-way decoded exit before the first control, memory or complex operation. Existing whole numeric/control Compact functions remain unchanged; no whole EH/prompt CFG certificate is added.",
         "Preserve the original source instruction and `pc` at the already-charged handoff, clear compact frame state, and enter the decoded handler once. A branch-over-barrier executes the decoded suffix. Keep references visible to GC roots and preserve contexts, fuel, continuation bytes and cleanup.",
-        "Retain the P114\u2013P120 correctness work, including P119's bounded shared `Store.resume_fuel` cleanup when resumed invocation termination abandons a segment during initial exception unwind or a catch-to-function-label returns with empty frames. Preserve consumed-handle ordering for the next independent invocation.",
-        "Run the full default runtime suite and the unfiltered `compact-executor,execution-reference` suite. The compact suite must execute all 21 named P114\u2013P120 cases plus all eight named P022 interactions; require the contract's minimum totals (228 default, 334 compact) and no filtered tests.",
+        "Retain the P114–P120 correctness work, including P119's bounded shared `Store.resume_fuel` cleanup when resumed invocation termination abandons a segment during initial exception unwind or a catch-to-function-label returns with empty frames. Preserve consumed-handle ordering for the next independent invocation.",
+        "Run the full default runtime suite and the unfiltered `compact-executor,execution-reference` suite. The compact suite must execute all 21 named P114–P120 cases plus all eight named P022 interactions; require the contract's minimum totals (228 default, 334 compact) and no filtered tests.",
         "Build the production benchmark binary, run all six independent integration probes, and pass both default and optional compact build budgets. Keep these checks in `verify` before any timed comparisons.",
         "Run `measure` once with the contract's two runs and 30 pairs per group per run; require exactly 1800 pair events with source-stable fixtures and binaries. Keep instrumentation disabled and use the frozen immediate predecessor.",
         "Run `analyze` once through the shared statistics producer, which computes paired statistics and the gate decision together, then records the relative build decision. Do not run a second statistics or gate calculation on the same comparison.",
-        "After reviewing the completion record and all four phase receipts, finalize the contract and publish its completion record. Keep this parent as the combined measured_promotion gate; P113\u2013P120 are correctness foundations and make no independent speed claims."
+        "After reviewing the completion record and all four phase receipts, finalize the contract and publish its completion record. Keep this parent as the combined measured_promotion gate; P113–P120 are correctness foundations and make no independent speed claims."
       ],
       "fixture_cases": [
         "Fuel interruption at each admitted prefix source operation matches decoded state and charges exactly once.",
@@ -80023,7 +80023,7 @@
         "try_table/throw, unhandled throw and nested unwind preserve original source pc, contexts and fuel.",
         "Suspend/bind/resume/resume_throw/switch preserve exact contexts, roots, continuation bytes, fuel and one-shot cleanup.",
         "Explicit Compact runs all eight P022 interaction cases with positive eligible prefix proof and visible fallback reporting.",
-        "The unfiltered compact suite executes all 21 named P114\u2013P120 tests plus all eight P022 tests; the unfiltered default runtime suite also passes its required total.",
+        "The unfiltered compact suite executes all 21 named P114–P120 tests plus all eight P022 tests; the unfiltered default runtime suite also passes its required total.",
         "P119 unhandled resume_throw and empty-frame function-label return clear saved resume fuel so a later independent invocation reaches consumed-handle validation without stale fuel preempting it.",
         "Production build and six integration probes pass; both default and optional compact build budgets pass before measurement.",
         "Paired measure records exactly 1800 source-stable pair events; the analyze phase computes paired statistics and the single gate decision once."
@@ -80068,7 +80068,7 @@
       "reviews_optional_tasks": [],
       "integration_owner": "One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.",
       "minimum_focused_cases": 3,
-      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass. Child P113\u2013P120 contract foundations make no independent speed claims; P044 retains combined paired measured_promotion evidence.",
+      "evidence_contract": "Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass. Child P113–P120 contract foundations make no independent speed claims; P044 retains combined paired measured_promotion evidence.",
       "external_constraints": [
         "original pinned core/proposal snapshot and exclusions",
         "default zero external dependencies and forbid-unsafe boundary",
@@ -80338,7 +80338,7 @@
       ],
       "input_output_contract": "A compact-tier decision contains complete supported/fallback coverage, two paired runs, full pinned corpus/interaction evidence and build/cold/retained-code gates; default selection changes only after this decision.",
       "implementation_steps": [
-        "Complete P121\u2013P124 tooling foundations first: full Compact corpus/preparation counts, actual-mode representative timer, frozen-P001 adapter capability proof, and one portfolio producer. Reuse source-current foundation evidence; the parent retains every original acceptance requirement.",
+        "Complete P121–P124 tooling foundations first: full Compact corpus/preparation counts, actual-mode representative timer, frozen-P001 adapter capability proof, and one portfolio producer. Reuse source-current foundation evidence; the parent retains every original acceptance requirement.",
         "Run full pinned MVP/Core3/Phase3/interactions through compact selection and preserve executed optimized/fallback source counts; full semantic support can use explicit decoded fallback.",
         "Compare predeclared scalar/memory/SIMD/representative families against archived and structural baselines without diagnostic features.",
         "Measure preparation/first-use, all build budgets, retained module/code bytes and dependency closure; inspect any 1.25 relative build/cold growth.",
@@ -82585,8 +82585,8 @@
       "key": "register-milestone",
       "title": "Evaluate register execution and adaptive break-even",
       "group": "05-register-executor",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "gate",
       "dependencies": [
         "P004",
@@ -82652,7 +82652,13 @@
         "python3 -B -m unittest discover -s tools/verification/tests -p 'test_p067.py' -v -b"
       ],
       "path": "05-register-executor/P067-register-milestone.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P067/shared-finalization/attempt-0006/evidence.json",
+          "sha256": "4b46babd7b04f800bdf7def1bce73372e3fb13efda6911a75921a501120a6c6c",
+          "bytes": 2271
+        }
+      ],
       "reviews_optional_tasks": [
         "P059"
       ],
@@ -82666,7 +82672,22 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P067/shared-finalization/attempt-0006/evidence.json": "4b46babd7b04f800bdf7def1bce73372e3fb13efda6911a75921a501120a6c6c"
+        },
+        "evidence": [
+          {
+            "bytes": 2271,
+            "path": "/workspace/wtime/target/performance/P067/shared-finalization/attempt-0006/evidence.json",
+            "sha256": "4b46babd7b04f800bdf7def1bce73372e3fb13efda6911a75921a501120a6c6c"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P067"
+      }
     },
     {
       "id": "P068",
@@ -84236,8 +84257,8 @@
       "key": "specialist-milestone",
       "title": "Evaluate GC, SIMD, continuation and shared-memory progress",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "inconclusive",
       "kind": "gate",
       "dependencies": [
         "P004",
@@ -84293,7 +84314,13 @@
         "python3 tools/wtime-bench/tier_check.py --tier decoded --selection integration --output target/performance/P080/conformance"
       ],
       "path": "06-memory-gc-simd-and-continuations/P080-specialist-milestone.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P080/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "d1cdd6abf8574b0f59313966cf08053d0cada05f873f7f0cea88e1c782576da2",
+          "bytes": 2495
+        }
+      ],
       "reviews_optional_tasks": [
         "P070",
         "P075"
@@ -84308,7 +84335,22 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P080/shared-finalization/attempt-0001/evidence.json": "d1cdd6abf8574b0f59313966cf08053d0cada05f873f7f0cea88e1c782576da2"
+        },
+        "evidence": [
+          {
+            "bytes": 2495,
+            "path": "/workspace/wtime/target/performance/P080/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "d1cdd6abf8574b0f59313966cf08053d0cada05f873f7f0cea88e1c782576da2"
+          }
+        ],
+        "outcome": "inconclusive",
+        "status": "done",
+        "task": "P080"
+      }
     },
     {
       "id": "P081",
@@ -87412,7 +87454,7 @@
       ],
       "input_output_contract": "The final interaction contract covers switch context transfer, stale/foreign refs, frame/byte boundary cleanup and explicitCompact across all eight P022 cases, with positive-path proof and fallback reporting.",
       "implementation_steps": [
-        "Integrate under the shared performance target only after serial P116\u2013P119 registration changes; retain one owner for tests/performance.rs registration.",
+        "Integrate under the shared performance target only after serial P116–P119 registration changes; retain one owner for tests/performance.rs registration.",
         "Exercise switch after a positive prefix and compare exact module/type/function context, pc, roots, fuel and cleanup with decoded execution.",
         "Test stale/foreign references and frame/continuation-byte boundary refusal after prefix entry; verify failure happens at the same original source point and resources return to zero.",
         "Run explicitCompact over all eight P022 interaction cases, prove at least one eligible positive path per intended family, and report fallback/decline reasons for unsupported cases.",
@@ -88295,12 +88337,12 @@
         "tools/verification/producers/p127_fuel_cases.rs",
         "tools/verification/producers/p127_prerequisite.py"
       ],
-      "input_output_contract": "Keep workload inputs fixed and run each declared row under both `unmetered` (`fuel=None`) and `metered` (`fuel=50_000_000`) settings. The frozen rows are `scalar_accumulator_n0`, `_n17`, `_n32`, `_n10000`; `scalar_dependent_n0`, `_n17`, `_n32`, `_n10000`; `call_overhead`; and `prepare_large`. Run every registry-declared stage for each row, both `decoded` and `compact` modes, and both fuel settings. These stage sets produce **184 distinct real row/stage/mode/fuel observations and driver commands**: nine rows with five stages plus `prepare_large` with `prepare`, across four mode/setting combinations. Warm calls use a fixed batch of three and bind it into the record; P127 does no warm-batch calibration or paired comparison. P053 later owns its declared 20 ms paired calibration, passing the same selected fuel policy to both sides. No aggregate statistics, speed gate, or promotion decision is part of P127.\n\nThe independent fuel proof separately establishes that sufficient `Some(50_000_000)` and `None` return the same exact result/state for every scalar proof row, that low budgets preserve P020's exact first-unexecuted boundary and remaining-fuel semantics, and that the reference accounting path agrees. Cancellation, prompt retirement, operand-height behavior, fuel-error priority, and continuation resume transitions retain existing P020 semantics. It covers nine scalar rows \u00d7 three modes (`decoded`, `compact`, `execution-reference`) \u00d7 two policies \u00d7 three repeats (162 guest calls), plus nine execution-reference source-event probes. Separate diagnostics cover 24 low-fuel prefixes, 12 captured cursor windows, 27 None/Some continuation tuples (54 guest calls), and five merge/three priority unit tuples using the accounting helper. The source-test-only Rust copy is diagnostic; the actual runtime tree is not edited.",
+      "input_output_contract": "Keep workload inputs fixed and run each declared row under both `unmetered` (`fuel=None`) and `metered` (`fuel=50_000_000`) settings. The frozen rows are `scalar_accumulator_n0`, `_n17`, `_n32`, `_n10000`; `scalar_dependent_n0`, `_n17`, `_n32`, `_n10000`; `call_overhead`; and `prepare_large`. Run every registry-declared stage for each row, both `decoded` and `compact` modes, and both fuel settings. These stage sets produce **184 distinct real row/stage/mode/fuel observations and driver commands**: nine rows with five stages plus `prepare_large` with `prepare`, across four mode/setting combinations. Warm calls use a fixed batch of three and bind it into the record; P127 does no warm-batch calibration or paired comparison. P053 later owns its declared 20 ms paired calibration, passing the same selected fuel policy to both sides. No aggregate statistics, speed gate, or promotion decision is part of P127.\n\nThe independent fuel proof separately establishes that sufficient `Some(50_000_000)` and `None` return the same exact result/state for every scalar proof row, that low budgets preserve P020's exact first-unexecuted boundary and remaining-fuel semantics, and that the reference accounting path agrees. Cancellation, prompt retirement, operand-height behavior, fuel-error priority, and continuation resume transitions retain existing P020 semantics. It covers nine scalar rows × three modes (`decoded`, `compact`, `execution-reference`) × two policies × three repeats (162 guest calls), plus nine execution-reference source-event probes. Separate diagnostics cover 24 low-fuel prefixes, 12 captured cursor windows, 27 None/Some continuation tuples (54 guest calls), and five merge/three priority unit tuples using the accounting helper. The source-test-only Rust copy is diagnostic; the actual runtime tree is not edited.",
       "implementation_steps": [
         "Before editing the harness, preserve and validate the current workload registry/selection identities and existing P020 source-bound fuel evidence. Add a P127 selection containing only the ten fixed rows above, their unchanged stages and inputs, and the explicit two-value fuel-policy axis. Do not add rows to `workloads.json`.",
         "Extend the scalar harness protocol with a typed fuel setting. `None` means unmetered; `Some(50_000_000)` means metered. Reject booleans, negative values, unsupported values, missing setting fields, and settings that drift between stages or are absent from an observation. Preserve the setting in command argv, source-bound identity, fixed-batch identity, report metadata, and every raw observation.",
         "Keep execution mode, feature profile, fuel policy, and stage as separate typed fields. For `prepare`, record the selected setting even though no guest call occurs. For warm calls, bind the single selected policy and fixed batch of three to the observation; do not calibrate in P127. Keep production binaries uninstrumented: runtime-only for Decoded and `compact-executor` for Compact. Unit driver checks use runtime-only, `compact-executor`, and `execution-reference` feature configurations. The separate private fuel proof uses instrumented `compact-executor` plus `execution-reference` only for semantic diagnostics, never as a production measurement binary.",
-        "Add a separate proof producer that checks every expected row/stage/mode/policy tuple, invokes the real scalar driver, archives command/stdout/stderr before oracle validation, and rejects missing, duplicate, mixed-setting, instrumented, or source-drifted records. Its full close collects all 184 observations and the independent fuel proof without running statistics. The independent proof covers nine scalar rows \u00d7 three modes \u00d7 two policies \u00d7 three repeats (162 guest calls) plus nine reference source-event probes; separate diagnostics retain 24 low-fuel prefixes, 12 cursor windows, 27 continuation tuples/54 guest calls, and five merge/three priority unit tuples."
+        "Add a separate proof producer that checks every expected row/stage/mode/policy tuple, invokes the real scalar driver, archives command/stdout/stderr before oracle validation, and rejects missing, duplicate, mixed-setting, instrumented, or source-drifted records. Its full close collects all 184 observations and the independent fuel proof without running statistics. The independent proof covers nine scalar rows × three modes × two policies × three repeats (162 guest calls) plus nine reference source-event probes; separate diagnostics retain 24 low-fuel prefixes, 12 cursor windows, 27 continuation tuples/54 guest calls, and five merge/three priority unit tuples."
       ],
       "fixture_cases": [
         "test_cli_value_requires_exact_well_typed_policy_dict",
@@ -88517,7 +88559,7 @@
         "tools/verification/tests/data/admitted_wasm/p128_literal_wrap_add.wasm",
         "tools/verification/tests/data/admitted_wasm/p128_literal_bitwise.wasm"
       ],
-      "input_output_contract": "Define exactly three MVP i32 loop fixtures: one identity local-copy sequence, one literal-only wrapping `i32.add`, and one literal-only integer bitwise identity (`i32.and`). The loop count aliases are fixed at `n=0,1,17,32,1024,10000`, producing 18 model rows, never arbitrary ranges. Exact dynamic source events, including the implicit function end, follow `9 + 14*n`; the source proof requires 18 rows and 126 source-event/fuel/reference commands (one event command plus six fuel probes per row). Each fixture's work count is exactly `n` opportunities of its named shape. The identity fixture includes a separate observable increment so the loop remains meaningful while the copy itself is neutral. The literal-add and bitwise fixtures feed each folded literal result into an accumulator, so the result depends on the repeated operation while each candidate expression remains literal-only.\n\nThe oracle independently performs explicit modulo-2^32 arithmetic and signed-i32 normalization. Expected results are `n` for identity-copy, signed-i32 of `n * 0x80000000` for wrapping-add (`0x7fffffff + 1`), and signed-i32 of `n * 0x13579bdf` for bitwise AND (`0x13579bdf & 0xffffffff`). No fixture contains multiply, divide, floating point, memory, calls, reference operations, traps, or control-flow exits from the single loop body. Keep all **459 existing registry rows, their IDs/hashes, and every selection membership unchanged**; the 18 rows exist only in the P128 fixture model/selection contract until P054 proposes a separately reviewed append.\n\nNormalize every workload at all five stages (`prepare`, `instantiate`, `first_call`, `warm_call`, `load_and_call`) in `decoded` and `compact` modes using source-current uninstrumented runtime-only binaries. This is exactly **180 real observations/driver commands** (18 shape/input rows \u00d7 5 stages \u00d7 2 modes). Warm calls bind bounded batch size three; no statistics or timing comparison is required.",
+      "input_output_contract": "Define exactly three MVP i32 loop fixtures: one identity local-copy sequence, one literal-only wrapping `i32.add`, and one literal-only integer bitwise identity (`i32.and`). The loop count aliases are fixed at `n=0,1,17,32,1024,10000`, producing 18 model rows, never arbitrary ranges. Exact dynamic source events, including the implicit function end, follow `9 + 14*n`; the source proof requires 18 rows and 126 source-event/fuel/reference commands (one event command plus six fuel probes per row). Each fixture's work count is exactly `n` opportunities of its named shape. The identity fixture includes a separate observable increment so the loop remains meaningful while the copy itself is neutral. The literal-add and bitwise fixtures feed each folded literal result into an accumulator, so the result depends on the repeated operation while each candidate expression remains literal-only.\n\nThe oracle independently performs explicit modulo-2^32 arithmetic and signed-i32 normalization. Expected results are `n` for identity-copy, signed-i32 of `n * 0x80000000` for wrapping-add (`0x7fffffff + 1`), and signed-i32 of `n * 0x13579bdf` for bitwise AND (`0x13579bdf & 0xffffffff`). No fixture contains multiply, divide, floating point, memory, calls, reference operations, traps, or control-flow exits from the single loop body. Keep all **459 existing registry rows, their IDs/hashes, and every selection membership unchanged**; the 18 rows exist only in the P128 fixture model/selection contract until P054 proposes a separately reviewed append.\n\nNormalize every workload at all five stages (`prepare`, `instantiate`, `first_call`, `warm_call`, `load_and_call`) in `decoded` and `compact` modes using source-current uninstrumented runtime-only binaries. This is exactly **180 real observations/driver commands** (18 shape/input rows × 5 stages × 2 modes). Warm calls bind bounded batch size three; no statistics or timing comparison is required.",
       "implementation_steps": [
         "Before adding fixtures, snapshot and validate the full 459-row registry, every selection's membership, the existing scalar model, stage-driver interface, and P047 named tests. Do not rewrite or reformat registry/workload data.",
         "Add the three minimal WAT inputs. Encode each through the repository's admitted encoder into an isolated evidence directory; bind both source and Wasm hashes in the P128 selection. Review decoded instruction order to confirm the copy pair and literal-only add/bitwise operation are present exactly as described. Reject a fixture if its actual opcode order or loop work count differs from the contract.",
@@ -88630,12 +88672,12 @@
         "Inspect the existing request, boundary matching, and snapshot/restore flow; preserve the current API by forwarding it to the new visit-counted request with skip_visits zero.",
         "Add a usize skip counter to the execution-reference materialization request, enforce the 100000 cap before guest execution, and decrement only when the active original instance, function and PC all match; trigger the existing one-time roundtrip when the counter reaches zero.",
         "Preserve all current handle/guest/PC rejection and charged-before-fetch behavior, and ensure an unreached request returns the ordinary full execution result without snapshot/restore or altered guest work.",
-        "Add the three named integration tests, including the P047 loop\u2019s third matching visit with exact state/fuel assertions and bounded nonmatching/unreached paths; register them in the existing performance test target."
+        "Add the three named integration tests, including the P047 loop’s third matching visit with exact state/fuel assertions and bounded nonmatching/unreached paths; register them in the existing performance test target."
       ],
       "fixture_cases": [
         "p129_zero_skip_preserves_first_visit: the existing API and explicit zero skip roundtrip at the first matching occurrence and retain current validation and state behavior.",
         "p129_later_loop_visit_keeps_exact_state_and_fuel: for the P047 branch_loop PC 8, skip two matches and roundtrip on visit three; assert counter 2, sum 16, step 8, exact 35 charged prefix events, remaining fuel 0 and pending charged instruction true, then observe ResourceLimit on invocation.",
-        "p129_invalid_visit_bound_and_unreached_request_are_bounded: skip above 100000 rejects before guest work; skip five beyond the loop\u2019s five visits returns full result 32 with no snapshot/restore."
+        "p129_invalid_visit_bound_and_unreached_request_are_bounded: skip above 100000 rejects before guest work; skip five beyond the loop’s five visits returns full result 32 with no snapshot/restore."
       ],
       "measurement_selection": "scalar",
       "execution_mode": "decoded",
@@ -88996,7 +89038,7 @@
         "crates/wtime-runtime/src/execution/register/execute.rs",
         "crates/wtime-runtime/tests/performance/p133_private.rs"
       ],
-      "input_output_contract": "Add a safe, private, per-module/body cache that can return an immutable `Arc<CachedFunction>` containing one P132 `PreparedFunction` and a retention token. Bind the cache at construction to the module\u2019s engine ID and exact decoded source `Arc<[u8]>`; validate both before every lookup and again before publish. Use the decoded body index as the cache key. The cache retains the source `Arc` and engine ID only, never `Arc<ModuleData>`, so it cannot create an ownership cycle.",
+      "input_output_contract": "Add a safe, private, per-module/body cache that can return an immutable `Arc<CachedFunction>` containing one P132 `PreparedFunction` and a retention token. Bind the cache at construction to the module’s engine ID and exact decoded source `Arc<[u8]>`; validate both before every lookup and again before publish. Use the decoded body index as the cache key. The cache retains the source `Arc` and engine ID only, never `Arc<ModuleData>`, so it cannot create an ownership cycle.",
       "implementation_steps": [
         "Add a private cache module and expose only the minimum P132 preparation types/functions to the sibling module with `pub(super)`: `PreparedFunction`, the four-outcome `Preparation`, and `prepare_function`. Add narrow accessors for the engine ID and decoded source `Arc`; do not expose module internals or make the cache public.",
         "Implement a source-bound cache with fixed maximum entry capacity, saturating per-body counters, the five declared states, deterministic FIFO ordering, and a single RAII compile lease. A lease reserves the P132 remaining budget while active, releases all locks before `prepare_function`, and commits its outcome atomically after rechecking source and engine ownership. Duplicate and other-body calls while a lease is active return fallback.",
@@ -89102,7 +89144,7 @@
       ],
       "fixture_cases": [
         "`p134_cold_hot_entry_threshold_and_diagnostics`: a lazy Register Engine compiles without an eager Register artifact; a real admitted body falls back below threshold, promotes at the exact threshold, and dispatches Register code on later entries. Existing diagnostics prove cold fallback, hot dispatch, one promotion, no per-opcode Arc cloning, and no mid-frame OSR.",
-        "`p134_shared_module_concurrency_and_store_ownership`: two independent Stores use the same Module and share one cache/compile lease under concurrent hot entries; the function is prepared once, while each Store builds its own frame, locals, labels, and memory binding checks. Calls through a foreign engine/source use that module\u2019s owner-bound cache or fail closed.",
+        "`p134_shared_module_concurrency_and_store_ownership`: two independent Stores use the same Module and share one cache/compile lease under concurrent hot entries; the function is prepared once, while each Store builds its own frame, locals, labels, and memory binding checks. Calls through a foreign engine/source use that module’s owner-bound cache or fail closed.",
         "`p134_host_effect_fuel_and_foreign_refusal`: a cached full Register prefix reaches a call/host decoded boundary exactly once; the callback, memory changes, traps, fuel result, and cancellation boundary match eager Register/decoded controls. A foreign engine/source owner cannot activate the cached body.",
         "`p134_eviction_pin_and_continuation_resume_without_reentry`: a private frame test holds a live `Activation` pin while FIFO eviction removes its cache entry, then proves the artifact stays valid and charged until the activation drops. A separate public numeric P065 capture/resume test proves the suspend barrier materializes and drops the activation before capture, resumes the saved decoded state without entry lookup or recompilation, and preserves one-shot behavior and source fuel."
       ],
@@ -89190,7 +89232,7 @@
         "tools/wtime-bench/tests/test_p135_entry_batch.py",
         "tools/verification/tests/test_p135_entry_batch.py"
       ],
-      "input_output_contract": "The MIT `counter.wat`/`.wasm` fixture exports a one-page memory named `count`; each call increments the little-endian i32 at byte offset zero. The separate `late_bad_result.wat`/`.wasm` fixture returns 12345 on its second call and the ordinary expected result on all others. `provenance.json` binds both WAT and Wasm hashes, license, and encoding details. The counter-memory assertion is fixture-specific verification, so future kernels need not export `count`.\n\nAdd the current-only command:\n\n```text\n--entry-batch FILE CASE INPUT EXPECTED CALLS register eager|adaptive THRESHOLD\n```\n\nAccept `CALLS` only from **1, 10, 100, 10000**. The execution mode is exactly `register`. `eager` requires threshold `0` and uses the existing eager Register Engine constructor; `adaptive` requires a positive threshold and uses the P134 opt-in constructor. Reject malformed, zero, negative, oversized, or unsupported values before guest execution. Use the existing MVP profile and omitted fuel configuration, with no implicit fuel budget or alternate profile selector.\n\nFor every batch invocation, build a fresh Engine before the timer, but start a new measured lifetime at `Engine::compile`. Inside one enclosing `total_ns` interval, compile the module, create a fresh Store, instantiate it, and invoke the same exported function exactly `CALLS` times. Report `prepare_ns` for `Engine::compile`, `instantiate_ns` for Store/linker/instance setup, and `invoke_ns` for the exact call loop; report actual invocation count and the strategy/threshold. `total_ns` measures the whole enclosed lifetime rather than the sum of separately rounded phases. Load the input file, construct Engine/configuration, and parse arguments before the timer. Do not preflight, warm up, calibrate, or invoke the measured Module before or after the timed loop. Check each individual result against `EXPECTED`; abort on the first mismatch. After the timed loop, read the admitted counter fixture\u2019s exported `count` memory at offset zero without another guest invocation and require the little-endian i32 to equal `CALLS`, proving the protocol added no warmup or extra entry. Keep this fixture-specific assertion in the protocol verification so other future kernels need not export `count`. Keep total and phase timings in nanoseconds and report no divided `ns_per_operation` field.\n\nThe production batch executable must be uninstrumented. The additive JSON result includes schema/version, driver and case identity, input/expected/result, `mode:\"register\"`, strategy, threshold, requested and actual call counts, `instrumented:false`, and `total_ns`, `prepare_ns`, `instantiate_ns`, `invoke_ns`. It must not report a synthetic compile count or imply that engine construction is part of the timed total.\n\nAdd a separate diagnostic command using the same fixture and strategy inputs:\n\n```text\n--entry-diagnostic FILE CASE INPUT EXPECTED CALLS register eager|adaptive THRESHOLD\n```\n\nBuild it with `execution-reference` instrumentation. Execute exactly the requested number of calls on a fresh module/store, take counter snapshots immediately around each call, and report per-call deltas for `register_dispatches`, `register_exits`, and `fallback_frames` (read from the existing `Store::register_fallback_frames` accessor), plus the one-based `first_register_call` whose dispatch delta is nonzero (or `null` when none). The diagnostic JSON is explicitly instrumented and contains no timing fields. Do not call a dispatch count a compilation count or label the field `promotion`; this driver observes dispatch only. Do not add any preflight invocation that changes entry hotness.\n\nKeep existing `--single-case` behavior and ordinary mode/capability query response unchanged, except for an optional capability that advertises the new entry-batch and diagnostic protocols when their required features are compiled. No timing comparison, policy choice, analyzer, workload-registry edit, P001 adapter, or paired sample collection belongs here.\n",
+      "input_output_contract": "The MIT `counter.wat`/`.wasm` fixture exports a one-page memory named `count`; each call increments the little-endian i32 at byte offset zero. The separate `late_bad_result.wat`/`.wasm` fixture returns 12345 on its second call and the ordinary expected result on all others. `provenance.json` binds both WAT and Wasm hashes, license, and encoding details. The counter-memory assertion is fixture-specific verification, so future kernels need not export `count`.\n\nAdd the current-only command:\n\n```text\n--entry-batch FILE CASE INPUT EXPECTED CALLS register eager|adaptive THRESHOLD\n```\n\nAccept `CALLS` only from **1, 10, 100, 10000**. The execution mode is exactly `register`. `eager` requires threshold `0` and uses the existing eager Register Engine constructor; `adaptive` requires a positive threshold and uses the P134 opt-in constructor. Reject malformed, zero, negative, oversized, or unsupported values before guest execution. Use the existing MVP profile and omitted fuel configuration, with no implicit fuel budget or alternate profile selector.\n\nFor every batch invocation, build a fresh Engine before the timer, but start a new measured lifetime at `Engine::compile`. Inside one enclosing `total_ns` interval, compile the module, create a fresh Store, instantiate it, and invoke the same exported function exactly `CALLS` times. Report `prepare_ns` for `Engine::compile`, `instantiate_ns` for Store/linker/instance setup, and `invoke_ns` for the exact call loop; report actual invocation count and the strategy/threshold. `total_ns` measures the whole enclosed lifetime rather than the sum of separately rounded phases. Load the input file, construct Engine/configuration, and parse arguments before the timer. Do not preflight, warm up, calibrate, or invoke the measured Module before or after the timed loop. Check each individual result against `EXPECTED`; abort on the first mismatch. After the timed loop, read the admitted counter fixture’s exported `count` memory at offset zero without another guest invocation and require the little-endian i32 to equal `CALLS`, proving the protocol added no warmup or extra entry. Keep this fixture-specific assertion in the protocol verification so other future kernels need not export `count`. Keep total and phase timings in nanoseconds and report no divided `ns_per_operation` field.\n\nThe production batch executable must be uninstrumented. The additive JSON result includes schema/version, driver and case identity, input/expected/result, `mode:\"register\"`, strategy, threshold, requested and actual call counts, `instrumented:false`, and `total_ns`, `prepare_ns`, `instantiate_ns`, `invoke_ns`. It must not report a synthetic compile count or imply that engine construction is part of the timed total.\n\nAdd a separate diagnostic command using the same fixture and strategy inputs:\n\n```text\n--entry-diagnostic FILE CASE INPUT EXPECTED CALLS register eager|adaptive THRESHOLD\n```\n\nBuild it with `execution-reference` instrumentation. Execute exactly the requested number of calls on a fresh module/store, take counter snapshots immediately around each call, and report per-call deltas for `register_dispatches`, `register_exits`, and `fallback_frames` (read from the existing `Store::register_fallback_frames` accessor), plus the one-based `first_register_call` whose dispatch delta is nonzero (or `null` when none). The diagnostic JSON is explicitly instrumented and contains no timing fields. Do not call a dispatch count a compilation count or label the field `promotion`; this driver observes dispatch only. Do not add any preflight invocation that changes entry hotness.\n\nKeep existing `--single-case` behavior and ordinary mode/capability query response unchanged, except for an optional capability that advertises the new entry-batch and diagnostic protocols when their required features are compiled. No timing comparison, policy choice, analyzer, workload-registry edit, P001 adapter, or paired sample collection belongs here.\n",
       "implementation_steps": [
         "Inspect current `protocol::try_main`, engine construction, module instantiation, invocation, mode reporting, and execution-reference counter APIs. Add a leaf `entry_batch_driver.rs` and route only the two new flags to it; preserve existing single-case and mode-query bytes/semantics except the optional protocol capability advertisement.",
         "Parse the command completely before guest work. Enforce the exact call-count set, `register` mode, and strategy/threshold pairing. Construct a fresh configured Engine outside the measured interval; then enclose module compilation, a new Store and instance, and exactly N checked invocations in one total timer. Keep phase timings additive observations, make every call's result oracle-visible, and emit one complete JSON line.",
@@ -89753,7 +89795,7 @@
       "fixture_cases": [
         "`p138_cold_threshold_and_single_builder_are_observed`: at threshold three, the first two entries remain cold and invoke decoded behavior; the third admits one preparation and invokes exactly one builder, then publishes a ready row. Later ready hits do not start more builders. Check result oracle, body identity, attempts, entry counts and exact lifecycle transitions.",
         "`p138_guest_fifo_eviction_and_recompilation_stay_bounded`: invoke all 66 exports with threshold one, verify insertion-order FIFO residency is capped at 64, then invoke an evicted body to force a new builder. Check eviction/recompile aggregates and that attempted work and retained bytes remain within their configured limits.",
-        "`p138_snapshot_preserves_all_fuel_prefixes_and_wraparound_results`: compare values, traps and fuel consumption for source fuel 0\u20134 against decoded and eager Register controls, including the implicit function-end event; diagnostic reads must not alter guest-visible state.",
+        "`p138_snapshot_preserves_all_fuel_prefixes_and_wraparound_results`: compare values, traps and fuel consumption for source fuel 0–4 against decoded and eager Register controls, including the implicit function-end event; diagnostic reads must not alter guest-visible state.",
         "`p138_private_snapshots_do_not_pin_evicted_artifacts`: privately hold a live artifact pin while FIFO eviction removes its resident row; prove its bytes remain charged and artifact usable until the last `Arc` drops, then observe release without refunding attempted work or a snapshot-owned Arc clone.",
         "`p138_private_failures_cooldown_abort_poison_and_foreign_are_observed`: drive decline/cooldown, abort, poison, invalid, exhausted-work and exhausted-wrapper cases, plus foreign owner and publication refusal; verify exact `preparation_starts`, `builder_starts`, `completed`, `published`, `publication_failures`, `declined`, `exhausted`, `invalid`, `aborted`, and eviction totals, bounded retry, fail-closed snapshots and no deadlock.",
         "`p138_private_active_builder_snapshot_and_saturating_counters`: snapshot an active builder as `Compiling`, prove builder execution holds neither cache lock, verify settled budgets exclude in-flight debits, and prove every lifecycle aggregate saturates at `u64::MAX`."

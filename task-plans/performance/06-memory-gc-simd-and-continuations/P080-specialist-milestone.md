@@ -1,8 +1,8 @@
 # P080 — Evaluate GC, SIMD, continuation and shared-memory progress
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **inconclusive**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -87,4 +87,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P080/shared-finalization/attempt-0001/evidence.json": "d1cdd6abf8574b0f59313966cf08053d0cada05f873f7f0cea88e1c782576da2"
+  },
+  "evidence": [
+    {
+      "bytes": 2495,
+      "path": "/workspace/wtime/target/performance/P080/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "d1cdd6abf8574b0f59313966cf08053d0cada05f873f7f0cea88e1c782576da2"
+    }
+  ],
+  "outcome": "inconclusive",
+  "status": "done",
+  "task": "P080"
+}
+```
