@@ -738,6 +738,23 @@
         "continuation_live_73",
         "continuation_live_512"
       ]
+    },
+    "shared-bulk": {
+      "status": "ready",
+      "workloads": [
+        "shared_bulk_copy_alias_w1_b512",
+        "shared_bulk_copy_alias_w1_b32768",
+        "shared_bulk_copy_alias_w1_b4097",
+        "shared_bulk_copy_alias_w4_b512",
+        "shared_bulk_copy_alias_w4_b32768",
+        "shared_bulk_copy_alias_w4_b4097",
+        "shared_bulk_copy_distinct_w1_b512",
+        "shared_bulk_copy_distinct_w1_b32768",
+        "shared_bulk_copy_distinct_w1_b4097",
+        "shared_bulk_copy_distinct_w4_b512",
+        "shared_bulk_copy_distinct_w4_b32768",
+        "shared_bulk_copy_distinct_w4_b4097"
+      ]
     }
   },
   "value_encoding": {
@@ -33940,6 +33957,1074 @@
       "work_units": {
         "count_from_param": "live_count",
         "unit": "continuation lifecycle"
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_alias_w1_b512",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 512,
+          "max": 512,
+          "baseline": 512
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "alias",
+        "workers": 1,
+        "bytes": 512,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "alias",
+        "workers": 1,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_alias_w1_b32768",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 32768,
+          "max": 32768,
+          "baseline": 32768
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "alias",
+        "workers": 1,
+        "bytes": 32768,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "alias",
+        "workers": 1,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_alias_w1_b4097",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 4097,
+          "max": 4097,
+          "baseline": 4097
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "alias",
+        "workers": 1,
+        "bytes": 4097,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "alias",
+        "workers": 1,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_alias_w4_b512",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 512,
+          "max": 512,
+          "baseline": 512
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "alias",
+        "workers": 4,
+        "bytes": 512,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "alias",
+        "workers": 4,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_alias_w4_b32768",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 32768,
+          "max": 32768,
+          "baseline": 32768
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "alias",
+        "workers": 4,
+        "bytes": 32768,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "alias",
+        "workers": 4,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_alias_w4_b4097",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 4097,
+          "max": 4097,
+          "baseline": 4097
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "alias",
+        "workers": 4,
+        "bytes": 4097,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "alias",
+        "workers": 4,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_distinct_w1_b512",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 512,
+          "max": 512,
+          "baseline": 512
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "distinct",
+        "workers": 1,
+        "bytes": 512,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "distinct",
+        "workers": 1,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_distinct_w1_b32768",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 32768,
+          "max": 32768,
+          "baseline": 32768
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "distinct",
+        "workers": 1,
+        "bytes": 32768,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "distinct",
+        "workers": 1,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_distinct_w1_b4097",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 4097,
+          "max": 4097,
+          "baseline": 4097
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "distinct",
+        "workers": 1,
+        "bytes": 4097,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "distinct",
+        "workers": 1,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_distinct_w4_b512",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 512,
+          "max": 512,
+          "baseline": 512
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "distinct",
+        "workers": 4,
+        "bytes": 512,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "distinct",
+        "workers": 4,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_distinct_w4_b32768",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 32768,
+          "max": 32768,
+          "baseline": 32768
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "distinct",
+        "workers": 4,
+        "bytes": 32768,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "distinct",
+        "workers": 4,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "shared_bulk_copy_distinct_w4_b4097",
+      "family": "shared-bulk",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/shared_bulk_copy.wat",
+        "sha256": "67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6",
+        "wasm_sha256": "0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d"
+      },
+      "params": [
+        {
+          "name": "workers",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        },
+        {
+          "name": "bytes",
+          "type": "i32",
+          "min": 4097,
+          "max": 4097,
+          "baseline": 4097
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "shared_bulk_workloads.py",
+        "independent": true,
+        "backing": "distinct",
+        "workers": 4,
+        "bytes": 4097,
+        "repetitions": 32,
+        "memory_bytes": 262144
+      },
+      "required_features": [
+        "mvp",
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "public shared-memory worker driver with full-image oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-bulk worker group",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator workload has no matching shared-bulk worker driver."
+        }
+      },
+      "driver": {
+        "kind": "shared_bulk",
+        "profile": "all-phase3-core",
+        "protocol": "wtime-shared-bulk-copy-v1",
+        "argv": [
+          "--shared-bulk-copy",
+          "FILE",
+          "CASE",
+          "BACKING",
+          "WORKERS",
+          "BYTES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "shared_bulk": {
+        "backing": "distinct",
+        "workers": 4,
+        "repetitions": 32,
+        "destination_base": 65536,
+        "worker_destination_stride": 32768,
+        "source_bytes_preserved": 32768,
+        "memory_bytes_per_backing": 262144
       }
     }
   ]

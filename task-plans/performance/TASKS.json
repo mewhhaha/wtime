@@ -83595,8 +83595,8 @@
       "key": "shared-bulk-chunks",
       "title": "Reduce shared bulk-copy overhead with coordinated fixed chunks",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "inconclusive",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -83651,7 +83651,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P078-verification.json --output target/performance/P078/complete --execute"
       ],
       "path": "06-memory-gc-simd-and-continuations/P078-shared-bulk-chunks.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P078/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "7b6597ce8aac9259987f3a4baa93a04db789c70931b7ca7ca24909a47fb5d8f4",
+          "bytes": 2172
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -83666,7 +83672,22 @@
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P078-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P078-selection.json target/performance/P078-before/manifest.json --output target/performance/P078/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P078/shared-finalization/attempt-0002/evidence.json": "7b6597ce8aac9259987f3a4baa93a04db789c70931b7ca7ca24909a47fb5d8f4"
+        },
+        "evidence": [
+          {
+            "bytes": 2172,
+            "path": "/workspace/wtime/target/performance/P078/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "7b6597ce8aac9259987f3a4baa93a04db789c70931b7ca7ca24909a47fb5d8f4"
+          }
+        ],
+        "outcome": "inconclusive",
+        "status": "done",
+        "task": "P078"
+      }
     },
     {
       "id": "P079",

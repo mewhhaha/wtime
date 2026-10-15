@@ -1,0 +1,1062 @@
+{
+  "schema_version": 1,
+  "task": "P078",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P078-before/manifest.json",
+        "target/performance/P078-before/source/**",
+        "target/performance/P078-before/binary/**",
+        "target/performance/P078/selection-freeze.json"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*",
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/src/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/threads/**",
+        "target/verification/P078-driver-development-0001/Cargo.toml",
+        "target/verification/P078-driver-development-0001/Cargo.lock",
+        "target/verification/P078-driver-development-0001/src/main.rs"
+      ]
+    },
+    "selection": {
+      "paths": [
+        "docs/benchmarks/performance/P078-selection.json",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/shared_bulk_workloads.py",
+        "tools/wtime-bench/thread_workloads.py",
+        "tools/wtime-bench/fixtures/threads/**",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p140_entry_policy.py",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/shared_bulk_compare.py",
+        "tools/wtime-bench/continuation_live_workloads.py",
+        "tools/wtime-bench/continuation_scaling.py",
+        "tools/wtime-bench/continuation_workloads.py",
+        "tools/wtime-bench/gc_compare.py",
+        "tools/wtime-bench/gc_layout_workloads.py",
+        "tools/wtime-bench/gc_scaling.py",
+        "tools/wtime-bench/gc_warm_workloads.py",
+        "tools/wtime-bench/gc_workloads.py",
+        "tools/wtime-bench/integration_compare.py",
+        "tools/wtime-bench/integration_workflow.py",
+        "tools/wtime-bench/integration_workloads.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/p043_fixtures.py",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/root_compare.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/simd_scaling.py",
+        "tools/wtime-bench/simd_workloads.py",
+        "tools/wtime-bench/thread_compare.py",
+        "tools/wtime-bench/thread_scaling.py",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/fixtures/continuations/**",
+        "tools/wtime-bench/fixtures/representative/**",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/fixtures/simd/**",
+        "tools/wtime-bench/fixtures/integration_p113/**",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**",
+        "docs/benchmarks/performance/P033-contract.json",
+        "docs/benchmarks/performance/P034-contract.json",
+        "docs/benchmarks/performance/P034-measurement-contract.json",
+        "docs/benchmarks/performance/P034-registry-preservation.json"
+      ],
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {
+        "candidate_mode": "decoded",
+        "pairs_per_run": 30,
+        "runs": 2,
+        "run_seeds": [
+          78001,
+          78002
+        ],
+        "selected_cpu": 1,
+        "thread_cpu_affinity": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    "protocol": {
+      "paths": [
+        "tools/verification/producers/p078_prepare_protocol.py",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/shared_bulk_workloads.py",
+        "tools/wtime-bench/fixtures/threads/**"
+      ]
+    },
+    "freeze_producer": {
+      "paths": [
+        "tools/verification/producers/candidate_freeze.py",
+        "tools/wtime-bench/selection_manifest.py"
+      ]
+    },
+    "build_producer": {
+      "paths": [
+        "tools/verification/producers/candidate_production.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "budgets": {
+      "paths": [
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    },
+    "analysis": {
+      "paths": [
+        "tools/verification/statistics.py",
+        "tools/verify.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/gates.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/verification/production_attestation.py",
+        "tools/verification/producers/runtime_production.py",
+        "tools/wtime-bench/shared_bulk_compare.py"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_shared_bulk_workloads.py",
+        "tools/wtime-bench/tests/test_p078_gate.py",
+        "tools/wtime-bench/tests/test_fast_candidate.py",
+        "tools/verification/tests/test_runtime_production.py",
+        "tools/verification/tests/test_production_attestation.py",
+        "tools/wtime-bench/tests/test_p078_bridge.py",
+        "tools/wtime-bench/tests/test_thread_compare.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "selection",
+        "freeze_producer"
+      ],
+      "commands": [
+        {
+          "name": "freeze-selection",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_freeze.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P078-selection.json",
+            "--predecessor",
+            "{repo}/target/performance/P078-before/manifest.json",
+            "--frozen",
+            "{repo}/target/performance/P078/selection-freeze.json",
+            "--output",
+            "{stage}/selection.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "selection": "{stage}/selection.json"
+      },
+      "checks": [
+        {
+          "artifact": "selection",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-candidate-selection-freeze-v1"
+        },
+        {
+          "artifact": "selection",
+          "pointer": "/predecessor_sha256",
+          "op": "equal",
+          "value": "e82fe66aaf16fa742b3daa0f95242132dbb5c0ee45af795acd83f4d6ec7f9507"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "predecessor",
+        "runtime",
+        "compilation",
+        "selection",
+        "harness",
+        "protocol",
+        "build_producer",
+        "budgets",
+        "tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "shared-bulk-policy-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_shared_bulk_workloads.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "shared-bulk-bridge-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p078_bridge.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "thread-comparison-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_thread_compare.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "prepare-driver-protocol",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p078_prepare_protocol.py",
+            "--output",
+            "{stage}/protocol"
+          ]
+        },
+        {
+          "name": "protocol-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "--manifest-path",
+            "{stage}/protocol/Cargo.toml",
+            "--features",
+            "runtime-only",
+            "p078_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "runtime-unit-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib"
+          ]
+        },
+        {
+          "name": "runtime-tier-tests",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib",
+            "--features",
+            "compact-executor,register-executor,execution-reference,performance-counters",
+            "p078_",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "baseline-adapter",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/p123_adapter.py",
+            "build",
+            "--baseline",
+            "{repo}/target/performance/P078-before",
+            "--output",
+            "{stage}/baseline-adapter",
+            "--mode",
+            "decoded",
+            "--current-api"
+          ]
+        },
+        {
+          "name": "candidate-production",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/production"
+          ]
+        },
+        {
+          "name": "default-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/build.json"
+          ]
+        },
+        {
+          "name": "dependency-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/dependency_budget.py"
+          ]
+        },
+        {
+          "name": "existing-bulk-oracles",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,register-executor,execution-reference,performance-counters",
+            "p027_",
+            "--",
+            "--nocapture"
+          ]
+        }
+      ],
+      "outputs": {
+        "protocol": "{stage}/protocol/prepared.json",
+        "baseline_adapter": "{stage}/baseline-adapter/manifest.json",
+        "production_record": "{stage}/production/build-record.json",
+        "binary": "{stage}/production/bin/wtime-bench",
+        "build": "{stage}/build.json"
+      },
+      "tests": [
+        {
+          "command": "shared-bulk-policy-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_rows_cover_alias_and_distinct_at_small_large_and_heldout_sizes",
+            "test_alias_four_worker_oracle_checks_full_backing_and_returns",
+            "test_distinct_sources_stay_unchanged_and_destinations_are_verified",
+            "test_truncated_or_corrupt_image_and_bad_worker_results_fail",
+            "test_batch_affinity_and_checked_worker_calls_are_bound",
+            "test_registry_rows_validate_in_a_fresh_contained_copy",
+            "test_complete_length_but_wrong_guest_write_fails_full_image_oracle"
+          ],
+          "minimum_passed": 7,
+          "features": []
+        },
+        {
+          "command": "protocol-tests",
+          "kind": "cargo",
+          "required_names": [
+            "p078_driver_rejects_invalid_shape_before_io",
+            "p078_driver_checks_full_images_and_worker_returns",
+            "p078_driver_detects_corrupted_copy_fixture"
+          ],
+          "minimum_passed": 3,
+          "features": [
+            "runtime-only"
+          ]
+        },
+        {
+          "command": "thread-comparison-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_capability_requires_explicit_thread_driver",
+            "test_thread_cpu_mask_validation",
+            "test_thread_process_sets_mask_and_preserves_compare_errors",
+            "test_atomic_full_trials_normalize_and_revalidate",
+            "test_legacy_schema_and_status_are_required_before_timing_proofs",
+            "test_observe_routes_existing_worker_cli",
+            "test_focused_producer_dispatches_batched_thread_profile",
+            "test_scalar_control_keeps_integer_cpu_pin",
+            "test_sc_retains_all_reset_trials_and_rejects_forbidden_outcome",
+            "test_batch_timing_proof_and_full_group_contract",
+            "test_batch_rejects_duplicate_seeds_quota_drift_and_cap",
+            "test_paired_candidate_gate_identity_requires_same_worker_quota",
+            "test_wait_latency_groups_sum_all_individual_intervals_and_retain_cleanup",
+            "test_wait_latency_and_cleanup_timeouts_are_independent_and_fixed",
+            "test_wait_revalidation_rejects_raw_timing_cleanup_and_shape_tampering",
+            "test_wait_observer_uses_no_random_seed"
+          ],
+          "minimum_passed": 16,
+          "features": []
+        },
+        {
+          "command": "runtime-unit-tests",
+          "kind": "cargo",
+          "required_names": [
+            "p078_shared_aliases_match_full_memmove_images",
+            "p078_opposing_shared_copies_finish_without_deadlock",
+            "p078_bulk_prechecks_and_cancellation_preserve_chunks",
+            "p078_copy_avoids_chunk_allocations",
+            "t133_cancel_infinite_wait_removes_registration",
+            "t133_aliases_counted_notification_and_registration_races",
+            "t130_two_memory_sc_store_buffering_and_fence_visibility",
+            "t133_wait_mismatch_timeout_notify",
+            "t130_concurrent_updates_and_distinct_memories"
+          ],
+          "minimum_passed": 9,
+          "features": [],
+          "unfiltered": true
+        },
+        {
+          "command": "runtime-tier-tests",
+          "kind": "cargo",
+          "required_names": [
+            "p078_shared_aliases_match_full_memmove_images",
+            "p078_opposing_shared_copies_finish_without_deadlock",
+            "p078_bulk_prechecks_and_cancellation_preserve_chunks",
+            "p078_copy_avoids_chunk_allocations"
+          ],
+          "minimum_passed": 4,
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference",
+            "performance-counters"
+          ]
+        },
+        {
+          "command": "existing-bulk-oracles",
+          "kind": "cargo",
+          "required_names": [
+            "p027_overlap_full_memory_images",
+            "p027_oob_precheck_preserves_prior_full_memory",
+            "p027_distinct_memory_copy_changes_destination_and_preserves_source",
+            "p027_distinct_table_copy_roots_references_across_chunk_boundary",
+            "p027_distinct_shared_capabilities_keep_aliased_memmove_semantics",
+            "p027_mixed_memory64_custom_page_copy_prechecks_both_full_ranges",
+            "p027_fill_exact_images_zero_odd_and_multiple_chunks",
+            "p027_reference_distinct_copy_uses_same_bounded_backend"
+          ],
+          "minimum_passed": 8,
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference",
+            "performance-counters"
+          ]
+        },
+        {
+          "command": "shared-bulk-bridge-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_profile_product_binds_the_exact_model_driver_and_fixture",
+            "test_memory_retainer_is_bound_only_in_the_focused_execution_identity",
+            "test_wait_control_binds_latency_and_separate_untimed_cleanup_policy",
+            "test_fixture_preparation_reuses_only_the_source_bound_encoded_guest",
+            "test_observer_uses_fixed_cli_and_binds_worker_affinity_to_validator",
+            "test_observer_rejects_other_modes_before_any_process_call",
+            "test_batch_calibration_uses_complete_group_elapsed_and_1024_cap",
+            "test_selection_manifest_binds_registry_family_and_exact_stage",
+            "test_full_images_are_deduplicated_and_revalidated_from_content_refs",
+            "test_reference_traversal_corrupt_bytes_and_normalized_type_drift_fail"
+          ],
+          "minimum_passed": 10,
+          "features": []
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "production_record",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "build",
+          "pointer": "/budget_pass",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "protocol",
+          "pointer": "/instrumented",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "protocol",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        }
+      ]
+    },
+    "measure": {
+      "uses": [
+        "predecessor",
+        "runtime",
+        "selection",
+        "harness",
+        "compilation"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "timing_evidence": true,
+      "commands": [
+        {
+          "name": "focused-candidate",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/focused_compare.py",
+            "--manifest",
+            "{repo}/docs/benchmarks/performance/P078-selection.json",
+            "--frozen",
+            "{freeze_dir}/selection.json",
+            "--semantic-receipt",
+            "{verify_dir}/receipt.json",
+            "--baseline",
+            "{verify_dir}/baseline-adapter",
+            "--candidate",
+            "{verify_dir}/production/bin/wtime-bench",
+            "--candidate-mode",
+            "decoded",
+            "--output",
+            "{stage}/comparison",
+            "--cpu",
+            "1",
+            "--thread-cpus",
+            "1,2,3,4",
+            "--run-seeds",
+            "78001",
+            "78002"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/comparison/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "selection",
+        "analysis",
+        "tests",
+        "harness",
+        "budgets",
+        "build_producer"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify",
+        "measure"
+      ],
+      "commands": [
+        {
+          "name": "gate-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p078_gate.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "candidate-gate-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_fast_candidate.py",
+            "-v"
+          ]
+        },
+        {
+          "name": "candidate-statistics",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verify.py",
+            "statistics",
+            "--task",
+            "P078",
+            "--comparison",
+            "{measure_dir}/comparison",
+            "--build",
+            "{verify_dir}/build.json",
+            "--candidate-build-record",
+            "{verify_dir}/production/build-record.json",
+            "--contract",
+            "{repo}/docs/benchmarks/performance/P078-selection.json",
+            "--output",
+            "{stage}/statistics.json",
+            "--execute"
+          ]
+        }
+      ],
+      "outputs": {
+        "statistics": "{stage}/statistics.json"
+      },
+      "tests": [
+        {
+          "command": "gate-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_gate_revalidates_exact_timer_and_full_memory_view",
+            "test_gate_rejects_corrupted_full_backing_image_and_compact_result",
+            "test_gate_rejects_modified_content_addressed_image",
+            "test_gate_binds_each_worker_affinity_to_selected_mask",
+            "test_primary_and_calibration_routes_cover_shared_bulk",
+            "test_shared_bulk_model_is_protected_execution_identity"
+          ],
+          "minimum_passed": 6,
+          "features": []
+        },
+        {
+          "command": "candidate-gate-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_target_warm_and_cold_stages_keep_warm_as_primary"
+          ],
+          "minimum_passed": 15,
+          "features": []
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "statistics",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "statistics",
+          "pointer": "/statistics_computations",
+          "op": "equal",
+          "value": 1
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/selection.json",
+    "pointer": "/runtime_sources",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/shared_memory.rs",
+      "crates/wtime-runtime/src/execution.rs",
+      "crates/wtime-runtime/tests/performance/p027.rs"
+    ],
+    "allowed_additions": []
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ],
+    "decision": {
+      "phase": "analyze",
+      "artifact": "statistics",
+      "pointer": "/decision/decision"
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "shared-bulk-policy",
+        "uses": [
+          "harness",
+          "tests"
+        ],
+        "commands": [
+          {
+            "name": "policy",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_shared_bulk_workloads.py",
+              "-v"
+            ]
+          },
+          {
+            "name": "bridge",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p078_bridge.py",
+              "-v"
+            ]
+          },
+          {
+            "name": "thread-policy",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_thread_compare.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "policy",
+            "kind": "unittest",
+            "required_names": [
+              "test_rows_cover_alias_and_distinct_at_small_large_and_heldout_sizes",
+              "test_alias_four_worker_oracle_checks_full_backing_and_returns",
+              "test_distinct_sources_stay_unchanged_and_destinations_are_verified",
+              "test_truncated_or_corrupt_image_and_bad_worker_results_fail",
+              "test_batch_affinity_and_checked_worker_calls_are_bound",
+              "test_registry_rows_validate_in_a_fresh_contained_copy",
+              "test_complete_length_but_wrong_guest_write_fails_full_image_oracle"
+            ],
+            "minimum_passed": 7
+          },
+          {
+            "command": "bridge",
+            "kind": "unittest",
+            "required_names": [
+              "test_profile_product_binds_the_exact_model_driver_and_fixture",
+              "test_memory_retainer_is_bound_only_in_the_focused_execution_identity",
+              "test_wait_control_binds_latency_and_separate_untimed_cleanup_policy",
+              "test_fixture_preparation_reuses_only_the_source_bound_encoded_guest",
+              "test_observer_uses_fixed_cli_and_binds_worker_affinity_to_validator",
+              "test_observer_rejects_other_modes_before_any_process_call",
+              "test_batch_calibration_uses_complete_group_elapsed_and_1024_cap",
+              "test_selection_manifest_binds_registry_family_and_exact_stage",
+              "test_full_images_are_deduplicated_and_revalidated_from_content_refs",
+              "test_reference_traversal_corrupt_bytes_and_normalized_type_drift_fail"
+            ],
+            "minimum_passed": 10,
+            "features": []
+          },
+          {
+            "command": "thread-policy",
+            "kind": "unittest",
+            "required_names": [
+              "test_capability_requires_explicit_thread_driver",
+              "test_thread_cpu_mask_validation",
+              "test_thread_process_sets_mask_and_preserves_compare_errors",
+              "test_atomic_full_trials_normalize_and_revalidate",
+              "test_legacy_schema_and_status_are_required_before_timing_proofs",
+              "test_observe_routes_existing_worker_cli",
+              "test_focused_producer_dispatches_batched_thread_profile",
+              "test_scalar_control_keeps_integer_cpu_pin",
+              "test_sc_retains_all_reset_trials_and_rejects_forbidden_outcome",
+              "test_batch_timing_proof_and_full_group_contract",
+              "test_batch_rejects_duplicate_seeds_quota_drift_and_cap",
+              "test_paired_candidate_gate_identity_requires_same_worker_quota",
+              "test_wait_latency_groups_sum_all_individual_intervals_and_retain_cleanup",
+              "test_wait_latency_and_cleanup_timeouts_are_independent_and_fixed",
+              "test_wait_revalidation_rejects_raw_timing_cleanup_and_shape_tampering",
+              "test_wait_observer_uses_no_random_seed"
+            ],
+            "minimum_passed": 16,
+            "features": []
+          }
+        ]
+      },
+      {
+        "name": "p078-protocol",
+        "uses": [
+          "protocol",
+          "harness",
+          "compilation",
+          "runtime"
+        ],
+        "commands": [
+          {
+            "name": "protocol-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "--offline",
+              "--manifest-path",
+              "{repo}/target/verification/P078-driver-development-0001/Cargo.toml",
+              "--features",
+              "runtime-only",
+              "p078_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "protocol-tests",
+            "kind": "cargo",
+            "required_names": [
+              "p078_driver_rejects_invalid_shape_before_io",
+              "p078_driver_checks_full_images_and_worker_returns",
+              "p078_driver_detects_corrupted_copy_fixture"
+            ],
+            "minimum_passed": 3,
+            "features": [
+              "runtime-only"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "runtime-unit",
+        "uses": [
+          "runtime",
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "unit",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "unit",
+            "kind": "cargo",
+            "required_names": [
+              "p078_shared_aliases_match_full_memmove_images",
+              "p078_opposing_shared_copies_finish_without_deadlock",
+              "p078_bulk_prechecks_and_cancellation_preserve_chunks",
+              "p078_copy_avoids_chunk_allocations"
+            ],
+            "minimum_passed": 4,
+            "features": [],
+            "unfiltered": true
+          }
+        ]
+      },
+      {
+        "name": "runtime-tier",
+        "uses": [
+          "runtime",
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "tier",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib",
+              "--features",
+              "compact-executor,register-executor,execution-reference,performance-counters",
+              "p078_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "tier",
+            "kind": "cargo",
+            "required_names": [
+              "p078_shared_aliases_match_full_memmove_images",
+              "p078_opposing_shared_copies_finish_without_deadlock",
+              "p078_bulk_prechecks_and_cancellation_preserve_chunks",
+              "p078_copy_avoids_chunk_allocations"
+            ],
+            "minimum_passed": 4,
+            "features": [
+              "compact-executor",
+              "register-executor",
+              "execution-reference",
+              "performance-counters"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "candidate-gate",
+        "uses": [
+          "harness",
+          "analysis",
+          "tests"
+        ],
+        "commands": [
+          {
+            "name": "gate",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p078_gate.py",
+              "-v"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "gate",
+            "kind": "unittest",
+            "required_names": [
+              "test_gate_revalidates_exact_timer_and_full_memory_view",
+              "test_gate_rejects_corrupted_full_backing_image_and_compact_result",
+              "test_gate_rejects_modified_content_addressed_image",
+              "test_gate_binds_each_worker_affinity_to_selected_mask",
+              "test_primary_and_calibration_routes_cover_shared_bulk",
+              "test_shared_bulk_model_is_protected_execution_identity"
+            ],
+            "minimum_passed": 6,
+            "features": []
+          }
+        ]
+      }
+    ]
+  }
+}

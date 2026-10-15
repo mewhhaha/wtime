@@ -56,6 +56,31 @@ def sc_raw(entry, seed=1):
             "forbidden_result": [0, 0]}
 
 
+def wait_latency_raw(entry, timeout_ns=1_000_000_000, offset=0):
+    samples = [offset + value for value in range(1, adapter.WAIT_SAMPLES + 1)]
+    return {"schema_version": 1, "status": "ok", "case": entry["id"],
+            "sample_kind": "one_wait_notify_round_trip", "samples": adapter.WAIT_SAMPLES,
+            "sample_count": adapter.WAIT_SAMPLES, "registration_observed": True,
+            "registration_evidence": "successful notify returned one for the address before waiter return",
+            "outcome": "notified", "timeout_ns": timeout_ns,
+            "notify_to_return_ns": samples, "p99_requires_individual_samples": 100,
+            "cancellation_cleanup": "unverified_public_registration_observer_unavailable"}
+
+
+def wait_cleanup_raw(timeout_ns=adapter.WAIT_CLEANUP_TIMEOUT_NS):
+    timeout = thread_workloads.wait_oracle("timeout_cleanup")
+    cancelled = thread_workloads.wait_oracle("cancel_cleanup")
+    return {"schema_version": 1, "status": "ok", "case": "threads_wait_cleanup",
+            "timeout_ns": timeout_ns, "timeout_elapsed_ns": timeout_ns + 100,
+            "timeout_result": timeout["wait_result"],
+            "value_mismatch_result": thread_workloads.wait_oracle("value_mismatch"),
+            "zero_timeout_result": thread_workloads.wait_oracle("zero_timeout"),
+            "timeout_notify_after": timeout["notify_after_cleanup"],
+            "cancellation_error_kind": "ResourceLimit", "cancellation_message": "execution cancelled",
+            "cancellation_notify_after": cancelled["notify_after_cleanup"],
+            "registration_observer_available": False}
+
+
 class ThreadAdapterTests(unittest.TestCase):
     def test_capability_requires_explicit_thread_driver(self):
         p = {"schema_version": 2, "engine": "wtime", "instrumented": False,
@@ -202,17 +227,81 @@ class ThreadAdapterTests(unittest.TestCase):
         candidate = adapter.retain_groups(e, [{"raw": atomic_raw(e, quota=8), "cleanup": None}], [1, 2])
         self.assertTrue(adapter.paired_worker_identities_match(baseline, candidate))
 
-    def test_wait_timeout_contract_mismatch_fails_closed(self):
+    def test_wait_latency_groups_sum_all_individual_intervals_and_retain_cleanup(self):
         e = row("threads_wait_notify_latency")
-        # Registry currently declares 1s; old cleanup validator permits at most 100ms.
         declared = e["measurement_protocol"]["wait_timeout_ns"]
         self.assertEqual(declared, 1_000_000_000)
         calls = []
+
+        def process(executable, argv, cpu):
+            calls.append((executable, argv, cpu))
+            if argv[0] == "--wait-latency":
+                return wait_latency_raw(e, int(argv[3]))
+            if argv[0] == "--wait-cleanup":
+                return wait_cleanup_raw(int(argv[2]))
+            self.fail(f"unexpected wait command: {argv}")
+
+        obs = adapter.observe("candidate", "wait.wasm", e, process=process, seed=None,
+            cpu=[1, 2], thread_cpu_affinity=[1, 2], batch=2)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual([call[1] for call in calls], [
+            ["--wait-latency", "wait.wasm", "1024", "1000000000"],
+            ["--wait-cleanup", "wait.wasm", "1000000"],
+            ["--wait-latency", "wait.wasm", "1024", "1000000000"],
+            ["--wait-cleanup", "wait.wasm", "1000000"],
+        ])
+        group_sum = sum(range(1, adapter.WAIT_SAMPLES + 1))
+        self.assertEqual(obs["elapsed_ns"], 2 * group_sum)
+        self.assertEqual(obs["ns_per_operation"], group_sum)
+        self.assertEqual(obs["normalization"],
+                         "mean_sum_individual_wait_notify_intervals_per_1024_sample_group")
+        self.assertEqual(obs["thread_legacy_metrics"][0], {
+            "p50_ns": 512, "p99_ns": 1014, "sample_count": 1024,
+            "normalization": "legacy_individual_wait_notify_p50_p99"})
+        self.assertEqual(obs["settings"]["wait_timeout_ns"], declared)
+        self.assertEqual(obs["settings"]["wait_cleanup_timeout_ns"],
+                         adapter.WAIT_CLEANUP_TIMEOUT_NS)
+        adapter.revalidate(e, obs, "decoded", "steady_state_group", [1, 2])
+
+    def test_wait_latency_and_cleanup_timeouts_are_independent_and_fixed(self):
+        e = row("threads_wait_notify_latency")
+        raw = wait_latency_raw(e)
+        cleanup = wait_cleanup_raw()
         with self.assertRaises(thread_scaling.ThreadMeasurementError):
-            adapter.observe("candidate", "wait.wasm", e, seed=4,
-                            process=lambda *args: calls.append(args), cpu=[1, 2],
-                            thread_cpu_affinity=[1, 2], timeout_ns=declared)
-        self.assertEqual(calls, [])
+            adapter.validate_raw(e, wait_latency_raw(e, 100_000_000), cleanup,
+                latency_timeout_ns=e["measurement_protocol"]["wait_timeout_ns"],
+                cleanup_timeout_ns=adapter.WAIT_CLEANUP_TIMEOUT_NS)
+        with self.assertRaises(thread_scaling.ThreadMeasurementError):
+            adapter.validate_raw(e, raw, wait_cleanup_raw(100_000_000),
+                latency_timeout_ns=e["measurement_protocol"]["wait_timeout_ns"],
+                cleanup_timeout_ns=adapter.WAIT_CLEANUP_TIMEOUT_NS)
+        with self.assertRaises(thread_scaling.ThreadMeasurementError):
+            adapter.retain_groups(e, [{"raw": raw, "cleanup": cleanup}], [1, 2],
+                latency_timeout_ns=e["measurement_protocol"]["wait_timeout_ns"],
+                cleanup_timeout_ns=100_000_000)
+
+    def test_wait_revalidation_rejects_raw_timing_cleanup_and_shape_tampering(self):
+        e = row("threads_wait_notify_latency")
+        obs = adapter.retain_groups(e, [{"raw": wait_latency_raw(e), "cleanup": wait_cleanup_raw()}], [1, 2])
+        adapter.revalidate(e, obs, "decoded", "steady_state_group", [1, 2])
+        mutations = (
+            lambda x: x["thread_groups"][0]["raw"]["notify_to_return_ns"].__setitem__(0, 8),
+            lambda x: x["thread_groups"][0]["cleanup"].update(timeout_result=1),
+            lambda x: x.update(ns_per_operation=x["thread_legacy_metrics"][0]["p50_ns"]),
+            lambda x: x["thread_groups"][0].pop("cleanup"),
+            lambda x: x.update(extra="not declared"),
+        )
+        for mutate in mutations:
+            bad = copy.deepcopy(obs)
+            mutate(bad)
+            with self.assertRaises(thread_scaling.ThreadMeasurementError):
+                adapter.revalidate(e, bad, "decoded", "steady_state_group", [1, 2])
+
+    def test_wait_observer_uses_no_random_seed(self):
+        e = row("threads_wait_notify_latency")
+        with self.assertRaisesRegex(ValueError, "do not accept or synthesize random seeds"):
+            adapter.observe("candidate", "wait.wasm", e, process=lambda *args: self.fail("unexpected process"),
+                seed=1, cpu=[1, 2], thread_cpu_affinity=[1, 2], batch=1)
 
 
 if __name__ == "__main__":

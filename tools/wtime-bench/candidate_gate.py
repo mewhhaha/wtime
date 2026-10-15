@@ -64,6 +64,16 @@ def check_observation(entry, observation, mode, root, stage=None, thread_cpus=No
         import thread_compare
         thread_compare.revalidate(entry, observation, mode, stage, expected_thread_cpus=thread_cpus)
         return
+    if module == 'shared_bulk_workloads.py':
+        import shared_bulk_compare as adapter
+        need(stage == 'steady_state_group' and thread_cpus is not None,
+             'shared-bulk observations require their selected steady-state stage and CPU mask')
+        verified = adapter.revalidate_observation(
+            entry, observation, root, expected_batch=observation.get('batch'),
+            expected_thread_cpus=thread_cpus)
+        need(verified == observation,
+             'shared-bulk normalized view/image references/CPU affinity differ')
+        return
     if module == 'gc_workloads.py':
         import gc_compare
         import gc_scaling
@@ -204,6 +214,13 @@ def validate_entry_observation(observation, threshold):
             p140_entry_policy.validate_wire(observation[key], threshold)
 
 
+def requires_batch_calibration(entry, stage):
+    module = entry['oracle'].get('module')
+    return (stage in ('warm_call', 'run_after_setup')
+            or (module in ('thread_workloads.py', 'shared_bulk_workloads.py')
+                and stage == 'steady_state_group'))
+
+
 def validate_entry_setting(declaration, settings, identities, capabilities):
     """Bind the selected adaptive policy to its frozen value and actual CLI."""
     import p140_entry_policy
@@ -249,7 +266,8 @@ def validate(path):
     entries = selection_manifest.rows(declaration)
     by_id = {entry['id']:entry for entry in entries}
     settings = report['metadata']['settings']
-    thread_selected = any(entry['oracle']['module'] == 'thread_workloads.py' for entry in entries)
+    thread_selected = any(entry['oracle']['module'] in
+                          ('thread_workloads.py', 'shared_bulk_workloads.py') for entry in entries)
     if thread_selected:
         import thread_compare
         thread_cpus = thread_compare.validate_cpu_affinity(settings.get('thread_cpu_affinity'))
@@ -328,7 +346,8 @@ def validate(path):
                     check_observation(entry,pair[side],settings[side+'_mode'],path.parent,stage=stage,
                                       thread_cpus=thread_cpus, fuel_setting=explicit_fuel)
                     if (stage not in ('warm_call','run_after_setup')
-                            and not (entry['oracle']['module'] == 'thread_workloads.py'
+                            and not (entry['oracle']['module'] in
+                                     ('thread_workloads.py', 'shared_bulk_workloads.py')
                                      and stage == 'steady_state_group')):
                         need(pair[side]['batch'] == 1, 'cold stage is batched')
                     if entry['oracle']['module'] == 'memory_workloads.py':
@@ -365,10 +384,9 @@ def validate(path):
             need(row.get('timing_excluded') is True
                  and row['observation']['result'] == expected(probe_entry),
                  'untimed input oracle differs')
-    needed_calibrations = {(run['run_id'],wid,stage) for run in report['runs']
-                           for wid,stage in required if stage in ('warm_call','run_after_setup')
-                           or (by_id[wid]['oracle']['module'] == 'thread_workloads.py'
-                               and stage == 'steady_state_group')}
+    needed_calibrations = {(run['run_id'], wid, stage) for run in report['runs']
+                           for wid, stage in required
+                           if requires_batch_calibration(by_id[wid], stage)}
     calibrations = report.get('warm_calibrations',[])
     need(len(calibrations) == len(needed_calibrations)
          and {(row['run_id'],row['workload'],row['stage']) for row in calibrations} == needed_calibrations,
@@ -409,6 +427,8 @@ def decision(report):
         elif 'run_after_setup' in declared:
             target_stages[wid] = 'run_after_setup'
         elif selected[wid].get('family') == 'threads' and declared == ['steady_state_group']:
+            target_stages[wid] = 'steady_state_group'
+        elif selected[wid].get('family') == 'shared-bulk' and declared == ['steady_state_group']:
             target_stages[wid] = 'steady_state_group'
         elif (selected[wid].get('family') == 'continuations'
               and declared == ['setup', 'capture']):

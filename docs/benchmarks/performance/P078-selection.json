@@ -1,0 +1,232 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P078",
+  "lane": "candidate",
+  "rationale": "Predeclared decoded-only shared bulk-copy comparison. Target small 512-byte and large 32768-byte copies across alias/distinct backing and one/four workers; hold out 4097-byte copies for all four worker/backing shapes. Preserve atomic load/store, same/distinct atomic RMW, SC store-buffering, wait/notify, first/load-and-call, and prepare controls. Every shared-bulk invocation uses all-phase3-core execution, complete seeded-memory image checking, and a fresh instance. Timing is limited to steady_state_group; no instrumentation or promotion claim is inferred from semantic diagnostics.",
+  "registry_sha256": "1c6d466e2bd2ba6a5b98015f13b045db291bb28e23a59cd61630d23e26a48ecb",
+  "rows": [
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_alias_w1_b512",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "aaef565c8afd3d63a16932acbb9fa501bd1e67f7b59526ee89c7c336ce8cd996"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_alias_w1_b32768",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "7a944425b7be054e3ecff985965aeb2aafdb6a25e5ba7f72a0b34eae473241aa"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_alias_w1_b4097",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "e313be021c1911fcef32844a34f9a9234db57c7f3bfb33a795b3559ee1268750"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_alias_w4_b512",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "8b8850b6113556860549aedd9136d82b62d21da0741d5d77248277e0af3b0310"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_alias_w4_b32768",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "1144b62aeb14a42db90bcbb270388a9297340171ac480d043f42a3260a8984f2"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_alias_w4_b4097",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "b8b73a7ad207d0b984a075678fb190c7fb52a9646822cc713ba38af63593fbb7"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_distinct_w1_b512",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "810efdb7d6fa4f9035afd62dfc98a3e4478465cb9001ca6f0ba9a5679acac1b1"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_distinct_w1_b32768",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "754df0038fa35ab08449407b33a41aa433bd4c8a03d5e26afe053f01aa8214d5"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_distinct_w1_b4097",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "99a2ce85126aa4521ce7eccdef314892be9f993bd07cc7b69d9705bafb65ebdb"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_distinct_w4_b512",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "6100e8a6d5f0ef6a563cf479240365f3e95ab799a2b16e6d4137aac980a41b2e"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_distinct_w4_b32768",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "6ec406609891d412c0811e2eb1d7ad9d0c41a780398c030e630a87225439608a"
+    },
+    {
+      "family": "shared-bulk",
+      "id": "shared_bulk_copy_distinct_w4_b4097",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "2039978f4a3716af0481f925d5c52bd6cc4d52af699c3a06e8355d3557f74ecd"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_load_store_n32",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "9655629cfdff1b7b0261359899e6580ac0e2fc26399a0c226a393b91d0c6caf3"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_load_store_n1024",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "d71382bc253c9b7fc2699fa408fc8df55e4ec269f88251d9ccf7cdd15192cf56"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w4_n1024",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "6b3de15265fa9aa253e44053dcf802134c32c6a01575f39ef29030a90fd99f4d"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w4_n1024",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "488a9655d8c44da933c8889e51e8530332a389c1e9d66c2b374bf2f78f24c48e"
+    },
+    {
+      "family": "threads",
+      "id": "threads_sc_store_buffering",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "31e9c1edfdbdd8d1a1bf280bdda606e875c8baa8c85e4280b2dcc7f3c75a0cab"
+    },
+    {
+      "family": "threads",
+      "id": "threads_wait_notify_latency",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "2e3cdd0045a715806a6d11c2a949a65a8b48db60673447c45bbd6ecf463567ba"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p078_shared_aliases_match_full_memmove_images",
+    "p078_opposing_shared_copies_finish_without_deadlock",
+    "p078_bulk_prechecks_and_cancellation_preserve_chunks",
+    "p078_copy_avoids_chunk_allocations",
+    "p078_driver_rejects_invalid_shape_before_io",
+    "p078_driver_checks_full_images_and_worker_returns",
+    "p078_driver_detects_corrupted_copy_fixture",
+    "t133_cancel_infinite_wait_removes_registration",
+    "t133_aliases_counted_notification_and_registration_races",
+    "t130_two_memory_sc_store_buffering_and_fence_visibility",
+    "t133_wait_mismatch_timeout_notify",
+    "t130_concurrent_updates_and_distinct_memories",
+    "p027_overlap_full_memory_images",
+    "p027_oob_precheck_preserves_prior_full_memory",
+    "p027_distinct_memory_copy_changes_destination_and_preserves_source",
+    "p027_distinct_table_copy_roots_references_across_chunk_boundary",
+    "p027_distinct_shared_capabilities_keep_aliased_memmove_semantics",
+    "p027_mixed_memory64_custom_page_copy_prechecks_both_full_ranges",
+    "p027_fill_exact_images_zero_odd_and_multiple_chunks",
+    "p027_reference_distinct_copy_uses_same_bounded_backend"
+  ]
+}

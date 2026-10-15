@@ -14,7 +14,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 DEFAULT_REGISTRY = HERE / "workloads.json"
 SCHEMA = "wtime-candidate-selection-v1"
-FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads", "continuations"}
+FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads", "continuations", "shared-bulk"}
 ROW_FIELDS = {"family", "id", "role", "scale", "stages", "row_sha256"}
 MANIFEST_FIELDS = {"schema", "task", "lane", "rationale", "registry_sha256", "rows", "semantic_cases"}
 OPTIONAL_MANIFEST_FIELDS = {"fixture_models", "execution_settings"}
@@ -114,6 +114,11 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
             if (fam != "continuations"
                     or wid not in {f"continuation_live_{n}" for n in (1, 8, 73, 512)}):
                 raise ValueError(f"invalid live-continuation family or fixed row: {wid}")
+        elif by_id[wid].get("oracle", {}).get("module") == "shared_bulk_workloads.py":
+            selection = registry["selections"].get("shared-bulk")
+            if (fam != "shared-bulk" or not isinstance(selection, dict)
+                    or wid not in selection.get("workloads", [])):
+                raise ValueError(f"shared-bulk row {wid} must use the shared-bulk family")
         else:
             selection = registry["selections"].get(fam)
             if not isinstance(selection, dict) or wid not in selection.get("workloads", []):
@@ -133,6 +138,10 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
             if (fam != "continuations" or wid not in {f"continuation_live_{n}" for n in (1, 8, 73, 512)}
                     or full_stages != ["setup", "capture"] or stages != ["setup", "capture"]):
                 raise ValueError(f"live-continuation row {wid} must select its exact setup/capture stages")
+        if by_id[wid].get("oracle", {}).get("module") == "shared_bulk_workloads.py":
+            if (fam != "shared-bulk" or full_stages != ["steady_state_group"]
+                    or stages != ["steady_state_group"]):
+                raise ValueError(f"shared-bulk row {wid} must select its exact steady_state_group stage")
         digest = item["row_sha256"]
         if not isinstance(digest, str) or not _SHA.fullmatch(digest) or digest != _canonical_sha(by_id[wid]):
             raise ValueError(f"row_sha256 mismatch for {wid}")

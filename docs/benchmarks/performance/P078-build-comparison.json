@@ -1,0 +1,66 @@
+{
+  "candidate_budget": {
+    "bytes": 333722,
+    "path": "/workspace/wtime/target/verification/runs/P078/verify/attempt-0002/build.json",
+    "sha256": "fd59f933536778c43df3205c44494bd4ce4352fdd3e007f8af132571d536798b"
+  },
+  "changed_package_inputs": [
+    "crates/wtime-runtime/src/execution.rs",
+    "crates/wtime-runtime/src/shared_memory.rs",
+    "crates/wtime-runtime/tests/performance/p027.rs"
+  ],
+  "complete_package_inputs_checked": 739,
+  "immediate_predecessor_archive": {
+    "bytes": 107213,
+    "path": "/workspace/wtime/target/performance/P078-before/manifest.json",
+    "sha256": "e82fe66aaf16fa742b3daa0f95242132dbb5c0ee45af795acd83f4d6ec7f9507"
+  },
+  "measurement_note": "Unpaired build observations on the declared reference environment; ratios describe recorded budgets and do not establish a build-speed improvement.",
+  "observations": {
+    "clean_peak_rss_kib": {
+      "candidate": 221136,
+      "candidate_over_predecessor": 1.0108057703910922,
+      "predecessor": 218772
+    },
+    "clean_seconds": {
+      "candidate": 2.7640864370041527,
+      "candidate_over_predecessor": 1.072448386183459,
+      "predecessor": 2.5773608059971593
+    },
+    "leaf_seconds": {
+      "candidate": 0.1457112460047938,
+      "candidate_over_predecessor": 1.0407174451136116,
+      "predecessor": 0.1400103810010478
+    },
+    "release_seconds": {
+      "candidate": 5.01013845000125,
+      "candidate_over_predecessor": 1.0103503619949437,
+      "predecessor": 4.958812940996722
+    },
+    "runtime_leaf_seconds": {
+      "candidate": 0.37649111199425533,
+      "candidate_over_predecessor": 1.0410763278390975,
+      "predecessor": 0.36163641601160634
+    },
+    "stripped_bytes": {
+      "candidate": 1004432,
+      "candidate_over_predecessor": 1.0034686700767264,
+      "predecessor": 1000960
+    },
+    "unchanged_seconds": {
+      "candidate": 0.03779770599794574,
+      "candidate_over_predecessor": 0.933213739508934,
+      "predecessor": 0.04050273200846277
+    }
+  },
+  "predecessor_budget": {
+    "bytes": 333723,
+    "path": "/workspace/wtime/target/verification/runs/P066/verify/attempt-0001/default-build.json",
+    "sha256": "0817507c1b45f7665d043daded86b03d423bec5b5d7491bd7a5516d0bb53ec7b"
+  },
+  "schema": "wtime-p078-build-comparison-v1",
+  "source_current_restored_tree_matches_predecessor_budget": true,
+  "status": "passed",
+  "timing_evidence": false,
+  "wasm_performance_decision_changed": false
+}

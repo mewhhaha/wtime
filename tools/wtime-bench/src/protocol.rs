@@ -22,6 +22,9 @@ mod continuation_driver;
 #[path = "continuation_live_driver.rs"]
 mod continuation_live_driver;
 #[cfg(not(feature = "legacy-api"))]
+#[path = "shared_bulk_driver.rs"]
+mod shared_bulk_driver;
+#[cfg(not(feature = "legacy-api"))]
 #[path = "gc_exception_driver.rs"]
 mod gc_exception_driver;
 #[cfg(not(feature = "legacy-api"))]
@@ -152,6 +155,10 @@ pub fn try_main(args: &[String]) -> bool {
         return true;
     }
     #[cfg(not(feature = "legacy-api"))]
+    if shared_bulk_driver::try_main(args) {
+        return true;
+    }
+    #[cfg(not(feature = "legacy-api"))]
     if continuation_driver::try_main(args) {
         return true;
     }
@@ -195,9 +202,10 @@ pub fn try_main(args: &[String]) -> bool {
     if args.first().map(String::as_str) == Some("--protocol") {
         assert_eq!(args.len(), 1);
         println!(
-            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{},\"batch_limits\":{{\"typed_numeric\":{},\"typed_memory\":{}}}{}}}",
+            "{{\"schema_version\":2,\"engine\":\"wtime\",\"modes\":[{}],\"types\":[{}],\"features\":[\"mvp\",\"stable-core\",\"all-phase3-core\",\"mvp-saturating\",\"simd\",\"simd-relaxed\"],\"thread_driver\":{},\"shared_bulk_copy_driver\":{},\"instrumented\":{},\"source_fuel_contract\":{},\"batch_limits\":{{\"typed_numeric\":{},\"typed_memory\":{}}}{}}}",
             available_modes(),
             available_types(),
+            cfg!(not(feature = "legacy-api")),
             cfg!(not(feature = "legacy-api")),
             cfg!(all(
                 not(feature = "legacy-api"),

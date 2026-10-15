@@ -1,8 +1,8 @@
 # P078 — Reduce shared bulk-copy overhead with coordinated fixed chunks
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **inconclusive**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -108,4 +108,107 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P078/shared-finalization/attempt-0002/evidence.json": "7b6597ce8aac9259987f3a4baa93a04db789c70931b7ca7ca24909a47fb5d8f4"
+  },
+  "evidence": [
+    {
+      "bytes": 2172,
+      "path": "/workspace/wtime/target/performance/P078/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "7b6597ce8aac9259987f3a4baa93a04db789c70931b7ca7ca24909a47fb5d8f4"
+    }
+  ],
+  "outcome": "inconclusive",
+  "status": "done",
+  "task": "P078"
+}
+```
+
+## Completion record
+
+The final candidate close is `inconclusive`, with the task remaining done and no
+candidate promoted. The frozen portfolio compared the immediate predecessor
+against the candidate using decoded execution. It contained 21 groups (eight
+targeted shared-copy rows, four held-out 4097-byte rows, six thread controls,
+and three cold controls), with 30 pairs per group in each of two runs. The
+1,260 unique pair observations used seeds 78001 and 78002, the selected CPU 1,
+worker affinity `[1, 2, 3, 4]`, and one 10,000-resample statistics computation.
+Aliases added no samples.
+
+The equal-weight targeted shared-copy candidate/baseline median was 0.871525
+with 95% interval [0.857468, 0.890047] in run 1, and 0.874265 with interval
+[0.853292, 0.886226] in run 2. Thirteen per-run bounds on small-copy, thread,
+and cold-control checks remained inconclusive, so the candidate did not pass
+the full gate. No Wasmtime comparison or 100× performance claim is made.
+
+The candidate changed only shared-to-shared copies: same-backing copies used
+one lock and `copy_within`, while distinct backings used ordered two-lock
+acquisition. Full-range prechecks and cancellation checkpoints remained in
+place; other paths were unchanged. The named runtime cases included
+`p078_shared_aliases_match_full_memmove_images`,
+`p078_opposing_shared_copies_finish_without_deadlock`,
+`p078_bulk_prechecks_and_cancellation_preserve_chunks`, and
+`p078_copy_avoids_chunk_allocations`. Candidate verification also ran the
+bounded driver and protocol cases. Across its declared full configuration, 120
+Rust and 54 Python tests ran (174 total), with no failures or skips. The first
+full measurement attempt exposed an unsupported wait-row report and was
+corrected before the final close. A development check of the smallest
+single-worker alias row took 8.29 ms for a 128-group batch, below the 20 ms
+target. The new driver's bounded cap was raised to 1024 before full timing.
+
+The frozen selection is SHA-256
+`41841d12d26fcab66a6247a7394c2502bde12b3062547f3f9aff5f6a24669d08`; its
+freeze receipt is `bc6358333fc1216ec136ea429d2c4c21ac1041478e54c224f8ce8e6207225f46`.
+The immediate-predecessor archive manifest is
+`e82fe66aaf16fa742b3daa0f95242132dbb5c0ee45af795acd83f4d6ec7f9507`. The
+shared-copy fixture identities are WAT
+`67f616d4c45c3e722949cc0bc092ba98da299984a6549df17b95392b247c0bc6` and Wasm
+`0ab2531cf95cb52c6fac3a249319343d7ef09ade4b618cacb36c0c7bf2af8a1d`. The
+candidate binary is `6b65bc5077389a8cfb1490b4d959ca4a19d308d20a16157f026cefc38be0e2e8`.
+Its default build passed with zero external dependencies, a 2.764 s clean
+build, a 0.1457 s CLI leaf build, a 5.010 s release build, a 1,004,432-byte
+stripped binary, and 221,136 KiB peak RSS.
+
+The three runtime files were restored with fresh modification times. The
+restoration close matched all 176 archived source entries to the predecessor,
+retained no runtime change, and built the restored production binary
+`ff6cda780e8e1a42373c3f6a6cd294a86e2b52690cd66e501f62df5230fe6711`. The
+restoration verification is contract-only evidence; it did not retime or
+promote the candidate. It passed 101 default unit tests, 173 combined-feature
+unit tests, eight existing bulk oracles, and three driver cases: 285 test
+executions, with no failures or ignored cases.
+
+The benchmark fixture, independent full-memory oracle, driver, retained image
+proofs, and focused wait/notify adapter remain available. The candidate
+verification contract describes historical candidate sources. Reproducing it
+requires restoring its three candidate Rust files from the record archive;
+the separate restoration contract verifies the retained checkout.
+
+[Build comparison](../../../wtime/docs/benchmarks/performance/P078-build-comparison.json)
+binds the predecessor budget to all 739 current restored package inputs. The
+candidate added 3,472 stripped CLI bytes (0.35%). Its unpaired clean/release
+build ratios were 1.0724/1.0104 and peak RSS ratio was 1.0108. These recorded
+budget observations do not establish a build-speed improvement.
+
+Final published records and detailed receipts:
+[completion](../../../wtime/docs/benchmarks/performance/P078-completion.json),
+[evidence](../../../wtime/docs/benchmarks/performance/P078-evidence.json),
+[freeze](../../../wtime/docs/benchmarks/performance/P078-freeze.json),
+[proof](../../../wtime/docs/benchmarks/performance/P078-proof.json),
+[statistics](../../../wtime/docs/benchmarks/performance/P078-statistics.json),
+[restoration](../../../wtime/docs/benchmarks/performance/P078-restoration.json), and
+[record archive](../../../wtime/docs/benchmarks/performance/P078-records.json.gz). The archive
+retains 929 files in 33,763,782 compressed bytes; its SHA-256 is
+`52b429319975a043150e1fb21aafb93e56661f1f370b6a0aedc96d236f331c14`.
+The candidate close
+is `target/performance/P078/shared-finalization/attempt-0002`; restoration is
+`target/performance/P078/restoration-finalization/attempt-0001`. Their evidence
+SHA-256 values are respectively
+`7b6597ce8aac9259987f3a4baa93a04db789c70931b7ca7ca24909a47fb5d8f4` and
+`954ab266ef3974b74746bcc96dc53d4e6750ddd0fe99135d951c3a9d13fe6d51`.

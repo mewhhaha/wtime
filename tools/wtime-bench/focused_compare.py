@@ -96,6 +96,8 @@ def profile(entry):
         return simd_scaling.execution_profile(entry)
     if module == 'thread_workloads.py':
         return 'threads'
+    if module == 'shared_bulk_workloads.py':
+        return 'all-phase3-core'
     if module == 'continuation_live_workloads.py':
         import continuation_live_workloads as model
         return model.PROFILE
@@ -185,6 +187,12 @@ def products(entries, declaration, settings):
                               'thread_fixture_wat_sha256': entry['source']['sha256'],
                               'thread_fixture_wasm_sha256': entry['source']['wasm_sha256'],
                               'measurement_policy': 'complete steady_state_group driver batches; retain all legacy trials'})
+                if entry['id'].startswith('threads_wait_notify'):
+                    import thread_compare
+                    timer.update({'wait_samples': thread_compare.WAIT_SAMPLES,
+                                  'wait_timeout_ns': entry['measurement_protocol']['wait_timeout_ns'],
+                                  'wait_cleanup_timeout_ns': thread_compare.WAIT_CLEANUP_TIMEOUT_NS,
+                                  'measurement_policy': 'sum 1024 accepted guest notify-call-to-waiter-return intervals per complete group; setup and cleanup checks untimed'})
             if module == 'continuation_live_workloads.py':
                 import continuation_live_workloads as model
                 need(stage in model.STAGES and entry['id'] in {row['id'] for row in model.entries()},
@@ -198,6 +206,13 @@ def products(entries, declaration, settings):
                               'live_fixture_wat_sha256': entry['source']['sha256'],
                               'live_fixture_wasm_sha256': entry['source']['wasm_sha256'],
                               'measurement_policy': 'decoded; exact selected setup_ns/capture_ns; fresh process; batch one'})
+            if module == 'shared_bulk_workloads.py':
+                timer.update({'shared_bulk_model_sha256': compare.sha(HERE/'shared_bulk_workloads.py'),
+                              'shared_bulk_compare_sha256': compare.sha(HERE/'shared_bulk_compare.py'),
+                              'shared_bulk_driver_sha256': compare.sha(HERE/'src/shared_bulk_driver.rs'),
+                              'shared_bulk_fixture_wat_sha256': entry['source']['sha256'],
+                              'shared_bulk_fixture_wasm_sha256': entry['source']['wasm_sha256'],
+                              'measurement_policy': 'decoded all-phase3-core; complete steady_state_group batches; full-memory validation outside elapsed intervals'})
             result.append({'workload': entry['id'], 'stage': stage,
                 'wasm_sha256': entry['source']['wasm_sha256'], 'profile': profile(entry),
                 'runtime_settings': settings,
@@ -249,7 +264,7 @@ def prepare_fixtures(entries, frozen, output, encoder):
         if entry['oracle'].get('module') == 'continuation_live_workloads.py':
             import continuation_live_workloads as model
             modeled = {row['id']: row for row in model.entries()}.get(entry['id'])
-            need(modeled == entry and source['path'] == model.SOURCE_PATH
+            need(modeled == entry and source['path'] == model.WAT_PATH
                  and source['sha256'] == model.WAT_SHA256
                  and source['wasm_sha256'] == model.WASM_SHA256,
                  'live-continuation row differs from its fixed fixture model: '+entry['id'])
@@ -259,6 +274,21 @@ def prepare_fixtures(entries, frozen, output, encoder):
                  'live-continuation WAT source changed')
             need(wasm.is_file() and compare.sha(wasm) == model.WASM_SHA256,
                  'live-continuation immutable Wasm fixture changed')
+            fixtures[entry['id']] = wasm
+            continue
+        if entry['oracle'].get('module') == 'shared_bulk_workloads.py':
+            import shared_bulk_workloads as model
+            modeled = {row['id']: row for row in model.entries()}.get(entry['id'])
+            need(modeled == entry and source['path'] == model.WAT_PATH
+                 and source['sha256'] == model.WAT_SHA256
+                 and source['wasm_sha256'] == model.WASM_SHA256,
+                 'shared-bulk row differs from its fixed fixture model: '+entry['id'])
+            wat = HERE/source['path']
+            wasm = wat.with_suffix('.wasm')
+            need(wat.is_file() and compare.sha(wat) == model.WAT_SHA256,
+                 'shared-bulk WAT source changed')
+            need(wasm.is_file() and compare.sha(wasm) == model.WASM_SHA256,
+                 'shared-bulk immutable Wasm fixture changed')
             fixtures[entry['id']] = wasm
             continue
         wat = HERE/source['path']
@@ -292,7 +322,8 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         import thread_compare
         need(stage == thread_compare.STAGE, 'thread rows require their declared steady_state_group stage')
         need(mode == thread_compare.MODE, 'focused thread timer requires decoded execution mode')
-        need(seed is not None, 'thread observation requires a stable run/pair seed')
+        need(seed is not None or entry['id'].startswith('threads_wait_notify'),
+             'thread observation requires a stable run/pair seed')
         need(thread_cpus is not None, 'thread observations require the explicit thread CPU mask')
         return thread_compare.observe(executable, wasm, entry, seed=seed, process=thread_process,
                                       cpu=thread_cpus, thread_cpu_affinity=thread_cpus, batch=batch)
@@ -309,6 +340,22 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         argv = ['--continuation-live-set', wasm, entry['id'], n, stage, mode, model.PROFILE]
         wire = compare.process(executable, argv, cpu)
         return model.validate_observation(entry, wire, stage)
+    if module == 'shared_bulk_workloads.py':
+        import shared_bulk_workloads as model
+        modeled = {row['id']: row for row in model.entries()}.get(entry.get('id'))
+        need(mode == model.MODE and stage == 'steady_state_group' and entry == modeled
+             and type(batch) is int and 1 <= batch <= model.MAX_BATCH
+             and register_entry_threshold is None and fuel_setting is None
+             and thread_cpus is not None and profile(entry) == model.PROFILE,
+             'shared-bulk rows require the fixed decoded all-phase3-core worker-group lane')
+        args = ['--shared-bulk-copy', wasm, entry['id'],
+                entry['oracle']['backing'], entry['oracle']['workers'],
+                entry['oracle']['bytes'], stage, batch, mode, model.PROFILE]
+        wire = thread_process(executable, args, thread_cpus)
+        validated = model.validate_observation(entry, wire, expected_batch=batch,
+                                               expected_thread_cpus=thread_cpus)
+        import shared_bulk_compare
+        return shared_bulk_compare.retain_memory_images(validated, output)
     if module == 'root_workloads.py':
         import root_compare
         wire = compare.process(executable, ['--gc-root-driver', wasm, entry['id'], entry['family'],
@@ -370,6 +417,9 @@ def batch_limit(entry):
         maximum = compare.SCALAR_MAX_BATCH
     if entry['oracle'].get('module') == 'thread_workloads.py':
         maximum = 128
+    if entry['oracle'].get('module') == 'shared_bulk_workloads.py':
+        import shared_bulk_workloads
+        maximum = shared_bulk_workloads.MAX_BATCH
     if entry['oracle'].get('module') == 'representative_workloads.py':
         import representative_compare
         maximum = representative_compare.cap(entry)
@@ -439,6 +489,16 @@ def run(args):
                      and entry['id'] in {row['id'] for row in live_model.entries()}
                      for entry in live_entries),
              'live-continuation selections require exact decoded setup/capture rows')
+    shared_bulk_entries = [entry for entry in entries
+                           if entry['oracle'].get('module') == 'shared_bulk_workloads.py']
+    if shared_bulk_entries:
+        import shared_bulk_workloads as shared_bulk_model
+        need(args.candidate_mode == shared_bulk_model.MODE
+             and all(entry['family'] == 'shared-bulk'
+                     and entry['stages'] == ['steady_state_group']
+                     and entry == {row['id']: row for row in shared_bulk_model.entries()}.get(entry['id'])
+                     for entry in shared_bulk_entries),
+             'shared-bulk selections require exact decoded steady_state_group rows')
     import p140_entry_policy
     entry_setting = p140_entry_policy.request(declaration, args.candidate_mode,
                                              getattr(args, 'register_entry_threshold', None))
@@ -460,9 +520,10 @@ def run(args):
     allowed = sorted(os.sched_getaffinity(0))
     cpu = args.cpu if args.cpu is not None else allowed[0]
     need(cpu in allowed, 'CPU outside permitted affinity')
-    has_threads = any(entry['oracle'].get('module') == 'thread_workloads.py' for entry in entries)
+    has_threads = any(entry['oracle'].get('module') in
+                      ('thread_workloads.py', 'shared_bulk_workloads.py') for entry in entries)
     thread_cpus = parse_thread_cpus(args.thread_cpus, allowed, required=has_threads)
-    need(has_threads or thread_cpus is None, '--thread-cpus requires selected thread rows')
+    need(has_threads or thread_cpus is None, '--thread-cpus requires selected thread or shared-bulk rows')
     frozen_selection = json.loads(args.frozen.read_text()) if args.frozen else None
     archive = baseline.verify_archive(args.baseline)
     # The supplied adapter may wrap the declared predecessor, but never substitute it.
@@ -511,9 +572,15 @@ def run(args):
         if live_entries:
             need(settings[side+'_mode'] == 'decoded',
                  'live-continuation observations require decoded mode on both sides')
+        if shared_bulk_entries:
+            need(settings[side+'_mode'] == 'decoded',
+                 'shared-bulk observations require decoded mode on both sides')
         if any(entry['oracle'].get('module') == 'thread_workloads.py' for entry in entries):
             import thread_compare
             thread_compare.validate_capability(cap)
+        if shared_bulk_entries:
+            need(cap.get('shared_bulk_copy_driver') is True,
+                 'both paired binaries require explicit shared_bulk_copy_driver capability')
     args.output.mkdir(parents=True, exist_ok=False)
     # Source copies precede execution; the outer shared runner binds the command.
     for name, digest in before.items():
@@ -543,8 +610,11 @@ def run(args):
         return (int.from_bytes(digest[:8], 'big') & ((1 << 63) - 1)) or 1
     def call(side, wid, stage, batch, seed=None):
         exe = baseline_binary if side == 'baseline' else candidate
-        if by_id[wid]['oracle'].get('module') == 'thread_workloads.py' and seed is None:
-            seed = seed_for('observation', wid, stage, batch)
+        if by_id[wid]['oracle'].get('module') == 'thread_workloads.py':
+            if wid.startswith('threads_wait_notify'):
+                seed = None
+            elif seed is None:
+                seed = seed_for('observation', wid, stage, batch)
         return observe(exe, by_id[wid], fixture_paths[wid], stage, batch, settings[side+'_mode'], cpu,
                        args.output, seed=seed, thread_cpus=thread_cpus,
                        **({'register_entry_threshold': entry_setting[side]} if entry_setting is not None else {}),
@@ -571,9 +641,10 @@ def run(args):
         # All selected inputs receive full independent oracle checks, including alias members.
         for entry in entries:
             stage = 'steady_state_group' if entry['oracle'].get('module') == 'thread_workloads.py' else (
+                'steady_state_group' if entry['oracle'].get('module') == 'shared_bulk_workloads.py' else (
                 'prepare' if entry['id'] == 'prepare_large' else (
                 'run_after_setup' if entry['oracle'].get('module') == 'representative_workloads.py' else (
-                'setup' if entry['oracle'].get('module') == 'continuation_live_workloads.py' else 'load_and_call')))
+                'setup' if entry['oracle'].get('module') == 'continuation_live_workloads.py' else 'load_and_call'))))
             for side in ('baseline', 'candidate'):
                 report['correctness_probes'].append({'workload':entry['id'], 'stage':stage, 'side':side,
                     'observation':call(side, entry['id'], stage, 1,
@@ -591,8 +662,9 @@ def run(args):
                 entry = by_id[wid]
                 batch = 1
                 thread_stage = entry['oracle'].get('module') == 'thread_workloads.py' and stage == 'steady_state_group'
+                shared_bulk_stage = entry['oracle'].get('module') == 'shared_bulk_workloads.py' and stage == 'steady_state_group'
                 live_stage = entry['oracle'].get('module') == 'continuation_live_workloads.py'
-                if not args.smoke and not live_stage and (stage in ('warm_call', 'run_after_setup') or thread_stage):
+                if not args.smoke and not live_stage and (stage in ('warm_call', 'run_after_setup') or thread_stage or shared_bulk_stage):
                     cal_seed = seed_for('calibration', run_id, wid, stage)
                     batch, audit = calibrate(entry, lambda side, n:call(side, wid, stage, n, seed=cal_seed))
                     report['warm_calibrations'].append({'run_id':run_id, 'workload':wid, 'stage':stage,
