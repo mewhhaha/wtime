@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -134,6 +136,69 @@ class P108SelectionTests(unittest.TestCase):
         enabled = copy.deepcopy(self.value)
         enabled["unselected"][1]["enabled"] = True
         self.rejects(enabled)
+
+
+class P108RetainedExecutableTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="p108-retained-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        source = self.write("crates/wtime-runtime/src/lib.rs", b"source")
+        source_map = {str(source.relative_to(self.root)): hashlib.sha256(source.read_bytes()).hexdigest()}
+        self.selected = {"schema": "wtime-selected-tier-check-v1", "passed": True,
+                         "source_stable": True, "timing_evidence": False,
+                         "configurations": copy.deepcopy(p108.TIERS), "tiers": {}, "executables": {}}
+        for tier in p108.TIERS:
+            name = tier["name"]
+            refs = {}
+            for logical in ("benchmark", "conformance", "diagnostic"):
+                refs[logical] = normal(self.write(f"{name}/{logical}", (name + logical).encode()))
+            report = {"passed": True, "source_stable": True, "requested_tier": tier["mode"],
+                      "register_entry_threshold": tier["register_entry_threshold"],
+                      "counts": {"failed": 0, "skipped": 0, "unsupported": 0, "all_checks_executed": 89},
+                      "implementation_sources": source_map,
+                      "binary": {"path": str(self.root / "shared-binary"), "sha256": refs["benchmark"]["sha256"]},
+                      "conformance_binary": {"sha256": refs["conformance"]["sha256"]},
+                      "diagnostic_instrumentation": {"binary_sha256": refs["diagnostic"]["sha256"]}}
+            self.selected["tiers"][name] = normal(self.write(f"{name}/report.json", json.dumps(report).encode()))
+            self.selected["executables"][name] = refs
+
+    def write(self, name, data):
+        path = (self.root / name).resolve()
+        path.relative_to(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def check(self, selected=None):
+        return p108.validate_selected_tiers(self.selected if selected is None else selected,
+                                           p108.TIERS, root=self.root)
+
+    def test_retained_executables_survive_original_cargo_path_replacement(self):
+        self.write("shared-binary", b"a later Cargo configuration")
+        self.assertEqual(set(self.check()), {row["name"] for row in p108.TIERS})
+
+    def test_retained_executable_tampering_or_different_tested_digest_is_rejected(self):
+        value = copy.deepcopy(self.selected)
+        value["executables"]["decoded"]["benchmark"] = value["executables"]["compact"]["benchmark"]
+        with self.assertRaises(VerificationError):
+            self.check(value)
+        self.write("decoded/benchmark", b"tampered")
+        with self.assertRaises(VerificationError):
+            self.check()
+
+    def test_missing_mode_wrong_configuration_and_stale_source_are_rejected(self):
+        for kind in ("missing", "configuration", "source"):
+            with self.subTest(kind=kind):
+                value = copy.deepcopy(self.selected)
+                if kind == "missing":
+                    del value["executables"]["register-eager"]
+                elif kind == "configuration":
+                    value["configurations"][3]["register_entry_threshold"] = 4
+                else:
+                    self.write("crates/wtime-runtime/src/lib.rs", b"changed source")
+                with self.assertRaises(VerificationError):
+                    self.check(value)
 
 
 if __name__ == "__main__":

@@ -189,6 +189,18 @@ class P111PerformanceCITests(unittest.TestCase):
                 with self.assertRaises(ci.PerformanceCIError):
                     ci.reference_lane(config, statistics, completion, root)
 
+    def test_reference_rejects_aarch64_declaration_for_x64_workflow(self):
+        with tempfile.TemporaryDirectory(prefix="p111-reference-architecture-") as temp:
+            root = Path(temp).resolve()
+            config, completion, statistics, bound = self._lane_fixture(root)
+            declaration = json.loads(config.read_text())
+            declaration["architecture"] = "aarch64"
+            config.write_text(json.dumps(declaration, sort_keys=True))
+            with patch.object(ci, "finalized_statistics", return_value=bound) as read_stats:
+                with self.assertRaises(ci.PerformanceCIError):
+                    ci.reference_lane(config, statistics, completion, root)
+            read_stats.assert_not_called()
+
     def test_finalized_statistics_rejects_synthetic_evidence_before_loading_contract(self):
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

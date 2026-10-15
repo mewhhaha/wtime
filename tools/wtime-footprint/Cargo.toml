@@ -1,0 +1,16 @@
+[package]
+name = "wtime-footprint-inspect"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+wtime-runtime = { path = "../../crates/wtime-runtime", default-features = false, features = [
+    "compact-executor",
+    "register-executor",
+    "execution-reference",
+    "performance-counters",
+] }

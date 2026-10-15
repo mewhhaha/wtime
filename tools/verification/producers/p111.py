@@ -31,6 +31,7 @@ def finalize(verify_dir,output):
     receipt=read_json(verify_dir/'receipt.json')
     need(receipt.get('status')=='passed' and receipt.get('lane')=='full','CI checks did not pass')
     write_new(output,{'schema':'wtime-p111-ci-v1','task':'P111','status':'passed','timing_evidence':False,
+        'core_sources':performance_ci.current_core_sources(ROOT),
         'smoke':normal(verify_dir/'smoke.json'),'reference':normal(verify_dir/'reference.json'),
         'prerequisites':prerequisites,'verification_receipt':normal(verify_dir/'receipt.json'),
         'limitations':['Shared-cloud smoke proves correctness and identity only; dedicated performance comparison is explicitly unrun.']})

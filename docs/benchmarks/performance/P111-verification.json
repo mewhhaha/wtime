@@ -174,8 +174,9 @@
         {
           "command": "ci-tests",
           "kind": "unittest",
-          "minimum_passed": 9,
+          "minimum_passed": 10,
           "required_names": [
+            "test_reference_rejects_aarch64_declaration_for_x64_workflow",
             "test_bound_reference_carries_stored_decision_without_recomputing_statistics",
             "test_finalized_statistics_rejects_synthetic_evidence_before_loading_contract",
             "test_missing_stable_reference_configuration_is_explicitly_unrun",
@@ -290,8 +291,9 @@
           {
             "command": "ci-tests",
             "kind": "unittest",
-            "minimum_passed": 9,
+            "minimum_passed": 10,
             "required_names": [
+              "test_reference_rejects_aarch64_declaration_for_x64_workflow",
               "test_bound_reference_carries_stored_decision_without_recomputing_statistics",
               "test_finalized_statistics_rejects_synthetic_evidence_before_loading_contract",
               "test_missing_stable_reference_configuration_is_explicitly_unrun",

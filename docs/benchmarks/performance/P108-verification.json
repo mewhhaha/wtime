@@ -133,8 +133,11 @@
         {
           "command": "policy-tests",
           "kind": "unittest",
-          "minimum_passed": 7,
+          "minimum_passed": 10,
           "required_names": [
+            "test_retained_executables_survive_original_cargo_path_replacement",
+            "test_retained_executable_tampering_or_different_tested_digest_is_rejected",
+            "test_missing_mode_wrong_configuration_and_stale_source_are_rejected",
             "test_complete_policy_keeps_decoded_default_and_only_explicit_experimental_opt_ins",
             "test_duplicate_or_unexplained_unselected_rows_are_rejected",
             "test_missing_or_pending_required_milestones_are_rejected",
@@ -233,8 +236,11 @@
           {
             "command": "policy-tests",
             "kind": "unittest",
-            "minimum_passed": 7,
+            "minimum_passed": 10,
             "required_names": [
+              "test_retained_executables_survive_original_cargo_path_replacement",
+              "test_retained_executable_tampering_or_different_tested_digest_is_rejected",
+              "test_missing_mode_wrong_configuration_and_stale_source_are_rejected",
               "test_complete_policy_keeps_decoded_default_and_only_explicit_experimental_opt_ins",
               "test_duplicate_or_unexplained_unselected_rows_are_rejected",
               "test_missing_or_pending_required_milestones_are_rejected",

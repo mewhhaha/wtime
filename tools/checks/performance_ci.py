@@ -364,8 +364,8 @@ def reference_lane(reference_config: Path | None = None,
          and config.get("schema") == REFERENCE_SCHEMA,
          "reference configuration schema differs")
     need(config["exclusive_runner"] is True and isinstance(config["runner_id"], str)
-         and bool(config["runner_id"]) and config["architecture"] in {"x86_64", "aarch64"},
-         "reference runner must have an explicit exclusive identity and supported architecture")
+         and bool(config["runner_id"]) and config["architecture"] == "x86_64",
+         "reference runner must have an explicit exclusive identity and use the supported x86_64 workflow")
     bound = finalized_statistics(completion, shared_statistics, root)
     measure = bound["receipts"]["measure"]
     config_ref = normal(config_path)

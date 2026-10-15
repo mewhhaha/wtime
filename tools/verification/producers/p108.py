@@ -87,25 +87,46 @@ def build(plan_path,output):
     validate_policy(value,sources=source_identity());write_new(output,value)
 
 
-def finalize(policy_path,verify_dir,output):
-    policy=read_json(policy_path);tiers=validate_policy(policy,sources=source_identity())
-    receipt=read_json(verify_dir/'receipt.json')
-    need(receipt.get('task')=='P108' and receipt.get('status')=='passed' and receipt.get('lane')=='full'
-         and receipt.get('synthetic') is False,'portfolio verification is incomplete')
-    selected=read_json(verify_dir/'selected/report.json')
+def validate_selected_tiers(selected,tiers,*,root=ROOT):
     need(selected.get('schema')=='wtime-selected-tier-check-v1' and selected.get('passed') is True,'selected tier expansion failed')
+    need(selected.get('source_stable') is True and selected.get('timing_evidence') is False,
+         'selected tier evidence is unstable or mislabeled')
     reports=selected.get('tiers',{})
     need(set(reports)=={row['name'] for row in tiers},'selected tier expansion omitted a policy')
+    expected_configurations=[{key:row[key] for key in ('name','mode','register_entry_threshold','features','support')} for row in tiers]
+    need(selected.get('configurations')==expected_configurations,'selected tier configurations differ from policy')
+    executables=selected.get('executables',{})
+    need(set(executables)==set(reports),'selected tier executables are incomplete')
     for tier in tiers:
         report=read_json(verify_normal(reports[tier['name']]))
         counts=report['counts']
         need(report.get('passed') is True and report.get('source_stable') is True
              and report.get('requested_tier')==tier['mode']
              and report.get('register_entry_threshold')==tier['register_entry_threshold'],'selected mode/configuration drifted')
-        need(all(counts.get(key)==0 for key in ('failed','skipped','unsupported'))
-             and counts.get('all_checks_executed')==89,'selected tier checks are incomplete')
+        need(all(type(counts.get(key)) is int and counts[key]==0 for key in ('failed','skipped','unsupported'))
+             and type(counts.get('all_checks_executed')) is int and counts['all_checks_executed']==89,
+             'selected tier checks are incomplete')
         for name,digest in report['implementation_sources'].items():
-            need(hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==digest,'selected tier source is stale')
+            need(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest,'selected tier source is stale')
+        retained=executables[tier['name']]
+        need(set(retained)=={'benchmark','conformance','diagnostic'},'selected tier retained executables are incomplete')
+        expected={'benchmark':report['binary']['sha256'],
+                  'conformance':report['conformance_binary']['sha256'],
+                  'diagnostic':report['diagnostic_instrumentation']['binary_sha256']}
+        for logical,reference in retained.items():
+            verify_normal(reference)
+            need(reference['sha256']==expected[logical],'retained executable differs from the one tested')
+    return reports
+
+
+def finalize(policy_path,verify_dir,output):
+    policy=read_json(policy_path);tiers=validate_policy(policy,sources=source_identity())
+    receipt=read_json(verify_dir/'receipt.json')
+    need(receipt.get('task')=='P108' and receipt.get('status')=='passed' and receipt.get('lane')=='full'
+         and receipt.get('synthetic') is False,'portfolio verification is incomplete')
+    selected=read_json(verify_dir/'selected/report.json')
+    need(selected.get('decisions')==normal(policy_path),'selected tier check used a different policy')
+    reports=validate_selected_tiers(selected,tiers)
     write_new(output,{'schema':'wtime-p108-portfolio-v1','task':'P108','status':'passed','timing_evidence':False,
         'policy':normal(policy_path),'selected_tiers':reports,'verification_receipt':normal(verify_dir/'receipt.json'),
         'sources':source_identity(),'limitations':policy['limitations']})
