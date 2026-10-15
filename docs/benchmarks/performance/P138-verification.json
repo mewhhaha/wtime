@@ -1,0 +1,642 @@
+{
+  "schema_version": 1,
+  "task": "P138",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P138-before/manifest.json",
+        "target/performance/P138-before/source/**/*",
+        "target/performance/P138-before/binary/**/*",
+        "target/performance/P138-before/fixtures/**/*",
+        "target/performance/P138-before/runs/**/*",
+        "target/performance/P138-before/historical_reports/**/*"
+      ],
+      "settings": {
+        "repository_commit": "78c581a72433fb44b8d135eb0b9971a0eab6bd73",
+        "manifest_sha256": "a70e79157fe54adc7d4a8413f73223fb4eea6c6532a245810fae59d235f2eba1",
+        "mode": "register"
+      }
+    },
+    "p137_foundation": {
+      "paths": [
+        "docs/benchmarks/performance/P137-completion.json",
+        "docs/benchmarks/performance/P137-evidence.json",
+        "docs/benchmarks/performance/P137-proof.json",
+        "docs/benchmarks/performance/P137-contract.json",
+        "docs/benchmarks/performance/P137-verification.json"
+      ],
+      "settings": {
+        "required_outcome": "contract_only",
+        "timing_evidence": false
+      }
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ],
+      "settings": {
+        "policy": "source-bound semantic diagnostics; no timing or promotion"
+      }
+    },
+    "fixtures": {
+      "paths": [
+        "crates/wtime-runtime/tests/fixtures/performance/p138/**"
+      ],
+      "settings": {
+        "profile": "MVP",
+        "functions": 66,
+        "source_events_per_call_including_implicit_end": 4
+      }
+    },
+    "test_sources": {
+      "paths": [
+        "crates/wtime-runtime/tests/performance.rs",
+        "crates/wtime-runtime/tests/performance/p138*.rs"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p138.py"
+      ]
+    },
+    "checker_tests": {
+      "paths": [
+        "tools/verification/tests/test_p138_cache_diagnostics.py"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/verify.py",
+        "tools/verification/README.md",
+        "tools/verification/**/*.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/wtime-bench/baseline.py"
+      ]
+    },
+    "task_plan": {
+      "paths": [
+        "task-plans/performance/05-register-executor/P138-register-cache-diagnostics.md"
+      ]
+    },
+    "contract": {
+      "paths": [
+        "docs/benchmarks/performance/P138-contract.json"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "p138-source-checker",
+        "uses": [
+          "producer",
+          "checker_tests"
+        ],
+        "commands": [
+          {
+            "name": "p138-source-checker",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-b",
+              "-v",
+              "tools.verification.tests.test_p138_cache_diagnostics"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p138-source-checker",
+            "kind": "unittest",
+            "minimum_passed": 6,
+            "required_names": [
+              "test_accepts_complete_bounded_snapshot_trace_sequences",
+              "test_rejects_timing_fields_and_unmarked_instrumentation",
+              "test_rejects_boolean_counters_unknown_rows_and_budget_overflow",
+              "test_accepts_exact_named_case_markers_and_rejects_missing_or_duplicate",
+              "test_rejects_fifo_reordering_and_recompilation_counter_mismatch",
+              "test_public_checker_accepts_contained_receipt_and_rejects_stale_log_hash"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "p138-private-runtime",
+        "uses": [
+          "runtime",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "p138-private-runtime",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib",
+              "--features",
+              "register-executor,execution-reference",
+              "p138_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p138-private-runtime",
+            "features": [
+              "register-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 3,
+            "required_names": [
+              "p138_private_snapshots_do_not_pin_evicted_artifacts",
+              "p138_private_failures_cooldown_abort_poison_and_foreign_are_observed",
+              "p138_private_active_builder_snapshot_and_saturating_counters"
+            ]
+          }
+        ],
+        "outputs": {}
+      },
+      {
+        "name": "p138-public-runtime",
+        "uses": [
+          "runtime",
+          "fixtures",
+          "test_sources"
+        ],
+        "commands": [
+          {
+            "name": "p138-public-runtime",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--test",
+              "performance",
+              "--features",
+              "register-executor,execution-reference",
+              "p138_",
+              "--",
+              "--nocapture"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "p138-public-runtime",
+            "features": [
+              "register-executor",
+              "execution-reference"
+            ],
+            "minimum_passed": 3,
+            "required_names": [
+              "p138_cold_threshold_and_single_builder_are_observed",
+              "p138_guest_fifo_eviction_and_recompilation_stay_bounded",
+              "p138_snapshot_preserves_all_fuel_prefixes_and_wraparound_results"
+            ]
+          }
+        ],
+        "outputs": {}
+      }
+    ]
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/report.json",
+    "pointer": "/predecessor/runtime_source_map",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/execution/register/cache.rs",
+      "crates/wtime-runtime/src/lib.rs",
+      "crates/wtime-runtime/tests/performance.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/src/register_cache_diagnostics.rs",
+      "crates/wtime-runtime/tests/performance/p138.rs",
+      "crates/wtime-runtime/tests/performance/p138_trace.rs",
+      "crates/wtime-runtime/tests/performance/p138_private.rs"
+    ]
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "p137_foundation",
+        "runtime",
+        "fixtures",
+        "producer",
+        "task_plan"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p138.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json",
+        "runtime_source_map": "{stage}/freeze/runtime-source-map.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/outcome",
+          "op": "equal",
+          "value": "contract_only"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/instrumented",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/gate_eligible",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/predecessor/commit",
+          "op": "equal",
+          "value": "78c581a72433fb44b8d135eb0b9971a0eab6bd73"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/predecessor/manifest_sha256_pinned",
+          "op": "equal",
+          "value": "a70e79157fe54adc7d4a8413f73223fb4eea6c6532a245810fae59d235f2eba1"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/fixture/function_count",
+          "op": "equal",
+          "value": 66
+        },
+        {
+          "artifact": "report",
+          "pointer": "/current_source_file_count",
+          "op": "positive"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "fixtures",
+        "test_sources",
+        "producer",
+        "checker_tests",
+        "tooling",
+        "task_plan",
+        "contract"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "register-full",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "register-executor,execution-reference",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "combined-full",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--features",
+            "compact-executor,register-executor,execution-reference",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "default-policy",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "p132_module_preparation_remains_policy_neutral",
+            "--",
+            "--nocapture"
+          ]
+        },
+        {
+          "name": "default-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ]
+        },
+        {
+          "name": "register-build-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/register-executor",
+            "--output",
+            "{stage}/register-build.json"
+          ]
+        },
+        {
+          "name": "source-checker",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-b",
+            "-v",
+            "tools.verification.tests.test_p138_cache_diagnostics"
+          ]
+        },
+        {
+          "name": "proof",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p138.py",
+            "verify",
+            "--freeze",
+            "{freeze_dir}/freeze/report.json",
+            "--p138-log",
+            "{stage}/register-full.stdout",
+            "--p138-stderr",
+            "{stage}/register-full.stderr",
+            "--register-log",
+            "{stage}/register-full.stdout",
+            "--combined-log",
+            "{stage}/combined-full.stdout",
+            "--default-log",
+            "{stage}/default-policy.stdout",
+            "--default-build",
+            "{stage}/default-build.json",
+            "--register-build",
+            "{stage}/register-build.json",
+            "--output",
+            "{stage}/proof"
+          ]
+        },
+        {
+          "name": "public-evidence-check",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p138.py",
+            "check-evidence",
+            "--report",
+            "{stage}/proof/report.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "register_log": "{stage}/register-full.stdout",
+        "combined_log": "{stage}/combined-full.stdout",
+        "default_log": "{stage}/default-policy.stdout",
+        "default_build": "{stage}/default-build.json",
+        "register_build": "{stage}/register-build.json",
+        "proof": "{stage}/proof/report.json",
+        "proof_helper": "{stage}/proof/helpers/p138.py",
+        "invocation": "{stage}/proof/invocation.json",
+        "build_helper": "{stage}/proof/helpers/build_budget.py",
+        "dependency_helper": "{stage}/proof/helpers/dependency_budget.py",
+        "register_stderr": "{stage}/register-full.stderr",
+        "baseline_helper": "{stage}/proof/helpers/baseline.py"
+      },
+      "tests": [
+        {
+          "command": "register-full",
+          "features": [
+            "register-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 21,
+          "unfiltered": true,
+          "required_names": [
+            "p138_cold_threshold_and_single_builder_are_observed",
+            "p138_guest_fifo_eviction_and_recompilation_stay_bounded",
+            "p138_snapshot_preserves_all_fuel_prefixes_and_wraparound_results",
+            "p138_private_snapshots_do_not_pin_evicted_artifacts",
+            "p138_private_failures_cooldown_abort_poison_and_foreign_are_observed",
+            "p138_private_active_builder_snapshot_and_saturating_counters",
+            "p133_cold_threshold_and_single_publish",
+            "p133_concurrent_duplicate_uses_one_unlocked_builder",
+            "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+            "p133_fifo_eviction_pinned_lifetime_and_budget_churn",
+            "p134_cold_hot_entry_threshold_and_diagnostics",
+            "p134_shared_module_concurrency_and_store_ownership",
+            "p134_host_effect_fuel_and_foreign_refusal",
+            "p134_eviction_pin_and_continuation_resume_without_reentry",
+            "p134_activation_pin_survives_eviction",
+            "p065_outer_reference_survives_reentrant_collection",
+            "p065_capture_retains_numeric_state_and_source_cursor",
+            "p065_cross_module_exact_suspend_and_resource_controls",
+            "p065_reference_and_vector_frames_decline",
+            "p065_exception_unwind_preserves_numeric_payload",
+            "p065_root_barrier_recipes_are_complete"
+          ]
+        },
+        {
+          "command": "combined-full",
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 21,
+          "unfiltered": true,
+          "required_names": [
+            "p138_cold_threshold_and_single_builder_are_observed",
+            "p138_guest_fifo_eviction_and_recompilation_stay_bounded",
+            "p138_snapshot_preserves_all_fuel_prefixes_and_wraparound_results",
+            "p138_private_snapshots_do_not_pin_evicted_artifacts",
+            "p138_private_failures_cooldown_abort_poison_and_foreign_are_observed",
+            "p138_private_active_builder_snapshot_and_saturating_counters",
+            "p133_cold_threshold_and_single_publish",
+            "p133_concurrent_duplicate_uses_one_unlocked_builder",
+            "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+            "p133_fifo_eviction_pinned_lifetime_and_budget_churn",
+            "p134_cold_hot_entry_threshold_and_diagnostics",
+            "p134_shared_module_concurrency_and_store_ownership",
+            "p134_host_effect_fuel_and_foreign_refusal",
+            "p134_eviction_pin_and_continuation_resume_without_reentry",
+            "p134_activation_pin_survives_eviction",
+            "p065_outer_reference_survives_reentrant_collection",
+            "p065_capture_retains_numeric_state_and_source_cursor",
+            "p065_cross_module_exact_suspend_and_resource_controls",
+            "p065_reference_and_vector_frames_decline",
+            "p065_exception_unwind_preserves_numeric_payload",
+            "p065_root_barrier_recipes_are_complete"
+          ]
+        },
+        {
+          "command": "default-policy",
+          "features": [],
+          "minimum_passed": 1,
+          "required_names": [
+            "p132_module_preparation_remains_policy_neutral"
+          ]
+        },
+        {
+          "command": "source-checker",
+          "kind": "unittest",
+          "minimum_passed": 6,
+          "required_names": [
+            "test_accepts_complete_bounded_snapshot_trace_sequences",
+            "test_rejects_timing_fields_and_unmarked_instrumentation",
+            "test_rejects_boolean_counters_unknown_rows_and_budget_overflow",
+            "test_accepts_exact_named_case_markers_and_rejects_missing_or_duplicate",
+            "test_rejects_fifo_reordering_and_recompilation_counter_mismatch",
+            "test_public_checker_accepts_contained_receipt_and_rejects_stale_log_hash"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/outcome",
+          "op": "equal",
+          "value": "contract_only"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/instrumented",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/gate_eligible",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/candidate_promoted",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p138_named_cases",
+          "op": "equal",
+          "value": 6
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p133_regression_named_cases",
+          "op": "equal",
+          "value": 4
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p134_regression_named_cases",
+          "op": "equal",
+          "value": 5
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/p065_regression_named_cases",
+          "op": "equal",
+          "value": 6
+        },
+        {
+          "artifact": "default_build",
+          "pointer": "/default_dependency_closure_pass",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "register_build",
+          "pointer": "/default_dependency_closure_pass",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Instrumented Register cache snapshots and semantic lifecycle traces only; no timing evidence, threshold recommendation, performance decision, or candidate promotion."
+    ]
+  }
+}

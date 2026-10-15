@@ -4,6 +4,11 @@ use super::{
     ir::Budget,
 };
 use crate::Module;
+#[cfg(feature = "execution-reference")]
+use crate::{
+    RegisterCacheEntrySnapshot, RegisterCacheEntryState, RegisterCacheLifecycle,
+    RegisterCacheSnapshot,
+};
 use std::{
     mem::size_of,
     sync::{Arc, Mutex},
@@ -76,6 +81,8 @@ struct State {
     // In insertion order. Fixed capacity makes both lookup and eviction bounded.
     entries: Vec<Entry>,
     active: Option<usize>,
+    #[cfg(feature = "execution-reference")]
+    lifecycle: RegisterCacheLifecycle,
 }
 pub(crate) struct Cache {
     owner: Owner,
@@ -85,6 +92,49 @@ pub(crate) struct Cache {
     threshold: u64,
 }
 impl Cache {
+    #[cfg(feature = "execution-reference")]
+    pub(crate) fn snapshot(&self, module: &Module) -> Option<RegisterCacheSnapshot> {
+        if !self.owner.matches(module) {
+            return None;
+        }
+        // Keep the existing state -> ledger lock order. Numeric copies never
+        // clone/drop an artifact Arc while its retention ledger is locked.
+        let state = self.state.lock().ok()?;
+        let ledger = self.ledger.lock().ok()?;
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(state.entries.len()).ok()?;
+        for entry in &state.entries {
+            let observed = match &entry.state {
+                EntryState::Cold => RegisterCacheEntryState::Cold,
+                EntryState::Compiling => RegisterCacheEntryState::Compiling,
+                EntryState::Ready(function) => RegisterCacheEntryState::Ready {
+                    retained_bytes: function._retention.bytes,
+                },
+                EntryState::Cooldown { remaining } => RegisterCacheEntryState::Cooldown {
+                    remaining: *remaining,
+                },
+                EntryState::Negative => RegisterCacheEntryState::Negative,
+            };
+            entries.push(RegisterCacheEntrySnapshot {
+                body: entry.body,
+                entries: entry.entries,
+                attempts: entry.attempts,
+                state: observed,
+            });
+        }
+        Some(RegisterCacheSnapshot {
+            engine: self.owner.engine,
+            threshold: self.threshold,
+            entry_limit: self.entry_limit,
+            active_body: state.active,
+            entries,
+            remaining_attempted_work: ledger.attempted,
+            remaining_retained_work: ledger.work,
+            retained_bytes: ledger.bytes,
+            byte_limit: ledger.byte_limit,
+            lifecycle: state.lifecycle,
+        })
+    }
     #[cfg(test)]
     pub(super) fn test_budget(&self) -> (usize, usize, usize) {
         let ledger = self.ledger.lock().unwrap();
@@ -140,6 +190,8 @@ impl Cache {
             state: Mutex::new(State {
                 entries: index,
                 active: None,
+                #[cfg(feature = "execution-reference")]
+                lifecycle: RegisterCacheLifecycle::default(),
             }),
             ledger: Arc::new(Mutex::new(Ledger {
                 attempted: remaining,
@@ -186,6 +238,10 @@ impl Cache {
                     matches!(entry.state, EntryState::Cold | EntryState::Ready(_))
                 })?;
                 state.entries.remove(oldest);
+                #[cfg(feature = "execution-reference")]
+                {
+                    state.lifecycle.evictions = state.lifecycle.evictions.saturating_add(1);
+                }
             }
             state.entries.push(Entry {
                 body,
@@ -225,6 +281,11 @@ impl Cache {
         state.entries[index].attempts = state.entries[index].attempts.saturating_add(1);
         state.entries[index].state = EntryState::Compiling;
         state.active = Some(body);
+        #[cfg(feature = "execution-reference")]
+        {
+            state.lifecycle.preparation_starts =
+                state.lifecycle.preparation_starts.saturating_add(1);
+        }
         drop(state);
         let mut lease = Lease {
             cache: self.clone(),
@@ -241,6 +302,15 @@ impl Cache {
             .checked_sub(size_of::<PreparedFunction>())?
             .checked_add(ARC_HEADER)?;
         let result = if lease.budget.reserve(0, wrapper).is_ok() {
+            #[cfg(feature = "execution-reference")]
+            {
+                // Instrumented observations may briefly synchronize here; the
+                // builder itself still runs after both cache locks are dropped.
+                if let Ok(mut state) = self.state.lock() {
+                    state.lifecycle.builder_starts =
+                        state.lifecycle.builder_starts.saturating_add(1);
+                }
+            }
             builder(module, body, &mut lease.budget, &mut lease.attempted)
         } else {
             Preparation::Exhausted
@@ -291,7 +361,8 @@ impl Lease {
         true
     }
     fn finish(mut self, module: &Module, result: Preparation) -> Option<Arc<CachedFunction>> {
-        let mut state = self.cache.state.lock().ok()?;
+        let mut locked = self.cache.state.lock().ok()?;
+        let state = &mut *locked;
         let index = state.entries.iter().position(|entry| {
             entry.body == self.body && matches!(entry.state, EntryState::Compiling)
         })?;
@@ -305,6 +376,23 @@ impl Lease {
         // No remaining failure path may settle this attempt a second time.
         self.finished = true;
         state.active = None;
+        #[cfg(feature = "execution-reference")]
+        match &result {
+            Preparation::Complete(_) => {
+                state.lifecycle.completed = state.lifecycle.completed.saturating_add(1)
+            }
+            Preparation::Declined => {
+                state.lifecycle.declined = state.lifecycle.declined.saturating_add(1)
+            }
+            Preparation::Exhausted => {
+                state.lifecycle.exhausted = state.lifecycle.exhausted.saturating_add(1)
+            }
+            Preparation::Invalid => {
+                state.lifecycle.invalid = state.lifecycle.invalid.saturating_add(1)
+            }
+        }
+        #[cfg(feature = "execution-reference")]
+        let complete = matches!(&result, Preparation::Complete(_));
         let entry = &mut state.entries[index];
         entry.state = match result {
             Preparation::Complete(function)
@@ -328,6 +416,10 @@ impl Lease {
                             bytes,
                         },
                     });
+                    #[cfg(feature = "execution-reference")]
+                    {
+                        state.lifecycle.published = state.lifecycle.published.saturating_add(1);
+                    }
                     entry.state = EntryState::Ready(cached.clone());
                     return Some(cached);
                 } else {
@@ -339,6 +431,11 @@ impl Lease {
             },
             _ => EntryState::Negative,
         };
+        #[cfg(feature = "execution-reference")]
+        if complete {
+            state.lifecycle.publication_failures =
+                state.lifecycle.publication_failures.saturating_add(1);
+        }
         None
     }
 }
@@ -365,6 +462,10 @@ impl Drop for Lease {
                     entry.state = EntryState::Negative;
                 }
                 state.active = None;
+                #[cfg(feature = "execution-reference")]
+                {
+                    state.lifecycle.aborted = state.lifecycle.aborted.saturating_add(1);
+                }
             }
         } else if let Ok(mut ledger) = self.cache.ledger.lock() {
             // Poisoned cache state is unusable; keep all possible work charged.
@@ -379,4 +480,11 @@ mod tests {
     use super::*;
     use crate::{Config, Engine, FeatureSet};
     include!("../../../tests/performance/p133_private.rs");
+    #[cfg(feature = "execution-reference")]
+    mod diagnostics {
+        use super::*;
+        use crate as wtime_runtime;
+        include!("../../../tests/performance/p138_trace.rs");
+        include!("../../../tests/performance/p138_private.rs");
+    }
 }

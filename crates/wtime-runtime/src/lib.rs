@@ -15,6 +15,13 @@ use wtime_validate::{
 mod perf;
 #[cfg(feature = "performance-counters")]
 pub use perf::CounterSnapshot;
+#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+mod register_cache_diagnostics;
+#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+pub use register_cache_diagnostics::{
+    RegisterCacheEntrySnapshot, RegisterCacheEntryState, RegisterCacheLifecycle,
+    RegisterCacheSnapshot,
+};
 mod continuation;
 mod exceptions;
 mod gc;
@@ -1506,6 +1513,13 @@ mod rollback_tests {
 }
 
 impl Module {
+    /// Observe bounded lazy-cache state without running guest code or pinning artifacts.
+    /// Returns None for eager/default modules, unavailable bookkeeping or wrong owners.
+    #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+    pub fn register_cache_snapshot(&self) -> Option<RegisterCacheSnapshot> {
+        self.data.register_cache.as_ref()?.snapshot(self)
+    }
+
     pub fn branch_hints(&self) -> wtime_validate::BranchHints {
         wtime_validate::inspect_branch_hints(self.data.inner.decoded())
     }
