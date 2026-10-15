@@ -217,7 +217,7 @@ fn batch(
         total - instantiated
     ))
 }
-#[cfg(feature = "execution-reference")]
+#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
 fn diagnostic(request: &Request, bytes: &[u8]) -> Result<String, String> {
     let engine = request.engine()?;
     let module = engine.compile(bytes).map_err(|error| error.to_string())?;
@@ -264,9 +264,9 @@ fn diagnostic(request: &Request, bytes: &[u8]) -> Result<String, String> {
         rows.join(",")
     ))
 }
-#[cfg(not(feature = "execution-reference"))]
+#[cfg(not(all(feature = "register-executor", feature = "execution-reference")))]
 fn diagnostic(_: &Request, _: &[u8]) -> Result<String, String> {
-    Err("diagnostics require execution-reference".into())
+    Err("diagnostics require Register and execution-reference".into())
 }
 
 pub(super) fn try_main(args: &[String]) -> bool {

@@ -1,0 +1,749 @@
+{
+  "schema_version": 1,
+  "task": "P143",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P143-before/manifest.json",
+        "target/performance/P143-before/source/**",
+        "target/performance/P143-before/binary/**"
+      ]
+    },
+    "core": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*"
+      ]
+    },
+    "owned": {
+      "paths": [
+        "tools/wtime-conformance/src/**/*.rs",
+        "tools/wtime-bench/src/tier_state_driver.rs",
+        "tools/wtime-bench/src/entry_sequence_driver.rs",
+        "tools/wtime-bench/src/entry_batch_driver.rs",
+        "tools/wtime-bench/src/protocol.rs",
+        "tools/wtime-bench/tier_check.py",
+        "tools/wtime-bench/tests/test_p143_tier_threshold.py"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/fixtures/**",
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/build.rs",
+        "tools/wtime-conformance/src/**/*.rs",
+        "docs/architecture/corpus-lock.json"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p143.py",
+        "tools/verify.py",
+        "tools/verification/*.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    },
+    "checker_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p143_tier_threshold.py",
+        "tools/verification/tests/test_p143_threshold_gate.py",
+        "tools/wtime-bench/tests/test_p014_tiers.py",
+        "tools/wtime-bench/tests/test_p045_tier_mapping.py",
+        "tools/wtime-bench/tests/test_p065_tier_policy.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "core",
+        "owned",
+        "producer",
+        "harness"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/verification/producers/p143.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "freeze": "{stage}/freeze.json"
+      },
+      "checks": [
+        {
+          "artifact": "freeze",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "core",
+        "owned",
+        "harness",
+        "producer",
+        "checker_tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "conformance-register",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-conformance",
+            "--bin",
+            "wtime-conformance",
+            "--features",
+            "register-executor,execution-reference,opcode-coverage",
+            "--",
+            "--show-output"
+          ]
+        },
+        {
+          "name": "conformance-default",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-conformance",
+            "--bin",
+            "wtime-conformance",
+            "p143_",
+            "--",
+            "--show-output"
+          ]
+        },
+        {
+          "name": "threshold-plumbing",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p143_tier_threshold.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "threshold-gate",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p143_threshold_gate.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "original-tier",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p014_tiers.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "compact-tier",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p045_tier_mapping.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "register-tier",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p065_tier_policy.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "counter-feature-check",
+          "argv": [
+            "cargo",
+            "check",
+            "--locked",
+            "--manifest-path",
+            "tools/wtime-bench/Cargo.toml",
+            "--no-default-features",
+            "--features",
+            "runtime-only,execution-reference,performance-counters"
+          ]
+        },
+        {
+          "name": "tier-explicit",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/wtime-bench/tier_check.py",
+            "--tier",
+            "register",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/explicit"
+          ]
+        },
+        {
+          "name": "tier-adaptive",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/wtime-bench/tier_check.py",
+            "--tier",
+            "register",
+            "--register-entry-threshold",
+            "3",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/adaptive",
+            "--binary",
+            "{repo}/tools/wtime-bench/target/release/wtime-bench",
+            "--conformance-binary",
+            "{repo}/target/release/wtime-conformance",
+            "--diagnostic-binary",
+            "{repo}/target/performance/P014/counters-build/release/wtime-bench"
+          ]
+        },
+        {
+          "name": "tier-decoded",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/wtime-bench/tier_check.py",
+            "--tier",
+            "decoded",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/decoded",
+            "--binary",
+            "{repo}/tools/wtime-bench/target/release/wtime-bench",
+            "--conformance-binary",
+            "{repo}/target/release/wtime-conformance",
+            "--diagnostic-binary",
+            "{repo}/target/performance/P014/counters-build/release/wtime-bench"
+          ]
+        },
+        {
+          "name": "dependency-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/checks/dependency_budget.py"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "conformance-register",
+          "kind": "cargo",
+          "features": [
+            "register-executor",
+            "execution-reference",
+            "opcode-coverage"
+          ],
+          "required_names": [
+            "p143_threshold_option_requires_one_positive_u64",
+            "p143_non_register_threshold_is_rejected_and_default_stays_decoded",
+            "p143_report_identifies_threshold_and_strategy",
+            "p143_adapter_threshold_promotes_on_third_entry_and_preserves_fallback"
+          ],
+          "minimum_passed": 4,
+          "unfiltered": true
+        },
+        {
+          "command": "conformance-default",
+          "kind": "cargo",
+          "features": [],
+          "required_names": [
+            "p143_threshold_option_requires_one_positive_u64",
+            "p143_non_register_threshold_is_rejected_and_default_stays_decoded",
+            "p143_report_identifies_threshold_and_strategy"
+          ],
+          "minimum_passed": 3
+        },
+        {
+          "command": "threshold-plumbing",
+          "kind": "unittest",
+          "required_names": [
+            "test_p143_threshold_bounds_and_mode_fail_before_output_creation",
+            "test_p143_typed_case_forwards_only_register_and_checks_echo",
+            "test_p143_state_driver_appends_threshold_and_rejects_wrong_echo",
+            "test_p143_conformance_threshold_cli_and_report_binding",
+            "test_p143_omitted_threshold_accepts_legacy_missing_field_but_rejects_nonnull",
+            "test_p143_duplicate_cli_threshold_fails_before_io"
+          ],
+          "minimum_passed": 6
+        },
+        {
+          "command": "threshold-gate",
+          "kind": "unittest",
+          "required_names": [
+            "test_accepts_complete_explicit_and_adaptive_reports",
+            "test_rejects_wrong_or_missing_top_level_threshold_and_strategy",
+            "test_reference_and_non_register_modes_never_receive_threshold",
+            "test_rejects_missing_state_fuel_corpus_and_aggregate_counts",
+            "test_rejects_failures_skips_unsupported_and_unstable_reports"
+          ],
+          "minimum_passed": 5
+        },
+        {
+          "command": "original-tier",
+          "kind": "unittest",
+          "required_names": [
+            "test_p014_three_semantic_cases_run_against_reference_and_decoded",
+            "test_p014_missing_reference_mode_is_a_failure_not_unsupported_mask",
+            "test_p014_mode_process_error_fails_case_and_is_not_skipped",
+            "test_p014_reference_decoded_mismatch_fails",
+            "test_p014_snapshot_requires_actual_p018_roundtrip",
+            "test_p014_full_memory_state_mismatch_fails",
+            "test_p014_reference_is_not_a_candidate_tier",
+            "test_p014_existing_output_is_rejected_before_build_or_run",
+            "test_p014_reference_build_records_forwarded_feature"
+          ],
+          "minimum_passed": 9
+        },
+        {
+          "command": "compact-tier",
+          "kind": "unittest",
+          "required_names": [
+            "test_compact_state_run_accepts_compact_policy_and_full_memory",
+            "test_compact_fuel_probe_accepts_compact_policy_and_full_memory",
+            "test_foreign_and_invalid_resolved_policies_are_rejected_without_fallback",
+            "test_compact_auto_build_forwards_policy_to_bench_and_conformance",
+            "test_invalid_auto_build_tier_is_rejected_before_builder_work"
+          ],
+          "minimum_passed": 5
+        },
+        {
+          "command": "register-tier",
+          "kind": "unittest",
+          "required_names": [
+            "test_p065_state_run_accepts_register_full_state",
+            "test_p065_state_run_rejects_decoded_policy_under_register",
+            "test_p065_state_fuel_probe_accepts_register_minimum_fuel",
+            "test_p065_state_fuel_probe_rejects_decoded_policy_under_register"
+          ],
+          "minimum_passed": 4
+        }
+      ],
+      "outputs": {
+        "explicit": "{stage}/explicit/report.json",
+        "adaptive": "{stage}/adaptive/report.json",
+        "decoded": "{stage}/decoded/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "explicit",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "adaptive",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "decoded",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "core",
+        "harness",
+        "producer"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "summarize",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/verification/producers/p143.py",
+            "summarize",
+            "--verify-dir",
+            "{verify_dir}",
+            "--freeze",
+            "{freeze_dir}/freeze.json",
+            "--output",
+            "{stage}/proof.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "owned",
+    "baseline": "{freeze_dir}/freeze.json",
+    "pointer": "/owned_sources",
+    "allowed_changes": [
+      "tools/wtime-conformance/src/adapter.rs",
+      "tools/wtime-conformance/src/cli.rs",
+      "tools/wtime-conformance/src/report.rs",
+      "tools/wtime-bench/src/tier_state_driver.rs",
+      "tools/wtime-bench/src/entry_sequence_driver.rs",
+      "tools/wtime-bench/src/entry_batch_driver.rs",
+      "tools/wtime-bench/src/protocol.rs",
+      "tools/wtime-bench/tier_check.py"
+    ],
+    "allowed_additions": [
+      "tools/wtime-conformance/src/p143_tests.rs",
+      "tools/wtime-bench/tests/test_p143_tier_threshold.py"
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "python",
+        "uses": [
+          "core",
+          "harness",
+          "producer",
+          "checker_tests"
+        ],
+        "commands": [
+          {
+            "name": "threshold-plumbing",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p143_tier_threshold.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "threshold-gate",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_p143_threshold_gate.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "original-tier",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p014_tiers.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "compact-tier",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p045_tier_mapping.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "register-tier",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p065_tier_policy.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "threshold-plumbing",
+            "kind": "unittest",
+            "required_names": [
+              "test_p143_threshold_bounds_and_mode_fail_before_output_creation",
+              "test_p143_typed_case_forwards_only_register_and_checks_echo",
+              "test_p143_state_driver_appends_threshold_and_rejects_wrong_echo",
+              "test_p143_conformance_threshold_cli_and_report_binding",
+              "test_p143_omitted_threshold_accepts_legacy_missing_field_but_rejects_nonnull",
+              "test_p143_duplicate_cli_threshold_fails_before_io"
+            ],
+            "minimum_passed": 6
+          },
+          {
+            "command": "threshold-gate",
+            "kind": "unittest",
+            "required_names": [
+              "test_accepts_complete_explicit_and_adaptive_reports",
+              "test_rejects_wrong_or_missing_top_level_threshold_and_strategy",
+              "test_reference_and_non_register_modes_never_receive_threshold",
+              "test_rejects_missing_state_fuel_corpus_and_aggregate_counts",
+              "test_rejects_failures_skips_unsupported_and_unstable_reports"
+            ],
+            "minimum_passed": 5
+          },
+          {
+            "command": "original-tier",
+            "kind": "unittest",
+            "required_names": [
+              "test_p014_three_semantic_cases_run_against_reference_and_decoded",
+              "test_p014_missing_reference_mode_is_a_failure_not_unsupported_mask",
+              "test_p014_mode_process_error_fails_case_and_is_not_skipped",
+              "test_p014_reference_decoded_mismatch_fails",
+              "test_p014_snapshot_requires_actual_p018_roundtrip",
+              "test_p014_full_memory_state_mismatch_fails",
+              "test_p014_reference_is_not_a_candidate_tier",
+              "test_p014_existing_output_is_rejected_before_build_or_run",
+              "test_p014_reference_build_records_forwarded_feature"
+            ],
+            "minimum_passed": 9
+          },
+          {
+            "command": "compact-tier",
+            "kind": "unittest",
+            "required_names": [
+              "test_compact_state_run_accepts_compact_policy_and_full_memory",
+              "test_compact_fuel_probe_accepts_compact_policy_and_full_memory",
+              "test_foreign_and_invalid_resolved_policies_are_rejected_without_fallback",
+              "test_compact_auto_build_forwards_policy_to_bench_and_conformance",
+              "test_invalid_auto_build_tier_is_rejected_before_builder_work"
+            ],
+            "minimum_passed": 5
+          },
+          {
+            "command": "register-tier",
+            "kind": "unittest",
+            "required_names": [
+              "test_p065_state_run_accepts_register_full_state",
+              "test_p065_state_run_rejects_decoded_policy_under_register",
+              "test_p065_state_fuel_probe_accepts_register_minimum_fuel",
+              "test_p065_state_fuel_probe_rejects_decoded_policy_under_register"
+            ],
+            "minimum_passed": 4
+          }
+        ]
+      },
+      {
+        "name": "rust",
+        "uses": [
+          "core",
+          "harness",
+          "owned"
+        ],
+        "commands": [
+          {
+            "name": "conformance-register",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-conformance",
+              "--bin",
+              "wtime-conformance",
+              "--features",
+              "register-executor,execution-reference,opcode-coverage",
+              "--",
+              "--show-output"
+            ]
+          },
+          {
+            "name": "conformance-default",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-conformance",
+              "--bin",
+              "wtime-conformance",
+              "p143_",
+              "--",
+              "--show-output"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "conformance-register",
+            "kind": "cargo",
+            "features": [
+              "register-executor",
+              "execution-reference",
+              "opcode-coverage"
+            ],
+            "required_names": [
+              "p143_threshold_option_requires_one_positive_u64",
+              "p143_non_register_threshold_is_rejected_and_default_stays_decoded",
+              "p143_report_identifies_threshold_and_strategy",
+              "p143_adapter_threshold_promotes_on_third_entry_and_preserves_fallback"
+            ],
+            "minimum_passed": 4,
+            "unfiltered": true
+          },
+          {
+            "command": "conformance-default",
+            "kind": "cargo",
+            "features": [],
+            "required_names": [
+              "p143_threshold_option_requires_one_positive_u64",
+              "p143_non_register_threshold_is_rejected_and_default_stays_decoded",
+              "p143_report_identifies_threshold_and_strategy"
+            ],
+            "minimum_passed": 3
+          }
+        ]
+      },
+      {
+        "name": "counter-feature-check",
+        "uses": [
+          "core",
+          "harness",
+          "owned"
+        ],
+        "commands": [
+          {
+            "name": "counter-feature-check",
+            "argv": [
+              "cargo",
+              "check",
+              "--locked",
+              "--manifest-path",
+              "tools/wtime-bench/Cargo.toml",
+              "--no-default-features",
+              "--features",
+              "runtime-only,execution-reference,performance-counters"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "analyze"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Source-bound conformance/threshold plumbing and semantic checks only. Diagnostic typed-case times are not performance measurements. Default core behavior remains unchanged."
+    ]
+  }
+}

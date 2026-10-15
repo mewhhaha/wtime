@@ -1,0 +1,2689 @@
+{
+  "baseline_tier": "reference",
+  "binary": {
+    "path": "tools/wtime-bench/target/release/wtime-bench",
+    "sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff"
+  },
+  "build": {
+    "commands": [
+      {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "--manifest-path",
+          "tools/wtime-bench/Cargo.toml",
+          "-j",
+          "4",
+          "--no-default-features",
+          "--features",
+          "execution-reference,register-executor,runtime-only"
+        ],
+        "returncode": 0
+      },
+      {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "-p",
+          "wtime-conformance",
+          "--no-default-features",
+          "--features",
+          "execution-reference,register-executor,opcode-coverage"
+        ],
+        "returncode": 0
+      },
+      {
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--release",
+          "--manifest-path",
+          "tools/wtime-bench/Cargo.toml",
+          "-j",
+          "4",
+          "--no-default-features",
+          "--features",
+          "execution-reference,performance-counters,runtime-only",
+          "--target-dir",
+          "target/performance/P014/counters-build"
+        ],
+        "returncode": 0
+      }
+    ],
+    "feature_sets": {
+      "benchmark_harness": [
+        "register-executor",
+        "runtime-only"
+      ],
+      "conformance_instrumentation": [
+        "opcode-coverage"
+      ],
+      "conformance_policy": [
+        "execution-reference",
+        "register-executor"
+      ],
+      "diagnostic_instrumentation": [
+        "performance-counters"
+      ],
+      "policy": [
+        "execution-reference",
+        "register-executor"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "equal": true,
+      "expected": "i32:101",
+      "fixture": {
+        "wasm": "tools/wtime-bench/fixtures/call_overhead.wasm",
+        "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "wat": "tools/wtime-bench/fixtures/call_overhead.wat",
+        "wat_sha256": "9493b8f751690a2fd6e8b19dcee5e2c1d50b717253d292ce34d5692b306663a5"
+      },
+      "id": "call_overhead",
+      "input": "i32:100",
+      "oracle": {
+        "function": "oracle",
+        "independent": true,
+        "module": "run.py"
+      },
+      "runs": {
+        "reference": {
+          "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+          "mode": "reference",
+          "ns_per_operation": 581.0,
+          "register_entry_threshold": null,
+          "result": "i32:101",
+          "stage": "first_call"
+        },
+        "register": {
+          "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+          "mode": "register",
+          "ns_per_operation": 701.0,
+          "register_entry_threshold": null,
+          "result": "i32:101",
+          "stage": "first_call"
+        }
+      }
+    },
+    {
+      "equal": true,
+      "expected": "i32:-205621359",
+      "fixture": {
+        "wasm": "tools/wtime-bench/fixtures/integer_loop.wasm",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c",
+        "wat": "tools/wtime-bench/fixtures/integer_loop.wat",
+        "wat_sha256": "791730112109f3d5751a7b3e2c1134e7e0e6f71a7f7ee01ea8481eb989ee3fa4"
+      },
+      "id": "integer_loop",
+      "input": "i32:10000",
+      "oracle": {
+        "function": "oracle",
+        "independent": true,
+        "module": "run.py"
+      },
+      "runs": {
+        "reference": {
+          "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+          "mode": "reference",
+          "ns_per_operation": 2835203.0,
+          "register_entry_threshold": null,
+          "result": "i32:-205621359",
+          "stage": "first_call"
+        },
+        "register": {
+          "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+          "mode": "register",
+          "ns_per_operation": 2915392.0,
+          "register_entry_threshold": null,
+          "result": "i32:-205621359",
+          "stage": "first_call"
+        }
+      }
+    },
+    {
+      "equal": true,
+      "expected": "i32:804656585",
+      "fixture": {
+        "wasm": "tools/wtime-bench/fixtures/branch_calls.wasm",
+        "wasm_sha256": "9b58d26f201900b5b6cce684133a98ab68b3cf55d979b64ce895e914e9d5327b",
+        "wat": "tools/wtime-bench/fixtures/branch_calls.wat",
+        "wat_sha256": "d0af4fdf9ad5be38344267ae72fc1855edb5a8fa1b475fd0af4cb507730b2309"
+      },
+      "id": "branch_calls",
+      "input": "i32:5000",
+      "oracle": {
+        "function": "oracle",
+        "independent": true,
+        "module": "run.py"
+      },
+      "runs": {
+        "reference": {
+          "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+          "mode": "reference",
+          "ns_per_operation": 3399676.0,
+          "register_entry_threshold": null,
+          "result": "i32:804656585",
+          "stage": "first_call"
+        },
+        "register": {
+          "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+          "mode": "register",
+          "ns_per_operation": 6220577.0,
+          "register_entry_threshold": null,
+          "result": "i32:804656585",
+          "stage": "first_call"
+        }
+      }
+    }
+  ],
+  "conformance": [
+    {
+      "command": [
+        "/workspace/wtime/target/release/wtime-conformance",
+        "run",
+        "--mode",
+        "reference",
+        "--profile",
+        "all-phase3-core",
+        "--suite",
+        "reference_types",
+        "--filter",
+        "all",
+        "--report",
+        "/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/reference_types-reference.json"
+      ],
+      "corpus_sources": {
+        ".cache/spec/test/core/ref_func.wast": "ff3d74f5e997d7a71a41d931235c345567136802a9f643f26872013242386d5f",
+        ".cache/spec/test/core/ref_is_null.wast": "876a66f7cd8cce163d62a2e8c2c4023a9aaf83c0b502f01521c7e689ee11d94f",
+        ".cache/spec/test/core/ref_null.wast": "63330c3c5f1bd0decb7473ba0c73378ce685edb16ce24714b2f7fab05ae68529",
+        ".cache/spec/test/core/table_get.wast": "30c289fd0d88affa4750387cd7ef300aa92543ec7e3670d74babe2f92644a97e",
+        ".cache/spec/test/core/table_set.wast": "8d41c2420113cc1e9fb04f30b4fd7b67acccbbd7f95d8c5bcc058091b6ed52ce",
+        "docs/architecture/corpus-lock.json": "a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71"
+      },
+      "mode": "reference",
+      "register_entry_threshold": null,
+      "report": {
+        "binary_sha256": "ccc4c95f365014524d931a9748b4588c967d2be46635bc579f7100275d899380",
+        "compatibility": [],
+        "compatibility_assertions": 0,
+        "engine_revision": "c3e40d4ba568ac26240a0b23bdf76bad9be39f47-dirty",
+        "errors": [],
+        "executed": 105,
+        "executed_opcodes": [
+          11,
+          16,
+          17,
+          32,
+          35,
+          36,
+          37,
+          38,
+          65,
+          106,
+          208,
+          209,
+          210
+        ],
+        "execution_counts": null,
+        "execution_mode": "reference",
+        "failed": 0,
+        "implementation_sources": {
+          "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+          "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+          "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+          "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+          "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+          "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+          "crates/wtime-runtime/src/canonical.rs": "0d2d13027169158ef85a4b57726ef9c6ba5d7055d9894e436e1c6c27aad104d7",
+          "crates/wtime-runtime/src/continuation.rs": "d2b8675da4f7f75b572d046e2ea7acdeb71087a47d2789d57e2dec0de0f5dacd",
+          "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+          "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+          "crates/wtime-runtime/src/execution.rs": "a267be634f8e7d8864b2466ad4d92a7e7c6769c0f08e303024569f3d36db4364",
+          "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+          "crates/wtime-runtime/src/execution/compact/calls.rs": "e1dcb6a55ee7c46f0dc3770df01cd99ff176d1fad0ecd4a60919ef8597f3a20b",
+          "crates/wtime-runtime/src/execution/compact/execute.rs": "b916847756faf161cf101bc52a87a61599487d2129c429e5ec1ac6ee1ebda9d8",
+          "crates/wtime-runtime/src/execution/compact/fuse.rs": "82207739cf5f98614f3a03a0c33c96e7827dd3a294bbc3419c54ea15ec41efc8",
+          "crates/wtime-runtime/src/execution/compact/indirect.rs": "12c523580d084b4a8610406ef16edb2ef0b6ec8bf1bebfc2984c979eb2a34332",
+          "crates/wtime-runtime/src/execution/compact/inline.rs": "586b3d0c8c2afcc30b222e69eebab7e513c59613597ab755724ede57cd42ae68",
+          "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+          "crates/wtime-runtime/src/execution/compact/lower_control.rs": "e65f4c395a76332459944d43cd7a375469bb340b6faa500cd1efb0d3a2edb15d",
+          "crates/wtime-runtime/src/execution/compact/lower_numeric.rs": "478f4314b477a576a949d7dd5a1a6a5d6c4d69f88672fe632dc78693e0066547",
+          "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486",
+          "crates/wtime-runtime/src/execution/compact/memory.rs": "edc8bc2e7a0ee4c1479410404d955ce236ef572fdee68c3c33760be5b191c87a",
+          "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+          "crates/wtime-runtime/src/execution/compact/prefix.rs": "ccdf0f3536d46eefec3c14392aef2e5eb13a92a41020a5ac207cd245aba91f63",
+          "crates/wtime-runtime/src/execution/compact/source_map.rs": "6b7b019ea82dc0e0d2130a3e2445a027b52d9dc9bad9d14b6bdceddc2853f84a",
+          "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+          "crates/wtime-runtime/src/execution/cursor.rs": "e2f41ca404be0be915c6ae50412076217337bf96427d3cceeacf28af4e0027b1",
+          "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+          "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+          "crates/wtime-runtime/src/execution/register/cache.rs": "3dce1d40358e4e4c7d3be91dbf3c8c582292e9148da736f30b6bcd49932d46be",
+          "crates/wtime-runtime/src/execution/register/control.rs": "cd86dd0bba5ec78e99423a96cc026ddc21c1e6d829fe3b6d0c7b40a0324b503d",
+          "crates/wtime-runtime/src/execution/register/execute.rs": "56cbcc2799a262350db11833d3e8ec244908160b3daa566e7703e87230086586",
+          "crates/wtime-runtime/src/execution/register/exits.rs": "6706e3c70c9cac9ec8af639a854fc8c0d139f4d9139b952a19e125a39eb9101c",
+          "crates/wtime-runtime/src/execution/register/float.rs": "23edf66a1de74565e8c1672456464c538991105a36cc37c522f3d9e7ecb73632",
+          "crates/wtime-runtime/src/execution/register/integer.rs": "c39b44b8341e69aa8b842854c8ba0fa6517e41906e0c8d2595e4b6fc0027126e",
+          "crates/wtime-runtime/src/execution/register/ir.rs": "62e3e658d599c1078998a2a8696d1cc94ce404052930a7568a76c4c561886624",
+          "crates/wtime-runtime/src/execution/register/lower.rs": "7831a2838172ffad102d9e4f647bf5598a0951eec365b95f3dfd6470e6f84509",
+          "crates/wtime-runtime/src/execution/register/memory.rs": "1770b972db3e26d4b4238f015d4dee4233fa7d4b945bb95b565c1e7eddecba47",
+          "crates/wtime-runtime/src/execution/register/mod.rs": "387fb9848651d95f5068df015d58a96a66a20696f57962ab34efa5d18930e7f8",
+          "crates/wtime-runtime/src/gc.rs": "aff0d7d49db4759e4776c5cffa4e3d2deabcce2fb1a1706257288d1833a22ed8",
+          "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+          "crates/wtime-runtime/src/lib.rs": "3046a66f8d8c2fff07cde1303e262de435c15ecf6b323265b79a22566520afe6",
+          "crates/wtime-runtime/src/linker.rs": "477f60f389d72bf89b41c3af39d1d241d234e09bd9445f2ff343ecdb36d5343e",
+          "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+          "crates/wtime-runtime/src/perf.rs": "14a6f3ba84000eeea2e31ef895895d2a46dd5d4e34135eba19ba0b5abc8bcd8f",
+          "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+          "crates/wtime-runtime/src/register_cache_diagnostics.rs": "3f058fdcbdeb43d16f4c6fce6b052e097c6514429f2de1392c85631e2d0bf125",
+          "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+          "crates/wtime-runtime/src/simd.rs": "7582da6d9aa7acc7de81f3a63d4d76b43d8695e500f153e5eb22f909a3360633",
+          "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+          "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+          "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+          "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+          "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+          "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+          "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+          "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+          "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+          "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+          "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+          "crates/wtime-validate/src/lib.rs": "6d6fd6442fdad200c494fc43775dc003ee18fbfa63632c7056e238777a283455",
+          "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0"
+        },
+        "instrumented": true,
+        "preparation_summary": null,
+        "profile": "all-phase3-core",
+        "register_entry_threshold": null,
+        "register_strategy": "disabled",
+        "replay": "cargo run --locked -p wtime-conformance --features opcode-coverage,execution-reference,register-executor -- 'run' '--mode' 'reference' '--profile' 'all-phase3-core' '--suite' 'reference_types' '--filter' 'all' '--report' '/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/reference_types-reference.json'",
+        "resource_limits": {
+          "fuel_per_invoke": 10000000,
+          "max_call_depth": 512,
+          "max_memory_bytes": 67108864,
+          "max_memory_pages": 18446744073709551615,
+          "worker_watchdog_ms": 30000
+        },
+        "selected": 105,
+        "skipped": 0,
+        "source_hash": "corpus-lock:a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71;/workspace/wtime/.cache/spec/test/core/ref_func.wast:ff3d74f5e997d7a71a41d931235c345567136802a9f643f26872013242386d5f;/workspace/wtime/.cache/spec/test/core/ref_is_null.wast:876a66f7cd8cce163d62a2e8c2c4023a9aaf83c0b502f01521c7e689ee11d94f;/workspace/wtime/.cache/spec/test/core/ref_null.wast:63330c3c5f1bd0decb7473ba0c73378ce685edb16ce24714b2f7fab05ae68529;/workspace/wtime/.cache/spec/test/core/table_get.wast:30c289fd0d88affa4750387cd7ef300aa92543ec7e3670d74babe2f92644a97e;/workspace/wtime/.cache/spec/test/core/table_set.wast:8d41c2420113cc1e9fb04f30b4fd7b67acccbbd7f95d8c5bcc058091b6ed52ce",
+        "suite": "reference_types",
+        "text_tool": "wast 261.0.0",
+        "text_tool_errors": 0,
+        "unsupported": 0,
+        "worker_stores_observed": 0
+      },
+      "report_sha256": "8c025efd553d07448473d7f6d93d63c9ed7f30d3ae926ace37f53f33e1f67776",
+      "suite": "reference_types"
+    },
+    {
+      "command": [
+        "/workspace/wtime/target/release/wtime-conformance",
+        "run",
+        "--mode",
+        "register",
+        "--profile",
+        "all-phase3-core",
+        "--suite",
+        "reference_types",
+        "--filter",
+        "all",
+        "--report",
+        "/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/reference_types-register.json"
+      ],
+      "corpus_sources": {
+        ".cache/spec/test/core/ref_func.wast": "ff3d74f5e997d7a71a41d931235c345567136802a9f643f26872013242386d5f",
+        ".cache/spec/test/core/ref_is_null.wast": "876a66f7cd8cce163d62a2e8c2c4023a9aaf83c0b502f01521c7e689ee11d94f",
+        ".cache/spec/test/core/ref_null.wast": "63330c3c5f1bd0decb7473ba0c73378ce685edb16ce24714b2f7fab05ae68529",
+        ".cache/spec/test/core/table_get.wast": "30c289fd0d88affa4750387cd7ef300aa92543ec7e3670d74babe2f92644a97e",
+        ".cache/spec/test/core/table_set.wast": "8d41c2420113cc1e9fb04f30b4fd7b67acccbbd7f95d8c5bcc058091b6ed52ce",
+        "docs/architecture/corpus-lock.json": "a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71"
+      },
+      "mode": "register",
+      "register_entry_threshold": null,
+      "report": {
+        "binary_sha256": "ccc4c95f365014524d931a9748b4588c967d2be46635bc579f7100275d899380",
+        "compatibility": [],
+        "compatibility_assertions": 0,
+        "engine_revision": "c3e40d4ba568ac26240a0b23bdf76bad9be39f47-dirty",
+        "errors": [],
+        "executed": 105,
+        "executed_opcodes": [
+          11,
+          16,
+          17,
+          32,
+          35,
+          36,
+          37,
+          38,
+          65,
+          106,
+          208,
+          209,
+          210
+        ],
+        "execution_counts": null,
+        "execution_mode": "register",
+        "failed": 0,
+        "implementation_sources": {
+          "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+          "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+          "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+          "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+          "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+          "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+          "crates/wtime-runtime/src/canonical.rs": "0d2d13027169158ef85a4b57726ef9c6ba5d7055d9894e436e1c6c27aad104d7",
+          "crates/wtime-runtime/src/continuation.rs": "d2b8675da4f7f75b572d046e2ea7acdeb71087a47d2789d57e2dec0de0f5dacd",
+          "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+          "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+          "crates/wtime-runtime/src/execution.rs": "a267be634f8e7d8864b2466ad4d92a7e7c6769c0f08e303024569f3d36db4364",
+          "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+          "crates/wtime-runtime/src/execution/compact/calls.rs": "e1dcb6a55ee7c46f0dc3770df01cd99ff176d1fad0ecd4a60919ef8597f3a20b",
+          "crates/wtime-runtime/src/execution/compact/execute.rs": "b916847756faf161cf101bc52a87a61599487d2129c429e5ec1ac6ee1ebda9d8",
+          "crates/wtime-runtime/src/execution/compact/fuse.rs": "82207739cf5f98614f3a03a0c33c96e7827dd3a294bbc3419c54ea15ec41efc8",
+          "crates/wtime-runtime/src/execution/compact/indirect.rs": "12c523580d084b4a8610406ef16edb2ef0b6ec8bf1bebfc2984c979eb2a34332",
+          "crates/wtime-runtime/src/execution/compact/inline.rs": "586b3d0c8c2afcc30b222e69eebab7e513c59613597ab755724ede57cd42ae68",
+          "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+          "crates/wtime-runtime/src/execution/compact/lower_control.rs": "e65f4c395a76332459944d43cd7a375469bb340b6faa500cd1efb0d3a2edb15d",
+          "crates/wtime-runtime/src/execution/compact/lower_numeric.rs": "478f4314b477a576a949d7dd5a1a6a5d6c4d69f88672fe632dc78693e0066547",
+          "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486",
+          "crates/wtime-runtime/src/execution/compact/memory.rs": "edc8bc2e7a0ee4c1479410404d955ce236ef572fdee68c3c33760be5b191c87a",
+          "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+          "crates/wtime-runtime/src/execution/compact/prefix.rs": "ccdf0f3536d46eefec3c14392aef2e5eb13a92a41020a5ac207cd245aba91f63",
+          "crates/wtime-runtime/src/execution/compact/source_map.rs": "6b7b019ea82dc0e0d2130a3e2445a027b52d9dc9bad9d14b6bdceddc2853f84a",
+          "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+          "crates/wtime-runtime/src/execution/cursor.rs": "e2f41ca404be0be915c6ae50412076217337bf96427d3cceeacf28af4e0027b1",
+          "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+          "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+          "crates/wtime-runtime/src/execution/register/cache.rs": "3dce1d40358e4e4c7d3be91dbf3c8c582292e9148da736f30b6bcd49932d46be",
+          "crates/wtime-runtime/src/execution/register/control.rs": "cd86dd0bba5ec78e99423a96cc026ddc21c1e6d829fe3b6d0c7b40a0324b503d",
+          "crates/wtime-runtime/src/execution/register/execute.rs": "56cbcc2799a262350db11833d3e8ec244908160b3daa566e7703e87230086586",
+          "crates/wtime-runtime/src/execution/register/exits.rs": "6706e3c70c9cac9ec8af639a854fc8c0d139f4d9139b952a19e125a39eb9101c",
+          "crates/wtime-runtime/src/execution/register/float.rs": "23edf66a1de74565e8c1672456464c538991105a36cc37c522f3d9e7ecb73632",
+          "crates/wtime-runtime/src/execution/register/integer.rs": "c39b44b8341e69aa8b842854c8ba0fa6517e41906e0c8d2595e4b6fc0027126e",
+          "crates/wtime-runtime/src/execution/register/ir.rs": "62e3e658d599c1078998a2a8696d1cc94ce404052930a7568a76c4c561886624",
+          "crates/wtime-runtime/src/execution/register/lower.rs": "7831a2838172ffad102d9e4f647bf5598a0951eec365b95f3dfd6470e6f84509",
+          "crates/wtime-runtime/src/execution/register/memory.rs": "1770b972db3e26d4b4238f015d4dee4233fa7d4b945bb95b565c1e7eddecba47",
+          "crates/wtime-runtime/src/execution/register/mod.rs": "387fb9848651d95f5068df015d58a96a66a20696f57962ab34efa5d18930e7f8",
+          "crates/wtime-runtime/src/gc.rs": "aff0d7d49db4759e4776c5cffa4e3d2deabcce2fb1a1706257288d1833a22ed8",
+          "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+          "crates/wtime-runtime/src/lib.rs": "3046a66f8d8c2fff07cde1303e262de435c15ecf6b323265b79a22566520afe6",
+          "crates/wtime-runtime/src/linker.rs": "477f60f389d72bf89b41c3af39d1d241d234e09bd9445f2ff343ecdb36d5343e",
+          "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+          "crates/wtime-runtime/src/perf.rs": "14a6f3ba84000eeea2e31ef895895d2a46dd5d4e34135eba19ba0b5abc8bcd8f",
+          "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+          "crates/wtime-runtime/src/register_cache_diagnostics.rs": "3f058fdcbdeb43d16f4c6fce6b052e097c6514429f2de1392c85631e2d0bf125",
+          "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+          "crates/wtime-runtime/src/simd.rs": "7582da6d9aa7acc7de81f3a63d4d76b43d8695e500f153e5eb22f909a3360633",
+          "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+          "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+          "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+          "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+          "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+          "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+          "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+          "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+          "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+          "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+          "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+          "crates/wtime-validate/src/lib.rs": "6d6fd6442fdad200c494fc43775dc003ee18fbfa63632c7056e238777a283455",
+          "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0"
+        },
+        "instrumented": true,
+        "preparation_summary": null,
+        "profile": "all-phase3-core",
+        "register_entry_threshold": null,
+        "register_strategy": "eager",
+        "replay": "cargo run --locked -p wtime-conformance --features opcode-coverage,execution-reference,register-executor -- 'run' '--mode' 'register' '--profile' 'all-phase3-core' '--suite' 'reference_types' '--filter' 'all' '--report' '/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/reference_types-register.json'",
+        "resource_limits": {
+          "fuel_per_invoke": 10000000,
+          "max_call_depth": 512,
+          "max_memory_bytes": 67108864,
+          "max_memory_pages": 18446744073709551615,
+          "worker_watchdog_ms": 30000
+        },
+        "selected": 105,
+        "skipped": 0,
+        "source_hash": "corpus-lock:a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71;/workspace/wtime/.cache/spec/test/core/ref_func.wast:ff3d74f5e997d7a71a41d931235c345567136802a9f643f26872013242386d5f;/workspace/wtime/.cache/spec/test/core/ref_is_null.wast:876a66f7cd8cce163d62a2e8c2c4023a9aaf83c0b502f01521c7e689ee11d94f;/workspace/wtime/.cache/spec/test/core/ref_null.wast:63330c3c5f1bd0decb7473ba0c73378ce685edb16ce24714b2f7fab05ae68529;/workspace/wtime/.cache/spec/test/core/table_get.wast:30c289fd0d88affa4750387cd7ef300aa92543ec7e3670d74babe2f92644a97e;/workspace/wtime/.cache/spec/test/core/table_set.wast:8d41c2420113cc1e9fb04f30b4fd7b67acccbbd7f95d8c5bcc058091b6ed52ce",
+        "suite": "reference_types",
+        "text_tool": "wast 261.0.0",
+        "text_tool_errors": 0,
+        "unsupported": 0,
+        "worker_stores_observed": 0
+      },
+      "report_sha256": "bb6268f8782ae7ad1ed390d782d397aa3dc2846be5b2040e05b2ac04550dcb67",
+      "suite": "reference_types"
+    },
+    {
+      "command": [
+        "/workspace/wtime/target/release/wtime-conformance",
+        "run",
+        "--mode",
+        "reference",
+        "--profile",
+        "all-phase3-core",
+        "--suite",
+        "interactions",
+        "--filter",
+        "all",
+        "--report",
+        "/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/interactions-reference.json"
+      ],
+      "corpus_sources": {
+        "docs/architecture/corpus-lock.json": "a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71",
+        "tests/fixtures/interactions/captured-descriptor.wast": "0874fc54994b1a032afcd6d3a394307e9bda7ef65e2b705c1cde967ac59e9ca7",
+        "tests/fixtures/interactions/exact-compact.wast": "20d32f07469c70cb366d56c19c0fa82460073c2e8e24f3c554322e734524004e",
+        "tests/fixtures/interactions/opcode-coverage.wast": "4cc48d66f0b16dfe92942a48bcc90e3c1bf528e7b5cf383290d23f0b90510012",
+        "tests/fixtures/interactions/shared-wide-simd.wast": "31afad7581f2562c7110dfa6b4513762e42576023c0bb72b02d37c873309149e"
+      },
+      "mode": "reference",
+      "register_entry_threshold": null,
+      "report": {
+        "binary_sha256": "ccc4c95f365014524d931a9748b4588c967d2be46635bc579f7100275d899380",
+        "compatibility": [],
+        "compatibility_assertions": 0,
+        "engine_revision": "c3e40d4ba568ac26240a0b23bdf76bad9be39f47-dirty",
+        "errors": [],
+        "executed": 15,
+        "executed_opcodes": [
+          2,
+          8,
+          11,
+          16,
+          17,
+          18,
+          26,
+          31,
+          32,
+          33,
+          65,
+          66,
+          106,
+          208,
+          210,
+          212,
+          224,
+          226,
+          227,
+          64001,
+          64002,
+          64003,
+          64004,
+          64256,
+          64258,
+          64288,
+          64289,
+          64522,
+          64768,
+          64779,
+          64780,
+          64795,
+          65040,
+          65047,
+          65054
+        ],
+        "execution_counts": null,
+        "execution_mode": "reference",
+        "failed": 0,
+        "implementation_sources": {
+          "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+          "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+          "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+          "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+          "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+          "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+          "crates/wtime-runtime/src/canonical.rs": "0d2d13027169158ef85a4b57726ef9c6ba5d7055d9894e436e1c6c27aad104d7",
+          "crates/wtime-runtime/src/continuation.rs": "d2b8675da4f7f75b572d046e2ea7acdeb71087a47d2789d57e2dec0de0f5dacd",
+          "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+          "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+          "crates/wtime-runtime/src/execution.rs": "a267be634f8e7d8864b2466ad4d92a7e7c6769c0f08e303024569f3d36db4364",
+          "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+          "crates/wtime-runtime/src/execution/compact/calls.rs": "e1dcb6a55ee7c46f0dc3770df01cd99ff176d1fad0ecd4a60919ef8597f3a20b",
+          "crates/wtime-runtime/src/execution/compact/execute.rs": "b916847756faf161cf101bc52a87a61599487d2129c429e5ec1ac6ee1ebda9d8",
+          "crates/wtime-runtime/src/execution/compact/fuse.rs": "82207739cf5f98614f3a03a0c33c96e7827dd3a294bbc3419c54ea15ec41efc8",
+          "crates/wtime-runtime/src/execution/compact/indirect.rs": "12c523580d084b4a8610406ef16edb2ef0b6ec8bf1bebfc2984c979eb2a34332",
+          "crates/wtime-runtime/src/execution/compact/inline.rs": "586b3d0c8c2afcc30b222e69eebab7e513c59613597ab755724ede57cd42ae68",
+          "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+          "crates/wtime-runtime/src/execution/compact/lower_control.rs": "e65f4c395a76332459944d43cd7a375469bb340b6faa500cd1efb0d3a2edb15d",
+          "crates/wtime-runtime/src/execution/compact/lower_numeric.rs": "478f4314b477a576a949d7dd5a1a6a5d6c4d69f88672fe632dc78693e0066547",
+          "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486",
+          "crates/wtime-runtime/src/execution/compact/memory.rs": "edc8bc2e7a0ee4c1479410404d955ce236ef572fdee68c3c33760be5b191c87a",
+          "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+          "crates/wtime-runtime/src/execution/compact/prefix.rs": "ccdf0f3536d46eefec3c14392aef2e5eb13a92a41020a5ac207cd245aba91f63",
+          "crates/wtime-runtime/src/execution/compact/source_map.rs": "6b7b019ea82dc0e0d2130a3e2445a027b52d9dc9bad9d14b6bdceddc2853f84a",
+          "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+          "crates/wtime-runtime/src/execution/cursor.rs": "e2f41ca404be0be915c6ae50412076217337bf96427d3cceeacf28af4e0027b1",
+          "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+          "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+          "crates/wtime-runtime/src/execution/register/cache.rs": "3dce1d40358e4e4c7d3be91dbf3c8c582292e9148da736f30b6bcd49932d46be",
+          "crates/wtime-runtime/src/execution/register/control.rs": "cd86dd0bba5ec78e99423a96cc026ddc21c1e6d829fe3b6d0c7b40a0324b503d",
+          "crates/wtime-runtime/src/execution/register/execute.rs": "56cbcc2799a262350db11833d3e8ec244908160b3daa566e7703e87230086586",
+          "crates/wtime-runtime/src/execution/register/exits.rs": "6706e3c70c9cac9ec8af639a854fc8c0d139f4d9139b952a19e125a39eb9101c",
+          "crates/wtime-runtime/src/execution/register/float.rs": "23edf66a1de74565e8c1672456464c538991105a36cc37c522f3d9e7ecb73632",
+          "crates/wtime-runtime/src/execution/register/integer.rs": "c39b44b8341e69aa8b842854c8ba0fa6517e41906e0c8d2595e4b6fc0027126e",
+          "crates/wtime-runtime/src/execution/register/ir.rs": "62e3e658d599c1078998a2a8696d1cc94ce404052930a7568a76c4c561886624",
+          "crates/wtime-runtime/src/execution/register/lower.rs": "7831a2838172ffad102d9e4f647bf5598a0951eec365b95f3dfd6470e6f84509",
+          "crates/wtime-runtime/src/execution/register/memory.rs": "1770b972db3e26d4b4238f015d4dee4233fa7d4b945bb95b565c1e7eddecba47",
+          "crates/wtime-runtime/src/execution/register/mod.rs": "387fb9848651d95f5068df015d58a96a66a20696f57962ab34efa5d18930e7f8",
+          "crates/wtime-runtime/src/gc.rs": "aff0d7d49db4759e4776c5cffa4e3d2deabcce2fb1a1706257288d1833a22ed8",
+          "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+          "crates/wtime-runtime/src/lib.rs": "3046a66f8d8c2fff07cde1303e262de435c15ecf6b323265b79a22566520afe6",
+          "crates/wtime-runtime/src/linker.rs": "477f60f389d72bf89b41c3af39d1d241d234e09bd9445f2ff343ecdb36d5343e",
+          "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+          "crates/wtime-runtime/src/perf.rs": "14a6f3ba84000eeea2e31ef895895d2a46dd5d4e34135eba19ba0b5abc8bcd8f",
+          "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+          "crates/wtime-runtime/src/register_cache_diagnostics.rs": "3f058fdcbdeb43d16f4c6fce6b052e097c6514429f2de1392c85631e2d0bf125",
+          "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+          "crates/wtime-runtime/src/simd.rs": "7582da6d9aa7acc7de81f3a63d4d76b43d8695e500f153e5eb22f909a3360633",
+          "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+          "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+          "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+          "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+          "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+          "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+          "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+          "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+          "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+          "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+          "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+          "crates/wtime-validate/src/lib.rs": "6d6fd6442fdad200c494fc43775dc003ee18fbfa63632c7056e238777a283455",
+          "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0"
+        },
+        "instrumented": true,
+        "preparation_summary": null,
+        "profile": "all-phase3-core",
+        "register_entry_threshold": null,
+        "register_strategy": "disabled",
+        "replay": "cargo run --locked -p wtime-conformance --features opcode-coverage,execution-reference,register-executor -- 'run' '--mode' 'reference' '--profile' 'all-phase3-core' '--suite' 'interactions' '--filter' 'all' '--report' '/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/interactions-reference.json'",
+        "resource_limits": {
+          "fuel_per_invoke": 10000000,
+          "max_call_depth": 512,
+          "max_memory_bytes": 67108864,
+          "max_memory_pages": 18446744073709551615,
+          "worker_watchdog_ms": 30000
+        },
+        "selected": 15,
+        "skipped": 0,
+        "source_hash": "corpus-lock:a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71;/workspace/wtime/.cache/../tests/fixtures/interactions/captured-descriptor.wast:0874fc54994b1a032afcd6d3a394307e9bda7ef65e2b705c1cde967ac59e9ca7;/workspace/wtime/.cache/../tests/fixtures/interactions/exact-compact.wast:20d32f07469c70cb366d56c19c0fa82460073c2e8e24f3c554322e734524004e;/workspace/wtime/.cache/../tests/fixtures/interactions/opcode-coverage.wast:4cc48d66f0b16dfe92942a48bcc90e3c1bf528e7b5cf383290d23f0b90510012;/workspace/wtime/.cache/../tests/fixtures/interactions/shared-wide-simd.wast:31afad7581f2562c7110dfa6b4513762e42576023c0bb72b02d37c873309149e",
+        "suite": "interactions",
+        "text_tool": "wast 261.0.0",
+        "text_tool_errors": 0,
+        "unsupported": 0,
+        "worker_stores_observed": 0
+      },
+      "report_sha256": "c5664b5cac487eda96226b50f77600c3f1169188b1a5911d86e598ffdad98e10",
+      "suite": "interactions"
+    },
+    {
+      "command": [
+        "/workspace/wtime/target/release/wtime-conformance",
+        "run",
+        "--mode",
+        "register",
+        "--profile",
+        "all-phase3-core",
+        "--suite",
+        "interactions",
+        "--filter",
+        "all",
+        "--report",
+        "/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/interactions-register.json"
+      ],
+      "corpus_sources": {
+        "docs/architecture/corpus-lock.json": "a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71",
+        "tests/fixtures/interactions/captured-descriptor.wast": "0874fc54994b1a032afcd6d3a394307e9bda7ef65e2b705c1cde967ac59e9ca7",
+        "tests/fixtures/interactions/exact-compact.wast": "20d32f07469c70cb366d56c19c0fa82460073c2e8e24f3c554322e734524004e",
+        "tests/fixtures/interactions/opcode-coverage.wast": "4cc48d66f0b16dfe92942a48bcc90e3c1bf528e7b5cf383290d23f0b90510012",
+        "tests/fixtures/interactions/shared-wide-simd.wast": "31afad7581f2562c7110dfa6b4513762e42576023c0bb72b02d37c873309149e"
+      },
+      "mode": "register",
+      "register_entry_threshold": null,
+      "report": {
+        "binary_sha256": "ccc4c95f365014524d931a9748b4588c967d2be46635bc579f7100275d899380",
+        "compatibility": [],
+        "compatibility_assertions": 0,
+        "engine_revision": "c3e40d4ba568ac26240a0b23bdf76bad9be39f47-dirty",
+        "errors": [],
+        "executed": 15,
+        "executed_opcodes": [
+          2,
+          8,
+          11,
+          16,
+          17,
+          18,
+          26,
+          31,
+          32,
+          33,
+          65,
+          66,
+          106,
+          208,
+          210,
+          212,
+          224,
+          226,
+          227,
+          64001,
+          64002,
+          64003,
+          64004,
+          64256,
+          64258,
+          64288,
+          64289,
+          64522,
+          64768,
+          64779,
+          64780,
+          64795,
+          65040,
+          65047,
+          65054
+        ],
+        "execution_counts": null,
+        "execution_mode": "register",
+        "failed": 0,
+        "implementation_sources": {
+          "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+          "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+          "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+          "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+          "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+          "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+          "crates/wtime-runtime/src/canonical.rs": "0d2d13027169158ef85a4b57726ef9c6ba5d7055d9894e436e1c6c27aad104d7",
+          "crates/wtime-runtime/src/continuation.rs": "d2b8675da4f7f75b572d046e2ea7acdeb71087a47d2789d57e2dec0de0f5dacd",
+          "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+          "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+          "crates/wtime-runtime/src/execution.rs": "a267be634f8e7d8864b2466ad4d92a7e7c6769c0f08e303024569f3d36db4364",
+          "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+          "crates/wtime-runtime/src/execution/compact/calls.rs": "e1dcb6a55ee7c46f0dc3770df01cd99ff176d1fad0ecd4a60919ef8597f3a20b",
+          "crates/wtime-runtime/src/execution/compact/execute.rs": "b916847756faf161cf101bc52a87a61599487d2129c429e5ec1ac6ee1ebda9d8",
+          "crates/wtime-runtime/src/execution/compact/fuse.rs": "82207739cf5f98614f3a03a0c33c96e7827dd3a294bbc3419c54ea15ec41efc8",
+          "crates/wtime-runtime/src/execution/compact/indirect.rs": "12c523580d084b4a8610406ef16edb2ef0b6ec8bf1bebfc2984c979eb2a34332",
+          "crates/wtime-runtime/src/execution/compact/inline.rs": "586b3d0c8c2afcc30b222e69eebab7e513c59613597ab755724ede57cd42ae68",
+          "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+          "crates/wtime-runtime/src/execution/compact/lower_control.rs": "e65f4c395a76332459944d43cd7a375469bb340b6faa500cd1efb0d3a2edb15d",
+          "crates/wtime-runtime/src/execution/compact/lower_numeric.rs": "478f4314b477a576a949d7dd5a1a6a5d6c4d69f88672fe632dc78693e0066547",
+          "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486",
+          "crates/wtime-runtime/src/execution/compact/memory.rs": "edc8bc2e7a0ee4c1479410404d955ce236ef572fdee68c3c33760be5b191c87a",
+          "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+          "crates/wtime-runtime/src/execution/compact/prefix.rs": "ccdf0f3536d46eefec3c14392aef2e5eb13a92a41020a5ac207cd245aba91f63",
+          "crates/wtime-runtime/src/execution/compact/source_map.rs": "6b7b019ea82dc0e0d2130a3e2445a027b52d9dc9bad9d14b6bdceddc2853f84a",
+          "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+          "crates/wtime-runtime/src/execution/cursor.rs": "e2f41ca404be0be915c6ae50412076217337bf96427d3cceeacf28af4e0027b1",
+          "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+          "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+          "crates/wtime-runtime/src/execution/register/cache.rs": "3dce1d40358e4e4c7d3be91dbf3c8c582292e9148da736f30b6bcd49932d46be",
+          "crates/wtime-runtime/src/execution/register/control.rs": "cd86dd0bba5ec78e99423a96cc026ddc21c1e6d829fe3b6d0c7b40a0324b503d",
+          "crates/wtime-runtime/src/execution/register/execute.rs": "56cbcc2799a262350db11833d3e8ec244908160b3daa566e7703e87230086586",
+          "crates/wtime-runtime/src/execution/register/exits.rs": "6706e3c70c9cac9ec8af639a854fc8c0d139f4d9139b952a19e125a39eb9101c",
+          "crates/wtime-runtime/src/execution/register/float.rs": "23edf66a1de74565e8c1672456464c538991105a36cc37c522f3d9e7ecb73632",
+          "crates/wtime-runtime/src/execution/register/integer.rs": "c39b44b8341e69aa8b842854c8ba0fa6517e41906e0c8d2595e4b6fc0027126e",
+          "crates/wtime-runtime/src/execution/register/ir.rs": "62e3e658d599c1078998a2a8696d1cc94ce404052930a7568a76c4c561886624",
+          "crates/wtime-runtime/src/execution/register/lower.rs": "7831a2838172ffad102d9e4f647bf5598a0951eec365b95f3dfd6470e6f84509",
+          "crates/wtime-runtime/src/execution/register/memory.rs": "1770b972db3e26d4b4238f015d4dee4233fa7d4b945bb95b565c1e7eddecba47",
+          "crates/wtime-runtime/src/execution/register/mod.rs": "387fb9848651d95f5068df015d58a96a66a20696f57962ab34efa5d18930e7f8",
+          "crates/wtime-runtime/src/gc.rs": "aff0d7d49db4759e4776c5cffa4e3d2deabcce2fb1a1706257288d1833a22ed8",
+          "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+          "crates/wtime-runtime/src/lib.rs": "3046a66f8d8c2fff07cde1303e262de435c15ecf6b323265b79a22566520afe6",
+          "crates/wtime-runtime/src/linker.rs": "477f60f389d72bf89b41c3af39d1d241d234e09bd9445f2ff343ecdb36d5343e",
+          "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+          "crates/wtime-runtime/src/perf.rs": "14a6f3ba84000eeea2e31ef895895d2a46dd5d4e34135eba19ba0b5abc8bcd8f",
+          "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+          "crates/wtime-runtime/src/register_cache_diagnostics.rs": "3f058fdcbdeb43d16f4c6fce6b052e097c6514429f2de1392c85631e2d0bf125",
+          "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+          "crates/wtime-runtime/src/simd.rs": "7582da6d9aa7acc7de81f3a63d4d76b43d8695e500f153e5eb22f909a3360633",
+          "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+          "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+          "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+          "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+          "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+          "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+          "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+          "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+          "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+          "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+          "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+          "crates/wtime-validate/src/lib.rs": "6d6fd6442fdad200c494fc43775dc003ee18fbfa63632c7056e238777a283455",
+          "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0"
+        },
+        "instrumented": true,
+        "preparation_summary": null,
+        "profile": "all-phase3-core",
+        "register_entry_threshold": null,
+        "register_strategy": "eager",
+        "replay": "cargo run --locked -p wtime-conformance --features opcode-coverage,execution-reference,register-executor -- 'run' '--mode' 'register' '--profile' 'all-phase3-core' '--suite' 'interactions' '--filter' 'all' '--report' '/workspace/wtime/target/verification/runs/P143/verify/attempt-0005/explicit/conformance/interactions-register.json'",
+        "resource_limits": {
+          "fuel_per_invoke": 10000000,
+          "max_call_depth": 512,
+          "max_memory_bytes": 67108864,
+          "max_memory_pages": 18446744073709551615,
+          "worker_watchdog_ms": 30000
+        },
+        "selected": 15,
+        "skipped": 0,
+        "source_hash": "corpus-lock:a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71;/workspace/wtime/.cache/../tests/fixtures/interactions/captured-descriptor.wast:0874fc54994b1a032afcd6d3a394307e9bda7ef65e2b705c1cde967ac59e9ca7;/workspace/wtime/.cache/../tests/fixtures/interactions/exact-compact.wast:20d32f07469c70cb366d56c19c0fa82460073c2e8e24f3c554322e734524004e;/workspace/wtime/.cache/../tests/fixtures/interactions/opcode-coverage.wast:4cc48d66f0b16dfe92942a48bcc90e3c1bf528e7b5cf383290d23f0b90510012;/workspace/wtime/.cache/../tests/fixtures/interactions/shared-wide-simd.wast:31afad7581f2562c7110dfa6b4513762e42576023c0bb72b02d37c873309149e",
+        "suite": "interactions",
+        "text_tool": "wast 261.0.0",
+        "text_tool_errors": 0,
+        "unsupported": 0,
+        "worker_stores_observed": 0
+      },
+      "report_sha256": "83b23c133a705f790614314d255b96f193d7bf56e94f67aaa69ae841e24ab436",
+      "suite": "interactions"
+    }
+  ],
+  "conformance_binary": {
+    "path": "target/release/wtime-conformance",
+    "sha256": "ccc4c95f365014524d931a9748b4588c967d2be46635bc579f7100275d899380"
+  },
+  "conformance_sources_after": {
+    ".cache/spec/test/core/ref_func.wast": "ff3d74f5e997d7a71a41d931235c345567136802a9f643f26872013242386d5f",
+    ".cache/spec/test/core/ref_is_null.wast": "876a66f7cd8cce163d62a2e8c2c4023a9aaf83c0b502f01521c7e689ee11d94f",
+    ".cache/spec/test/core/ref_null.wast": "63330c3c5f1bd0decb7473ba0c73378ce685edb16ce24714b2f7fab05ae68529",
+    ".cache/spec/test/core/table_get.wast": "30c289fd0d88affa4750387cd7ef300aa92543ec7e3670d74babe2f92644a97e",
+    ".cache/spec/test/core/table_set.wast": "8d41c2420113cc1e9fb04f30b4fd7b67acccbbd7f95d8c5bcc058091b6ed52ce",
+    "docs/architecture/corpus-lock.json": "a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71",
+    "tests/fixtures/interactions/captured-descriptor.wast": "0874fc54994b1a032afcd6d3a394307e9bda7ef65e2b705c1cde967ac59e9ca7",
+    "tests/fixtures/interactions/exact-compact.wast": "20d32f07469c70cb366d56c19c0fa82460073c2e8e24f3c554322e734524004e",
+    "tests/fixtures/interactions/opcode-coverage.wast": "4cc48d66f0b16dfe92942a48bcc90e3c1bf528e7b5cf383290d23f0b90510012",
+    "tests/fixtures/interactions/shared-wide-simd.wast": "31afad7581f2562c7110dfa6b4513762e42576023c0bb72b02d37c873309149e"
+  },
+  "conformance_sources_before": {
+    ".cache/spec/test/core/ref_func.wast": "ff3d74f5e997d7a71a41d931235c345567136802a9f643f26872013242386d5f",
+    ".cache/spec/test/core/ref_is_null.wast": "876a66f7cd8cce163d62a2e8c2c4023a9aaf83c0b502f01521c7e689ee11d94f",
+    ".cache/spec/test/core/ref_null.wast": "63330c3c5f1bd0decb7473ba0c73378ce685edb16ce24714b2f7fab05ae68529",
+    ".cache/spec/test/core/table_get.wast": "30c289fd0d88affa4750387cd7ef300aa92543ec7e3670d74babe2f92644a97e",
+    ".cache/spec/test/core/table_set.wast": "8d41c2420113cc1e9fb04f30b4fd7b67acccbbd7f95d8c5bcc058091b6ed52ce",
+    "docs/architecture/corpus-lock.json": "a2560d023c8941ee8191d1213a0efdc5e0402983b9345cf651bfeaa316775f71",
+    "tests/fixtures/interactions/captured-descriptor.wast": "0874fc54994b1a032afcd6d3a394307e9bda7ef65e2b705c1cde967ac59e9ca7",
+    "tests/fixtures/interactions/exact-compact.wast": "20d32f07469c70cb366d56c19c0fa82460073c2e8e24f3c554322e734524004e",
+    "tests/fixtures/interactions/opcode-coverage.wast": "4cc48d66f0b16dfe92942a48bcc90e3c1bf528e7b5cf383290d23f0b90510012",
+    "tests/fixtures/interactions/shared-wide-simd.wast": "31afad7581f2562c7110dfa6b4513762e42576023c0bb72b02d37c873309149e"
+  },
+  "counts": {
+    "all_checks_attempted": 89,
+    "all_checks_executed": 89,
+    "all_checks_expected": 89,
+    "conformance_mode_runs_executed": 4,
+    "conformance_mode_runs_expected": 4,
+    "conformance_suites": 2,
+    "cursor_checks_executed": 1,
+    "failed": 0,
+    "mode_runs_executed": 6,
+    "mode_runs_expected": 6,
+    "selected_cases": 3,
+    "semantic_cases": 3,
+    "skipped": 0,
+    "state_cases": 3,
+    "state_fuel_probes_executed": 68,
+    "state_fuel_probes_expected": 68,
+    "state_mode_runs_executed": 6,
+    "state_mode_runs_expected": 6,
+    "unsupported": 0
+  },
+  "cursor_checks": [
+    {
+      "case": "state_normal",
+      "cursor": {
+        "charged": true,
+        "prepared_pc": 3,
+        "remaining_fuel": 99996,
+        "source_pc": 3,
+        "state": "DiagnosticSnapshot { cursor: ExecutionCursor { instance: 0, function_body: 1, source_pc: 3, prepared_pc: 3 }, frames: [DiagnosticFrame { cursor: ExecutionCursor { instance: 0, function_body: 1, source_pc: 3, prepared_pc: 3 }, base: 0, local_count: 0, locals: [], labels: [], label_count: 0, module_fingerprint: 897808664792407131 }], frame_count: 1, operands: [I32(0)], operand_count: 1, prompt_depths: [], prompt_count: 0, remaining_fuel: Some(99996), pending_boundary_charged: true, memory_prefixes: [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], memory_lengths: [65536], globals: [I32(11)], table_prefixes: [[Reference { category: \"func\", identity: Some(0) }, Reference { category: \"null\", identity: None }]], active_root_groups: 0, published_value_count: 0, truncated: true }"
+      },
+      "mode": "decoded",
+      "requested_source_pc": 3
+    }
+  ],
+  "decoded_source_op_diagnostics": [
+    {
+      "binary_sha256": "ce6e41e833a92282bf49b2f773964024af0c2a18c1496744f7e02e2dc2f0ba58",
+      "case": "call_overhead",
+      "counters": {
+        "argument_allocations": 1,
+        "branch_result_allocations": 1,
+        "bulk_slice_chunks": 0,
+        "compact_bound_calls": 0,
+        "compact_fallback_frames": 0,
+        "compact_indirect_evictions": 0,
+        "compact_indirect_hits": 0,
+        "compact_indirect_misses": 0,
+        "compact_memory_accesses": 0,
+        "compact_result_moves": 0,
+        "compact_shared_memory_accesses": 0,
+        "compact_steps": 0,
+        "continuation_scan_entries": 0,
+        "frame_entries": 1,
+        "instruction_clone_bytes": 0,
+        "instruction_clone_events": 4,
+        "module_deep_copy_bytes": 0,
+        "module_deep_copy_events": 0,
+        "read_fixed_operations": 0,
+        "read_vec_operations": 0,
+        "register_fallback_frames": 0,
+        "register_steps": 0,
+        "root_snapshot_allocations": 0,
+        "source_dispatches": 4,
+        "subtype_probes": 0,
+        "table_copy_snapshot_chunks": 0
+      },
+      "mode": "decoded",
+      "source_dispatches": 4
+    },
+    {
+      "binary_sha256": "ce6e41e833a92282bf49b2f773964024af0c2a18c1496744f7e02e2dc2f0ba58",
+      "case": "integer_loop",
+      "counters": {
+        "argument_allocations": 1,
+        "branch_result_allocations": 1,
+        "bulk_slice_chunks": 0,
+        "compact_bound_calls": 0,
+        "compact_fallback_frames": 0,
+        "compact_indirect_evictions": 0,
+        "compact_indirect_hits": 0,
+        "compact_indirect_misses": 0,
+        "compact_memory_accesses": 0,
+        "compact_result_moves": 0,
+        "compact_shared_memory_accesses": 0,
+        "compact_steps": 0,
+        "continuation_scan_entries": 0,
+        "frame_entries": 1,
+        "instruction_clone_bytes": 0,
+        "instruction_clone_events": 150010,
+        "module_deep_copy_bytes": 0,
+        "module_deep_copy_events": 0,
+        "read_fixed_operations": 0,
+        "read_vec_operations": 0,
+        "register_fallback_frames": 0,
+        "register_steps": 0,
+        "root_snapshot_allocations": 0,
+        "source_dispatches": 150010,
+        "subtype_probes": 0,
+        "table_copy_snapshot_chunks": 0
+      },
+      "mode": "decoded",
+      "source_dispatches": 150010
+    },
+    {
+      "binary_sha256": "ce6e41e833a92282bf49b2f773964024af0c2a18c1496744f7e02e2dc2f0ba58",
+      "case": "branch_calls",
+      "counters": {
+        "argument_allocations": 5001,
+        "branch_result_allocations": 10001,
+        "bulk_slice_chunks": 0,
+        "compact_bound_calls": 0,
+        "compact_fallback_frames": 0,
+        "compact_indirect_evictions": 0,
+        "compact_indirect_hits": 0,
+        "compact_indirect_misses": 0,
+        "compact_memory_accesses": 0,
+        "compact_result_moves": 0,
+        "compact_shared_memory_accesses": 0,
+        "compact_steps": 0,
+        "continuation_scan_entries": 0,
+        "frame_entries": 5001,
+        "instruction_clone_bytes": 0,
+        "instruction_clone_events": 127510,
+        "module_deep_copy_bytes": 0,
+        "module_deep_copy_events": 0,
+        "read_fixed_operations": 0,
+        "read_vec_operations": 0,
+        "register_fallback_frames": 0,
+        "register_steps": 0,
+        "root_snapshot_allocations": 0,
+        "source_dispatches": 127510,
+        "subtype_probes": 0,
+        "table_copy_snapshot_chunks": 0
+      },
+      "mode": "decoded",
+      "source_dispatches": 127510
+    }
+  ],
+  "diagnostic_instrumentation": {
+    "binary": "target/performance/P014/counters-build/release/wtime-bench",
+    "binary_sha256": "ce6e41e833a92282bf49b2f773964024af0c2a18c1496744f7e02e2dc2f0ba58",
+    "enabled": true,
+    "feature": "performance-counters"
+  },
+  "errors": [],
+  "fixture_identities_after": {
+    "p018_cursor": {
+      "wasm": "crates/wtime-runtime/tests/fixtures/performance/cursor/store_successor.wasm",
+      "wasm_sha256": "e05575761936f326eebf004bcfc6b015cb6dbf8ab14412aa7daae268cff3ce96",
+      "wat": "crates/wtime-runtime/tests/fixtures/performance/cursor/store_successor.wat",
+      "wat_sha256": "366ad9a071ac01995edfcb5e7291c5bc3c3de4a33c7c52b63edfce3403d1fcbd"
+    },
+    "semantic_cases": {
+      "branch_calls": {
+        "wasm": "tools/wtime-bench/fixtures/branch_calls.wasm",
+        "wasm_sha256": "9b58d26f201900b5b6cce684133a98ab68b3cf55d979b64ce895e914e9d5327b",
+        "wat": "tools/wtime-bench/fixtures/branch_calls.wat",
+        "wat_sha256": "d0af4fdf9ad5be38344267ae72fc1855edb5a8fa1b475fd0af4cb507730b2309"
+      },
+      "call_overhead": {
+        "wasm": "tools/wtime-bench/fixtures/call_overhead.wasm",
+        "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "wat": "tools/wtime-bench/fixtures/call_overhead.wat",
+        "wat_sha256": "9493b8f751690a2fd6e8b19dcee5e2c1d50b717253d292ce34d5692b306663a5"
+      },
+      "integer_loop": {
+        "wasm": "tools/wtime-bench/fixtures/integer_loop.wasm",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c",
+        "wat": "tools/wtime-bench/fixtures/integer_loop.wat",
+        "wat_sha256": "791730112109f3d5751a7b3e2c1134e7e0e6f71a7f7ee01ea8481eb989ee3fa4"
+      }
+    },
+    "state_cases": {
+      "state_graph": {
+        "wasm": "target/performance/P014-state-fixtures/state_graph.wasm",
+        "wasm_sha256": "5370ba21415ef9f2245caa51e73c86d8034b4ff294e4645c7dbb4701e15d36c2",
+        "wat": "tools/wtime-bench/fixtures/integration/state_graph.wat",
+        "wat_sha256": "a2c4d3f0986f615828779cf256f15e2db425697e2240fecbd179e5b967612589"
+      },
+      "state_normal": {
+        "wasm": "target/performance/P014-state-fixtures/state_normal.wasm",
+        "wasm_sha256": "63cdccecaa341f9f2d8ef8ad8f779356549d3227b234e73117f6bdd33e612a9b",
+        "wat": "tools/wtime-bench/fixtures/integration/state_normal.wat",
+        "wat_sha256": "9e0278001f41ea1f2cc229b3ddc7c670f24d1f2860adb5c552fa613037f43717"
+      },
+      "state_trap": {
+        "wasm": "target/performance/P014-state-fixtures/state_trap.wasm",
+        "wasm_sha256": "94155562450b9f3668eb31dacb751fe24d2180e68f30a88a91a1cc88cc5476b7",
+        "wat": "tools/wtime-bench/fixtures/integration/state_trap.wat",
+        "wat_sha256": "99c3408b7697ad7184440d5d37593796b94a2ddf5c6369f0f27f61be5c1ba72d"
+      }
+    }
+  },
+  "fixture_identities_before": {
+    "p018_cursor": {
+      "wasm": "crates/wtime-runtime/tests/fixtures/performance/cursor/store_successor.wasm",
+      "wasm_sha256": "e05575761936f326eebf004bcfc6b015cb6dbf8ab14412aa7daae268cff3ce96",
+      "wat": "crates/wtime-runtime/tests/fixtures/performance/cursor/store_successor.wat",
+      "wat_sha256": "366ad9a071ac01995edfcb5e7291c5bc3c3de4a33c7c52b63edfce3403d1fcbd"
+    },
+    "semantic_cases": {
+      "branch_calls": {
+        "wasm": "tools/wtime-bench/fixtures/branch_calls.wasm",
+        "wasm_sha256": "9b58d26f201900b5b6cce684133a98ab68b3cf55d979b64ce895e914e9d5327b",
+        "wat": "tools/wtime-bench/fixtures/branch_calls.wat",
+        "wat_sha256": "d0af4fdf9ad5be38344267ae72fc1855edb5a8fa1b475fd0af4cb507730b2309"
+      },
+      "call_overhead": {
+        "wasm": "tools/wtime-bench/fixtures/call_overhead.wasm",
+        "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "wat": "tools/wtime-bench/fixtures/call_overhead.wat",
+        "wat_sha256": "9493b8f751690a2fd6e8b19dcee5e2c1d50b717253d292ce34d5692b306663a5"
+      },
+      "integer_loop": {
+        "wasm": "tools/wtime-bench/fixtures/integer_loop.wasm",
+        "wasm_sha256": "560744f64244064c43a3ebe2b2d5f39fa326308e723ee12bc15aae81e22cf04c",
+        "wat": "tools/wtime-bench/fixtures/integer_loop.wat",
+        "wat_sha256": "791730112109f3d5751a7b3e2c1134e7e0e6f71a7f7ee01ea8481eb989ee3fa4"
+      }
+    },
+    "state_cases": {
+      "state_graph": {
+        "wasm": "target/performance/P014-state-fixtures/state_graph.wasm",
+        "wasm_sha256": "5370ba21415ef9f2245caa51e73c86d8034b4ff294e4645c7dbb4701e15d36c2",
+        "wat": "tools/wtime-bench/fixtures/integration/state_graph.wat",
+        "wat_sha256": "a2c4d3f0986f615828779cf256f15e2db425697e2240fecbd179e5b967612589"
+      },
+      "state_normal": {
+        "wasm": "target/performance/P014-state-fixtures/state_normal.wasm",
+        "wasm_sha256": "63cdccecaa341f9f2d8ef8ad8f779356549d3227b234e73117f6bdd33e612a9b",
+        "wat": "tools/wtime-bench/fixtures/integration/state_normal.wat",
+        "wat_sha256": "9e0278001f41ea1f2cc229b3ddc7c670f24d1f2860adb5c552fa613037f43717"
+      },
+      "state_trap": {
+        "wasm": "target/performance/P014-state-fixtures/state_trap.wasm",
+        "wasm_sha256": "94155562450b9f3668eb31dacb751fe24d2180e68f30a88a91a1cc88cc5476b7",
+        "wat": "tools/wtime-bench/fixtures/integration/state_trap.wat",
+        "wat_sha256": "99c3408b7697ad7184440d5d37593796b94a2ddf5c6369f0f27f61be5c1ba72d"
+      }
+    }
+  },
+  "fixtures": {
+    "p018/store_successor.wasm": "e05575761936f326eebf004bcfc6b015cb6dbf8ab14412aa7daae268cff3ce96",
+    "p018/store_successor.wat": "366ad9a071ac01995edfcb5e7291c5bc3c3de4a33c7c52b63edfce3403d1fcbd",
+    "state_expectations.json": "126d72095766530e35a90ad864c8f90399c88c4bcac3bc039e02324bdd407ba9",
+    "state_fixtures_sha256": "468da59941a37c689f637741384b94510d1fdbe9b794ad79383c31fa8447226b",
+    "workloads.json": "474b1fce96ce1302fe78885c8385eb592b1111ff912fd7f1b2c56763683ed0d9"
+  },
+  "fuel_boundaries": {
+    "state_normal": {
+      "boundary_verified": true,
+      "max_probe_fuel": 16,
+      "minimal_success_fuel": {
+        "reference": 10,
+        "register": 10
+      },
+      "previous_fuel_outcome": {
+        "reference": "ResourceLimit",
+        "register": "ResourceLimit"
+      }
+    },
+    "state_trap": {
+      "max_probe_fuel": 16,
+      "minimal_expected_trap_fuel": {
+        "reference": 8,
+        "register": 8
+      },
+      "trap_code": "MemoryOutOfBounds"
+    }
+  },
+  "implementation_sources": {
+    "Cargo.lock": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
+    "Cargo.toml": "9656851608b4f5ecb5f973a5ad370c67aef45fc557d4c132469bbf012662efff",
+    "crates/wtime-decode/Cargo.toml": "1ae571b0eb1a293cd0ef6a181e33d267c40b228cd1afd5dd44ef9a309d113fa1",
+    "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+    "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+    "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+    "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+    "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+    "crates/wtime-runtime/Cargo.toml": "2ee79daf9485c056793d57b1886f75e0e74b12a6ddbf69f4b18f20ecffe8171b",
+    "crates/wtime-runtime/examples/embedding.rs": "d9baac3b51bacbee00c42a109831e8bd1a845158b5a0ceae46a911307d8b0907",
+    "crates/wtime-runtime/examples/suspension.rs": "097175e5cbbcf1be4716d4c1b584702042558d299360392fa742a85ead331e1d",
+    "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+    "crates/wtime-runtime/src/canonical.rs": "0d2d13027169158ef85a4b57726ef9c6ba5d7055d9894e436e1c6c27aad104d7",
+    "crates/wtime-runtime/src/continuation.rs": "d2b8675da4f7f75b572d046e2ea7acdeb71087a47d2789d57e2dec0de0f5dacd",
+    "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+    "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+    "crates/wtime-runtime/src/execution.rs": "a267be634f8e7d8864b2466ad4d92a7e7c6769c0f08e303024569f3d36db4364",
+    "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+    "crates/wtime-runtime/src/execution/compact/calls.rs": "e1dcb6a55ee7c46f0dc3770df01cd99ff176d1fad0ecd4a60919ef8597f3a20b",
+    "crates/wtime-runtime/src/execution/compact/execute.rs": "b916847756faf161cf101bc52a87a61599487d2129c429e5ec1ac6ee1ebda9d8",
+    "crates/wtime-runtime/src/execution/compact/fuse.rs": "82207739cf5f98614f3a03a0c33c96e7827dd3a294bbc3419c54ea15ec41efc8",
+    "crates/wtime-runtime/src/execution/compact/indirect.rs": "12c523580d084b4a8610406ef16edb2ef0b6ec8bf1bebfc2984c979eb2a34332",
+    "crates/wtime-runtime/src/execution/compact/inline.rs": "586b3d0c8c2afcc30b222e69eebab7e513c59613597ab755724ede57cd42ae68",
+    "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+    "crates/wtime-runtime/src/execution/compact/lower_control.rs": "e65f4c395a76332459944d43cd7a375469bb340b6faa500cd1efb0d3a2edb15d",
+    "crates/wtime-runtime/src/execution/compact/lower_numeric.rs": "478f4314b477a576a949d7dd5a1a6a5d6c4d69f88672fe632dc78693e0066547",
+    "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486",
+    "crates/wtime-runtime/src/execution/compact/memory.rs": "edc8bc2e7a0ee4c1479410404d955ce236ef572fdee68c3c33760be5b191c87a",
+    "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+    "crates/wtime-runtime/src/execution/compact/prefix.rs": "ccdf0f3536d46eefec3c14392aef2e5eb13a92a41020a5ac207cd245aba91f63",
+    "crates/wtime-runtime/src/execution/compact/source_map.rs": "6b7b019ea82dc0e0d2130a3e2445a027b52d9dc9bad9d14b6bdceddc2853f84a",
+    "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+    "crates/wtime-runtime/src/execution/cursor.rs": "e2f41ca404be0be915c6ae50412076217337bf96427d3cceeacf28af4e0027b1",
+    "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+    "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+    "crates/wtime-runtime/src/execution/register/cache.rs": "3dce1d40358e4e4c7d3be91dbf3c8c582292e9148da736f30b6bcd49932d46be",
+    "crates/wtime-runtime/src/execution/register/control.rs": "cd86dd0bba5ec78e99423a96cc026ddc21c1e6d829fe3b6d0c7b40a0324b503d",
+    "crates/wtime-runtime/src/execution/register/execute.rs": "56cbcc2799a262350db11833d3e8ec244908160b3daa566e7703e87230086586",
+    "crates/wtime-runtime/src/execution/register/exits.rs": "6706e3c70c9cac9ec8af639a854fc8c0d139f4d9139b952a19e125a39eb9101c",
+    "crates/wtime-runtime/src/execution/register/float.rs": "23edf66a1de74565e8c1672456464c538991105a36cc37c522f3d9e7ecb73632",
+    "crates/wtime-runtime/src/execution/register/integer.rs": "c39b44b8341e69aa8b842854c8ba0fa6517e41906e0c8d2595e4b6fc0027126e",
+    "crates/wtime-runtime/src/execution/register/ir.rs": "62e3e658d599c1078998a2a8696d1cc94ce404052930a7568a76c4c561886624",
+    "crates/wtime-runtime/src/execution/register/lower.rs": "7831a2838172ffad102d9e4f647bf5598a0951eec365b95f3dfd6470e6f84509",
+    "crates/wtime-runtime/src/execution/register/memory.rs": "1770b972db3e26d4b4238f015d4dee4233fa7d4b945bb95b565c1e7eddecba47",
+    "crates/wtime-runtime/src/execution/register/mod.rs": "387fb9848651d95f5068df015d58a96a66a20696f57962ab34efa5d18930e7f8",
+    "crates/wtime-runtime/src/gc.rs": "aff0d7d49db4759e4776c5cffa4e3d2deabcce2fb1a1706257288d1833a22ed8",
+    "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+    "crates/wtime-runtime/src/lib.rs": "3046a66f8d8c2fff07cde1303e262de435c15ecf6b323265b79a22566520afe6",
+    "crates/wtime-runtime/src/linker.rs": "477f60f389d72bf89b41c3af39d1d241d234e09bd9445f2ff343ecdb36d5343e",
+    "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+    "crates/wtime-runtime/src/perf.rs": "14a6f3ba84000eeea2e31ef895895d2a46dd5d4e34135eba19ba0b5abc8bcd8f",
+    "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+    "crates/wtime-runtime/src/register_cache_diagnostics.rs": "3f058fdcbdeb43d16f4c6fce6b052e097c6514429f2de1392c85631e2d0bf125",
+    "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+    "crates/wtime-runtime/src/simd.rs": "7582da6d9aa7acc7de81f3a63d4d76b43d8695e500f153e5eb22f909a3360633",
+    "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+    "crates/wtime-runtime/tests/core.rs": "54f6e18cff27f3da96ae0736d7910013883742f0215d35abb551ce324c78af1f",
+    "crates/wtime-runtime/tests/exception_root_safety.rs": "91419a4df0834c064ac143e34f92a15224cea597716328a2074b0a351ff51213",
+    "crates/wtime-runtime/tests/exceptions.rs": "3cc47afeeb6428154f6d0a30db6362a009c45d292278f5f03ca60c53c3342a93",
+    "crates/wtime-runtime/tests/feature_profiles.rs": "dafe483c28f8683332d198935818fff885827dfc5cfd1ad62f27330490ebc14a",
+    "crates/wtime-runtime/tests/performance.rs": "17f9ba4c18c59a42d618a9dfb37787f6ef8a3a63006ba4046507bb719e2d3153",
+    "crates/wtime-runtime/tests/performance/p016.rs": "b9b60ca9b110c68d472e7fca62b16952b0cb84694fd374d09850e9d2a141aeb4",
+    "crates/wtime-runtime/tests/performance/p017.rs": "4122d30ef0f042af886692d52de26c9a48d016f5f8e2a0bf67c6e9c9b84e9ef7",
+    "crates/wtime-runtime/tests/performance/p018.rs": "e06da12e7539dbfc36bdfcc1981e87c8d926b08679f9bd2fce201987d5dafeae",
+    "crates/wtime-runtime/tests/performance/p019.rs": "8294310dd4da5f9a7a05bf0bfee0d2be503ec52cdddbca4e21c6a3ee9d3b2715",
+    "crates/wtime-runtime/tests/performance/p020.rs": "b6cb36f79e0d9702e7a8be4f81d254fcbd9d683d57c6baefe37f06951f611185",
+    "crates/wtime-runtime/tests/performance/p021.rs": "fec19c012536565dbf2ba3e3f80f26b3fcc4e7d560a2218b5335552be2448a94",
+    "crates/wtime-runtime/tests/performance/p022.rs": "ae36fe56e6a9f73b24074e5f23381ac05cb3377df9d5f44799490c8114c677b7",
+    "crates/wtime-runtime/tests/performance/p023.rs": "6cbadd3bf64068c0ba819bed3be369c1334fb876075e9f3253c9d612666472f6",
+    "crates/wtime-runtime/tests/performance/p024.rs": "bb48a497f6ef46705df70225077b224cbcec21c4d600a5f6fa22bf29bd428b59",
+    "crates/wtime-runtime/tests/performance/p025.rs": "1af91ae70dae7ecd1d03abab59b76c5cc34aa3169b7154b2a9fc3034df680c2e",
+    "crates/wtime-runtime/tests/performance/p026.rs": "10ecfc3d74d0e881e5f98d46f0ac33daa04085586bd2604f09cfcd5a161f2446",
+    "crates/wtime-runtime/tests/performance/p027.rs": "5ad17c20bb89f535590936259526b11f09d9bde2cc17e2e94876d8083b995b71",
+    "crates/wtime-runtime/tests/performance/p028.rs": "a20b1701af071f41de5493e8e69587fd0fedb2dcccfec45e9294e0773ed29edb",
+    "crates/wtime-runtime/tests/performance/p029.rs": "fe926229024f5ca65b40bf38f3c62a9de0801ee4cdd49d9787565c3366d04871",
+    "crates/wtime-runtime/tests/performance/p030.rs": "96ff18f747e5c9deb19359c13d5f34b2261f06474edbf69e6f4d559500cedba2",
+    "crates/wtime-runtime/tests/performance/p031.rs": "b4b0f3466af3d54f2b82376dd8191682a1e8c5dfdb24da36424beeaf705286c5",
+    "crates/wtime-runtime/tests/performance/p032.rs": "8cda54330226e6b8de7de2fd7565c3d1feeed95563174df6561794ce252d914a",
+    "crates/wtime-runtime/tests/performance/p033.rs": "75e7d654b6e9d49b7e5929c756fb81909bf8c429d238bd24e5f29160609670c5",
+    "crates/wtime-runtime/tests/performance/p034.rs": "9c8e581c4f1b5848bb4f3f38601675cccd361a91c936896b0db9db6bae8efeae",
+    "crates/wtime-runtime/tests/performance/p036.rs": "1dadaf679a3c12ba6070dc5c0c74e01aef0b072a8fbf691adf96b42fbf1c27d7",
+    "crates/wtime-runtime/tests/performance/p036_private.rs": "a2cec4949872b46936509fa5e7becbc23440a18cba0bf273979687c548cb12e5",
+    "crates/wtime-runtime/tests/performance/p037.rs": "9f761a49e3ab4a57fe173bd406aff861f304f14f970d0ff8fc73659bf87be30e",
+    "crates/wtime-runtime/tests/performance/p037_private.rs": "b35445fc643e895f66975832d43ece1525e389b876f9e87331de5042894b89ab",
+    "crates/wtime-runtime/tests/performance/p038.rs": "bac986494a5c5ac5eeff07ac124109bf65e76397b9b60fc5600db2ee84b842ea",
+    "crates/wtime-runtime/tests/performance/p039.rs": "95bf392e7b99132efd76c088a6902645223a665dd32f2c74bf374a6da1522810",
+    "crates/wtime-runtime/tests/performance/p040.rs": "6efa67f4cd7a93b0441af8002a150f7972e756990b918a5464fa5d6804f2ca07",
+    "crates/wtime-runtime/tests/performance/p040_private.rs": "dcb3592b2b785c45fea707a9ba6ed6c4f5f69f2660b0e62e16fe68ab48c552d5",
+    "crates/wtime-runtime/tests/performance/p041.rs": "71b15997f183fa4044b64a3576c3ceca7c31f7463b4e1d10faeff8a8e51da28b",
+    "crates/wtime-runtime/tests/performance/p041_private.rs": "8b6d1bc9a67259fa72b972b78353caccb2851b157face5bd85ca208a506670e6",
+    "crates/wtime-runtime/tests/performance/p042.rs": "5a2fb3d372fdb06c4cbde9bcc6a40735faf2e1e7ae63309c2cfbd58bd37c6fd2",
+    "crates/wtime-runtime/tests/performance/p042_private.rs": "6fdf329b9c2ae26b31602eade65c53ec92949e3a20afed3d5ea3f879b723962f",
+    "crates/wtime-runtime/tests/performance/p043.rs": "496b45cef6ca74dc44dd9c41ea51a0dc83d290c5eb3f96f1220bb29d30e9c330",
+    "crates/wtime-runtime/tests/performance/p043_private.rs": "15df279059fd51eb7a22704dde731a2f772d749245c0308a980161e0844dde55",
+    "crates/wtime-runtime/tests/performance/p045.rs": "3c7940178aa23cdd06d5ea9d433080befde388a0bd5230b7b1247243c1120e6c",
+    "crates/wtime-runtime/tests/performance/p045_private.rs": "6816e5e2f16b67f6e8fd9c38a883a595c60b56ed8ee178f5d5427c67951cc7c7",
+    "crates/wtime-runtime/tests/performance/p047.rs": "c2d02b5914983ff1465c935dc3d717f8ee224b4917854a2c3d42a1ecf822792b",
+    "crates/wtime-runtime/tests/performance/p050.rs": "1bfca2c47bf31d1cf248136f8014676a42556a1c15e908c81b5ec72834e119ff",
+    "crates/wtime-runtime/tests/performance/p057.rs": "b7ce417e17e6910a63d0d2f8ddd158608d385e9675394508bd949770f6c8d9ab",
+    "crates/wtime-runtime/tests/performance/p057_private.rs": "f3eb58e7e4e5207ad1c794e23d3bb7d222c43e6e67854df3c66604c972cd8016",
+    "crates/wtime-runtime/tests/performance/p058.rs": "68e119a7a03af160ff13dd1a8d4587fb30201a4ef870f9e751f3d57c8843f30d",
+    "crates/wtime-runtime/tests/performance/p058_private.rs": "547b71ccf24236d7a0e4ee38ff9fae66c07a1ce09599aeb34177034dcfa0b231",
+    "crates/wtime-runtime/tests/performance/p060.rs": "ded8cafc91068935622c4bff5d0cc2e9c1d3a5863d8292b6b7a7587eb3b6e5b0",
+    "crates/wtime-runtime/tests/performance/p060_private.rs": "90afd3956d6e5cfaae9bec4175817ff6a89030d09185ae9f3980779c6a47c846",
+    "crates/wtime-runtime/tests/performance/p061.rs": "eee0c6726bc00269b0e92e200fe926ed0c27cc0e9bbd366b1b05b4dea2cf868c",
+    "crates/wtime-runtime/tests/performance/p061_private.rs": "81d695ecb2029610f14c0176dc2974c830bf67e7352a2a6cfd9033f393a078e3",
+    "crates/wtime-runtime/tests/performance/p062.rs": "fb4cab0309b1dfbe01d4fe20d513de9f6f25f804838460e2ee97aa713bfd41c8",
+    "crates/wtime-runtime/tests/performance/p062_private.rs": "b9a72f3342425f76e9fea0e3510272a2fba7128c338420b7e4e8a5f9ea13297f",
+    "crates/wtime-runtime/tests/performance/p063.rs": "6d7995ff4173ac06e530750edbeb161a6823e3be913fbb277a3561f201f67cb8",
+    "crates/wtime-runtime/tests/performance/p063_private.rs": "5e8087bd879ae5ede25094216538428fe7a5cce061f8d87bc1771f76896c9298",
+    "crates/wtime-runtime/tests/performance/p064.rs": "4bb54fa71c207a5168ddc6dc2bfca470dacc6b69c86a697adc9035b71c39772b",
+    "crates/wtime-runtime/tests/performance/p064_private.rs": "73cf2aaa94546a8ad7e354b0f0fde8df84e972da2c8e603e52ba247e9330fdab",
+    "crates/wtime-runtime/tests/performance/p065.rs": "751bfb59bbf54ec982ecd390559dd3a7b796486539570ae9c30b9a6d15065b9c",
+    "crates/wtime-runtime/tests/performance/p065_private.rs": "8eadd31af3466121805c4080ce9783e47b5d711d698a7aae7c9902493c4417c8",
+    "crates/wtime-runtime/tests/performance/p066.rs": "ec88659280c029c1680ca7c1766e7d4c41d390c0c2d9ea1ef85710cf5c6392e8",
+    "crates/wtime-runtime/tests/performance/p079_continuation.rs": "db9a69bce48997db7cc9a9b83600a6bf2285fd02e7a84107721469ac984b5eb6",
+    "crates/wtime-runtime/tests/performance/p079_gc.rs": "3233b7e1eab096dc9e50750ddc5f98c141a58d7554a2c71fd69a4d3ad7329c77",
+    "crates/wtime-runtime/tests/performance/p114_private.rs": "df7c3c69a3809be0c7c2537d5f75313fd9417180f92eb2f222ccd22158de785b",
+    "crates/wtime-runtime/tests/performance/p115.rs": "810cf96a658de92f91aa11172061b7f08f0567f31013374e607328a6420f3aa7",
+    "crates/wtime-runtime/tests/performance/p116.rs": "d8cc346589346282cd463f59aa52e8095f1b6aa130e084fa2eebd8dccab22451",
+    "crates/wtime-runtime/tests/performance/p117.rs": "4408e6ee08188d857f0e473efb0bbd08efe58a255cf0b133fdcd3205e9947953",
+    "crates/wtime-runtime/tests/performance/p118.rs": "61f5cb9a87b89e714ffacc1f4557abfd2001769d6ae65804b8b2ce6eeaa1d42b",
+    "crates/wtime-runtime/tests/performance/p119.rs": "08c8575b9f1881509326a9785edd8f4fb67fa71a2407ec6dbf0e9c8d9e709b8a",
+    "crates/wtime-runtime/tests/performance/p120.rs": "158343f8ea6dfad884cd0580501dbfb7225f46432ca5a2b59113dcc2aad0ff60",
+    "crates/wtime-runtime/tests/performance/p121.rs": "00c01c1ac1816c4d56548bdb7d043a49ed85b9639d2492ef4c9e6d7b97f9e80d",
+    "crates/wtime-runtime/tests/performance/p129.rs": "3b41dee1e7f247050c2e600a6adc4f0d785a3f1fd13bd91e78e7610bd5ea4cb6",
+    "crates/wtime-runtime/tests/performance/p130.rs": "eb1ad458bc5a041b338e5594d7d6d8a2f8cb974006705f6d282fe0f1fbcb9a0b",
+    "crates/wtime-runtime/tests/performance/p130_private.rs": "9b9408c2b222f14a1678ea17765373d155190768decc8d04937897794fb6853b",
+    "crates/wtime-runtime/tests/performance/p131.rs": "4f3e481d10e01dc2bb171a61c7082726ce1fb972e28591e7f962c07b88be70ca",
+    "crates/wtime-runtime/tests/performance/p131_private.rs": "775e71c8f0ae18997fe079a2f3210f8ef59a784a143c15d8a05bb8e39669b70f",
+    "crates/wtime-runtime/tests/performance/p132.rs": "5a0c9a699497b37b5951a281adeb8ec5688c408a46b72166aab325802fad8393",
+    "crates/wtime-runtime/tests/performance/p132_inventory.rs": "be3863d3a57c328de5bccdbac192b646fb863302eb6a6e61c7c43d0ced1f9cad",
+    "crates/wtime-runtime/tests/performance/p132_private.rs": "ca118ce8a4a30c49ed79a19cad8d6b6bd49d7561abd90130f174277551d3d0b7",
+    "crates/wtime-runtime/tests/performance/p133_private.rs": "40a3bf04dc78baa36893c17b5cc9a84577790fc04bb66480488a8ab072645729",
+    "crates/wtime-runtime/tests/performance/p134.rs": "c9e1e09f4771afde4c2808b2e8b7fd12ce024b2402cb60147d0a3598e1ea2634",
+    "crates/wtime-runtime/tests/performance/p134_private.rs": "d60857fe7689fb5996f3d27d381174880f8ccf0a0c8c197844296b4a71712318",
+    "crates/wtime-runtime/tests/performance/p138.rs": "510d306c8fac79e7be58a695d1c190c44817ddf8cd3b1c8b174ee12b4df99327",
+    "crates/wtime-runtime/tests/performance/p138_private.rs": "c67fd76c55c855d4c19167dfae97365a4ca8f36ad8af69ffa18442a4e743c908",
+    "crates/wtime-runtime/tests/performance/p138_trace.rs": "6a213782642e543b18c1a47e31b35d9a3adf133c175b29ce67ea2adbfde3e423",
+    "crates/wtime-runtime/tests/proposals.rs": "8fffaa52d03e81fc7d88d0970617f1a0c8ba7602fc241ad9c65367133d2a9927",
+    "crates/wtime-types/Cargo.toml": "e5c4d20d5d35fd4a15ce854f96602add82b86a1bbe4599aab69b0abcc7dc9031",
+    "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+    "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+    "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+    "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+    "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+    "crates/wtime-validate/Cargo.toml": "fed963beb5aa95d1c242f4131509edd95069e1b27c4e69f84f969357a04a0639",
+    "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+    "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+    "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+    "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+    "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+    "crates/wtime-validate/src/lib.rs": "6d6fd6442fdad200c494fc43775dc003ee18fbfa63632c7056e238777a283455",
+    "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0",
+    "crates/wtime-validate/tests/exceptions.rs": "061d15fe56d6028e54671c5dd5d86ee1069f2ac99183886a3c3441356d4da290",
+    "crates/wtime-validate/tests/policy.rs": "4a4c47509bd9da3850b1ab76235d585db2c7aba826f1f89ec9055a2d888774c3",
+    "tools/wtime-bench/Cargo.lock": "4d1a59eab7ae2ce8c6abcd203afb3a20d0787e6cd536b86a919fd133196c5431",
+    "tools/wtime-bench/Cargo.toml": "389e92491b6caca59c924bd41a46bee79828b41459f2c3712411e3e40bcb5a3b",
+    "tools/wtime-bench/fixtures/integration/expected_state.json": "126d72095766530e35a90ad864c8f90399c88c4bcac3bc039e02324bdd407ba9",
+    "tools/wtime-bench/run.py": "f793c150ae38031467c91a70cddf66e85b6cd6d9782e227b773b4da6ff564bea",
+    "tools/wtime-bench/src/continuation_driver.rs": "445c53f93ed06d53a4cb99caafd7e1b8b2da6d7a4817ecb6e382b11b10daac4c",
+    "tools/wtime-bench/src/continuation_live_driver.rs": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+    "tools/wtime-bench/src/entry_batch_driver.rs": "8df0ae2401df1a53aec362f335813e2fef465df16987223164302027a86b482f",
+    "tools/wtime-bench/src/entry_sequence_driver.rs": "9cdce74ed329dc40f89ef7a874dcf1b3955561e3d2118c64c31ec2766534e842",
+    "tools/wtime-bench/src/fuel_policy.rs": "fd1f2721c9a9f0bfb9b2e4a67bc74f9153c43d6aa20e95d6a2f1b0309bc71ce5",
+    "tools/wtime-bench/src/gc_collect_driver.rs": "e6ef18d7c1d48823dde3476153a93594b6eb1595d143f8deba64347017b2b18f",
+    "tools/wtime-bench/src/gc_exception_driver.rs": "63c192dd2f0f5a376dba96b66ac3e55c40303512374b02fe96b782e33ace369f",
+    "tools/wtime-bench/src/gc_roots_driver.rs": "5561e27d8460541da683c66d59d22ad3eba6e2cefafb20b55cb6babfc3e259c3",
+    "tools/wtime-bench/src/gc_warm_driver.rs": "9fc4b6ef80c4e4aca86bff36a8fdec32a0d9b4871cf1d757e0d374dbf89bb5b7",
+    "tools/wtime-bench/src/integration_driver.rs": "53ed517b031cbfe33eac6a33c1a410284398e21e1afe8d2e3b0f4c8577675710",
+    "tools/wtime-bench/src/main.rs": "9f9496929d3c60165fa061030336397d1825d9b0545a70aadeaf07208c3768e5",
+    "tools/wtime-bench/src/memory_driver.rs": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+    "tools/wtime-bench/src/p140_tests.rs": "7250e09961de6d3e1578ebee0f135c883f9db48f172b79c67f990e7bba4217ea",
+    "tools/wtime-bench/src/protocol.rs": "8b48dc5beaa0289e578a02d371ded31496803172253c2bc805672e20bbb4b758",
+    "tools/wtime-bench/src/representative_driver.rs": "3a4e9e55184618f36c1ec9bfcc32d9acc98e4666af533219e11e7380a7715ff9",
+    "tools/wtime-bench/src/scalar_driver.rs": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175",
+    "tools/wtime-bench/src/shared_bulk_driver.rs": "18d1606841480e8d8cfa76df113cad0cc351dc3439fddf801b2e488cf18081a8",
+    "tools/wtime-bench/src/thread_driver.rs": "96801dbc985a214e335c2be69dedce48a1cd2acf37055547f3d5fc87a21f4ee3",
+    "tools/wtime-bench/src/tier_state_driver.rs": "bc732d98733590e5cd0f6742b1a4b0f59e506322d1b4926367932302adfc22d0",
+    "tools/wtime-bench/src/wait_queue_driver.rs": "244094a86cee173db1f488f8cf37131f2d653219c2e163fc47d37bf015e1cc6a",
+    "tools/wtime-bench/tier_check.py": "86ee9d55311bf119b7cdc914ebda1975e3e7e9a825a28b589f7cfd8a194484a0",
+    "tools/wtime-bench/workloads.json": "474b1fce96ce1302fe78885c8385eb592b1111ff912fd7f1b2c56763683ed0d9",
+    "tools/wtime-bench/workloads.py": "c08faf6b9295f22b3b554819b59d2367c5a436c16308029bccbf85095f425096",
+    "tools/wtime-conformance/Cargo.toml": "4a097bcb388a22fac6458881519b247fc5287ab23fcb7cd569632a5519f4d787",
+    "tools/wtime-conformance/build.rs": "1e37a8f6ec1af7964228b03abb3e9675c2c5218edf3bb43a94d76243cc893ef1",
+    "tools/wtime-conformance/src/adapter.rs": "2009fbf4484748dae77839a9ca2903d8725679942bc525cdc3d8cf374549d576",
+    "tools/wtime-conformance/src/bin/wtime-allocation-check.rs": "1a20e70ac081c7792732bc1cffded19935e19d0141bca5ea78a6b6086f4c6034",
+    "tools/wtime-conformance/src/bin/wtime-probe.rs": "f1884d2cca082353bf2fc33e9765a814189920ba0ea6847546b6bf386e671c4e",
+    "tools/wtime-conformance/src/cli.rs": "003ba29e10269c1c971266bf732451707fbad5cbd009a4e363d24a8d1daf0e50",
+    "tools/wtime-conformance/src/corpus.rs": "b1d2a7947b5904b9bd80c0109bc8b5e0f5f8329ba92a693db3f4409cd93cbc1e",
+    "tools/wtime-conformance/src/main.rs": "ecf37373cd8988e4f45569d49a0a971fc85a5b687c091ae2ec7964ec8f35c169",
+    "tools/wtime-conformance/src/p143_tests.rs": "36b397e1277b8fcee8ab36256c44881ebae0d1be318a836ed3419e92d06ca2da",
+    "tools/wtime-conformance/src/report.rs": "b088cad39e8289213ab9d091be440f3d5fc5eab572706262ac38e05f7533986d",
+    "tools/wtime-conformance/src/script.rs": "a19dc275414fc1479b431767ed696426982a284e5007e504f47a4769d33b4d16",
+    "tools/wtime-conformance/src/spectest.rs": "1403166f4be6ce443b47d4a7ba4a44da553c67e280dfa2876b3f2ad1e64e8883",
+    "tools/wtime-conformance/tests/annotations.rs": "5eb54a28e57e7e929bcb2342d65c28e23c2ae112b7c10b36f707fa580f489b08",
+    "tools/wtime-conformance/tests/interactions.rs": "fd36710c8cd2ef7f3a2883d3f0ab6cbfecace3ae80adf693095228e4f4641938",
+    "tools/wtime-conformance/tests/p121_compact_counts.rs": "96ba2a7b5ded8a05bfa6e360de283ddaea777fedf39348bae0cf5c6d414c4782"
+  },
+  "implementation_sources_sha256": "4a8c4997f7304f6e02dc0c61c4651e67a0ce95078172285f7bf6801057481f56",
+  "instrumented": true,
+  "limitations": [
+    "The reference dispatcher shares admission, frames, numeric/memory/GC/continuation helpers; it is not an independent oracle for bugs in shared helpers.",
+    "P018 snapshots are bounded diagnostic views and are checked only in decoded mode; P022 supplies broader interaction-state fixtures.",
+    "This is a correctness check. Execution timings in typed protocol output are diagnostic only and are not performance evidence."
+  ],
+  "modes": [
+    "decoded",
+    "portable",
+    "reference",
+    "register"
+  ],
+  "passed": true,
+  "register_entry_threshold": null,
+  "register_strategy": "eager",
+  "requested_tier": "register",
+  "schema_version": 1,
+  "selection": "integration",
+  "snapshot": {
+    "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+    "case": "store_successor",
+    "diagnostic": true,
+    "function_body": 0,
+    "materialization_roundtrips": 1,
+    "normalized_state": "DiagnosticSnapshot { cursor: ExecutionCursor { instance: 0, function_body: 0, source_pc: 3, prepared_pc: 3 }, frames: [DiagnosticFrame { cursor: ExecutionCursor { instance: 0, function_body: 0, source_pc: 3, prepared_pc: 3 }, base: 0, local_count: 0, locals: [], labels: [], label_count: 0, module_fingerprint: 5888410375836923908 }], frame_count: 1, operands: [], operand_count: 0, prompt_depths: [], prompt_count: 0, remaining_fuel: None, pending_boundary_charged: true, memory_prefixes: [[7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], memory_lengths: [65536], globals: [], table_prefixes: [], active_root_groups: 0, published_value_count: 0, truncated: true }",
+    "pending_boundary_charged": true,
+    "prepared_pc": 3,
+    "remaining_fuel": null,
+    "schema_version": 1,
+    "source_pc": 3
+  },
+  "source_stable": true,
+  "state_checks": [
+    {
+      "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+      "case": "state_normal",
+      "collection": {
+        "live": 0,
+        "reclaimed": 0
+      },
+      "global": "i32:11",
+      "graph": null,
+      "memory_byte_length": 65536,
+      "memory_prefix_u32": 11,
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "remaining_memory_zero": true,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+      "case": "state_normal",
+      "collection": {
+        "live": 0,
+        "reclaimed": 0
+      },
+      "global": "i32:11",
+      "graph": null,
+      "memory_byte_length": 65536,
+      "memory_prefix_u32": 11,
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "remaining_memory_zero": true,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+      "case": "state_trap",
+      "collection": {
+        "live": 0,
+        "reclaimed": 0
+      },
+      "global": "i32:5",
+      "graph": null,
+      "memory_byte_length": 65536,
+      "memory_prefix_u32": 5,
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "remaining_memory_zero": true,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+      "case": "state_trap",
+      "collection": {
+        "live": 0,
+        "reclaimed": 0
+      },
+      "global": "i32:5",
+      "graph": null,
+      "memory_byte_length": 65536,
+      "memory_prefix_u32": 5,
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "remaining_memory_zero": true,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+      "case": "state_graph",
+      "collection": {
+        "live": 2,
+        "reclaimed": 0
+      },
+      "global": "i32:33",
+      "graph": [
+        "i32:2",
+        "i32:12",
+        "i32:19",
+        "i32:1"
+      ],
+      "memory_byte_length": 65536,
+      "memory_prefix_u32": 33,
+      "memory_sha256": "5e9595c77555d6b0c3782705054e329e2fdd44e4074f96f19349bd2b0bfad509",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "remaining_memory_zero": true,
+      "root": "gc",
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "binary_sha256": "17229bfd26a5f72649504b8e06452687a522bc8f4e94f51931a9b055e8d1a2ff",
+      "case": "state_graph",
+      "collection": {
+        "live": 2,
+        "reclaimed": 0
+      },
+      "global": "i32:33",
+      "graph": [
+        "i32:2",
+        "i32:12",
+        "i32:19",
+        "i32:1"
+      ],
+      "memory_byte_length": 65536,
+      "memory_prefix_u32": 33,
+      "memory_sha256": "5e9595c77555d6b0c3782705054e329e2fdd44e4074f96f19349bd2b0bfad509",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "remaining_memory_zero": true,
+      "root": "gc",
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    }
+  ],
+  "state_fixture_identities": {
+    "state_graph": {
+      "wasm": "target/performance/P014-state-fixtures/state_graph.wasm",
+      "wasm_sha256": "5370ba21415ef9f2245caa51e73c86d8034b4ff294e4645c7dbb4701e15d36c2",
+      "wat": "tools/wtime-bench/fixtures/integration/state_graph.wat",
+      "wat_sha256": "a2c4d3f0986f615828779cf256f15e2db425697e2240fecbd179e5b967612589"
+    },
+    "state_normal": {
+      "wasm": "target/performance/P014-state-fixtures/state_normal.wasm",
+      "wasm_sha256": "63cdccecaa341f9f2d8ef8ad8f779356549d3227b234e73117f6bdd33e612a9b",
+      "wat": "tools/wtime-bench/fixtures/integration/state_normal.wat",
+      "wat_sha256": "9e0278001f41ea1f2cc229b3ddc7c670f24d1f2860adb5c552fa613037f43717"
+    },
+    "state_trap": {
+      "wasm": "target/performance/P014-state-fixtures/state_trap.wasm",
+      "wasm_sha256": "94155562450b9f3668eb31dacb751fe24d2180e68f30a88a91a1cc88cc5476b7",
+      "wat": "tools/wtime-bench/fixtures/integration/state_trap.wat",
+      "wat_sha256": "99c3408b7697ad7184440d5d37593796b94a2ddf5c6369f0f27f61be5c1ba72d"
+    }
+  },
+  "state_fuel_checks": [
+    {
+      "case": "state_normal",
+      "fuel": 0,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 0,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 1,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 1,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 2,
+      "global": "i32:11",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 2,
+      "global": "i32:11",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 3,
+      "global": "i32:11",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 3,
+      "global": "i32:11",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 4,
+      "global": "i32:11",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 4,
+      "global": "i32:11",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 5,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 5,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 6,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 6,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 7,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 7,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 8,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 8,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 9,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 9,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_normal",
+      "fuel": 10,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 10,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 11,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 11,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 12,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 12,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 13,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 13,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 14,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 14,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 15,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 15,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 16,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "reference",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_normal",
+      "fuel": 16,
+      "global": "i32:11",
+      "memory_prefix_hex": "0b00000000000000",
+      "memory_sha256": "9b7782a6552fb4e41537009e9f0ad735bca1de6eb3a3e0da6e3736bc6093ea07",
+      "mode": "register",
+      "outcome": "returned",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": [
+        "i32:42"
+      ]
+    },
+    {
+      "case": "state_trap",
+      "fuel": 0,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 0,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 1,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 1,
+      "global": "i32:0",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 2,
+      "global": "i32:5",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 2,
+      "global": "i32:5",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 3,
+      "global": "i32:5",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 3,
+      "global": "i32:5",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 4,
+      "global": "i32:5",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 4,
+      "global": "i32:5",
+      "memory_prefix_hex": "0000000000000000",
+      "memory_sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 5,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 5,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 6,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 6,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 7,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 7,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "ResourceLimit",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": null,
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 8,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 8,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 9,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 9,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 10,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 10,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 11,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 11,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 12,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 12,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 13,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 13,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 14,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 14,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 15,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 15,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 16,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "reference",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    },
+    {
+      "case": "state_trap",
+      "fuel": 16,
+      "global": "i32:5",
+      "memory_prefix_hex": "0500000000000000",
+      "memory_sha256": "a0cef7e607271f0d81a0288935d5bf19bb031588b3221473d6b1fb9498dccdde",
+      "mode": "register",
+      "outcome": "Trap",
+      "register_entry_threshold": null,
+      "root": null,
+      "table": [
+        "function",
+        "null"
+      ],
+      "trap": "MemoryOutOfBounds",
+      "values": []
+    }
+  ],
+  "timing_evidence": false
+}

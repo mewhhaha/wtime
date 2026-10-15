@@ -36,6 +36,10 @@ Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P066 — Compile register code lazily at bounded function thresholds](P066-function-boundary-tiering.md)
 
+[P143 — Forward explicit Register thresholds through conformance](P143-register-threshold-conformance.md)
+
+[P144 — Report Register activation capacity high-water](P144-register-activation-capacity-diagnostics.md)
+
 Optional results to review (do not block the portable path):
 
 [P059 — Try conservative temporary-slot reuse without global SSA](P059-bounded-slot-reuse.md)

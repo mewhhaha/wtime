@@ -29,27 +29,37 @@ pub fn try_main(args: &[String]) -> bool {
     if args.first().map(String::as_str) != Some("--tier-state-driver") {
         return false;
     }
-    assert_eq!(
-        args.len(),
-        7,
-        "--tier-state-driver FILE CASE MODE PROFILE FUEL PC"
+    let entry = super::fuel_policy::FuelArgument::parse(args, 7).expect(
+        "--tier-state-driver FILE CASE MODE PROFILE FUEL PC [--register-entry-threshold N]",
     );
+    assert!(
+        !entry.explicit,
+        "state driver uses its positional fuel budget"
+    );
+    entry
+        .validate_mode(&args[3])
+        .expect("invalid Register entry setting");
     assert!(
         !cfg!(feature = "performance-counters"),
         "state observations require counters disabled"
     );
     assert_eq!(args[4], "all-phase3-core");
     let fuel: u64 = args[5].parse().expect("invalid fuel");
-    let engine = super::configured_engine(
-        Config {
-            features: FeatureSet::all_phase3_core(),
-            limits: ResourceLimits {
-                fuel: Some(fuel),
-                ..ResourceLimits::default()
-            },
+    let config = Config {
+        features: FeatureSet::all_phase3_core(),
+        limits: ResourceLimits {
+            fuel: Some(fuel),
+            ..ResourceLimits::default()
         },
-        &args[3],
-    );
+    };
+    #[cfg(all(feature = "register-executor", not(feature = "legacy-api")))]
+    let engine = if let Some(threshold) = entry.register_entry_threshold {
+        wtime_runtime::Engine::with_register_entry_threshold(config, threshold).unwrap()
+    } else {
+        super::configured_engine(config, &args[3])
+    };
+    #[cfg(not(all(feature = "register-executor", not(feature = "legacy-api"))))]
+    let engine = super::configured_engine(config, &args[3]);
     let path = std::path::Path::new(&args[1]);
     assert!(std::fs::metadata(path).unwrap().len() <= 1 << 20);
     let module = engine.compile(&std::fs::read(path).unwrap()).unwrap();
@@ -127,7 +137,7 @@ pub fn try_main(args: &[String]) -> bool {
     #[cfg(not(feature = "execution-reference"))]
     let cursor = "null";
     println!(
-        "{{\"schema_version\":1,\"diagnostic\":true,\"instrumented\":false,\"case\":{},\"mode\":{},\"resolved_policy\":{},\"fuel_budget\":{},\"outcome\":{},\"values\":{},\"trap\":{},\"memory_hex\":{},\"global\":{},\"table\":{},\"root\":{},\"graph\":{},\"collection\":{{\"live\":{},\"reclaimed\":{}}},\"cursor\":{}}}",
+        "{{\"schema_version\":1,\"diagnostic\":true,\"instrumented\":false,\"case\":{},\"mode\":{},\"resolved_policy\":{},\"fuel_budget\":{},\"outcome\":{},\"values\":{},\"trap\":{},\"memory_hex\":{},\"global\":{},\"table\":{},\"root\":{},\"graph\":{},\"collection\":{{\"live\":{},\"reclaimed\":{}}},\"cursor\":{}{}}}",
         super::quote(&args[2]),
         super::quote(&args[3]),
         super::quote(&format!("{:?}", engine.execution_policy())),
@@ -142,7 +152,8 @@ pub fn try_main(args: &[String]) -> bool {
         graph,
         collection.live,
         collection.reclaimed,
-        cursor
+        cursor,
+        entry.json_suffix()
     );
     true
 }

@@ -142,9 +142,9 @@ fn run(request: &Request, bytes: &[u8]) -> Result<String, String> {
         .collect::<Result<Vec<Func>, String>>()?;
     for (body, visit, phase) in schedule(request.schedule_threshold) {
         let args = black_box([Value::I32(request.input)]);
-        #[cfg(feature = "execution-reference")]
+        #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
         let dispatch_before = store.register_dispatches();
-        #[cfg(feature = "execution-reference")]
+        #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
         let fallback_before = store.register_fallback_frames();
         // No export lookup, oracle, snapshot, formatting or row storage is timed.
         let start = (!request.diagnostic).then(Instant::now);
@@ -156,7 +156,7 @@ fn run(request: &Request, bytes: &[u8]) -> Result<String, String> {
         if let Some(ns) = elapsed {
             write!(row, ",\"elapsed_ns\":{ns}").unwrap();
         }
-        #[cfg(feature = "execution-reference")]
+        #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
         if request.diagnostic {
             let dispatches = store
                 .register_dispatches()

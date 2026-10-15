@@ -43,6 +43,7 @@ SNAPSHOT = {
 }
 MODES = ("reference", "decoded")
 TIMEOUT_SECONDS = 45
+MAX_REGISTER_ENTRY_THRESHOLD = (1 << 64) - 1
 REFERENCE_BUILD = [
     "cargo", "build", "--locked", "--release", "--manifest-path",
     "tools/wtime-bench/Cargo.toml", "-j", "4", "--no-default-features",
@@ -194,11 +195,18 @@ def _protocol(binary: Path, runner: Callable[..., Any]) -> dict[str, Any]:
 
 
 def _case_run(binary: Path, case: dict[str, Any], mode: str,
-              runner: Callable[..., Any]) -> dict[str, Any]:
-    result = _run_json(binary, [
+              runner: Callable[..., Any],
+              register_entry_threshold: int | None = None) -> dict[str, Any]:
+    args = [
         "--typed-case", str(case["wasm"]), case["id"], case["input"], case["expected"],
         "first_call", "1", mode, "mvp",
-    ], runner)
+    ]
+    if register_entry_threshold is not None and mode == "register":
+        args.extend(["--register-entry-threshold", str(register_entry_threshold)])
+    result = _run_json(binary, args, runner)
+    _check_register_entry_threshold(
+        result, register_entry_threshold if mode == "register" else None, f"{case['id']} ({mode})"
+    )
     expected_fields = {
         "schema_version": 2, "case": case["id"], "stage": "first_call",
         "input": case["input"], "expected": case["expected"], "result": case["expected"],
@@ -211,7 +219,20 @@ def _case_run(binary: Path, case: dict[str, Any], mode: str,
     if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed <= 0:
         raise TierCheckError(f"{case['id']} ({mode}): invalid execution observation")
     return {"mode": mode, "stage": "first_call", "result": result["result"],
+            "register_entry_threshold": register_entry_threshold if mode == "register" else None,
             "ns_per_operation": elapsed, "binary_sha256": None}
+
+
+def _check_register_entry_threshold(value: dict[str, Any], requested: int | None,
+                                    context: str) -> None:
+    observed = value.get("register_entry_threshold")
+    if requested is None:
+        if observed is not None:
+            raise TierCheckError(f"{context}: unexpected register entry threshold {observed!r}")
+    elif type(observed) is not int or observed != requested:
+        raise TierCheckError(
+            f"{context}: register entry threshold {observed!r}, expected {requested}"
+        )
 
 
 def _snapshot_run(binary: Path, runner: Callable[..., Any]) -> dict[str, Any]:
@@ -299,10 +320,13 @@ def _build_reference(binary: Path, builder: Callable[..., Any], tier: str = "ref
 
 
 def _conformance_run(binary: Path, suite: str, mode: str, report_path: Path,
-                     runner: Callable[..., Any]) -> dict[str, Any]:
+                     runner: Callable[..., Any],
+                     register_entry_threshold: int | None = None) -> dict[str, Any]:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     command = [str(binary), "run", "--mode", mode, "--profile", "all-phase3-core",
                "--suite", suite, "--filter", "all", "--report", str(report_path)]
+    if register_entry_threshold is not None and mode == "register":
+        command.extend(["--register-entry-threshold", str(register_entry_threshold)])
     try:
         completed = runner(command, cwd=ROOT, text=True, capture_output=True,
                            timeout=1800, check=False)
@@ -320,6 +344,10 @@ def _conformance_run(binary: Path, suite: str, mode: str, report_path: Path,
         raise TierCheckError(f"{suite} conformance ({mode}) failed: {detail[-1000:]}")
     if report.get("execution_mode") != mode or report.get("instrumented") is not True:
         raise TierCheckError(f"{suite} conformance report did not identify instrumented mode {mode}")
+    _check_register_entry_threshold(
+        report, register_entry_threshold if mode == "register" else None,
+        f"{suite} conformance ({mode})",
+    )
     for field in ("selected", "executed", "failed", "skipped", "unsupported"):
         if type(report.get(field)) is not int:
             raise TierCheckError(f"{suite} conformance report has malformed {field}")
@@ -333,7 +361,9 @@ def _conformance_run(binary: Path, suite: str, mode: str, report_path: Path,
     if not isinstance(source_hash, str):
         raise TierCheckError(f"{suite} conformance ({mode}) report has no source_hash")
     corpus_sources = _resolve_corpus_sources(source_hash)
-    return {"suite": suite, "mode": mode, "report": report,
+    return {"suite": suite, "mode": mode,
+            "register_entry_threshold": register_entry_threshold if mode == "register" else None,
+            "report": report,
             "report_sha256": _sha(report_path), "command": command,
             "corpus_sources": corpus_sources}
 
@@ -408,10 +438,17 @@ def _fixture_identities(cases: list[dict[str, Any]],
 
 
 def _state_run(binary: Path, case: str, mode: str, expected: dict[str, Any],
-               runner: Callable[..., Any]) -> dict[str, Any]:
+               runner: Callable[..., Any],
+               register_entry_threshold: int | None = None) -> dict[str, Any]:
     wasm = STATE_WASM_DIR / f"{case}.wasm"
-    value = _run_json(binary, ["--tier-state-driver", str(wasm), case, mode,
-                               "all-phase3-core", str(STATE_FUEL), "none"], runner)
+    args = ["--tier-state-driver", str(wasm), case, mode,
+            "all-phase3-core", str(STATE_FUEL), "none"]
+    if register_entry_threshold is not None and mode == "register":
+        args.extend(["--register-entry-threshold", str(register_entry_threshold)])
+    value = _run_json(binary, args, runner)
+    _check_register_entry_threshold(
+        value, register_entry_threshold if mode == "register" else None, f"{case} ({mode})"
+    )
     want_outcome = expected["expected_outcome"].split(":", 1)
     if want_outcome[0] == "returned":
         outcome, trap, values = "returned", None, [want_outcome[1]]
@@ -462,7 +499,9 @@ def _state_run(binary: Path, case: str, mode: str, expected: dict[str, Any],
         raise TierCheckError(f"{case} ({mode}): normalized graph collection state differs from manifest")
     if value.get("cursor") is not None:
         raise TierCheckError(f"{case} ({mode}): unexpected cursor snapshot for PC=none")
-    return {"case": case, "mode": mode, "outcome": outcome, "trap": trap,
+    return {"case": case, "mode": mode,
+            "register_entry_threshold": register_entry_threshold if mode == "register" else None,
+            "outcome": outcome, "trap": trap,
             "values": values, "memory_sha256": hashlib.sha256(memory).hexdigest(),
             "memory_byte_length": len(memory), "memory_prefix_u32": int.from_bytes(memory[:4], "little"),
             "remaining_memory_zero": not any(memory[4:]), "global": value["global"],
@@ -471,10 +510,18 @@ def _state_run(binary: Path, case: str, mode: str, expected: dict[str, Any],
 
 
 def _state_fuel_probe(binary: Path, case: str, mode: str, fuel: int,
-                      runner: Callable[..., Any]) -> dict[str, Any]:
+                      runner: Callable[..., Any],
+                      register_entry_threshold: int | None = None) -> dict[str, Any]:
     wasm = STATE_WASM_DIR / f"{case}.wasm"
-    value = _run_json(binary, ["--tier-state-driver", str(wasm), case, mode,
-                               "all-phase3-core", str(fuel), "none"], runner)
+    args = ["--tier-state-driver", str(wasm), case, mode,
+            "all-phase3-core", str(fuel), "none"]
+    if register_entry_threshold is not None and mode == "register":
+        args.extend(["--register-entry-threshold", str(register_entry_threshold)])
+    value = _run_json(binary, args, runner)
+    _check_register_entry_threshold(
+        value, register_entry_threshold if mode == "register" else None,
+        f"{case} ({mode}, fuel={fuel})",
+    )
     policy = {"reference": "Reference", "decoded": "Decoded", "portable": "Portable",
               "compact": "Compact", "register": "Register"}.get(mode)
     outcome = value.get("outcome")
@@ -493,7 +540,9 @@ def _state_fuel_probe(binary: Path, case: str, mode: str, fuel: int,
         raise TierCheckError(f"{case} ({mode}, fuel={fuel}): malformed memory image") from exc
     if value.get("cursor") is not None:
         raise TierCheckError(f"{case} ({mode}, fuel={fuel}): unexpected cursor for PC=none")
-    return {"case": case, "mode": mode, "fuel": fuel, "outcome": outcome,
+    return {"case": case, "mode": mode,
+            "register_entry_threshold": register_entry_threshold if mode == "register" else None,
+            "fuel": fuel, "outcome": outcome,
             "trap": value.get("trap"), "values": value.get("values"),
             "memory_prefix_hex": memory[:8].hex(),
             "memory_sha256": hashlib.sha256(memory).hexdigest(),
@@ -525,11 +574,18 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
                conformance_binary: Path | None = None,
                diagnostic_binary: Path | None = None,
                runner: Callable[..., Any] = subprocess.run,
-               builder: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+               builder: Callable[..., Any] = subprocess.run,
+               register_entry_threshold: int | None = None) -> dict[str, Any]:
     if not tier or tier == "reference":
         raise TierCheckError("--tier must name a candidate mode; reference is the comparison baseline")
     if selection != "integration":
         raise TierCheckError("only the declared integration selection is supported")
+    if register_entry_threshold is not None:
+        if (type(register_entry_threshold) is not int
+                or not 1 <= register_entry_threshold <= MAX_REGISTER_ENTRY_THRESHOLD):
+            raise TierCheckError("register entry threshold must be a positive u64 integer")
+        if tier != "register":
+            raise TierCheckError("register entry threshold requires --tier register")
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise TierCheckError(f"refusing to overwrite existing output directory: {output}")
@@ -586,7 +642,8 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
                                 "fixture": case["fixture"], "runs": {}, "equal": False}
         for mode in ("reference", tier):
             try:
-                mode_result = _case_run(binary, case, mode, runner)
+                threshold = register_entry_threshold if mode == tier and tier == "register" else None
+                mode_result = _case_run(binary, case, mode, runner, threshold)
                 mode_result["binary_sha256"] = binary_before
                 item["runs"][mode] = mode_result
             except TierCheckError as exc:
@@ -604,6 +661,7 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
                     item = _conformance_run(
                         conformance_binary, suite, mode,
                         output / "conformance" / f"{suite}-{mode}.json", runner,
+                        register_entry_threshold if mode == tier and tier == "register" else None,
                     )
                     suite_runs.append(item)
                     conformance_runs.append(item)
@@ -626,15 +684,16 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
             case_runs = []
             for mode in ("reference", tier):
                 try:
+                    threshold = register_entry_threshold if mode == tier and tier == "register" else None
                     item = _state_run(binary, case, mode,
-                                      state_expectations["cases"][case], runner)
+                                      state_expectations["cases"][case], runner, threshold)
                     case_runs.append(item)
                     state_runs.append(item)
                 except TierCheckError as exc:
                     setup_errors.append(str(exc))
             if len(case_runs) == 2:
                 comparable = [{key: value for key, value in result.items()
-                               if key not in {"mode", "binary_sha256"}}
+                               if key not in {"mode", "binary_sha256", "register_entry_threshold"}}
                               for result in case_runs]
                 if comparable[0] != comparable[1]:
                     setup_errors.append(f"{case}: reference and {tier} full-state observations differ")
@@ -645,7 +704,8 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
                 pair = []
                 for mode in ("reference", tier):
                     try:
-                        result = _state_fuel_probe(binary, case, mode, fuel, runner)
+                        threshold = register_entry_threshold if mode == tier and tier == "register" else None
+                        result = _state_fuel_probe(binary, case, mode, fuel, runner, threshold)
                         pair.append(result)
                         case_observations[mode].append(result)
                         state_fuel_runs.append(result)
@@ -766,6 +826,10 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
         "source_stable": source_before == source_after,
         "selection": selection,
         "requested_tier": tier,
+        "register_strategy": ("disabled" if tier != "register" else
+                              "adaptive" if register_entry_threshold is not None else "eager"),
+        "register_entry_threshold": register_entry_threshold,
+        "timing_evidence": False,
         "build": build_info,
         "diagnostic_instrumentation": {
             "enabled": len(dispatch_diagnostics) == len(cases),
@@ -824,10 +888,19 @@ def check_tier(*, tier: str = "decoded", selection: str = "integration",
     return report
 
 
+class _RegisterThresholdAction(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            raise argparse.ArgumentError(self, "may only be specified once")
+        setattr(namespace, self.dest, value)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tier", default="decoded", help="requested candidate execution mode")
     parser.add_argument("--selection", default="integration", choices=["integration"])
+    parser.add_argument("--register-entry-threshold", type=int, action=_RegisterThresholdAction,
+                        help="use the optional adaptive Register policy at this positive u64 threshold")
     parser.add_argument("--output", type=Path, required=True, help="directory for report.json")
     parser.add_argument("--binary", type=Path,
                         help="use an existing mode-aware benchmark executable (default: build with execution-reference)")
@@ -840,7 +913,8 @@ def main(argv: list[str] | None = None) -> int:
         report = check_tier(tier=args.tier, selection=args.selection,
                             output=args.output, binary=args.binary,
                             conformance_binary=args.conformance_binary,
-                            diagnostic_binary=args.diagnostic_binary)
+                            diagnostic_binary=args.diagnostic_binary,
+                            register_entry_threshold=args.register_entry_threshold)
     except TierCheckError as exc:
         print(f"tier_check: error: {exc}", file=sys.stderr)
         return 2

@@ -4,6 +4,7 @@ use crate::adapter::PreparationCounts;
 #[derive(Default, Debug)]
 pub struct Report {
     pub execution_mode: String,
+    pub register_entry_threshold: Option<u64>,
     pub selected: usize,
     pub executed: usize,
     pub failed: usize,
@@ -161,13 +162,16 @@ impl Report {
             p.peak_artifact_retained_budget_bytes
         )).unwrap_or_else(|| "null".into());
         format!(
-            "{{\"profile\":{},\"execution_mode\":{},\"instrumented\":{},\"suite\":{},\"source_hash\":{},\"engine_revision\":{},\"text_tool\":\"wast 261.0.0\",\"text_tool_errors\":{},\"resource_limits\":{{\"fuel_per_invoke\":10000000,\"max_call_depth\":512,\"max_memory_pages\":18446744073709551615,\"max_memory_bytes\":67108864,\"worker_watchdog_ms\":30000}},\"binary_sha256\":{},\"implementation_sources\":{},\"executed_opcodes\":{},\"compatibility\":[{}],\"compatibility_assertions\":{},\"selected\":{},\"executed\":{},\"failed\":{},\"skipped\":{},\"unsupported\":{},\"replay\":{},\"errors\":[{}],\"execution_counts\":{},\"preparation_summary\":{},\"worker_stores_observed\":{}}}\n",
+            "{{\"profile\":{},\"execution_mode\":{},\"register_entry_threshold\":{},\"register_strategy\":{},\"instrumented\":{},\"suite\":{},\"source_hash\":{},\"engine_revision\":{},\"text_tool\":\"wast 261.0.0\",\"text_tool_errors\":{},\"resource_limits\":{{\"fuel_per_invoke\":10000000,\"max_call_depth\":512,\"max_memory_pages\":18446744073709551615,\"max_memory_bytes\":67108864,\"worker_watchdog_ms\":30000}},\"binary_sha256\":{},\"implementation_sources\":{},\"executed_opcodes\":{},\"compatibility\":[{}],\"compatibility_assertions\":{},\"selected\":{},\"executed\":{},\"failed\":{},\"skipped\":{},\"unsupported\":{},\"replay\":{},\"errors\":[{}],\"execution_counts\":{},\"preparation_summary\":{},\"worker_stores_observed\":{}}}\n",
             quote(profile),
             quote(if self.execution_mode.is_empty() {
                 "decoded"
             } else {
                 &self.execution_mode
             }),
+            self.register_entry_threshold.map(|value| value.to_string()).unwrap_or_else(|| "null".into()),
+            quote(if self.register_entry_threshold.is_some() { "adaptive" }
+                  else if self.execution_mode == "register" { "eager" } else { "disabled" }),
             cfg!(any(feature = "opcode-coverage", feature = "performance-counters")),
             quote(suite),
             quote(hash),

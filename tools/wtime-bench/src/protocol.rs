@@ -565,11 +565,9 @@ fn typed_main(args: &[String]) -> bool {
     }
     let allowed = command == Some("--typed-allowed-case");
     let memory = command == Some("--simd-memory-case");
-    assert_eq!(
-        args.len(),
-        9,
-        "--typed-case FILE CASE ARGS EXPECTED STAGE BATCH MODE PROFILE"
-    );
+    let fuel = fuel_policy::FuelArgument::parse(args, 9)
+        .expect("--typed-case FILE CASE ARGS EXPECTED STAGE BATCH MODE PROFILE [fuel/entry options]");
+    fuel.validate_mode(&args[7]).expect("invalid register entry setting");
     let bytes = std::fs::read(&args[1]).unwrap();
     let case = &args[2];
     let input = &args[3];
@@ -597,7 +595,7 @@ fn typed_main(args: &[String]) -> bool {
         ]
         .contains(&stage.as_str())
     );
-    let e = typed_engine(mode, profile);
+    let e = typed_engine_with_fuel(mode, profile, fuel);
     let module = e.compile(&bytes).unwrap();
     let linker = Linker::new(&e);
     let mut store = Store::new(&e);
@@ -618,7 +616,7 @@ fn typed_main(args: &[String]) -> bool {
     let mut batch = 1;
     let (ns, result) = match stage.as_str() {
         "prepare" => {
-            let e = typed_engine(mode, profile);
+            let e = typed_engine_with_fuel(mode, profile, fuel);
             let start = Instant::now();
             let m = e.compile(black_box(&bytes)).unwrap();
             let ns = start.elapsed().as_nanos() as f64;
@@ -638,7 +636,7 @@ fn typed_main(args: &[String]) -> bool {
             (ns, format_values(&store, &values))
         }
         "load_and_call" => {
-            let e = typed_engine(mode, profile);
+            let e = typed_engine_with_fuel(mode, profile, fuel);
             let start = Instant::now();
             let m = e.compile(&bytes).unwrap();
             let mut s = Store::new(&e);
@@ -692,7 +690,7 @@ fn typed_main(args: &[String]) -> bool {
     };
     assert!(accepts(&result), "typed oracle mismatch: {result}");
     println!(
-        "{{\"schema_version\":2,\"case\":{},\"stage\":{},\"input\":{},\"expected\":{},\"result\":{},\"batch\":{},\"ns_per_operation\":{:.3},\"mode\":{},\"profile\":{}{}}}",
+        "{{\"schema_version\":2,\"case\":{},\"stage\":{},\"input\":{},\"expected\":{},\"result\":{},\"batch\":{},\"ns_per_operation\":{:.3},\"mode\":{},\"profile\":{}{}{}}}",
         quote(case),
         quote(stage),
         quote(input),
@@ -702,7 +700,8 @@ fn typed_main(args: &[String]) -> bool {
         ns.max(1.0),
         quote(mode),
         quote(profile),
-        memory_fields
+        memory_fields,
+        fuel.json_suffix()
     );
     true
 }

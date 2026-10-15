@@ -106,19 +106,38 @@ impl Adapter {
         Self::with_policy(features, ExecutionPolicy::Decoded)
     }
     pub fn with_policy(features: FeatureSet, policy: ExecutionPolicy) -> Result<Self> {
-        let engine = Engine::with_execution_policy(
-            Config {
-                features,
-                limits: ResourceLimits {
-                    fuel: Some(10_000_000),
-                    max_call_depth: 512,
-                    max_memory_pages: u64::MAX,
-                    max_memory_bytes: 64 * 1024 * 1024,
-                    ..ResourceLimits::default()
-                },
+        Self::with_policy_and_threshold(features, policy, None)
+    }
+    pub fn with_policy_and_threshold(
+        features: FeatureSet,
+        policy: ExecutionPolicy,
+        threshold: Option<u64>,
+    ) -> Result<Self> {
+        if threshold.is_some_and(|value| value == 0 || policy != ExecutionPolicy::Register) {
+            return Err(Error::new(
+                ErrorKind::Host,
+                "a positive entry threshold requires Register execution",
+            ));
+        }
+        let config = Config {
+            features,
+            limits: ResourceLimits {
+                fuel: Some(10_000_000),
+                max_call_depth: 512,
+                max_memory_pages: u64::MAX,
+                max_memory_bytes: 64 * 1024 * 1024,
+                ..ResourceLimits::default()
             },
-            policy,
-        )?;
+        };
+        let engine = match threshold {
+            #[cfg(feature = "register-executor")]
+            Some(value) => Engine::with_register_entry_threshold(config, value)?,
+            #[cfg(not(feature = "register-executor"))]
+            Some(_) => {
+                return Err(Error::new(ErrorKind::Host, "Register executor is unavailable"));
+            }
+            None => Engine::with_execution_policy(config, policy)?,
+        };
         Self::from_engine(engine, features)
     }
     fn from_engine(engine: Engine, features: FeatureSet) -> Result<Self> {

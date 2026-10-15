@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=103, todo=39, in_progress=0, blocked=0, deferred=0 (142 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=104, todo=40, in_progress=0, blocked=0, deferred=0 (144 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -14,7 +14,7 @@ P001 freezes the unrebuildable historical baseline. Then P002/P003/P004/P005 pro
 | Structural wins | P023–P035 plus P017 | P035: 10x compute aspiration and current profiles |
 | Compact execution | P036–P046 | P046: correctness/cold/build selection |
 | Fusion and specialization | P047–P056 | P056: bounded accepted fusion portfolio |
-| Register execution | P057–P067, P130–P133 | P067: adaptive crossover and portable aspiration |
+| Register execution | P057–P067, P130–P133, P143–P144 | P067: adaptive crossover and portable aspiration |
 | GC/SIMD/shared/continuations | P068–P080 | P080: family-specific measured decisions |
 | Portable/offline research | P081–P093 | Optional independent experiment decisions |
 | Native research | P094–P107 | Conditional go/no_go; P107 supported-target gate |
@@ -145,6 +145,8 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P140 — Freeze and attest the adaptive Register entry threshold](05-register-executor/P140-register-entry-threshold.md) | foundation / portable | P127, P139 |
 | [P141 — Add individual-entry Register timing and diagnostics](05-register-executor/P141-register-entry-sequence-driver.md) | foundation / portable | P138, P140 |
 | [P142 — Collect and analyze source-bound Register cold and churn sequences](05-register-executor/P142-register-cold-churn-collection.md) | foundation / portable | P139, P141 |
+| [P143 — Forward explicit Register thresholds through conformance](05-register-executor/P143-register-threshold-conformance.md) | foundation / portable | P065, P066, P138 |
+| [P144 — Report Register activation capacity high-water](05-register-executor/P144-register-activation-capacity-diagnostics.md) | foundation / portable | P065, P066, P138, P141 |
 
 ### 06-memory-gc-simd-and-continuations
 

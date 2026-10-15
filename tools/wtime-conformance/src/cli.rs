@@ -1,6 +1,9 @@
 use crate::{adapter::Adapter, corpus, report::Report, script};
 use std::{path::Path, process::Command};
 use wtime_types::FeatureSet;
+#[cfg(test)]
+#[path = "p143_tests.rs"]
+mod p143_tests;
 pub fn encode(input: &Path, output: &Path) -> Result<(), String> {
     let src = std::fs::read_to_string(input).map_err(|e| e.to_string())?;
     let b = wast::parser::ParseBuffer::new(&src).map_err(|e| e.to_string())?;
@@ -16,6 +19,22 @@ fn execution_policy(mode: &str) -> Result<wtime_runtime::ExecutionPolicy, String
         "register" => Ok(wtime_runtime::ExecutionPolicy::Register),
         _ => Err(format!("unknown execution mode {mode}")),
     }
+}
+
+fn entry_threshold_option(current: &mut Option<u64>, value: &str) -> Result<(), String> {
+    if current.is_some() {
+        return Err("duplicate --register-entry-threshold".into());
+    }
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("register entry threshold must be a positive u64".into());
+    }
+    let threshold = value.parse::<u64>()
+        .map_err(|_| "register entry threshold must be a positive u64")?;
+    if threshold == 0 {
+        return Err("register entry threshold must be positive".into());
+    }
+    *current = Some(threshold);
+    Ok(())
 }
 
 fn replay_feature_args(
@@ -64,6 +83,7 @@ pub fn run() -> Result<(), String> {
     let mut suite = None;
     let mut filter = None;
     let mut report_path = None;
+    let mut register_entry_threshold = None;
     for pair in args[1..].chunks(2) {
         if pair.len() != 2 {
             return Err("missing option value".into());
@@ -74,10 +94,14 @@ pub fn run() -> Result<(), String> {
             "--suite" => suite = Some(pair[1].as_str()),
             "--filter" => filter = Some(pair[1].as_str()),
             "--report" => report_path = Some(pair[1].as_str()),
+            "--register-entry-threshold" => entry_threshold_option(&mut register_entry_threshold, &pair[1])?,
             _ => return Err(format!("unknown option {}", pair[0])),
         }
     }
     let policy = execution_policy(mode)?;
+    if register_entry_threshold.is_some() && policy != wtime_runtime::ExecutionPolicy::Register {
+        return Err("--register-entry-threshold requires --mode register".into());
+    }
     let profile = profile.ok_or("missing profile")?;
     let features = match profile {
         "mvp" => FeatureSet::mvp(),
@@ -89,7 +113,8 @@ pub fn run() -> Result<(), String> {
     let report_path = report_path.ok_or("missing report")?;
     let mut report = Report::default();
     report.execution_mode = mode.to_owned();
-    Adapter::with_policy(features, policy).map_err(|e| e.to_string())?;
+    report.register_entry_threshold = register_entry_threshold;
+    Adapter::with_policy_and_threshold(features, policy, register_entry_threshold).map_err(|e| e.to_string())?;
     let proc_exe = std::path::PathBuf::from(format!("/proc/{}/exe", std::process::id()));
     report.binary_sha256 = corpus::hash(&if proc_exe.exists() {
         proc_exe
@@ -117,7 +142,7 @@ pub fn run() -> Result<(), String> {
                     }
                 }
                 let mut adapter =
-                    Adapter::with_policy(effective_features, policy).map_err(|e| e.to_string())?;
+                    Adapter::with_policy_and_threshold(effective_features, policy, register_entry_threshold).map_err(|e| e.to_string())?;
                 adapter.legacy_syntax = historical;
                 let error_start = report.errors.len();
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
