@@ -18,6 +18,7 @@ LIMITATIONS = [
     "Native AArch64 release execution for T166 and T169 remains unrun; this report does not verify the original release on that target.",
     "Only the decoded tier is the default. Compact and Register remain experimental opt-ins and carry no default speed claim.",
     "Historical release proof remains history; this report is a separate current-source appendix.",
+    "The specialist thread portfolio used a two-CPU mask. Four requested workers were quota-clamped to two effective workers; no four-worker scaling claim is made.",
 ]
 
 
@@ -221,6 +222,15 @@ def _markdown(report: dict) -> str:
         build = read_json(verify_normal(reference))
         if all(key in build for key in metrics):
             lines.append(f"| {name} | {build['clean_seconds']:.3f} | {build['leaf_seconds']:.3f} | {build['runtime_leaf_seconds']:.3f} | {build['stripped_bytes']} | {build['clean_peak_rss_kib']} |")
+    footprints = read_json(verify_normal(report['final_gates']['footprints']))
+    lines += ['', 'Compile-only module counters below are instrumented diagnostics with zero guest invocations. The columns overlap; they are not additive or a complete heap census. An unavailable adaptive cache is reported explicitly.', '',
+              '| Fixture | Mode | Wasm bytes | Lowered control bytes | Function-plan bytes | Compact retained bytes | Adaptive cache state |',
+              '| --- | --- | ---: | ---: | ---: | ---: | --- |']
+    for row in footprints.get('records', []):
+        value = row['observation']
+        compact = value.get('compact_preparation_counts')
+        retained = compact['retained_bytes'] if compact is not None else 'not requested'
+        lines.append(f"| {Path(row['fixture']['path']).stem} | {row['mode']} | {value['wasm_bytes']} | {value['lowered_control_bytes']} | {value['function_plan_bytes']} | {retained} | {value['register_cache_state']} |")
     lines += ['', '## Fixed warm examples', '',
               'Candidate/baseline ratios below 1 favor the candidate. Each row preserves its own run and 95% interval. These examples do not summarize other workloads or establish a universal tier ranking. All original products remain in the linked statistics.', '',
               '| Comparison | Workload | Run | Baseline (us) | Candidate (us) | Ratio | 95% interval |',
@@ -289,6 +299,19 @@ def finalize(root: Path, output_dir: Path) -> dict:
         "properties": {"schema": {"const": "wtime-p112-release-report-v1"}, "task": {"const": "P112"},
                        "status": {"const": "passed"}, "timing_evidence": {"const": False}},
         "additionalProperties": True})
+    historical = root / 'docs/architecture/release-manifest.json'
+    write_new(output_dir / 'performance-release-manifest.json', {
+        'schema': 'wtime-performance-release-manifest-v1', 'task': 'P112',
+        'status': 'passed', 'timing_evidence': False,
+        'current_core_sources': sources, 'portfolio': portfolio,
+        'prerequisite_proofs': {task: record['proof'] for task, record in milestones.items()},
+        'performance_report': _ref(output_dir / 'report.json'),
+        'historical_release_manifest': _ref(historical) if historical.is_file() else None,
+        'original_release_reverified': False,
+        'native_aarch64': {'status': 'unrun', 'original_tasks': ['T166', 'T169']},
+        'default_external_dependencies': 0, 'default_unsafe': False,
+        'native_enabled': False, 'aot_enabled': False,
+        'limitations': LIMITATIONS})
     return report
 
 

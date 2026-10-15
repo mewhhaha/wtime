@@ -61,6 +61,14 @@ edits must not retime unchanged workloads. Reuse only source-current immutable
 receipts; preparation aliases share raw pairs and uncertainty, never extra
 independent samples. Development/smoke or synthetic evidence cannot promote.
 
+Keep the entire verification contract unchanged while its `run` or `close`
+operation is active, including declarations for later analysis phases. Draft
+contract changes separately and apply them after the operation finishes. If
+an outer contract-file guard fails after a collector succeeds, preserve the
+failed attempt and its raw reports. Reuse those reports only through an explicit
+source-current validation step that records the original failure; do not retime
+unchanged workloads or rewrite the failed receipt as a pass.
+
 The default core must remain safe Rust with zero external dependencies.
 Experimental tiers stay disabled by default and must preserve Wasm semantics,
 resource limits, source-level fuel, and cancellation contracts.

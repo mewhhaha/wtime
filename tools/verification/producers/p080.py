@@ -77,7 +77,7 @@ def analyze(verify_dir,measure_dir,output):
     reports={family:row['report'] for family,row in collection['comparisons'].items()}
     reports.update(collection['previous_family_reports']['reports'])
     need(set(reports)=={'gc-exceptions','simd','threads','continuations'},'specialist family portfolio incomplete')
-    statistics={};counts={};wait_samples=[]
+    statistics={};counts={};wait_samples=[];worker_counts={}
     output.parent.mkdir(parents=True,exist_ok=True)
     for family,reference in sorted(reports.items()):
         path=verify_normal(reference)
@@ -99,10 +99,14 @@ def analyze(verify_dir,measure_dir,output):
         counts[family]={'workloads':len(expected),'runs':2,
                         'pairs':sum(len(rows) for run in runs for rows in run['groups'].values())}
         if family=='threads':
+            import thread_compare
             # Retain the driver's individual distributions. A grouped duration
             # is not used to invent individual wait or collection percentiles.
             for run in raw['runs']:
                 for pair in run['pairs']:
+                    observed=thread_compare.worker_identities(pair['candidate'])
+                    if observed:
+                        worker_counts.setdefault(pair['workload'],set()).update(observed)
                     if pair['workload']=='threads_wait_notify_latency':
                         wait_samples.append({'run':run['run_id'],'pair_id':pair['pair_id'],
                             'baseline':pair['baseline'],'candidate':pair['candidate']})
@@ -123,6 +127,8 @@ def analyze(verify_dir,measure_dir,output):
         'measurements':normal(collection_path),'family_reports':reports,'statistics':statistics,'counts':counts,
         'collector_forks':collector_forks,'collection_source_root':str(p080_workflow.PRIVATE_ROOT),
         'individual_wait_observations':normal(wait_path),'comparators':comparators,
+        'thread_worker_identities':{name:[{'effective_workers':effective,'worker_quota':quota}
+            for effective,quota in sorted(values)] for name,values in sorted(worker_counts.items())},
         'retained_specialist_runtime_optimizations':[],'optimized_specialist_paths_requested':0,
         'experiments':restored,'resource_contract_history':resource_history,'current_builds':builds,
         'limitations':['Every specialist trial was restored after rejection or inconclusive promotion evidence; the combined decoded runtime has no newly retained specialist kernel.',
@@ -130,6 +136,7 @@ def analyze(verify_dir,measure_dir,output):
             'Two lifecycle collector modules run from an explicitly frozen private source tree; their exact sources are retained separately from the original P067 collector. All runtime and other execution inputs match the checkout.',
             'Unsupported comparator labels describe the pinned harness interface; they do not claim engine-wide proposal support.',
             'Wait tails come from individual driver observations; no collection pause or tail claim is inferred from grouped averages.',
+            'Thread rows retain requested-worker labels. The predeclared two-CPU worker mask yields a quota of two; rows requesting four workers therefore use two effective workers and do not establish four-worker scaling.',
             'Measurements share a cloud host with the P067 collection; CPU affinity does not establish physical-core isolation.',
             'Native AArch64 execution remains unrun.']})
 

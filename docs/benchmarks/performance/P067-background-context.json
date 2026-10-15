@@ -1,0 +1,33 @@
+{
+  "schema": "wtime-background-work-context-v1",
+  "task": "P067",
+  "status": "recorded",
+  "source": "Luna setup chore report",
+  "affinity": "unpinned",
+  "reported_shell_wall_seconds": 0.237,
+  "precise_utc_interval": "not captured",
+  "commands": [
+    "cached smoke Cargo test/fmt/clippy",
+    "wasm32 smoke build",
+    "wasm-tools parse/validate/print"
+  ],
+  "runtime_source_changed": false,
+  "scope": "Independent environment smoke project /workspace/.setup/smoke. This records background activity, not wtime conformance or timing evidence.",
+  "additional_background_work": [
+    {
+      "source": "Luna optional-disposition synthetic tests",
+      "reported_cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "reported_test_wall_seconds": 0.058,
+      "tests": 3,
+      "guest_invocations": 0,
+      "precise_utc_interval": "not captured",
+      "run_packet": "target/recovery/final-optional-disposition-tests-0001/attempt-0003"
+    }
+  ],
+  "untimed_work_affinity": "Mixed: retained verification/archive helpers used CPU4; some status/inspection and short Luna chore processes were unpinned or used CPUs0-3. This is not an exhaustive overlap trace."
+}
