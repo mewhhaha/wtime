@@ -1,0 +1,125 @@
+{
+  "added_candidate_inputs": [
+    "crates/wtime-runtime/src/execution/roots.rs",
+    "crates/wtime-runtime/tests/performance/p069.rs",
+    "crates/wtime-validate/src/root_maps.rs"
+  ],
+  "added_core_source_leaves": [
+    "crates/wtime-runtime/src/execution/roots.rs",
+    "crates/wtime-validate/src/root_maps.rs"
+  ],
+  "added_noncore_inputs": [
+    "crates/wtime-runtime/tests/performance/p069.rs"
+  ],
+  "archive_source_overlap_count": 188,
+  "baseline_input_count": 739,
+  "baseline_report": {
+    "bytes": 333723,
+    "path": "/workspace/wtime/target/verification/runs/P066/verify/attempt-0001/default-build.json",
+    "sha256": "0817507c1b45f7665d043daded86b03d423bec5b5d7491bd7a5516d0bb53ec7b"
+  },
+  "candidate_input_count": 742,
+  "candidate_report": {
+    "bytes": 334789,
+    "path": "/workspace/wtime/target/verification/runs/P069/verify/attempt-0001/build.json",
+    "sha256": "0fe8f73e4ccb524f1168eca0b9187221a5f646ac7c682fc04cd783b9e7bff074"
+  },
+  "causal_build_speed_claim": false,
+  "changed_common_inputs": [
+    "crates/wtime-runtime/src/execution.rs",
+    "crates/wtime-runtime/src/lib.rs",
+    "crates/wtime-validate/src/lib.rs"
+  ],
+  "common_input_count": 739,
+  "comparable_settings": [
+    "schema_version",
+    "budgets",
+    "build_command",
+    "cargo_version",
+    "compile_environment",
+    "cpu",
+    "default_dependency_closure_pass",
+    "default_dependency_violations",
+    "feature_name",
+    "feature_package",
+    "features",
+    "jobs",
+    "lock_sha256",
+    "logical_cpus",
+    "mode",
+    "resolved_graph",
+    "rustc",
+    "target_initially_empty"
+  ],
+  "comparison_kind": "unpaired_build_budget_observations",
+  "measurement_note": "Baseline and candidate build-budget measurements are not paired. Absolute values, deltas, ratios, and relative changes describe recorded observations and do not establish a causal build-speed effect.",
+  "observations": {
+    "clean_peak_rss_kib": {
+      "absolute_delta": 2180,
+      "baseline_absolute": 218772,
+      "candidate_absolute": 220952,
+      "candidate_over_baseline": 1.009964712120381,
+      "relative_change_percent": 0.9964712120381035
+    },
+    "clean_seconds": {
+      "absolute_delta": 0.2000197349989321,
+      "baseline_absolute": 2.5773608059971593,
+      "candidate_absolute": 2.7773805409960914,
+      "candidate_over_baseline": 1.0776064160413683,
+      "relative_change_percent": 7.760641604136839
+    },
+    "leaf_seconds": {
+      "absolute_delta": 0.005499425999005325,
+      "baseline_absolute": 0.1400103810010478,
+      "candidate_absolute": 0.14550980700005312,
+      "candidate_over_baseline": 1.0392787017625797,
+      "relative_change_percent": 3.9278701762579797
+    },
+    "release_seconds": {
+      "absolute_delta": 0.3572901490115328,
+      "baseline_absolute": 4.958812940996722,
+      "candidate_absolute": 5.316103090008255,
+      "candidate_over_baseline": 1.0720515480746724,
+      "relative_change_percent": 7.205154807467236
+    },
+    "runtime_leaf_seconds": {
+      "absolute_delta": 0.07095099799335003,
+      "baseline_absolute": 0.36163641601160634,
+      "candidate_absolute": 0.43258741400495637,
+      "candidate_over_baseline": 1.1961942847898175,
+      "relative_change_percent": 19.619428478981753
+    },
+    "stripped_bytes": {
+      "absolute_delta": 10832,
+      "baseline_absolute": 1000960,
+      "candidate_absolute": 1011792,
+      "candidate_over_baseline": 1.010821611253197,
+      "relative_change_percent": 1.082161125319693
+    },
+    "unchanged_peak_rss_kib": {
+      "absolute_delta": 24,
+      "baseline_absolute": 25240,
+      "candidate_absolute": 25264,
+      "candidate_over_baseline": 1.0009508716323297,
+      "relative_change_percent": 0.09508716323296355
+    },
+    "unchanged_seconds": {
+      "absolute_delta": -0.0010424060019431636,
+      "baseline_absolute": 0.04050273200846277,
+      "candidate_absolute": 0.03946032600651961,
+      "candidate_over_baseline": 0.9742633163183817,
+      "relative_change_percent": -2.5736683681618313
+    }
+  },
+  "predecessor_archive_manifest": {
+    "bytes": 108543,
+    "path": "/workspace/wtime/target/performance/P069-before/manifest.json",
+    "sha256": "837cc939a620ef3f0896d458a8de0bd89ad1c4ea286b61a9dd0b2bb569b3105f"
+  },
+  "predecessor_commit": "9df9885103494636e8f2a716cc33c9209e57930e",
+  "removed_candidate_inputs": [],
+  "schema": "wtime-p069-build-budget-comparison-v1",
+  "status": "passed",
+  "timing_evidence": false,
+  "unchanged_common_input_count": 736
+}

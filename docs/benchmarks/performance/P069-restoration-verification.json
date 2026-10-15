@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "task": "P069",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P069-before/manifest.json",
+        "target/performance/P069-before/source/**",
+        "target/performance/P069-before/binary/**",
+        "target/performance/P069/shared-finalization/attempt-0001/completion.json",
+        "target/performance/P069/shared-finalization/attempt-0001/evidence.json",
+        "target/recovery/P069-restoration-0001/result.json",
+        "target/performance/P069/selection-freeze.json",
+        "target/recovery/P069-restoration-0001/candidate/**"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*",
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/src/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "crates/wtime-runtime/tests/fixtures/**/*.wat",
+        "crates/wtime-runtime/tests/fixtures/**/*.wasm",
+        "tools/wtime-bench/fixtures/threads/**",
+        "tools/wtime-bench/fixtures/threads/wait_queue_cohort.wat",
+        "tools/wtime-bench/fixtures/threads/wait_queue_cohort.wasm",
+        "tools/wtime-bench/fixtures/continuations/depth_0.wasm",
+        "tools/wtime-bench/fixtures/p135/counter.wasm",
+        "tools/wtime-bench/fixtures/p135/late_bad_result.wasm",
+        "crates/wtime-runtime/tests/fixtures/performance/p138/uniform66.wasm",
+        "tools/wtime-conformance/build.rs",
+        "tools/wtime-conformance/tests/**/*.rs",
+        "tools/wtime-bench/fixtures/**"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/shared_bulk_workloads.py",
+        "tools/wtime-bench/thread_workloads.py",
+        "tools/wtime-bench/fixtures/threads/**",
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p140_entry_policy.py",
+        "tools/wtime-bench/fixtures/scalar/**",
+        "tools/wtime-bench/shared_bulk_compare.py",
+        "tools/wtime-bench/continuation_live_workloads.py",
+        "tools/wtime-bench/continuation_scaling.py",
+        "tools/wtime-bench/continuation_workloads.py",
+        "tools/wtime-bench/gc_compare.py",
+        "tools/wtime-bench/gc_layout_workloads.py",
+        "tools/wtime-bench/gc_scaling.py",
+        "tools/wtime-bench/gc_warm_workloads.py",
+        "tools/wtime-bench/gc_workloads.py",
+        "tools/wtime-bench/integration_compare.py",
+        "tools/wtime-bench/integration_workflow.py",
+        "tools/wtime-bench/integration_workloads.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/p043_fixtures.py",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/root_compare.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/simd_scaling.py",
+        "tools/wtime-bench/simd_workloads.py",
+        "tools/wtime-bench/thread_compare.py",
+        "tools/wtime-bench/thread_scaling.py",
+        "tools/wtime-bench/fixtures/gc/**",
+        "tools/wtime-bench/fixtures/exceptions/**",
+        "tools/wtime-bench/fixtures/continuations/**",
+        "tools/wtime-bench/fixtures/representative/**",
+        "tools/wtime-bench/fixtures/memory/**",
+        "tools/wtime-bench/fixtures/simd/**",
+        "tools/wtime-bench/fixtures/integration_p113/**",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/**",
+        "docs/benchmarks/performance/P033-contract.json",
+        "docs/benchmarks/performance/P034-contract.json",
+        "docs/benchmarks/performance/P034-measurement-contract.json",
+        "docs/benchmarks/performance/P034-registry-preservation.json",
+        "tools/wtime-bench/wait_queue_workloads.py",
+        "tools/wtime-bench/fixtures/threads/wait_queue_cohort.wat",
+        "tools/wtime-bench/fixtures/threads/wait_queue_cohort.wasm",
+        "tools/wtime-bench/gc_cold_adapter.py",
+        "docs/benchmarks/performance/P069-selection.json"
+      ],
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml",
+        "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {
+        "candidate_mode": "decoded",
+        "pairs_per_run": 30,
+        "runs": 2,
+        "run_seeds": [
+          69001,
+          69002
+        ],
+        "selected_cpu": 1,
+        "primary_stage": "warm_call",
+        "instrumented": false
+      }
+    },
+    "production": {
+      "paths": [
+        "tools/verification/producers/candidate_production.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/workloads.json"
+      ]
+    },
+    "restoration_helper": {
+      "paths": [
+        "tools/verification/producers/p069_restoration.py",
+        "tools/wtime-bench/baseline.py"
+      ]
+    },
+    "runtime_tests": {
+      "paths": [
+        "crates/wtime-runtime/src/**/*.rs",
+        "tools/wtime-bench/src/**/*.rs"
+      ]
+    }
+  },
+  "stages": {
+    "verify": {
+      "uses": [
+        "predecessor",
+        "runtime",
+        "compilation",
+        "harness",
+        "production",
+        "restoration_helper",
+        "runtime_tests"
+      ],
+      "commands": [
+        {
+          "name": "restored-default",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib"
+          ]
+        },
+        {
+          "name": "restored-tiers",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib",
+            "--features",
+            "compact-executor,register-executor,execution-reference,performance-counters"
+          ]
+        },
+        {
+          "name": "restored-validator",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-validate",
+            "--lib"
+          ]
+        },
+        {
+          "name": "restored-production",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/candidate_production.py",
+            "--mode",
+            "decoded",
+            "--output",
+            "{stage}/production"
+          ]
+        },
+        {
+          "name": "check-restoration",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p069_restoration.py",
+            "--production",
+            "{stage}/production/build-record.json",
+            "--output",
+            "{stage}/restoration.json"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "restored-default",
+          "kind": "cargo",
+          "minimum_passed": 8,
+          "features": [],
+          "unfiltered": true,
+          "required_names": [
+            "t112_cycles_and_stale_references",
+            "t113_host_token_clones_and_descriptor_edges",
+            "t114_mark_budget_failure_never_sweeps_and_identity_is_stable",
+            "t145_detached_frame_keeps_gc_local_alive",
+            "t124_rooted_gc_reaches_exception_payload",
+            "t124_unreachable_exception_payload_cycles_reclaimed",
+            "t145_suspension_carries_remaining_fuel",
+            "t140_second_resume_traps"
+          ]
+        },
+        {
+          "command": "restored-tiers",
+          "kind": "cargo",
+          "minimum_passed": 8,
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference",
+            "performance-counters"
+          ],
+          "unfiltered": true,
+          "required_names": [
+            "t112_cycles_and_stale_references",
+            "t113_host_token_clones_and_descriptor_edges",
+            "t114_mark_budget_failure_never_sweeps_and_identity_is_stable",
+            "t145_detached_frame_keeps_gc_local_alive",
+            "t124_rooted_gc_reaches_exception_payload",
+            "t124_unreachable_exception_payload_cycles_reclaimed",
+            "t145_suspension_carries_remaining_fuel",
+            "t140_second_resume_traps"
+          ]
+        },
+        {
+          "command": "restored-validator",
+          "kind": "cargo",
+          "minimum_passed": 3,
+          "features": [],
+          "unfiltered": true,
+          "required_names": [
+            "t025_case01_unknown_function_type",
+            "t026_case02_start_requires_empty_signature",
+            "t028_polymorphic_untyped_select_still_rejects_known_reference"
+          ]
+        }
+      ],
+      "outputs": {
+        "restoration": "{stage}/restoration.json",
+        "production": "{stage}/production/build-record.json",
+        "binary": "{stage}/production/bin/wtime-bench"
+      },
+      "checks": [
+        {
+          "artifact": "restoration",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "restoration",
+          "pointer": "/restored_core_matches_predecessor",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "restoration",
+          "pointer": "/runtime_change_retained",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "restoration",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "restoration",
+          "pointer": "/candidate_outcome",
+          "op": "equal",
+          "value": "inconclusive"
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "verify"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "The P069 candidate result remains inconclusive and was not promoted; this verifies restoration to the predecessor and a fresh source-bound build without claiming a performance result."
+    ]
+  }
+}

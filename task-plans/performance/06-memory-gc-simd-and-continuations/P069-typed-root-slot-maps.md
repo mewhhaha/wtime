@@ -1,8 +1,8 @@
 # P069 — Use conservative typed root maps for prepared frames
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **inconclusive**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -34,6 +34,11 @@ Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and
 
 - `crates/wtime-runtime/src/execution/roots.rs`
 - `crates/wtime-runtime/src/gc_exec.rs`
+- `crates/wtime-runtime/src/execution.rs`
+- `crates/wtime-runtime/src/execution/plan.rs`
+- `crates/wtime-runtime/src/lib.rs`
+- `crates/wtime-validate/src/lib.rs`
+- `crates/wtime-validate/src/root_maps.rs`
 - `crates/wtime-runtime/tests/performance/p069.rs`
 
 One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.
@@ -46,7 +51,7 @@ Prepared root maps enumerate all reference-typed local/operand slots retained by
 
 0. Before runtime edits, create docs/benchmarks/performance/P069-selection.json and docs/benchmarks/performance/P069-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.
 
-1. Derive slot class maps from validated FunctionPlan/source stack state; numeric-only regions need no local reference scan, unknown layouts fall back to full Value scanning.
+1. Derive bounded slot class maps during the existing validation pass and bind them to the FunctionPlan body and source PC. Record retained reference locals and the operand layout at call boundaries without running a second validator. Numeric-only regions need no local reference scan; unknown, unreachable, over-budget, or unmatched layouts fall back to full Value scanning. Charge owned map capacities to module metadata and decline maps transactionally when their work or byte budget is exhausted.
 2. Associate maps with exact materialization/source points and include cached/adapter values, exception payloads and outer frames.
 3. Validate maps against a development full-scan oracle on every root boundary and preserve one owned reentry snapshot rather than borrowing active vectors.
 4. Measure mixed numeric/reference host/GC workloads, preserving the same roots/live counts and limiting metadata growth.
@@ -110,4 +115,10 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+P069 completed with an **inconclusive** performance decision, so the candidate optimization was fully restored. The candidate close passed 425 tests (383 Rust and 42 Python); the restored-tree close passed 357 tests (101 default, 173 combined, and 83 validator), with no failures or ignored tests. The measurement used 1,020 paired observations across 17 groups, two 30-pair runs (seeds 69001 and 69002), CPU 1, decoded mode, and no instrumentation. The two primary estimates were 0.4093314493 [0.3941898078, 0.4184230671] and 0.3942602585 [0.389870884, 0.4031465694]; nine protected bounds remained uncertain, preventing promotion. The implementation used bounded typed root maps with a 1 MiB retained metadata cap and used complete scanning when layouts were unsupported; a mixed snapshot copied 2 reference slots instead of 578 total slots. Three modified Rust files were restored and three added files removed; all 176 archived inputs matched the fresh restored build.
+
+Durable completion, evidence, proof, statistics, freeze, records, restoration, and build-comparison artifacts are linked from TASKS.json. The candidate result is historical evidence only; the current runtime contains the restored predecessor.

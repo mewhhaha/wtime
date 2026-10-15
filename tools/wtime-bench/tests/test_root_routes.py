@@ -83,7 +83,7 @@ class RootRouteTests(unittest.TestCase):
             calls.append((side, batch))
             return {"batch": batch, "ns_per_operation": 1.0}
 
-        with self.assertRaisesRegex(ValueError, "workload limit"):
+        with self.assertRaisesRegex(ValueError, "calibration reached batch cap"):
             focused_compare.calibrate(entry, observe)
         self.assertGreater(cap, 1)
         self.assertEqual([batch for side, batch in calls if side == "baseline"],

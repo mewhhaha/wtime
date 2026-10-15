@@ -82788,8 +82788,8 @@
       "key": "typed-root-slot-maps",
       "title": "Use conservative typed root maps for prepared frames",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "inconclusive",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -82806,12 +82806,17 @@
       "owned_paths": [
         "crates/wtime-runtime/src/execution/roots.rs",
         "crates/wtime-runtime/src/gc_exec.rs",
+        "crates/wtime-runtime/src/execution.rs",
+        "crates/wtime-runtime/src/execution/plan.rs",
+        "crates/wtime-runtime/src/lib.rs",
+        "crates/wtime-validate/src/lib.rs",
+        "crates/wtime-validate/src/root_maps.rs",
         "crates/wtime-runtime/tests/performance/p069.rs"
       ],
       "input_output_contract": "Prepared root maps enumerate all reference-typed local/operand slots retained by the current contract, including temporaries at every barrier; they do not drop dead-but-retained locals or alter collection statistics by changing liveness policy.",
       "implementation_steps": [
         "Before runtime edits, create docs/benchmarks/performance/P069-selection.json and docs/benchmarks/performance/P069-verification.json; freeze the exact target small/large, held-out, protected and cold rows, and bind all semantic cases to successful full verification receipts.",
-        "Derive slot class maps from validated FunctionPlan/source stack state; numeric-only regions need no local reference scan, unknown layouts fall back to full Value scanning.",
+        "Derive bounded slot class maps during the existing validation pass and bind them to the FunctionPlan body and source PC. Record retained reference locals and the operand layout at call boundaries without running a second validator. Numeric-only regions need no local reference scan; unknown, unreachable, over-budget, or unmatched layouts fall back to full Value scanning. Charge owned map capacities to module metadata and decline maps transactionally when their work or byte budget is exhausted.",
         "Associate maps with exact materialization/source points and include cached/adapter values, exception payloads and outer frames.",
         "Validate maps against a development full-scan oracle on every root boundary and preserve one owned reentry snapshot rather than borrowing active vectors.",
         "Measure mixed numeric/reference host/GC workloads, preserving the same roots/live counts and limiting metadata growth.",
@@ -82845,7 +82850,53 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P069-verification.json --output target/performance/P069/complete --execute"
       ],
       "path": "06-memory-gc-simd-and-continuations/P069-typed-root-slot-maps.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P069/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "8ee73e7c31eae3175c33641d9bca701de5cc8d94d8f999e06a5adfea3bbdca6c",
+          "bytes": 2170
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-completion.json",
+          "sha256": "af42ec85a41fca5e961a749152721fb02bf45f047f020f2e9041fe1da03aa5ff",
+          "bytes": 502
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-evidence.json",
+          "sha256": "8ee73e7c31eae3175c33641d9bca701de5cc8d94d8f999e06a5adfea3bbdca6c",
+          "bytes": 2170
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-proof.json",
+          "sha256": "85983fc3a5abde86eebe0bd9c078c92fb7e8dace094ac7e27e06b33dac811f42",
+          "bytes": 166995
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-statistics.json",
+          "sha256": "0b8450bcc1f1c384242ab3665e0c0133ab2ff43d0c7aa4d46e374a1829773077",
+          "bytes": 104953
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-freeze.json",
+          "sha256": "9d881e41a0855413d04b1cf07b9e323af3fbd1050350e893c522a100d128c2e8",
+          "bytes": 20966
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-records.json.gz",
+          "sha256": "f6c54df58ebb8a1676c91a22b00f78e1582e5c4fd4f1c08c09b3f39a23e64d87",
+          "bytes": 4612801
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-restoration.json",
+          "sha256": "c1df9143e1a2c54e94e8b773f83c659ebdbefad9dadf6555df8397ff228e8d2a",
+          "bytes": 23409
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P069-build-comparison.json",
+          "sha256": "90985e56e772f4727174edbf87d5baec5f6e3bc998118b68cb7b80acf29fd560",
+          "bytes": 4481
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -82860,7 +82911,70 @@
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P069-before",
         "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P069-selection.json target/performance/P069-before/manifest.json target/performance/P069/selection-freeze.json"
-      ]
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P069/shared-finalization/attempt-0001/evidence.json": "8ee73e7c31eae3175c33641d9bca701de5cc8d94d8f999e06a5adfea3bbdca6c",
+          "/workspace/wtime/docs/benchmarks/performance/P069-completion.json": "af42ec85a41fca5e961a749152721fb02bf45f047f020f2e9041fe1da03aa5ff",
+          "/workspace/wtime/docs/benchmarks/performance/P069-evidence.json": "8ee73e7c31eae3175c33641d9bca701de5cc8d94d8f999e06a5adfea3bbdca6c",
+          "/workspace/wtime/docs/benchmarks/performance/P069-proof.json": "85983fc3a5abde86eebe0bd9c078c92fb7e8dace094ac7e27e06b33dac811f42",
+          "/workspace/wtime/docs/benchmarks/performance/P069-statistics.json": "0b8450bcc1f1c384242ab3665e0c0133ab2ff43d0c7aa4d46e374a1829773077",
+          "/workspace/wtime/docs/benchmarks/performance/P069-freeze.json": "9d881e41a0855413d04b1cf07b9e323af3fbd1050350e893c522a100d128c2e8",
+          "/workspace/wtime/docs/benchmarks/performance/P069-records.json.gz": "f6c54df58ebb8a1676c91a22b00f78e1582e5c4fd4f1c08c09b3f39a23e64d87",
+          "/workspace/wtime/docs/benchmarks/performance/P069-restoration.json": "c1df9143e1a2c54e94e8b773f83c659ebdbefad9dadf6555df8397ff228e8d2a",
+          "/workspace/wtime/docs/benchmarks/performance/P069-build-comparison.json": "90985e56e772f4727174edbf87d5baec5f6e3bc998118b68cb7b80acf29fd560"
+        },
+        "evidence": [
+          {
+            "path": "/workspace/wtime/target/performance/P069/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "8ee73e7c31eae3175c33641d9bca701de5cc8d94d8f999e06a5adfea3bbdca6c",
+            "bytes": 2170
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-completion.json",
+            "sha256": "af42ec85a41fca5e961a749152721fb02bf45f047f020f2e9041fe1da03aa5ff",
+            "bytes": 502
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-evidence.json",
+            "sha256": "8ee73e7c31eae3175c33641d9bca701de5cc8d94d8f999e06a5adfea3bbdca6c",
+            "bytes": 2170
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-proof.json",
+            "sha256": "85983fc3a5abde86eebe0bd9c078c92fb7e8dace094ac7e27e06b33dac811f42",
+            "bytes": 166995
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-statistics.json",
+            "sha256": "0b8450bcc1f1c384242ab3665e0c0133ab2ff43d0c7aa4d46e374a1829773077",
+            "bytes": 104953
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-freeze.json",
+            "sha256": "9d881e41a0855413d04b1cf07b9e323af3fbd1050350e893c522a100d128c2e8",
+            "bytes": 20966
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-records.json.gz",
+            "sha256": "f6c54df58ebb8a1676c91a22b00f78e1582e5c4fd4f1c08c09b3f39a23e64d87",
+            "bytes": 4612801
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-restoration.json",
+            "sha256": "c1df9143e1a2c54e94e8b773f83c659ebdbefad9dadf6555df8397ff228e8d2a",
+            "bytes": 23409
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P069-build-comparison.json",
+            "sha256": "90985e56e772f4727174edbf87d5baec5f6e3bc998118b68cb7b80acf29fd560",
+            "bytes": 4481
+          }
+        ],
+        "outcome": "inconclusive",
+        "status": "done",
+        "task": "P069"
+      }
     },
     {
       "id": "P070",
