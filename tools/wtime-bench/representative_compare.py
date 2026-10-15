@@ -182,8 +182,8 @@ def run(args, growth_explanation=None):
     import workloads
     need(args.selection == 'representative', 'wrong representative route')
     need(not getattr(args,'workload_subset',None), 'full representative9 selection cannot be silently subsetted')
-    need(args.candidate_mode in ('decoded', 'compact') and type(args.pairs) is int and args.pairs >= 30,
-         'requires decoded or compact candidate mode and at least30 pairs')
+    need(args.candidate_mode in ('decoded', 'compact', 'register') and type(args.pairs) is int and args.pairs >= 30,
+         'requires decoded, compact, or register candidate mode and at least30 pairs')
     checkpoint.Journal.preflight(args.output)
     manifest = baseline.verify_archive(args.baseline)
     info = compare._baseline_identity(args.baseline, manifest, HERE/'src/protocol.rs', baseline)

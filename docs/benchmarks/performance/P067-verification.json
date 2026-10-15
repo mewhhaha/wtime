@@ -1,0 +1,658 @@
+{
+  "schema_version": 1,
+  "task": "P067",
+  "identities": {
+    "predecessors": {
+      "paths": [
+        "target/performance/P067-before/manifest.json",
+        "target/performance/P067-before/source/**",
+        "target/performance/P067-before/binary/**",
+        "target/performance/P067-register-before/manifest.json",
+        "target/performance/P067-register-before/source/**",
+        "target/performance/P067-register-before/binary/**",
+        "target/performance/baseline/manifest.json",
+        "target/performance/baseline/binary/**"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*"
+      ]
+    },
+    "runtime_sources": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "harness": {
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/fixtures/**",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/bootstrap.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/cold_products.py",
+        "tools/wtime-bench/compact_production.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/continuation_live_workloads.py",
+        "tools/wtime-bench/continuation_pairing.py",
+        "tools/wtime-bench/continuation_scaling.py",
+        "tools/wtime-bench/continuation_workloads.py",
+        "tools/wtime-bench/dataset_cache.py",
+        "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/wtime-bench/entry_batch_compare.py",
+        "tools/wtime-bench/entry_sequence_compare.py",
+        "tools/wtime-bench/entry_sequence_policy.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/focused_compare.py",
+        "tools/wtime-bench/gc_cold_adapter.py",
+        "tools/wtime-bench/gc_collect_compare.py",
+        "tools/wtime-bench/gc_collect_workloads.py",
+        "tools/wtime-bench/gc_compare.py",
+        "tools/wtime-bench/gc_layout_workloads.py",
+        "tools/wtime-bench/gc_scaling.py",
+        "tools/wtime-bench/gc_warm_workloads.py",
+        "tools/wtime-bench/gc_workloads.py",
+        "tools/wtime-bench/integration_compare.py",
+        "tools/wtime-bench/integration_workflow.py",
+        "tools/wtime-bench/integration_workloads.py",
+        "tools/wtime-bench/memory_scaling.py",
+        "tools/wtime-bench/memory_workloads.py",
+        "tools/wtime-bench/p027_memory_workloads.py",
+        "tools/wtime-bench/p042_check.py",
+        "tools/wtime-bench/p042_coverage.py",
+        "tools/wtime-bench/p042_production.py",
+        "tools/wtime-bench/p043_coverage.py",
+        "tools/wtime-bench/p043_fixtures.py",
+        "tools/wtime-bench/p043_workflow.py",
+        "tools/wtime-bench/p045_corpus.py",
+        "tools/wtime-bench/p046_gate.py",
+        "tools/wtime-bench/p123_adapter.py",
+        "tools/wtime-bench/p127_fuel_policy.py",
+        "tools/wtime-bench/p128_scalar_scaling.py",
+        "tools/wtime-bench/p140_entry_policy.py",
+        "tools/wtime-bench/profile.py",
+        "tools/wtime-bench/profile_routes.py",
+        "tools/wtime-bench/representative_compare.py",
+        "tools/wtime-bench/representative_scaling.py",
+        "tools/wtime-bench/representative_workloads.py",
+        "tools/wtime-bench/root_compare.py",
+        "tools/wtime-bench/root_workloads.py",
+        "tools/wtime-bench/run.py",
+        "tools/wtime-bench/scalar_p128_workloads.py",
+        "tools/wtime-bench/scalar_workloads.py",
+        "tools/wtime-bench/scaling.py",
+        "tools/wtime-bench/selection_manifest.py",
+        "tools/wtime-bench/semantic_receipt.py",
+        "tools/wtime-bench/shared_bulk_compare.py",
+        "tools/wtime-bench/shared_bulk_workloads.py",
+        "tools/wtime-bench/simd_scaling.py",
+        "tools/wtime-bench/simd_workloads.py",
+        "tools/wtime-bench/structural_check.py",
+        "tools/wtime-bench/thread_compare.py",
+        "tools/wtime-bench/thread_scaling.py",
+        "tools/wtime-bench/thread_workloads.py",
+        "tools/wtime-bench/tier_check.py",
+        "tools/wtime-bench/wait_queue_workloads.py",
+        "tools/wtime-bench/workloads.py"
+      ]
+    },
+    "selections": {
+      "paths": [
+        "docs/benchmarks/performance/P067-eager-selection.json",
+        "docs/benchmarks/performance/P067-adaptive-selection.json"
+      ]
+    },
+    "builds": {
+      "paths": [
+        "target/performance/P067-builds/**"
+      ]
+    },
+    "prior": {
+      "paths": [
+        "docs/benchmarks/performance/P144-completion.json",
+        "docs/benchmarks/performance/P144-evidence.json",
+        "docs/benchmarks/performance/P144-proof.json"
+      ]
+    },
+    "workflow": {
+      "paths": [
+        "tools/verification/producers/p067_workflow.py"
+      ]
+    },
+    "tooling": {
+      "paths": [
+        "tools/verify.py",
+        "tools/verification/*.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    },
+    "conformance": {
+      "paths": [
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/build.rs",
+        "tools/wtime-conformance/src/**/*.rs",
+        "docs/architecture/corpus-lock.json"
+      ]
+    },
+    "route_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p067_representative_route.py"
+      ]
+    },
+    "analysis": {
+      "paths": [
+        "tools/verification/producers/p067.py",
+        "tools/verification/producers/p143.py",
+        "tools/verification/producers/p138.py",
+        "tools/verification/tests/test_p067.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/gates.py",
+        "tools/wtime-bench/candidate_gate.py",
+        "tools/wtime-bench/entry_batch_analyze.py",
+        "tools/wtime-bench/entry_sequence_analyze.py"
+      ]
+    },
+    "paths_diagnostics": {
+      "paths": [
+        "tools/verification/producers/p145.py",
+        "tools/wtime-path-probe/Cargo.toml",
+        "tools/wtime-path-probe/Cargo.lock",
+        "tools/wtime-path-probe/src/**/*.rs",
+        "docs/benchmarks/performance/P145-completion.json",
+        "docs/benchmarks/performance/P145-evidence.json",
+        "docs/benchmarks/performance/P145-proof.json",
+        "target/verification/runs/P145/freeze/attempt-0002/freeze.json",
+        "target/verification/runs/P145/verify/attempt-0001/receipt.json",
+        "target/verification/runs/P145/verify/attempt-0001/diagnostics/**"
+      ]
+    },
+    "path_checker": {
+      "paths": [
+        "tools/verification/producers/p067_path_checks.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessors",
+        "runtime_sources",
+        "selections",
+        "builds",
+        "workflow",
+        "harness",
+        "tooling"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p067_workflow.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "freeze.json": "{stage}/freeze.json",
+        "eager-selection-freeze.json": "{stage}/eager-selection-freeze.json",
+        "adaptive-selection-freeze.json": "{stage}/adaptive-selection-freeze.json",
+        "entry-rows.json": "{stage}/entry-rows.json",
+        "sequence-rows.json": "{stage}/sequence-rows.json"
+      }
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "runtime_sources",
+        "harness",
+        "selections",
+        "builds",
+        "workflow",
+        "tooling",
+        "prior",
+        "conformance",
+        "route_tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "route-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p067_representative_route.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "register-controls",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "register-executor,execution-reference",
+            "p066_",
+            "--",
+            "--show-output"
+          ]
+        },
+        {
+          "name": "prior-controls",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p067_workflow.py",
+            "verify-prior",
+            "--output",
+            "{stage}/prior-controls.json"
+          ]
+        },
+        {
+          "name": "tier-eager",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/tier_check.py",
+            "--tier",
+            "register",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/eager"
+          ]
+        },
+        {
+          "name": "tier-adaptive",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/tier_check.py",
+            "--tier",
+            "register",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/adaptive",
+            "--register-entry-threshold",
+            "3",
+            "--binary",
+            "{repo}/tools/wtime-bench/target/release/wtime-bench",
+            "--conformance-binary",
+            "{repo}/target/release/wtime-conformance",
+            "--diagnostic-binary",
+            "{repo}/target/performance/P014/counters-build/release/wtime-bench"
+          ]
+        },
+        {
+          "name": "tier-decoded",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/tier_check.py",
+            "--tier",
+            "decoded",
+            "--selection",
+            "integration",
+            "--output",
+            "{stage}/decoded",
+            "--binary",
+            "{repo}/tools/wtime-bench/target/release/wtime-bench",
+            "--conformance-binary",
+            "{repo}/target/release/wtime-conformance",
+            "--diagnostic-binary",
+            "{repo}/target/performance/P014/counters-build/release/wtime-bench"
+          ]
+        },
+        {
+          "name": "default-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ]
+        },
+        {
+          "name": "register-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/register-build.json",
+            "--features",
+            "wtime-runtime/register-executor"
+          ]
+        },
+        {
+          "name": "compact-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/build_budget.py",
+            "--output",
+            "{stage}/compact-build.json",
+            "--features",
+            "wtime-runtime/compact-executor"
+          ]
+        },
+        {
+          "name": "dependency-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/dependency_budget.py"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "route-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_register_route_passes_mode_guard_and_reaches_baseline_validation",
+            "test_reference_and_unknown_modes_fail_before_any_preflight_io",
+            "test_small_boolean_or_invalid_pair_counts_fail_before_io",
+            "test_workload_subset_is_rejected_before_io"
+          ],
+          "minimum_passed": 4
+        },
+        {
+          "command": "register-controls",
+          "kind": "cargo",
+          "features": [
+            "register-executor",
+            "execution-reference"
+          ],
+          "minimum_passed": 3,
+          "required_names": [
+            "p066_representative_fresh_store_and_hot_cache_equivalence",
+            "p066_representative_source_fuel_prefix_equivalence",
+            "p066_representative_cancellation_and_error_memory"
+          ]
+        }
+      ],
+      "outputs": {
+        "prior-controls.json": "{stage}/prior-controls.json",
+        "eager/report.json": "{stage}/eager/report.json",
+        "adaptive/report.json": "{stage}/adaptive/report.json",
+        "decoded/report.json": "{stage}/decoded/report.json",
+        "default-build.json": "{stage}/default-build.json",
+        "register-build.json": "{stage}/register-build.json",
+        "compact-build.json": "{stage}/compact-build.json"
+      }
+    },
+    "measure": {
+      "uses": [
+        "runtime",
+        "runtime_sources",
+        "harness",
+        "selections",
+        "builds",
+        "workflow"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "measure",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p067_workflow.py",
+            "measure",
+            "--freeze",
+            "{freeze_dir}/freeze.json",
+            "--verify-dir",
+            "{verify_dir}",
+            "--output",
+            "{stage}/measure"
+          ]
+        }
+      ],
+      "outputs": {
+        "measurements": "{stage}/measure/report.json",
+        "artifacts": "{stage}/measure/artifacts.json"
+      }
+    },
+    "analyze": {
+      "uses": [
+        "runtime",
+        "harness",
+        "selections",
+        "builds",
+        "workflow",
+        "analysis",
+        "tooling",
+        "paths_diagnostics"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify",
+        "measure"
+      ],
+      "commands": [
+        {
+          "name": "milestone-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p067.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "analyze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p067.py",
+            "--verify-dir",
+            "{verify_dir}",
+            "--measure-dir",
+            "{measure_dir}/measure",
+            "--output",
+            "{stage}/proof.json"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "milestone-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_valid_selections_cover_expected_complete_portfolios",
+            "test_omitted_scalar_memory_strict_float_or_held_out_rows_fail",
+            "test_protected_control_stage_and_role_are_enforced",
+            "test_adaptive_entry_threshold_must_remain_three",
+            "test_decision_requires_all_adoptions_and_rejection_dominates",
+            "test_missing_unknown_and_boolean_decisions_are_rejected",
+            "test_hard_gate_must_be_explicitly_passed"
+          ],
+          "minimum_passed": 7
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime_sources",
+    "baseline": "{freeze_dir}/freeze.json",
+    "pointer": "/core_sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "python",
+        "uses": [
+          "harness",
+          "selections",
+          "analysis",
+          "route_tests"
+        ],
+        "commands": [
+          {
+            "name": "route-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p067_representative_route.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "milestone-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/verification/tests",
+              "-p",
+              "test_p067.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "route-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_register_route_passes_mode_guard_and_reaches_baseline_validation",
+              "test_reference_and_unknown_modes_fail_before_any_preflight_io",
+              "test_small_boolean_or_invalid_pair_counts_fail_before_io",
+              "test_workload_subset_is_rejected_before_io"
+            ],
+            "minimum_passed": 4
+          },
+          {
+            "command": "milestone-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_valid_selections_cover_expected_complete_portfolios",
+              "test_omitted_scalar_memory_strict_float_or_held_out_rows_fail",
+              "test_protected_control_stage_and_role_are_enforced",
+              "test_adaptive_entry_threshold_must_remain_three",
+              "test_decision_requires_all_adoptions_and_rejection_dominates",
+              "test_missing_unknown_and_boolean_decisions_are_rejected",
+              "test_hard_gate_must_be_explicitly_passed"
+            ],
+            "minimum_passed": 7
+          }
+        ]
+      },
+      {
+        "name": "path-link",
+        "uses": [
+          "analysis",
+          "paths_diagnostics",
+          "harness",
+          "path_checker"
+        ],
+        "commands": [
+          {
+            "name": "path-link",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "tools.verification.producers.p067_path_checks",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "path-link",
+            "kind": "unittest",
+            "minimum_passed": 1,
+            "required_names": [
+              "test_finalized_paths_are_current_complete_and_untimed"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ],
+    "decision": {
+      "phase": "analyze",
+      "artifact": "proof",
+      "pointer": "/decision"
+    },
+    "limitations": [
+      "Register milestone; default-policy selection is finalized by P108. No native AArch64 claim."
+    ]
+  }
+}

@@ -40,6 +40,8 @@ Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P144 — Report Register activation capacity high-water](P144-register-activation-capacity-diagnostics.md)
 
+[P145 — Bind Register workload execution-path diagnostics](P145-register-workload-path-diagnostics.md)
+
 Optional results to review (do not block the portable path):
 
 [P059 — Try conservative temporary-slot reuse without global SSA](P059-bounded-slot-reuse.md)
@@ -49,17 +51,25 @@ Optional results to review (do not block the portable path):
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C5, C6, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).
 
 - `docs/benchmarks/performance/register.md`
-- `tools/wtime-bench/tests/test_p067_register_gate.py`
+- `docs/benchmarks/performance/P067-eager-selection.json`
+- `docs/benchmarks/performance/P067-adaptive-selection.json`
+- `docs/benchmarks/performance/P067-verification.json`
+- `tools/verification/producers/p067.py`
+- `tools/verification/producers/p067_workflow.py`
+- `tools/verification/producers/p067_path_checks.py`
+- `tools/verification/tests/test_p067.py`
+- `tools/wtime-bench/representative_compare.py`
+- `tools/wtime-bench/tests/test_p067_representative_route.py`
 
 One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; leaf owners submit a bounded integration hunk.
 
 ## Input/output contract
 
-A register-tier decision reports eligible optimized functions, all fallback reasons, semantic gates, warm/cold totals and adaptive code/build budgets; universal proposal support remains through portable fallback.
+A register-tier decision reports eligible optimized functions, all fallback reasons, semantic gates, warm/cold totals and adaptive code/build budgets; universal proposal support remains through portable fallback. Bind P145's source-current eager and threshold-3 execution-path diagnostics to show actual optimized dispatch, prefix exits, and fallback coverage across the exact selected corpus. The diagnostics add no timing evidence or changes to the measured executable.
 
 ## Implementation recipe
 
-1. Run pinned corpus/interaction/source-prefix checks through explicit and adaptive register policies, proving real optimized execution for supported cases.
+1. Run pinned corpus/interaction/source-prefix checks through explicit and adaptive register policies, proving real optimized execution for supported cases; validate the complete P145 path-coverage reports for both settings.
 2. Compare scalar/memory/strict-float/representative families to archived and best portable baselines; measure retained activation/code bytes and compile spikes.
 3. Check preparation/cold/build/dependency controls and derive supported break-even thresholds rather than a fixed universal hot-count guess.
 4. Report the 100x portable aspiration and whether register adds enough value over compact; reject/default-disable it if complexity wins no broad measurable benefit.
@@ -75,7 +85,7 @@ A register-tier decision reports eligible optimized functions, all fallback reas
 Activate Rust as described in EXECUTION.md. These are required implementation-time commands; new tools/modes are supplied by linked tasks or this task. The focused tests/validators must execute at least **three** named cases, and optimized-path tests must prove the requested path ran.
 
 ```sh
-python3 -m unittest discover -s tools/wtime-bench/tests -p 'test_p067*.py' -v
+python3 -B -m unittest discover -s tools/verification/tests -p 'test_p067.py' -v -b
 python3 tools/wtime-bench/tier_check.py --tier register --selection integration --output target/performance/P067/conformance
 ```
 
