@@ -82485,7 +82485,8 @@
         "P133",
         "P134",
         "P135",
-        "P136"
+        "P136",
+        "P137"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -89078,6 +89079,100 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P136"
+      }
+    },
+    {
+      "id": "P137",
+      "key": "register-entry-total-paired-analysis",
+      "title": "Analyze paired Register entry totals and phases",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P136"
+      ],
+      "owned_paths": [
+        "tools/wtime-bench/entry_batch_analyze.py",
+        "tools/wtime-bench/tests/test_p137_entry_analysis.py",
+        "tools/verification/producers/p137.py",
+        "tools/verification/tests/test_p137_entry_analysis.py",
+        "docs/benchmarks/performance/P137-contract.json",
+        "docs/benchmarks/performance/P137-verification.json"
+      ],
+      "input_output_contract": "Expose:\n\n```python\nanalyze(report: dict, collection_root: Path, allow_smoke: bool = False) -> dict\n```\n\nRequire the P136 report to pass `entry_batch_compare.validate_report` against its collection root, including all untouched raw side records, report identity digest, pair joins, settings, fixtures, executables, and source/build records. Recheck referenced build records, executable hashes, fixture hashes, helper identities, and report/identity hashes before and after analysis. The producer and CLI also run P136's full source-current `verify_collection` wrapper against the recorded archive, adapter, candidate and harness inputs; never launch either executable or guest during analysis.\n\nProduction analysis requires `timing_evidence:true`, distinct archived/current source identities, exactly two independent runs with distinct seeds, the complete declared row matrix, and at least 30 complete pairs for every row in each run. Reject same-source aliases and smoke collections as production evidence. Reject missing, duplicate, foreign, stale, mixed-setting or malformed observations. Input timing samples must be non-boolean nonnegative integers no greater than the Rust `u128` range. Full analysis requires each `total_ns` to be positive because it is used in a logarithmic ratio; phase values may be zero. Smoke may contain zero totals and phases because it computes no ratios or confidence intervals.\n\nFor every run and each distinct row, retain baseline and candidate summaries for `total_ns` and `prepare_ns`, `instantiate_ns`, and `invoke_ns`: median, MAD, p25, p75, minimum, maximum, and p99, all with unit `ns`. Raw samples remain integer nanoseconds; interpolated summaries can be fractional nanoseconds. For `total_ns`, calculate the point estimate as `exp(median(log(candidate_total_ns / baseline_total_ns)))`, not the arithmetic median of raw ratios. Compute its deterministic 95% percentile interval by exponentiating the 2.5th and 97.5th percentiles of 10,000 resampled paired-log-ratio medians. Reuse `analyze._summary`, `analyze._bootstrap_interval`, and `analyze._seed_for`; bind the bootstrap seed to the run seed and exact row identity. Report each run independently. Never pool call counts, strategies, thresholds, rows, or the two runs. Phase summaries are descriptive only; do not bootstrap phase ratios unless separately specified by a later contract.\n\nDo not divide by calls, calculate ns/op, infer tail latency from a batch, compute a break-even point, recommend a threshold, or issue a candidate decision. Set decision and promotion fields to null/false. Retain exact row settings (call count, strategy, threshold), raw metric name `entry_total`, raw nanosecond unit, method, confidence level, resample count, pair count, run seed, input identities and source bindings in the output.\n\nAn explicit `--allow-smoke` path is analysis-only and cannot satisfy candidate evidence. It accepts the P136 two-pair-per-row smoke only after receipt verification and source stability checks, labels `timing_evidence:false` and `gate_eligible:false`, and emits descriptive raw summaries only. Its ratio and CI fields are null. Smoke descriptives may include zero timings, but never compute logarithms or bootstrap intervals for them. Without `--allow-smoke`, refuse smoke input.\n\nThe analysis record binds the P136 report content hash and identity digest, all referenced inputs and helpers, analysis settings, and recomputable result. Verify those identities again after analysis; write only to a new exclusive output path. Re-analysis of identical inputs must produce the same statistics and record content apart from explicitly excluded creation metadata.",
+      "implementation_steps": [
+        "Add `entry_batch_analyze.py` with the typed API and CLI. Validate the report through P136's collector validator; verify the complete source/build/executable/fixture/helper closure; then analyze raw totals/phases without launching Wasm. Reuse the existing deterministic summary and median-bootstrap primitives rather than adding a second statistical implementation.",
+        "Separate full candidate-compatible evidence from smoke descriptives. Enforce the two-run complete matrix and >=30 complete pairs per row/run, positive full-analysis timings, unique row/run joins, and source/settings identity. For each run and row, summarize each side in raw ns; compute paired total ratios and a separate deterministic 10,000-resample CI. Do not calculate an aggregate across runs or policy settings.",
+        "Add `p137.py` to verify the consumed P136 completion/proof and collection identities, call the P136 source-current collection verifier without subprocess timing, invoke the analyzer once, and write a source-bound receipt. Freeze the P136 smoke collection and immutable completion/proof in the P137 contract.",
+        "Add focused tests for full and smoke paths, exact bootstrap output, raw units, row/run separation, failure modes, stale references and deterministic re-analysis. Synthetic reports and all resolved outputs must stay inside a fresh temporary root; the analysis-only verification must reuse P136's retained real 32-pair smoke collection after producer verification, with no new Rust build, archive, timing, or guest execution.",
+        "Run both named P137 test suites and the canonical contract plan/close checks when the producer and contract are ready. Keep P137 status pending until the source-bound analysis receipt and all required checks pass."
+      ],
+      "fixture_cases": [
+        "`p137_full_pair_uses_raw_total_and_known_median_bootstrap_ci`: a complete paired fixture with known raw totals produces the expected candidate/baseline median and exact deterministic 95% interval from 10,000 draws.",
+        "`p137_runs_call_counts_and_policy_rows_remain_independent`: two distinct run seeds and rows spanning call counts/strategies/thresholds produce separate results without pooling observations or settings.",
+        "`p137_reports_raw_phase_summaries_without_division`: total and each phase retain ns median/MAD/p25/p75/min/max/p99; output contains no divided metric, threshold recommendation, break-even, or decision.",
+        "`p137_rejects_incomplete_stale_or_invalid_full_evidence`: reject missing/duplicate pairs, changed report/source/build/executable/fixture/helper hashes, wrong settings, same-source alias, fewer than 30 pairs, booleans, and nonpositive full timing values.",
+        "`p137_smoke_requires_opt_in_and_never_claims_timing_evidence`: refuse smoke by default; with explicit opt-in, accept only verified P136 smoke, return descriptives with null ratios/CIs and false timing/gate eligibility, including when raw totals or phases are zero.",
+        "`p137_bootstrap_and_receipt_are_deterministic_without_guest_execution`: repeated analysis of the same verified report yields identical statistics and receipt inputs and does not launch a benchmark subprocess.",
+        "`p137_rejects_mutation_during_analysis`: changing a bound helper or report identity during analysis is detected by the post-analysis stability check."
+      ],
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "python3 -B tools/wtime-bench/tests/test_p137_entry_analysis.py -v",
+        "python3 -B tools/verification/tests/test_p137_entry_analysis.py -v",
+        "python3 -B tools/verification/producers/p137.py freeze --output target/verification/P137-freeze",
+        "python3 -B tools/verification/producers/p137.py verify --freeze target/verification/P137-freeze/report.json --output target/verification/P137-verify",
+        "python3 -B tools/verification/producers/p137.py check-evidence --report target/verification/P137-verify/report.json",
+        "python3 -B tools/wtime-bench/entry_batch_analyze.py --comparison target/verification/runs/P136/verify/attempt-0001/proof/collection --allow-smoke --output target/verification/P137-example-analysis",
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P137-verification.json",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P137-verification.json --output target/performance/P137/complete --execute"
+      ],
+      "path": "05-register-executor/P137-entry-total-paired-analysis.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P137/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "e9052b67826b07d012472c97a83c05ed37ca7dbf2348e74480377c1c709b601d",
+          "bytes": 1535
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One tooling integrator owns the raw P136 entry-total analyzer, producer and analysis-only verification; the P066 integrator owns candidate selection and promotion.",
+      "minimum_focused_cases": 7,
+      "evidence_contract": "Bind P136 completion/proof/report/identity, complete collection and source-current receipt; archive/current source/build/executable identities; fixture and helper hashes; P137 contract/producer; full output hash; exact per-run/per-row pair counts and settings; raw-total bootstrap method, seed and 10,000 resamples; raw phase summaries; named test counts; and smoke timing_evidence:false/gate_eligible:false. No speed decision is permitted. P066 retains separate cold-code and eviction/recompile evidence.",
+      "external_constraints": [
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P137/shared-finalization/attempt-0002/evidence.json": "e9052b67826b07d012472c97a83c05ed37ca7dbf2348e74480377c1c709b601d"
+        },
+        "evidence": [
+          {
+            "bytes": 1535,
+            "path": "/workspace/wtime/target/performance/P137/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "e9052b67826b07d012472c97a83c05ed37ca7dbf2348e74480377c1c709b601d"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P137"
       }
     }
   ]

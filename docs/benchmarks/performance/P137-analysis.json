@@ -1,0 +1,2001 @@
+{
+  "analysis_helpers": {
+    "analyze.py": {
+      "path": "/workspace/wtime/target/verification/runs/P137/verify/attempt-0002/proof/analysis/helpers/analyze.py",
+      "sha256": "28c6d36c504bf285f9012c9490fbeea654fa5b3abfd0134f6f4a97646458c54e"
+    },
+    "bootstrap.py": {
+      "path": "/workspace/wtime/target/verification/runs/P137/verify/attempt-0002/proof/analysis/helpers/bootstrap.py",
+      "sha256": "2dcb988c2d00cb06a7afc4a5076ea3ec443618c6a0fbd47bb8651d9f804bb3e2"
+    },
+    "entry_batch_analyze.py": {
+      "path": "/workspace/wtime/target/verification/runs/P137/verify/attempt-0002/proof/analysis/helpers/entry_batch_analyze.py",
+      "sha256": "21c01a3d37d364ee52803261a29d2ebe4c729319c6e1216c83422b714fcdacf6"
+    }
+  },
+  "analysis_source_refs": {
+    "analyze.py": {
+      "path": "/workspace/wtime/tools/wtime-bench/analyze.py",
+      "sha256": "28c6d36c504bf285f9012c9490fbeea654fa5b3abfd0134f6f4a97646458c54e"
+    },
+    "bootstrap.py": {
+      "path": "/workspace/wtime/tools/wtime-bench/bootstrap.py",
+      "sha256": "2dcb988c2d00cb06a7afc4a5076ea3ec443618c6a0fbd47bb8651d9f804bb3e2"
+    },
+    "entry_batch_analyze.py": {
+      "path": "/workspace/wtime/tools/wtime-bench/entry_batch_analyze.py",
+      "sha256": "21c01a3d37d364ee52803261a29d2ebe4c729319c6e1216c83422b714fcdacf6"
+    }
+  },
+  "collection_identity_sha256": "54f369b2c1a4a882992674c9eba9acb584da63c52d70b1b65444a7bb57dc5d8e",
+  "comparison": {
+    "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/collection/report.json",
+    "sha256": "6b6e3e04c5f2733477d911e1775d053648287e6fe5617a69a7597c89eedc722d"
+  },
+  "decision": null,
+  "gate_eligible": false,
+  "input_refs": {
+    "archive_manifest": {
+      "path": "/workspace/wtime/target/performance/P136-before/manifest.json",
+      "sha256": "9fe9882d9c7e23b833d769a8edddabcfe92bf04c0633d153c1e5e532e7537335"
+    },
+    "baseline_build_record": {
+      "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/archived-adapter/adapter.json",
+      "sha256": "37fb10dd7ee847a174904943122b321d35717bc9d21f153eb911141b992d16c3"
+    },
+    "baseline_executable": {
+      "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/archived-adapter/binary/wtime-register-entry-adapter",
+      "sha256": "186855ed4c24c06291f4c673445a4e20babbe89ea900a3323332a45087c33849"
+    },
+    "candidate_build_record": {
+      "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/candidate-adapter/adapter.json",
+      "sha256": "f76a134b84a93ab6464dfb5b950c63829ed10f9d7720aaf41cbde94225f32fb6"
+    },
+    "candidate_executable": {
+      "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/candidate-adapter/binary/wtime-register-entry-adapter",
+      "sha256": "a90977d00dd42bf56720098819addaedc1f596629f2899ae4810dfa93304f95d"
+    },
+    "collector_checkpoint.py": {
+      "path": "/workspace/wtime/tools/wtime-bench/checkpoint.py",
+      "sha256": "827a1f659ddd524f9e06c37e4fb47ecf3c8bdc1d2c7e454cf195a6e787328b37"
+    },
+    "collector_entry_batch_adapter.py": {
+      "path": "/workspace/wtime/tools/wtime-bench/entry_batch_adapter.py",
+      "sha256": "b5808d7214e72510d2ac203c85f51e40a21efe5b262ad1bba095efbca5d56e9a"
+    },
+    "collector_entry_batch_compare.py": {
+      "path": "/workspace/wtime/tools/wtime-bench/entry_batch_compare.py",
+      "sha256": "7c09071a526494782b59df05d539a7cee0d801a46eb34ae4a7c2155d87273bcb"
+    },
+    "fixture_0": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_1": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_2": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_3": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_4": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_5": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_6": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    },
+    "fixture_7": {
+      "path": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+      "sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776"
+    }
+  },
+  "limitations": [
+    "Per-row uncertainty only; P066 owns semantic, control, cold-code, cache-churn and build gates."
+  ],
+  "method": "paired-log-median-rank-bootstrap-v1",
+  "metric": "entry_total",
+  "raw_unit": "ns",
+  "report_sha256": "360e2888a54660d7ca13f0e1c71e529f6dcd74a4718a5f8e9364af332fc20c21",
+  "runs": [
+    {
+      "rows": [
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2489.0,
+              "max": 29984,
+              "median": 27495.0,
+              "min": 25006,
+              "p25": 26250.5,
+              "p75": 28739.5,
+              "p99": 29934.22,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 451.0,
+              "max": 7992,
+              "median": 7541.0,
+              "min": 7090,
+              "p25": 7315.5,
+              "p75": 7766.5,
+              "p99": 7982.98,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 776.0,
+              "max": 43494,
+              "median": 42718.0,
+              "min": 41942,
+              "p25": 42330.0,
+              "p75": 43106.0,
+              "p99": 43478.48,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 2814.0,
+              "max": 80568,
+              "median": 77754.0,
+              "min": 74940,
+              "p25": 76347.0,
+              "p75": 79161.0,
+              "p99": 80511.72,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 3704803977898750608,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2324.0,
+              "max": 31928,
+              "median": 29604.0,
+              "min": 27280,
+              "p25": 28442.0,
+              "p75": 30766.0,
+              "p99": 31881.52,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 75.0,
+              "max": 6139,
+              "median": 6064.0,
+              "min": 5989,
+              "p25": 6026.5,
+              "p75": 6101.5,
+              "p99": 6137.5,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 32242.5,
+              "max": 103402,
+              "median": 71159.5,
+              "min": 38917,
+              "p25": 55038.25,
+              "p75": 87280.75,
+              "p99": 102757.15,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 34641.5,
+              "max": 141469,
+              "median": 106827.5,
+              "min": 72186,
+              "p25": 89506.75,
+              "p75": 124148.25,
+              "p99": 140776.16999999998,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "0",
+          "settings": {
+            "calls": 1,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "0",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 701.0,
+              "max": 23254,
+              "median": 22553.0,
+              "min": 21852,
+              "p25": 22202.5,
+              "p75": 22903.5,
+              "p99": 23239.98,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 0.5,
+              "max": 7802,
+              "median": 7801.5,
+              "min": 7801,
+              "p25": 7801.25,
+              "p75": 7801.75,
+              "p99": 7801.99,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 52297.0,
+              "max": 128139,
+              "median": 75842.0,
+              "min": 23545,
+              "p25": 49693.5,
+              "p75": 101990.5,
+              "p99": 127093.06,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 51595.5,
+              "max": 157792,
+              "median": 106196.5,
+              "min": 54601,
+              "p25": 80398.75,
+              "p75": 131994.25,
+              "p99": 156760.09,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 15295943401691082471,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 911.0,
+              "max": 23685,
+              "median": 22774.0,
+              "min": 21863,
+              "p25": 22318.5,
+              "p75": 23229.5,
+              "p99": 23666.78,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 290.5,
+              "max": 9654,
+              "median": 9363.5,
+              "min": 9073,
+              "p25": 9218.25,
+              "p75": 9508.75,
+              "p99": 9648.19,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 2508.5,
+              "max": 33669,
+              "median": 31160.5,
+              "min": 28652,
+              "p25": 29906.25,
+              "p75": 32414.75,
+              "p99": 33618.83,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 1888.0,
+              "max": 65186,
+              "median": 63298.0,
+              "min": 61410,
+              "p25": 62354.0,
+              "p75": 64242.0,
+              "p99": 65148.24,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "1",
+          "settings": {
+            "calls": 10,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "1",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 281.0,
+              "max": 22614,
+              "median": 22333.0,
+              "min": 22052,
+              "p25": 22192.5,
+              "p75": 22473.5,
+              "p99": 22608.38,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 1362.0,
+              "max": 43414,
+              "median": 42052.0,
+              "min": 40690,
+              "p25": 41371.0,
+              "p75": 42733.0,
+              "p99": 43386.76,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1903.5,
+              "max": 27922,
+              "median": 26018.5,
+              "min": 24115,
+              "p25": 25066.75,
+              "p75": 26970.25,
+              "p99": 27883.93,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 2984.5,
+              "max": 93388,
+              "median": 90403.5,
+              "min": 87419,
+              "p25": 88911.25,
+              "p75": 91895.75,
+              "p99": 93328.31,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 2511879593980305992,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2759.0,
+              "max": 27220,
+              "median": 24461.0,
+              "min": 21702,
+              "p25": 23081.5,
+              "p75": 25840.5,
+              "p99": 27164.82,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 1082.0,
+              "max": 44696,
+              "median": 43614.0,
+              "min": 42532,
+              "p25": 43073.0,
+              "p75": 44155.0,
+              "p99": 44674.36,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 6619.5,
+              "max": 42012,
+              "median": 35392.5,
+              "min": 28773,
+              "p25": 32082.75,
+              "p75": 38702.25,
+              "p99": 41879.61,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 10460.5,
+              "max": 113928,
+              "median": 103467.5,
+              "min": 93007,
+              "p25": 98237.25,
+              "p75": 108697.75,
+              "p99": 113718.79000000001,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "2",
+          "settings": {
+            "calls": 100,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "2",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 3270.0,
+              "max": 31176,
+              "median": 27906.0,
+              "min": 24636,
+              "p25": 26271.0,
+              "p75": 29541.0,
+              "p99": 31110.6,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 123262.0,
+              "max": 5569537,
+              "median": 5446275.0,
+              "min": 5323013,
+              "p25": 5384644.0,
+              "p75": 5507906.0,
+              "p99": 5567071.76,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 5.0,
+              "max": 44906,
+              "median": 44901.0,
+              "min": 44896,
+              "p25": 44898.5,
+              "p75": 44903.5,
+              "p99": 44905.9,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 119987.0,
+              "max": 5639069,
+              "median": 5519082.0,
+              "min": 5399095,
+              "p25": 5459088.5,
+              "p75": 5579075.5,
+              "p99": 5636669.26,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 8701041964910374898,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 1232.0,
+              "max": 26940,
+              "median": 25708.0,
+              "min": 24476,
+              "p25": 25092.0,
+              "p75": 26324.0,
+              "p99": 26915.36,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 125736.0,
+              "max": 6494712,
+              "median": 6368976.0,
+              "min": 6243240,
+              "p25": 6306108.0,
+              "p75": 6431844.0,
+              "p99": 6492197.28,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1572.0,
+              "max": 41791,
+              "median": 40219.0,
+              "min": 38647,
+              "p25": 39433.0,
+              "p75": 41005.0,
+              "p99": 41759.56,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 122932.0,
+              "max": 6557835,
+              "median": 6434903.0,
+              "min": 6311971,
+              "p25": 6373437.0,
+              "p75": 6496369.0,
+              "p99": 6555376.36,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "3",
+          "settings": {
+            "calls": 10000,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "3",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 1512.0,
+              "max": 27430,
+              "median": 25918.0,
+              "min": 24406,
+              "p25": 25162.0,
+              "p75": 26674.0,
+              "p99": 27399.76,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 781.5,
+              "max": 8343,
+              "median": 7561.5,
+              "min": 6780,
+              "p25": 7170.75,
+              "p75": 7952.25,
+              "p99": 8327.369999999999,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1793.0,
+              "max": 34261,
+              "median": 32468.0,
+              "min": 30675,
+              "p25": 31571.5,
+              "p75": 33364.5,
+              "p99": 34225.14,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 4086.5,
+              "max": 70034,
+              "median": 65947.5,
+              "min": 61861,
+              "p25": 63904.25,
+              "p75": 67990.75,
+              "p99": 69952.27,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 2062442651952898626,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 285.5,
+              "max": 28482,
+              "median": 28196.5,
+              "min": 27911,
+              "p25": 28053.75,
+              "p75": 28339.25,
+              "p99": 28476.29,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 225.0,
+              "max": 7571,
+              "median": 7346.0,
+              "min": 7121,
+              "p25": 7233.5,
+              "p75": 7458.5,
+              "p99": 7566.5,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 33038.5,
+              "max": 96322,
+              "median": 63283.5,
+              "min": 30245,
+              "p25": 46764.25,
+              "p75": 79802.75,
+              "p99": 95661.23,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 33099.0,
+              "max": 131925,
+              "median": 98826.0,
+              "min": 65727,
+              "p25": 82276.5,
+              "p75": 115375.5,
+              "p99": 131263.02000000002,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "4",
+          "settings": {
+            "calls": 1,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "4",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2128.0,
+              "max": 24536,
+              "median": 22408.0,
+              "min": 20280,
+              "p25": 21344.0,
+              "p75": 23472.0,
+              "p99": 24493.44,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 4912.0,
+              "max": 23925,
+              "median": 19013.0,
+              "min": 14101,
+              "p25": 16557.0,
+              "p75": 21469.0,
+              "p99": 23826.760000000002,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 6730.0,
+              "max": 30886,
+              "median": 24156.0,
+              "min": 17426,
+              "p25": 20791.0,
+              "p75": 27521.0,
+              "p99": 30751.4,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 13770.0,
+              "max": 79347,
+              "median": 65577.0,
+              "min": 51807,
+              "p25": 58692.0,
+              "p75": 72462.0,
+              "p99": 79071.6,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 376792655821684481,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 631.0,
+              "max": 21151,
+              "median": 20520.0,
+              "min": 19889,
+              "p25": 20204.5,
+              "p75": 20835.5,
+              "p99": 21138.38,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 2894.5,
+              "max": 22764,
+              "median": 19869.5,
+              "min": 16975,
+              "p25": 18422.25,
+              "p75": 21316.75,
+              "p99": 22706.11,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 390.5,
+              "max": 21502,
+              "median": 21111.5,
+              "min": 20721,
+              "p25": 20916.25,
+              "p75": 21306.75,
+              "p99": 21494.19,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 1873.0,
+              "max": 63374,
+              "median": 61501.0,
+              "min": 59628,
+              "p25": 60564.5,
+              "p75": 62437.5,
+              "p99": 63336.54,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "5",
+          "settings": {
+            "calls": 10,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "5",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2814.5,
+              "max": 24917,
+              "median": 22102.5,
+              "min": 19288,
+              "p25": 20695.25,
+              "p75": 23509.75,
+              "p99": 24860.71,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 419724.0,
+              "max": 895441,
+              "median": 475717.0,
+              "min": 55993,
+              "p25": 265855.0,
+              "p75": 685579.0,
+              "p99": 887046.52,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1753.0,
+              "max": 27501,
+              "median": 25748.0,
+              "min": 23995,
+              "p25": 24871.5,
+              "p75": 26624.5,
+              "p99": 27465.94,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 424291.5,
+              "max": 947859,
+              "median": 523567.5,
+              "min": 99276,
+              "p25": 311421.75,
+              "p75": 735713.25,
+              "p99": 939373.17,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 8637990922899580451,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 3750.5,
+              "max": 24436,
+              "median": 20685.5,
+              "min": 16935,
+              "p25": 18810.25,
+              "p75": 22560.75,
+              "p99": 24360.989999999998,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 5668.5,
+              "max": 58887,
+              "median": 53218.5,
+              "min": 47550,
+              "p25": 50384.25,
+              "p75": 56052.75,
+              "p99": 58773.63,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 8833.0,
+              "max": 33860,
+              "median": 25027.0,
+              "min": 16194,
+              "p25": 20610.5,
+              "p75": 29443.5,
+              "p99": 33683.34,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 18252.0,
+              "max": 117183,
+              "median": 98931.0,
+              "min": 80679,
+              "p25": 89805.0,
+              "p75": 108057.0,
+              "p99": 116817.95999999999,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "6",
+          "settings": {
+            "calls": 100,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "6",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 886.5,
+              "max": 24346,
+              "median": 23459.5,
+              "min": 22573,
+              "p25": 23016.25,
+              "p75": 23902.75,
+              "p99": 24328.27,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 167978.0,
+              "max": 4503113,
+              "median": 4335135.0,
+              "min": 4167157,
+              "p25": 4251146.0,
+              "p75": 4419124.0,
+              "p99": 4499753.44,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 3054.5,
+              "max": 33600,
+              "median": 30545.5,
+              "min": 27491,
+              "p25": 29018.25,
+              "p75": 32072.75,
+              "p99": 33538.91,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 164037.0,
+              "max": 4553177,
+              "median": 4389140.0,
+              "min": 4225103,
+              "p25": 4307121.5,
+              "p75": 4471158.5,
+              "p99": 4549896.26,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 10595679600718363838,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 35432.0,
+              "max": 96282,
+              "median": 60850.0,
+              "min": 25418,
+              "p25": 43134.0,
+              "p75": 78566.0,
+              "p99": 95573.36,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 28202.0,
+              "max": 4332632,
+              "median": 4304430.0,
+              "min": 4276228,
+              "p25": 4290329.0,
+              "p75": 4318531.0,
+              "p99": 4332067.96,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 3630.0,
+              "max": 33239,
+              "median": 29609.0,
+              "min": 25979,
+              "p25": 27794.0,
+              "p75": 31424.0,
+              "p99": 33166.4,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 3600.0,
+              "max": 4398489,
+              "median": 4394889.0,
+              "min": 4391289,
+              "p25": 4393089.0,
+              "p75": 4396689.0,
+              "p99": 4398417.0,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "7",
+          "settings": {
+            "calls": 10000,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "7",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        }
+      ],
+      "run_id": 0,
+      "seed": 136001
+    },
+    {
+      "rows": [
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 13514.5,
+              "max": 52898,
+              "median": 39383.5,
+              "min": 25869,
+              "p25": 32626.25,
+              "p75": 46140.75,
+              "p99": 52627.71,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 681.0,
+              "max": 6780,
+              "median": 6099.0,
+              "min": 5418,
+              "p25": 5758.5,
+              "p75": 6439.5,
+              "p99": 6766.38,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 4161.0,
+              "max": 51355,
+              "median": 47194.0,
+              "min": 43033,
+              "p25": 45113.5,
+              "p75": 49274.5,
+              "p99": 51271.78,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 10034.5,
+              "max": 102711,
+              "median": 92676.5,
+              "min": 82642,
+              "p25": 87659.25,
+              "p75": 97693.75,
+              "p99": 102510.31,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 16301424872306507525,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 11897.5,
+              "max": 46779,
+              "median": 34881.5,
+              "min": 22984,
+              "p25": 28932.75,
+              "p75": 40830.25,
+              "p99": 46541.05,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 871.0,
+              "max": 6239,
+              "median": 5368.0,
+              "min": 4497,
+              "p25": 4932.5,
+              "p75": 5803.5,
+              "p99": 6221.58,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 5318.0,
+              "max": 38477,
+              "median": 33159.0,
+              "min": 27841,
+              "p25": 30500.0,
+              "p75": 35818.0,
+              "p99": 38370.64,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 5708.5,
+              "max": 79117,
+              "median": 73408.5,
+              "min": 67700,
+              "p25": 70554.25,
+              "p75": 76262.75,
+              "p99": 79002.83,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "0",
+          "settings": {
+            "calls": 1,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "0",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 1387.0,
+              "max": 24176,
+              "median": 22789.0,
+              "min": 21402,
+              "p25": 22095.5,
+              "p75": 23482.5,
+              "p99": 24148.26,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 10.0,
+              "max": 8172,
+              "median": 8162.0,
+              "min": 8152,
+              "p25": 8157.0,
+              "p75": 8167.0,
+              "p99": 8171.8,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1783.0,
+              "max": 28462,
+              "median": 26679.0,
+              "min": 24896,
+              "p25": 25787.5,
+              "p75": 27570.5,
+              "p99": 28426.34,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 3180.0,
+              "max": 60810,
+              "median": 57630.0,
+              "min": 54450,
+              "p25": 56040.0,
+              "p75": 59220.0,
+              "p99": 60746.4,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 8109023095580714585,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 581.0,
+              "max": 22043,
+              "median": 21462.0,
+              "min": 20881,
+              "p25": 21171.5,
+              "p75": 21752.5,
+              "p99": 22031.38,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 390.5,
+              "max": 8462,
+              "median": 8071.5,
+              "min": 7681,
+              "p25": 7876.25,
+              "p75": 8266.75,
+              "p99": 8454.19,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1442.0,
+              "max": 25698,
+              "median": 24256.0,
+              "min": 22814,
+              "p25": 23535.0,
+              "p75": 24977.0,
+              "p99": 25669.16,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 2413.5,
+              "max": 56203,
+              "median": 53789.5,
+              "min": 51376,
+              "p25": 52582.75,
+              "p75": 54996.25,
+              "p99": 56154.729999999996,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "1",
+          "settings": {
+            "calls": 10,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "1",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 1352.0,
+              "max": 21842,
+              "median": 20490.0,
+              "min": 19138,
+              "p25": 19814.0,
+              "p75": 21166.0,
+              "p99": 21814.96,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 771.0,
+              "max": 42012,
+              "median": 41241.0,
+              "min": 40470,
+              "p25": 40855.5,
+              "p75": 41626.5,
+              "p99": 41996.58,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 14721.5,
+              "max": 55752,
+              "median": 41030.5,
+              "min": 26309,
+              "p25": 33669.75,
+              "p75": 48391.25,
+              "p99": 55457.57,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 16844.5,
+              "max": 119606,
+              "median": 102761.5,
+              "min": 85917,
+              "p25": 94339.25,
+              "p75": 111183.75,
+              "p99": 119269.11,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 3122093693032272998,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 11236.5,
+              "max": 45587,
+              "median": 34350.5,
+              "min": 23114,
+              "p25": 28732.25,
+              "p75": 39968.75,
+              "p99": 45362.270000000004,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 550.5,
+              "max": 42312,
+              "median": 41761.5,
+              "min": 41211,
+              "p25": 41486.25,
+              "p75": 42036.75,
+              "p99": 42300.99,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 531.0,
+              "max": 24436,
+              "median": 23905.0,
+              "min": 23374,
+              "p25": 23639.5,
+              "p75": 24170.5,
+              "p99": 24425.38,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 10155.0,
+              "max": 110172,
+              "median": 100017.0,
+              "min": 89862,
+              "p25": 94939.5,
+              "p75": 105094.5,
+              "p99": 109968.9,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "2",
+          "settings": {
+            "calls": 100,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "2",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 85.0,
+              "max": 25588,
+              "median": 25503.0,
+              "min": 25418,
+              "p25": 25460.5,
+              "p75": 25545.5,
+              "p99": 25586.3,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 116492.0,
+              "max": 4134269,
+              "median": 4017777.0,
+              "min": 3901285,
+              "p25": 3959531.0,
+              "p75": 4076023.0,
+              "p99": 4131939.16,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 4236.0,
+              "max": 47009,
+              "median": 42773.0,
+              "min": 38537,
+              "p25": 40655.0,
+              "p75": 44891.0,
+              "p99": 46924.28,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 120813.0,
+              "max": 4206866,
+              "median": 4086053.0,
+              "min": 3965240,
+              "p25": 4025646.5,
+              "p75": 4146459.5,
+              "p99": 4204449.74,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 7808263902206954496,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2048.0,
+              "max": 26639,
+              "median": 24591.0,
+              "min": 22543,
+              "p25": 23567.0,
+              "p75": 25615.0,
+              "p99": 26598.04,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 250674.5,
+              "max": 4382756,
+              "median": 4132081.5,
+              "min": 3881407,
+              "p25": 4006744.25,
+              "p75": 4257418.75,
+              "p99": 4377742.51,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 5443.0,
+              "max": 39478,
+              "median": 34035.0,
+              "min": 28592,
+              "p25": 31313.5,
+              "p75": 36756.5,
+              "p99": 39369.14,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 243183.5,
+              "max": 4433891,
+              "median": 4190707.5,
+              "min": 3947524,
+              "p25": 4069115.75,
+              "p75": 4312299.25,
+              "p99": 4429027.33,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "3",
+          "settings": {
+            "calls": 10000,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "3",
+            "source_fuel": null,
+            "strategy": "eager",
+            "threshold": 0
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 330.0,
+              "max": 23935,
+              "median": 23605.0,
+              "min": 23275,
+              "p25": 23440.0,
+              "p75": 23770.0,
+              "p99": 23928.4,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 575.5,
+              "max": 6409,
+              "median": 5833.5,
+              "min": 5258,
+              "p25": 5545.75,
+              "p75": 6121.25,
+              "p99": 6397.49,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1192.0,
+              "max": 26189,
+              "median": 24997.0,
+              "min": 23805,
+              "p25": 24401.0,
+              "p75": 25593.0,
+              "p99": 26165.16,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 946.5,
+              "max": 55382,
+              "median": 54435.5,
+              "min": 53489,
+              "p25": 53962.25,
+              "p75": 54908.75,
+              "p99": 55363.07,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 10120137589044489214,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 2433.0,
+              "max": 26258,
+              "median": 23825.0,
+              "min": 21392,
+              "p25": 22608.5,
+              "p75": 25041.5,
+              "p99": 26209.34,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 1658.0,
+              "max": 7231,
+              "median": 5573.0,
+              "min": 3915,
+              "p25": 4744.0,
+              "p75": 6402.0,
+              "p99": 7197.84,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 5583.5,
+              "max": 28072,
+              "median": 22488.5,
+              "min": 16905,
+              "p25": 19696.75,
+              "p75": 25280.25,
+              "p99": 27960.33,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 9674.5,
+              "max": 61561,
+              "median": 51886.5,
+              "min": 42212,
+              "p25": 47049.25,
+              "p75": 56723.75,
+              "p99": 61367.509999999995,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "4",
+          "settings": {
+            "calls": 1,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "4",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 27766.0,
+              "max": 79387,
+              "median": 51621.0,
+              "min": 23855,
+              "p25": 37738.0,
+              "p75": 65504.0,
+              "p99": 78831.68,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 415.5,
+              "max": 23415,
+              "median": 22999.5,
+              "min": 22584,
+              "p25": 22791.75,
+              "p75": 23207.25,
+              "p99": 23406.69,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1933.0,
+              "max": 27621,
+              "median": 25688.0,
+              "min": 23755,
+              "p25": 24721.5,
+              "p75": 26654.5,
+              "p99": 27582.34,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 30114.5,
+              "max": 130423,
+              "median": 100308.5,
+              "min": 70194,
+              "p25": 85251.25,
+              "p75": 115365.75,
+              "p99": 129820.70999999999,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 2679049564138488449,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 1021.0,
+              "max": 23254,
+              "median": 22233.0,
+              "min": 21212,
+              "p25": 21722.5,
+              "p75": 22743.5,
+              "p99": 23233.58,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 486.0,
+              "max": 21021,
+              "median": 20535.0,
+              "min": 20049,
+              "p25": 20292.0,
+              "p75": 20778.0,
+              "p99": 21011.28,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 1497.5,
+              "max": 20240,
+              "median": 18742.5,
+              "min": 17245,
+              "p25": 17993.75,
+              "p75": 19491.25,
+              "p99": 20210.05,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 2032.5,
+              "max": 63543,
+              "median": 61510.5,
+              "min": 59478,
+              "p25": 60494.25,
+              "p75": 62526.75,
+              "p99": 63502.35,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "5",
+          "settings": {
+            "calls": 10,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "5",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 39.5,
+              "max": 22753,
+              "median": 22713.5,
+              "min": 22674,
+              "p25": 22693.75,
+              "p75": 22733.25,
+              "p99": 22752.21,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 936.5,
+              "max": 49513,
+              "median": 48576.5,
+              "min": 47640,
+              "p25": 48108.25,
+              "p75": 49044.75,
+              "p99": 49494.27,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 976.5,
+              "max": 21622,
+              "median": 20645.5,
+              "min": 19669,
+              "p25": 20157.25,
+              "p75": 21133.75,
+              "p99": 21602.47,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 1952.5,
+              "max": 93888,
+              "median": 91935.5,
+              "min": 89983,
+              "p25": 90959.25,
+              "p75": 92911.75,
+              "p99": 93848.95,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 17941059894943226274,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 435.5,
+              "max": 24255,
+              "median": 23819.5,
+              "min": 23384,
+              "p25": 23601.75,
+              "p75": 24037.25,
+              "p99": 24246.29,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 140.5,
+              "max": 53770,
+              "median": 53629.5,
+              "min": 53489,
+              "p25": 53559.25,
+              "p75": 53699.75,
+              "p99": 53767.19,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 861.0,
+              "max": 21532,
+              "median": 20671.0,
+              "min": 19810,
+              "p25": 20240.5,
+              "p75": 21101.5,
+              "p99": 21514.78,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 566.0,
+              "max": 98686,
+              "median": 98120.0,
+              "min": 97554,
+              "p25": 97837.0,
+              "p75": 98403.0,
+              "p99": 98674.68,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "6",
+          "settings": {
+            "calls": 100,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "6",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        },
+        {
+          "baseline": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 1026.5,
+              "max": 24917,
+              "median": 23890.5,
+              "min": 22864,
+              "p25": 23377.25,
+              "p75": 24403.75,
+              "p99": 24896.47,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 438532.0,
+              "max": 4502833,
+              "median": 4064301.0,
+              "min": 3625769,
+              "p25": 3845035.0,
+              "p75": 4283567.0,
+              "p99": 4494062.36,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 2243.0,
+              "max": 30895,
+              "median": 28652.0,
+              "min": 26409,
+              "p25": 27530.5,
+              "p75": 29773.5,
+              "p99": 30850.14,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 435262.5,
+              "max": 4552106,
+              "median": 4116843.5,
+              "min": 3681581,
+              "p25": 3899212.25,
+              "p75": 4334474.75,
+              "p99": 4543400.75,
+              "unit": "ns"
+            }
+          },
+          "bootstrap_resamples": 0,
+          "bootstrap_seed": 1888834117593508308,
+          "candidate": {
+            "instantiate_ns": {
+              "count": 2,
+              "mad": 3210.0,
+              "max": 26319,
+              "median": 23109.0,
+              "min": 19899,
+              "p25": 21504.0,
+              "p75": 24714.0,
+              "p99": 26254.8,
+              "unit": "ns"
+            },
+            "invoke_ns": {
+              "count": 2,
+              "mad": 196905.5,
+              "max": 4256670,
+              "median": 4059764.5,
+              "min": 3862859,
+              "p25": 3961311.75,
+              "p75": 4158217.25,
+              "p99": 4252731.89,
+              "unit": "ns"
+            },
+            "prepare_ns": {
+              "count": 2,
+              "mad": 2593.5,
+              "max": 24706,
+              "median": 22112.5,
+              "min": 19519,
+              "p25": 20815.75,
+              "p75": 23409.25,
+              "p99": 24654.13,
+              "unit": "ns"
+            },
+            "total_ns": {
+              "count": 2,
+              "mad": 191102.0,
+              "max": 4296088,
+              "median": 4104986.0,
+              "min": 3913884,
+              "p25": 4009435.0,
+              "p75": 4200537.0,
+              "p99": 4292265.96,
+              "unit": "ns"
+            }
+          },
+          "candidate_over_baseline": null,
+          "ci95": null,
+          "metric": "entry_total",
+          "pairs": 2,
+          "raw_unit": "ns",
+          "row_id": "7",
+          "settings": {
+            "calls": 10000,
+            "case": "p135_counter",
+            "expected": 8,
+            "feature_profile": "mvp",
+            "fixture": "/workspace/wtime/tools/wtime-bench/fixtures/p135/counter.wasm",
+            "fixture_sha256": "6b365cbdbe8c189ad1b19a8cbdc6304012207dbf0f83c0de6824f8c8b8f07776",
+            "input": 7,
+            "metric": "entry_total",
+            "mode": "register",
+            "row_id": "7",
+            "source_fuel": null,
+            "strategy": "adaptive",
+            "threshold": 3
+          }
+        }
+      ],
+      "run_id": 1,
+      "seed": 136002
+    }
+  ],
+  "scaled_by_calls": false,
+  "schema": "wtime-register-entry-analysis-v1",
+  "status": "passed",
+  "threshold_selection": null,
+  "timing_evidence": false
+}

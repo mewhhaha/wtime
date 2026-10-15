@@ -1,0 +1,64 @@
+{
+  "counts": {
+    "pairs": 32,
+    "rows": 8,
+    "runs": 2
+  },
+  "current_source_file_count": 732,
+  "current_source_map": {
+    "bytes": 104412,
+    "path": "/workspace/wtime/target/verification/runs/P137/freeze/attempt-0001/freeze/current-source-map.json",
+    "sha256": "ee43805299d625b93683fdeec42513061ee4348bfb3a05ad1605092220b55155"
+  },
+  "current_source_map_sha256": "90d7833af9e65339493d1b963cc763b5e68aab93a5c49fb8ed71c974b1bafd86",
+  "guest_or_build_launched": false,
+  "outcome": "contract_only",
+  "p136": {
+    "collection_report": {
+      "bytes": 310529,
+      "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/collection/report.json",
+      "sha256": "6b6e3e04c5f2733477d911e1775d053648287e6fe5617a69a7597c89eedc722d"
+    },
+    "completion": {
+      "bytes": 503,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P136-completion.json",
+      "sha256": "804eeb3ebc4b911835d40cbe74811d8510e68ced766f91d35ca1dff0be132225"
+    },
+    "contract": {
+      "bytes": 1210,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P136-contract.json",
+      "sha256": "33cf233df12679d89b23a17c8ae11a6bd1b3f0257e50d2af311c0d3e0cc1f209"
+    },
+    "evidence": {
+      "bytes": 1545,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P136-evidence.json",
+      "sha256": "138a7b9629ad4b29d805599deaccb3891405cfcf41a127867795e5db8d8fc4d1"
+    },
+    "proof": {
+      "bytes": 3139,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P136-proof.json",
+      "sha256": "47dc725464f09572f78eae96e5e4d409e7eca0bb06a8aea92eaedba60f8737a5"
+    },
+    "proof_report": {
+      "bytes": 3139,
+      "path": "/workspace/wtime/target/verification/runs/P136/verify/attempt-0001/proof/report.json",
+      "sha256": "47dc725464f09572f78eae96e5e4d409e7eca0bb06a8aea92eaedba60f8737a5"
+    },
+    "records": {
+      "bytes": 922317,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P136-records.json.gz",
+      "sha256": "a1930ec2ae6c629e1dcbcf9f91318e6b3b98aed9324ae08ba158334119638137"
+    },
+    "verification_contract": {
+      "bytes": 14492,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P136-verification.json",
+      "sha256": "4a47fd358d7b4dc65b4830d9606127f3bf793615738b233d7ba4169e44ad0386"
+    }
+  },
+  "p136_collection_identity_sha256": "6b6e3e04c5f2733477d911e1775d053648287e6fe5617a69a7597c89eedc722d",
+  "p136_proof_identity_sha256": "34bbfb99995509fa5030ca5792584860eceecfd1f4a86383c471cd25970a5bf4",
+  "schema": "wtime-p137-freeze-v1",
+  "status": "passed",
+  "timing_evidence": false,
+  "timing_reused": true
+}

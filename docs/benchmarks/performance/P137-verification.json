@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "task": "P137",
+  "identities": {
+    "p136_closed_evidence": {
+      "paths": [
+        "docs/benchmarks/performance/P136-completion.json",
+        "docs/benchmarks/performance/P136-evidence.json",
+        "docs/benchmarks/performance/P136-proof.json",
+        "docs/benchmarks/performance/P136-contract.json",
+        "docs/benchmarks/performance/P136-verification.json",
+        "docs/benchmarks/performance/P136-records.json.gz",
+        "target/performance/P136/shared-finalization/attempt-0001/completion.json",
+        "target/performance/P136/shared-finalization/attempt-0001/evidence.json",
+        "target/verification/runs/P136/verify/attempt-0001/proof/report.json",
+        "target/verification/runs/P136/verify/attempt-0001/proof/collection/report.json",
+        "target/verification/runs/P136/verify/attempt-0001/proof/collection/checkpoint.jsonl",
+        "target/verification/runs/P136/verify/attempt-0001/proof/collection/commands/**/*",
+        "target/verification/runs/P136/verify/attempt-0001/proof/collection/helpers/**/*",
+        "target/verification/runs/P136/verify/attempt-0001/proof/archived-adapter/**/*",
+        "target/verification/runs/P136/verify/attempt-0001/proof/candidate-adapter/**/*",
+        "target/verification/runs/P134/verify/attempt-0001/default-build.json",
+        "target/verification/runs/P134/verify/attempt-0001/register-build.json"
+      ],
+      "settings": {"p136_status": "done", "p136_outcome": "contract_only", "rows": 8, "pairs": 32}
+    },
+    "runtime": {
+      "optional_paths": [".cargo/config", ".cargo/config.toml"],
+      "paths": [
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "LICENSE-APACHE", "LICENSE-MIT",
+        "crates/**/*", "tools/wtime-conformance/**/*", ".cargo/config", ".cargo/config.toml"
+      ]
+    },
+    "bench_harness": {
+      "optional_paths": [
+        ".cargo/config", ".cargo/config.toml", "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "paths": [
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+        "tools/wtime-bench/Cargo.toml", "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs", "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/wtime-bench/entry_batch_compare.py", "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/baseline.py", "tools/wtime-bench/fixtures/p135/**",
+        ".cargo/config", ".cargo/config.toml", "tools/wtime-bench/.cargo/config",
+        "tools/wtime-bench/.cargo/config.toml"
+      ],
+      "settings": {"mode": "analysis-only", "rows": 8, "runs": 2, "pairs": 32, "guest_launch": false}
+    },
+    "analysis": {
+      "paths": [
+        "tools/wtime-bench/entry_batch_analyze.py", "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py", "tools/wtime-bench/entry_batch_compare.py",
+        "tools/wtime-bench/checkpoint.py", "tools/verification/producers/p137.py",
+        "tools/verification/producers/p136.py", "tools/verification/producers/p135.py",
+        "tools/checks/build_budget.py", "tools/checks/dependency_budget.py",
+        "docs/benchmarks/performance/P137-contract.json"
+      ],
+      "settings": {"allow_smoke": true, "timing_evidence": false, "gate_eligible": false, "resamples": 0}
+    },
+    "analyzer_tests": {"paths": ["tools/wtime-bench/tests/test_p137_entry_analysis.py"]},
+    "checker_tests": {"paths": ["tools/verification/tests/test_p137_entry_analysis.py"]},
+    "task_plan": {"paths": ["task-plans/performance/05-register-executor/P137-entry-total-paired-analysis.md"]},
+    "freeze_helpers": {
+      "paths": [
+        "tools/verification/producers/p137.py", "tools/verification/producers/p136.py",
+        "tools/verification/producers/p135.py", "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/wtime-bench/entry_batch_compare.py", "tools/wtime-bench/baseline.py",
+        "tools/checks/build_budget.py"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "p137-analyzer-tests",
+        "uses": ["bench_harness", "analysis", "analyzer_tests"],
+        "commands": [{"name": "p137-analyzer-tests", "argv": ["{python}", "-B", "-m", "unittest", "discover", "-s", "tools/wtime-bench/tests", "-p", "test_p137_entry_analysis.py", "-b", "-v"]}],
+        "tests": [{"command": "p137-analyzer-tests", "kind": "unittest", "minimum_passed": 8, "required_names": [
+          "test_complete_two_run_report_keeps_each_row_and_reports_exact_point_ci",
+          "test_pure_analysis_is_deterministic_and_never_launches_subprocesses",
+          "test_mutations_during_bootstrap_invalidate_report_and_bound_artifacts",
+          "test_smoke_requires_opt_in_and_never_reports_uncertainty_or_gate_eligibility",
+          "test_invalid_zero_totals_and_boolean_timing_samples_are_rejected",
+          "test_missing_duplicate_pairs_and_changed_artifact_or_fixture_are_rejected",
+          "test_run_analysis_revalidates_collection_and_writes_durable_offline_result",
+          "test_run_analysis_rejects_stale_checkpoint_and_smoke_stays_ineligible"
+        ]}],
+        "outputs": {}
+      },
+      {
+        "name": "p137-source-bound-tests",
+        "uses": ["analysis", "checker_tests"],
+        "commands": [{"name": "p137-source-bound-tests", "argv": ["{python}", "-B", "-m", "unittest", "-b", "-v", "tools.verification.tests.test_p137_entry_analysis"]}],
+        "tests": [{"command": "p137-source-bound-tests", "kind": "unittest", "minimum_passed": 6, "required_names": [
+          "test_accepts_complete_smoke_matrix_without_promotion",
+          "test_rejects_promoting_envelope_or_computed_uncertainty",
+          "test_rejects_incomplete_duplicate_and_foreign_setting_rows",
+          "test_rejects_bool_counts_and_duplicate_run_identity",
+          "test_synthetic_files_and_resolved_paths_are_contained",
+          "test_public_checker_accepts_valid_contained_receipt_and_rejects_stale_hash"
+        ]}],
+        "outputs": {}
+      }
+    ]
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze/current-source-map.json",
+    "pointer": "/source_map",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "stages": {
+    "freeze": {
+      "uses": ["p136_closed_evidence", "runtime", "freeze_helpers", "task_plan"],
+      "commands": [{"name": "freeze", "argv": ["{python}", "-B", "{repo}/tools/verification/producers/p137.py", "freeze", "--output", "{stage}/freeze"]}],
+      "outputs": {"report": "{stage}/freeze/report.json", "current_source_map": "{stage}/freeze/current-source-map.json"},
+      "checks": [
+        {"artifact": "report", "pointer": "/status", "op": "equal", "value": "passed"},
+        {"artifact": "report", "pointer": "/timing_evidence", "op": "equal", "value": false},
+        {"artifact": "report", "pointer": "/outcome", "op": "equal", "value": "contract_only"},
+        {"artifact": "report", "pointer": "/current_source_file_count", "op": "equal", "value": 732},
+        {"artifact": "report", "pointer": "/counts/pairs", "op": "equal", "value": 32}
+      ]
+    },
+    "verify": {
+      "uses": ["p136_closed_evidence", "runtime", "bench_harness", "analysis", "analyzer_tests", "checker_tests", "task_plan"],
+      "dependencies": ["freeze"],
+      "commands": [
+        {"name": "analyzer-tests", "argv": ["{python}", "-B", "-m", "unittest", "discover", "-s", "tools/wtime-bench/tests", "-p", "test_p137_entry_analysis.py", "-b", "-v"]},
+        {"name": "source-bound-tests", "argv": ["{python}", "-B", "-m", "unittest", "-b", "-v", "tools.verification.tests.test_p137_entry_analysis"]},
+        {"name": "analysis-smoke", "argv": ["{python}", "-B", "{repo}/tools/verification/producers/p137.py", "verify", "--freeze", "{freeze_dir}/freeze/report.json", "--output", "{stage}/proof"]}
+      ],
+      "outputs": {
+        "proof": "{stage}/proof/report.json",
+        "analysis": "{stage}/proof/analysis/report.json",
+        "analysis_helper": "{stage}/proof/analysis/helpers/entry_batch_analyze.py",
+        "summary_helper": "{stage}/proof/analysis/helpers/analyze.py",
+        "bootstrap_helper": "{stage}/proof/analysis/helpers/bootstrap.py",
+        "invocation": "{stage}/proof/invocation.json"
+      },
+      "tests": [
+        {"command": "analyzer-tests", "kind": "unittest", "minimum_passed": 8, "required_names": [
+          "test_complete_two_run_report_keeps_each_row_and_reports_exact_point_ci",
+          "test_pure_analysis_is_deterministic_and_never_launches_subprocesses",
+          "test_mutations_during_bootstrap_invalidate_report_and_bound_artifacts",
+          "test_smoke_requires_opt_in_and_never_reports_uncertainty_or_gate_eligibility",
+          "test_invalid_zero_totals_and_boolean_timing_samples_are_rejected",
+          "test_missing_duplicate_pairs_and_changed_artifact_or_fixture_are_rejected",
+          "test_run_analysis_revalidates_collection_and_writes_durable_offline_result",
+          "test_run_analysis_rejects_stale_checkpoint_and_smoke_stays_ineligible"
+        ]},
+        {"command": "source-bound-tests", "kind": "unittest", "minimum_passed": 6, "required_names": [
+          "test_accepts_complete_smoke_matrix_without_promotion",
+          "test_rejects_promoting_envelope_or_computed_uncertainty",
+          "test_rejects_incomplete_duplicate_and_foreign_setting_rows",
+          "test_rejects_bool_counts_and_duplicate_run_identity",
+          "test_synthetic_files_and_resolved_paths_are_contained",
+          "test_public_checker_accepts_valid_contained_receipt_and_rejects_stale_hash"
+        ]}
+      ],
+      "checks": [
+        {"artifact": "proof", "pointer": "/status", "op": "equal", "value": "passed"},
+        {"artifact": "proof", "pointer": "/outcome", "op": "equal", "value": "contract_only"},
+        {"artifact": "proof", "pointer": "/timing_evidence", "op": "equal", "value": false},
+        {"artifact": "proof", "pointer": "/gate_eligible", "op": "equal", "value": false},
+        {"artifact": "proof", "pointer": "/candidate_promoted", "op": "equal", "value": false},
+        {"artifact": "proof", "pointer": "/counts/runs", "op": "equal", "value": 2},
+        {"artifact": "proof", "pointer": "/counts/rows", "op": "equal", "value": 8},
+        {"artifact": "proof", "pointer": "/counts/pairs", "op": "equal", "value": 32}
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": ["freeze", "verify"],
+    "outcome": "contract_only",
+    "limitations": ["P137 reanalyzes only the existing P136 non-promoting smoke collection; no timing decision, threshold selection, or performance claim."]
+  }
+}

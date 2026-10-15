@@ -1,0 +1,56 @@
+{
+  "schema": "wtime-performance-task-contract-v1",
+  "task": "P137",
+  "kind": "foundation",
+  "selection": "register",
+  "protocol": "source-bound raw paired Register entry analysis",
+  "predecessor": {
+    "task": "P136",
+    "status": "done",
+    "outcome": "contract_only",
+    "completion": "docs/benchmarks/performance/P136-completion.json",
+    "evidence": "docs/benchmarks/performance/P136-evidence.json",
+    "proof": "docs/benchmarks/performance/P136-proof.json",
+    "collection": "target/verification/runs/P136/verify/attempt-0001/proof/collection",
+    "records": "docs/benchmarks/performance/P136-records.json.gz"
+  },
+  "analysis": {
+    "runs": 2,
+    "rows_per_run": 8,
+    "pairs_per_row_per_run": 2,
+    "total_pairs": 32,
+    "fixture_case": "p135_counter",
+    "call_counts": [1, 10, 100, 10000],
+    "settings": [
+      {"strategy": "eager", "threshold": 0},
+      {"strategy": "adaptive", "threshold": 3}
+    ],
+    "metric": "entry_total",
+    "raw_unit": "ns",
+    "timing_evidence": false,
+    "gate_eligible": false,
+    "candidate_over_baseline": null,
+    "ci95": null,
+    "bootstrap_resamples": 0,
+    "decision": null
+  },
+  "integrity": {
+    "verify_p136_public_source_current_receipt": true,
+    "revalidate_collection_report_and_raw_pair_records": true,
+    "bind_archived_and_current_executables_fixtures_and_helpers": true,
+    "bind_current_candidate_source_closure_files": 732,
+    "reuse_p136_core_build_budget_evidence_only": true,
+    "launch_guest_or_build": false,
+    "modify_p136_or_runtime_sources": false
+  },
+  "non_goals": [
+    "no division by calls or ns/op metric",
+    "no threshold or workload selection",
+    "no break-even inference",
+    "no promotion or candidate decision",
+    "no timing refresh or guest execution"
+  ],
+  "outcome": "contract_only",
+  "timing_evidence": false,
+  "performance_claim": false
+}
