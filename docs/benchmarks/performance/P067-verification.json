@@ -153,6 +153,7 @@
     },
     "analysis": {
       "paths": [
+        "target/recovery/P080-isolate-0001/runs/attempt-0001/result.json",
         "tools/verification/producers/p067.py",
         "tools/verification/producers/p143.py",
         "tools/verification/producers/p138.py",

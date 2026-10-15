@@ -1,0 +1,120 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P080",
+  "lane": "candidate",
+  "rationale": "Predeclared decoded specialist comparison over all seven legacy continuation rows. Target depth four and depth thirty-two, hold out captured-reference behavior, and protect depth zero, bound nested, one-shot reuse/trap, and cross-module nominal-context behavior. Timed stages are limited to setup plus the actual capture/bind and resume operations; accounting, cleanup, and nominal-context checks remain untimed semantic validation. Keep first-call/load-and-call and large preparation controls protected. Unsupported external comparators remain typed unsupported or unrun and never receive a ratio.",
+  "registry_sha256": "474b1fce96ce1302fe78885c8385eb592b1111ff912fd7f1b2c56763683ed0d9",
+  "rows": [
+    {
+      "family": "continuations",
+      "id": "continuation_depth_0",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "862e7337f25a4e4dd289d85b96ed8166cf8bfeaf8c01dea105311e00b5faf4e8"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_depth_4",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "24205b858a520d88051a9b4f84211f5f9258923c890a8fc075ae48d6f060713d"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_depth_32",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "e19d63163ba230d76f6ffb71cd852f8f97cefc8fd5e58fa92ac0e377b5086b58"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_captured_reference",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "01385435a0937eeef0878d0c4bdb1185b48a11c53bfa671ad81de52af1de2281"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_bound_nested",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "bind",
+        "resume"
+      ],
+      "row_sha256": "f53f2368bd29a3c535a40e3aebaf92c9cc0ea66056f47839cb739f2447986b31"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_one_shot",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture",
+        "resume_once",
+        "resume_reuse"
+      ],
+      "row_sha256": "33fecd914277c0d03958b2dcbf0b9821482b0ca00c603f7ac1e37209e8b3d7dc"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_cross_module_consumer",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture",
+        "resume"
+      ],
+      "row_sha256": "684a1495af5a050e26152466b2ebbe559dc5388e282b9f03c290cd8704c388ac"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "test_full_thread_and_continuation_families_use_only_declared_timed_stages",
+    "test_target_roles_and_protected_controls_are_explicit_in_both_selections",
+    "test_unavailable_wasmtime_comparators_never_claim_ratios"
+  ]
+}

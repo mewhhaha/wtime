@@ -282,6 +282,18 @@ def validate_entry_setting(declaration, settings, identities, capabilities):
     return entry_setting
 
 
+def expected_setup_modules(entries):
+    result={entry['id']:entry['setup_modules'] for entry in entries if entry.get('setup_modules')}
+    import continuation_pairing
+    import continuation_workloads
+    for entry in entries:
+        if continuation_pairing.matches(entry) and entry['id']=='continuation_cross_module_consumer':
+            rows={row['id']:row for row in continuation_workloads.workload_entries()}
+            need('continuation_cross_module_provider' in rows,'continuation provider model is missing')
+            result[entry['id']]=[rows['continuation_cross_module_provider']['source']]
+    return result
+
+
 def validate(path):
     path = Path(path).resolve(strict=True)
     report = json.loads(path.read_text())
@@ -353,7 +365,7 @@ def validate(path):
     need(set(identities.get('fixture_files',{})) == set(by_id), 'fixture inventory differs')
     for wid,entry in by_id.items():
         need(identities['fixture_files'][wid]['sha256'] == entry['source']['wasm_sha256'], 'fixture bytes differ from declaration')
-    expected_setups = {wid:entry['setup_modules'] for wid,entry in by_id.items() if entry.get('setup_modules')}
+    expected_setups = expected_setup_modules(by_id.values())
     need(set(identities.get('setup_fixture_files',{})) == set(expected_setups),
          'setup fixture inventory differs')
     for wid, setups in expected_setups.items():

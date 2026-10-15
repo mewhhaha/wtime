@@ -1,0 +1,51 @@
+{
+  "claim": "These are exact completed raw measurement datasets, not task completion or supported speed claims.",
+  "datasets": [
+    {
+      "dataset": "p067_eager_decoded",
+      "gzip_ref": {
+        "bytes": 1973622,
+        "encoding": "gzip-json-identity",
+        "path": "docs/benchmarks/performance/P067-eager-decoded-measurements.json.gz",
+        "sha256": "39024308843d96524cb960e4e3d6e8a37ebbfc8d5778664e8b2096e1f26464f2"
+      },
+      "original_bytes": 107845624,
+      "original_path": "/workspace/wtime/target/verification/runs/P067/measure/attempt-0001/measure/eager-vs-decoded/report.json",
+      "original_sha256": "97f16e4a4bab2d2d77b99eeff2f2cb2e8f78f0d6a71cd46c148ebd7526c7c56e"
+    },
+    {
+      "dataset": "p080_gc",
+      "gzip_ref": {
+        "bytes": 2004632,
+        "encoding": "gzip-json-identity",
+        "path": "docs/benchmarks/performance/P080-gc-measurements.json.gz",
+        "sha256": "9ea84146181cccd85d3d8637ac87a1acea1169bd4aa5a5d342ab5e4e8e6eef31"
+      },
+      "original_bytes": 79949617,
+      "original_path": "/workspace/wtime/target/performance/P080-families-0004/gc-exceptions/report.json",
+      "original_sha256": "5ea130641cbac4f9a87d2b29aba270fc1734c00978da22af6c5f564227c883d1"
+    },
+    {
+      "dataset": "p080_simd",
+      "gzip_ref": {
+        "bytes": 694164,
+        "encoding": "gzip-json-identity",
+        "path": "docs/benchmarks/performance/P080-simd-measurements.json.gz",
+        "sha256": "fb2243f3998b029b79412c5afc9e312911bdb163e855167fb1818636de5f5a72"
+      },
+      "original_bytes": 49839330,
+      "original_path": "/workspace/wtime/target/performance/P080-families-0004/simd/report.json",
+      "original_sha256": "53eb6cce583b77717ece7cb299baa88899e4851a53d7b880af3854bbb30640de"
+    }
+  ],
+  "decision": "pending_final_gate",
+  "helper": {
+    "bytes": 5695,
+    "path": "tools/verification/producers/measurement_checkpoint.py",
+    "sha256": "b1434de7d65570ae93fa2815a805596b52db58269ca1e035d1afd84b742e4610"
+  },
+  "original_reports_modified": false,
+  "schema": "wtime-measurement-checkpoint-v1",
+  "source_commit": "c73fc0d",
+  "task_completion": false
+}

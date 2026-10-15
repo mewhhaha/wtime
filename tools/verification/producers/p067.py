@@ -84,6 +84,10 @@ def analyze(verify_dir,measure_dir,output):
     collection=read_json(measure_dir/'report.json')
     need(collection.get('schema')=='wtime-p067-measurements-v1' and collection.get('status')=='passed'
          and collection.get('timing_evidence') is True and collection.get('source_stable') is True,'milestone measurements incomplete')
+    context_path=ROOT/'target/recovery/P080-isolate-0001/runs/attempt-0001/result.json'
+    context=read_json(context_path)
+    need(context.get('status')=='passed' and context.get('shared_encoder_restored') is True,
+         'known fixture-encoder replacement has no restoration record')
     store=ArtifactStore(ROOT/'target/verification')
     for reference in read_json(verify_normal(collection['artifacts'])).values():store.verify(reference)
     expected={'eager-vs-decoded','eager-vs-compact','adaptive-vs-decoded',
@@ -133,6 +137,10 @@ def analyze(verify_dir,measure_dir,output):
         'coverage':coverage,'execution_paths':paths,'tier_checks':counts,'runtime_controls':normal(verify_dir/'prior-controls.json'),
         'measurements':normal(measure_dir/'report.json'),'statistics':stats,'sample_counts':raw_counts,'builds':builds,
         'register_comparisons':decisions,'timing_evidence':True,
+        'collection_context':{'encoder_restoration':normal(context_path),
+            'background_work':'Independent benchmarks on CPUs 1, 2 and 3 and bounded untimed verification/build work on CPU 4 overlapped this CPU 0 collection.',
+            'fixture_encoder_event':'An unrelated Cargo test replaced the shared preparation encoder after the first comparison had encoded its fixtures. Its hash-verified original bytes were restored before the final integrity check. Retained Wasm fixtures and timed runtime executables were unchanged.',
+            'physical_core_idle':'unknown/shared cloud'},
         'limitations':['Full SIMD P001 control includes 114 rows; the primary explicit Register strict-float projection has 26 model-defined rows.',
           'Adaptive threshold 3 is measured on scalar and representative routes; memory and strict float use eager Register only.',
           'No universal promotion threshold is inferred from per-entry observations or paired batch totals.',

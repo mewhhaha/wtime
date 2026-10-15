@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "task": "P094",
+  "identities": {
+    "runtime_sources": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/*/Cargo.toml",
+        "crates/**/*.rs"
+      ]
+    },
+    "policy": {
+      "paths": [
+        "docs/architecture/performance-native-adr.md",
+        "docs/architecture/native-policy-skeleton.json",
+        "tools/verification/producers/p094_policy.py"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p109.py",
+        "tools/checks/dependency_budget.py",
+        "tools/verification/*.py",
+        "tools/verify.py"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p094_native_policy.py"
+      ]
+    },
+    "cost_review": {
+      "paths": [
+        "tools/verification/producers/p094.py",
+        "tools/verification/producers/p094_policy.py",
+        "tools/verification/producers/p108.py",
+        "tools/verification/producers/p109.py",
+        "tools/verification/producers/p110.py",
+        "tools/verification/producers/p110_builds.py",
+        "tools/verification/producers/p110_finalize.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/wtime-bench/tests/test_p094_cost_inventory.py"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "runtime_sources",
+        "policy",
+        "producer"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p109.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "freeze": "{stage}/freeze.json"
+      },
+      "checks": [
+        {
+          "artifact": "freeze",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime_sources",
+        "policy",
+        "producer",
+        "tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "native-policy-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p094_native_policy.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "default-dependency-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/checks/dependency_budget.py"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "native-policy-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": [
+            "test_no_go_keeps_decoded_default_and_native_aot_disabled",
+            "test_no_go_defers_descendants_and_rejects_dependency_unsafe_or_cycle_drift",
+            "test_reopen_policy_requires_finite_code_wx_abi_and_transactional_bounds"
+          ]
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime_sources",
+    "baseline": "{freeze_dir}/freeze.json",
+    "pointer": "/core_sources",
+    "allowed_changes": [],
+    "allowed_additions": []
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "native-policy-tests",
+        "uses": [
+          "policy",
+          "tests",
+          "producer"
+        ],
+        "commands": [
+          {
+            "name": "native-policy-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p094_native_policy.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "native-policy-tests",
+            "kind": "unittest",
+            "minimum_passed": 3,
+            "required_names": [
+              "test_no_go_keeps_decoded_default_and_native_aot_disabled",
+              "test_no_go_defers_descendants_and_rejects_dependency_unsafe_or_cycle_drift",
+              "test_reopen_policy_requires_finite_code_wx_abi_and_transactional_bounds"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "native-cost-tests",
+        "uses": [
+          "cost_review",
+          "producer"
+        ],
+        "commands": [
+          {
+            "name": "native-cost-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p094_cost_inventory.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "native-cost-tests",
+            "kind": "unittest",
+            "minimum_passed": 3,
+            "required_names": [
+              "test_two_complete_runs_remain_separate_and_retain_statistics_references",
+              "test_incomplete_and_boolean_pair_run_or_bootstrap_counts_fail",
+              "test_nonfinite_nonpositive_or_reversed_ratio_intervals_fail"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "analyze"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Provisional design preparation only until the P067/P080 cost review and final no_go decision artifact are supplied.",
+      "No native implementation, unsafe exemption, supported native target or measured native speedup is claimed."
+    ]
+  }
+}

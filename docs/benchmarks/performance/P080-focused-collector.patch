@@ -1,0 +1,166 @@
+--- a/tools/wtime-bench/focused_compare.py
++++ b/tools/wtime-bench/focused_compare.py
+@@ -20,6 +20,7 @@
+ import cold_products
+ import compare
+ import continuation_pairing
++import continuation_workloads
+ import execution_identity
+ import selection_manifest
+ 
+@@ -177,7 +178,15 @@
+                      'scalar_sha256': compare.sha(HERE/'src/scalar_driver.rs'),
+                      'memory_sha256': compare.sha(HERE/'src/memory_driver.rs')}
+             if continuation_pairing.matches(entry):
+-                need(stage in entry['stages'] and stage in ('setup', 'capture', 'bind', 'resume'),
++                if entry['id'] == 'continuation_one_shot':
++                    timed_stages = ('setup', 'capture', 'resume_once', 'resume_reuse')
++                elif entry['id'] == 'continuation_cross_module_consumer':
++                    timed_stages = ('setup', 'capture', 'resume')
++                elif entry['id'] == 'continuation_bound_nested':
++                    timed_stages = ('setup', 'bind', 'resume')
++                else:
++                    timed_stages = ('setup', 'capture', 'resume')
++                need(stage in entry['stages'] and stage in timed_stages,
+                      'unsupported paired continuation timer stage')
+                 need(settings.get('baseline_mode') == 'decoded'
+                      and settings.get('candidate_mode') == 'decoded',
+@@ -189,6 +198,16 @@
+                               'fixture_wat_sha256': entry['source']['sha256'],
+                               'fixture_wasm_sha256': entry['source']['wasm_sha256'],
+                               'measurement_policy': 'decoded; exact selected lifecycle interval; fresh process; batch one'})
++                if entry['id'] == 'continuation_cross_module_consumer':
++                    provider_rows = {row['id']: row for row in
++                                     continuation_workloads.workload_entries()}
++                    provider = provider_rows.get('continuation_cross_module_provider')
++                    need(provider is not None,
++                         'cross-module provider model row is missing')
++                    timer.update({
++                        'setup_module_wat_sha256': provider['source']['sha256'],
++                        'setup_module_wasm_sha256': provider['source']['wasm_sha256'],
++                        'setup_module_policy': 'provider compiled in same Engine and instantiated before consumer'})
+             if module == 'gc_workloads.py':
+                 timer.update({'adapter_sha256': compare.sha(HERE/'gc_cold_adapter.py'),
+                               'gc_validator_sha256': compare.sha(HERE/'gc_scaling.py'),
+@@ -262,20 +281,71 @@
+     return result
+ 
+ 
+-def prepare_fixtures(entries, frozen, output, encoder):
++def _continuation_wasm(entry, wat, output, encoder, encoding_records):
++    source = entry['source']
++    need(wat.is_file() and compare.sha(wat) == source['sha256'],
++         'continuation WAT source changed: '+entry['id'])
++    expected_wasm_sha = source['wasm_sha256']
++    sibling = wat.with_suffix('.wasm')
++    if sibling.exists():
++        need(sibling.is_file() and compare.sha(sibling) == expected_wasm_sha,
++             'continuation sibling Wasm bytes changed: '+entry['id'])
++        encoding_records.append({
++            'workload':entry['id'], 'method':'source_sibling', 'returncode':None,
++            'source_wat_sha256':source['sha256'], 'expected_wasm_sha256':expected_wasm_sha,
++            'wasm_path':str(sibling), 'observed_wasm_sha256':compare.sha(sibling),
++        })
++        return sibling
++
++    output_root = Path(output).resolve(strict=True)
++    destination = output_root/('continuation-'+entry['id']+'.wasm')
++    need(destination.resolve().is_relative_to(output_root),
++         'encoded continuation Wasm path escapes fresh fixture output')
++    need(not destination.exists(), 'encoded continuation fixture output already exists')
++    argv = [str(encoder), 'encode', str(wat), '-o', str(destination)]
++    proc = subprocess.run(argv, cwd=ROOT, text=True, capture_output=True, timeout=60)
++    observed_wasm_sha = compare.sha(destination) if destination.is_file() else None
++    encoding_records.append({
++        'workload':entry['id'], 'method':'private_encoder', 'argv':argv,
++        'returncode':proc.returncode, 'source_wat_sha256':source['sha256'],
++        'expected_wasm_sha256':expected_wasm_sha,
++        'wasm_path':str(destination), 'observed_wasm_sha256':observed_wasm_sha,
++        'stdout':proc.stdout, 'stderr':proc.stderr,
++    })
++    need(proc.returncode == 0,
++         'continuation fixture encoder failed for '+entry['id']+': '+proc.stderr[-2000:])
++    need(destination.is_file() and observed_wasm_sha == expected_wasm_sha,
++         'continuation encoded Wasm bytes differ from model: '+entry['id'])
++    return destination
++
++
++def prepare_fixtures(entries, frozen, output, encoder, encoding_records=None):
+     fixtures = {}
+     import subprocess
++    if encoding_records is None:
++        encoding_records = []
+     for entry in entries:
+         source = entry['source']
+         if continuation_pairing.matches(entry):
+             continuation_pairing.expected(entry)
+             wat = HERE/source['path']
+-            wasm = wat.with_suffix('.wasm')
+-            need(wat.is_file() and compare.sha(wat) == source['sha256'],
+-                 'continuation WAT source changed: '+entry['id'])
+-            need(wasm.is_file() and compare.sha(wasm) == source['wasm_sha256'],
+-                 'continuation immutable Wasm fixture changed: '+entry['id'])
+-            fixtures[entry['id']] = wasm
++            wasm = _continuation_wasm(entry, wat, output, encoder, encoding_records)
++            if entry['id'] == 'continuation_cross_module_consumer':
++                provider_rows = {row['id']: row for row in
++                                 continuation_workloads.workload_entries()}
++                provider = provider_rows.get('continuation_cross_module_provider')
++                need(provider is not None
++                     and provider.get('id') == 'continuation_cross_module_provider',
++                     'cross-module provider model row is missing')
++                provider_source = provider['source']
++                provider_wat = HERE/provider_source['path']
++                provider_wasm = _continuation_wasm(
++                    provider, provider_wat, output, encoder, encoding_records)
++                # Reuse the existing setup_modules report identity; the provider
++                # is setup-only and the consumer remains the measured fixture.
++                fixtures[entry['id']] = {'path': wasm, 'setup_modules': [provider_wasm]}
++            else:
++                fixtures[entry['id']] = wasm
+             continue
+         if entry['oracle'].get('module') == 'gc_workloads.py':
+             import gc_workloads
+@@ -390,7 +460,22 @@
+     if continuation_pairing.matches(entry):
+         need(register_entry_threshold is None and fuel_setting is None,
+              'paired continuation driver has fixed fuel and entry policy')
+-        wire = compare.process(executable, continuation_pairing.argv(entry, wasm, mode), cpu)
++        provider_wasm = None
++        if entry['id'] == 'continuation_cross_module_consumer':
++            need(isinstance(wasm, dict)
++                 and set(wasm) == {'path', 'setup_modules'}
++                 and isinstance(wasm['setup_modules'], list)
++                 and len(wasm['setup_modules']) == 1,
++                 'cross-module fixture lacks its single provider setup module')
++            provider_wasm = wasm['setup_modules'][0]
++            wasm = wasm['path']
++        else:
++            need(not isinstance(wasm, dict),
++                 'only cross-module continuation accepts setup modules')
++        wire = compare.process(
++            executable,
++            continuation_pairing.argv(entry, wasm, mode, provider_wasm=provider_wasm),
++            cpu)
+         return continuation_pairing.validate_observation(
+             entry, wire, batch, expected_mode=mode, expected_stage=stage)
+     n = input_value(entry)
+@@ -724,7 +809,9 @@
+     fixture_dir.mkdir()
+     encoder = ROOT/'target/debug/wtime-conformance'
+     encoder_identity = ref(encoder)
+-    fixture_paths = prepare_fixtures(entries, predecessor, fixture_dir, encoder)
++    fixture_encoding = []
++    fixture_paths = prepare_fixtures(entries, predecessor, fixture_dir, encoder,
++                                     encoding_records=fixture_encoding)
+     identities['fixture_files'] = {wid:ref(path['path'] if isinstance(path, dict) else path)
+                                    for wid,path in fixture_paths.items()}
+     identities['setup_fixture_files'] = {
+@@ -749,6 +836,7 @@
+     report = {'schema': SCHEMA, 'schema_version':2, 'selection':declaration['task'],
+         'lane':'development' if args.smoke else 'candidate', 'passed':False, 'source_stable':False,
+         'declaration': declaration, 'identities':identities, 'cold_products':product_plan,
++        'fixture_encoding':fixture_encoding,
+         'recorded_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+         'metadata':{'settings':settings, 'capabilities':capabilities, 'candidate_sources':before,
+             'candidate_binary_sha256':identities['candidate']['sha256'],

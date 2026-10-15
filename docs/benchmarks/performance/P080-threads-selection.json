@@ -1,0 +1,215 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P080",
+  "lane": "candidate",
+  "rationale": "Predeclared decoded specialist comparison over the complete 18-row thread family. Target a small one-worker same-location atomic workload and a large four-worker same-location workload; hold out small ordinary read/write behavior. Keep every other atomic, ordinary-memory, wait/notify, and SC store-buffering row protected, plus first-call/load-and-call and large preparation controls. This selection supports family-specific evidence only; unavailable external comparators remain typed unsupported or unrun and receive no ratio.",
+  "registry_sha256": "474b1fce96ce1302fe78885c8385eb592b1111ff912fd7f1b2c56763683ed0d9",
+  "rows": [
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w1_n32",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "74fa6765bf358e5eba0e7a54350e5cecf3e5d72dbd36dc873224b215e0c898ca"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w1_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "b9760c35109fea290732f4dbf54791ac4f81bb0bf8f3bd47fcc7ef30c33951c2"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w2_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "aa9766ac27f1b7d4a544947baad80e665cc9126cd5487cd6836511f63cedac18"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w2_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "d4d1397cc6220d40f5fa29d5085c6e465857553388bb33f954a71fee6ec65827"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w4_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "35c890209cd8a40a9ad781e738fc889ac0b5234c0540c82437199158e8b2d25c"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w4_n1024",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "6b3de15265fa9aa253e44053dcf802134c32c6a01575f39ef29030a90fd99f4d"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w1_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "e891941e6eb721d3044d0e705973bee9283d53e17d81dfa53d7a0c7e7a8e1b7a"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w1_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "2b45fa3395fa8f2dce0ea0e72d040f25bcedf32ff0a50e166b54c429a1b6ff48"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w2_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "456bbc7613b5694fce37359b5f9c2c07517efce12bdb18ad099ccea02c8156d5"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w2_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "4f57086f078247dd89f058a87cac54a7710b91a0f14ff9861669f2c8e29b9a35"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w4_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "30f9ac299dec7da79d6d73603c6b2b20c66ea1e144b359fe376e14fdae39b920"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w4_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "488a9655d8c44da933c8889e51e8530332a389c1e9d66c2b374bf2f78f24c48e"
+    },
+    {
+      "family": "threads",
+      "id": "threads_ordinary_rw_n32",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "6e79ad63883fbac37ef043e5a87b8f887435707571a0060303dd32779de30480"
+    },
+    {
+      "family": "threads",
+      "id": "threads_ordinary_rw_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "18e2a30c7c823e11a72420739b6f6768e815f479539d576156855982dcbb6da8"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_load_store_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "9655629cfdff1b7b0261359899e6580ac0e2fc26399a0c226a393b91d0c6caf3"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_load_store_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "d71382bc253c9b7fc2699fa408fc8df55e4ec269f88251d9ccf7cdd15192cf56"
+    },
+    {
+      "family": "threads",
+      "id": "threads_wait_notify_latency",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "2e3cdd0045a715806a6d11c2a949a65a8b48db60673447c45bbd6ecf463567ba"
+    },
+    {
+      "family": "threads",
+      "id": "threads_sc_store_buffering",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "31e9c1edfdbdd8d1a1bf280bdda606e875c8baa8c85e4280b2dcc7f3c75a0cab"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "test_full_thread_and_continuation_families_use_only_declared_timed_stages",
+    "test_target_roles_and_protected_controls_are_explicit_in_both_selections",
+    "test_unavailable_wasmtime_comparators_never_claim_ratios"
+  ]
+}

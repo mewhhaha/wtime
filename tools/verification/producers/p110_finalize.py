@@ -123,7 +123,9 @@ def finalize(verify_dir,measure_dir,output):
     builds=p110_builds.collect()
     need(current==p109.sources(),'core source changed during final budget review')
     write_new(output,{'schema':'wtime-p110-final-budgets-v1','task':'P110','status':'passed',
-        'hard_gate_passed':True,'outcome':'inconclusive' if any(row['requires_review'] for row in reviews.values()) else 'adopted',
+        'hard_gate_passed':True,'outcome':'inconclusive' if (
+            any(row['requires_review'] for row in reviews.values())
+            or builds['optional_tier_review']['review_required']) else 'adopted',
         'core_sources':current,'prerequisites':prerequisites,'policy':normal(policy_path),
         'footprints':normal(footprint_path),'builds':builds,'cold_collection':normal(collection_path),
         'statistics':statistics,'cold_reviews':reviews,'timing_evidence':True,

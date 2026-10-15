@@ -1,0 +1,193 @@
+--- a/tools/wtime-bench/continuation_pairing.py
++++ b/tools/wtime-bench/continuation_pairing.py
+@@ -16,6 +16,7 @@
+ _SUPPORTED = {
+     "continuation_depth_0", "continuation_depth_4", "continuation_depth_32",
+     "continuation_captured_reference", "continuation_bound_nested",
++    "continuation_one_shot", "continuation_cross_module_consumer",
+ }
+ _DEPTH_KEYS = {
+     "schema_version", "case", "driver", "mode", "profile", "instrumented",
+@@ -28,6 +29,21 @@
+     "schema_version", "case", "driver", "mode", "profile", "instrumented",
+     "measurement_boundary", "setup_ns", "bind_ns", "resume_ns", "bind_result",
+     "result", "worker_calls", "continuation_bytes", "gc_payload_bytes", "collection",
++}
++_ONE_SHOT_KEYS = {
++    "schema_version", "case", "driver", "mode", "profile", "instrumented",
++    "measurement_boundary", "setup_ns", "capture_ns", "resume_once_ns",
++    "resume_reuse_ns", "first_result", "result", "error_kind", "error_message",
++    "continuation_bytes", "gc_payload_bytes", "collection",
++}
++_ONE_SHOT_CONTINUATION = ("before", "after_capture", "after_trap", "after_collect")
++_ONE_SHOT_GC = ("before_capture", "after_capture", "after_trap", "after_collect")
++_CROSS_MODULE_KEYS = {
++    "schema_version", "case", "driver", "exact_host_result_rejected",
++    "exact_host_error_kind", "mode", "profile", "instrumented",
++    "measurement_boundary", "setup_ns", "capture_ns", "resume_ns", "payload",
++    "result", "continuation_bytes", "gc_payload_bytes", "collection_with_root",
++    "collection_after_drop",
+ }
+ _DEPTH_CHECKPOINTS = ("before_capture", "after_capture", "after_root_transfer",
+                       "after_resume", "after_drop_and_collect")
+@@ -76,7 +92,7 @@
+         raise _fail(entry, "lifecycle outcomes cannot be represented as a generic result")
+     if entry.get("id") not in _SUPPORTED:
+         raise _fail(entry, "continuation lifecycle is outside the paired adapter subset")
+-    expected_stages = ["setup", "bind", "resume", "accounting"] if entry["id"] == "continuation_bound_nested" else ["setup", "capture", "resume", "accounting"]
++    expected_stages = row["stages"]
+     if entry["stages"] != expected_stages:
+         raise _fail(entry, "continuation stage declaration changed")
+     return row
+@@ -94,20 +110,111 @@
+                 "bind": {"kind": "returned", "result": ["i32:0"]},
+                 "resume": {"kind": "returned", "result": _wire(oracle["expected_resume"]["result"])},
+                 "worker_calls": oracle["expected_worker_calls"]}
++    if entry["id"] == "continuation_one_shot":
++        return {"kind": "one_shot_then_trap",
++                "first_resume": {"kind": "returned", "result": _wire(oracle["expected_first_resume"]["result"])},
++                "reuse": {"kind": "trap", "category": oracle["expected_second_resume"]["category"]}}
+     result = {"kind": "suspend_then_resume",
+               "suspension": {"kind": "suspended", "payload": _wire(oracle["expected_suspension"]["payload"])},
+               "resume": {"kind": "returned", "result": _wire(oracle["expected_resume"]["result"])} }
+     if "captured_reference" in oracle:
+         result["captured_reference"] = copy.deepcopy(oracle["captured_reference"])
++    if entry["id"] == "continuation_cross_module_consumer":
++        result["nominal_probe"] = copy.deepcopy(oracle["nominal_probe"])
+     return result
+ 
+ 
+-def argv(entry: dict[str, Any], wasm: str | Path, mode: str) -> list[str]:
++def argv(entry: dict[str, Any], wasm: str | Path, mode: str,
++         provider_wasm: str | Path | None = None) -> list[str]:
+     _modeled(entry)
+     if mode != MODE:
+         raise _fail(entry, "continuation driver supports decoded mode only")
++    if entry["id"] == "continuation_cross_module_consumer":
++        if provider_wasm is None:
++            raise _fail(entry, "cross-module continuation requires the provider Wasm fixture")
++        return ["--continuation-cross-module", str(provider_wasm), str(wasm), MODE, PROFILE]
++    if provider_wasm is not None:
++        raise _fail(entry, "provider Wasm is only valid for cross-module continuation")
++    if entry["id"] == "continuation_one_shot":
++        return ["--continuation-driver", str(wasm), entry["id"], MODE, PROFILE, "oneshot"]
+     selector = "bind" if entry["id"] == "continuation_bound_nested" else "depth" if entry["id"].startswith("continuation_depth_") else "root"
+     return ["--continuation-driver", str(wasm), entry["id"], MODE, PROFILE, selector]
++
++
++def _collection_exact(entry: dict[str, Any], row: Any, label: str, *, live: int | None = None) -> dict[str, int]:
++    if not isinstance(row, dict) or set(row) != {"live", "reclaimed"}:
++        raise _fail(entry, f"{label} collection has the wrong schema")
++    if (type(row["live"]) is not int or type(row["reclaimed"]) is not int
++            or row["live"] < 0 or row["reclaimed"] < 0
++            or (live is not None and row["live"] != live)):
++        raise _fail(entry, f"{label} collection counts are inconsistent")
++    return row
++
++
++def _validate_one_shot(entry: dict[str, Any], wire: dict[str, Any]) -> tuple[dict[str, Any], dict[str, float], dict[str, Any]]:
++    scaling = continuation_scaling
++    if set(wire) != _ONE_SHOT_KEYS:
++        raise _fail(entry, "one-shot driver wire schema has missing or unknown fields")
++    if (wire.get("schema_version") != 2 or wire.get("case") != entry["id"]
++            or wire.get("driver") != "oneshot" or wire.get("mode") != MODE
++            or wire.get("profile") != PROFILE or wire.get("instrumented") is not False
++            or wire.get("measurement_boundary") != BOUNDARY):
++        raise _fail(entry, "one-shot driver identity, instrumentation, or measurement boundary differs")
++    cont = _integer_map(entry, wire["continuation_bytes"], _ONE_SHOT_CONTINUATION,
++                        "one-shot continuation byte", positive_after="after_capture")
++    gc = _integer_map(entry, wire["gc_payload_bytes"], _ONE_SHOT_GC,
++                      "one-shot GC payload", positive_after="after_capture")
++    if cont["before"] != 0 or cont["after_collect"] != 0 or gc["before_capture"] != 0 or gc["after_collect"] != 0:
++        raise _fail(entry, "one-shot capture/cleanup accounting is inconsistent")
++    collection = _collection_exact(entry, wire["collection"], "one-shot", live=0)
++    # Reuse the P012 semantic oracle and timing validator after enforcing this adapter's exact wire schema.
++    semantic = expected(entry)
++    if wire["first_result"] != semantic["first_resume"]["result"][0]:
++        raise _fail(entry, "first continuation resume result differs from the independent oracle")
++    if wire["result"] != "trap" or wire["error_kind"] != "Trap":
++        raise _fail(entry, "second continuation use did not trap")
++    if (not isinstance(wire["error_message"], str)
++            or "continuation" not in wire["error_message"].lower()):
++        raise _fail(entry, "second-use trap is not continuation-related")
++    times = {name: _positive_time(entry, wire, (name,))[name]
++             for name in ("setup_ns", "capture_ns", "resume_once_ns", "resume_reuse_ns")}
++    scaling._validate_one_shot(entry, wire)
++    return semantic, times, {"continuation_bytes": cont, "gc_payload_bytes": gc,
++                             "collection": collection}
++
++
++def _validate_cross_module(entry: dict[str, Any], wire: dict[str, Any]) -> tuple[dict[str, Any], dict[str, float], dict[str, Any]]:
++    scaling, model = continuation_scaling, continuation_workloads
++    if set(wire) != _CROSS_MODULE_KEYS:
++        raise _fail(entry, "cross-module driver wire schema has missing or unknown fields")
++    if (wire.get("schema_version") != 2 or wire.get("case") != entry["id"]
++            or wire.get("driver") != "cross_module" or wire.get("mode") != MODE
++            or wire.get("profile") != PROFILE or wire.get("instrumented") is not False
++            or wire.get("measurement_boundary") != BOUNDARY):
++        raise _fail(entry, "cross-module driver identity, instrumentation, or measurement boundary differs")
++    semantic = expected(entry)
++    if (wire.get("payload") != semantic["suspension"]["payload"]
++            or wire.get("result") != semantic["resume"]["result"]
++            or wire.get("exact_host_result_rejected") is not True
++            or wire.get("exact_host_error_kind") != "Host"):
++        raise _fail(entry, "cross-module lifecycle or nominal-context oracle differs")
++    cont = _integer_map(entry, wire["continuation_bytes"], _DEPTH_CHECKPOINTS,
++                        "cross-module continuation byte", positive_after="after_capture")
++    gc = _integer_map(entry, wire["gc_payload_bytes"], _GC_DEPTH,
++                      "cross-module GC payload", positive_after="after_capture")
++    if (cont["before_capture"] != 0 or cont["after_root_transfer"] != cont["after_capture"]
++            or cont["after_drop_and_collect"] != 0 or gc["before_capture"] != 0
++            or gc["after_drop_and_collect"] != 0):
++        raise _fail(entry, "cross-module capture/root-transfer/cleanup accounting is inconsistent")
++    rooted = _collection_exact(entry, wire["collection_with_root"], "cross-module rooted")
++    if rooted["live"] <= 0:
++        raise _fail(entry, "cross-module continuation was not retained across collection")
++    dropped = _collection_exact(entry, wire["collection_after_drop"], "cross-module dropped", live=0)
++    times = {name: _positive_time(entry, wire, (name,))[name]
++             for name in ("setup_ns", "capture_ns", "resume_ns")}
++    scaling._validate_capture_resume(entry, wire, model)
++    return semantic, times, {"continuation_bytes": cont, "gc_payload_bytes": gc,
++                             "collection_with_root": rooted, "collection_after_drop": dropped}
+ 
+ 
+ def _integer_map(entry: dict[str, Any], row: Any, keys: tuple[str, ...], label: str,
+@@ -144,10 +251,36 @@
+     model = _modeled(entry)
+     workload = entry["id"]
+     bound = workload == "continuation_bound_nested"
+-    stages = {"setup": "setup_ns", "bind": "bind_ns", "resume": "resume_ns"} if bound else {"setup": "setup_ns", "capture": "capture_ns", "resume": "resume_ns"}
+     if type(batch) is not int or batch != 1:
+         raise _fail(entry, "continuation observations require fresh-process batch one")
+-    if expected_mode != MODE or expected_stage not in stages:
++    if expected_mode != MODE:
++        raise _fail(entry, "requested mode is not supported by the continuation driver")
++    if workload == "continuation_one_shot":
++        semantic, times, auxiliary = _validate_one_shot(entry, wire)
++        stages = {"setup": "setup_ns", "capture": "capture_ns",
++                  "resume_once": "resume_once_ns", "resume_reuse": "resume_reuse_ns"}
++        if expected_stage not in stages:
++            raise _fail(entry, "requested one-shot stage is semantic-only or unsupported")
++        stage_time = times[stages[expected_stage]]
++        return {"mode": expected_mode, "stage": expected_stage, "batch": batch,
++                "expected": semantic, "result": semantic, "driver_reported_times_ns": times,
++                "stage_time_ns": stage_time, "ns_per_operation": stage_time,
++                "raw_wire_observation": copy.deepcopy(wire), "continuation_lifecycle": semantic,
++                **auxiliary}
++    if workload == "continuation_cross_module_consumer":
++        semantic, times, auxiliary = _validate_cross_module(entry, wire)
++        stages = {"setup": "setup_ns", "capture": "capture_ns", "resume": "resume_ns"}
++        if expected_stage not in stages:
++            raise _fail(entry, "requested cross-module stage is semantic-only or unsupported")
++        stage_time = times[stages[expected_stage]]
++        return {"mode": expected_mode, "stage": expected_stage, "batch": batch,
++                "expected": semantic, "result": semantic, "driver_reported_times_ns": times,
++                "stage_time_ns": stage_time, "ns_per_operation": stage_time,
++                "raw_wire_observation": copy.deepcopy(wire), "continuation_lifecycle": semantic,
++                **auxiliary}
++    stages = ({"setup": "setup_ns", "bind": "bind_ns", "resume": "resume_ns"}
++              if bound else {"setup": "setup_ns", "capture": "capture_ns", "resume": "resume_ns"})
++    if expected_stage not in stages:
+         raise _fail(entry, "requested mode/stage is not supported by the continuation driver")
+     if not isinstance(wire, dict) or set(wire) != (_BIND_KEYS if bound else _DEPTH_KEYS):
+         raise _fail(entry, "driver wire schema has missing or unknown fields")

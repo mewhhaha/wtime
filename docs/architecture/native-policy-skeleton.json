@@ -1,0 +1,137 @@
+{
+  "schema": "wtime-native-policy-skeleton-v1",
+  "task": "P094",
+  "status": "provisional",
+  "decision": "no_go",
+  "native_enabled": false,
+  "aot_enabled": false,
+  "native_status": "not_selected",
+  "native_supported_targets": [],
+  "native_measurements": "none",
+  "default_policy": {
+    "engine": "decoded",
+    "external_dependencies": 0,
+    "unsafe": false,
+    "native_or_aot_enabled": false
+  },
+  "optional_boundary": {
+    "initial_target_if_reopened": "x86_64-unknown-linux-gnu",
+    "value_types": ["i32", "i64"],
+    "numeric_subset_only": true,
+    "host_calls": false,
+    "references": false,
+    "native_guest_stack": false,
+    "unsupported_operations": "decline before execution and use decoded fallback",
+    "fallback": {
+      "engine": "decoded",
+      "source_fuel_exact": true,
+      "cancellation_exact": true,
+      "source_cursor_exact": true,
+      "guest_state_exact": true,
+      "partial_native_execution_before_fallback": false
+    }
+  },
+  "dependency_policy": {
+    "default_packages": [
+      "wtime-types",
+      "wtime-decode",
+      "wtime-validate",
+      "wtime-runtime",
+      "wtime-cli"
+    ],
+    "default_external_dependencies": 0,
+    "default_native_crates": [],
+    "optional_internal_crate_limit": 2,
+    "optional_crates": [
+      {
+        "name": "wtime-exec-ir",
+        "internal": true,
+        "external_dependencies": 0,
+        "depends_on": []
+      },
+      {
+        "name": "wtime-native",
+        "internal": true,
+        "external_dependencies": 0,
+        "depends_on": ["wtime-exec-ir"]
+      }
+    ],
+    "runtime_native_feature": {
+      "enabled": false,
+      "optional_dependencies": ["wtime-native"],
+      "default_membership": false
+    },
+    "exec_ir_depends_on_runtime": false,
+    "crate_graph_acyclic": true
+  },
+  "unsafe_policy": {
+    "default_forbid_unsafe": true,
+    "scanner_exception_activated": false,
+    "future_exception_scope_if_separately_approved": "crates/wtime-native/src/**",
+    "no_default_unsafe_exemption": true
+  },
+  "provisional_resource_ceilings": {
+    "status": "design_choice_requires_evaluation",
+    "measured": false,
+    "maximum_function_code_bytes": 16384,
+    "maximum_module_code_bytes": 1048576,
+    "maximum_mapping_bytes": 1048576,
+    "maximum_temporary_compile_bytes": 2097152,
+    "maximum_attempted_ir_instructions": 65536,
+    "maximum_source_event_expansion": 4096,
+    "compile_synchronous": true,
+    "worker_pool": false,
+    "checked_arithmetic": true,
+    "pre_reserve_before_emission": true,
+    "budget_exhaustion_is_transactional": true,
+    "decline_before_guest_execution": true
+  },
+  "mapping_policy": {
+    "maximum_bytes": 1048576,
+    "writable_and_executable_simultaneously": false,
+    "immutable_after_publication": true,
+    "mapping_lifetime_references_audited": true,
+    "platform_mapping_path_optional": true,
+    "publication_is_atomic": true
+  },
+  "abi_policy": {
+    "target_abi": "System V AMD64",
+    "stack_alignment_bytes": 16,
+    "callee_saved_registers_preserved": true,
+    "unwind_across_native_boundary": false,
+    "entry_and_return_layout_versioned": true,
+    "host_function_abi_exposed_to_guest": false
+  },
+  "reopen_thresholds": {
+    "source_bound_p067_p080_evidence_required": true,
+    "primary_point_improvement_minimum": 0.05,
+    "primary_ratio_95ci_upper_strictly_below": 1.0,
+    "independent_runs_required": 2,
+    "primary_gate_applies_in_each_run": true,
+    "protected_ratio_95ci_upper_maximum": 1.05,
+    "preparation_ratio_maximum": 1.25,
+    "tiny_first_use_ratio_maximum": 1.05,
+    "clean_build_seconds_maximum": 60,
+    "touched_cli_leaf_seconds_maximum": 5,
+    "stripped_cli_bytes_maximum": 5242880,
+    "relative_clean_build_maximum": 1.25,
+    "relative_leaf_build_maximum": 1.25,
+    "relative_stripped_size_maximum": 1.25,
+    "relative_rss_maximum": 1.25
+  },
+  "descendants": {
+    "P095": "deferred_not_selected",
+    "P096": "deferred_not_selected",
+    "P097": "deferred_not_selected",
+    "P098": "deferred_not_selected",
+    "P099": "deferred_not_selected",
+    "P100": "deferred_not_selected",
+    "P101": "deferred_not_selected",
+    "P102": "deferred_not_selected",
+    "P103": "deferred_not_selected",
+    "P104": "deferred_not_selected",
+    "P105": "deferred_not_selected",
+    "P106": "deferred_not_selected",
+    "P107": "deferred_not_selected"
+  }
+}

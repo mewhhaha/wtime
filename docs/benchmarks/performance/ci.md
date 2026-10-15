@@ -1,11 +1,15 @@
 # Performance verification lanes
 
-Ordinary CI runs the portable correctness smoke on x86_64 and AArch64. It builds
-the default CLI, records its source and executable hashes, and invokes three
-fixed MVP modules: `call_overhead`, `integer_loop`, and `branch_calls`. Every
-result must match the separately bound P001 oracle. Zero work, changed fixture
-bytes, a stale executable binding, or unexpected output fails the job. These
-checks make no timing claim. GitHub retains their reports for 14 days.
+Ordinary CI runs the portable correctness smoke in a separate x86_64 Ubuntu
+job, independently of the broad architecture/lint matrix. It builds the
+default CLI, records its source and executable hashes, and invokes three fixed
+MVP modules: `call_overhead`, `integer_loop`, and `branch_calls`. Every result
+must match the separately bound P001 oracle. Zero work, changed fixture bytes,
+a stale executable binding, or unexpected output fails the job. These checks
+make no timing claim. GitHub retains their reports for 14 days under the
+`performance-smoke-x64` artifact name. The existing core matrix still runs its
+native hardening evidence on both x86_64 and AArch64; this change does not add
+or claim a new AArch64 performance smoke.
 
 ```sh
 cargo build --locked --offline -j 1 -p wtime-cli
