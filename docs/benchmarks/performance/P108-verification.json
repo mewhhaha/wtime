@@ -133,7 +133,7 @@
         {
           "command": "policy-tests",
           "kind": "unittest",
-          "minimum_passed": 10,
+          "minimum_passed": 11,
           "required_names": [
             "test_retained_executables_survive_original_cargo_path_replacement",
             "test_retained_executable_tampering_or_different_tested_digest_is_rejected",
@@ -144,7 +144,8 @@
             "test_native_and_aot_branches_cannot_be_enabled",
             "test_optional_tier_feature_mode_threshold_tuples_are_exact",
             "test_rejected_experimental_tier_cannot_become_default",
-            "test_stale_milestone_proof_and_source_identity_are_rejected"
+            "test_stale_milestone_proof_and_source_identity_are_rejected",
+            "test_incomplete_source_maps_or_partial_and_boolean_counts_are_rejected"
           ]
         }
       ],
@@ -236,7 +237,7 @@
           {
             "command": "policy-tests",
             "kind": "unittest",
-            "minimum_passed": 10,
+            "minimum_passed": 11,
             "required_names": [
               "test_retained_executables_survive_original_cargo_path_replacement",
               "test_retained_executable_tampering_or_different_tested_digest_is_rejected",
@@ -247,7 +248,8 @@
               "test_native_and_aot_branches_cannot_be_enabled",
               "test_optional_tier_feature_mode_threshold_tuples_are_exact",
               "test_rejected_experimental_tier_cannot_become_default",
-              "test_stale_milestone_proof_and_source_identity_are_rejected"
+              "test_stale_milestone_proof_and_source_identity_are_rejected",
+              "test_incomplete_source_maps_or_partial_and_boolean_counts_are_rejected"
             ]
           }
         ]

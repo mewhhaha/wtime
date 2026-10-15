@@ -210,14 +210,57 @@ def _markdown(report: dict) -> str:
              "The exact final build budgets, cold reviews, and retained statistics are referenced in the P110 proof:", "",
              f"- P110 final proof: `{report['final_gates']['final_budget']['path']}` "
              f"(`{report['final_gates']['final_budget']['sha256']}`).", "",
-             "## Verified milestones", ""]
+             ""]
+    builds = report['final_gates']['build_budgets']
+    lines += ['## Build and deployment cost', '',
+              'These are retained source-current observations on the shared cloud host. Optional-tier ratios are unpaired cost reviews; no longitudinal P001 build comparison is available.', '',
+              '| Configuration | Clean (s) | CLI leaf (s) | Runtime leaf (s) | Stripped CLI (bytes) | Peak build RSS (KiB) |',
+              '| --- | ---: | ---: | ---: | ---: | ---: |']
+    metrics = ('clean_seconds', 'leaf_seconds', 'runtime_leaf_seconds', 'stripped_bytes', 'clean_peak_rss_kib')
+    for name, reference in builds['retained_reports'].items():
+        build = read_json(verify_normal(reference))
+        if all(key in build for key in metrics):
+            lines.append(f"| {name} | {build['clean_seconds']:.3f} | {build['leaf_seconds']:.3f} | {build['runtime_leaf_seconds']:.3f} | {build['stripped_bytes']} | {build['clean_peak_rss_kib']} |")
+    lines += ['', '## Fixed warm examples', '',
+              'Candidate/baseline ratios below 1 favor the candidate. Each row preserves its own run and 95% interval. These examples do not summarize other workloads or establish a universal tier ranking. All original products remain in the linked statistics.', '',
+              '| Comparison | Workload | Run | Baseline (us) | Candidate (us) | Ratio | 95% interval |',
+              '| --- | --- | ---: | ---: | ---: | ---: | --- |']
+    summaries = {}
+    for name, reference in report['final_gates']['measured_statistics'].items():
+        value = read_json(verify_normal(reference))
+        summary = value['analysis'] if 'decision' in value else value
+        summaries[name] = summary
+        for row in summary['per_run']:
+            if row['stage'] != 'warm_call' or row['workload'] not in ('call_overhead', 'integer_loop', 'branch_calls'):
+                continue
+            interval = row['median_ratio_95ci']
+            lines.append(f"| {name} | {row['workload']} | {row['run']} | {row['baseline_ns_per_operation']['median']/1000:.3f} | {row['candidate_ns_per_operation']['median']/1000:.3f} | {row['candidate_over_baseline']['median']:.3f} | {interval['lower']:.3f}–{interval['upper']:.3f} |")
+    lines += ['', '## Cold controls and amortization', '',
+              '| Comparison | Workload / stage | Run | Ratio | 95% interval | Budget review |',
+              '| --- | --- | ---: | ---: | --- | --- |']
+    for name, review in report['final_gates']['cold_reviews'].items():
+        for row in review.get('rows', []):
+            if not (row['workload'] == 'prepare_large' or
+                    row['workload'] == 'call_overhead' and row['stage'] in ('first_call', 'load_and_call')):
+                continue
+            interval = row['median_ratio_95ci']
+            lines.append(f"| {name} | {row['workload']} / {row['stage']} | {row['run']} | {row['candidate_over_baseline']:.3f} | {interval['lower']:.3f}–{interval['upper']:.3f} | {row['review']} |")
+    lines += ['', 'All remaining cold rows, including arithmetic and mixed branch/call modules, stay in the P110 cold review. A budget overrun or uncertain interval remains visible and does not promote an optional tier.', '',
+              'Break-even counts below are descriptive estimates already computed by the paired analyzer from preparation, instantiation and warm medians. They are not measured deployment totals or confidence bounds.', '']
+    for name, summary in summaries.items():
+        for row in summary.get('break_even', []):
+            if row['workload'] == 'call_overhead':
+                result = str(row['break_even_calls']) + ' calls' if row['break_even_calls'] is not None else row['break_even']
+                lines.append(f"- {name}, call_overhead, run {row['run']}: {result}.")
+    lines += ['', '## Wasmtime comparison scope', '',
+              'The historical Wasmtime 49.0.2 comparisons in `docs/benchmarks/wasmtime-comparison*.json` retain their original source identities and settings. This current portfolio did not collect a new matched Wasmtime comparison. Its wtime/predecessor ratios cannot refresh those historical ratios. GC, thread and continuation comparator limitations describe the pinned harness interface; no unsupported or unrun comparator receives a ratio.', '',
+              '## Verified milestones', '']
     for task, record in report["milestones"].items():
         lines.append(f"- {task} ({record['outcome']}): completion `{record['completion']['sha256']}`, "
                      f"proof `{record['proof']['sha256']}`.")
     if report["milestones"]["P110"]["candidate_promoted"] is True:
         lines += ["", "P110 records its budget-gate approval; P108 still keeps Compact and Register experimental."]
-    lines += ["", "## Current core sources", "", "The release appendix binds the following source hashes:", ""]
-    lines.extend(f"- `{name}`: `{digest}`" for name, digest in report["current_core_sources"].items())
+    lines += ["", "## Current core sources", "", "The accompanying `report.json` retains the complete current core source map and exact prerequisite proof hashes."]
     lines += ["", "## Limitations", ""]
     lines.extend(f"- {item}" for item in report["limitations"])
     lines.append("")

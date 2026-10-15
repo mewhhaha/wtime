@@ -97,17 +97,30 @@ def validate_selected_tiers(selected,tiers,*,root=ROOT):
     need(selected.get('configurations')==expected_configurations,'selected tier configurations differ from policy')
     executables=selected.get('executables',{})
     need(set(executables)==set(reports),'selected tier executables are incomplete')
+    required_sources={path.relative_to(root).as_posix() for path in
+        [root/'Cargo.toml',root/'Cargo.lock',
+         *(path for crate in ('wtime-types','wtime-decode','wtime-validate','wtime-runtime')
+           for path in (root/'crates'/crate).rglob('*')
+           if path.name=='Cargo.toml' or path.suffix=='.rs')] if path.is_file()}
     for tier in tiers:
         report=read_json(verify_normal(reports[tier['name']]))
         counts=report['counts']
         need(report.get('passed') is True and report.get('source_stable') is True
              and report.get('requested_tier')==tier['mode']
              and report.get('register_entry_threshold')==tier['register_entry_threshold'],'selected mode/configuration drifted')
+        expected_counts={'mode_runs':6,'state_mode_runs':6,'state_fuel_probes':68,
+                         'conformance_mode_runs':4,'all_checks':89}
         need(all(type(counts.get(key)) is int and counts[key]==0 for key in ('failed','skipped','unsupported'))
-             and type(counts.get('all_checks_executed')) is int and counts['all_checks_executed']==89,
+             and all(type(counts.get(name+'_'+suffix)) is int and counts[name+'_'+suffix]==expected
+                     for name,expected in expected_counts.items() for suffix in ('expected','executed')),
              'selected tier checks are incomplete')
-        for name,digest in report['implementation_sources'].items():
-            need(hashlib.sha256((root/name).read_bytes()).hexdigest()==digest,'selected tier source is stale')
+        sources=report.get('implementation_sources',{})
+        need(bool(required_sources) and isinstance(sources,dict) and required_sources<=set(sources),
+             'selected tier source map omits current runtime inputs')
+        for name,digest in sources.items():
+            path=(root/name).resolve(strict=True)
+            need(path.is_relative_to(root.resolve()) and path.is_file()
+                 and hashlib.sha256(path.read_bytes()).hexdigest()==digest,'selected tier source is stale or escapes the checkout')
         retained=executables[tier['name']]
         need(set(retained)=={'benchmark','conformance','diagnostic'},'selected tier retained executables are incomplete')
         expected={'benchmark':report['binary']['sha256'],

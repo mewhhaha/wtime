@@ -155,7 +155,11 @@ class P108RetainedExecutableTests(unittest.TestCase):
                 refs[logical] = normal(self.write(f"{name}/{logical}", (name + logical).encode()))
             report = {"passed": True, "source_stable": True, "requested_tier": tier["mode"],
                       "register_entry_threshold": tier["register_entry_threshold"],
-                      "counts": {"failed": 0, "skipped": 0, "unsupported": 0, "all_checks_executed": 89},
+                      "counts": {"failed": 0, "skipped": 0, "unsupported": 0,
+                          **{name+'_'+suffix: count for name,count in
+                             {'mode_runs':6,'state_mode_runs':6,'state_fuel_probes':68,
+                              'conformance_mode_runs':4,'all_checks':89}.items()
+                             for suffix in ('expected','executed')}},
                       "implementation_sources": source_map,
                       "binary": {"path": str(self.root / "shared-binary"), "sha256": refs["benchmark"]["sha256"]},
                       "conformance_binary": {"sha256": refs["conformance"]["sha256"]},
@@ -197,6 +201,18 @@ class P108RetainedExecutableTests(unittest.TestCase):
                     value["configurations"][3]["register_entry_threshold"] = 4
                 else:
                     self.write("crates/wtime-runtime/src/lib.rs", b"changed source")
+                with self.assertRaises(VerificationError):
+                    self.check(value)
+
+    def test_incomplete_source_maps_or_partial_and_boolean_counts_are_rejected(self):
+        for mutation in ('sources','partial','boolean'):
+            with self.subTest(mutation=mutation):
+                value=copy.deepcopy(self.selected)
+                report=json.loads(Path(value['tiers']['decoded']['path']).read_text())
+                if mutation=='sources': report['implementation_sources']={}
+                elif mutation=='partial': report['counts']['state_fuel_probes_executed']=0
+                else: report['counts']['mode_runs_expected']=True
+                value['tiers']['decoded']=normal(self.write('mutated-report.json',json.dumps(report).encode()))
                 with self.assertRaises(VerificationError):
                     self.check(value)
 

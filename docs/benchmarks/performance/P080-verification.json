@@ -117,6 +117,16 @@
         "docs/benchmarks/performance/P067-*.json",
         "task-plans/performance/TASKS.json"
       ]
+    },
+    "measurement_reuse": {
+      "paths": [
+        "tools/verification/producers/p080_retain.py",
+        "tools/wtime-bench/tests/test_p080_measurement_reuse.py",
+        "target/verification/runs/P080/measure/attempt-0002/inputs.json",
+        "target/verification/runs/P080/measure/attempt-0002/failure.json",
+        "target/verification/runs/P080/measure/attempt-0002/specialist-comparisons.*",
+        "target/verification/runs/P080/measure/attempt-0002/comparisons/**"
+      ]
     }
   },
   "stages": {
@@ -259,7 +269,8 @@
         "selections",
         "predecessors",
         "private_harness",
-        "previous_measurements"
+        "previous_measurements",
+        "measurement_reuse"
       ],
       "dependencies": [
         "freeze",
@@ -267,12 +278,29 @@
       ],
       "commands": [
         {
-          "name": "specialist-comparisons",
+          "name": "measurement-reuse-tests",
           "argv": [
             "{python}",
             "-B",
-            "{repo}/tools/verification/producers/p080_workflow.py",
-            "measure",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p080_measurement_reuse.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "reuse-completed-specialist-comparisons",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p080_retain.py",
+            "--completed",
+            "{repo}/target/verification/runs/P080/measure/attempt-0002",
             "--freeze",
             "{freeze_dir}/freeze.json",
             "--verify-dir",
@@ -284,7 +312,8 @@
       ],
       "outputs": {
         "measurements": "{stage}/comparisons/summary.json",
-        "artifacts": "{stage}/comparisons/artifacts.json"
+        "artifacts": "{stage}/comparisons/artifacts.json",
+        "reuse": "{stage}/comparisons/reuse.json"
       },
       "checks": [
         {
@@ -292,6 +321,18 @@
           "pointer": "/status",
           "op": "equal",
           "value": "passed"
+        }
+      ],
+      "tests": [
+        {
+          "command": "measurement-reuse-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": [
+            "test_completed_collector_and_exact_contract_guard_are_required",
+            "test_failed_missing_duplicate_or_boolean_exit_status_cannot_be_reused",
+            "test_different_collector_or_phase_is_rejected"
+          ]
         }
       ]
     },
@@ -413,6 +454,43 @@
               "test_cross_module_consumer_binds_real_provider_source_and_wasm_sha",
               "test_expected_setup_modules_preserves_existing_gc_setup_rows",
               "test_gate_inventory_rejects_missing_or_tampered_provider_reference"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "measurement-reuse-tests",
+        "uses": [
+          "workflow",
+          "measurement_reuse"
+        ],
+        "commands": [
+          {
+            "name": "measurement-reuse-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p080_measurement_reuse.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "measurement-reuse-tests",
+            "kind": "unittest",
+            "minimum_passed": 3,
+            "required_names": [
+              "test_completed_collector_and_exact_contract_guard_are_required",
+              "test_failed_missing_duplicate_or_boolean_exit_status_cannot_be_reused",
+              "test_different_collector_or_phase_is_rejected"
             ]
           }
         ]
