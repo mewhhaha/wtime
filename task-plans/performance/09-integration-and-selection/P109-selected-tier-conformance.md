@@ -1,8 +1,8 @@
 # P109 — Refresh full conformance and hardening for selected tiers
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **contract_only**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -65,4 +65,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P109/shared-finalization/attempt-0001/evidence.json": "a004e37124c6807c3bb3427e722923cd83032476ac3af7991328a9b2abaf90ed"
+  },
+  "evidence": [
+    {
+      "bytes": 1925,
+      "path": "/workspace/wtime/target/performance/P109/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "a004e37124c6807c3bb3427e722923cd83032476ac3af7991328a9b2abaf90ed"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P109"
+}
+```

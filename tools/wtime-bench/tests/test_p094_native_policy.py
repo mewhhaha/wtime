@@ -1,4 +1,4 @@
-"""Design-only integrity checks for the provisional P094 native no-go policy."""
+"""Integrity checks for the native no-go and its provisional future limits."""
 from __future__ import annotations
 
 import copy
@@ -33,9 +33,11 @@ class NativePolicyTests(unittest.TestCase):
         self.assertIs(policy["default_policy"]["unsafe"], False)
         self.assertEqual(policy["native_measurements"], "none")
         adr = ADR_PATH.read_text(encoding="utf-8")
-        self.assertIn("Provisional decision: `no_go`", adr)
+        self.assertIn("Decision: `no_go`", adr)
         self.assertIn("Native implementation: none. Native measurements: none.", adr)
-        self.assertIn("P094 remains open", adr)
+        self.assertIn("The source-bound P094 proof", adr)
+        self.assertIn("../benchmarks/performance/P067-proof.json", adr)
+        self.assertIn("../benchmarks/performance/P080-proof.json", adr)
 
     def test_no_go_defers_descendants_and_rejects_dependency_unsafe_or_cycle_drift(self):
         baseline = policy_document()

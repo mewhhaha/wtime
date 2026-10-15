@@ -1,8 +1,8 @@
 # P111 — Add honest smoke, regression and reference-machine lanes
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **contract_only**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -68,4 +68,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P111/shared-finalization/attempt-0001/evidence.json": "2a1a113b5c36d0881987dd7da22821562f9e1d6ca1d09d083bc3982e1f21c449"
+  },
+  "evidence": [
+    {
+      "bytes": 1779,
+      "path": "/workspace/wtime/target/performance/P111/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "2a1a113b5c36d0881987dd7da22821562f9e1d6ca1d09d083bc3982e1f21c449"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P111"
+}
+```

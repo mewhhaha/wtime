@@ -63,10 +63,20 @@ class ContinuationPairingTests(unittest.TestCase):
                 entry = _ROWS[workload]
                 self.assertTrue(pairing.matches(entry))
                 outcome = pairing.expected(entry)
-                self.assertIn(outcome["kind"], ("suspend_then_resume", "bind_then_resume"))
+                self.assertIn(outcome["kind"],
+                              ("suspend_then_resume", "bind_then_resume", "one_shot_then_trap"))
                 self.assertEqual(entry["result"], {"type": "none"})
-                self.assertEqual(pairing.argv(entry, "/contained/fixture.wasm", pairing.MODE)[-1],
-                                 "bind" if workload.endswith("bound_nested") else "depth" if "depth_" in workload else "root")
+                provider = ("/contained/provider.wasm"
+                            if workload == "continuation_cross_module_consumer" else None)
+                args = pairing.argv(entry, "/contained/fixture.wasm", pairing.MODE, provider)
+                if workload == "continuation_one_shot":
+                    self.assertEqual(args[-1], "oneshot")
+                elif workload == "continuation_cross_module_consumer":
+                    self.assertEqual(args, ["--continuation-cross-module", provider,
+                                            "/contained/fixture.wasm", pairing.MODE, pairing.PROFILE])
+                else:
+                    self.assertEqual(args[-1], "bind" if workload.endswith("bound_nested")
+                                     else "depth" if "depth_" in workload else "root")
 
     def test_capture_resume_observation_round_trips_full_typed_lifecycle(self):
         entry = _ROWS["continuation_depth_4"]
@@ -110,7 +120,8 @@ class ContinuationPairingTests(unittest.TestCase):
             pairing.revalidate_observation(entry, observation)
 
     def test_unsupported_legacy_lifecycle_is_recognized_then_rejected(self):
-        entry = _ROWS["continuation_one_shot"]
+        entry = copy.deepcopy(_ROWS["continuation_one_shot"])
+        entry["id"] = "continuation_unsupported_legacy_repeat"
         self.assertTrue(pairing.matches(entry))
         with self.assertRaises(pairing.PairingError):
             pairing.expected(entry)

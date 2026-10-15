@@ -44,6 +44,35 @@
         "tools/checks/dependency_budget.py",
         "tools/wtime-bench/tests/test_p094_cost_inventory.py"
       ]
+    },
+    "finalizer_tests": {
+      "paths": [
+        "tools/verification/tests/test_p094_finalize_design.py"
+      ]
+    },
+    "prerequisites": {
+      "paths": [
+        "docs/benchmarks/performance/P067-completion.json",
+        "docs/benchmarks/performance/P067-evidence.json",
+        "docs/benchmarks/performance/P067-proof.json",
+        "docs/benchmarks/performance/P080-completion.json",
+        "docs/benchmarks/performance/P080-evidence.json",
+        "docs/benchmarks/performance/P080-proof.json"
+      ]
+    },
+    "build_inputs": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*",
+        "tools/wtime-conformance/**/*"
+      ]
+    },
+    "build_reports": {
+      "paths": [
+        "target/verification/runs/P067/verify/attempt-0001/**"
+      ]
     }
   },
   "stages": {
@@ -83,7 +112,8 @@
         "runtime_sources",
         "policy",
         "producer",
-        "tests"
+        "cost_review",
+        "finalizer_tests"
       ],
       "dependencies": [
         "freeze"
@@ -101,6 +131,38 @@
             "tools/wtime-bench/tests",
             "-p",
             "test_p094_native_policy.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "native-cost-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p094_cost_inventory.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "design-finalizer-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/verification/tests",
+            "-p",
+            "test_p094_finalize_design.py",
             "-v",
             "-b"
           ]
@@ -124,6 +186,100 @@
             "test_no_go_defers_descendants_and_rejects_dependency_unsafe_or_cycle_drift",
             "test_reopen_policy_requires_finite_code_wx_abi_and_transactional_bounds"
           ]
+        },
+        {
+          "command": "design-finalizer-tests",
+          "kind": "unittest",
+          "minimum_passed": 6,
+          "required_names": [
+            "test_design_contract_accepts_only_go_and_no_go_from_phase_artifact",
+            "test_design_contract_rejects_each_ordinary_outcome",
+            "test_design_contract_requires_a_verified_decision_artifact",
+            "test_design_flag_requires_an_exact_boolean",
+            "test_final_outcome_must_be_a_string",
+            "test_ordinary_contract_keeps_existing_outcomes_and_rejects_design_outcomes"
+          ]
+        },
+        {
+          "command": "native-cost-tests",
+          "kind": "unittest",
+          "minimum_passed": 3,
+          "required_names": [
+            "test_two_complete_runs_remain_separate_and_retain_statistics_references",
+            "test_incomplete_and_boolean_pair_run_or_bootstrap_counts_fail",
+            "test_nonfinite_nonpositive_or_reversed_ratio_intervals_fail"
+          ]
+        }
+      ],
+      "outputs": {
+        "native_cost_tests_log": "{stage}/native-cost-tests.stdout"
+      }
+    },
+    "analyze": {
+      "uses": [
+        "runtime_sources",
+        "policy",
+        "producer",
+        "cost_review",
+        "prerequisites",
+        "build_inputs",
+        "build_reports"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "native-decision",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p094.py",
+            "--output",
+            "{stage}/proof.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "proof": "{stage}/proof.json"
+      },
+      "checks": [
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/decision",
+          "op": "equal",
+          "value": "no_go"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/native_enabled",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/aot_enabled",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/native_implemented",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
         }
       ]
     }
@@ -220,10 +376,16 @@
       "verify",
       "analyze"
     ],
-    "outcome": "contract_only",
+    "design_decision": true,
+    "decision": {
+      "phase": "analyze",
+      "artifact": "proof",
+      "pointer": "/decision"
+    },
     "limitations": [
-      "Provisional design preparation only until the P067/P080 cost review and final no_go decision artifact are supplied.",
-      "No native implementation, unsafe exemption, supported native target or measured native speedup is claimed."
+      "This is a no-go design review, not a native implementation or measured native benefit claim.",
+      "The finite code, module, instruction, and expansion ceilings are provisional design choices, not measured capacities.",
+      "No unsafe scanner exception, native target support, or AOT deployment artifact is enabled."
     ]
   }
 }

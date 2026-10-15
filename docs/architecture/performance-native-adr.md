@@ -1,6 +1,6 @@
-# P094 provisional native-backend boundary decision
+# P094 native-backend boundary decision
 
-**Provisional decision: `no_go`. Native implementation: none. Native measurements: none.** This keeps decoded execution as the only selected policy while P094's prerequisite evidence and design checks are assembled. P094 remains open; this note is a scoped design decision, not completion evidence and not a claim that a native backend was implemented, benchmarked, proven safe, or shown to be slower.
+**Decision: `no_go`. Native implementation: none. Native measurements: none.** The completed [Register milestone](../benchmarks/performance/P067-proof.json) rejected promotion against both portable comparators, and the [specialist milestone](../benchmarks/performance/P080-proof.json) retained no specialist optimization. These workload-specific portable results do not establish an accepted native workload, native benefit, or native break-even point. Keep decoded execution as the default, with Compact and Register available only as explicit experimental opt-ins. The source-bound P094 proof records the reused per-run costs and this design decision; it makes no claim that native execution was implemented or shown to be slower.
 
 The current release keeps `native_enabled` and `aot_enabled` false, uses decoded execution by default, has zero default external dependencies, and retains the default safe-Rust boundary. No native crate, Cargo feature, unsafe scanner exception, dispatch path, executable mapping, or native descendant is enabled by this document. P095–P107 remain deferred and not selected. A future go decision must be separately reviewed and source-bound; it cannot inherit safety or performance claims from this no-go.
 

@@ -1,0 +1,51 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 10200,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P094-verification.json",
+    "sha256": "562a48d909e7c848d09e573b7a4cac40c399ff26358176fee38a03d0882f11ea"
+  },
+  "decision": "no_go",
+  "finalizer_sha256": "f707d26c67440eac0996c3cf19d664b50a572475093bc684d4b20073bf582a37",
+  "limitations": [
+    "This is a no-go design review, not a native implementation or measured native benefit claim.",
+    "The finite code, module, instruction, and expansion ceilings are provisional design choices, not measured capacities.",
+    "No unsafe scanner exception, native target support, or AOT deployment artifact is enabled."
+  ],
+  "outcome": "no_go",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 641392,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/39/392351722d0ce2b8003a5391b1748c5ef906edc3b86a0e7b14cb107cbcb67471",
+      "sha256": "392351722d0ce2b8003a5391b1748c5ef906edc3b86a0e7b14cb107cbcb67471",
+      "stored_bytes": 641392,
+      "stored_sha256": "392351722d0ce2b8003a5391b1748c5ef906edc3b86a0e7b14cb107cbcb67471"
+    },
+    "freeze": {
+      "bytes": 111115,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/ef/efebfb3dc37ec7c23f21a8b3d701b596abe4dc990f051db4388c494c849fa022",
+      "sha256": "efebfb3dc37ec7c23f21a8b3d701b596abe4dc990f051db4388c494c849fa022",
+      "stored_bytes": 111115,
+      "stored_sha256": "efebfb3dc37ec7c23f21a8b3d701b596abe4dc990f051db4388c494c849fa022"
+    },
+    "verify": {
+      "bytes": 147766,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/24/241fe30e852d2241bfe47344fe1f5f1bd6379be1852d6abbd8a841018b9cff4b",
+      "sha256": "241fe30e852d2241bfe47344fe1f5f1bd6379be1852d6abbd8a841018b9cff4b",
+      "stored_bytes": 147766,
+      "stored_sha256": "241fe30e852d2241bfe47344fe1f5f1bd6379be1852d6abbd8a841018b9cff4b"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P094"
+}

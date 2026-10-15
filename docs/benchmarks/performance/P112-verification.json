@@ -108,7 +108,10 @@
             "test_finalize_rejects_wrong_default_policy"
           ]
         }
-      ]
+      ],
+      "outputs": {
+        "release_tests_log": "{stage}/release-tests.stderr"
+      }
     },
     "analyze": {
       "uses": [

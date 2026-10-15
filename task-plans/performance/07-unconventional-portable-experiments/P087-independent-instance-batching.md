@@ -1,8 +1,8 @@
 # P087 — Try lockstep execution of independent numeric invocations
 
-Status: **todo**
+Status: **deferred**
 
-Outcome: **pending**
+Outcome: **not_selected**
 
 Kind: `experiment` · Branch: `optional` · Model: **Sol 6.1 Low**
 
@@ -88,4 +88,29 @@ python3 tools/wtime-bench/baseline.py --output target/performance/P087-before
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/final-optional-dispositions-0002/proof.json": "5a2943b1b7f0e4fedf44a2d4e96153937683fc97d45e079e55c0ef43a5e3b97f"
+  },
+  "evidence": [
+    {
+      "bytes": 38990,
+      "path": "/workspace/wtime/target/performance/final-optional-dispositions-0002/proof.json",
+      "sha256": "5a2943b1b7f0e4fedf44a2d4e96153937683fc97d45e079e55c0ef43a5e3b97f"
+    }
+  ],
+  "implementation_claimed": false,
+  "outcome": "not_selected",
+  "reason": "Conditional research is not selected for the current portfolio; this record claims no implementation, test execution, or speed result.",
+  "schema": "wtime-task-disposition-record-v1",
+  "status": "deferred",
+  "task": "P087",
+  "tests_claimed": 0,
+  "timing_evidence": false
+}
+```

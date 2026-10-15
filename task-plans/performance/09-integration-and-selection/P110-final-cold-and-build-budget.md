@@ -1,8 +1,8 @@
 # P110 — Verify the final portfolio stays small and quick to prepare
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **inconclusive**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -64,4 +64,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P110/shared-finalization/attempt-0001/evidence.json": "6fcd1afe1b1ae133f6d621837c62d7546045376f3bba6f9353a521d198783f08"
+  },
+  "evidence": [
+    {
+      "bytes": 2404,
+      "path": "/workspace/wtime/target/performance/P110/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "6fcd1afe1b1ae133f6d621837c62d7546045376f3bba6f9353a521d198783f08"
+    }
+  ],
+  "outcome": "inconclusive",
+  "status": "done",
+  "task": "P110"
+}
+```

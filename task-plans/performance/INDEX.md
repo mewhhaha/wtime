@@ -1,6 +1,8 @@
 # Performance task index
 
-Progress: done=108, todo=37, in_progress=0, blocked=0, deferred=0 (145 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=114, todo=0, in_progress=0, blocked=0, deferred=31 (145 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+
+The selected portable portfolio is complete. Deferred entries are unimplemented optional research; original native AArch64 release verification remains outstanding.
 
 ## Suggested first work
 

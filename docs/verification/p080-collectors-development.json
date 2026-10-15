@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "task": "P080",
+  "development_only": true,
+  "identities": {
+    "collectors": {
+      "paths": [
+        "tools/wtime-bench/*.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/fixtures/**",
+        "tools/verification/*.py",
+        "tools/verify.py"
+      ]
+    },
+    "tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_continuation_pairing.py",
+        "tools/wtime-bench/tests/test_p080_continuation_pairing.py",
+        "tools/wtime-bench/tests/test_p080_focused_fixture_prepare.py",
+        "tools/wtime-bench/tests/test_p080_provider_binding.py"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "integrated-collectors",
+        "uses": [
+          "collectors",
+          "tests"
+        ],
+        "commands": [
+          {
+            "name": "collectors-0",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_continuation_pairing.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "collectors-1",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p080_continuation_pairing.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "collectors-2",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p080_focused_fixture_prepare.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "collectors-3",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p080_provider_binding.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "collectors-0",
+            "kind": "unittest",
+            "minimum_passed": 6,
+            "required_names": [
+              "test_real_registry_rows_match_expected_lifecycle_and_cli",
+              "test_capture_resume_observation_round_trips_full_typed_lifecycle",
+              "test_captured_reference_collection_oracle_keeps_both_objects",
+              "test_bound_chain_allows_consumption_before_cleanup",
+              "test_rejects_wrong_stage_batch_boundary_and_tampered_retained_wire",
+              "test_unsupported_legacy_lifecycle_is_recognized_then_rejected"
+            ]
+          },
+          {
+            "command": "collectors-1",
+            "kind": "unittest",
+            "minimum_passed": 10,
+            "required_names": [
+              "test_real_registry_rows_match_expected_lifecycle_and_cli",
+              "test_capture_resume_observation_round_trips_full_typed_lifecycle",
+              "test_captured_reference_collection_oracle_keeps_both_objects",
+              "test_bound_chain_allows_consumption_before_cleanup",
+              "test_rejects_wrong_stage_batch_boundary_and_tampered_retained_wire",
+              "test_cross_module_oracle_declares_nominal_context_rejection",
+              "test_one_shot_timed_stages_and_cleanup_semantics_are_separate",
+              "test_one_shot_rejects_bad_trap_accounting_and_unknown_wire",
+              "test_cross_module_requires_provider_binding_and_checks_nominal_context",
+              "test_cross_module_rejects_wrong_nominal_result_or_leaked_cleanup"
+            ]
+          },
+          {
+            "command": "collectors-2",
+            "kind": "unittest",
+            "minimum_passed": 4,
+            "required_names": [
+              "test_matching_sibling_is_reused_and_mismatched_sibling_is_rejected",
+              "test_missing_one_shot_consumer_and_provider_siblings_encode_to_output",
+              "test_prepare_fixtures_binds_cross_module_provider_as_setup_only",
+              "test_wat_encoder_exit_and_encoded_hash_are_fail_closed"
+            ]
+          },
+          {
+            "command": "collectors-3",
+            "kind": "unittest",
+            "minimum_passed": 3,
+            "required_names": [
+              "test_cross_module_consumer_binds_real_provider_source_and_wasm_sha",
+              "test_expected_setup_modules_preserves_existing_gc_setup_rows",
+              "test_gate_inventory_rejects_missing_or_tampered_provider_reference"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "schema": "wtime-final-portfolio-audit-v1",
+  "status": "passed",
+  "completion_scope": {
+    "performance_portfolio": "portfolio_complete_with_deferred_research",
+    "tasks": {"done": 114, "deferred_not_selected": 31, "todo": 0},
+    "original_plan": {"done": 167, "in_progress": 2, "pending_ids": ["T166", "T169"]}
+  },
+  "gate_outcomes": {
+    "P067": "rejected",
+    "P080": "inconclusive",
+    "P094": "no_go",
+    "P108": "contract_only",
+    "P109": "contract_only",
+    "P110": "inconclusive",
+    "P111": "contract_only",
+    "P112": "contract_only"
+  },
+  "gate_proofs": [
+    {"task": "P067", "path": "docs/benchmarks/performance/P067-proof.json", "sha256": "6a13071b4455ac887656516105c2ff17e0be622ff742d4887e74318b968673b4"},
+    {"task": "P080", "path": "docs/benchmarks/performance/P080-proof.json", "sha256": "1b05673b379d030cb33223f769f7325e957ec718b6541d8b002b39cc782851a6"},
+    {"task": "P094", "path": "docs/benchmarks/performance/P094-proof.json", "sha256": "64f7f6996379d6f47df9241c67ba9bce1f978ee58051f603c5d6ccadcb72d5eb"},
+    {"task": "P108", "path": "docs/benchmarks/performance/P108-proof.json", "sha256": "eb21c40fa2b14a7c0487ba9f2c79415709c7f44f51903184f2a1656e56b2fe56"},
+    {"task": "P109", "path": "docs/benchmarks/performance/P109-proof.json", "sha256": "0df3ddc30b4cebcaa61db2bc603a327c8555c4a17e26812dc37e692ca2f40ab5"},
+    {"task": "P110", "path": "docs/benchmarks/performance/P110-proof.json", "sha256": "e3468d606dd93f8ac94ee033d01412152c0f6ef0341dbf66c7edd3885f1f3e71"},
+    {"task": "P111", "path": "docs/benchmarks/performance/P111-proof.json", "sha256": "a8b2c453f3a2b80958471b4682b19414c4887b3c6bf9c3916612ae9e6d9e976d"},
+    {"task": "P112", "path": "docs/benchmarks/performance/P112-proof.json", "sha256": "3340c49bf1343a1a6d7f3a4e76ade8ad65a2b98af06c9d67934f4f6f89490933"}
+  ],
+  "audit_run": {
+    "path": "target/recovery/final-portfolio-review-0004/result.json",
+    "sha256": "3a7de39319081e92078e615d5dcf1c04588e270d73b655a67b368465b07b4fd4",
+    "status": "passed",
+    "exit_code": 0,
+    "checks": [
+      {"name": "performance_plan", "command": "/workspace/tasks/performance/check_plan.py", "exit_code": 0},
+      {"name": "root_plan", "command": "/workspace/tasks/check_plan.py", "exit_code": 0},
+      {"name": "canonical_mirror_diff_excluding_tracked_recovery", "command": "diff -qr --exclude=recovery /workspace/tasks /workspace/wtime/task-plans", "exit_code": 0}
+    ],
+    "mirror_note": "The canonical task trees match. The separately tracked task-plans/recovery directory contains historical provenance and was preserved."
+  },
+  "preserved_failed_audit_attempts": [
+    {"path": "target/recovery/final-portfolio-review-0001", "reason": "publication-record discovery did not yet match P067's publication path"},
+    {"path": "target/recovery/final-portfolio-review-0002", "reason": "P109 corpus matrix rows were grouped with the wrong field"},
+    {"path": "target/recovery/final-portfolio-review-0003", "reason": "the full tree diff reported the tracked task-plans/recovery provenance extra; subsequent comparison excludes only that directory"}
+  ],
+  "measurement_checkpoint_index": {
+    "path": "docs/benchmarks/performance/measurement-checkpoint-index-0002.json",
+    "sha256": "ed736f4bba8addff0e0811908c14c4353f4d3675c35785c0ddb1f35e7862d0c0",
+    "datasets": 14,
+    "streaming_gzip_roundtrips": "passed"
+  },
+  "limitations": [
+    "Historical timing reports were validated against their frozen source and executable identities; equality with later live benchmark-helper sources was not asserted.",
+    "The original plan still has T166 and T169 in progress; the completed portfolio is the selected portable scope with 31 conditional research tasks explicitly deferred."
+  ]
+}

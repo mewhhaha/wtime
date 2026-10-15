@@ -17,17 +17,25 @@ def finalize(workflow, spec_path, output):
     config = spec.get('completion', {})
     required = config.get('required_phases', ['freeze', 'verify', 'measure'])
     need(required and set(required) <= set(spec['stages']), 'incomplete finalization contract')
+    design_decision = config.get('design_decision', False)
+    need(type(design_decision) is bool, 'design_decision must be a boolean')
     outcome = config.get('outcome')
     if 'decision' in config:
         from .contracts import json_pointer
         rule = config['decision']
+        need(isinstance(rule, dict), 'invalid decision rule')
         need(rule.get('phase') in required, 'decision phase is not required')
         _, receipt = workflow._receipt(spec['task'], rule['phase'])
         need(rule.get('artifact') in receipt['artifacts'], 'decision artifact is absent')
         outcome = json_pointer(workflow.store.json(receipt['artifacts'][rule['artifact']]), rule.get('pointer', '/decision'))
     else:
+        need(not design_decision, 'design decisions must come from a verified decision artifact')
         need(outcome == 'contract_only', 'measured outcomes must come from a verified decision artifact')
-    need(outcome in ('adopted', 'rejected', 'inconclusive', 'contract_only'), 'missing final outcome')
+    need(type(outcome) is str, 'final outcome must be a string')
+    ordinary_outcomes = ('adopted', 'rejected', 'inconclusive', 'contract_only')
+    design_outcomes = ('go', 'no_go')
+    allowed_outcomes = design_outcomes if design_decision else ordinary_outcomes
+    need(outcome in allowed_outcomes, 'final outcome is not allowed for this completion contract')
     phases = {}
     for phase in required:
         ref, receipt = workflow._receipt(spec['task'], phase)

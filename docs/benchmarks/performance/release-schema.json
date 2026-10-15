@@ -1,0 +1,31 @@
+{
+  "$id": "wtime-p112-release-report-v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "wtime-p112-release-report-v1"
+    },
+    "status": {
+      "const": "passed"
+    },
+    "task": {
+      "const": "P112"
+    },
+    "timing_evidence": {
+      "const": false
+    }
+  },
+  "required": [
+    "schema",
+    "task",
+    "status",
+    "timing_evidence",
+    "current_core_sources",
+    "milestones",
+    "policy",
+    "final_gates",
+    "limitations"
+  ],
+  "type": "object"
+}

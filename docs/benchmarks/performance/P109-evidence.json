@@ -1,0 +1,50 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 25827,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P109-verification.json",
+    "sha256": "48dff7cfbd4bbca895aa0b4ca841a8fac8b9407ac7acfecd0d47f6340a13cce4"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Native AArch64 release execution is unrun.",
+    "External differential oracle is unrun; deterministic independent vectors are checked."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 151050,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/22/227ae0ff7eb09fbc6a3d11436ff92e6bdc72d80b94e7fe7440c527bfa663fee6",
+      "sha256": "227ae0ff7eb09fbc6a3d11436ff92e6bdc72d80b94e7fe7440c527bfa663fee6",
+      "stored_bytes": 151050,
+      "stored_sha256": "227ae0ff7eb09fbc6a3d11436ff92e6bdc72d80b94e7fe7440c527bfa663fee6"
+    },
+    "freeze": {
+      "bytes": 120858,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/5d/5d5b23ad2a33ad0e1764b3390d6fe29636c0fd5e522189df43a0dbee9e4d82d7",
+      "sha256": "5d5b23ad2a33ad0e1764b3390d6fe29636c0fd5e522189df43a0dbee9e4d82d7",
+      "stored_bytes": 120858,
+      "stored_sha256": "5d5b23ad2a33ad0e1764b3390d6fe29636c0fd5e522189df43a0dbee9e4d82d7"
+    },
+    "verify": {
+      "bytes": 251176,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/14/14dae424076251ca2f72deca4ab93790ec51bd37201b51900f2a42e3bb899a12",
+      "sha256": "14dae424076251ca2f72deca4ab93790ec51bd37201b51900f2a42e3bb899a12",
+      "stored_bytes": 251176,
+      "stored_sha256": "14dae424076251ca2f72deca4ab93790ec51bd37201b51900f2a42e3bb899a12"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P109"
+}

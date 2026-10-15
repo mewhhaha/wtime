@@ -1,0 +1,59 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 13372,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P110-verification.json",
+    "sha256": "c0068aecffead23311b2e73b2b580f9d9a4fc396b25a98aaad92bb742eceb6e4"
+  },
+  "decision": "inconclusive",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Cold and optional build reviews retain over-budget or uncertain observations; no optional tier is promoted by this budget gate.",
+    "The original P001 build-budget comparison is unavailable. Native AArch64 remains unrun."
+  ],
+  "outcome": "inconclusive",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 656350,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/25/2595d1d84021baa6431f4e6f77172f24bdef09f574b09dac9f10b168972750b6",
+      "sha256": "2595d1d84021baa6431f4e6f77172f24bdef09f574b09dac9f10b168972750b6",
+      "stored_bytes": 656350,
+      "stored_sha256": "2595d1d84021baa6431f4e6f77172f24bdef09f574b09dac9f10b168972750b6"
+    },
+    "freeze": {
+      "bytes": 114890,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/76/767aebd1796cf67e869184968ed0810a9793409e4e2db29461cd05250db1b3e2",
+      "sha256": "767aebd1796cf67e869184968ed0810a9793409e4e2db29461cd05250db1b3e2",
+      "stored_bytes": 114890,
+      "stored_sha256": "767aebd1796cf67e869184968ed0810a9793409e4e2db29461cd05250db1b3e2"
+    },
+    "measure": {
+      "bytes": 2861152,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/c3/c3daf2902056ab2c7faff674416b688f0a57e3a418c6c8340e9571f70817ae34",
+      "sha256": "c3daf2902056ab2c7faff674416b688f0a57e3a418c6c8340e9571f70817ae34",
+      "stored_bytes": 2861152,
+      "stored_sha256": "c3daf2902056ab2c7faff674416b688f0a57e3a418c6c8340e9571f70817ae34"
+    },
+    "verify": {
+      "bytes": 142296,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/53/5389cd8e7e9334ed9de4f83d2303a7f8db18cd11ec71106250f2fec248856c17",
+      "sha256": "5389cd8e7e9334ed9de4f83d2303a7f8db18cd11ec71106250f2fec248856c17",
+      "stored_bytes": 142296,
+      "stored_sha256": "5389cd8e7e9334ed9de4f83d2303a7f8db18cd11ec71106250f2fec248856c17"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P110"
+}

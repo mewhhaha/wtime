@@ -10,6 +10,12 @@ in the sibling `../tasks` directory, with a tracked backup in
 [`task-plans`](task-plans/); official test runs produce JSON reports
 with separate failed and unsupported counts.
 
+The selected portable performance portfolio is complete. See the
+[measured results](docs/benchmarks/performance/README.md) and
+[execution policy](docs/architecture/performance-policy.md). Native AArch64
+release verification remains outstanding; conditional research branches are
+explicitly deferred.
+
 After a fresh clone, restore the plans if the sibling directory is absent:
 
 ```sh

@@ -1,8 +1,8 @@
 # P108 — Choose defaults, opt-in tiers and retired experiments
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **contract_only**
 
 Kind: `gate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -139,4 +139,24 @@ Validate current selected artifacts and all stated checks, retaining unselected/
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P108/shared-finalization/attempt-0001/evidence.json": "cb2e78354ff6e10ca01d1f7c5fec0a963de12fc2b879cd722c89d01371f41129"
+  },
+  "evidence": [
+    {
+      "bytes": 1878,
+      "path": "/workspace/wtime/target/performance/P108/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "cb2e78354ff6e10ca01d1f7c5fec0a963de12fc2b879cd722c89d01371f41129"
+    }
+  ],
+  "outcome": "contract_only",
+  "status": "done",
+  "task": "P108"
+}
+```

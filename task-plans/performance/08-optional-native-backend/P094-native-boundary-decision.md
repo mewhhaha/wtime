@@ -1,8 +1,8 @@
 # P094 — Decide the tiny native backend boundary and budget
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **no_go**
 
 Kind: `experiment` · Branch: `optional` · Model: **Sol 6.1 Low**
 
@@ -65,4 +65,24 @@ Complete the design/integrity checks and a concrete cost/scope decision artifact
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P094/shared-finalization/attempt-0002/evidence.json": "9e0941ab76ac73bd228d38024707efd199fa3b723289f841dc49433b2e5680d0"
+  },
+  "evidence": [
+    {
+      "bytes": 2089,
+      "path": "/workspace/wtime/target/performance/P094/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "9e0941ab76ac73bd228d38024707efd199fa3b723289f841dc49433b2e5680d0"
+    }
+  ],
+  "outcome": "no_go",
+  "status": "done",
+  "task": "P094"
+}
+```
