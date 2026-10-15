@@ -74,6 +74,17 @@ def check_observation(entry, observation, mode, root, stage=None, thread_cpus=No
         need(verified == observation,
              'shared-bulk normalized view/image references/CPU affinity differ')
         return
+    if module == 'wait_queue_workloads.py':
+        import shared_bulk_compare as adapter
+        import wait_queue_workloads as model
+        need(mode == model.MODE and stage == 'steady_state_group' and thread_cpus is not None,
+             'wait-queue observations require decoded steady-state groups and their selected CPU mask')
+        verified = adapter.revalidate_observation(
+            entry, observation, root, expected_batch=observation.get('batch'),
+            expected_thread_cpus=thread_cpus, validator=model.validate_observation)
+        need(verified == observation,
+             'wait-queue normalized view/image references/CPU affinity differ')
+        return
     if module == 'gc_workloads.py':
         import gc_compare
         import gc_scaling
@@ -214,10 +225,22 @@ def validate_entry_observation(observation, threshold):
             p140_entry_policy.validate_wire(observation[key], threshold)
 
 
+def validate_wait_queue_capability(entries, capabilities):
+    """Require the typed cohort driver advertised by both paired binaries."""
+    if any(entry.get('oracle', {}).get('module') == 'wait_queue_workloads.py'
+           for entry in entries):
+        need(isinstance(capabilities, dict), 'wait-queue capability metadata is missing')
+        for side in ('baseline', 'candidate'):
+            protocol = capabilities.get(side)
+            need(isinstance(protocol, dict)
+                 and protocol.get('wait_queue_cohort_driver') is True,
+                 f'{side} protocol lacks the wait-queue cohort driver')
+
+
 def requires_batch_calibration(entry, stage):
     module = entry['oracle'].get('module')
     return (stage in ('warm_call', 'run_after_setup')
-            or (module in ('thread_workloads.py', 'shared_bulk_workloads.py')
+            or (module in ('thread_workloads.py', 'shared_bulk_workloads.py', 'wait_queue_workloads.py')
                 and stage == 'steady_state_group'))
 
 
@@ -266,11 +289,16 @@ def validate(path):
     entries = selection_manifest.rows(declaration)
     by_id = {entry['id']:entry for entry in entries}
     settings = report['metadata']['settings']
+    validate_wait_queue_capability(entries, report['metadata'].get('capabilities'))
     thread_selected = any(entry['oracle']['module'] in
-                          ('thread_workloads.py', 'shared_bulk_workloads.py') for entry in entries)
+                          ('thread_workloads.py', 'shared_bulk_workloads.py', 'wait_queue_workloads.py')
+                          for entry in entries)
     if thread_selected:
         import thread_compare
         thread_cpus = thread_compare.validate_cpu_affinity(settings.get('thread_cpu_affinity'))
+        if any(entry['oracle']['module'] == 'wait_queue_workloads.py' for entry in entries):
+            need(thread_cpus == [1, 2, 3, 4],
+                 'wait-queue timing requires the predeclared CPU mask [1, 2, 3, 4]')
         need(report['metadata'].get('hardware', {}).get('thread_cpu_affinity') == thread_cpus,
              'thread CPU affinity differs between settings and hardware metadata')
         command_ref = identities.get('command')
@@ -347,7 +375,7 @@ def validate(path):
                                       thread_cpus=thread_cpus, fuel_setting=explicit_fuel)
                     if (stage not in ('warm_call','run_after_setup')
                             and not (entry['oracle']['module'] in
-                                     ('thread_workloads.py', 'shared_bulk_workloads.py')
+                                     ('thread_workloads.py', 'shared_bulk_workloads.py', 'wait_queue_workloads.py')
                                      and stage == 'steady_state_group')):
                         need(pair[side]['batch'] == 1, 'cold stage is batched')
                     if entry['oracle']['module'] == 'memory_workloads.py':
@@ -419,6 +447,10 @@ def decision(report):
     declaration = report['declaration']
     selected = {row['id']:row for row in declaration['rows']}
     targeted = {row['id'] for row in declaration['rows'] if row['role'] == 'targeted'}
+    if any(row.get('family') == 'wait-queues' for row in declaration['rows']):
+        wait_targets = {wid for wid in targeted if selected[wid].get('family') == 'wait-queues'}
+        need(wait_targets == {'wait_queue_cohort_w2_a1', 'wait_queue_cohort_w32_a1'},
+             'wait-queue primary targets must be same-address cohorts with 2 and 32 waiters')
     target_stages = {}
     for wid in targeted:
         declared = selected[wid]['stages']
@@ -429,6 +461,8 @@ def decision(report):
         elif selected[wid].get('family') == 'threads' and declared == ['steady_state_group']:
             target_stages[wid] = 'steady_state_group'
         elif selected[wid].get('family') == 'shared-bulk' and declared == ['steady_state_group']:
+            target_stages[wid] = 'steady_state_group'
+        elif selected[wid].get('family') == 'wait-queues' and declared == ['steady_state_group']:
             target_stages[wid] = 'steady_state_group'
         elif (selected[wid].get('family') == 'continuations'
               and declared == ['setup', 'capture']):

@@ -59,7 +59,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
     })
 }
 
-fn affinity() -> Result<Vec<usize>, String> {
+pub(super) fn affinity() -> Result<Vec<usize>, String> {
     let status = std::fs::read_to_string("/proc/thread-self/status").map_err(|e| e.to_string())?;
     let value = status
         .lines()
@@ -82,16 +82,16 @@ fn affinity() -> Result<Vec<usize>, String> {
 }
 
 #[derive(Default)]
-struct Gate {
+pub(super) struct Gate {
     state: Mutex<Option<bool>>,
     wake: Condvar,
 }
 impl Gate {
-    fn release(&self, execute: bool) {
+    pub(super) fn release(&self, execute: bool) {
         *self.state.lock().unwrap() = Some(execute);
         self.wake.notify_all();
     }
-    fn wait(&self) -> bool {
+    pub(super) fn wait(&self) -> bool {
         let mut state = self.state.lock().unwrap();
         while state.is_none() {
             state = self.wake.wait(state).unwrap();

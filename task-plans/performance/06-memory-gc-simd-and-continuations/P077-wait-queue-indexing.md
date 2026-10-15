@@ -1,8 +1,8 @@
 # P077 — Improve wait registration lookup while retaining exact notifications
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -91,7 +91,7 @@ Run these commands before changing the candidate sources. The archive is immutab
 
 ```sh
 python3 tools/wtime-bench/baseline.py --output target/performance/P077-before
-python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P077-selection.json target/performance/P077-before/manifest.json --output target/performance/P077/selection-freeze.json
+python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P077-selection.json target/performance/P077-before/manifest.json target/performance/P077/selection-freeze.json
 ```
 
 Create and validate the task-owned selection manifest before these commands.
@@ -101,6 +101,36 @@ in its `freeze` phase without replacing it after implementation.
 
 ## Completion evidence
 
-Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
+P077 completed with outcome **rejected**. The full candidate close was `close-0120/attempt-0002`, using freeze attempt 0001, verification attempt 0002, measurement attempt 0002, and analysis attempt 0001. Its 900 pairs covered 15 groups over two independent runs (30 pairs per group per run), with seeds 77001 and 77002, CPU affinity fixed to CPU 1, workers 1–4, and 10,000 bootstrap resamples. Production timings were uninstrumented. The cohort timer began before waiter-gate release and ended after all waiter and drain results; it includes readiness polling and zero-result notify probes.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+All 171 candidate test executions passed: 112 Rust executions (105 default-suite, 4 combined focused, 3 driver) and 59 Python executions (9 model, 9 bridge, 16 thread, 10 gate, 15 generic). The 13 frozen P077 semantic cases passed. The primary candidate/baseline ratios were 0.9761586921823108 (95% CI 0.9399016077964196–1.0431538744540014) and 1.0143695031737103 (0.9674887554731454–1.0458325008564127). The protected legacy-wait ratios were 1.6759117381058724 (1.4751563449132326–1.7604719191829266) and 1.652816725810792 (1.5604600406344655–1.7636165703070408). The results do not support the required 5% gain, so the candidate was rejected and reverted.
+
+Focused diagnostics recorded 32 queue visits for 32 successful notifications versus 528 in the predecessor, and six comparisons for middle cleanup at the tested queue size. Deque removal still shifts later entries, so this is not an O(1) cleanup claim. The candidate enforced limits of 65,536 live waiters and 16 MiB for owned queue capacities, address values, and live waiter allocations; allocator and BTree internals are outside that byte estimate. The live waiter charge remained held through worker cleanup. These changes were reverted with the candidate.
+
+The candidate clean build took 2.473659468 seconds, the CLI leaf build 0.130840664 seconds, and the default release build 5.044756799 seconds. The stripped binary was 1,008,264 bytes and peak RSS was 218,940 KiB. It introduced zero external dependencies. The separate unpaired build comparison is descriptive and does not support a causal speed claim.
+
+A separate restoration close, `close-0121` / verification attempt 0003, passed 277 executions: 101 default, 173 combined, and 3 protocol, with zero failures or ignored tests. It verified the restored runtime crate source identity and a fresh default production build. This restoration verification does not replace or promote the rejected candidate result.
+
+Evidence: [completion](../../../wtime/docs/benchmarks/performance/P077-completion.json), [candidate evidence](../../../wtime/docs/benchmarks/performance/P077-evidence.json), [freeze](../../../wtime/docs/benchmarks/performance/P077-freeze.json), [proof](../../../wtime/docs/benchmarks/performance/P077-proof.json), [statistics](../../../wtime/docs/benchmarks/performance/P077-statistics.json), [paired records](../../../wtime/docs/benchmarks/performance/P077-records.json.gz), [restoration](../../../wtime/docs/benchmarks/performance/P077-restoration.json), and [build comparison](../../../wtime/docs/benchmarks/performance/P077-build-comparison.json).
+
+Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P077/shared-finalization/attempt-0002/evidence.json": "2eb4a89125609632ec81f37d3043a213e2bad745c74a0bd56c400a26148818f2"
+  },
+  "evidence": [
+    {
+      "bytes": 2164,
+      "path": "/workspace/wtime/target/performance/P077/shared-finalization/attempt-0002/evidence.json",
+      "sha256": "2eb4a89125609632ec81f37d3043a213e2bad745c74a0bd56c400a26148818f2"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P077"
+}
+```

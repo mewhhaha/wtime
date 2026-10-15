@@ -755,6 +755,17 @@
         "shared_bulk_copy_distinct_w4_b32768",
         "shared_bulk_copy_distinct_w4_b4097"
       ]
+    },
+    "wait-queues": {
+      "status": "ready",
+      "workloads": [
+        "wait_queue_cohort_w2_a1",
+        "wait_queue_cohort_w32_a1",
+        "wait_queue_cohort_w8_a1",
+        "wait_queue_cohort_w2_a2",
+        "wait_queue_cohort_w32_a8",
+        "wait_queue_cohort_w8_a4"
+      ]
     }
   },
   "value_encoding": {
@@ -35025,6 +35036,534 @@
         "worker_destination_stride": 32768,
         "source_bytes_preserved": 32768,
         "memory_bytes_per_backing": 262144
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "wait_queue_cohort_w2_a1",
+      "family": "wait-queues",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/wait_queue_cohort.wat",
+        "sha256": "699371f6bf7153748c80e0160c1b69a88046ad85f23967fae489eafa86de261a",
+        "wasm_sha256": "162d57d39e470d40bff2ab5f7543946480bfe27dfd41d16115049bf8616b95f4",
+        "encoding_status": "encoded"
+      },
+      "params": [
+        {
+          "name": "waiters",
+          "type": "i32",
+          "min": 2,
+          "max": 2,
+          "baseline": 2
+        },
+        {
+          "name": "addresses",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "wait_queue_workloads.py",
+        "independent": true,
+        "waiters": 2,
+        "addresses": 1,
+        "memory_bytes": 65536,
+        "memory_pages": 1
+      },
+      "required_features": [
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "source-bound shared wait queue cohort with full-memory lifecycle oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-memory waiter cohort",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator has no matching shared-memory waiter cohort driver."
+        }
+      },
+      "driver": {
+        "kind": "wait_queue_cohort",
+        "profile": "threads",
+        "protocol": "wtime-wait-queue-cohort-v1",
+        "argv": [
+          "--wait-queue-cohort",
+          "FILE",
+          "CASE",
+          "WAITERS",
+          "ADDRESSES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "wait_queue_cohort": {
+        "waiters": 2,
+        "addresses": 1,
+        "timeout_ns": 5000000000,
+        "memory_bytes": 65536,
+        "max_notify_attempts": 1000000,
+        "ready_flag_offset": 4096,
+        "readiness_evidence": "guest acknowledgement before wait; queue registration is not observed before timing",
+        "timing_boundary": "waiter gate release through all waiter and drain results; guest readiness and failed notify probes included; host setup/join/image/cleanup checks excluded"
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "wait_queue_cohort_w32_a1",
+      "family": "wait-queues",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/wait_queue_cohort.wat",
+        "sha256": "699371f6bf7153748c80e0160c1b69a88046ad85f23967fae489eafa86de261a",
+        "wasm_sha256": "162d57d39e470d40bff2ab5f7543946480bfe27dfd41d16115049bf8616b95f4",
+        "encoding_status": "encoded"
+      },
+      "params": [
+        {
+          "name": "waiters",
+          "type": "i32",
+          "min": 32,
+          "max": 32,
+          "baseline": 32
+        },
+        {
+          "name": "addresses",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "wait_queue_workloads.py",
+        "independent": true,
+        "waiters": 32,
+        "addresses": 1,
+        "memory_bytes": 65536,
+        "memory_pages": 1
+      },
+      "required_features": [
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "source-bound shared wait queue cohort with full-memory lifecycle oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-memory waiter cohort",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator has no matching shared-memory waiter cohort driver."
+        }
+      },
+      "driver": {
+        "kind": "wait_queue_cohort",
+        "profile": "threads",
+        "protocol": "wtime-wait-queue-cohort-v1",
+        "argv": [
+          "--wait-queue-cohort",
+          "FILE",
+          "CASE",
+          "WAITERS",
+          "ADDRESSES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "wait_queue_cohort": {
+        "waiters": 32,
+        "addresses": 1,
+        "timeout_ns": 5000000000,
+        "memory_bytes": 65536,
+        "max_notify_attempts": 1000000,
+        "ready_flag_offset": 4096,
+        "readiness_evidence": "guest acknowledgement before wait; queue registration is not observed before timing",
+        "timing_boundary": "waiter gate release through all waiter and drain results; guest readiness and failed notify probes included; host setup/join/image/cleanup checks excluded"
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "wait_queue_cohort_w8_a1",
+      "family": "wait-queues",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/wait_queue_cohort.wat",
+        "sha256": "699371f6bf7153748c80e0160c1b69a88046ad85f23967fae489eafa86de261a",
+        "wasm_sha256": "162d57d39e470d40bff2ab5f7543946480bfe27dfd41d16115049bf8616b95f4",
+        "encoding_status": "encoded"
+      },
+      "params": [
+        {
+          "name": "waiters",
+          "type": "i32",
+          "min": 8,
+          "max": 8,
+          "baseline": 8
+        },
+        {
+          "name": "addresses",
+          "type": "i32",
+          "min": 1,
+          "max": 1,
+          "baseline": 1
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "wait_queue_workloads.py",
+        "independent": true,
+        "waiters": 8,
+        "addresses": 1,
+        "memory_bytes": 65536,
+        "memory_pages": 1
+      },
+      "required_features": [
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "source-bound shared wait queue cohort with full-memory lifecycle oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-memory waiter cohort",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator has no matching shared-memory waiter cohort driver."
+        }
+      },
+      "driver": {
+        "kind": "wait_queue_cohort",
+        "profile": "threads",
+        "protocol": "wtime-wait-queue-cohort-v1",
+        "argv": [
+          "--wait-queue-cohort",
+          "FILE",
+          "CASE",
+          "WAITERS",
+          "ADDRESSES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "wait_queue_cohort": {
+        "waiters": 8,
+        "addresses": 1,
+        "timeout_ns": 5000000000,
+        "memory_bytes": 65536,
+        "max_notify_attempts": 1000000,
+        "ready_flag_offset": 4096,
+        "readiness_evidence": "guest acknowledgement before wait; queue registration is not observed before timing",
+        "timing_boundary": "waiter gate release through all waiter and drain results; guest readiness and failed notify probes included; host setup/join/image/cleanup checks excluded"
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "wait_queue_cohort_w2_a2",
+      "family": "wait-queues",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/wait_queue_cohort.wat",
+        "sha256": "699371f6bf7153748c80e0160c1b69a88046ad85f23967fae489eafa86de261a",
+        "wasm_sha256": "162d57d39e470d40bff2ab5f7543946480bfe27dfd41d16115049bf8616b95f4",
+        "encoding_status": "encoded"
+      },
+      "params": [
+        {
+          "name": "waiters",
+          "type": "i32",
+          "min": 2,
+          "max": 2,
+          "baseline": 2
+        },
+        {
+          "name": "addresses",
+          "type": "i32",
+          "min": 2,
+          "max": 2,
+          "baseline": 2
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "wait_queue_workloads.py",
+        "independent": true,
+        "waiters": 2,
+        "addresses": 2,
+        "memory_bytes": 65536,
+        "memory_pages": 1
+      },
+      "required_features": [
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "source-bound shared wait queue cohort with full-memory lifecycle oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-memory waiter cohort",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator has no matching shared-memory waiter cohort driver."
+        }
+      },
+      "driver": {
+        "kind": "wait_queue_cohort",
+        "profile": "threads",
+        "protocol": "wtime-wait-queue-cohort-v1",
+        "argv": [
+          "--wait-queue-cohort",
+          "FILE",
+          "CASE",
+          "WAITERS",
+          "ADDRESSES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "wait_queue_cohort": {
+        "waiters": 2,
+        "addresses": 2,
+        "timeout_ns": 5000000000,
+        "memory_bytes": 65536,
+        "max_notify_attempts": 1000000,
+        "ready_flag_offset": 4096,
+        "readiness_evidence": "guest acknowledgement before wait; queue registration is not observed before timing",
+        "timing_boundary": "waiter gate release through all waiter and drain results; guest readiness and failed notify probes included; host setup/join/image/cleanup checks excluded"
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "wait_queue_cohort_w32_a8",
+      "family": "wait-queues",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/wait_queue_cohort.wat",
+        "sha256": "699371f6bf7153748c80e0160c1b69a88046ad85f23967fae489eafa86de261a",
+        "wasm_sha256": "162d57d39e470d40bff2ab5f7543946480bfe27dfd41d16115049bf8616b95f4",
+        "encoding_status": "encoded"
+      },
+      "params": [
+        {
+          "name": "waiters",
+          "type": "i32",
+          "min": 32,
+          "max": 32,
+          "baseline": 32
+        },
+        {
+          "name": "addresses",
+          "type": "i32",
+          "min": 8,
+          "max": 8,
+          "baseline": 8
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "wait_queue_workloads.py",
+        "independent": true,
+        "waiters": 32,
+        "addresses": 8,
+        "memory_bytes": 65536,
+        "memory_pages": 1
+      },
+      "required_features": [
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "source-bound shared wait queue cohort with full-memory lifecycle oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-memory waiter cohort",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator has no matching shared-memory waiter cohort driver."
+        }
+      },
+      "driver": {
+        "kind": "wait_queue_cohort",
+        "profile": "threads",
+        "protocol": "wtime-wait-queue-cohort-v1",
+        "argv": [
+          "--wait-queue-cohort",
+          "FILE",
+          "CASE",
+          "WAITERS",
+          "ADDRESSES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "wait_queue_cohort": {
+        "waiters": 32,
+        "addresses": 8,
+        "timeout_ns": 5000000000,
+        "memory_bytes": 65536,
+        "max_notify_attempts": 1000000,
+        "ready_flag_offset": 4096,
+        "readiness_evidence": "guest acknowledgement before wait; queue registration is not observed before timing",
+        "timing_boundary": "waiter gate release through all waiter and drain results; guest readiness and failed notify probes included; host setup/join/image/cleanup checks excluded"
+      }
+    },
+    {
+      "schema_version": 2,
+      "id": "wait_queue_cohort_w8_a4",
+      "family": "wait-queues",
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/threads/wait_queue_cohort.wat",
+        "sha256": "699371f6bf7153748c80e0160c1b69a88046ad85f23967fae489eafa86de261a",
+        "wasm_sha256": "162d57d39e470d40bff2ab5f7543946480bfe27dfd41d16115049bf8616b95f4",
+        "encoding_status": "encoded"
+      },
+      "params": [
+        {
+          "name": "waiters",
+          "type": "i32",
+          "min": 8,
+          "max": 8,
+          "baseline": 8
+        },
+        {
+          "name": "addresses",
+          "type": "i32",
+          "min": 4,
+          "max": 4,
+          "baseline": 4
+        }
+      ],
+      "result": {
+        "type": "i32"
+      },
+      "oracle": {
+        "kind": "semantic",
+        "function": "oracle",
+        "module": "wait_queue_workloads.py",
+        "independent": true,
+        "waiters": 8,
+        "addresses": 4,
+        "memory_bytes": 65536,
+        "memory_pages": 1
+      },
+      "required_features": [
+        "threads"
+      ],
+      "profile": {
+        "status": "ready",
+        "reason": "source-bound shared wait queue cohort with full-memory lifecycle oracle"
+      },
+      "work_units": {
+        "unit": "complete shared-memory waiter cohort",
+        "count": 1
+      },
+      "reset_policy": "fresh_instance_per_invocation",
+      "stages": [
+        "steady_state_group"
+      ],
+      "comparators": {
+        "wasmtime": {
+          "status": "unsupported",
+          "reason": "Pinned comparator has no matching shared-memory waiter cohort driver."
+        }
+      },
+      "driver": {
+        "kind": "wait_queue_cohort",
+        "profile": "threads",
+        "protocol": "wtime-wait-queue-cohort-v1",
+        "argv": [
+          "--wait-queue-cohort",
+          "FILE",
+          "CASE",
+          "WAITERS",
+          "ADDRESSES",
+          "STAGE",
+          "BATCH",
+          "MODE",
+          "PROFILE"
+        ]
+      },
+      "wait_queue_cohort": {
+        "waiters": 8,
+        "addresses": 4,
+        "timeout_ns": 5000000000,
+        "memory_bytes": 65536,
+        "max_notify_attempts": 1000000,
+        "ready_flag_offset": 4096,
+        "readiness_evidence": "guest acknowledgement before wait; queue registration is not observed before timing",
+        "timing_boundary": "waiter gate release through all waiter and drain results; guest readiness and failed notify probes included; host setup/join/image/cleanup checks excluded"
       }
     }
   ]

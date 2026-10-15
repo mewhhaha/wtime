@@ -80491,7 +80491,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode compact --output target/performance/P047-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P047-selection.json target/performance/P047-before/manifest.json --output target/performance/P047/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P047-selection.json target/performance/P047-before/manifest.json target/performance/P047/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -80590,7 +80590,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode compact --output target/performance/P048-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P048-selection.json target/performance/P048-before/manifest.json --output target/performance/P048/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P048-selection.json target/performance/P048-before/manifest.json target/performance/P048/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -80691,7 +80691,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode compact --output target/performance/P049-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P049-selection.json target/performance/P049-before/manifest.json --output target/performance/P049/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P049-selection.json target/performance/P049-before/manifest.json target/performance/P049/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -80792,7 +80792,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode compact --output target/performance/P050-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P050-selection.json target/performance/P050-before/manifest.json --output target/performance/P050/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P050-selection.json target/performance/P050-before/manifest.json target/performance/P050/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -81053,7 +81053,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P053-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P053-selection.json target/performance/P053-before/manifest.json --output target/performance/P053/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P053-selection.json target/performance/P053-before/manifest.json target/performance/P053/selection-freeze.json"
       ],
       "implementation_record": {
         "status_note": "The candidate completed full close and was rejected by its paired measurements; rollback restored the frozen predecessor. Details and limits are documented in completion_notes.",
@@ -81947,7 +81947,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode register --output target/performance/P060-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P060-selection.json target/performance/P060-before/manifest.json --output target/performance/P060/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P060-selection.json target/performance/P060-before/manifest.json target/performance/P060/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -82048,7 +82048,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P061-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P061-selection.json target/performance/P061-before/manifest.json --output target/performance/P061/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P061-selection.json target/performance/P061-before/manifest.json target/performance/P061/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -82147,7 +82147,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode register --output target/performance/P062-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P062-selection.json target/performance/P062-before/manifest.json --output target/performance/P062/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P062-selection.json target/performance/P062-before/manifest.json target/performance/P062/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -82247,7 +82247,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --mode register --output target/performance/P063-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P063-selection.json target/performance/P063-before/manifest.json --output target/performance/P063/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P063-selection.json target/performance/P063-before/manifest.json target/performance/P063/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -82351,7 +82351,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P064-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P064-selection.json target/performance/P064-before/manifest.json --output target/performance/P064/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P064-selection.json target/performance/P064-before/manifest.json target/performance/P064/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -82859,7 +82859,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P069-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P069-selection.json target/performance/P069-before/manifest.json --output target/performance/P069/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P069-selection.json target/performance/P069-before/manifest.json target/performance/P069/selection-freeze.json"
       ]
     },
     {
@@ -83015,7 +83015,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P071-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before/manifest.json --output target/performance/P071/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before/manifest.json target/performance/P071/selection-freeze.json"
       ]
     },
     {
@@ -83099,7 +83099,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P072-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P072-selection.json target/performance/P072-before/manifest.json --output target/performance/P072/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P072-selection.json target/performance/P072-before/manifest.json target/performance/P072/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -83195,7 +83195,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P073-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P073-selection.json target/performance/P073-before/manifest.json --output target/performance/P073/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P073-selection.json target/performance/P073-before/manifest.json target/performance/P073/selection-freeze.json"
       ]
     },
     {
@@ -83521,8 +83521,8 @@
       "key": "wait-queue-indexing",
       "title": "Improve wait registration lookup while retaining exact notifications",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -83573,7 +83573,13 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P077-verification.json --output target/performance/P077/complete --execute"
       ],
       "path": "06-memory-gc-simd-and-continuations/P077-wait-queue-indexing.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P077/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "2eb4a89125609632ec81f37d3043a213e2bad745c74a0bd56c400a26148818f2",
+          "bytes": 2164
+        }
+      ],
       "branch": "portable",
       "decision_rule": "measured_promotion",
       "reviews_optional_tasks": [],
@@ -83587,8 +83593,23 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P077-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P077-selection.json target/performance/P077-before/manifest.json --output target/performance/P077/selection-freeze.json"
-      ]
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P077-selection.json target/performance/P077-before/manifest.json target/performance/P077/selection-freeze.json"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P077/shared-finalization/attempt-0002/evidence.json": "2eb4a89125609632ec81f37d3043a213e2bad745c74a0bd56c400a26148818f2"
+        },
+        "evidence": [
+          {
+            "bytes": 2164,
+            "path": "/workspace/wtime/target/performance/P077/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "2eb4a89125609632ec81f37d3043a213e2bad745c74a0bd56c400a26148818f2"
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P077"
+      }
     },
     {
       "id": "P078",
@@ -83671,7 +83692,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P078-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P078-selection.json target/performance/P078-before/manifest.json --output target/performance/P078/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P078-selection.json target/performance/P078-before/manifest.json target/performance/P078/selection-freeze.json"
       ],
       "completion_record": {
         "artifact_hashes": {
@@ -85268,7 +85289,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P099-native-matched-baseline --mode portable",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P099-selection.json target/performance/P099-native-matched-baseline/manifest.json --output target/performance/P099/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P099-selection.json target/performance/P099-native-matched-baseline/manifest.json target/performance/P099/selection-freeze.json"
       ]
     },
     {
@@ -85354,7 +85375,7 @@
       ],
       "before_edit_commands": [
         "python3 tools/wtime-bench/baseline.py --output target/performance/P100-native-matched-baseline --mode portable",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P100-selection.json target/performance/P100-native-matched-baseline/manifest.json --output target/performance/P100/selection-freeze.json"
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P100-selection.json target/performance/P100-native-matched-baseline/manifest.json target/performance/P100/selection-freeze.json"
       ]
     },
     {

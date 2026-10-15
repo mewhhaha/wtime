@@ -131,7 +131,8 @@ def retain_memory_images(validated: dict[str, Any], output_root: str | Path) -> 
 
 def revalidate_observation(entry: dict[str, Any], stored: dict[str, Any], output_root: str | Path,
                            *, expected_batch: int | None = None,
-                           expected_thread_cpus: list[int] | None = None) -> dict[str, Any]:
+                           expected_thread_cpus: list[int] | None = None,
+                           validator: Any = None) -> dict[str, Any]:
     """Rehydrate retained bytes, rerun the strict independent oracle, and compare the full view."""
     _need(isinstance(stored, dict), "stored shared-bulk observation must be an object")
     root = Path(output_root).resolve(strict=True)
@@ -162,9 +163,12 @@ def revalidate_observation(entry: dict[str, Any], stored: dict[str, Any], output
               "referenced shared-bulk image bytes or digest differ")
         raw["backings_hex"][name] = image.hex()
 
-    import shared_bulk_workloads as model
-    verified = model.validate_observation(entry, raw, expected_batch=expected_batch,
-                                           expected_thread_cpus=expected_thread_cpus)
+    if validator is None:
+        import shared_bulk_workloads as model
+        validator = model.validate_observation
+    _need(callable(validator), "full-memory observation validator must be callable")
+    verified = validator(entry, raw, expected_batch=expected_batch,
+                         expected_thread_cpus=expected_thread_cpus)
     projected = _stored_view(verified, refs)
     _need(_canonical(projected) == _canonical(stored),
           "stored shared-bulk normalized view differs from revalidated raw image bytes")

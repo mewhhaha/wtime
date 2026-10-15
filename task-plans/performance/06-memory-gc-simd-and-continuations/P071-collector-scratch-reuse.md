@@ -98,7 +98,7 @@ Run these commands before changing the candidate sources. The archive is immutab
 
 ```sh
 python3 tools/wtime-bench/baseline.py --output target/performance/P071-before
-python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before/manifest.json --output target/performance/P071/selection-freeze.json
+python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before/manifest.json target/performance/P071/selection-freeze.json
 ```
 
 Create and validate the task-owned selection manifest before these commands.

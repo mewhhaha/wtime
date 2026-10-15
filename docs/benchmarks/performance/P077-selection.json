@@ -1,0 +1,165 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P077",
+  "lane": "candidate",
+  "rationale": "Predeclared decoded-only shared wait-queue cohort comparison. Target the 2-waiter/1-address small and 32-waiter/1-address large cohorts; hold out the 8-waiter/1-address cohort and protect the 2/2, 32/8, and 8/4 fanout cohorts. Keep the existing six atomic, SC store-buffering, and wait/notify controls plus first/load-and-call and prepare controls. All wait-queue timing uses steady_state_group from waiter gate release through all waiter and drain results; guest readiness and failed notify probes are included, while host setup/join/image/cleanup checks remain outside timing. The driver is fixed and non-random, with complete shared-memory lifecycle validation and fresh instances. Use two independent runs of 30 pairs with seeds 77001 and 77002, CPU 1, and worker CPUs 1,2,3,4; no instrumentation or promotion is inferred from diagnostics.",
+  "registry_sha256": "33ba7868769f3840cad2e158eabbc4122cfae4c11eaa643212b41509b1ac07ab",
+  "rows": [
+    {
+      "family": "wait-queues",
+      "id": "wait_queue_cohort_w2_a1",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "484b032d12a4a36f383c2b42d937224427d9bfa7a622bc3ff1d129dce595bc43"
+    },
+    {
+      "family": "wait-queues",
+      "id": "wait_queue_cohort_w32_a1",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "bde55b204d7b34c11e313bc4b82c33b18721520680535d49d95238b83aed95f4"
+    },
+    {
+      "family": "wait-queues",
+      "id": "wait_queue_cohort_w8_a1",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "37b7ac1e3c3bd7d04c7c3c6025f888074e205d9b375c5b9f1fa89bd1f010f72a"
+    },
+    {
+      "family": "wait-queues",
+      "id": "wait_queue_cohort_w2_a2",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "0dedd6e5f1253bffda9d923cbafcfe5ba0a5dae69932b97a08ee1e87d9e8da94"
+    },
+    {
+      "family": "wait-queues",
+      "id": "wait_queue_cohort_w32_a8",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "33bb051f6df6cff260bf3ded9e137425d1564f6359ff3f8f08f4f72b4b6f05d8"
+    },
+    {
+      "family": "wait-queues",
+      "id": "wait_queue_cohort_w8_a4",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "9793dbe8badc848c94796a9e1e7eafe23960c09a9db9e1a1e55f4e13b7e4762c"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_load_store_n32",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "9655629cfdff1b7b0261359899e6580ac0e2fc26399a0c226a393b91d0c6caf3"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_load_store_n1024",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "d71382bc253c9b7fc2699fa408fc8df55e4ec269f88251d9ccf7cdd15192cf56"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_same_w4_n1024",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "6b3de15265fa9aa253e44053dcf802134c32c6a01575f39ef29030a90fd99f4d"
+    },
+    {
+      "family": "threads",
+      "id": "threads_atomic_add_distinct_w4_n1024",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "488a9655d8c44da933c8889e51e8530332a389c1e9d66c2b374bf2f78f24c48e"
+    },
+    {
+      "family": "threads",
+      "id": "threads_sc_store_buffering",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "31e9c1edfdbdd8d1a1bf280bdda606e875c8baa8c85e4280b2dcc7f3c75a0cab"
+    },
+    {
+      "family": "threads",
+      "id": "threads_wait_notify_latency",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "steady_state_group"
+      ],
+      "row_sha256": "2e3cdd0045a715806a6d11c2a949a65a8b48db60673447c45bbd6ecf463567ba"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p077_notify_counts_and_alias_races",
+    "p077_cleanup_ids_and_limits_are_transactional",
+    "p077_address_fanout_and_infinite_cancellation",
+    "p077_queue_work_is_bounded",
+    "p077_driver_rejects_invalid_shape_before_io",
+    "p077_driver_checks_cohort_counts_and_full_memory",
+    "p077_driver_rejects_corrupt_wait_fixture",
+    "t133_cancel_infinite_wait_removes_registration",
+    "t133_aliases_counted_notification_and_registration_races",
+    "t130_two_memory_sc_store_buffering_and_fence_visibility",
+    "t133_wait_mismatch_timeout_notify",
+    "t130_concurrent_updates_and_distinct_memories",
+    "t131_atomic_subword_and_alignment"
+  ]
+}

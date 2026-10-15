@@ -43,7 +43,7 @@ selection. The freezer checks actual archived and current core sources match:
 ```sh
 python3 -B tools/wtime-bench/selection_manifest.py freeze \
   docs/benchmarks/performance/P047-selection.json \
-  PREDECESSOR_ARCHIVE/manifest.json --output NEW_FREEZE_RECEIPT.json
+  PREDECESSOR_ARCHIVE/manifest.json NEW_FREEZE_RECEIPT.json
 ```
 
 After implementation, the task's shared `verify` phase must run every declared
