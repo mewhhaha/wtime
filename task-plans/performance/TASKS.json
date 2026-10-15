@@ -82487,7 +82487,8 @@
         "P135",
         "P136",
         "P137",
-        "P138"
+        "P138",
+        "P139"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -89276,6 +89277,111 @@
         "outcome": "contract_only",
         "status": "done",
         "task": "P138"
+      }
+    },
+    {
+      "id": "P139",
+      "key": "register-entry-side-settings",
+      "title": "Collect side-specific Register entry settings",
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "dependencies": [
+        "P136",
+        "P137",
+        "P138"
+      ],
+      "owned_paths": [
+        "tools/wtime-bench/entry_batch_compare.py",
+        "tools/wtime-bench/entry_batch_analyze.py",
+        "tools/wtime-bench/tests/test_p139_entry_settings.py",
+        "tools/verification/producers/p139.py",
+        "tools/verification/tests/test_p139_entry_batch.py",
+        "docs/benchmarks/performance/P139-contract.json",
+        "docs/benchmarks/performance/P139-verification.json"
+      ],
+      "input_output_contract": "Emit `wtime-register-entry-pairs-v2` reports for new collections. Each baseline and candidate command must be made from the matching fields in that row. The baseline adapter remains the P136 archived-source adapter, and the candidate remains a separately built current-workspace Register executable.",
+      "implementation_steps": [
+        "Inspect the P136 collector/analyzer APIs and their immutable v1 report, checkpoint, and P137 smoke analysis. Add schema dispatch at the report boundary: strict v1 normalization/validation remains unchanged; v2 accepts only the exact caller row fields above and writes a distinct v2 identity and journal header.",
+        "In v2, generate baseline argv from baseline settings and candidate argv from candidate settings. Validate argv, payload strategy/threshold, source binding and common row identity independently for each side. Keep deterministic randomized process order, exact call counts, raw command files and crash-safe pair journaling. Refuse incomplete, duplicate, foreign, changed-settings, stale-source, stale-binary, or mixed-schema resumes before launching a guest.",
+        "Extend P137 analysis with a narrow schema-aware row-settings adapter. Reuse its existing validation, deterministic `_seed_for`, `_summary`, `_bootstrap_interval`, and paired-log-median method. Bind the report hash, input references and both policy settings before/after analysis. Preserve v1's existing output interpretation.",
+        "Add `p139.py` to verify the already closed P136/P137/P138 prerequisites, pin the actual post-P138 immediate Register archive, build/attest the archived eager baseline adapter and current adaptive candidate harness from their verified source roots, collect a non-promoting smoke, validate its already-produced descriptive analysis, and emit source-bound receipts. Evidence checking must not rebuild, retime, rerun analysis, or run guest code.",
+        "Run the exact Python development groups. Full close builds the two minimal runtime-only adapters once from the pinned archive and current source; no Wasmtime package, execution-reference, or performance-counter feature is present in either timing binary. It then collects the smoke rows below and revalidates all receipts. The candidate and baseline executable identities are separate file references; never represent one executable by two directory aliases or claim an archived binary is current."
+      ],
+      "fixture_cases": [
+        "test_p139_v1_and_v2_rows_normalize_without_mixing_schemas",
+        "test_p139_collector_uses_distinct_eager_and_adaptive_side_argv",
+        "test_p139_report_rejects_swapped_side_argv_payload_and_binding",
+        "test_p139_rejects_bool_unknown_and_mixed_settings",
+        "test_p139_checkpoint_resume_rejects_changed_side_identity_and_pair_corruption",
+        "test_p139_v1_report_remains_analyzable",
+        "test_p139_v2_two_run_thirty_pair_analysis_keeps_rows_and_bootstraps_10000",
+        "test_p139_smoke_keeps_raw_totals_and_null_uncertainty"
+      ],
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "test_commands": [
+        "python3 -B -m unittest discover -s tools/wtime-bench/tests -p test_p139_entry_settings.py -v",
+        "python3 -B -m unittest -b -v tools.verification.tests.test_p139_entry_batch",
+        "python3 -B -m unittest -b -v tools.wtime_bench.tests.test_p136_entry_batch tools.wtime_bench.tests.test_p137_entry_analysis",
+        ". /workspace/.setup/rust-env.sh",
+        "python3 -B tools/verification/producers/p139.py freeze --output target/verification/P139-freeze",
+        "python3 -B tools/wtime-bench/entry_batch_adapter.py build --core-archive target/performance/P139-before --harness tools/wtime-bench --output target/verification/P139-baseline-adapter",
+        "python3 -B tools/wtime-bench/entry_batch_adapter.py build-current --repo . --harness tools/wtime-bench --output target/verification/P139-current-adapter",
+        "python3 -B tools/wtime-bench/entry_batch_compare.py --archive target/performance/P139-before --adapter target/verification/P139-baseline-adapter --candidate target/verification/P139-current-adapter --repo . --harness tools/wtime-bench --rows target/verification/P139-freeze/rows.json --pairs 2 --seeds 139001 139002 --output target/verification/P139-collection --smoke",
+        "python3 -B tools/wtime-bench/entry_batch_analyze.py --comparison target/verification/P139-collection --output target/verification/P139-analysis --allow-smoke",
+        "python3 -B tools/verification/producers/p139.py verify --freeze target/verification/P139-freeze/report.json --baseline target/verification/P139-baseline-adapter --candidate target/verification/P139-current-adapter --collection target/verification/P139-collection --analysis target/verification/P139-analysis/report.json --output target/verification/P139-verify",
+        "python3 -B tools/verification/producers/p139.py check-evidence --report target/verification/P139-verify/report.json",
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P139-verification.json",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P139-verification.json --output target/performance/P139/complete --execute"
+      ],
+      "path": "05-register-executor/P139-side-specific-register-entry-settings.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P139/shared-finalization/attempt-0004/evidence.json",
+          "sha256": "b43321ef951629dbffe849278bd1f9c4ec5c8fdca07fdcd108bec93c459bf7cc",
+          "bytes": 1914
+        }
+      ],
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "integration_owner": "One tooling integrator owns P139 source verification and receipt validation; the P066 integrator owns candidate selection and promotion.",
+      "minimum_focused_cases": 7,
+      "evidence_contract": "Bind the P139-before archive, immutable P136/P137/P138 evidence, P138 runtime/build-budget identity, actual P135 provenance and validator outputs, distinct archived/current build-record and executable file paths, per-side v2 settings/argv, source/helper refs, two seeds, 32 raw pairs, retained analysis, and all 8 collector + 7 producer + 15 v1-compatibility tests. Smoke stays timing_evidence:false, gate_eligible:false, decision:null, threshold_selection:null. P066 retains every existing focused-stage, mandatory-control, cold/churn, statistical and promotion gate.",
+      "external_constraints": [
+        "default zero external dependencies and forbid-unsafe boundary",
+        "original native AArch64 verification remains unresolved until real native evidence"
+      ],
+      "before_edit_commands": [
+        "python3 -B tools/wtime-bench/baseline.py --verify target/performance/P139-before"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P139/shared-finalization/attempt-0004/evidence.json": "b43321ef951629dbffe849278bd1f9c4ec5c8fdca07fdcd108bec93c459bf7cc"
+        },
+        "evidence": [
+          {
+            "bytes": 1914,
+            "path": "/workspace/wtime/target/performance/P139/shared-finalization/attempt-0004/evidence.json",
+            "sha256": "b43321ef951629dbffe849278bd1f9c4ec5c8fdca07fdcd108bec93c459bf7cc"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P139"
       }
     }
   ]

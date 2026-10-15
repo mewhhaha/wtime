@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=91, todo=47, in_progress=0, blocked=0, deferred=0 (138 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=92, todo=47, in_progress=0, blocked=0, deferred=0 (139 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
@@ -141,6 +141,7 @@ The IDs are labels, not a serial schedule. Optional reviews do not create depend
 | [P136 — Bind Register entry settings to source-bound paired collection](05-register-executor/P136-register-entry-paired-collection.md) | foundation / portable | P135 |
 | [P137 — Analyze paired Register entry totals and phases](05-register-executor/P137-entry-total-paired-analysis.md) | foundation / portable | P136 |
 | [P138 — Expose source-bound Register cache diagnostics](05-register-executor/P138-register-cache-diagnostics.md) | foundation / portable | P134, P137 |
+| [P139 — Collect side-specific Register entry settings](05-register-executor/P139-side-specific-register-entry-settings.md) | foundation / portable | P136, P137, P138 |
 
 ### 06-memory-gc-simd-and-continuations
 

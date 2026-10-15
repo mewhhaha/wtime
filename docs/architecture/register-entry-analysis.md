@@ -1,12 +1,13 @@
 # Register entry analysis
 
-`tools/wtime-bench/entry_batch_analyze.py` reads the P136 paired lifetime format.
+`tools/wtime-bench/entry_batch_analyze.py` reads the P136 paired lifetime format
+and [P139's per-side settings format](register-entry-side-settings.md).
 It reuses the existing summary and deterministic median-bootstrap primitives
 from `analyze.py` and `bootstrap.py`. It launches no guest processes and adds no
 Rust dependencies.
 
 Every run and row receives its own result. A row identifies the fixture,
-oracle, number of calls, Register strategy and threshold. The analyzer keeps
+oracle, number of calls, Register strategy and threshold for each side. The analyzer keeps
 raw total and phase summaries in nanoseconds, including median, MAD, quartiles,
 minimum, maximum and p99. Interpolated statistics may have fractional
 nanoseconds. It never divides by the call count or pools different rows.

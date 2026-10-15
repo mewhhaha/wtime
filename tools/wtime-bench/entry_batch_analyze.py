@@ -12,6 +12,7 @@ import analyze as statistics
 import entry_batch_compare as pairs
 
 SCHEMA = "wtime-register-entry-analysis-v1"
+SCHEMA_SIDE = "wtime-register-entry-analysis-v2"
 METHOD = "paired-log-median-rank-bootstrap-v1"
 ROW_KEYS = ("fixture", "case", "input", "expected", "calls", "strategy", "threshold")
 
@@ -68,7 +69,7 @@ def analyze(report, collection_root, allow_smoke=False):
                    and baseline["executable"]["path"] != candidate["executable"]["path"]
                    and baseline["common"] == candidate["common"], "invalid production side identities")
     inputs = bound_inputs(report)
-    rows = [{key: row[key] for key in ROW_KEYS} for row in identity["rows"]]
+    rows = [{key: row[key] for key in pairs.row_keys(row)} for row in identity["rows"]]
     pairs.need(pairs.normalize_rows(rows) == identity["rows"], "analysis row/settings identity differs")
     runs = []
     for run in report["runs"]:
@@ -102,7 +103,8 @@ def analyze(report, collection_root, allow_smoke=False):
     pairs.need(pairs.digest(report) == report_hash, "report changed during analysis")
     pairs.need(all(pairs.reference(ref["path"]) == ref for ref in analysis_sources.values()),
                "analysis helper changed during computation")
-    return {"schema": SCHEMA, "status": "passed", "metric": "entry_total", "raw_unit": "ns",
+    return {"schema": SCHEMA_SIDE if identity["schema"] == pairs.SCHEMA_SIDE else SCHEMA,
+            "status": "passed", "metric": "entry_total", "raw_unit": "ns",
             "method": METHOD, "report_sha256": report_hash, "collection_identity_sha256": pairs.digest(identity),
             "analysis_source_refs": analysis_sources,
             "input_refs": inputs, "timing_evidence": not smoke, "gate_eligible": not smoke,
@@ -124,7 +126,7 @@ def verify_current_collection(comparison):
     # has no current candidate record and uses the collector helper's location.
     repo = Path(candidate.get("repository_root", Path(identity["helpers"]["entry_batch_compare.py"]["path"]).parents[2]))
     archive = Path(identity["archive_manifest"]["path"]).parent
-    rows = [{key: row[key] for key in ROW_KEYS} for row in identity["rows"]]
+    rows = [{key: row[key] for key in pairs.row_keys(row)} for row in identity["rows"]]
     verified = pairs.verify_collection(root, archive, baseline_root, candidate_root, repo,
                                        repo / "tools/wtime-bench", rows, identity["pairs_per_row"], identity["seeds"],
                                        smoke=identity["smoke"], same_source_smoke=identity["same_source_alias"])

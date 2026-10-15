@@ -1,0 +1,41 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 18344,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P139-verification.json",
+    "sha256": "4addfd33df5e8f9582bafda72eb6b885f54791f1332b255da251a4159265dbf0"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Two-policy side-specific collection and descriptive smoke only; no threshold recommendation, timing claim, or promotion. P066 retains all selection, focused-stage, mandatory-control, cold/churn, statistical, and promotion gates.",
+    "Source-current builds, 32 smoke pairs and descriptive analysis were retained from verify attempt-0002; that attempt failed only in proof packaging and is not itself a completion receipt. The successful close revalidates every retained input without rebuilding or rerunning Wasm."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "freeze": {
+      "bytes": 738563,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/31/310a2117e00a2eedea9fb3411956687a3b795b840422f82f56e291a54ea7fbb7",
+      "sha256": "310a2117e00a2eedea9fb3411956687a3b795b840422f82f56e291a54ea7fbb7",
+      "stored_bytes": 738563,
+      "stored_sha256": "310a2117e00a2eedea9fb3411956687a3b795b840422f82f56e291a54ea7fbb7"
+    },
+    "verify": {
+      "bytes": 1775779,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/12/126902b3e4c004962cf18f087585789c3eef2395c3e27c263e0368389953214e",
+      "sha256": "126902b3e4c004962cf18f087585789c3eef2395c3e27c263e0368389953214e",
+      "stored_bytes": 1775779,
+      "stored_sha256": "126902b3e4c004962cf18f087585789c3eef2395c3e27c263e0368389953214e"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P139"
+}

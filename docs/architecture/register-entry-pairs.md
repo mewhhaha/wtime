@@ -17,7 +17,9 @@ compares the snapshot with its original inputs. The captured Git HEAD records
 provenance; source hashes determine whether a current build can be reused.
 
 `entry_batch_compare.py` runs each side in a separate process using exactly the
-same fixture, oracle, call count, Register strategy and threshold. Each process
+same fixture, oracle and call count. V1 rows share a Register strategy and
+threshold; [V2 rows declare each side's settings](register-entry-side-settings.md).
+Each process
 creates the fresh lifetime specified by P135. Collection performs no guest
 warmup or calibration and retains the original integer nanoseconds. The
 `entry_total` metric is the whole lifetime: preparation, instantiation and all

@@ -15,9 +15,13 @@ import checkpoint
 import entry_batch_adapter as adapter
 
 SCHEMA = "wtime-register-entry-pairs-v1"
+SCHEMA_SIDE = "wtime-register-entry-pairs-v2"
 COUNTS = (1, 10, 100, 10000)
 TIMINGS = ("total_ns", "prepare_ns", "instantiate_ns", "invoke_ns")
 SIDES = ("baseline", "candidate")
+ROW_KEYS = ("fixture", "case", "input", "expected", "calls", "strategy", "threshold")
+SIDE_ROW_KEYS = ("fixture", "case", "input", "expected", "calls",
+                 "baseline_strategy", "baseline_threshold", "candidate_strategy", "candidate_threshold")
 
 
 def need(condition, message):
@@ -47,12 +51,33 @@ def write_new(path, value):
         stream.write("\n")
 
 
+def row_keys(row):
+    return SIDE_ROW_KEYS if "baseline_strategy" in row else ROW_KEYS
+
+
+def side_row(row, side=None):
+    """Project an explicit side into the unchanged single-process wire protocol."""
+    if row_keys(row) == ROW_KEYS:
+        need(side is None or side in SIDES, "unknown entry side")
+        return row
+    need(side in SIDES, "side-specific rows require an explicit entry side")
+    return {**row, "strategy": row[side + "_strategy"], "threshold": row[side + "_threshold"]}
+
+
+def row_schema(rows):
+    need(isinstance(rows, list) and rows, "explicit rows are required")
+    need(all(isinstance(row, dict) for row in rows), "entry rows must be objects")
+    keys = row_keys(rows[0])
+    need(all(row_keys(row) == keys for row in rows), "mixed entry row schemas")
+    return SCHEMA_SIDE if keys == SIDE_ROW_KEYS else SCHEMA
+
+
 def normalize_rows(rows):
     need(isinstance(rows, list) and rows, "explicit rows are required")
+    row_schema(rows)
     result = []
     for index, row in enumerate(rows):
-        need(isinstance(row, dict) and set(row) == {
-            "fixture", "case", "input", "expected", "calls", "strategy", "threshold"},
+        need(isinstance(row, dict) and set(row) == set(row_keys(row)),
             "row fields differ from the entry contract")
         fixture = Path(row["fixture"]).resolve(strict=True)
         need(fixture.is_file(), "fixture is not a file")
@@ -61,10 +86,12 @@ def normalize_rows(rows):
         for key in ("input", "expected"):
             integer(row[key], key, -(2**31), 2**31 - 1)
         need(type(row["calls"]) is int and row["calls"] in COUNTS, "unsupported calls")
-        integer(row["threshold"], "threshold", 0, 2**64 - 1)
-        need((row["strategy"] == "eager" and row["threshold"] == 0)
-             or (row["strategy"] == "adaptive" and row["threshold"] > 0),
-             "invalid strategy/threshold")
+        for side in SIDES:
+            setting = side_row(row, side)
+            integer(setting["threshold"], "threshold", 0, 2**64 - 1)
+            need((setting["strategy"] == "eager" and setting["threshold"] == 0)
+                 or (setting["strategy"] == "adaptive" and setting["threshold"] > 0),
+                 "invalid strategy/threshold")
         result.append({**row, "fixture": str(fixture), "fixture_sha256": adapter.sha256_file(fixture),
                        "row_id": str(index), "metric": "entry_total", "mode": "register",
                        "feature_profile": "mvp", "source_fuel": None})
@@ -121,7 +148,7 @@ def prepare(archive, adapter_root, candidate_root, repo, harness, rows, pairs, s
     if not same_source_smoke:
         need(sides["baseline"]["executable"]["path"] != sides["candidate"]["executable"]["path"],
              "same binary cannot be candidate evidence")
-    return {"schema": SCHEMA, "metric": "entry_total", "smoke": smoke,
+    return {"schema": row_schema(rows), "metric": "entry_total", "smoke": smoke,
             "same_source_alias": same_source_smoke, "timing_evidence": not smoke,
             "pairs_per_row": pairs, "seeds": list(seeds), "rows": normalize_rows(rows), "sides": sides,
             "archive_manifest": reference(Path(archive) / "manifest.json"),
@@ -129,12 +156,14 @@ def prepare(archive, adapter_root, candidate_root, repo, harness, rows, pairs, s
                 "entry_batch_compare.py", "entry_batch_adapter.py", "checkpoint.py")}}
 
 
-def command(binary, row):
+def command(binary, row, side=None):
+    row = side_row(row, side)
     return [str(binary), "--entry-batch", row["fixture"], row["case"], str(row["input"]),
             str(row["expected"]), str(row["calls"]), "register", row["strategy"], str(row["threshold"])]
 
 
-def validate_payload(payload, row):
+def validate_payload(payload, row, side=None):
+    row = side_row(row, side)
     need(isinstance(payload, dict), "entry response is not an object")
     fields = {"schema", "schema_version", "driver", "case", "input", "expected", "result", "mode",
               "strategy", "threshold", "requested_calls", "actual_calls", "instrumented",
@@ -191,12 +220,12 @@ def validate_pair(pair, spec, identity, output):
         bound = identity["sides"][side]
         need(obs["side"] == side and obs["source_binding"] == digest(bound)
              and obs["fixture_sha256"] == row["fixture_sha256"], "observation source/fixture join differs")
-        need(obs["argv"] == command(bound["executable"]["path"], row), "side argv/settings differ")
+        need(obs["argv"] == command(bound["executable"]["path"], row, side), "side argv/settings differ")
         need(type(obs["returncode"]) is int and obs["returncode"] == 0, "entry command failed")
         need(isinstance(obs["stdout"], str) and isinstance(obs["stderr"], str), "missing raw output")
         payload = json.loads(obs["stdout"])
         need(payload == obs["payload"], "raw JSON differs from preserved payload")
-        validate_payload(payload, row)
+        validate_payload(payload, row, side)
         rel = adapter._safe_rel(obs["raw_record"])
         raw = (Path(output) / rel).resolve(strict=True)
         need(raw.is_relative_to(Path(output).resolve()) and raw.is_file(), "raw observation escapes output")
@@ -209,8 +238,14 @@ def validate_report(report, output):
          "identity_sha256", "metric", "timing_evidence", "same_source_alias", "runs", "pair_count"},
          "invalid paired report fields")
     identity = report["identity"]
-    need(report["schema"] == SCHEMA and report["metric"] == "entry_total"
+    need(report["schema"] in (SCHEMA, SCHEMA_SIDE)
+         and report["schema"] == identity.get("schema") == row_schema(identity["rows"])
+         and report["metric"] == "entry_total"
          and report["passed"] is True and report["source_stable"] is True, "incomplete paired report")
+    need(all(adapter.sha256_file(Path(row["fixture"])) == row["fixture_sha256"]
+             for row in identity["rows"]), "stale fixture")
+    rows = [{key: row[key] for key in row_keys(row)} for row in identity["rows"]]
+    need(normalize_rows(rows) == identity["rows"], "paired row/settings identity differs")
     need(report["identity_sha256"] == digest(identity), "paired identity digest differs")
     need(report["timing_evidence"] is identity["timing_evidence"]
          and report["same_source_alias"] is identity["same_source_alias"], "smoke labeling differs")
@@ -270,13 +305,13 @@ def observe(side, spec, row, identity, output):
             break
         except FileExistsError:
             attempt += 1
-    argv = command(identity["sides"][side]["executable"]["path"], row)
+    argv = command(identity["sides"][side]["executable"]["path"], row, side)
     write_new(raw_dir / "invocation.json", {"argv": argv})
     result = subprocess.run(argv, text=True, capture_output=True, check=False)
     raw = {"argv": argv, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
     write_new(raw_dir / "result.json", raw)
     need(result.returncode == 0, f"{side} entry command failed: {result.stderr}")
-    payload = validate_payload(json.loads(result.stdout), row)
+    payload = validate_payload(json.loads(result.stdout), row, side)
     return {**raw, "side": side, "source_binding": digest(identity["sides"][side]),
             "fixture_sha256": row["fixture_sha256"], "payload": payload,
             "raw_record": (raw_dir / "result.json").relative_to(output).as_posix()}
@@ -325,7 +360,7 @@ def collect(archive, adapter_root, candidate_root, repo, harness, rows, pairs, s
             journal.append(spec["run_id"], spec["seed"], pair)
         after = prepare(archive, adapter_root, candidate_root, repo, harness, rows, pairs, seeds, smoke, same_source_smoke)
         need(after == identity, "sources/binaries/fixtures changed during collection")
-        report = {"schema": SCHEMA, "passed": True, "source_stable": True, "identity": identity,
+        report = {"schema": identity["schema"], "passed": True, "source_stable": True, "identity": identity,
                   "identity_sha256": digest(identity), "metric": "entry_total",
                   "timing_evidence": not smoke, "same_source_alias": same_source_smoke,
                   "runs": journal.runs(), "pair_count": len(specs)}
