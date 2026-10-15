@@ -1,0 +1,56 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 20766,
+    "path": "/workspace/wtime/docs/benchmarks/wasmtime-current-verification.json",
+    "sha256": "90220b0418f6ae2451610795270c660f8b7c7dc83612954b6b80d3e6d23ad789"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "f707d26c67440eac0996c3cf19d664b50a572475093bc684d4b20073bf582a37",
+  "limitations": [],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 10444,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/f0/f0a24b66889b390441b6b20c006fa4d8b9202c4d1058ae08903aef1915f5c956",
+      "sha256": "f0a24b66889b390441b6b20c006fa4d8b9202c4d1058ae08903aef1915f5c956",
+      "stored_bytes": 10444,
+      "stored_sha256": "f0a24b66889b390441b6b20c006fa4d8b9202c4d1058ae08903aef1915f5c956"
+    },
+    "freeze": {
+      "bytes": 121403,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/78/787ff7ca44a1317cc3630aa84fe19b90c0d17b447ca76c446852f27692f97e70",
+      "sha256": "787ff7ca44a1317cc3630aa84fe19b90c0d17b447ca76c446852f27692f97e70",
+      "stored_bytes": 121403,
+      "stored_sha256": "787ff7ca44a1317cc3630aa84fe19b90c0d17b447ca76c446852f27692f97e70"
+    },
+    "measure": {
+      "bytes": 153476,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/2c/2c1e82e92669fe2465148e46bcc10904b538cce96e153648a5b621d18fe132f8",
+      "sha256": "2c1e82e92669fe2465148e46bcc10904b538cce96e153648a5b621d18fe132f8",
+      "stored_bytes": 153476,
+      "stored_sha256": "2c1e82e92669fe2465148e46bcc10904b538cce96e153648a5b621d18fe132f8"
+    },
+    "verify": {
+      "bytes": 151897,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/28/28293d40466152e38885527341e665ebb77d44602ee3c4291c935baf12b6332f",
+      "sha256": "28293d40466152e38885527341e665ebb77d44602ee3c4291c935baf12b6332f",
+      "stored_bytes": 151897,
+      "stored_sha256": "28293d40466152e38885527341e665ebb77d44602ee3c4291c935baf12b6332f"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P146"
+}

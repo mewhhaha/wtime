@@ -1,0 +1,125 @@
+{
+  "copied_files": [
+    {
+      "bytes": 22922,
+      "file": "source-freeze.json",
+      "sha256": "392f71f723616c2fdc27cb0f37680ccb376df76770251f99da363f6c2fc99621",
+      "source": "/workspace/wtime/target/verification/runs/P146/freeze/attempt-0001/freeze.json"
+    },
+    {
+      "bytes": 23667,
+      "file": "build-decoded.json",
+      "sha256": "ce013ddf9d7cf6de18729f0f07bd3c2fe7134ca49bb93a101d03ca7d3ca99a85",
+      "source": "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/decoded.json"
+    },
+    {
+      "bytes": 23710,
+      "file": "build-compact.json",
+      "sha256": "66a6c6fbfa8d86ebaea2f1d2842aea35d62a235a4a9d445dc1e1a642ac04b796",
+      "source": "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/compact.json"
+    },
+    {
+      "bytes": 23923,
+      "file": "build-register.json",
+      "sha256": "4f219be434339f94e05d5fa9af8ec323d9f85ea0818fcf295e4eaa1574b1e9b3",
+      "source": "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/register.json"
+    },
+    {
+      "bytes": 2577,
+      "file": "verify.json",
+      "sha256": "f96ca4f4659f8d3f971e0e7df4eb5c928a11f84d6f041eea3c9cd3bafa03071f",
+      "source": "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/verify.json"
+    },
+    {
+      "bytes": 4740,
+      "file": "measurement-manifest.json",
+      "sha256": "62f8bd639431b06890320bef83838c810c0a280007c4f55e4386458d1766170f",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/manifest.json"
+    },
+    {
+      "bytes": 180249,
+      "file": "analysis.json",
+      "sha256": "291232f00ab1366d49dfecececf8666a5a19b49654408d5ce8d5047b95bb4d7e",
+      "source": "/workspace/wtime/target/verification/runs/P146/analyze/attempt-0001/analysis.json"
+    },
+    {
+      "bytes": 26063,
+      "file": "results.md",
+      "sha256": "f51935e51b0b9808bbd37bfdf9919897dbd034e206dcab259177303141445f18",
+      "source": "/workspace/wtime/target/verification/runs/P146/analyze/attempt-0001/results.md"
+    },
+    {
+      "bytes": 471,
+      "file": "completion.json",
+      "sha256": "52ed48b6759c6c9f158061560a1d7ec46cada24de841cca16284b4a43de0e579",
+      "source": "/workspace/wtime/target/verification/P146-completion-0001/completion.json"
+    },
+    {
+      "bytes": 2170,
+      "file": "evidence.json",
+      "sha256": "0d875194e6100409211bc198b4f1d04e2fc47960b46abc0ba7efcea19ccc25f9",
+      "source": "/workspace/wtime/target/verification/P146-completion-0001/evidence.json"
+    },
+    {
+      "bytes": 20766,
+      "file": "contract.json",
+      "sha256": "90220b0418f6ae2451610795270c660f8b7c7dc83612954b6b80d3e6d23ad789",
+      "source": "/workspace/wtime/docs/benchmarks/wasmtime-current-verification.json"
+    },
+    {
+      "bytes": 260123,
+      "file": "decoded-run1.json",
+      "sha256": "aa52ecf37b9207c8f44c1da55f016d9b9b8f81062ae9770c37bb7ac80c2179cb",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/decoded-run1.json"
+    },
+    {
+      "bytes": 260148,
+      "file": "decoded-run2.json",
+      "sha256": "d2f289d0a69ea3b84c155e1d9bf324592bc444c98a1000510721dd3ca95221a6",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/decoded-run2.json"
+    },
+    {
+      "bytes": 260186,
+      "file": "compact-run1.json",
+      "sha256": "3f26df143055d06267ddba543b6ed3d657a9a57e0d6c5d25e79c95520a2e325f",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/compact-run1.json"
+    },
+    {
+      "bytes": 260152,
+      "file": "compact-run2.json",
+      "sha256": "6f72f542a300d89df39c043a0248799b79a4f47a09ad8f5c0914fdb9722d9961",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/compact-run2.json"
+    },
+    {
+      "bytes": 260466,
+      "file": "register-eager-run1.json",
+      "sha256": "1982d8865e18c24de2473e92351e5692dbfe867b73016f44f1f5faa4590a0876",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/register-eager-run1.json"
+    },
+    {
+      "bytes": 260433,
+      "file": "register-eager-run2.json",
+      "sha256": "4a6a936191ff28259caaa56454cea02a0390e68d3ed32d4b40588ca55601eced",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/register-eager-run2.json"
+    },
+    {
+      "bytes": 260534,
+      "file": "register-adaptive-3-run1.json",
+      "sha256": "3c3e87b552e8a780b6d754871dd43d0fd6f366cb80de6ef4e66b5af2d8f66d09",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/register-adaptive-3-run1.json"
+    },
+    {
+      "bytes": 260565,
+      "file": "register-adaptive-3-run2.json",
+      "sha256": "f76c2a0727a451495de043e94c5fdcf3afba0dd01a94e92e63c05b512dc5b021",
+      "source": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/register-adaptive-3-run2.json"
+    }
+  ],
+  "measurement_manifest_copy_unchanged": true,
+  "schema": "wasmtime-current-raw-filemap-v1",
+  "source_manifest": {
+    "bytes": 4740,
+    "path": "/workspace/wtime/target/verification/runs/P146/measure/attempt-0001/manifest.json",
+    "sha256": "62f8bd639431b06890320bef83838c810c0a280007c4f55e4386458d1766170f"
+  }
+}

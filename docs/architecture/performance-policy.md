@@ -35,6 +35,6 @@ Original native AArch64 release tasks T166 and T169 remain pending actual AArch6
 
 ## External comparator scope
 
-The archived comparator runs use Wasmtime 49.0.2: [run 1](../benchmarks/wasmtime-comparison.json) and [run 2](../benchmarks/wasmtime-comparison-run2.json). The selected release has no fresh matched Wasmtime comparison. Historical ratios therefore do not establish current cross-engine performance. Unsupported or unrun comparator cases have no ratio.
+The release gate retained historical Wasmtime 49.0.2 runs: [run 1](../benchmarks/wasmtime-comparison.json) and [run 2](../benchmarks/wasmtime-comparison-run2.json). A later [matched four-tier comparison](../benchmarks/wasmtime-current/README.md) measures the same runtime core against Wasmtime 49.0.2. It is informational and changes no tier policy. Historical ratios do not establish current cross-engine performance; unsupported or unrun comparator cases have no ratio.
 
 P111's smoke lane is a correctness and identity check on the shared host. Its dedicated reference-machine comparison is explicitly unrun. The P112 report, [release appendix](../benchmarks/performance/release-appendix.md), and [performance release manifest](performance-release-manifest.json) retain that limitation along with the final source hashes.

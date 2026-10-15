@@ -2,6 +2,8 @@
 
 This standalone workspace keeps Wasmtime and its compiler dependencies out of
 wtime's production dependency graph and lockfile. Wasmtime is pinned to 49.0.2.
+The [current four-tier results](../../docs/benchmarks/wasmtime-current/README.md)
+include Decoded, Compact, Register eager, and Register adaptive threshold 3.
 Both engines are built in release mode. The benchmark uses Wasmtime's Cranelift
 `Speed` optimization, without module caching, parallel compilation, fuel or
 epoch interruption. wtime uses its MVP feature profile, without fuel or opcode
@@ -13,7 +15,7 @@ From the repository root:
 . /workspace/.setup/rust-env.sh
 cargo build --locked -p wtime-conformance
 cargo build --locked --release --manifest-path tools/wtime-bench/Cargo.toml -j 4
-python3 tools/wtime-bench/run.py
+python3 -B tools/wtime-bench/run.py --output target/wasmtime-new-run.json
 ```
 
 The runner pins each benchmark process to one available logical CPU. It records
@@ -24,6 +26,14 @@ seed. Independent Python calculations supply expected results; both engines
 must return them. Measurements fail if source files or the executable change
 while the suite runs. Encoder work, file reads and Cargo compilation are outside
 all Wasm timing intervals.
+
+The direct runner accepts `--executable PATH`, `--mode decoded|compact|register`,
+and Register-only `--register-entry-threshold N`. Build the corresponding feature
+before selecting Compact or Register. `--fixture-only` encodes and checks the
+five fixtures without collecting timings. Outputs and fixture directories must
+be new; shared historical fixtures and reports are preserved. For separately
+retained builds, two 30-pair runs per tier, and source-bound paired analysis,
+use `docs/benchmarks/wasmtime-current-verification.json` with `tools/verify.py`.
 
 ## Timing boundaries
 

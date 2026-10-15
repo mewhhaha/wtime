@@ -4,13 +4,35 @@ use wtime_runtime::{Config, Engine, External, Linker, RunOutcome, Store, Value};
 use wtime_types::FeatureSet;
 mod protocol;
 
-fn ours() -> Engine {
+fn ours(mode: &str, register_entry_threshold: Option<u64>) -> Engine {
     let config = Config {
         features: FeatureSet::mvp(),
         ..Config::default()
     };
     assert!(config.limits.fuel.is_none());
-    Engine::new(config).unwrap()
+    if let Some(threshold) = register_entry_threshold {
+        assert_eq!(mode, "register", "entry threshold requires Register mode");
+        assert!(threshold > 0, "entry threshold must be positive");
+        #[cfg(all(feature = "register-executor", not(feature = "legacy-api")))]
+        return Engine::with_register_entry_threshold(config, threshold).unwrap();
+        #[cfg(not(all(feature = "register-executor", not(feature = "legacy-api"))))]
+        panic!("Register entry preparation is unavailable in this build");
+    }
+    #[cfg(feature = "legacy-api")]
+    {
+        assert_eq!(mode, "decoded", "legacy comparison supports Decoded only");
+        Engine::new(config).unwrap()
+    }
+    #[cfg(not(feature = "legacy-api"))]
+    {
+        let policy = match mode {
+            "decoded" => wtime_runtime::ExecutionPolicy::Decoded,
+            "compact" => wtime_runtime::ExecutionPolicy::Compact,
+            "register" => wtime_runtime::ExecutionPolicy::Register,
+            _ => panic!("unknown comparison execution policy"),
+        };
+        Engine::with_execution_policy(config, policy).unwrap()
+    }
 }
 fn theirs() -> wasmtime::Engine {
     let mut config = wasmtime::Config::new();
@@ -68,8 +90,8 @@ fn main() {
         return;
     }
     assert!(
-        args.len() == 6,
-        "usage: bench FILE CASE INPUT EXPECTED SAMPLES SEED; CASE=prepare_large omits invocation"
+        (6..=8).contains(&args.len()),
+        "usage: bench FILE CASE INPUT EXPECTED SAMPLES SEED [MODE [REGISTER_ENTRY_THRESHOLD]]; CASE=prepare_large omits invocation"
     );
     let bytes = std::fs::read(&args[0]).unwrap();
     let case = &args[1];
@@ -77,14 +99,16 @@ fn main() {
     let expected = args[3].parse::<i32>().unwrap();
     let samples = args[4].parse::<usize>().unwrap();
     let mut seed = args[5].parse::<u64>().unwrap();
+    let mode = args.get(6).map(String::as_str).unwrap_or("decoded");
+    let register_entry_threshold = args.get(7).map(|value| value.parse::<u64>().unwrap());
     assert!(samples >= 5);
     // Compiler/process caches are warmed; each timed preparation uses a fresh engine.
-    black_box(ours().compile(&bytes).unwrap());
+    black_box(ours(mode, register_entry_threshold).compile(&bytes).unwrap());
     black_box(wasmtime::Module::new(&theirs(), &bytes).unwrap());
     for sample in 0..samples {
         for engine in order(&mut seed) {
             let ns = if engine == 0 {
-                let e = ours();
+                let e = ours(mode, register_entry_threshold);
                 let start = Instant::now();
                 let m = e.compile(black_box(&bytes)).unwrap();
                 let ns = start.elapsed().as_nanos() as f64;
@@ -116,7 +140,7 @@ fn main() {
     for sample in 0..samples {
         for which in order(&mut seed) {
             if which == 0 {
-                let e = ours();
+                let e = ours(mode, register_entry_threshold);
                 let start = Instant::now();
                 let module = e.compile(&bytes).unwrap();
                 let mut store = Store::new(&e);
@@ -147,7 +171,7 @@ fn main() {
             }
         }
     }
-    let engine = ours();
+    let engine = ours(mode, register_entry_threshold);
     let module = engine.compile(&bytes).unwrap();
     let linker = Linker::new(&engine);
     let foreign_engine = theirs();

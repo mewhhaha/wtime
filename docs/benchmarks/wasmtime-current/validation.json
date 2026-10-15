@@ -1,0 +1,13 @@
+{
+  "archive_bytes": 1588668,
+  "archive_members": 424,
+  "archive_sha256": "b767a8ef9168c396eed23c3caa7679a7aede797194bdb58b04c493fa7abcf470",
+  "archive_streamed_gzip_tar_membership_and_hashes": "passed",
+  "build_performed": false,
+  "cas_note": "Original phase receipts are retained in the run tree and archive; their referenced CAS object store was not rehydrated.",
+  "cas_objects_rehydrated": false,
+  "copied_files_exact": true,
+  "measurement_manifest_unchanged": true,
+  "status": "passed",
+  "timing_performed": false
+}

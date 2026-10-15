@@ -1,0 +1,80 @@
+{
+  "status": "passed",
+  "tier_checks": [
+    {
+      "tier": "decoded",
+      "argv": [
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/bin/decoded",
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/fixtures/call_overhead.wasm",
+        "call_overhead",
+        "100",
+        "101",
+        "5",
+        "20261015",
+        "decoded"
+      ],
+      "observations": 50,
+      "correctness": "passed; actual comparison CLI validates independent expected result",
+      "purpose": "verification smoke only; excluded from comparison statistics"
+    },
+    {
+      "tier": "compact",
+      "argv": [
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/bin/compact",
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/fixtures/call_overhead.wasm",
+        "call_overhead",
+        "100",
+        "101",
+        "5",
+        "20261015",
+        "compact"
+      ],
+      "observations": 50,
+      "correctness": "passed; actual comparison CLI validates independent expected result",
+      "purpose": "verification smoke only; excluded from comparison statistics"
+    },
+    {
+      "tier": "register-eager",
+      "argv": [
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/bin/register",
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/fixtures/call_overhead.wasm",
+        "call_overhead",
+        "100",
+        "101",
+        "5",
+        "20261015",
+        "register"
+      ],
+      "observations": 50,
+      "correctness": "passed; actual comparison CLI validates independent expected result",
+      "purpose": "verification smoke only; excluded from comparison statistics"
+    },
+    {
+      "tier": "register-adaptive-3",
+      "argv": [
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/bin/register",
+        "/workspace/wtime/target/verification/runs/P146/verify/attempt-0001/fixtures/call_overhead.wasm",
+        "call_overhead",
+        "100",
+        "101",
+        "5",
+        "20261015",
+        "register",
+        "3"
+      ],
+      "observations": 50,
+      "correctness": "passed; actual comparison CLI validates independent expected result",
+      "purpose": "verification smoke only; excluded from comparison statistics"
+    }
+  ],
+  "tiers": [
+    "decoded",
+    "compact",
+    "register-eager",
+    "register-adaptive-3"
+  ],
+  "fixture_count": 5,
+  "historical_fixture_identity": "all five byte-identical",
+  "timing_evidence": false,
+  "runtime_source_changes": false
+}

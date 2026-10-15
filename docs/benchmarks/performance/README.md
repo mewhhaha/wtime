@@ -54,7 +54,7 @@ P110 retains 12 compile-only footprint observations across `call_overhead`, `pre
 
 ## Comparator scope and limitations
 
-The retained Wasmtime comparison files ([run 1](../wasmtime-comparison.json), [run 2](../wasmtime-comparison-run2.json)) use Wasmtime 49.0.2. No fresh matched Wasmtime comparison was collected for this selected release, so those historic ratios are not current release comparisons. Unsupported and unrun GC, thread, SIMD, and continuation comparator rows carry no ratio.
+The release gate retained historical Wasmtime comparison files ([run 1](../wasmtime-comparison.json), [run 2](../wasmtime-comparison-run2.json)) using Wasmtime 49.0.2. A subsequent [matched four-tier comparison](../wasmtime-current/README.md) measures the same runtime core with a new tier-selectable harness. The original release proofs remain unchanged. Unsupported and unrun GC, thread, SIMD, and continuation comparator rows carry no ratio.
 
 The current native target evidence is x86_64 Linux on a shared cloud host. CPU affinity does not prove physical-core isolation; workload timing can vary with contention, quota, scheduling, and frequency. No native AArch64 result is claimed. Original native tasks T166 and T169 remain pending native execution. The 31 conditional research tasks deferred with outcome `not_selected` remain unimplemented. Native execution is `no_go`, and AOT stays disabled.
 

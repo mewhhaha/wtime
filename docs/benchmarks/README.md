@@ -1,5 +1,9 @@
 # Wasm performance against Wasmtime
 
+This page preserves the original baseline. See the
+[current four-tier comparison](wasmtime-current/README.md) for new measurements
+of the selected runtime core against Wasmtime 49.0.2.
+
 **wtime prepares modules faster; Wasmtime executes these compute workloads much faster.**
 
 Two independently ordered runs used Wasmtime 49.0.2, release builds, single-CPU affinity (CPU 0 then CPU 2), Cranelift `Speed`, and fuel/epoch/cache/parallel compilation disabled. Each run collected 21 samples per engine/stage. All results matched independent Python oracles. Ranges below are the two run medians, not minima/maxima of individual measurements.
