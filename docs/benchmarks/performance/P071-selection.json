@@ -1,0 +1,136 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P071",
+  "lane": "candidate",
+  "rationale": "Predeclared same-store repeated collection of small and large wide object graphs, with a held-out linked chain shape. Warm calls are primary; prepare, first-call, and full load-and-call remain declared for each graph shape. Preserve lifecycle, host-reentry, continuation, legacy graph, scalar, call-overhead, and large-preparation controls. Measurements use two independent uninstrumented decoded runs on CPU 1.",
+  "registry_sha256": "474b1fce96ce1302fe78885c8385eb592b1111ff912fd7f1b2c56763683ed0d9",
+  "rows": [
+    {
+      "family": "gc-collections",
+      "id": "gc_collect_wide_32_n32",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "e223e29daac5b628215052343169f9ccf1deb0b6bf5e9defb22bdb89379d423a"
+    },
+    {
+      "family": "gc-collections",
+      "id": "gc_collect_wide_1024_n32",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "661a0f1400e331a3ecd3a84cfdd667c3a06bc769df13255c30eeadc164ff09af"
+    },
+    {
+      "family": "gc-collections",
+      "id": "gc_collect_chain_256_n17",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "prepare",
+        "first_call",
+        "warm_call",
+        "load_and_call"
+      ],
+      "row_sha256": "366df285f2f5cd822792d361383242369d404f4206e06f714d85d82c93af355c"
+    },
+    {
+      "family": "gc-exceptions",
+      "id": "gc_root_lifecycle_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "load_and_call"
+      ],
+      "row_sha256": "dda70367b4beff774a0344f832a1108dc7ce215364bfd52361470dffa1e98672"
+    },
+    {
+      "family": "gc-exceptions",
+      "id": "gc_host_reentry_collect_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "load_and_call"
+      ],
+      "row_sha256": "0eac0f514d2d235bfa7806a26f2e1ea82094d9307dbebb9ab2bc928bc24edbbc"
+    },
+    {
+      "family": "gc-exceptions",
+      "id": "gc_continuation_root_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "load_and_call"
+      ],
+      "row_sha256": "5099e1ea0c351cda7169f060823ab991c25655a8e0526cad1fa6983e618be181"
+    },
+    {
+      "family": "gc-exceptions",
+      "id": "gc_struct_graph_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "load_and_call"
+      ],
+      "row_sha256": "38de7c10640d1faace4fc271b5408fcdb7304e4edea9cb00b7f249557f7897cf"
+    },
+    {
+      "family": "gc-exceptions",
+      "id": "gc_struct_graph_n1024",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "load_and_call"
+      ],
+      "row_sha256": "25dc5b6ff310ec8c2ca0a8c74f76c4dc07c2320ee657e55f65d7f2187a178a3d"
+    },
+    {
+      "family": "scalar",
+      "id": "scalar_dynamic_api_n32",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "warm_call"
+      ],
+      "row_sha256": "97fac9834e628c16f08a914017be980f202e89942695bab37de43495c221887f"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "prepare",
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p071_shared_graph_preserves_exact_work_budget",
+    "p071_failed_collection_clears_scratch_before_recovery",
+    "p071_large_then_small_trims_retained_capacity",
+    "p071_store_root_buffer_reuses_and_clears_after_error"
+  ]
+}

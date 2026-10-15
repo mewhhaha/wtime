@@ -87,7 +87,7 @@ def sources():
 
 def profile(entry):
     module = entry['oracle'].get('module')
-    if module == 'gc_workloads.py':
+    if module in ('gc_workloads.py', 'gc_collect_workloads.py'):
         return 'all-phase3-core'
     if module == 'memory_workloads.py':
         import memory_scaling
@@ -182,6 +182,13 @@ def products(entries, declaration, settings):
                 timer.update({'driver_sha256': compare.sha(HERE/'src/gc_roots_driver.rs'),
                               'validator_sha256': compare.sha(HERE/'root_compare.py'),
                               'measurement_policy': 'sum_guest_invoke_intervals_excluding_each_oracle_and_gc_reset'})
+            if module == 'gc_collect_workloads.py':
+                timer.update({'model_sha256': compare.sha(HERE/'gc_collect_workloads.py'),
+                              'validator_sha256': compare.sha(HERE/'gc_collect_compare.py'),
+                              'driver_sha256': compare.sha(HERE/'src/gc_collect_driver.rs'),
+                              'fixture_wat_sha256': entry['source']['sha256'],
+                              'fixture_wasm_sha256': entry['source']['wasm_sha256'],
+                              'measurement_policy': 'sum_guest_repeated_collect_intervals_excluding_setup_oracles_and_final_cleanup'})
             if module == 'thread_workloads.py':
                 timer.update({'thread_adapter_sha256': compare.sha(HERE/'thread_compare.py'),
                               'thread_scaling_sha256': compare.sha(HERE/'thread_scaling.py'),
@@ -266,6 +273,18 @@ def prepare_fixtures(entries, frozen, output, encoder):
                      'GC setup Wasm bytes changed: '+entry['id'])
                 setup_paths.append(setup_wasm)
             fixtures[entry['id']] = {'path': wasm, 'setup_modules': setup_paths}
+            continue
+        if entry['oracle'].get('module') == 'gc_collect_workloads.py':
+            import gc_collect_workloads as model
+            modeled = {row['id']: row for row in model.entries()}.get(entry['id'])
+            need(modeled == entry, 'repeated-collection row differs from its fixed fixture model: '+entry['id'])
+            wat = HERE/source['path']
+            wasm = wat.with_suffix('.wasm')
+            need(wat.is_file() and compare.sha(wat) == source['sha256'],
+                 'repeated-collection WAT source changed: '+entry['id'])
+            need(wasm.is_file() and compare.sha(wasm) == source['wasm_sha256'],
+                 'repeated-collection immutable Wasm fixture changed: '+entry['id'])
+            fixtures[entry['id']] = wasm
             continue
         if entry['oracle'].get('module') == 'thread_workloads.py':
             wat = HERE/source['path']
@@ -410,6 +429,12 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         wire = compare.process(executable, ['--gc-root-driver', wasm, entry['id'], entry['family'],
             n, mode, profile(entry), stage, batch], cpu)
         return root_compare.validate_observation(entry, wire, batch, expected_mode=mode, expected_stage=stage)
+    if module == 'gc_collect_workloads.py':
+        import gc_collect_compare
+        wire = compare.process(executable, ['--gc-collect-driver', wasm, entry['id'], entry['family'],
+            n, mode, profile(entry), stage, batch], cpu)
+        return gc_collect_compare.validate_observation(entry, wire, batch,
+            expected_mode=mode, expected_stage=stage)
     if module == 'gc_workloads.py':
         import gc_cold_adapter
         import gc_compare
@@ -478,6 +503,10 @@ def batch_limit(entry):
     if entry['oracle'].get('module') == 'root_workloads.py':
         import root_workloads
         maximum = root_workloads.max_batch(entry['gc_expectation']['bank_slots'], input_value(entry))
+    if entry['oracle'].get('module') == 'gc_collect_workloads.py':
+        import gc_collect_workloads as model
+        count = model.FAMILIES[entry['family']]['count']
+        maximum = model.max_batch(count, input_value(entry))
     if entry['oracle'].get('module') == 'simd_workloads.py':
         import simd_scaling
         maximum = simd_scaling.batch_limit(entry)
@@ -629,9 +658,9 @@ def run(args):
                for entry in entries):
             required_profiles.discard('threads')
         need(required_profiles <= set(cap.get('features', [])), 'unsupported feature profile')
-        if any(entry['oracle'].get('module') in ('gc_workloads.py', 'root_workloads.py') for entry in entries):
+        if any(entry['oracle'].get('module') in ('gc_workloads.py', 'root_workloads.py', 'gc_collect_workloads.py') for entry in entries):
             need(settings[side+'_mode'] == 'decoded',
-                 'legacy GC candidate rows require the existing decoded cold driver on both sides')
+                 'GC candidate rows require the declared decoded driver on both sides')
         if live_entries:
             need(settings[side+'_mode'] == 'decoded',
                  'live-continuation observations require decoded mode on both sides')

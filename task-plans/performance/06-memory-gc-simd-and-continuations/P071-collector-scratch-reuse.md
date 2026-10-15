@@ -1,8 +1,8 @@
 # P071 — Reuse bounded GC mark and root work buffers
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **rejected**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -96,9 +96,11 @@ Before implementation, freeze and verify the immediate-predecessor archive and a
 
 Run these commands before changing the candidate sources. The archive is immutable and captures the immediate predecessor. Retain P001's original archive for milestone totals. For native work, use the named portable control and verify its actual policy/quantum; if this archive already exists with different sources, choose a new recorded run-specific directory and update the comparison path rather than overwriting it.
 
+Earlier P071 predecessor archives and their attempt history remain retained. The final candidate comparison and freeze use the immutable `target/performance/P071-before-0002` archive.
+
 ```sh
-python3 tools/wtime-bench/baseline.py --output target/performance/P071-before
-python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before/manifest.json target/performance/P071/selection-freeze.json
+python3 tools/wtime-bench/baseline.py --output target/performance/P071-before-0002
+python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before-0002/manifest.json target/performance/P071/selection-freeze.json
 ```
 
 Create and validate the task-owned selection manifest before these commands.
@@ -110,4 +112,32 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Final result
+
+P071 completed with a **rejected** performance decision. The full candidate verification passed 434 tests (369 Rust, including 83 validator cases, and 65 Python). The uninstrumented decoded measurement contains 1,320 paired observations across 22 groups, two 30-pair runs with seeds 71001 and 71002 on CPU 1. The primary estimates were 0.9974012074 [0.9785465393, 1.0082817435] and 0.9853042066 [0.9638408014, 1.0022414333], so the declared 5% improvement was not supported; host reentry showed a supported regression.
+
+The candidate tested three bounded scratch buffers capped at 4,096 slots, trimmed capacity above `max(64, 4 × used)`, and preserved exact mark-work accounting. The focused cases covered each cap, reuse, and error recovery. The runtime candidate changes were fully reverted, with 357 restoration tests passing and all 176 archived core/build inputs matching. The retained foundation covers nine repeated-collection rows (wide graphs with 32 and 1,024 distinct leaves and a 256-node chain), 45 guest/host collection-stage checks using the same Store/global root, and cleanup of all objects. These observations include guest plus host collection work and are not isolated GC-only timings.
+
+The predecessor archive used for the final candidate comparison is `target/performance/P071-before-0002`; earlier archive attempts and their history remain preserved. The rejected runtime changes are not retained in the current source tree. Durable completion, evidence, proof, statistics, freeze, records, restoration, and build-comparison artifacts are linked from TASKS.json.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P071/shared-finalization/attempt-0001/evidence.json": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8"
+  },
+  "evidence": [
+    {
+      "bytes": 2164,
+      "path": "/workspace/wtime/target/performance/P071/shared-finalization/attempt-0001/evidence.json",
+      "sha256": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8"
+    }
+  ],
+  "outcome": "rejected",
+  "status": "done",
+  "task": "P071"
+}
+```

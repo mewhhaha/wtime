@@ -36,6 +36,9 @@ mod gc_warm_driver;
 #[cfg(not(feature = "legacy-api"))]
 #[path = "gc_roots_driver.rs"]
 mod gc_roots_driver;
+#[cfg(not(feature = "legacy-api"))]
+#[path = "gc_collect_driver.rs"]
+mod gc_collect_driver;
 #[path = "memory_driver.rs"]
 mod memory_driver;
 #[path = "scalar_driver.rs"]
@@ -183,6 +186,10 @@ pub fn try_main(args: &[String]) -> bool {
     }
     #[cfg(not(feature = "legacy-api"))]
     if gc_roots_driver::try_main(args) {
+        return true;
+    }
+    #[cfg(not(feature = "legacy-api"))]
+    if gc_collect_driver::try_main(args) {
         return true;
     }
     if memory_driver::try_main(args) {

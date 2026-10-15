@@ -14,7 +14,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 DEFAULT_REGISTRY = HERE / "workloads.json"
 SCHEMA = "wtime-candidate-selection-v1"
-FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads", "continuations", "shared-bulk", "wait-queues"}
+FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "gc-collections", "threads", "continuations", "shared-bulk", "wait-queues"}
 ROW_FIELDS = {"family", "id", "role", "scale", "stages", "row_sha256"}
 MANIFEST_FIELDS = {"schema", "task", "lane", "rationale", "registry_sha256", "rows", "semantic_cases"}
 OPTIONAL_MANIFEST_FIELDS = {"fixture_models", "execution_settings"}

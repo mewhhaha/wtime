@@ -83059,8 +83059,8 @@
       "key": "collector-scratch-reuse",
       "title": "Reuse bounded GC mark and root work buffers",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "rejected",
       "kind": "candidate",
       "dependencies": [
         "P002",
@@ -83113,7 +83113,53 @@
         "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P071-verification.json --output target/performance/P071/complete --execute"
       ],
       "path": "06-memory-gc-simd-and-continuations/P071-collector-scratch-reuse.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P071/shared-finalization/attempt-0001/evidence.json",
+          "sha256": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8",
+          "bytes": 2164
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-completion.json",
+          "sha256": "46a823c4139f8d22cadf6dae83fed74a26e992bac6e9761599d1875cc250169b",
+          "bytes": 498
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-evidence.json",
+          "sha256": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8",
+          "bytes": 2164
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-proof.json",
+          "sha256": "e41d90badc0efe2fc6c67f6b3a6774cb7efe46bb0e119a1d9e74af961835a93f",
+          "bytes": 201394
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-statistics.json",
+          "sha256": "da597a8fa6ff07026dae7cd678a7104efd0c782484db5f9cdff654934783b211",
+          "bytes": 117577
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-freeze.json",
+          "sha256": "ab2b3e307d0b9e984ed2faafacc43231ccd24b69eb88f214d8d74e53fbd1d861",
+          "bytes": 21299
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-records.json.gz",
+          "sha256": "707ab2965f6413f124f0478311042285c4848c7cf38e4c8db7a35e8fbdd0cd69",
+          "bytes": 4550954
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-restoration.json",
+          "sha256": "29f911e3eaa1bed00c020631dc717fb649175375faeb11830f312fdeb791cdd4",
+          "bytes": 23409
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P071-build-comparison.json",
+          "sha256": "8a420a00a0ed1b20a8872bedf83ec740141a4362809df13e918c3489f660e8e9",
+          "bytes": 4250
+        }
+      ],
       "reviews_optional_tasks": [
         "P070"
       ],
@@ -83128,9 +83174,72 @@
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
       "before_edit_commands": [
-        "python3 tools/wtime-bench/baseline.py --output target/performance/P071-before",
-        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before/manifest.json target/performance/P071/selection-freeze.json"
-      ]
+        "python3 tools/wtime-bench/baseline.py --output target/performance/P071-before-0002",
+        "python3 -B tools/wtime-bench/selection_manifest.py freeze docs/benchmarks/performance/P071-selection.json target/performance/P071-before-0002/manifest.json target/performance/P071/selection-freeze.json"
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P071/shared-finalization/attempt-0001/evidence.json": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8",
+          "/workspace/wtime/docs/benchmarks/performance/P071-completion.json": "46a823c4139f8d22cadf6dae83fed74a26e992bac6e9761599d1875cc250169b",
+          "/workspace/wtime/docs/benchmarks/performance/P071-evidence.json": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8",
+          "/workspace/wtime/docs/benchmarks/performance/P071-proof.json": "e41d90badc0efe2fc6c67f6b3a6774cb7efe46bb0e119a1d9e74af961835a93f",
+          "/workspace/wtime/docs/benchmarks/performance/P071-statistics.json": "da597a8fa6ff07026dae7cd678a7104efd0c782484db5f9cdff654934783b211",
+          "/workspace/wtime/docs/benchmarks/performance/P071-freeze.json": "ab2b3e307d0b9e984ed2faafacc43231ccd24b69eb88f214d8d74e53fbd1d861",
+          "/workspace/wtime/docs/benchmarks/performance/P071-records.json.gz": "707ab2965f6413f124f0478311042285c4848c7cf38e4c8db7a35e8fbdd0cd69",
+          "/workspace/wtime/docs/benchmarks/performance/P071-restoration.json": "29f911e3eaa1bed00c020631dc717fb649175375faeb11830f312fdeb791cdd4",
+          "/workspace/wtime/docs/benchmarks/performance/P071-build-comparison.json": "8a420a00a0ed1b20a8872bedf83ec740141a4362809df13e918c3489f660e8e9"
+        },
+        "evidence": [
+          {
+            "path": "/workspace/wtime/target/performance/P071/shared-finalization/attempt-0001/evidence.json",
+            "sha256": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8",
+            "bytes": 2164
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-completion.json",
+            "sha256": "46a823c4139f8d22cadf6dae83fed74a26e992bac6e9761599d1875cc250169b",
+            "bytes": 498
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-evidence.json",
+            "sha256": "7ee6abe588b238388c0e3013a3220472fa6ce2fa09302371754a35a0ff9cc5d8",
+            "bytes": 2164
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-proof.json",
+            "sha256": "e41d90badc0efe2fc6c67f6b3a6774cb7efe46bb0e119a1d9e74af961835a93f",
+            "bytes": 201394
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-statistics.json",
+            "sha256": "da597a8fa6ff07026dae7cd678a7104efd0c782484db5f9cdff654934783b211",
+            "bytes": 117577
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-freeze.json",
+            "sha256": "ab2b3e307d0b9e984ed2faafacc43231ccd24b69eb88f214d8d74e53fbd1d861",
+            "bytes": 21299
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-records.json.gz",
+            "sha256": "707ab2965f6413f124f0478311042285c4848c7cf38e4c8db7a35e8fbdd0cd69",
+            "bytes": 4550954
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-restoration.json",
+            "sha256": "29f911e3eaa1bed00c020631dc717fb649175375faeb11830f312fdeb791cdd4",
+            "bytes": 23409
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P071-build-comparison.json",
+            "sha256": "8a420a00a0ed1b20a8872bedf83ec740141a4362809df13e918c3489f660e8e9",
+            "bytes": 4250
+          }
+        ],
+        "outcome": "rejected",
+        "status": "done",
+        "task": "P071"
+      }
     },
     {
       "id": "P072",

@@ -60,6 +60,11 @@ def source_map():
         "tools/wtime-bench/root_workloads.py": "3" * 64,
         "tools/wtime-bench/root_compare.py": "4" * 64,
         "tools/wtime-bench/thread_compare.py": "5" * 64,
+        "tools/wtime-bench/shared_bulk_compare.py": "6" * 64,
+        "tools/wtime-bench/shared_bulk_workloads.py": "7" * 64,
+        "tools/wtime-bench/wait_queue_workloads.py": "8" * 64,
+        "tools/wtime-bench/gc_collect_workloads.py": "9" * 64,
+        "tools/wtime-bench/gc_collect_compare.py": "a" * 64,
     }
 
 

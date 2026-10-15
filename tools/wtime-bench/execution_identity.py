@@ -31,7 +31,7 @@ _ANALYSIS_ONLY = {
 _KNOWN_FAST_PATH = {
     "cold_products.py", "execution_identity.py", "focused_compare.py",
     "selection_manifest.py", "dataset_cache.py", "candidate_gate.py", "semantic_receipt.py",
-    "root_workloads.py", "root_compare.py", "thread_compare.py",
+    "root_workloads.py", "root_compare.py", "gc_collect_workloads.py", "gc_collect_compare.py", "thread_compare.py",
     "shared_bulk_compare.py", "shared_bulk_workloads.py",
     "entry_batch_adapter.py", "entry_batch_compare.py", "entry_batch_analyze.py",
     "entry_sequence_policy.py",
@@ -60,6 +60,7 @@ _LEGACY_TIMING = {
 _FOCUSED_TIMING = {
     "cold_products.py", "execution_identity.py", "focused_compare.py",
     "selection_manifest.py", "semantic_receipt.py", "root_workloads.py", "root_compare.py",
+    "gc_collect_workloads.py", "gc_collect_compare.py",
     "thread_compare.py", "shared_bulk_compare.py", "shared_bulk_workloads.py",
     "wait_queue_workloads.py",
 }

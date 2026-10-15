@@ -60,6 +60,10 @@ def check_observation(entry, observation, mode, root, stage=None, thread_cpus=No
         import root_compare
         root_compare.revalidate_observation(entry, observation)
         return
+    if module == 'gc_collect_workloads.py':
+        import gc_collect_compare
+        gc_collect_compare.revalidate_observation(entry, observation)
+        return
     if module == 'thread_workloads.py':
         import thread_compare
         thread_compare.revalidate(entry, observation, mode, stage, expected_thread_cpus=thread_cpus)

@@ -1,6 +1,6 @@
 # Performance task index
 
-Progress: done=100, todo=42, in_progress=0, blocked=0, deferred=0 (142 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
+Progress: done=101, todo=41, in_progress=0, blocked=0, deferred=0 (142 total). Read [README.md](README.md), [EXECUTION.md](EXECUTION.md), and [TASKS.json](TASKS.json).
 
 ## Suggested first work
 
