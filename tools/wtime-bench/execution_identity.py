@@ -34,6 +34,7 @@ _KNOWN_FAST_PATH = {
     "root_workloads.py", "root_compare.py", "thread_compare.py",
     "entry_batch_adapter.py", "entry_batch_compare.py", "entry_batch_analyze.py",
     "entry_sequence_policy.py",
+    "entry_sequence_compare.py", "entry_sequence_analyze.py",
 }
 
 # Explicit legacy execution inputs. The non-Python portion of compare.sources

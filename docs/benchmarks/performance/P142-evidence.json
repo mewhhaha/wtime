@@ -1,0 +1,60 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 23218,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P142-verification.json",
+    "sha256": "69615b2495680d1b6f9cf3b3721c4306b1215145dabc03fa4a1d852b3b8dd9c7"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "The two-pair-per-row smoke is descriptive foundation evidence only; timing_evidence, gate_eligible, and candidate_promoted are false, with decision and threshold_selection null.",
+    "P138 core build budgets are revalidated and reused because core sources are unchanged; no new core dependency is introduced.",
+    "The smoke does not satisfy P066 cold/churn or promotion gates; P066 retains every existing gate."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 1710730,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/b5/b5f1a61a9d579a83c6ce2dda088b31e8dd63bc85340bb25664262904b09ae312",
+      "sha256": "b5f1a61a9d579a83c6ce2dda088b31e8dd63bc85340bb25664262904b09ae312",
+      "stored_bytes": 1710730,
+      "stored_sha256": "b5f1a61a9d579a83c6ce2dda088b31e8dd63bc85340bb25664262904b09ae312"
+    },
+    "freeze": {
+      "bytes": 841735,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/99/991ff790b0b106d969fe7ed79adfb186111d91cf8df4112fe815ba1adbe3102f",
+      "sha256": "991ff790b0b106d969fe7ed79adfb186111d91cf8df4112fe815ba1adbe3102f",
+      "stored_bytes": 841735,
+      "stored_sha256": "991ff790b0b106d969fe7ed79adfb186111d91cf8df4112fe815ba1adbe3102f"
+    },
+    "measure": {
+      "bytes": 1230913,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/05/052b901c978033aeff754d4efafed92d67f964aee1e8ddd96b3373a3623ea184",
+      "sha256": "052b901c978033aeff754d4efafed92d67f964aee1e8ddd96b3373a3623ea184",
+      "stored_bytes": 1230913,
+      "stored_sha256": "052b901c978033aeff754d4efafed92d67f964aee1e8ddd96b3373a3623ea184"
+    },
+    "verify": {
+      "bytes": 1702613,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/d6/d6f2e4e97ce99b1c7593892f848165af86a5f6245432c67951cc4f72a3c7fe8f",
+      "sha256": "d6f2e4e97ce99b1c7593892f848165af86a5f6245432c67951cc4f72a3c7fe8f",
+      "stored_bytes": 1702613,
+      "stored_sha256": "d6f2e4e97ce99b1c7593892f848165af86a5f6245432c67951cc4f72a3c7fe8f"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P142"
+}

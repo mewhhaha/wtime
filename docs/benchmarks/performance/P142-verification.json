@@ -1,0 +1,795 @@
+{
+  "schema_version": 1,
+  "task": "P142",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P142-before/manifest.json",
+        "target/performance/P142-before/source/**/*",
+        "target/performance/P142-before/binary/**/*",
+        "target/performance/P142-before/fixtures/**/*",
+        "target/performance/P142-before/runs/**/*",
+        "target/performance/P142-before/historical_reports/**/*"
+      ],
+      "settings": {
+        "repository_commit": "6efc75e941857993ab1ed1bc71dd0afa445fb51e",
+        "manifest_sha256": "3870d08abba86ab4d72428bc47ea8ac454c0022fcd94b59c8a6cf68208bdd618",
+        "mode": "register"
+      }
+    },
+    "prerequisites": {
+      "paths": [
+        "docs/benchmarks/performance/P139-completion.json",
+        "docs/benchmarks/performance/P139-evidence.json",
+        "docs/benchmarks/performance/P139-proof.json",
+        "target/performance/P139/shared-finalization/attempt-0004/evidence.json",
+        "docs/benchmarks/performance/P141-completion.json",
+        "docs/benchmarks/performance/P141-evidence.json",
+        "docs/benchmarks/performance/P141-proof.json",
+        "target/performance/P141/shared-finalization/attempt-0002/evidence.json",
+        "docs/benchmarks/performance/P138-proof.json",
+        "target/verification/runs/P138/verify/attempt-0002/default-build.json",
+        "target/verification/runs/P138/verify/attempt-0002/register-build.json"
+      ],
+      "settings": {
+        "required_prerequisites": [
+          "P139",
+          "P141"
+        ],
+        "required_outcome": "contract_only",
+        "P139_proof_sha256": "52cfccaf7cfa5fca57d98a68bfb918d455b0a1fa92c346a9ea87ffcc0bd45a19",
+        "P141_proof_sha256": "6e3f8044a61e4746e750e63ff334d694ee17b1dd096efe5a119930673815d5ac"
+      }
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ],
+      "settings": {
+        "runtime_features": [
+          "runtime-only",
+          "register-executor"
+        ],
+        "external_core_dependencies": 0,
+        "core_source_matches_predecessor": true
+      }
+    },
+    "harness_and_fixture": {
+      "paths": [
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/entry_sequence_policy.py",
+        "tools/wtime-bench/focused_compare.py",
+        "crates/wtime-runtime/tests/fixtures/performance/p138/**",
+        "target/recovery/P138-fixtures-0001/executed/generate.executed.py",
+        "target/recovery/P138-fixtures-0001/official.stdout",
+        "target/recovery/P138-fixtures-0001/official.stderr",
+        "target/recovery/P138-fixtures-0001/probe.stdout",
+        "target/recovery/P138-fixtures-0001/probe.stderr"
+      ],
+      "settings": {
+        "fixture": "p138/uniform66.wasm",
+        "schedule_thresholds": [
+          3,
+          10
+        ],
+        "timing_features": [
+          "runtime-only",
+          "register-executor"
+        ],
+        "diagnostic_features": [
+          "runtime-only",
+          "compact-executor",
+          "register-executor",
+          "execution-reference"
+        ]
+      }
+    },
+    "freezer": {
+      "paths": [
+        "tools/verification/producers/p142_freeze.py",
+        "tools/verification/producers/p138.py",
+        "tools/verification/producers/p139.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/entry_batch_adapter.py"
+      ]
+    },
+    "collector": {
+      "paths": [
+        "tools/wtime-bench/entry_sequence_compare.py",
+        "tools/wtime-bench/entry_sequence_policy.py",
+        "tools/wtime-bench/entry_batch_adapter.py",
+        "tools/wtime-bench/entry_batch_compare.py",
+        "tools/wtime-bench/checkpoint.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/p123_adapter.py"
+      ]
+    },
+    "collector_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p142_sequence_collection.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py"
+      ]
+    },
+    "analyzer": {
+      "paths": [
+        "tools/wtime-bench/entry_sequence_analyze.py",
+        "tools/wtime-bench/analyze.py",
+        "tools/wtime-bench/bootstrap.py"
+      ]
+    },
+    "analyzer_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p142_sequence_analysis.py"
+      ]
+    },
+    "proof_helpers": {
+      "paths": [
+        "tools/verification/producers/p142.py",
+        "tools/verification/producers/p142_freeze.py",
+        "tools/verification/producers/p138.py",
+        "tools/verification/producers/p139.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py"
+      ]
+    },
+    "contract": {
+      "paths": [
+        "docs/benchmarks/performance/P142-contract.json"
+      ]
+    },
+    "task_plan": {
+      "paths": [
+        "task-plans/performance/05-register-executor/P138-register-cache-diagnostics.md",
+        "task-plans/performance/05-register-executor/P139-side-specific-register-entry-settings.md",
+        "task-plans/performance/05-register-executor/P141-register-entry-sequence-driver.md",
+        "task-plans/performance/05-register-executor/P142-register-cold-churn-collection.md",
+        "task-plans/performance/05-register-executor/P066-function-boundary-tiering.md",
+        "task-plans/performance/TASKS.json",
+        "task-plans/performance/INDEX.md"
+      ]
+    },
+    "reused_budget_inputs": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*",
+        "tools/wtime-conformance/**/*"
+      ],
+      "optional_paths": [
+        ".cargo/config",
+        ".cargo/config.toml"
+      ],
+      "settings": {
+        "source_inputs_per_p138_report": 738,
+        "coverage": [
+          "root Cargo.toml/Cargo.lock/toolchain",
+          "all crates/**/*",
+          "all tools/wtime-conformance/**/*"
+        ],
+        "budgets": "P138 default and Register build reports; revalidate and reuse only"
+      }
+    },
+    "retained_builds": {
+      "paths": [
+        "target/verification/runs/P142/verify/attempt-0001/inputs.json",
+        "target/verification/runs/P142/verify/attempt-0001/p142-build-baseline.result.json",
+        "target/verification/runs/P142/verify/attempt-0001/p142-build-candidate.result.json",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/adapter.json",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/adapter.json",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/binary/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/binary/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/source/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/source/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/workspace/Cargo.toml",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/workspace/Cargo.toml",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/workspace/Cargo.lock",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/workspace/Cargo.lock",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/workspace/src/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/workspace/src/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/baseline/commands/**/*",
+        "target/verification/runs/P142/verify/attempt-0001/candidate/commands/**/*"
+      ],
+      "settings": {
+        "attempt": "attempt-0001",
+        "scope": "exact successful immutable adapter builds, metadata, command results, source/workspace maps and binaries; no nested Cargo target trees"
+      }
+    },
+    "reuse_helper": {
+      "paths": [
+        "tools/verification/producers/p142_reuse_builds.py",
+        "tools/verification/runner.py"
+      ]
+    }
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "collector-and-identity",
+        "uses": [
+          "collector",
+          "collector_tests",
+          "harness_and_fixture",
+          "contract",
+          "task_plan"
+        ],
+        "commands": [
+          {
+            "name": "p142-collector-and-identity-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-b",
+              "-v",
+              "tools/wtime-bench/tests/test_p142_sequence_collection.py",
+              "tools/wtime-bench/tests/test_fast_execution_identity.py"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "analyzer",
+        "uses": [
+          "analyzer",
+          "analyzer_tests",
+          "collector",
+          "contract",
+          "task_plan"
+        ],
+        "commands": [
+          {
+            "name": "p142-analyzer-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "-b",
+              "-v",
+              "tools/wtime-bench/tests/test_p142_sequence_analysis.py"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "prerequisites",
+        "reused_budget_inputs",
+        "runtime",
+        "harness_and_fixture",
+        "freezer",
+        "contract",
+        "task_plan"
+      ],
+      "environment": [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "PATH",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_WRAPPER"
+      ],
+      "commands": [
+        {
+          "name": "p142-freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p142_freeze.py",
+            "--output",
+            "{stage}/freeze"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/freeze/report.json",
+        "rows": "{stage}/freeze/rows.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-p142-freeze-v1"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "report",
+          "pointer": "/smoke_pairs_per_row",
+          "op": "equal",
+          "value": 2
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "predecessor",
+        "prerequisites",
+        "runtime",
+        "harness_and_fixture",
+        "freezer",
+        "collector",
+        "collector_tests",
+        "contract",
+        "task_plan",
+        "retained_builds",
+        "reused_budget_inputs",
+        "reuse_helper"
+      ],
+      "environment": [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "PATH",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_WRAPPER"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "p142-collector-and-identity-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-b",
+            "-v",
+            "tools/wtime-bench/tests/test_p142_sequence_collection.py",
+            "tools/wtime-bench/tests/test_fast_execution_identity.py"
+          ]
+        },
+        {
+          "name": "p142-reuse-source-current-builds",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p142_reuse_builds.py",
+            "--baseline",
+            "{repo}/target/verification/runs/P142/verify/attempt-0001/baseline",
+            "--candidate",
+            "{repo}/target/verification/runs/P142/verify/attempt-0001/candidate",
+            "--output",
+            "{stage}/builds"
+          ]
+        }
+      ],
+      "outputs": {
+        "builds": "{stage}/builds/report.json"
+      },
+      "tests": [
+        {
+          "command": "p142-collector-and-identity-tests",
+          "kind": "unittest",
+          "minimum_passed": 11,
+          "required_names": [
+            "test_smoke_collects_contained_source_bound_pairs_and_replays",
+            "test_full_collection_requires_thirty_pairs_and_distinct_seeds",
+            "test_failure_preserves_first_side_and_resume_uses_new_attempts",
+            "test_report_rejects_wire_order_and_raw_record_corruption",
+            "test_analysis_changes_are_visible_but_do_not_stale_legacy_pairs",
+            "test_runtime_timer_fixture_and_oracle_edits_stale_legacy_pairs",
+            "test_membership_changes_and_unknown_python_modules_fail_closed",
+            "test_focused_producer_changes_stale_focused_pairs",
+            "test_verify_inputs_uses_live_sources_without_running_a_comparison",
+            "test_focused_identity_uses_task_declaration_without_registry_selection_lookup",
+            "test_adapter_archive_corruption_is_still_rejected"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "builds",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-p142-build-reuse-v1"
+        },
+        {
+          "artifact": "builds",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "builds",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "builds",
+          "pointer": "/guest_or_build_launched",
+          "op": "equal",
+          "value": false
+        }
+      ]
+    },
+    "measure": {
+      "uses": [
+        "predecessor",
+        "prerequisites",
+        "runtime",
+        "harness_and_fixture",
+        "collector",
+        "contract",
+        "task_plan",
+        "retained_builds"
+      ],
+      "environment": [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "PATH",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_WRAPPER"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "p142-two-pair-smoke",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/entry_sequence_compare.py",
+            "--archive",
+            "{repo}/target/performance/P142-before",
+            "--baseline",
+            "{repo}/target/verification/runs/P142/verify/attempt-0001/baseline",
+            "--candidate",
+            "{repo}/target/verification/runs/P142/verify/attempt-0001/candidate",
+            "--repo",
+            "{repo}",
+            "--harness",
+            "{repo}/tools/wtime-bench",
+            "--rows",
+            "{freeze_dir}/freeze/rows.json",
+            "--pairs",
+            "2",
+            "--seeds",
+            "142001",
+            "142002",
+            "--smoke",
+            "--output",
+            "{stage}/collection"
+          ]
+        }
+      ],
+      "outputs": {
+        "collection": "{stage}/collection/report.json"
+      },
+      "checks": [
+        {
+          "artifact": "collection",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/pair_count",
+          "op": "equal",
+          "value": 8
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/gate_eligible",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/identity/smoke",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/identity/pairs_per_row",
+          "op": "equal",
+          "value": 2
+        },
+        {
+          "artifact": "collection",
+          "pointer": "/identity/seeds",
+          "op": "exact_set",
+          "value": [
+            142001,
+            142002
+          ]
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "predecessor",
+        "prerequisites",
+        "reused_budget_inputs",
+        "runtime",
+        "harness_and_fixture",
+        "freezer",
+        "collector",
+        "analyzer",
+        "analyzer_tests",
+        "proof_helpers",
+        "contract",
+        "task_plan",
+        "retained_builds"
+      ],
+      "environment": [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "PATH",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_WRAPPER"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify",
+        "measure"
+      ],
+      "commands": [
+        {
+          "name": "p142-analyzer-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "-b",
+            "-v",
+            "tools/wtime-bench/tests/test_p142_sequence_analysis.py"
+          ]
+        },
+        {
+          "name": "p142-analyze-smoke",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/wtime-bench/entry_sequence_analyze.py",
+            "--comparison",
+            "{measure_dir}/collection",
+            "--output",
+            "{stage}/analysis",
+            "--allow-smoke"
+          ]
+        },
+        {
+          "name": "p142-proof",
+          "argv": [
+            "{python}",
+            "-B",
+            "{repo}/tools/verification/producers/p142.py",
+            "--freeze",
+            "{freeze_dir}/freeze/report.json",
+            "--collection",
+            "{measure_dir}/collection",
+            "--analysis",
+            "{stage}/analysis/report.json",
+            "--output",
+            "{stage}/proof"
+          ]
+        }
+      ],
+      "outputs": {
+        "analysis": "{stage}/analysis/report.json",
+        "proof": "{stage}/proof/report.json"
+      },
+      "tests": [
+        {
+          "command": "p142-analyzer-tests",
+          "kind": "unittest",
+          "minimum_passed": 4,
+          "required_names": [
+            "test_individual_spike_remains_visible_in_process_p99_and_max",
+            "test_rows_runs_classes_and_ci_are_separate_and_deterministic",
+            "test_smoke_requires_opt_in_and_has_descriptive_null_uncertainty",
+            "test_bad_sample_count_payload_shape_and_stale_fixture_are_rejected"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "artifact": "analysis",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "analysis",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "analysis",
+          "pointer": "/gate_eligible",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "analysis",
+          "pointer": "/decision",
+          "op": "equal",
+          "value": null
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/schema",
+          "op": "equal",
+          "value": "wtime-p142-verification-v1"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/source_stable",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/outcome",
+          "op": "equal",
+          "value": "contract_only"
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/gate_eligible",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/candidate_promoted",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/decision",
+          "op": "equal",
+          "value": null
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/threshold_selection",
+          "op": "equal",
+          "value": null
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/guest_or_build_launched",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/statistics_recomputed",
+          "op": "equal",
+          "value": false
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/runs",
+          "op": "equal",
+          "value": 2
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/rows",
+          "op": "equal",
+          "value": 2
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/pairs",
+          "op": "equal",
+          "value": 8
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/processes",
+          "op": "equal",
+          "value": 16
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/individual_calls",
+          "op": "equal",
+          "value": 8040
+        },
+        {
+          "artifact": "proof",
+          "pointer": "/counts/event_groups",
+          "op": "equal",
+          "value": 24
+        }
+      ]
+    }
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "measure",
+      "analyze"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "The two-pair-per-row smoke is descriptive foundation evidence only; timing_evidence, gate_eligible, and candidate_promoted are false, with decision and threshold_selection null.",
+      "P138 core build budgets are revalidated and reused because core sources are unchanged; no new core dependency is introduced.",
+      "The smoke does not satisfy P066 cold/churn or promotion gates; P066 retains every existing gate."
+    ]
+  }
+}
