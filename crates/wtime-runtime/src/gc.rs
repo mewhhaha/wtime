@@ -1,4 +1,7 @@
 //! Nonmoving, generation-checked guest heap with explicit roots.
+#[cfg(test)]
+#[path = "../tests/performance/p079_gc.rs"]
+mod p079;
 use super::*;
 use crate::canonical::CanonicalTypeId;
 use std::sync::{Mutex, Weak};

@@ -84052,8 +84052,8 @@
       "key": "specialist-budget-gate",
       "title": "Check specialist retention, allocation and compilation costs",
       "group": "06-memory-gc-simd-and-continuations",
-      "status": "todo",
-      "outcome": "pending",
+      "status": "done",
+      "outcome": "contract_only",
       "kind": "gate",
       "dependencies": [
         "P004",
@@ -84071,19 +84071,26 @@
       ],
       "owned_paths": [
         "docs/benchmarks/performance/specialist-budgets.json",
-        "tools/wtime-bench/tests/test_p079_specialist_budgets.py"
+        "docs/benchmarks/performance/P079-verification.json",
+        "tools/wtime-bench/tests/test_p079_specialist_budgets.py",
+        "crates/wtime-runtime/src/gc.rs",
+        "crates/wtime-runtime/src/continuation.rs",
+        "crates/wtime-runtime/tests/performance/p079_gc.rs",
+        "crates/wtime-runtime/tests/performance/p079_continuation.rs",
+        "tools/verification/producers/p079.py"
       ],
-      "input_output_contract": "The gate binds selected specialist code to actual allocation-failure/retention/dependency/build evidence; compact GC storage, pooling and ledgers cannot hide larger retained memory or resource-policy changes.",
+      "input_output_contract": "All P068, P069, P071, P072, P073, P074, P076, P077 and P078 runtime candidates ended rejected or inconclusive and were restored. There is no selected specialist pool, ledger, or packed-storage implementation to measure as an adopted optimization. This gate records resource and physical-retention evidence for the current portable runtime and any future explicitly selected specialist; it does not authorize a production behavior change. The GC payload charge includes live object and field-storage charges; `continuation_bytes()` includes the owned continuation frame, label, operand, and related vector capacities and is checked against a physical-capacity scan. These are accounting charges, not total retained memory: `GcArena.slots`, `GcArena.free`, root-map storage, and the Store continuation registry can retain metadata capacity after payload cleanup. Report owned capacities separately through test-only probes; do not claim they represent total process RSS. Probe hooks and focused cases must be `cfg(test)` only. Keep semantic accounting, limits, and resource policy unchanged.",
       "implementation_steps": [
-        "Run existing allocation-failure/hardening checks plus focused cache/pool/ledger failure cases with exact selected features.",
-        "Measure retained bytes after create/use/drop/reclaim and large-then-small workloads; compare physical accounting with owned capacities and full-scan ledger oracles.",
-        "Run default and optional build/size/RSS/dependency closure checks, keeping optional unsafe/native code outside this portable gate.",
-        "Reject any default specialist that exceeds limits or lacks cleanup/accounting evidence, recording negative decisions separately."
+        "Confirm the prior specialist outcomes and archives, then inspect the current GC and continuation ownership paths; do not assume a pool, ledger, packed store, or numeric capacity report exists.",
+        "Add `cfg(test)`-only probes and the three named GC/continuation cases below to report owned Vec slot/free/field/frame capacities across large-then-small reuse and full cleanup, separately from live payload charges; leave production behavior and resource policy unchanged.",
+        "Run the real host allocation-failure path in the memory constructor and its recovery check, plus the GC's explicit object- and byte-budget failure cases; do not describe those GC budget failures as allocator failures. Record default and `experimental-executors` build and dependency closure results with source-current inputs.",
+        "Have `tools/verification/producers/p079.py` bind the probes, allocator-failure result, default and optional build/dependency records, and budget fixture checks; retain only evidence-supported limits and make no promotion claim for unselected specialists."
       ],
       "fixture_cases": [
-        "Allocation failure cannot publish partially packed objects or corrupt totals.",
-        "Dropped/consumed resources release bounded retained ownership exactly once.",
-        "Default build/dependency ceilings and source-current report identities are enforced."
+        "`p079_gc_large_small_reuses_bounded_metadata_and_releases_payloads` checks large/small reuse, cleared payload charge, and retained slot/free capacity before arena drop.",
+        "`p079_gc_budget_failures_publish_no_partial_object` checks atomic failure under explicit GC object and byte budgets and verifies recovery; this is not the host allocator-failure test.",
+        "`p079_continuation_large_small_matches_owned_capacities_and_reclaims` matches continuation charges to owned vector capacities across repeated large/small captures, then checks payload cleanup and separately reports Store registry capacity.",
+        "The real host allocator-failure test exercises the memory constructor and recovery path; default and `experimental-executors` build/dependency records are source-current."
       ],
       "measurement_selection": "integration",
       "execution_mode": "decoded",
@@ -84105,11 +84112,48 @@
       "test_commands": [
         "python3 -m unittest discover -s tools/wtime-bench/tests -p 'test_p079*.py' -v",
         "bash tools/checks/ci.sh allocation",
-        "python3 tools/checks/build_budget.py --output target/performance/P079/build.json",
+        "python3 tools/checks/build_budget.py --output target/performance/P079/build-default.json",
+        "python3 tools/checks/build_budget.py --features wtime-runtime/experimental-executors --output target/performance/P079/build-experimental-executors.json",
         "python3 tools/checks/dependency_budget.py"
       ],
       "path": "06-memory-gc-simd-and-continuations/P079-specialist-budget-gate.md",
-      "evidence": [],
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P079/shared-finalization/attempt-0003/evidence.json",
+          "sha256": "740ff68716350ab20ec8bbc5dcfbed8d787f3b2132350b927f6c7aa1869f8c16",
+          "bytes": 1969
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P079-completion.json",
+          "sha256": "1e37a4c4edf4f09fbaec0cc935e9d199a6c5b548403124325b48ccd6ff2719eb",
+          "bytes": 503
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P079-evidence.json",
+          "sha256": "740ff68716350ab20ec8bbc5dcfbed8d787f3b2132350b927f6c7aa1869f8c16",
+          "bytes": 1969
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P079-freeze.json",
+          "sha256": "5d7b4596bac5e3de9fa0fff25bc5f343f310cb487843f5671d49495c13366245",
+          "bytes": 41269
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P079-proof.json",
+          "sha256": "b373ef6353a6bfd8ee06428c0659379469aa0141e904a6fd2d106e2d2bf6ae32",
+          "bytes": 8299
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/specialist-budgets.json",
+          "sha256": "b373ef6353a6bfd8ee06428c0659379469aa0141e904a6fd2d106e2d2bf6ae32",
+          "bytes": 8299
+        },
+        {
+          "path": "/workspace/wtime/docs/benchmarks/performance/P079-records.json.gz",
+          "sha256": "05d1cfde48fa2bfa699384fdae58faaaf579b9197937b8ecb21acc8f04a5dd59",
+          "bytes": 5754133
+        }
+      ],
       "reviews_optional_tasks": [
         "P070",
         "P075"
@@ -84124,7 +84168,58 @@
         "default zero external dependencies and forbid-unsafe boundary",
         "original native AArch64 verification remains unresolved until real native evidence"
       ],
-      "before_edit_commands": []
+      "before_edit_commands": [],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P079/shared-finalization/attempt-0003/evidence.json": "740ff68716350ab20ec8bbc5dcfbed8d787f3b2132350b927f6c7aa1869f8c16",
+          "/workspace/wtime/docs/benchmarks/performance/P079-completion.json": "1e37a4c4edf4f09fbaec0cc935e9d199a6c5b548403124325b48ccd6ff2719eb",
+          "/workspace/wtime/docs/benchmarks/performance/P079-evidence.json": "740ff68716350ab20ec8bbc5dcfbed8d787f3b2132350b927f6c7aa1869f8c16",
+          "/workspace/wtime/docs/benchmarks/performance/P079-freeze.json": "5d7b4596bac5e3de9fa0fff25bc5f343f310cb487843f5671d49495c13366245",
+          "/workspace/wtime/docs/benchmarks/performance/P079-proof.json": "b373ef6353a6bfd8ee06428c0659379469aa0141e904a6fd2d106e2d2bf6ae32",
+          "/workspace/wtime/docs/benchmarks/performance/specialist-budgets.json": "b373ef6353a6bfd8ee06428c0659379469aa0141e904a6fd2d106e2d2bf6ae32",
+          "/workspace/wtime/docs/benchmarks/performance/P079-records.json.gz": "05d1cfde48fa2bfa699384fdae58faaaf579b9197937b8ecb21acc8f04a5dd59"
+        },
+        "evidence": [
+          {
+            "path": "/workspace/wtime/target/performance/P079/shared-finalization/attempt-0003/evidence.json",
+            "sha256": "740ff68716350ab20ec8bbc5dcfbed8d787f3b2132350b927f6c7aa1869f8c16",
+            "bytes": 1969
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P079-completion.json",
+            "sha256": "1e37a4c4edf4f09fbaec0cc935e9d199a6c5b548403124325b48ccd6ff2719eb",
+            "bytes": 503
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P079-evidence.json",
+            "sha256": "740ff68716350ab20ec8bbc5dcfbed8d787f3b2132350b927f6c7aa1869f8c16",
+            "bytes": 1969
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P079-freeze.json",
+            "sha256": "5d7b4596bac5e3de9fa0fff25bc5f343f310cb487843f5671d49495c13366245",
+            "bytes": 41269
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P079-proof.json",
+            "sha256": "b373ef6353a6bfd8ee06428c0659379469aa0141e904a6fd2d106e2d2bf6ae32",
+            "bytes": 8299
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/specialist-budgets.json",
+            "sha256": "b373ef6353a6bfd8ee06428c0659379469aa0141e904a6fd2d106e2d2bf6ae32",
+            "bytes": 8299
+          },
+          {
+            "path": "/workspace/wtime/docs/benchmarks/performance/P079-records.json.gz",
+            "sha256": "05d1cfde48fa2bfa699384fdae58faaaf579b9197937b8ecb21acc8f04a5dd59",
+            "bytes": 5754133
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P079"
+      }
     },
     {
       "id": "P080",

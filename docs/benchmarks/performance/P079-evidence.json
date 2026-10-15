@@ -1,0 +1,49 @@
+{
+  "candidate_promoted": false,
+  "contract": {
+    "bytes": 18357,
+    "path": "/workspace/wtime/docs/benchmarks/performance/P079-verification.json",
+    "sha256": "f5a602c89b9f60c330408426dc94bd4d8afeeb97b025c587d9b0c34df625d62d"
+  },
+  "decision": "contract_only",
+  "finalizer_sha256": "caebb447a15a149247cd6ff29f4e53180ff37a2b0f0049de268c786204278c23",
+  "limitations": [
+    "Source-current allocation/cleanup and build-budget gate. No guest timing, performance promotion, or process RSS claim. Prior specialist candidates remain rejected or inconclusive."
+  ],
+  "outcome": "contract_only",
+  "passed": true,
+  "phases": {
+    "analyze": {
+      "bytes": 712336,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/1d/1de0d2f6f3b78377a61a64ea703bc25b3740f7d9dfb98953923ed7e2e7a7f2e3",
+      "sha256": "1de0d2f6f3b78377a61a64ea703bc25b3740f7d9dfb98953923ed7e2e7a7f2e3",
+      "stored_bytes": 712336,
+      "stored_sha256": "1de0d2f6f3b78377a61a64ea703bc25b3740f7d9dfb98953923ed7e2e7a7f2e3"
+    },
+    "freeze": {
+      "bytes": 362685,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/37/377f1da361c091298a0ffbf220fcd814f249a3e8dd24547eab53c4f85892ca6d",
+      "sha256": "377f1da361c091298a0ffbf220fcd814f249a3e8dd24547eab53c4f85892ca6d",
+      "stored_bytes": 362685,
+      "stored_sha256": "377f1da361c091298a0ffbf220fcd814f249a3e8dd24547eab53c4f85892ca6d"
+    },
+    "verify": {
+      "bytes": 791374,
+      "encoding": "raw",
+      "mode": "0o600",
+      "path": "objects/eb/eb5732a5be1aba754fb62e6f548f7887b358ef95389242228ca3bd6b52e36b85",
+      "sha256": "eb5732a5be1aba754fb62e6f548f7887b358ef95389242228ca3bd6b52e36b85",
+      "stored_bytes": 791374,
+      "stored_sha256": "eb5732a5be1aba754fb62e6f548f7887b358ef95389242228ca3bd6b52e36b85"
+    }
+  },
+  "schema": "wtime-verification-evidence-v1",
+  "status": "passed",
+  "store": "/workspace/wtime/target/verification",
+  "synthetic": false,
+  "task": "P079"
+}

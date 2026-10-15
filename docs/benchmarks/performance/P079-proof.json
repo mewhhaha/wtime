@@ -1,0 +1,258 @@
+{
+  "allocation_failure": {
+    "bytes": 542,
+    "path": "/workspace/wtime/target/verification/runs/P079/analyze/attempt-0001/allocation.json",
+    "sha256": "4a117e1412529aa1dba390e0496fcafb56fdbe23f83b28867eefb149acef8afe"
+  },
+  "allocator_scope": "real host allocation failure in memory constructor; GC tests exercise explicit budgets",
+  "builds": {
+    "default-build.json": {
+      "clean_seconds": 2.6994678679911885,
+      "leaf_seconds": 0.1698637429944938,
+      "peak_rss_kib": 219304,
+      "report": {
+        "bytes": 336280,
+        "path": "/workspace/wtime/target/verification/runs/P079/verify/attempt-0003/default-build.json",
+        "sha256": "0d5998d89581bb583a054f5b3252658d1705d74cdcde4ca3d96567def515b3ed"
+      },
+      "runtime_leaf_seconds": 0.39779182900383603,
+      "stripped_bytes": 1000960
+    },
+    "experimental-build.json": {
+      "clean_seconds": 3.9978184870124096,
+      "leaf_seconds": 0.14155046100495383,
+      "peak_rss_kib": 277224,
+      "report": {
+        "bytes": 336519,
+        "path": "/workspace/wtime/target/verification/runs/P079/verify/attempt-0003/experimental-build.json",
+        "sha256": "2f4ed1404685c06d44d61a30ba93db2166b5e3632aab53354851b485f81ade30"
+      },
+      "runtime_leaf_seconds": 0.5648083390115062,
+      "stripped_bytes": 1182096
+    },
+    "register-build.json": {
+      "clean_seconds": 3.168535407996387,
+      "leaf_seconds": 0.1462018239981262,
+      "peak_rss_kib": 241232,
+      "report": {
+        "bytes": 336439,
+        "path": "/workspace/wtime/target/verification/runs/P079/verify/attempt-0003/register-build.json",
+        "sha256": "0d0af73a88ca9f3c3e63ee41da9740c982a8f3ac3ffc611439221b8705592775"
+      },
+      "runtime_leaf_seconds": 0.4844742119894363,
+      "stripped_bytes": 1090512
+    }
+  },
+  "default_execution": "decoded",
+  "freeze": {
+    "bytes": 41269,
+    "path": "/workspace/wtime/target/verification/runs/P079/freeze/attempt-0003/freeze.json",
+    "sha256": "5d7b4596bac5e3de9fa0fff25bc5f343f310cb487843f5671d49495c13366245"
+  },
+  "metadata_lifetime": "Reusable arena metadata lives until arena drop; continuation registry metadata lives until Store drop.",
+  "optional_register_cache": {
+    "accounting_note": "Prepared code retention charge; not activation bytes or process RSS.",
+    "case_count": 6,
+    "max_ready_entries": 64,
+    "max_retained_bytes": 86904,
+    "trace_check": {
+      "case_count": 5,
+      "per_case": {
+        "p138_cold_threshold_and_single_builder_are_observed": 6,
+        "p138_guest_fifo_eviction_and_recompilation_stay_bounded": 68,
+        "p138_private_active_builder_snapshot_and_saturating_counters": 3,
+        "p138_private_failures_cooldown_abort_poison_and_foreign_are_observed": 8,
+        "p138_private_snapshots_do_not_pin_evicted_artifacts": 3
+      },
+      "trace_count": 88,
+      "trace_sha256": "6c32cc17d8f3b521d92f5bbd078717c893e7e5f0d667abe3d167c8c9ec5f93f8"
+    }
+  },
+  "physical_retention": {
+    "runtime-combined": [
+      {
+        "capture_bytes": [
+          19376,
+          1456,
+          19376,
+          1456
+        ],
+        "case": "continuation_large_small",
+        "final_continuation_bytes": 0,
+        "final_gc_payload_bytes": 0,
+        "final_states": 0,
+        "physical_scan_matches": true,
+        "registry_capacity": 3,
+        "registry_lifetime": "store"
+      },
+      {
+        "before": {
+          "field_capacity_bytes": 128,
+          "free_capacity_bytes": 0,
+          "live": 1,
+          "payload_charge_bytes": 208,
+          "slot_capacity_bytes": 416,
+          "slot_count": 1
+        },
+        "byte_failure_atomic": true,
+        "case": "gc_failure",
+        "final": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 32,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 416,
+          "slot_count": 1
+        },
+        "object_failure_atomic": true
+      },
+      {
+        "before": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 0,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 0,
+          "slot_count": 0
+        },
+        "case": "gc_large_small",
+        "cleared": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 8192,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        },
+        "final": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 8192,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        },
+        "large": {
+          "field_capacity_bytes": 524288,
+          "free_capacity_bytes": 0,
+          "live": 1024,
+          "payload_charge_bytes": 606208,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        },
+        "metadata_lifetime": "arena",
+        "root_hashmap_capacity": 0,
+        "small": {
+          "field_capacity_bytes": 128,
+          "free_capacity_bytes": 8192,
+          "live": 4,
+          "payload_charge_bytes": 448,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        }
+      }
+    ],
+    "runtime-default": [
+      {
+        "capture_bytes": [
+          16816,
+          1296,
+          16816,
+          1296
+        ],
+        "case": "continuation_large_small",
+        "final_continuation_bytes": 0,
+        "final_gc_payload_bytes": 0,
+        "final_states": 0,
+        "physical_scan_matches": true,
+        "registry_capacity": 3,
+        "registry_lifetime": "store"
+      },
+      {
+        "before": {
+          "field_capacity_bytes": 128,
+          "free_capacity_bytes": 0,
+          "live": 1,
+          "payload_charge_bytes": 208,
+          "slot_capacity_bytes": 416,
+          "slot_count": 1
+        },
+        "byte_failure_atomic": true,
+        "case": "gc_failure",
+        "final": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 32,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 416,
+          "slot_count": 1
+        },
+        "object_failure_atomic": true
+      },
+      {
+        "before": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 0,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 0,
+          "slot_count": 0
+        },
+        "case": "gc_large_small",
+        "cleared": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 8192,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        },
+        "final": {
+          "field_capacity_bytes": 0,
+          "free_capacity_bytes": 8192,
+          "live": 0,
+          "payload_charge_bytes": 0,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        },
+        "large": {
+          "field_capacity_bytes": 524288,
+          "free_capacity_bytes": 0,
+          "live": 1024,
+          "payload_charge_bytes": 606208,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        },
+        "metadata_lifetime": "arena",
+        "root_hashmap_capacity": 0,
+        "small": {
+          "field_capacity_bytes": 128,
+          "free_capacity_bytes": 8192,
+          "live": 4,
+          "payload_charge_bytes": 448,
+          "slot_capacity_bytes": 106496,
+          "slot_count": 1024
+        }
+      }
+    ]
+  },
+  "physical_scope": "Exact Vec capacities for arena slots, free list and object fields; excludes allocator padding, root/continuation HashMap bucket layout and process RSS.",
+  "schema": "wtime-p079-specialist-budgets-v1",
+  "selected_specialist_candidates": [],
+  "status": "passed",
+  "task": "P079",
+  "tests": {
+    "allocation-checker-tests": 3,
+    "budget-checker-tests": 7,
+    "exception-roots": 2,
+    "performance-combined": 214,
+    "runtime-combined": 176,
+    "runtime-default": 104
+  },
+  "timing_evidence": false,
+  "verification_receipt": {
+    "bytes": 791374,
+    "path": "/workspace/wtime/target/verification/runs/P079/verify/attempt-0003/receipt.json",
+    "sha256": "eb5732a5be1aba754fb62e6f548f7887b358ef95389242228ca3bd6b52e36b85"
+  }
+}

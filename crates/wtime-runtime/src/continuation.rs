@@ -1,4 +1,7 @@
 //! One-shot continuations own detached explicit frames. No native frame is captured.
+#[cfg(test)]
+#[path = "../tests/performance/p079_continuation.rs"]
+mod p079;
 use super::*;
 use crate::execution::Frame;
 use crate::gc::{Object, ObjectKind};

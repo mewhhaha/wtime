@@ -1,0 +1,625 @@
+{
+  "schema_version": 1,
+  "task": "P079",
+  "identities": {
+    "predecessor": {
+      "paths": [
+        "target/performance/P079-before/manifest.json",
+        "target/performance/P079-before/source/**",
+        "target/performance/P079-before/binary/**"
+      ]
+    },
+    "runtime": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/wtime-runtime/Cargo.toml",
+        "crates/wtime-runtime/**/*.rs",
+        "crates/wtime-types/Cargo.toml",
+        "crates/wtime-types/**/*.rs",
+        "crates/wtime-decode/Cargo.toml",
+        "crates/wtime-decode/**/*.rs",
+        "crates/wtime-validate/Cargo.toml",
+        "crates/wtime-validate/**/*.rs"
+      ]
+    },
+    "compilation": {
+      "paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/**/*",
+        "tools/wtime-conformance/Cargo.toml",
+        "tools/wtime-conformance/build.rs",
+        "tools/wtime-conformance/src/**/*.rs",
+        "tools/wtime-bench/Cargo.toml",
+        "tools/wtime-bench/Cargo.lock",
+        "tools/wtime-bench/src/**/*.rs",
+        "tools/wtime-bench/fixtures/**"
+      ]
+    },
+    "producer": {
+      "paths": [
+        "tools/verification/producers/p079.py",
+        "tools/verification/producers/p138.py",
+        "tools/wtime-bench/baseline.py",
+        "tools/wtime-bench/compare.py",
+        "tools/wtime-bench/workloads.py",
+        "tools/wtime-bench/workloads.json",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/checks/build_budget.py",
+        "tools/checks/dependency_budget.py",
+        "tools/checks/hardening.py",
+        "tools/checks/allocation_failure.py",
+        "tools/checks/ci.sh",
+        "tools/verify.py",
+        "tools/verification/*.py"
+      ]
+    },
+    "checker_tests": {
+      "paths": [
+        "tools/wtime-bench/tests/test_p079_specialist_budgets.py",
+        "tools/checks/tests/test_allocation_failure.py"
+      ]
+    },
+    "plan": {
+      "paths": [
+        "task-plans/performance/TASKS.json",
+        "task-plans/performance/06-memory-gc-simd-and-continuations/P079-specialist-budget-gate.md"
+      ]
+    }
+  },
+  "stages": {
+    "freeze": {
+      "uses": [
+        "predecessor",
+        "runtime",
+        "producer",
+        "plan"
+      ],
+      "commands": [
+        {
+          "name": "freeze",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/verification/producers/p079.py",
+            "freeze",
+            "--output",
+            "{stage}/freeze.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "freeze": "{stage}/freeze.json"
+      },
+      "checks": [
+        {
+          "artifact": "freeze",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        }
+      ]
+    },
+    "verify": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "producer",
+        "checker_tests"
+      ],
+      "dependencies": [
+        "freeze"
+      ],
+      "commands": [
+        {
+          "name": "runtime-default",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib",
+            "--",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ]
+        },
+        {
+          "name": "runtime-combined",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--lib",
+            "--features",
+            "compact-executor,register-executor,execution-reference,performance-counters",
+            "--",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ]
+        },
+        {
+          "name": "performance-combined",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "performance",
+            "--features",
+            "compact-executor,register-executor,execution-reference,performance-counters",
+            "--",
+            "--show-output",
+            "--test-threads",
+            "1"
+          ]
+        },
+        {
+          "name": "exception-roots",
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "wtime-runtime",
+            "--test",
+            "exception_root_safety",
+            "--features",
+            "compact-executor,register-executor,execution-reference,performance-counters",
+            "--",
+            "--nocapture",
+            "--test-threads",
+            "1"
+          ]
+        },
+        {
+          "name": "budget-checker-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/wtime-bench/tests",
+            "-p",
+            "test_p079_specialist_budgets.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "allocation-checker-tests",
+          "argv": [
+            "{python}",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/checks/tests",
+            "-p",
+            "test_allocation_failure.py",
+            "-v",
+            "-b"
+          ]
+        },
+        {
+          "name": "preserve-allocation",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/verification/producers/p079.py",
+            "preserve-allocation",
+            "--output",
+            "{stage}/prior-allocation"
+          ]
+        },
+        {
+          "name": "actual-allocation-failure",
+          "argv": [
+            "bash",
+            "tools/checks/ci.sh",
+            "allocation"
+          ]
+        },
+        {
+          "name": "capture-allocation",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/verification/producers/p079.py",
+            "capture-allocation",
+            "--output",
+            "{stage}/allocation.json"
+          ]
+        },
+        {
+          "name": "default-build",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/checks/build_budget.py",
+            "--output",
+            "{stage}/default-build.json"
+          ]
+        },
+        {
+          "name": "register-build",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/register-executor",
+            "--output",
+            "{stage}/register-build.json"
+          ]
+        },
+        {
+          "name": "experimental-build",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/checks/build_budget.py",
+            "--features",
+            "wtime-runtime/experimental-executors",
+            "--output",
+            "{stage}/experimental-build.json"
+          ]
+        },
+        {
+          "name": "dependency-budget",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/checks/dependency_budget.py"
+          ]
+        }
+      ],
+      "tests": [
+        {
+          "command": "runtime-default",
+          "kind": "cargo",
+          "features": [],
+          "required_names": [
+            "p079_gc_large_small_reuses_bounded_metadata_and_releases_payloads",
+            "p079_gc_budget_failures_publish_no_partial_object",
+            "p079_continuation_large_small_matches_owned_capacities_and_reclaims",
+            "t112_cycles_and_stale_references",
+            "t112_payload_byte_limit_is_transactional_and_reclaimed",
+            "t113_host_token_clones_and_descriptor_edges",
+            "t114_foreign_refs_fail_and_budgets_preserve_heap",
+            "t114_deep_heap_chain_marks_and_reclaims_iteratively",
+            "t114_mark_budget_failure_never_sweeps_and_identity_is_stable",
+            "t140_aggregate_bytes_fail_before_capture_and_release_after_drop",
+            "t147_repeated_suspension_release_and_cancel_do_not_retain_segments"
+          ],
+          "minimum_passed": 11,
+          "unfiltered": true
+        },
+        {
+          "command": "runtime-combined",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference",
+            "performance-counters"
+          ],
+          "required_names": [
+            "p079_gc_large_small_reuses_bounded_metadata_and_releases_payloads",
+            "p079_gc_budget_failures_publish_no_partial_object",
+            "p079_continuation_large_small_matches_owned_capacities_and_reclaims",
+            "t112_cycles_and_stale_references",
+            "t112_payload_byte_limit_is_transactional_and_reclaimed",
+            "t113_host_token_clones_and_descriptor_edges",
+            "t114_foreign_refs_fail_and_budgets_preserve_heap",
+            "t114_deep_heap_chain_marks_and_reclaims_iteratively",
+            "t114_mark_budget_failure_never_sweeps_and_identity_is_stable",
+            "t140_aggregate_bytes_fail_before_capture_and_release_after_drop",
+            "t147_repeated_suspension_release_and_cancel_do_not_retain_segments",
+            "p138_private_snapshots_do_not_pin_evicted_artifacts",
+            "p138_private_failures_cooldown_abort_poison_and_foreign_are_observed",
+            "p138_private_active_builder_snapshot_and_saturating_counters",
+            "p133_cold_threshold_and_single_publish",
+            "p133_concurrent_duplicate_uses_one_unlocked_builder",
+            "p133_decline_poison_foreign_and_aborted_lease_fail_closed",
+            "p133_fifo_eviction_pinned_lifetime_and_budget_churn",
+            "p065_root_barrier_recipes_are_complete",
+            "p134_activation_pin_survives_eviction"
+          ],
+          "minimum_passed": 20,
+          "unfiltered": true
+        },
+        {
+          "command": "performance-combined",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference",
+            "performance-counters"
+          ],
+          "required_names": [
+            "p138_cold_threshold_and_single_builder_are_observed",
+            "p138_guest_fifo_eviction_and_recompilation_stay_bounded",
+            "p138_snapshot_preserves_all_fuel_prefixes_and_wraparound_results",
+            "p134_cold_hot_entry_threshold_and_diagnostics",
+            "p134_shared_module_concurrency_and_store_ownership",
+            "p134_host_effect_fuel_and_foreign_refusal",
+            "p134_eviction_pin_and_continuation_resume_without_reentry",
+            "p065_outer_reference_survives_reentrant_collection",
+            "p065_capture_retains_numeric_state_and_source_cursor",
+            "p065_cross_module_exact_suspend_and_resource_controls",
+            "p065_reference_and_vector_frames_decline",
+            "p065_exception_unwind_preserves_numeric_payload"
+          ],
+          "minimum_passed": 12,
+          "unfiltered": true
+        },
+        {
+          "command": "exception-roots",
+          "kind": "cargo",
+          "features": [
+            "compact-executor",
+            "register-executor",
+            "execution-reference",
+            "performance-counters"
+          ],
+          "required_names": [
+            "caught_reference_root_decoded",
+            "caught_reference_root_reference"
+          ],
+          "minimum_passed": 2,
+          "unfiltered": true
+        },
+        {
+          "command": "budget-checker-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_accepts_realistic_three_case_retention_report",
+            "test_rejects_missing_duplicate_and_unknown_cases",
+            "test_rejects_boolean_and_non_integer_capacity_values",
+            "test_rejects_residual_payload_after_collection",
+            "test_rejects_slot_or_free_capacity_growth_during_small_reuse",
+            "test_rejects_continuation_physical_accounting_mismatch",
+            "test_rejects_repeated_continuation_size_drift"
+          ],
+          "minimum_passed": 7
+        },
+        {
+          "command": "allocation-checker-tests",
+          "kind": "unittest",
+          "required_names": [
+            "test_allocator_failure_requires_recovery",
+            "test_process_fault_is_not_allocator_success",
+            "test_successful_failure_and_recovery_retained"
+          ],
+          "minimum_passed": 3
+        }
+      ],
+      "outputs": {
+        "allocation": "{stage}/allocation.json",
+        "default-build": "{stage}/default-build.json",
+        "register-build": "{stage}/register-build.json",
+        "experimental-build": "{stage}/experimental-build.json",
+        "allocation-worker": "{stage}/allocation-worker"
+      },
+      "checks": [
+        {
+          "artifact": "allocation",
+          "pointer": "/passed",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "default-build",
+          "pointer": "/budget_pass",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "register-build",
+          "pointer": "/budget_pass",
+          "op": "equal",
+          "value": true
+        },
+        {
+          "artifact": "experimental-build",
+          "pointer": "/budget_pass",
+          "op": "equal",
+          "value": true
+        }
+      ]
+    },
+    "analyze": {
+      "uses": [
+        "runtime",
+        "compilation",
+        "producer"
+      ],
+      "dependencies": [
+        "freeze",
+        "verify"
+      ],
+      "commands": [
+        {
+          "name": "specialist-budget-summary",
+          "argv": [
+            "{python}",
+            "-B",
+            "tools/verification/producers/p079.py",
+            "summarize",
+            "--verify-dir",
+            "{verify_dir}",
+            "--freeze",
+            "{freeze_dir}/freeze.json",
+            "--output",
+            "{stage}/specialist-budgets.json"
+          ]
+        }
+      ],
+      "outputs": {
+        "report": "{stage}/specialist-budgets.json",
+        "allocation": "{stage}/allocation.json"
+      },
+      "checks": [
+        {
+          "artifact": "report",
+          "pointer": "/status",
+          "op": "equal",
+          "value": "passed"
+        },
+        {
+          "artifact": "report",
+          "pointer": "/timing_evidence",
+          "op": "equal",
+          "value": false
+        }
+      ]
+    }
+  },
+  "source_delta": {
+    "identity": "runtime",
+    "baseline": "{freeze_dir}/freeze.json",
+    "pointer": "/runtime_sources",
+    "allowed_changes": [
+      "crates/wtime-runtime/src/gc.rs",
+      "crates/wtime-runtime/src/continuation.rs"
+    ],
+    "allowed_additions": [
+      "crates/wtime-runtime/tests/performance/p079_gc.rs",
+      "crates/wtime-runtime/tests/performance/p079_continuation.rs"
+    ]
+  },
+  "development": {
+    "groups": [
+      {
+        "name": "physical-retention",
+        "uses": [
+          "compilation"
+        ],
+        "commands": [
+          {
+            "name": "physical-retention-tests",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "wtime-runtime",
+              "--lib",
+              "p079_",
+              "--",
+              "--nocapture",
+              "--test-threads",
+              "1"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "physical-retention-tests",
+            "kind": "cargo",
+            "features": [],
+            "required_names": [
+              "p079_gc_large_small_reuses_bounded_metadata_and_releases_payloads",
+              "p079_gc_budget_failures_publish_no_partial_object",
+              "p079_continuation_large_small_matches_owned_capacities_and_reclaims"
+            ],
+            "minimum_passed": 3
+          }
+        ]
+      },
+      {
+        "name": "checker-tests",
+        "uses": [
+          "producer",
+          "checker_tests"
+        ],
+        "commands": [
+          {
+            "name": "budget-checker-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/wtime-bench/tests",
+              "-p",
+              "test_p079_specialist_budgets.py",
+              "-v",
+              "-b"
+            ]
+          },
+          {
+            "name": "allocation-checker-tests",
+            "argv": [
+              "{python}",
+              "-B",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tools/checks/tests",
+              "-p",
+              "test_allocation_failure.py",
+              "-v",
+              "-b"
+            ]
+          }
+        ],
+        "tests": [
+          {
+            "command": "budget-checker-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_accepts_realistic_three_case_retention_report",
+              "test_rejects_missing_duplicate_and_unknown_cases",
+              "test_rejects_boolean_and_non_integer_capacity_values",
+              "test_rejects_residual_payload_after_collection",
+              "test_rejects_slot_or_free_capacity_growth_during_small_reuse",
+              "test_rejects_continuation_physical_accounting_mismatch",
+              "test_rejects_repeated_continuation_size_drift"
+            ],
+            "minimum_passed": 7
+          },
+          {
+            "command": "allocation-checker-tests",
+            "kind": "unittest",
+            "required_names": [
+              "test_allocator_failure_requires_recovery",
+              "test_process_fault_is_not_allocator_success",
+              "test_successful_failure_and_recovery_retained"
+            ],
+            "minimum_passed": 3
+          }
+        ]
+      }
+    ]
+  },
+  "completion": {
+    "required_phases": [
+      "freeze",
+      "verify",
+      "analyze"
+    ],
+    "outcome": "contract_only",
+    "limitations": [
+      "Source-current allocation/cleanup and build-budget gate. No guest timing, performance promotion, or process RSS claim. Prior specialist candidates remain rejected or inconclusive."
+    ]
+  }
+}
