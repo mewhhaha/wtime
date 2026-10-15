@@ -33,6 +33,7 @@ _KNOWN_FAST_PATH = {
     "selection_manifest.py", "dataset_cache.py", "candidate_gate.py", "semantic_receipt.py",
     "root_workloads.py", "root_compare.py", "thread_compare.py",
     "entry_batch_adapter.py", "entry_batch_compare.py", "entry_batch_analyze.py",
+    "entry_sequence_policy.py",
 }
 
 # Explicit legacy execution inputs. The non-Python portion of compare.sources

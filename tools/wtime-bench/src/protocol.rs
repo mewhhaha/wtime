@@ -5,6 +5,9 @@ mod p140_tests;
 #[cfg(not(feature = "legacy-api"))]
 #[path = "entry_batch_driver.rs"]
 mod entry_batch_driver;
+#[cfg(not(feature = "legacy-api"))]
+#[path = "entry_sequence_driver.rs"]
+mod entry_sequence_driver;
 #[path = "fuel_policy.rs"]
 mod fuel_policy;
 #[cfg(not(feature = "legacy-api"))]
@@ -132,6 +135,8 @@ fn measured(batch: usize, mut f: impl FnMut() -> i32, expected: i32) -> f64 {
 pub fn try_main(args: &[String]) -> bool {
     #[cfg(not(feature = "legacy-api"))]
     if entry_batch_driver::try_main(args) { return true; }
+    #[cfg(not(feature = "legacy-api"))]
+    if entry_sequence_driver::try_main(args) { return true; }
     #[cfg(not(feature = "legacy-api"))]
     if integration_driver::try_main(args) { return true; }
     if representative_driver::try_main(args) { return true; }

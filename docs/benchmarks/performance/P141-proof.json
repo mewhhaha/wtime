@@ -1,0 +1,118 @@
+{
+  "candidate_promoted": false,
+  "counts": {
+    "diagnostic_observations": 4,
+    "individual_calls_per_lane": 2010,
+    "timing_observations": 4
+  },
+  "gate_eligible": false,
+  "guest_or_build_launched": false,
+  "outcome": "contract_only",
+  "producer": {
+    "bytes": 16000,
+    "path": "/workspace/wtime/target/verification/runs/P141/verify/attempt-0002/revalidation/helpers/p141.py",
+    "sha256": "7174527f3314eba62e66407856287e92113e1927803a67fadb0d3bd5154a0e74"
+  },
+  "retained": {
+    "driver_diagnostic": {
+      "bytes": 49531,
+      "path": "/workspace/wtime/target/verification/runs/P141/verify/attempt-0001/driver-diagnostic/report.json",
+      "sha256": "ef14a40c8eb4222748ad17e556f7d6afe03ad399620655c510c52936d00d4d3c"
+    },
+    "driver_production": {
+      "bytes": 48873,
+      "path": "/workspace/wtime/target/verification/runs/P141/verify/attempt-0001/driver-production/report.json",
+      "sha256": "453be859279f0bd7dd5aca04f284f55e02359b018c2037b49de2c43d50655593"
+    },
+    "production": {
+      "bytes": 243832,
+      "path": "/workspace/wtime/target/verification/runs/P141/verify/attempt-0001/production/build-record.json",
+      "sha256": "e78c1c744bca8221989675327d6e121466a7b01f97204caf6c3259bec13921a2"
+    },
+    "smoke": {
+      "bytes": 1037200,
+      "path": "/workspace/wtime/target/verification/runs/P141/verify/attempt-0001/smoke/report.json",
+      "sha256": "fc9c8197465a496943cc6017f65b6c3398016d36c89af2c70d0029e0dc7080ea"
+    }
+  },
+  "retained_producer_sha256": "b2476db5867bc79bc8521b7593b863bc8237a92120351eab5ffd4cc2e728b782",
+  "schema": "wtime-p141-verification-v1",
+  "smoke": {
+    "bytes": 1037200,
+    "path": "/workspace/wtime/target/verification/runs/P141/verify/attempt-0001/smoke/report.json",
+    "sha256": "fc9c8197465a496943cc6017f65b6c3398016d36c89af2c70d0029e0dc7080ea"
+  },
+  "source_stable": true,
+  "status": "passed",
+  "tests": {
+    "diagnostic": {
+      "failed": 0,
+      "features": [
+        "runtime-only",
+        "compact-executor",
+        "register-executor",
+        "execution-reference"
+      ],
+      "ignored": 0,
+      "names": [
+        "protocol::entry_batch_driver::tests::p135_oracle_checks_every_call_and_stops_on_mismatch",
+        "protocol::entry_batch_driver::tests::p135_fresh_batch_times_compile_instantiation_and_exact_calls",
+        "protocol::entry_batch_driver::tests::p135_entry_batch_parser_rejects_unsupported_counts_and_strategy_pairs",
+        "protocol::entry_sequence_driver::tests::p141_sequence_parser_and_build_reject_before_fixture_io",
+        "protocol::fuel_policy::tests::p127_fixed_metered_policy_sets_fuel_without_changing_other_limits",
+        "protocol::fuel_policy::tests::p127_malformed_or_unsupported_fuel_arguments_are_rejected",
+        "protocol::fuel_policy::tests::p127_omitted_and_explicit_unmetered_preserve_distinct_wire_identity",
+        "protocol::memory_driver::repeatable_memory_case_tests::accepts_width_aliases_and_preserves_existing_cases",
+        "protocol::memory_driver::repeatable_memory_case_tests::rejects_unknown_or_malformed_width_aliases",
+        "protocol::p127_tests::p127_single_case_builder_uses_selected_fuel_at_guest_source_boundary",
+        "protocol::entry_batch_driver::tests::p135_diagnostic_reports_dispatch_deltas_without_timing_or_promotion_claims",
+        "protocol::p140_tests::p140_actual_adaptive_engines_preserve_threshold_and_fuel",
+        "protocol::p140_tests::p140_bad_entry_settings_are_rejected_before_fixture_io",
+        "protocol::p140_tests::p140_parser_composes_entry_threshold_and_source_fuel",
+        "protocol::p140_tests::p140_omitted_threshold_preserves_legacy_wire",
+        "protocol::scalar_driver::current::fuel_tests::p127_scalar_builder_uses_selected_fuel_at_guest_source_boundary",
+        "protocol::entry_sequence_driver::tests::p141_sequence_oracle_and_fifo_recompile_are_checked",
+        "protocol::entry_sequence_driver::tests::p141_sequence_executes_every_initial_and_revisit_entry"
+      ],
+      "passed": 18,
+      "required_names": [
+        "p141_sequence_executes_every_initial_and_revisit_entry",
+        "p141_sequence_oracle_and_fifo_recompile_are_checked",
+        "p141_sequence_parser_and_build_reject_before_fixture_io"
+      ]
+    },
+    "production": {
+      "failed": 0,
+      "features": [
+        "runtime-only",
+        "register-executor"
+      ],
+      "ignored": 0,
+      "names": [
+        "protocol::entry_batch_driver::tests::p135_diagnostic_reports_dispatch_deltas_without_timing_or_promotion_claims",
+        "protocol::entry_batch_driver::tests::p135_entry_batch_parser_rejects_unsupported_counts_and_strategy_pairs",
+        "protocol::entry_batch_driver::tests::p135_oracle_checks_every_call_and_stops_on_mismatch",
+        "protocol::entry_sequence_driver::tests::p141_sequence_oracle_and_fifo_recompile_are_checked",
+        "protocol::entry_sequence_driver::tests::p141_sequence_parser_and_build_reject_before_fixture_io",
+        "protocol::fuel_policy::tests::p127_fixed_metered_policy_sets_fuel_without_changing_other_limits",
+        "protocol::fuel_policy::tests::p127_malformed_or_unsupported_fuel_arguments_are_rejected",
+        "protocol::memory_driver::repeatable_memory_case_tests::accepts_width_aliases_and_preserves_existing_cases",
+        "protocol::fuel_policy::tests::p127_omitted_and_explicit_unmetered_preserve_distinct_wire_identity",
+        "protocol::memory_driver::repeatable_memory_case_tests::rejects_unknown_or_malformed_width_aliases",
+        "protocol::entry_sequence_driver::tests::p141_sequence_executes_every_initial_and_revisit_entry",
+        "protocol::entry_batch_driver::tests::p135_fresh_batch_times_compile_instantiation_and_exact_calls"
+      ],
+      "passed": 12,
+      "required_names": [
+        "p141_sequence_executes_every_initial_and_revisit_entry",
+        "p141_sequence_oracle_and_fifo_recompile_are_checked",
+        "p141_sequence_parser_and_build_reject_before_fixture_io"
+      ]
+    }
+  },
+  "thresholds": [
+    3,
+    10
+  ],
+  "timing_evidence": false
+}

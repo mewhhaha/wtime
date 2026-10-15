@@ -1,0 +1,163 @@
+{
+  "schema": "wtime-performance-task-contract-v1",
+  "task": "P141",
+  "kind": "foundation",
+  "selection": "register",
+  "protocol": {
+    "timing": "--entry-sequence FILE INPUT SCHEDULE_THRESHOLD register eager|adaptive THRESHOLD",
+    "diagnostic": "--entry-sequence-diagnostic FILE INPUT SCHEDULE_THRESHOLD register eager|adaptive THRESHOLD",
+    "schedule_threshold": {
+      "minimum": 1,
+      "maximum": 64
+    },
+    "schedule": "f00 through f65, each N+1 ordered calls, then f00 N+1 revisit calls",
+    "input": "i32; expected result is wrapping i32 input plus body index",
+    "eager_threshold": 0,
+    "adaptive_threshold": "must equal positive schedule threshold N",
+    "source_fuel": null,
+    "timing_interval": "one Store::invoke only; preparation and instantiation are separate",
+    "timing_features": [
+      "runtime-only",
+      "register-executor"
+    ],
+    "diagnostic_features": [
+      "runtime-only",
+      "compact-executor",
+      "register-executor",
+      "execution-reference"
+    ],
+    "diagnostic_wire": {
+      "instrumented": true,
+      "diagnostic": true,
+      "duration_fields": false,
+      "timestamp_fields": false
+    }
+  },
+  "predecessor": {
+    "archive": "target/performance/P141-before",
+    "repository_commit": "02674dc16b4d94d79646bda22a86969e6146ac99",
+    "manifest_sha256": "63b22d3a53dbb40e16bc30676f6ce78bf796faf047ac2faf11f02922ce1f56ca",
+    "mode": "register"
+  },
+  "prerequisites": {
+    "P138": "docs/benchmarks/performance/P138-completion.json",
+    "P140": "docs/benchmarks/performance/P140-completion.json",
+    "all_done_contract_only": true
+  },
+  "fixture": {
+    "path": "crates/wtime-runtime/tests/fixtures/performance/p138/uniform66.wasm",
+    "provenance": "P138 uniform66 fixture, unchanged",
+    "exports": [
+      "f00",
+      "f01",
+      "f02",
+      "f03",
+      "f04",
+      "f05",
+      "f06",
+      "f07",
+      "f08",
+      "f09",
+      "f10",
+      "f11",
+      "f12",
+      "f13",
+      "f14",
+      "f15",
+      "f16",
+      "f17",
+      "f18",
+      "f19",
+      "f20",
+      "f21",
+      "f22",
+      "f23",
+      "f24",
+      "f25",
+      "f26",
+      "f27",
+      "f28",
+      "f29",
+      "f30",
+      "f31",
+      "f32",
+      "f33",
+      "f34",
+      "f35",
+      "f36",
+      "f37",
+      "f38",
+      "f39",
+      "f40",
+      "f41",
+      "f42",
+      "f43",
+      "f44",
+      "f45",
+      "f46",
+      "f47",
+      "f48",
+      "f49",
+      "f50",
+      "f51",
+      "f52",
+      "f53",
+      "f54",
+      "f55",
+      "f56",
+      "f57",
+      "f58",
+      "f59",
+      "f60",
+      "f61",
+      "f62",
+      "f63",
+      "f64",
+      "f65"
+    ],
+    "entry_limit": 64
+  },
+  "smoke": {
+    "thresholds": [
+      3,
+      10
+    ],
+    "observations": {
+      "timing": 4,
+      "diagnostic": 4,
+      "individual_calls_per_lane": 2010
+    },
+    "timing_evidence": false,
+    "gate_eligible": false,
+    "candidate_promoted": false,
+    "decision": null
+  },
+  "acceptance": {
+    "strict_arguments_before_fixture_io": true,
+    "both_protocols_share_identical_deterministic_schedule": true,
+    "timing_records_are_uninstrumented_and_per_invoke": true,
+    "diagnostic_wire_is_separate_from_timing_and_has_no_time_fields": true,
+    "observed_cache_state_and_counters_validate_cold_compile_ready_and_recompile": true,
+    "f00_recompile_follows_fifo_eviction_at_64_entries": true,
+    "independent_wrapping_i32_oracle_checks_every_call": true,
+    "P138_core_source_unchanged_and_build_budgets_reused": true,
+    "no_threshold_recommendation_or_performance_claim": true,
+    "final_checker_only_fix_reuses_immutable_source_current_observations": true,
+    "failed_verification_attempt_retained": true
+  },
+  "decision": "integrity",
+  "outcome": "contract_only",
+  "timing_evidence": false,
+  "performance_claim": false,
+  "final_verification": {
+    "observation_attempt": "target/verification/runs/P141/verify/attempt-0001",
+    "observation_attempt_source_current": true,
+    "fresh_policy_suite_tests": 11,
+    "fresh_command": "python3 -B tools/verification/producers/p141.py revalidate --report <retained-smoke-report> --output <verify-stage>/revalidation",
+    "revalidation_schema": "wtime-p141-verification-v1",
+    "revalidation_build_or_guest_launch": false,
+    "proof_export": "P141-proof.json contains the successful source-current revalidation report; raw smoke stays separately retained",
+    "failed_close_attempt_retained": true,
+    "reason": "The final correction changes only the smoke checker compatibility call; raw source, timer, guest, binary, build, tests and smoke wires remain immutable."
+  }
+}

@@ -82489,7 +82489,8 @@
         "P137",
         "P138",
         "P139",
-        "P140"
+        "P140",
+        "P142"
       ],
       "owned_paths": [
         "crates/wtime-runtime/src/execution/tiering.rs",
@@ -89495,6 +89496,172 @@
         "status": "done",
         "task": "P140"
       }
+    },
+    {
+      "group": "05-register-executor",
+      "status": "done",
+      "outcome": "contract_only",
+      "kind": "foundation",
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "external_constraints": [
+        "default Rust core remains free of external dependencies and unsafe code",
+        "diagnostic instrumentation is excluded from timing measurements",
+        "P066 retains every existing semantic, focused-stage, control, build/dependency, cold/churn, statistical, and promotion gate"
+      ],
+      "before_edit_commands": [],
+      "id": "P141",
+      "key": "register-entry-sequence-driver",
+      "title": "Add individual-entry Register timing and diagnostics",
+      "dependencies": [
+        "P138",
+        "P140"
+      ],
+      "owned_paths": [
+        "tools/wtime-bench/src/protocol.rs",
+        "tools/wtime-bench/src/entry_sequence_driver.rs",
+        "tools/verification/producers/p141.py",
+        "tools/verification/producers/p141_driver_tests.py",
+        "tools/wtime-bench/entry_sequence_policy.py",
+        "tools/wtime-bench/execution_identity.py",
+        "tools/wtime-bench/tests/test_p141_sequence_policy.py",
+        "tools/wtime-bench/tests/test_fast_execution_identity.py",
+        "docs/benchmarks/performance/P141-contract.json",
+        "docs/benchmarks/performance/P141-verification.json"
+      ],
+      "input_output_contract": "Add two strict protocols: `--entry-sequence FILE INPUT SCHEDULE_THRESHOLD register eager|adaptive THRESHOLD` and `--entry-sequence-diagnostic FILE INPUT SCHEDULE_THRESHOLD register eager|adaptive THRESHOLD`. Parse and validate the entire argument vector before opening `FILE`. Require the fixed Register mode, schedule threshold `N` in `1..=64`, `eager` with engine threshold `0`, and `adaptive` with engine threshold exactly equal to schedule threshold N. Do not accept fuel, warmup, batch invocation, duplicate settings, unknown modes, non-integers, booleans-as-numbers, zero adaptive thresholds, or out-of-range schedule thresholds. Use the checked-in P138 `uniform66.wasm` bytes unchanged.\n\nGenerate a deterministic schedule that calls each export `f00` through `f65` exactly `N+1` times in order, then revisits `f00` exactly `N+1` times. Each call invokes one export once, in one Store and one module instance. Compute the independent expected result as the wrapping `i32` sum of the input and the numeric body index; check every returned result. No guest fuel is configured.\n\nThe eager side uses ordinary eager Register execution with effective entry threshold zero. The adaptive side uses P140's explicit positive threshold. Both sides receive identical fixture bytes, input, schedule threshold and call order. Separate module preparation and instantiation durations from entry observations. In `timing` mode, time each `Store::invoke` individually and only: do not include snapshot reads, result formatting, logging, command processing or I/O in `elapsed_ns`. Emit ordered raw records with `{body,visit,phase,result,elapsed_ns}`, distinguishing the initial pass from the revisit. Timing builds use `runtime-only,register-executor` without `execution-reference` or performance counters and set `instrumented:false`.\n\nIn `--entry-sequence-diagnostic` mode, require `execution-reference` and execute the identical call schedule without timers. Capture per-call P138 cache state/counters and dispatch deltas, independently validate each expected result, and verify cold, compile, ready and recompile transitions against the deterministic schedule. The Python policy assigns phase-specific cold/compile/warm/recompile classes from exact body/visit/phase positions; the diagnostic wire independently validates observed state and counter transitions. Prove the second `f00` series occurs after its FIFO eviction from the 64-entry cache. Diagnostic builds use `runtime-only,compact-executor,register-executor,execution-reference`, and their per-call wires set `instrumented:true` and `diagnostic:true` without duration or timestamp fields. The source-bound smoke report carries `timing_evidence:false`, `gate_eligible:false`, and `candidate_promoted:false`; diagnostic wires remain separate from timing observations.",
+      "implementation_steps": [
+        "Confirm the completed P138 and P140 prerequisite identities and fixture provenance. Freeze the current P140 source/feature inputs for the producer contract; keep all generated outputs under a fresh, exclusive P141 target directory.",
+        "Add the new leaf module to the existing protocol dispatcher. Implement strict argument parsing and validation before file reads; share one validated schedule representation between timing and diagnostic modes. Keep the timing build uninstrumented and require `execution-reference` only for diagnostic builds.",
+        "Build eager and adaptive Register engines with the exact requested settings, compile the uniform fixture, and instantiate once. In timing mode isolate preparation and instantiation durations and time only one `Store::invoke` at a time. Keep serialization and all I/O outside every invoke timer.",
+        "Implement diagnostic observations as a separate no-timer path. Take P138 snapshots and dispatch deltas around calls; validate every result and check observed state/counter transitions against the deterministic schedule, and verify the `f00` eviction and recompile against the documented FIFO limit.",
+        "Add the three actual named Rust tests for strict parsing/build rejection, full 66-body/revisit execution, and oracle/FIFO recompile. Add four Python policy tests plus the seven existing execution-identity compatibility tests. Add producer checks for source/fixture identities, ordered records, exact counts, timer isolation, diagnostic wire shape and non-promoting smoke fields.",
+        "Preserve the actual source-bound attempt, including both feature-specific Cargo test groups, the production build, four timing observations and four diagnostic observations (2010 calls per lane), raw commands and outputs. If a checker-only fix follows collection, bind the previously passing, source-current attempt unchanged; rerun the Python policy suite and read-only producer revalidation only. Retain and identify any failed/superseded verification attempt rather than replacing it."
+      ],
+      "fixture_cases": [
+        "`p141_sequence_parser_and_build_reject_before_fixture_io`: accept the exact timing and diagnostic switches; reject malformed schedules, mismatched thresholds, non-Register mode, bad strategy, duplicates, fuel and unknown options before attempting a missing fixture, and reject incompatible build features before file access.",
+        "`p141_sequence_executes_every_initial_and_revisit_entry`: run all 66 bodies through `N+1` calls and revisit `f00`; verify ordered body/visit/phase records and exact call counts for both strategies and modes.",
+        "`p141_sequence_oracle_and_fifo_recompile_are_checked`: validate every wrapping result, observed P138 lifecycle/cache state, 64-entry eviction and f00 recompile; ensure diagnostic wires contain no timing or timestamp fields.",
+        "`test_exact_schedule_and_wraparound_oracle_for_all_thresholds`: validate schedule cardinality and wrapping i32 oracle at schedule thresholds 1, 3, 10 and 64.",
+        "`test_rejects_exact_type_count_order_oracle_and_extra_field_drift`: reject wire type, ordering, count, oracle and unknown-field drift.",
+        "`test_rejects_instrumented_or_mixed_timing_and_diagnostic_wires`: reject timed/diagnostic schema mixing and instrumentation mismatches.",
+        "`test_adaptive_transition_drift_and_eager_diagnostic_contract`: reject observed cache/counter drift and invalid eager diagnostics."
+      ],
+      "integration_owner": "One tooling integrator owns the Rust sequence protocol and producer; runtime/cache policy remains owned by the P138/P066 integrator.",
+      "minimum_focused_cases": 3,
+      "evidence_contract": "Bind the immutable P141-before archive/manifest, P138 and P140 prerequisite envelopes, source-current attempt-0001 freeze/verify reports and raw outputs, all three Rust case names and 11 Python policy/identity cases, production build, four timing and four diagnostic wires (2010 calls per lane), actual command logs, and final checker-only revalidation receipt. Preserve the failed verification attempt. Require final proof timing_evidence:false, gate_eligible:false, candidate_promoted:false, guest_or_build_launched:false, and decision null; make no threshold recommendation or performance claim.",
+      "test_commands": [
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P141-verification.json",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P141-verification.json --output target/performance/P141/complete --execute"
+      ],
+      "path": "05-register-executor/P141-register-entry-sequence-driver.md",
+      "evidence": [
+        {
+          "path": "/workspace/wtime/target/performance/P141/shared-finalization/attempt-0002/evidence.json",
+          "sha256": "2c1db3a11a9d843430f7ebd75a2813d897b7334b40f071e1b314b19a32685c67",
+          "bytes": 1897
+        }
+      ],
+      "completion_record": {
+        "artifact_hashes": {
+          "/workspace/wtime/target/performance/P141/shared-finalization/attempt-0002/evidence.json": "2c1db3a11a9d843430f7ebd75a2813d897b7334b40f071e1b314b19a32685c67"
+        },
+        "evidence": [
+          {
+            "bytes": 1897,
+            "path": "/workspace/wtime/target/performance/P141/shared-finalization/attempt-0002/evidence.json",
+            "sha256": "2c1db3a11a9d843430f7ebd75a2813d897b7334b40f071e1b314b19a32685c67"
+          }
+        ],
+        "outcome": "contract_only",
+        "status": "done",
+        "task": "P141"
+      }
+    },
+    {
+      "group": "05-register-executor",
+      "status": "todo",
+      "outcome": "pending",
+      "kind": "foundation",
+      "measurement_selection": "register",
+      "execution_mode": "register",
+      "semantic_contracts": [
+        "C1",
+        "C2",
+        "C7",
+        "C8"
+      ],
+      "enable_when": null,
+      "implementation_model": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "low"
+      },
+      "branch": "portable",
+      "decision_rule": "integrity",
+      "reviews_optional_tasks": [],
+      "external_constraints": [
+        "default Rust core remains free of external dependencies and unsafe code",
+        "diagnostic instrumentation is excluded from timing measurements",
+        "P066 retains every existing semantic, focused-stage, control, build/dependency, cold/churn, statistical, and promotion gate"
+      ],
+      "before_edit_commands": [],
+      "id": "P142",
+      "key": "register-cold-churn-collection",
+      "title": "Collect and analyze source-bound Register cold and churn sequences",
+      "dependencies": [
+        "P139",
+        "P141"
+      ],
+      "owned_paths": [
+        "tools/wtime-bench/entry_sequence_compare.py",
+        "tools/wtime-bench/entry_sequence_analyze.py",
+        "tools/wtime-bench/tests/test_p142_entry_sequence.py",
+        "tools/verification/producers/p142.py",
+        "tools/verification/tests/test_p142_entry_sequence.py",
+        "docs/benchmarks/performance/P142-contract.json",
+        "docs/benchmarks/performance/P142-verification.json",
+        "docs/benchmarks/performance/P142-selection.json"
+      ],
+      "input_output_contract": "Freeze the immediate predecessor and a complete source identity for the P141 driver, current Rust harness, runtime, fixture/provenance, collector, analyzer, producer, contracts, selection, feature configuration and toolchain. Build separate eager baseline and adaptive candidate executables with P136's isolated Register adapter machinery. Both adapters must use the same P141 protocol/driver and common overlay bytes. Bind archived and current source maps, commands, lockfiles, toolchain, binaries, fixture, contract and settings independently; reject aliasing, drift or changed identities before guest execution and recheck source stability after collection.\n\nUse a new P142 schema and crash-safe journal; never reinterpret or modify P136/P139 v1/v2 records. The row set is the fixed P138 `uniform66` fixture, one input, schedule threshold `N` in `{3,10}`, and eager/adaptive sides. Eager always uses Register threshold zero; adaptive uses the row's positive threshold `N`. For each side observation, invoke the P141 `timing` protocol and preserve its actual argv, command stdout/stderr, ordered raw response, preparation/instantiation observations, fixture/source/binary identities, and process result. One process is one fresh engine/module/store lifetime and one independent observation; never batch or warm invocations.\n\nRun two independent runs with distinct recorded seeds and at least 30 complete process pairs per row in each run. Randomize eager/adaptive process order deterministically per pair. Each raw sequence contains the complete schedule and one elapsed-nanosecond value per invocation. Reject missing/extra/reordered calls, body/visit/phase mismatch, bad oracle output, malformed or negative timings, incomplete/duplicate pairs, mixed source or binary identities, and changed settings before or during resume.\n\nRun P141's separate no-timer diagnostic schedule to verify the actual event-class labels for each row. Bind that diagnostic report and class map independently. Match classes to timed observations by the exact ordered `(body,visit,phase)` key; do not infer labels from latency. Validate classes cold, compile, ready and recompile, including FIFO eviction and `f00` recompile. Keep instrumented diagnostics outside all timing records and analysis.\n\nFor each independent run, row and validated event class, reduce each process's individual invoke latencies to p50, p99 and maximum before pairing. Compute paired candidate/eager log-median ratios and deterministic 95% bootstrap intervals using 10,000 resamples over independent process pairs. Never pool calls as independent samples, divide by call count, combine run seeds, aggregate thresholds, or mix preparation/instantiation with entry latency. Preserve preparation and instantiation measurements separately as descriptive fields. Full collection may be timing evidence, but it is descriptive only: set `decision:null`, `gate_eligible:false`, and `candidate_promoted:false`; do not make a speed or threshold recommendation. A two-pair-per-row smoke is allowed only as foundation smoke and must set `timing_evidence:false`; it cannot satisfy the full source-bound two-run analysis or any P066 gate.",
+      "implementation_steps": [
+        "Verify the completed P139 and P141 receipts and the P138 fixture/provenance. Freeze the P142 row/settings manifest and immediate predecessor before building; use a new immutable archive location and do not overwrite earlier task archives.",
+        "Reuse P136's archive verification, build-record validation and isolated adapter workspace. Overlay identical P141 protocol and leaf-driver bytes on both baseline and candidate adapters. Prove separate executable/source identities and the expected eager-zero versus adaptive-`N` settings before starting a guest.",
+        "Implement a strict P142 collector with exact two-run row declarations, deterministic process-order seeds, independent process pairs and a crash-safe checkpoint. Log every actual argv, stdout/stderr and raw per-invocation record. On resume, validate all prior pair bytes and revalidate source, executable and fixture identities before new processes.",
+        "Add a separate P141 diagnostic validation step. Bind its actual body/visit/phase labels and observed cache lifecycle transitions to each row. Join those labels to timing records only by exact call identity; reject class mismatch, omitted observations, unexpected extra calls and any diagnostic timing fields.",
+        "Implement the analyzer by run, row and event class. First summarize each process's calls to p50, p99 and max; then compute paired log medians and deterministic 10,000-resample intervals over independent process pairs. Keep each run and threshold row separate and keep preparation/instantiation summaries outside entry metrics. Emit no candidate decision or recommendation.",
+        "Add focused synthetic and CLI tests for schema dispatch, source binding, resume integrity, exact schedule joins, event-class validation, per-process reduction, deterministic bootstrap, and rejection of timing/diagnostic mixing. Synthetic inputs must use a fresh temporary root and prove every resolved output remains inside it before writing.",
+        "Full close performs two independent runs with at least 30 process pairs per row and a separate two-pair smoke solely for the foundation smoke path. Preserve all raw commands/outputs, helpers, checkpoints, diagnostic traces, analyses and receipts. Do not claim promotion or treat the smoke as measurement evidence."
+      ],
+      "fixture_cases": [
+        "`p142_reuses_p136_adapters_with_one_common_p141_overlay`: require the same P141 driver, protocol, fixture and toolchain overlay on distinct archived/current source identities; reject changed overlays, executable aliases, stale source maps and non-Register feature sets.",
+        "`p142_collector_keeps_two_seeded_runs_and_complete_pairs`: require two distinct run seeds, rows 3 and 10, at least 30 complete randomized eager/adaptive process pairs per row/run, exact ordered schedules, raw output preservation and safe checkpoint resume.",
+        "`p142_diagnostic_class_map_must_match_every_timed_call`: verify classes from the separate untimed diagnostic, join only by `(body,visit,phase)`, and reject missing, reordered, unexpected or misclassified calls and timer fields in diagnostics.",
+        "`p142_analyzer_reduces_calls_per_process_before_pairing`: known synthetic sequences produce expected per-process p50/p99/max, per-run/per-row/per-class paired log medians, and deterministic 10,000-resample intervals without pooling calls or runs.",
+        "`p142_rejects_stale_mixed_or_incomplete_source_bound_inputs`: reject archive/contract/helper/fixture/binary mutation, settings drift, duplicate or incomplete pairs, invalid timings, wrong oracle values, foreign paths and source changes during collection or analysis.",
+        "`p142_smoke_is_nonpromoting_and_cannot_satisfy_full_matrix`: accept only the explicit two-pair foundation smoke path, mark it non-timing and ineligible, and reject it as full analysis or P066 evidence."
+      ],
+      "integration_owner": "One source-bound tooling integrator owns P142 collection, event-label validation and descriptive analysis; P066 integrator owns candidate selection and promotion.",
+      "minimum_focused_cases": 6,
+      "evidence_contract": "Bind P139/P141 prerequisite proofs, immutable predecessor, common P141 overlay, separate source/build/executable identities, exact fixture and toolchain hashes, two independent seeds, each full row/pair count, actual argv/stdout/stderr, raw per-call observations, diagnostic class-map identities, per-process p50/p99/max reductions, bootstrap seed/method/resample count, all test counts and source-current receipts. Full timing remains descriptive with decision null and ineligible/non-promoting flags; two-pair smoke remains timing_evidence:false.",
+      "test_commands": [
+        "python3 -B tools/verify.py plan --contract docs/benchmarks/performance/P142-verification.json",
+        "python3 -B tools/verify.py close --contract docs/benchmarks/performance/P142-verification.json --output target/performance/P142/complete --execute"
+      ],
+      "path": "05-register-executor/P142-register-cold-churn-collection.md"
     }
   ]
 }

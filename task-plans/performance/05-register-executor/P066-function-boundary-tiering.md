@@ -50,6 +50,10 @@ Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
 [P140 — Freeze and attest the adaptive Register entry threshold](P140-register-entry-threshold.md)
 
+[P141 — Add individual-entry Register timing and diagnostics](P141-register-entry-sequence-driver.md)
+
+[P142 — Collect and analyze source-bound Register cold and churn sequences](P142-register-cold-churn-collection.md)
+
 ## Scope and ownership
 
 Read [EXECUTION.md](../EXECUTION.md), [SOURCE_NOTES.md](../SOURCE_NOTES.md), and [BACKEND_CONTRACTS.md](../BACKEND_CONTRACTS.md), plus contracts **C1, C2, C3, C4, C7, C8** in [CONTRACTS.md](../CONTRACTS.md).
@@ -62,7 +66,7 @@ One integrator owns lib.rs, dispatch, Cargo features and tests/performance.rs; l
 
 ## Input/output contract
 
-An opt-in adaptive policy counts bounded function entries and promotes at an invocation/call boundary using measured thresholds. No mid-loop OSR is attempted; failed/unsupported compilation keeps portable execution.
+An opt-in adaptive policy counts bounded function entries and promotes at an invocation/call boundary using measured thresholds. No mid-loop OSR is attempted; failed/unsupported compilation keeps portable execution. P141/P142 provide source-bound per-entry cold/churn observations and descriptive class analysis; this evidence supplements but does not replace this task's frozen candidate selection, semantic checks, controls, budgets, full measurements, statistics, or promotion gate.
 
 ## Implementation recipe
 
