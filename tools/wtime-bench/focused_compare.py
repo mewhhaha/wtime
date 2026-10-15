@@ -76,6 +76,11 @@ def sources():
     for path in [*(HERE/'fixtures'/'threads').glob('*.wat'),
                  *(HERE/'fixtures'/'threads').glob('*.wasm')]:
         source_map[str(path.relative_to(ROOT))] = compare.sha(path)
+    # The live-continuation driver reuses the immutable P012 depth-zero WAT
+    # and encoded Wasm as production inputs, so bind both fixture bytes too.
+    for path in (HERE/'fixtures'/'continuations').glob('depth_0.*'):
+        if path.suffix in ('.wat', '.wasm'):
+            source_map[str(path.relative_to(ROOT))] = compare.sha(path)
     return execution_identity.project(source_map, focused=True)
 
 
@@ -91,6 +96,9 @@ def profile(entry):
         return simd_scaling.execution_profile(entry)
     if module == 'thread_workloads.py':
         return 'threads'
+    if module == 'continuation_live_workloads.py':
+        import continuation_live_workloads as model
+        return model.PROFILE
     return entry.get('driver', {}).get('profile', 'mvp')
 
 
@@ -177,6 +185,19 @@ def products(entries, declaration, settings):
                               'thread_fixture_wat_sha256': entry['source']['sha256'],
                               'thread_fixture_wasm_sha256': entry['source']['wasm_sha256'],
                               'measurement_policy': 'complete steady_state_group driver batches; retain all legacy trials'})
+            if module == 'continuation_live_workloads.py':
+                import continuation_live_workloads as model
+                need(stage in model.STAGES and entry['id'] in {row['id'] for row in model.entries()},
+                     'unknown live-continuation product')
+                need(settings.get('baseline_mode') == model.MODE
+                     and settings.get('candidate_mode') == model.MODE,
+                     'live-continuation products require decoded mode on both sides')
+                timer.update({'live_model_sha256': compare.sha(HERE/'continuation_live_workloads.py'),
+                              'live_validator_sha256': compare.sha(HERE/'continuation_live_workloads.py'),
+                              'live_driver_sha256': compare.sha(HERE/'src/continuation_live_driver.rs'),
+                              'live_fixture_wat_sha256': entry['source']['sha256'],
+                              'live_fixture_wasm_sha256': entry['source']['wasm_sha256'],
+                              'measurement_policy': 'decoded; exact selected setup_ns/capture_ns; fresh process; batch one'})
             result.append({'workload': entry['id'], 'stage': stage,
                 'wasm_sha256': entry['source']['wasm_sha256'], 'profile': profile(entry),
                 'runtime_settings': settings,
@@ -225,6 +246,21 @@ def prepare_fixtures(entries, frozen, output, encoder):
             need(compare.sha(wasm) == source['wasm_sha256'], 'thread Wasm fixture bytes changed: '+entry['id'])
             fixtures[entry['id']] = wasm
             continue
+        if entry['oracle'].get('module') == 'continuation_live_workloads.py':
+            import continuation_live_workloads as model
+            modeled = {row['id']: row for row in model.entries()}.get(entry['id'])
+            need(modeled == entry and source['path'] == model.SOURCE_PATH
+                 and source['sha256'] == model.WAT_SHA256
+                 and source['wasm_sha256'] == model.WASM_SHA256,
+                 'live-continuation row differs from its fixed fixture model: '+entry['id'])
+            wat = HERE/source['path']
+            wasm = wat.with_suffix('.wasm')
+            need(wat.is_file() and compare.sha(wat) == model.WAT_SHA256,
+                 'live-continuation WAT source changed')
+            need(wasm.is_file() and compare.sha(wasm) == model.WASM_SHA256,
+                 'live-continuation immutable Wasm fixture changed')
+            fixtures[entry['id']] = wasm
+            continue
         wat = HERE/source['path']
         if entry['id'] == 'prepare_large':
             import workloads
@@ -260,6 +296,19 @@ def observe(executable, entry, wasm, stage, batch, mode, cpu, output, seed=None,
         need(thread_cpus is not None, 'thread observations require the explicit thread CPU mask')
         return thread_compare.observe(executable, wasm, entry, seed=seed, process=thread_process,
                                       cpu=thread_cpus, thread_cpu_affinity=thread_cpus, batch=batch)
+    if module == 'continuation_live_workloads.py':
+        import continuation_live_workloads as model
+        modeled = {row['id']: row for row in model.entries()}.get(entry.get('id'))
+        need(mode == model.MODE and stage in model.STAGES and batch == 1
+             and register_entry_threshold is None and fuel_setting is None
+             and entry == modeled and entry.get('family') == 'continuations'
+             and entry.get('reset_policy') == 'fresh_instance_per_invocation'
+             and entry.get('batch_policy') == {'fixed': 1, 'fresh_process_per_sample': True}
+             and profile(entry) == model.PROFILE,
+             'live-continuation rows require decoded all-phase3-core fresh-process batch-one observations')
+        argv = ['--continuation-live-set', wasm, entry['id'], n, stage, mode, model.PROFILE]
+        wire = compare.process(executable, argv, cpu)
+        return model.validate_observation(entry, wire, stage)
     if module == 'root_workloads.py':
         import root_compare
         wire = compare.process(executable, ['--gc-root-driver', wasm, entry['id'], entry['family'],
@@ -380,6 +429,16 @@ def run(args):
     declaration = (selection_manifest.verify_frozen(args.manifest, args.frozen) if args.frozen
                    else selection_manifest.load(args.manifest))
     entries = selection_manifest.rows(declaration)
+    live_entries = [entry for entry in entries
+                    if entry['oracle'].get('module') == 'continuation_live_workloads.py']
+    if live_entries:
+        import continuation_live_workloads as live_model
+        need(args.candidate_mode == live_model.MODE
+             and all(entry['family'] == 'continuations'
+                     and entry['stages'] == list(live_model.STAGES)
+                     and entry['id'] in {row['id'] for row in live_model.entries()}
+                     for entry in live_entries),
+             'live-continuation selections require exact decoded setup/capture rows')
     import p140_entry_policy
     entry_setting = p140_entry_policy.request(declaration, args.candidate_mode,
                                              getattr(args, 'register_entry_threshold', None))
@@ -449,6 +508,9 @@ def run(args):
         if any(entry['oracle'].get('module') in ('gc_workloads.py', 'root_workloads.py') for entry in entries):
             need(settings[side+'_mode'] == 'decoded',
                  'legacy GC candidate rows require the existing decoded cold driver on both sides')
+        if live_entries:
+            need(settings[side+'_mode'] == 'decoded',
+                 'live-continuation observations require decoded mode on both sides')
         if any(entry['oracle'].get('module') == 'thread_workloads.py' for entry in entries):
             import thread_compare
             thread_compare.validate_capability(cap)
@@ -510,8 +572,8 @@ def run(args):
         for entry in entries:
             stage = 'steady_state_group' if entry['oracle'].get('module') == 'thread_workloads.py' else (
                 'prepare' if entry['id'] == 'prepare_large' else (
-                'run_after_setup' if entry['oracle'].get('module') == 'representative_workloads.py' else 'load_and_call')
-            )
+                'run_after_setup' if entry['oracle'].get('module') == 'representative_workloads.py' else (
+                'setup' if entry['oracle'].get('module') == 'continuation_live_workloads.py' else 'load_and_call')))
             for side in ('baseline', 'candidate'):
                 report['correctness_probes'].append({'workload':entry['id'], 'stage':stage, 'side':side,
                     'observation':call(side, entry['id'], stage, 1,
@@ -529,7 +591,8 @@ def run(args):
                 entry = by_id[wid]
                 batch = 1
                 thread_stage = entry['oracle'].get('module') == 'thread_workloads.py' and stage == 'steady_state_group'
-                if not args.smoke and (stage in ('warm_call', 'run_after_setup') or thread_stage):
+                live_stage = entry['oracle'].get('module') == 'continuation_live_workloads.py'
+                if not args.smoke and not live_stage and (stage in ('warm_call', 'run_after_setup') or thread_stage):
                     cal_seed = seed_for('calibration', run_id, wid, stage)
                     batch, audit = calibrate(entry, lambda side, n:call(side, wid, stage, n, seed=cal_seed))
                     report['warm_calibrations'].append({'run_id':run_id, 'workload':wid, 'stage':stage,
@@ -545,10 +608,14 @@ def run(args):
                         pair[side] = call(side, wid, stage, batch, seed=pair_seed)
                     if entry['oracle'].get('module') == 'simd_workloads.py':
                         pair['expected'] = simd_expected_result(entry)
+                    elif entry['oracle'].get('module') == 'continuation_live_workloads.py':
+                        import continuation_live_workloads as model
+                        pair['expected'] = model.oracle(entry['id'], input_value(entry))
                     else:
                         pair['expected'] = pair['baseline']['result']
-                    need(pair['baseline']['result'] == pair['expected']
-                         and pair['candidate']['result'] == pair['expected'], 'paired oracle mismatch')
+                    if entry['oracle'].get('module') != 'continuation_live_workloads.py':
+                        need(pair['baseline']['result'] == pair['expected']
+                             and pair['candidate']['result'] == pair['expected'], 'paired oracle mismatch')
                     rows.append(pair)
                     journal.append(run_id,seeds[run_id],pair)
         need(sources() == before, 'measured source changed')

@@ -19,6 +19,9 @@ mod representative_driver;
 #[path = "continuation_driver.rs"]
 mod continuation_driver;
 #[cfg(not(feature = "legacy-api"))]
+#[path = "continuation_live_driver.rs"]
+mod continuation_live_driver;
+#[cfg(not(feature = "legacy-api"))]
 #[path = "gc_exception_driver.rs"]
 mod gc_exception_driver;
 #[cfg(not(feature = "legacy-api"))]
@@ -142,6 +145,10 @@ pub fn try_main(args: &[String]) -> bool {
     if representative_driver::try_main(args) { return true; }
     #[cfg(not(feature = "legacy-api"))]
     if thread_driver::try_main(args) {
+        return true;
+    }
+    #[cfg(not(feature = "legacy-api"))]
+    if continuation_live_driver::try_main(args) {
         return true;
     }
     #[cfg(not(feature = "legacy-api"))]

@@ -1,0 +1,2558 @@
+{
+  "analysis": {
+    "analysis": {
+      "batch_tail_latency_claims": "not calculated from batch averages",
+      "bootstrap_resamples": 10000,
+      "bootstrap_seed": 1347366964,
+      "confidence_level": 0.95,
+      "method": "paired candidate/baseline log ratios; median bootstrap",
+      "minimum_pairs_per_group_per_run": 30,
+      "sampling": "exact resampled median-rank distribution v1 for groups up to128 pairs; explicit resamples above128"
+    },
+    "break_even": [],
+    "family_aggregates": [
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 0.7653483635981965,
+        "run": 1,
+        "stage": "capture",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0060824250725844,
+            "run": 1,
+            "stage": "capture",
+            "workload": "continuation_live_1"
+          },
+          {
+            "median_ratio": 0.5980363902571473,
+            "run": 1,
+            "stage": "capture",
+            "workload": "continuation_live_512"
+          },
+          {
+            "median_ratio": 0.5903193077405007,
+            "run": 1,
+            "stage": "capture",
+            "workload": "continuation_live_73"
+          },
+          {
+            "median_ratio": 0.9660252315554136,
+            "run": 1,
+            "stage": "capture",
+            "workload": "continuation_live_8"
+          }
+        ],
+        "workloads": 4
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 1.019764775732293,
+        "run": 1,
+        "stage": "first_call",
+        "workload_medians": [
+          {
+            "median_ratio": 1.019764775732293,
+            "run": 1,
+            "stage": "first_call",
+            "workload": "call_overhead"
+          }
+        ],
+        "workloads": 1
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 1.0139396171487833,
+        "run": 1,
+        "stage": "load_and_call",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0139396171487833,
+            "run": 1,
+            "stage": "load_and_call",
+            "workload": "call_overhead"
+          }
+        ],
+        "workloads": 1
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 1.0134688627533053,
+        "run": 1,
+        "stage": "prepare",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0134688627533053,
+            "run": 1,
+            "stage": "prepare",
+            "workload": "prepare_large"
+          }
+        ],
+        "workloads": 1
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 0.7432234591653418,
+        "run": 1,
+        "stage": "setup",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0483007502436474,
+            "run": 1,
+            "stage": "setup",
+            "workload": "continuation_live_1"
+          },
+          {
+            "median_ratio": 0.33713353096955495,
+            "run": 1,
+            "stage": "setup",
+            "workload": "continuation_live_512"
+          },
+          {
+            "median_ratio": 0.8366558867167371,
+            "run": 1,
+            "stage": "setup",
+            "workload": "continuation_live_73"
+          },
+          {
+            "median_ratio": 1.031912611837472,
+            "run": 1,
+            "stage": "setup",
+            "workload": "continuation_live_8"
+          }
+        ],
+        "workloads": 4
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 0.7512224989979606,
+        "run": 2,
+        "stage": "capture",
+        "workload_medians": [
+          {
+            "median_ratio": 1.002518659657107,
+            "run": 2,
+            "stage": "capture",
+            "workload": "continuation_live_1"
+          },
+          {
+            "median_ratio": 0.5564197451503168,
+            "run": 2,
+            "stage": "capture",
+            "workload": "continuation_live_512"
+          },
+          {
+            "median_ratio": 0.5891801372765555,
+            "run": 2,
+            "stage": "capture",
+            "workload": "continuation_live_73"
+          },
+          {
+            "median_ratio": 0.9690166759592478,
+            "run": 2,
+            "stage": "capture",
+            "workload": "continuation_live_8"
+          }
+        ],
+        "workloads": 4
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 1.0397105995908391,
+        "run": 2,
+        "stage": "first_call",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0397105995908391,
+            "run": 2,
+            "stage": "first_call",
+            "workload": "call_overhead"
+          }
+        ],
+        "workloads": 1
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 0.9945922198158125,
+        "run": 2,
+        "stage": "load_and_call",
+        "workload_medians": [
+          {
+            "median_ratio": 0.9945922198158125,
+            "run": 2,
+            "stage": "load_and_call",
+            "workload": "call_overhead"
+          }
+        ],
+        "workloads": 1
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 1.0115808623300877,
+        "run": 2,
+        "stage": "prepare",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0115808623300877,
+            "run": 2,
+            "stage": "prepare",
+            "workload": "prepare_large"
+          }
+        ],
+        "workloads": 1
+      },
+      {
+        "equally_weighted_geomean_candidate_over_baseline": 0.7516564016554459,
+        "run": 2,
+        "stage": "setup",
+        "workload_medians": [
+          {
+            "median_ratio": 1.0407701146659822,
+            "run": 2,
+            "stage": "setup",
+            "workload": "continuation_live_1"
+          },
+          {
+            "median_ratio": 0.346558689768206,
+            "run": 2,
+            "stage": "setup",
+            "workload": "continuation_live_512"
+          },
+          {
+            "median_ratio": 0.8420256246517297,
+            "run": 2,
+            "stage": "setup",
+            "workload": "continuation_live_73"
+          },
+          {
+            "median_ratio": 1.0510431061015122,
+            "run": 2,
+            "stage": "setup",
+            "workload": "continuation_live_8"
+          }
+        ],
+        "workloads": 4
+      }
+    ],
+    "metadata": {
+      "baseline_binary_sha256": "b11e2322e486a74b1242d0f7a7d8fde78b753892487696b0742b88032492631b",
+      "candidate_binary_sha256": "f5112aad50edbfceb84876af8ca07b95a222841fc3082901e6bfce17cb1c91cc",
+      "candidate_sources": {
+        "Cargo.lock": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
+        "Cargo.toml": "9656851608b4f5ecb5f973a5ad370c67aef45fc557d4c132469bbf012662efff",
+        "crates/wtime-cli/Cargo.toml": "67dc333182e863f6bbe2a09d9c99e7519ff35a1bc41c551c49273cc1c9f935e8",
+        "crates/wtime-cli/src/main.rs": "760feeee1801d17c5675ba1f35e5fed10b3e2a02eb58458435e7d9ad355e6dfe",
+        "crates/wtime-cli/tests/metadata.rs": "38015f945e99ffca1c9dc18577575057050a91e4df215314d7636f3c9cc7141f",
+        "crates/wtime-decode/Cargo.toml": "1ae571b0eb1a293cd0ef6a181e33d267c40b228cd1afd5dd44ef9a309d113fa1",
+        "crates/wtime-decode/src/instructions.rs": "d352215a69fc6d33b188850974c364023510056c347d0ecf95ce9ba96cd05168",
+        "crates/wtime-decode/src/lib.rs": "9a83e26510e41a1d73556ebc74f4402f0aecb3493068dd7f66d4851d451524d9",
+        "crates/wtime-decode/src/metadata.rs": "e9b8d4d88fc5b34dccd0a1918346cfed3a03dd256129dca4c62f4e0bce8d036e",
+        "crates/wtime-decode/src/module.rs": "51b8fb2669a8323f36c7b199847a002f5b751dc04a382584a7112d7dd7dde71d",
+        "crates/wtime-decode/src/reader.rs": "0c061e8df82b02c1d0fb25ad2744991a2a8f0db7893ae5d5818ba89772651e6e",
+        "crates/wtime-runtime/Cargo.toml": "2ee79daf9485c056793d57b1886f75e0e74b12a6ddbf69f4b18f20ecffe8171b",
+        "crates/wtime-runtime/examples/embedding.rs": "d9baac3b51bacbee00c42a109831e8bd1a845158b5a0ceae46a911307d8b0907",
+        "crates/wtime-runtime/examples/suspension.rs": "097175e5cbbcf1be4716d4c1b584702042558d299360392fa742a85ead331e1d",
+        "crates/wtime-runtime/src/arena.rs": "cd929b222d1ccf871f06684510df6767a1e69af4d338458c0e98b88cd16c8441",
+        "crates/wtime-runtime/src/canonical.rs": "0d2d13027169158ef85a4b57726ef9c6ba5d7055d9894e436e1c6c27aad104d7",
+        "crates/wtime-runtime/src/continuation.rs": "939bfc2abfb16d1655de12af5306a0b4a6a1bbf6684b0073f00fe4a0eaa1ee6c",
+        "crates/wtime-runtime/src/coverage.rs": "fa735d933bf1334d23c262aac2d35282a743a49aaddb0c2bbc68da4c308f3fbe",
+        "crates/wtime-runtime/src/exceptions.rs": "08e306b7f60b25077f31706bf55cc4b521b0b2b713a61e8656e36fcc34c326ba",
+        "crates/wtime-runtime/src/execution.rs": "a267be634f8e7d8864b2466ad4d92a7e7c6769c0f08e303024569f3d36db4364",
+        "crates/wtime-runtime/src/execution/accounting.rs": "c86761a09e3c98301f54c971aa93e08da97140832c0f58e279aca4a75bef7127",
+        "crates/wtime-runtime/src/execution/compact/calls.rs": "e1dcb6a55ee7c46f0dc3770df01cd99ff176d1fad0ecd4a60919ef8597f3a20b",
+        "crates/wtime-runtime/src/execution/compact/execute.rs": "b916847756faf161cf101bc52a87a61599487d2129c429e5ec1ac6ee1ebda9d8",
+        "crates/wtime-runtime/src/execution/compact/fuse.rs": "82207739cf5f98614f3a03a0c33c96e7827dd3a294bbc3419c54ea15ec41efc8",
+        "crates/wtime-runtime/src/execution/compact/indirect.rs": "12c523580d084b4a8610406ef16edb2ef0b6ec8bf1bebfc2984c979eb2a34332",
+        "crates/wtime-runtime/src/execution/compact/inline.rs": "586b3d0c8c2afcc30b222e69eebab7e513c59613597ab755724ede57cd42ae68",
+        "crates/wtime-runtime/src/execution/compact/ir.rs": "8c3d92c69b456154f24437ae003ecec98e6f752f2bf6d81303c47495182674c0",
+        "crates/wtime-runtime/src/execution/compact/lower_control.rs": "e65f4c395a76332459944d43cd7a375469bb340b6faa500cd1efb0d3a2edb15d",
+        "crates/wtime-runtime/src/execution/compact/lower_numeric.rs": "478f4314b477a576a949d7dd5a1a6a5d6c4d69f88672fe632dc78693e0066547",
+        "crates/wtime-runtime/src/execution/compact/lower_scalar.rs": "443ab5a9ae5e9072b30ac0bf142831569333b7985bf30f4cff3de5d662756486",
+        "crates/wtime-runtime/src/execution/compact/memory.rs": "edc8bc2e7a0ee4c1479410404d955ce236ef572fdee68c3c33760be5b191c87a",
+        "crates/wtime-runtime/src/execution/compact/mod.rs": "d8a569262cb6be8adecf75d953aa025f386775604a5e51ba8540e62cc9a7a205",
+        "crates/wtime-runtime/src/execution/compact/prefix.rs": "ccdf0f3536d46eefec3c14392aef2e5eb13a92a41020a5ac207cd245aba91f63",
+        "crates/wtime-runtime/src/execution/compact/source_map.rs": "6b7b019ea82dc0e0d2130a3e2445a027b52d9dc9bad9d14b6bdceddc2853f84a",
+        "crates/wtime-runtime/src/execution/compact/verify.rs": "8aab417d454af6dc1b5dfb2f275bb5219022f04414499a9bb29811d453969678",
+        "crates/wtime-runtime/src/execution/cursor.rs": "e2f41ca404be0be915c6ae50412076217337bf96427d3cceeacf28af4e0027b1",
+        "crates/wtime-runtime/src/execution/effects.rs": "640bf290be1691465e44f188213b644030dab6f8ca1599790f5138816e192bcd",
+        "crates/wtime-runtime/src/execution/plan.rs": "68e43e6484a6c198529b333a6e5122526845544d660191121755c3108e125d7e",
+        "crates/wtime-runtime/src/execution/register/cache.rs": "3dce1d40358e4e4c7d3be91dbf3c8c582292e9148da736f30b6bcd49932d46be",
+        "crates/wtime-runtime/src/execution/register/control.rs": "cd86dd0bba5ec78e99423a96cc026ddc21c1e6d829fe3b6d0c7b40a0324b503d",
+        "crates/wtime-runtime/src/execution/register/execute.rs": "56cbcc2799a262350db11833d3e8ec244908160b3daa566e7703e87230086586",
+        "crates/wtime-runtime/src/execution/register/exits.rs": "6706e3c70c9cac9ec8af639a854fc8c0d139f4d9139b952a19e125a39eb9101c",
+        "crates/wtime-runtime/src/execution/register/float.rs": "23edf66a1de74565e8c1672456464c538991105a36cc37c522f3d9e7ecb73632",
+        "crates/wtime-runtime/src/execution/register/integer.rs": "c39b44b8341e69aa8b842854c8ba0fa6517e41906e0c8d2595e4b6fc0027126e",
+        "crates/wtime-runtime/src/execution/register/ir.rs": "62e3e658d599c1078998a2a8696d1cc94ce404052930a7568a76c4c561886624",
+        "crates/wtime-runtime/src/execution/register/lower.rs": "7831a2838172ffad102d9e4f647bf5598a0951eec365b95f3dfd6470e6f84509",
+        "crates/wtime-runtime/src/execution/register/memory.rs": "1770b972db3e26d4b4238f015d4dee4233fa7d4b945bb95b565c1e7eddecba47",
+        "crates/wtime-runtime/src/execution/register/mod.rs": "387fb9848651d95f5068df015d58a96a66a20696f57962ab34efa5d18930e7f8",
+        "crates/wtime-runtime/src/gc.rs": "7dcfcc9aaff6a333041d9d8a7323d1ce0fad90b382b5023e9caeeb52815b3471",
+        "crates/wtime-runtime/src/gc_exec.rs": "56cf9173994d267fa4ead0af137b8f9f941f6b86a52d458f31be3ce7a32280fc",
+        "crates/wtime-runtime/src/lib.rs": "06e6ab34c277220b9fde0afa591d700a3911679eed4fa4c79b20524a4d0aa681",
+        "crates/wtime-runtime/src/linker.rs": "477f60f389d72bf89b41c3af39d1d241d234e09bd9445f2ff343ecdb36d5343e",
+        "crates/wtime-runtime/src/numeric.rs": "5acd2cc6a4e9e9c23fd4bb25ab8a9fbc1fa1658d63f4a95e207a00963650dc92",
+        "crates/wtime-runtime/src/perf.rs": "14a6f3ba84000eeea2e31ef895895d2a46dd5d4e34135eba19ba0b5abc8bcd8f",
+        "crates/wtime-runtime/src/reference.rs": "0fc6c3d773332bc39bde1e627e6c683ccfc36d525cf1a6b410c8fd69fdbac287",
+        "crates/wtime-runtime/src/register_cache_diagnostics.rs": "3f058fdcbdeb43d16f4c6fce6b052e097c6514429f2de1392c85631e2d0bf125",
+        "crates/wtime-runtime/src/shared_memory.rs": "6b1a5a02e49d2d73ee04865af8d6bac68c60305f1afc754ca9b70252750bce44",
+        "crates/wtime-runtime/src/simd.rs": "7582da6d9aa7acc7de81f3a63d4d76b43d8695e500f153e5eb22f909a3360633",
+        "crates/wtime-runtime/src/wide.rs": "e0347c76d5a00a56396bd641ce4beb4f0d6a7500739f6de57283c1cbacc4224a",
+        "crates/wtime-runtime/tests/core.rs": "54f6e18cff27f3da96ae0736d7910013883742f0215d35abb551ce324c78af1f",
+        "crates/wtime-runtime/tests/exception_root_safety.rs": "91419a4df0834c064ac143e34f92a15224cea597716328a2074b0a351ff51213",
+        "crates/wtime-runtime/tests/exceptions.rs": "3cc47afeeb6428154f6d0a30db6362a009c45d292278f5f03ca60c53c3342a93",
+        "crates/wtime-runtime/tests/feature_profiles.rs": "dafe483c28f8683332d198935818fff885827dfc5cfd1ad62f27330490ebc14a",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/canonical_seed.wasm": "596587cde1c31c6ff46516aea149ee457eb2785004d763e385b43289e578c51c",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/canonical_seed.wat": "c09ee55f2db8ddc880899ae8f57f34fdb89c20be8101fb1049e0408da6a605be",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/changed_indirect_target.wasm": "c501d42742682b643b9616347e1ed09cd63dc1c715e5cb338e23a3bb41734ae9",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/changed_indirect_target.wat": "3faed5bf7864b4f31f7f8fbf4867dce3a1418c47269bbd0989e2573fa67e1928",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/equal_heap_fields_256.wasm": "0378a4f1f4bf8599446c7330e991f43cfe8a32f85e57d146845c678c4d0e61d8",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/equal_heap_fields_256.wat": "500fcf1b0932bdd04ccfe25a2fe75e9f990f5687bb9f69fd681a22619a8eae14",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/nominal_exact_casts.wasm": "6fc8a2cac95a90fe0d1a3d7c1cf1a9f57041df41f6ec8ccae747c1368b9f03e2",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/nominal_exact_casts.wat": "278b748822210879d166c0131c10b88ac32b38bf8437c1ada05667e1d8156ada",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_1024.wasm": "29959efb8bb583a1426fbb05a3f4f88fc4fbf1f95b887c7f3157e9e9800d1d46",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_1024.wat": "5d192737237cae94eab827c0ad5bc712b7575c6295755f7b4c084a8237c58a2b",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_16.wasm": "709e64aec13594de819a90d324d75026e3179fb5b78d92d1f49c9427db398c9f",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_16.wat": "f95da25cedb52055b84f0c92346f19523cc6e613c60d7a6f899f8b5fc2f8e963",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_256.wasm": "e1194d66f564ba7c37445d91f70d3a47acfad2f1da37bf4f714617896289e471",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/packed_gc_types_256.wat": "847d7a5b472a1ef08af9510b80d64468aa9e92da19a72929e21a20a0aff2200c",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/typed_function_refs.wasm": "c07a43c30d251223ebd9769ef3742eb32ec5d3ef751d6a9f0e1507ad353b4cb7",
+        "crates/wtime-runtime/tests/fixtures/performance/gc/typed_function_refs.wat": "5d62ffda642de10f8ddbfa828512e8bc7d36d3cbcd70ce2e52f5532c030d990b",
+        "crates/wtime-runtime/tests/performance.rs": "17f9ba4c18c59a42d618a9dfb37787f6ef8a3a63006ba4046507bb719e2d3153",
+        "crates/wtime-runtime/tests/performance/p016.rs": "b9b60ca9b110c68d472e7fca62b16952b0cb84694fd374d09850e9d2a141aeb4",
+        "crates/wtime-runtime/tests/performance/p017.rs": "4122d30ef0f042af886692d52de26c9a48d016f5f8e2a0bf67c6e9c9b84e9ef7",
+        "crates/wtime-runtime/tests/performance/p018.rs": "e06da12e7539dbfc36bdfcc1981e87c8d926b08679f9bd2fce201987d5dafeae",
+        "crates/wtime-runtime/tests/performance/p019.rs": "8294310dd4da5f9a7a05bf0bfee0d2be503ec52cdddbca4e21c6a3ee9d3b2715",
+        "crates/wtime-runtime/tests/performance/p020.rs": "b6cb36f79e0d9702e7a8be4f81d254fcbd9d683d57c6baefe37f06951f611185",
+        "crates/wtime-runtime/tests/performance/p021.rs": "fec19c012536565dbf2ba3e3f80f26b3fcc4e7d560a2218b5335552be2448a94",
+        "crates/wtime-runtime/tests/performance/p022.rs": "ae36fe56e6a9f73b24074e5f23381ac05cb3377df9d5f44799490c8114c677b7",
+        "crates/wtime-runtime/tests/performance/p023.rs": "6cbadd3bf64068c0ba819bed3be369c1334fb876075e9f3253c9d612666472f6",
+        "crates/wtime-runtime/tests/performance/p024.rs": "bb48a497f6ef46705df70225077b224cbcec21c4d600a5f6fa22bf29bd428b59",
+        "crates/wtime-runtime/tests/performance/p025.rs": "1af91ae70dae7ecd1d03abab59b76c5cc34aa3169b7154b2a9fc3034df680c2e",
+        "crates/wtime-runtime/tests/performance/p026.rs": "10ecfc3d74d0e881e5f98d46f0ac33daa04085586bd2604f09cfcd5a161f2446",
+        "crates/wtime-runtime/tests/performance/p027.rs": "5ad17c20bb89f535590936259526b11f09d9bde2cc17e2e94876d8083b995b71",
+        "crates/wtime-runtime/tests/performance/p028.rs": "a20b1701af071f41de5493e8e69587fd0fedb2dcccfec45e9294e0773ed29edb",
+        "crates/wtime-runtime/tests/performance/p029.rs": "fe926229024f5ca65b40bf38f3c62a9de0801ee4cdd49d9787565c3366d04871",
+        "crates/wtime-runtime/tests/performance/p030.rs": "96ff18f747e5c9deb19359c13d5f34b2261f06474edbf69e6f4d559500cedba2",
+        "crates/wtime-runtime/tests/performance/p031.rs": "b4b0f3466af3d54f2b82376dd8191682a1e8c5dfdb24da36424beeaf705286c5",
+        "crates/wtime-runtime/tests/performance/p032.rs": "8cda54330226e6b8de7de2fd7565c3d1feeed95563174df6561794ce252d914a",
+        "crates/wtime-runtime/tests/performance/p033.rs": "75e7d654b6e9d49b7e5929c756fb81909bf8c429d238bd24e5f29160609670c5",
+        "crates/wtime-runtime/tests/performance/p034.rs": "9c8e581c4f1b5848bb4f3f38601675cccd361a91c936896b0db9db6bae8efeae",
+        "crates/wtime-runtime/tests/performance/p036.rs": "1dadaf679a3c12ba6070dc5c0c74e01aef0b072a8fbf691adf96b42fbf1c27d7",
+        "crates/wtime-runtime/tests/performance/p036_private.rs": "a2cec4949872b46936509fa5e7becbc23440a18cba0bf273979687c548cb12e5",
+        "crates/wtime-runtime/tests/performance/p037.rs": "9f761a49e3ab4a57fe173bd406aff861f304f14f970d0ff8fc73659bf87be30e",
+        "crates/wtime-runtime/tests/performance/p037_private.rs": "b35445fc643e895f66975832d43ece1525e389b876f9e87331de5042894b89ab",
+        "crates/wtime-runtime/tests/performance/p038.rs": "bac986494a5c5ac5eeff07ac124109bf65e76397b9b60fc5600db2ee84b842ea",
+        "crates/wtime-runtime/tests/performance/p039.rs": "95bf392e7b99132efd76c088a6902645223a665dd32f2c74bf374a6da1522810",
+        "crates/wtime-runtime/tests/performance/p040.rs": "6efa67f4cd7a93b0441af8002a150f7972e756990b918a5464fa5d6804f2ca07",
+        "crates/wtime-runtime/tests/performance/p040_private.rs": "dcb3592b2b785c45fea707a9ba6ed6c4f5f69f2660b0e62e16fe68ab48c552d5",
+        "crates/wtime-runtime/tests/performance/p041.rs": "71b15997f183fa4044b64a3576c3ceca7c31f7463b4e1d10faeff8a8e51da28b",
+        "crates/wtime-runtime/tests/performance/p041_private.rs": "8b6d1bc9a67259fa72b972b78353caccb2851b157face5bd85ca208a506670e6",
+        "crates/wtime-runtime/tests/performance/p042.rs": "5a2fb3d372fdb06c4cbde9bcc6a40735faf2e1e7ae63309c2cfbd58bd37c6fd2",
+        "crates/wtime-runtime/tests/performance/p042_private.rs": "6fdf329b9c2ae26b31602eade65c53ec92949e3a20afed3d5ea3f879b723962f",
+        "crates/wtime-runtime/tests/performance/p043.rs": "496b45cef6ca74dc44dd9c41ea51a0dc83d290c5eb3f96f1220bb29d30e9c330",
+        "crates/wtime-runtime/tests/performance/p043_private.rs": "15df279059fd51eb7a22704dde731a2f772d749245c0308a980161e0844dde55",
+        "crates/wtime-runtime/tests/performance/p045.rs": "3c7940178aa23cdd06d5ea9d433080befde388a0bd5230b7b1247243c1120e6c",
+        "crates/wtime-runtime/tests/performance/p045_private.rs": "6816e5e2f16b67f6e8fd9c38a883a595c60b56ed8ee178f5d5427c67951cc7c7",
+        "crates/wtime-runtime/tests/performance/p047.rs": "c2d02b5914983ff1465c935dc3d717f8ee224b4917854a2c3d42a1ecf822792b",
+        "crates/wtime-runtime/tests/performance/p050.rs": "1bfca2c47bf31d1cf248136f8014676a42556a1c15e908c81b5ec72834e119ff",
+        "crates/wtime-runtime/tests/performance/p057.rs": "b7ce417e17e6910a63d0d2f8ddd158608d385e9675394508bd949770f6c8d9ab",
+        "crates/wtime-runtime/tests/performance/p057_private.rs": "f3eb58e7e4e5207ad1c794e23d3bb7d222c43e6e67854df3c66604c972cd8016",
+        "crates/wtime-runtime/tests/performance/p058.rs": "68e119a7a03af160ff13dd1a8d4587fb30201a4ef870f9e751f3d57c8843f30d",
+        "crates/wtime-runtime/tests/performance/p058_private.rs": "547b71ccf24236d7a0e4ee38ff9fae66c07a1ce09599aeb34177034dcfa0b231",
+        "crates/wtime-runtime/tests/performance/p060.rs": "ded8cafc91068935622c4bff5d0cc2e9c1d3a5863d8292b6b7a7587eb3b6e5b0",
+        "crates/wtime-runtime/tests/performance/p060_private.rs": "90afd3956d6e5cfaae9bec4175817ff6a89030d09185ae9f3980779c6a47c846",
+        "crates/wtime-runtime/tests/performance/p061.rs": "eee0c6726bc00269b0e92e200fe926ed0c27cc0e9bbd366b1b05b4dea2cf868c",
+        "crates/wtime-runtime/tests/performance/p061_private.rs": "81d695ecb2029610f14c0176dc2974c830bf67e7352a2a6cfd9033f393a078e3",
+        "crates/wtime-runtime/tests/performance/p062.rs": "fb4cab0309b1dfbe01d4fe20d513de9f6f25f804838460e2ee97aa713bfd41c8",
+        "crates/wtime-runtime/tests/performance/p062_private.rs": "b9a72f3342425f76e9fea0e3510272a2fba7128c338420b7e4e8a5f9ea13297f",
+        "crates/wtime-runtime/tests/performance/p063.rs": "6d7995ff4173ac06e530750edbeb161a6823e3be913fbb277a3561f201f67cb8",
+        "crates/wtime-runtime/tests/performance/p063_private.rs": "5e8087bd879ae5ede25094216538428fe7a5cce061f8d87bc1771f76896c9298",
+        "crates/wtime-runtime/tests/performance/p064.rs": "4bb54fa71c207a5168ddc6dc2bfca470dacc6b69c86a697adc9035b71c39772b",
+        "crates/wtime-runtime/tests/performance/p064_private.rs": "73cf2aaa94546a8ad7e354b0f0fde8df84e972da2c8e603e52ba247e9330fdab",
+        "crates/wtime-runtime/tests/performance/p065.rs": "751bfb59bbf54ec982ecd390559dd3a7b796486539570ae9c30b9a6d15065b9c",
+        "crates/wtime-runtime/tests/performance/p065_private.rs": "8eadd31af3466121805c4080ce9783e47b5d711d698a7aae7c9902493c4417c8",
+        "crates/wtime-runtime/tests/performance/p066.rs": "ec88659280c029c1680ca7c1766e7d4c41d390c0c2d9ea1ef85710cf5c6392e8",
+        "crates/wtime-runtime/tests/performance/p114_private.rs": "df7c3c69a3809be0c7c2537d5f75313fd9417180f92eb2f222ccd22158de785b",
+        "crates/wtime-runtime/tests/performance/p115.rs": "810cf96a658de92f91aa11172061b7f08f0567f31013374e607328a6420f3aa7",
+        "crates/wtime-runtime/tests/performance/p116.rs": "d8cc346589346282cd463f59aa52e8095f1b6aa130e084fa2eebd8dccab22451",
+        "crates/wtime-runtime/tests/performance/p117.rs": "4408e6ee08188d857f0e473efb0bbd08efe58a255cf0b133fdcd3205e9947953",
+        "crates/wtime-runtime/tests/performance/p118.rs": "61f5cb9a87b89e714ffacc1f4557abfd2001769d6ae65804b8b2ce6eeaa1d42b",
+        "crates/wtime-runtime/tests/performance/p119.rs": "08c8575b9f1881509326a9785edd8f4fb67fa71a2407ec6dbf0e9c8d9e709b8a",
+        "crates/wtime-runtime/tests/performance/p120.rs": "158343f8ea6dfad884cd0580501dbfb7225f46432ca5a2b59113dcc2aad0ff60",
+        "crates/wtime-runtime/tests/performance/p121.rs": "00c01c1ac1816c4d56548bdb7d043a49ed85b9639d2492ef4c9e6d7b97f9e80d",
+        "crates/wtime-runtime/tests/performance/p129.rs": "3b41dee1e7f247050c2e600a6adc4f0d785a3f1fd13bd91e78e7610bd5ea4cb6",
+        "crates/wtime-runtime/tests/performance/p130.rs": "eb1ad458bc5a041b338e5594d7d6d8a2f8cb974006705f6d282fe0f1fbcb9a0b",
+        "crates/wtime-runtime/tests/performance/p130_private.rs": "9b9408c2b222f14a1678ea17765373d155190768decc8d04937897794fb6853b",
+        "crates/wtime-runtime/tests/performance/p131.rs": "4f3e481d10e01dc2bb171a61c7082726ce1fb972e28591e7f962c07b88be70ca",
+        "crates/wtime-runtime/tests/performance/p131_private.rs": "775e71c8f0ae18997fe079a2f3210f8ef59a784a143c15d8a05bb8e39669b70f",
+        "crates/wtime-runtime/tests/performance/p132.rs": "5a0c9a699497b37b5951a281adeb8ec5688c408a46b72166aab325802fad8393",
+        "crates/wtime-runtime/tests/performance/p132_inventory.rs": "be3863d3a57c328de5bccdbac192b646fb863302eb6a6e61c7c43d0ced1f9cad",
+        "crates/wtime-runtime/tests/performance/p132_private.rs": "ca118ce8a4a30c49ed79a19cad8d6b6bd49d7561abd90130f174277551d3d0b7",
+        "crates/wtime-runtime/tests/performance/p133_private.rs": "40a3bf04dc78baa36893c17b5cc9a84577790fc04bb66480488a8ab072645729",
+        "crates/wtime-runtime/tests/performance/p134.rs": "c9e1e09f4771afde4c2808b2e8b7fd12ce024b2402cb60147d0a3598e1ea2634",
+        "crates/wtime-runtime/tests/performance/p134_private.rs": "d60857fe7689fb5996f3d27d381174880f8ccf0a0c8c197844296b4a71712318",
+        "crates/wtime-runtime/tests/performance/p138.rs": "510d306c8fac79e7be58a695d1c190c44817ddf8cd3b1c8b174ee12b4df99327",
+        "crates/wtime-runtime/tests/performance/p138_private.rs": "c67fd76c55c855d4c19167dfae97365a4ca8f36ad8af69ffa18442a4e743c908",
+        "crates/wtime-runtime/tests/performance/p138_trace.rs": "6a213782642e543b18c1a47e31b35d9a3adf133c175b29ce67ea2adbfde3e423",
+        "crates/wtime-runtime/tests/proposals.rs": "8fffaa52d03e81fc7d88d0970617f1a0c8ba7602fc241ad9c65367133d2a9927",
+        "crates/wtime-types/Cargo.toml": "e5c4d20d5d35fd4a15ce854f96602add82b86a1bbe4599aab69b0abcc7dc9031",
+        "crates/wtime-types/src/error.rs": "a25659ee8aefcf08babfd2e4b027b698176adc100da5336a9a28f2f0664d8a2c",
+        "crates/wtime-types/src/features.rs": "3c465ce7c325c9110d42a6df08ef20dfc90122e8a86a2fdbb85a6063e82b2dc5",
+        "crates/wtime-types/src/indices.rs": "249359a286195771d58ad78daa775c8164de6419100fea38e6f6f172f92e2e40",
+        "crates/wtime-types/src/lib.rs": "9f1ce2f00f37fba42288e5f4c78262234bf6ab453f7061d7b4907bbe4fdeca4d",
+        "crates/wtime-types/src/types.rs": "d5d6a398f344494ada0d065afcab4bdee157f4803351a2ce6752ee3fc0d4e266",
+        "crates/wtime-validate/Cargo.toml": "fed963beb5aa95d1c242f4131509edd95069e1b27c4e69f84f969357a04a0639",
+        "crates/wtime-validate/src/acceptance.rs": "322c98e589f396f77097a7acf1dabc666f72ccbba8936703cb115ed7befd9621",
+        "crates/wtime-validate/src/atomics.rs": "51d71f78adc9f140c79dad601afe64f4bc42fb2cf896a1d753a480f57f70bbc4",
+        "crates/wtime-validate/src/continuations.rs": "185cf7f137c9dbd57062f95f3d36715e92420a44f5579fb09a34b7dd65029969",
+        "crates/wtime-validate/src/exceptions.rs": "5afe91db3e03444019a0181f639f683c8969563ac20376c6485395c79f46c99b",
+        "crates/wtime-validate/src/gc.rs": "e46a4440d3ffbea02c4905ffffa75e9582c3193697a8484ec464fdaa7a34f21f",
+        "crates/wtime-validate/src/lib.rs": "6d6fd6442fdad200c494fc43775dc003ee18fbfa63632c7056e238777a283455",
+        "crates/wtime-validate/src/types.rs": "2d6f8561b6d9d8eeff0bbb76510e9b9a6159d9646d7c01a01fda6f51207ec7a0",
+        "crates/wtime-validate/tests/exceptions.rs": "061d15fe56d6028e54671c5dd5d86ee1069f2ac99183886a3c3441356d4da290",
+        "crates/wtime-validate/tests/policy.rs": "4a4c47509bd9da3850b1ab76235d585db2c7aba826f1f89ec9055a2d888774c3",
+        "docs/benchmarks/performance/P033-contract.json": "99f9f88ea35fcc87c6339d9d91a179e7b900fb7aba2010faafaf41f8e27bf4d1",
+        "docs/benchmarks/performance/P034-contract.json": "1e0038bec040eb356dff993f1f2c1d862f203ce1056fde6338d8ed530b6bc91e",
+        "docs/benchmarks/performance/P034-measurement-contract.json": "0471ddb2b3c6a43d5c65686af402c4bb3d132dfac7df8469b97b8a151d97506b",
+        "docs/benchmarks/performance/P034-registry-preservation.json": "fa8d2565b2d12a2a004d8d64004397cce6f302d73714c7e89f49578bad5b9f33",
+        "rust-toolchain.toml": "10c67ce85265f8fc5b1a52b416af1a553e56ad96ca9843da6579e2854741e084",
+        "tools/wtime-bench/Cargo.lock": "4d1a59eab7ae2ce8c6abcd203afb3a20d0787e6cd536b86a919fd133196c5431",
+        "tools/wtime-bench/Cargo.toml": "389e92491b6caca59c924bd41a46bee79828b41459f2c3712411e3e40bcb5a3b",
+        "tools/wtime-bench/checkpoint.py": "827a1f659ddd524f9e06c37e4fb47ecf3c8bdc1d2c7e454cf195a6e787328b37",
+        "tools/wtime-bench/cold_products.py": "a69ec2c0864539c6bb7721a86bd6810ffb77058c724fe7ecd5f2832a0184d4ab",
+        "tools/wtime-bench/compare.py": "677333407b615beccc1946995300f6e5a67ef8061187e6d922e7a8278754e711",
+        "tools/wtime-bench/continuation_live_workloads.py": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+        "tools/wtime-bench/continuation_scaling.py": "2c078358502ed394c29e8f99aac611eed1e31311749a5856683969a7aacd1961",
+        "tools/wtime-bench/continuation_workloads.py": "384f68be5a40308aee52e0b8d8288511f36a0c2347ba7ebb36fa0a7bfdb7b872",
+        "tools/wtime-bench/execution_identity.py": "906837962752ca92ed1cff93649601a52d97bf29ad170e04b95c9ae3f28b5b77",
+        "tools/wtime-bench/fixtures/continuations/bound_nested.wat": "5bb9f6ec7c849fd71bb91e7e9006ad6b954ab723a724442539bdb956c1c66f70",
+        "tools/wtime-bench/fixtures/continuations/captured_reference.wat": "f04c26de19fe09fce7bfb0182559bd2976de582b891712d304dc4bc760c6f7d1",
+        "tools/wtime-bench/fixtures/continuations/cross_module_consumer.wat": "6c9a7c8e869e9f3c1d931b63251032bae765c20c78d06f11aa5ff9e1fb24256d",
+        "tools/wtime-bench/fixtures/continuations/cross_module_provider.wat": "4e69dd91d7bc14d7e8ba630138ab2ae4c58accdf9de0f284bcfdfcda13b6e651",
+        "tools/wtime-bench/fixtures/continuations/depth_0.wasm": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "tools/wtime-bench/fixtures/continuations/depth_0.wat": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+        "tools/wtime-bench/fixtures/continuations/depth_32.wat": "8fc4cd5704aac0b9ca91a13ff8ac87957cd30406b43994fa5eadab23d00ba226",
+        "tools/wtime-bench/fixtures/continuations/depth_4.wat": "05cd6aec67fe1eee5466a1bb39cdf7bc1d701f2fbe41b88620eb62ce06c7d554",
+        "tools/wtime-bench/fixtures/continuations/one_shot.wat": "1d33035426adde6a81cb71f9fe3457e869bfd810c68c728e5868b3196daf9ae9",
+        "tools/wtime-bench/fixtures/exceptions/caught_throw.wat": "5433ec09235db09ebfd9e02c9ad89afb76732b7b42586c9204d0bbb5c67245f9",
+        "tools/wtime-bench/fixtures/exceptions/cross_call_catch.wat": "d8b1444bb104bc896f56ad1e67fca80a5977c58f52e05805b231c4753d2ea521",
+        "tools/wtime-bench/fixtures/exceptions/host_throw_catch.wat": "52c9f9b5da3990de5a948b6614680fc0099891c226d4b6903ed56560a3d2b087",
+        "tools/wtime-bench/fixtures/exceptions/normal_path.wat": "cd26d75fd8d2f01183fd3c40ad2b0eb5865d433a4efe2826cd86dda709e2d9cb",
+        "tools/wtime-bench/fixtures/exceptions/throw_ref_unwind.wat": "47a2d51cc83f365c3099c82712c57d422968535750eb91f078868c204ebf0f9f",
+        "tools/wtime-bench/fixtures/exceptions/uncaught_throw.wat": "e89d6eca82d1d903fcac6dd8bda281f6ec837f4c268513c416b979528a674fd8",
+        "tools/wtime-bench/fixtures/gc/continuation_root.wat": "05d3278c9be02485919784bae44f7b5fcd55a63856296b0fb1e4a2c854379448",
+        "tools/wtime-bench/fixtures/gc/descriptor_consumer.wat": "f80a41c42745545c0007917baeb5b905f3085a49b507cb8e9f4331fec1607118",
+        "tools/wtime-bench/fixtures/gc/descriptor_graph.wat": "f7bf5ef8fb302e705e232586f720e9d864e5431be67b29590ea9b7f98b9b1a93",
+        "tools/wtime-bench/fixtures/gc/descriptor_provider.wat": "3197bba5170209b278b8a436d09923fd383255d10b51fe0014383f5099dec9d3",
+        "tools/wtime-bench/fixtures/gc/host_reentry_collect.wasm": "63852bfe7dd4659db0cabbd8a01fe4249734ea4a719c8a0dcb5396e1c8a7c8e4",
+        "tools/wtime-bench/fixtures/gc/host_reentry_collect.wat": "91d9a3ba857c39ace65f4a9e1e3ff91cdfe96ca0b52ad45539b63a61534ae7cd",
+        "tools/wtime-bench/fixtures/gc/nominal_exact_casts.wasm": "6fc8a2cac95a90fe0d1a3d7c1cf1a9f57041df41f6ec8ccae747c1368b9f03e2",
+        "tools/wtime-bench/fixtures/gc/nominal_exact_casts.wat": "278b748822210879d166c0131c10b88ac32b38bf8437c1ada05667e1d8156ada",
+        "tools/wtime-bench/fixtures/gc/packed_array.wat": "7580ef1c80342937d900b7acac0bde6e4cddf21fc03de15b9da0d7c91dad6a8d",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_1024.wasm": "29959efb8bb583a1426fbb05a3f4f88fc4fbf1f95b887c7f3157e9e9800d1d46",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_1024.wat": "5d192737237cae94eab827c0ad5bc712b7575c6295755f7b4c084a8237c58a2b",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_16.wasm": "709e64aec13594de819a90d324d75026e3179fb5b78d92d1f49c9427db398c9f",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_16.wat": "f95da25cedb52055b84f0c92346f19523cc6e613c60d7a6f899f8b5fc2f8e963",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_256.wasm": "e1194d66f564ba7c37445d91f70d3a47acfad2f1da37bf4f714617896289e471",
+        "tools/wtime-bench/fixtures/gc/packed_gc_types_256.wat": "847d7a5b472a1ef08af9510b80d64468aa9e92da19a72929e21a20a0aff2200c",
+        "tools/wtime-bench/fixtures/gc/root_lifecycle.wasm": "7210514252b38d64d46fb0d7452e91aa838ae87077922e9277aa81b65bd9fa5f",
+        "tools/wtime-bench/fixtures/gc/root_lifecycle.wat": "79f4ac8511123ba14bdde5a31cd1953bae1c69f1dcba9ec5878785e1db447a51",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_256.wasm": "0afc4043fc2919ddd466d1b4a89281b48281ac5e567d5c49c94cf41d28f33412",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_256.wat": "c4e717d0a3514d8a4d784bf72fd8ffaa63d73a001dcaf27454c446b48ec720e9",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_512.wasm": "e03dd87300e95c5f1a94f4befe2ff7820e6c91a8bd32b7958abae96e5cfebd93",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_512.wat": "f0fd64cb87de3404559acdec57c14af619c4a1959f169f69e23ef517d7fb4487",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_64.wasm": "1c6a6a8349ed5788fe3bbef01f1de97755327b874f1ca1bb9a63b8ebe4121013",
+        "tools/wtime-bench/fixtures/gc/roots/root_numeric_64.wat": "774e252694b779c271d153e62e481a0e22aa770015947fcde0a3478ceebceb59",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_256.wasm": "5344dc604f261464555b2f22a497ae74b45811d72faa543124243ae3d881afdb",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_256.wat": "499df04692c77e5c7c8edf45d2a84a0d41e4b926489dcce8c17f7a129dc3e100",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_512.wasm": "f57cb65c58aefa656614cfe1394321a656494fae0192208d376ecc4db637a94c",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_512.wat": "46265b44e96969da2f08dec2650cfd374763a91c827330a450115a787dd7db73",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_64.wasm": "ce260e4693744fb37d7f40ef0c30ea7072b47fb64b57715390f15db288cdad8f",
+        "tools/wtime-bench/fixtures/gc/roots/root_reference_64.wat": "11c57d5a347b71b492da01678bab8ae9cd853710d9e9526b6c5ddeb730697bdb",
+        "tools/wtime-bench/fixtures/gc/struct_graph.wat": "9fe9e8f7c7c9cd995d063bf4a54eb8d4aab61eb526f101b8c50126c50ddbc8df",
+        "tools/wtime-bench/fixtures/gc/type_churn_1024.wasm": "09f4dcbb91c1575f2f4ad2115d6198ae7959f048c66028ada960b5b4a2061bfd",
+        "tools/wtime-bench/fixtures/gc/type_churn_1024.wat": "cc0e5ea4534c2464bf1b1b286ece900942882174da20af3d506ddff6f8ef813b",
+        "tools/wtime-bench/fixtures/gc/type_churn_256.wasm": "bd136a0aeae3917c1af98d7a50de8f8b78b7db1ed1e4b3a92ebc5fa3bb172f17",
+        "tools/wtime-bench/fixtures/gc/type_churn_256.wat": "f5431b25768d26b0022060c7c5d8fb58049c55393d3f68e1b9b3657db527c5b2",
+        "tools/wtime-bench/fixtures/gc/type_churn_64.wasm": "37663a4ba8344cc5d09120a231c4e71699d1a9038e9a9788a5b5bfc03fe2b930",
+        "tools/wtime-bench/fixtures/gc/type_churn_64.wat": "6688be1ceb64af3446c2027fa03639e136fec8d27646915888755f13c4fd1de0",
+        "tools/wtime-bench/fixtures/gc/type_repeat_128.wasm": "a85c15e59addfdd67d5d246a309fd5bbfe958b744a73863baec0500791d13084",
+        "tools/wtime-bench/fixtures/gc/type_repeat_128.wat": "bb8a419be00efc018b7715550878ec1aed52c20140acacf2b1aa840ca8ad94c0",
+        "tools/wtime-bench/fixtures/gc/typed_function_refs.wasm": "c07a43c30d251223ebd9769ef3742eb32ec5d3ef751d6a9f0e1507ad353b4cb7",
+        "tools/wtime-bench/fixtures/gc/typed_function_refs.wat": "5d62ffda642de10f8ddbfa828512e8bc7d36d3cbcd70ce2e52f5532c030d990b",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_entry_control.wasm": "04482f0045357ab9d492b055d3a9326a00c87ea579be180068af20413350a5e6",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_entry_control.wat": "4eca1d1937b586fea63a34945398989b246ad20be0ce4774d853dae179af222d",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_prefix.wasm": "2c45432f322f4509022b7f03abed8511f9f5da2857aff931b50280f96393a5e6",
+        "tools/wtime-bench/fixtures/integration_p113/integration_cont_prefix.wat": "f268cb9ad985aefed169ce39b676a227443b3328de0b5104373bc9f69c533122",
+        "tools/wtime-bench/fixtures/integration_p113/integration_eh_prefix.wasm": "d44d336838a5d582e8925b6715de22b3d700b5b9abf8273a7971ce268c5ef9f5",
+        "tools/wtime-bench/fixtures/integration_p113/integration_eh_prefix.wat": "d1cae8eabd8cbf3f2bf2eb6578ac897c86987f16091d782667538d0766a391fb",
+        "tools/wtime-bench/fixtures/integration_p113/integration_gc_prefix.wasm": "7054f515f17783eba6c39c5c8792b8921ca9330a91762156df48d54c84e5042b",
+        "tools/wtime-bench/fixtures/integration_p113/integration_gc_prefix.wat": "07796599eded27f1aa0a79edb6b050227d02d1b96a83228d14bab083197923ae",
+        "tools/wtime-bench/fixtures/integration_p113/integration_numeric_control.wasm": "bd87843ebdf470f9a5d3e1cd227b571d28bdce2f3e94d418dd11f390f021c0d1",
+        "tools/wtime-bench/fixtures/integration_p113/integration_numeric_control.wat": "98fdbf74ab736b7bc11ba3888b6ca3598cc32b6855a50446daf033440264bf7d",
+        "tools/wtime-bench/fixtures/integration_p113/integration_ref_entry_control.wasm": "5d624038f81872b1032a504cab528983a1a202ae98c50cf76b18369648fa25f6",
+        "tools/wtime-bench/fixtures/integration_p113/integration_ref_entry_control.wat": "ae99b8050ea47922435151d8e9297126911854706f12bfcc901b474f313c46ca",
+        "tools/wtime-bench/fixtures/integration_p113/provenance.json": "9a74e7d05bec7d671a1d39d6c530a6d1e078e8e7de653a9728fdd26fe65e04c6",
+        "tools/wtime-bench/fixtures/memory/bulk_copy_aliased.wat": "537407a213ca8fab037aa8c8a21c9026f69fb687c4ef549ca98b63c80f78b350",
+        "tools/wtime-bench/fixtures/memory/bulk_copy_backward.wat": "fb8df158fd1b32d9f4904b8ecd7e1cbd30a4fc72516137ca3cd9e50c588fc98b",
+        "tools/wtime-bench/fixtures/memory/bulk_copy_forward.wat": "b9a27938596761c1436161193e7a391ef7bd967dc0929d84a5749f27c44ebe87",
+        "tools/wtime-bench/fixtures/memory/bulk_fill.wat": "e5c02412b38dfe2fcbead753ff43c6005063f8f32e4d34c2af6dc61c613fe2c3",
+        "tools/wtime-bench/fixtures/memory/custom_page_one_byte.wat": "db0b93cd8845b3e62363b0022f3d5aa5328550cd15f76f0a6bc3259728e5726b",
+        "tools/wtime-bench/fixtures/memory/effective_address_overflow.wat": "55bfac00d3a850898829d29e3762959f1743da76bb3067bd05ec455b12b5c3bb",
+        "tools/wtime-bench/fixtures/memory/growth.wat": "6f2a67b40f25e75f20ec7113aafcff2c7736afa865e8071a0d141cdf74a85c82",
+        "tools/wtime-bench/fixtures/memory/memory64.wat": "665bef075c3a08b202de3556fc1d00a86df030c5d9dd6f1bb39a26c8efa517aa",
+        "tools/wtime-bench/fixtures/memory/memory_copy_distinct_seeded.wat": "bf18ea60ed4c0397f753ccf17b7a062218f165494d0fb394637df8ddb903faaa",
+        "tools/wtime-bench/fixtures/memory/memory_fill_seeded.wat": "8de59ae14f60b42127159fb2819d7cd0519999825f07fb94d3971ad1cd0f49ef",
+        "tools/wtime-bench/fixtures/memory/multi_memory_second.wat": "2aa28f49f655d02744d404d30e7932f38a03bd7e278ec4dda45b88c03ca7d276",
+        "tools/wtime-bench/fixtures/memory/oob_order.wat": "a23b97a75e92b9e9d4e56040ff358bfc899ea5dfe1d5de0a799fbb7274ec0166",
+        "tools/wtime-bench/fixtures/memory/read_scan.wat": "038f4cb301322d2c71d31a4606a6b6dab35dd27ff555f26c7d894f5a580d4259",
+        "tools/wtime-bench/fixtures/memory/widths.wat": "486d62872cff7ba519404a536d9d402eb267dbba18df867d79cc376c189c4425",
+        "tools/wtime-bench/fixtures/memory/widths_shuffled.wat": "ecefc97475a82eca997250f5e55aadcf58ec787e4a60b1ae6c0da88ce39191a8",
+        "tools/wtime-bench/fixtures/representative/graph_bfs.wasm": "28de8728d043d81703727cd71f4f67c9c1aa32b45fecba0f8bb760560ee2f63c",
+        "tools/wtime-bench/fixtures/representative/graph_bfs.wat": "641c210679045e870953ec340aa479d4282fd5d798c8e5857b507c49c2643069",
+        "tools/wtime-bench/fixtures/representative/image_filter.wasm": "678eee3d25fff15f867befd2602cf403f25db7da67339f1f1b7b9b2c4e2e6f0a",
+        "tools/wtime-bench/fixtures/representative/image_filter.wat": "081e25e5b2f01d521167678c1aca46c967f4379989e945f14bc59bcc670e225c",
+        "tools/wtime-bench/fixtures/representative/parser_hash.wasm": "4ab2c42b5ec50f2b8a2d4c325ebaa54a6673b7ce42265cf9f9f477788f634a98",
+        "tools/wtime-bench/fixtures/representative/parser_hash.wat": "44aefe0593f79d3732466f248d1c69f1e9450145b15c6bd64908bc8f217bf32b",
+        "tools/wtime-bench/fixtures/scalar/accumulator.wat": "61aaec7a86d481378f31f3e27b0c1413684065841fa5909297181fcad9bef10d",
+        "tools/wtime-bench/fixtures/scalar/br_table.wat": "637b96cd8926ffadf728af4949b43fa6b62fffb61968c14c716e0c203a1e5e6d",
+        "tools/wtime-bench/fixtures/scalar/branch_entropy.wat": "6b4861d8bfbbd7e2718e577ec2d479bfff32e94dc47a3b7dda9a1b363baa98b6",
+        "tools/wtime-bench/fixtures/scalar/call_ref.wat": "0323154b79000eeeb0a63310541ec91b6c4d91e32a6a3406125a30f2c8e53a12",
+        "tools/wtime-bench/fixtures/scalar/dependent.wat": "0dd5e9778eb09bac9ee432e5fece3f432d034ea9878d2302972142501f0c60c6",
+        "tools/wtime-bench/fixtures/scalar/direct_calls.wat": "0a075601a2a651f9cb95e8ee0404c64bbf076d17bf242b9c88fecbb8cb973826",
+        "tools/wtime-bench/fixtures/scalar/dynamic_api.wat": "f02cc93a4a43691ce5be8782fa2df454fc2468a7935117ea18104a7dce22cb2d",
+        "tools/wtime-bench/fixtures/scalar/host_call.wat": "4c4026de620eff0b1e9cb4ed4e0440e6045d921267e3962715f6430ac68f5120",
+        "tools/wtime-bench/fixtures/scalar/indirect_calls.wat": "29024ae23844664a9fea4a809d1ce414de40f243f7e678ce5ea6d811843f7797",
+        "tools/wtime-bench/fixtures/scalar/multivalue_branch.wat": "a1f4958100af82889208bb28090d6af7c3e56cbeeccabad4106601c9a9c17014",
+        "tools/wtime-bench/fixtures/scalar/ordinary_recursion.wat": "aca6a66637fa36b72f3c528dd5e3e44039b573f363b5b4fb77437e9278623903",
+        "tools/wtime-bench/fixtures/scalar/p042/table-between-calls.wat": "b5d40527a0055ddf1882cff0826e5c1f454b0fef8e39c1f4af60d2eafab48f4e",
+        "tools/wtime-bench/fixtures/scalar/p042/table-indirect-2targets.wat": "b2f24091c989fecd417fcb121743b250e6e4e65504141fd6dc9fc4c1dfb670a1",
+        "tools/wtime-bench/fixtures/scalar/p042/table-indirect-3targets.wat": "1a2a5410aa54c7c2cb8a55a678f28c52c4634bb977c0470f7f7872a8673ecba9",
+        "tools/wtime-bench/fixtures/scalar/p042/typed-call-ref-2targets.wat": "661a2238e6b2ceb72ea0c0de8dc5382c7e57b50622fffeba55f70fc4e9c3017b",
+        "tools/wtime-bench/fixtures/scalar/p042/typed-call-ref-3targets.wat": "56a6a61be87da38400349209b55d0edbf54637a11e71ed5d772824f4d64d6538",
+        "tools/wtime-bench/fixtures/scalar/p128_identity_copy.wat": "690abafcb954c712285c0348eacd4d9b5167638a77829377402fd3583e7cc952",
+        "tools/wtime-bench/fixtures/scalar/p128_literal_bitwise.wat": "094d32e7834b68b3a00d0575fe2c4b31c1bfcf82b3a135a9112c6c551f809c8c",
+        "tools/wtime-bench/fixtures/scalar/p128_literal_wrap_add.wat": "7cb90f9723a0233241e9d067f378c1eef035b9d145ad52e5e414136b8095ca1e",
+        "tools/wtime-bench/fixtures/scalar/table_controls.wat": "9b61bd9cbca804bf639085769fd766a2cf8a69d516fc7efb9e4edfe4ff6d18c9",
+        "tools/wtime-bench/fixtures/scalar/tail_calls.wat": "9953f19384c51b579921e6f789b13a8b57c86ba86d760b77846e3e33825ece02",
+        "tools/wtime-bench/fixtures/scalar/try_table_normal.wat": "ab92800dd4e4d4053498c317effadedf52568270ab7b476eef74b09638de8964",
+        "tools/wtime-bench/fixtures/simd/f64_arithmetic.wat": "1ded010deec79fb83fbee8fd7f14512270be182574bd216c7b691cc49c3e0c3b",
+        "tools/wtime-bench/fixtures/simd/f64_minmax.wat": "27da5ed0409e2c811187eeb54c37da2c4ed3a3592645af5b93e6908702ecdcfd",
+        "tools/wtime-bench/fixtures/simd/float_arithmetic.wat": "98b2b50a26ef07e2a35c811eae0398deedfce2b1f99c11c4fe2e5c6b85004372",
+        "tools/wtime-bench/fixtures/simd/float_edges.wat": "ba3bc8c3abb8f6cf8a9f75dd586d0d78d5bb7a178f67e16d6e41424bf6e6be26",
+        "tools/wtime-bench/fixtures/simd/integer_lanes.wat": "fd4846ae1a22a31b17f5dc344bb20c015388d675991c9ac3a7c809ef83e7ad44",
+        "tools/wtime-bench/fixtures/simd/integer_lanes_typed.wat": "19abdb4ac058a1b3fec2be1c463975e87ab5f29f124a72e39d1ce409ddb4eccb",
+        "tools/wtime-bench/fixtures/simd/lane_memory.wat": "4f35680b9f3cb94cba0296cccb0cf0a8f96588ea637bea83cd83a6caac059141",
+        "tools/wtime-bench/fixtures/simd/lane_memory_footprint.wat": "8a713b01f558578da5179920488b9ec580de5681341d8a874d2a6c58e240ae4e",
+        "tools/wtime-bench/fixtures/simd/relaxed_swizzle.wat": "cc13f0de9250eaf780cf6082345e9c9bfc38be317a47ef1ce306d994624dc6f5",
+        "tools/wtime-bench/fixtures/simd/relaxed_swizzle_oob.wat": "af53075fe822615e699161579301dd484114bdac67c4fa41621ac8b58ce6861c",
+        "tools/wtime-bench/fixtures/simd/saturating_select.wat": "a4edecbc5fa5ace4c9d4d69b29be6b3131f1500b6cae84d8ebafe813454f70c6",
+        "tools/wtime-bench/fixtures/simd/scalar_f64_arithmetic.wat": "d5bd87cd9029c7050048fea8b3932be7a0531d68cc1ab91b3578d059e7a8667a",
+        "tools/wtime-bench/fixtures/simd/scalar_float_arithmetic.wat": "a11d4969aaa9fb4066b72d0123f905bfa2e2e708f2f178234a0252a7bd727bab",
+        "tools/wtime-bench/fixtures/simd/scalar_float_edges.wat": "5bbb77c7bb55bb2f436b9fe97f4e9f6c4a512473d9943024981489aeaa2386ba",
+        "tools/wtime-bench/fixtures/simd/scalar_integer_lanes.wat": "60fa829c372957e8aa2533153ceff2977361ec361eb01b38d72415083caba53e",
+        "tools/wtime-bench/fixtures/simd/scalar_integer_lanes_typed.wat": "6b90a27d798fb8ac6254a8e8c19dce1be396600447c65c9cd3baad1c38799156",
+        "tools/wtime-bench/fixtures/simd/scalar_shuffle.wat": "485df07d8a162fcbcbcc537ce0c067124629eb67946ad1e432de41d9c1beef23",
+        "tools/wtime-bench/fixtures/simd/shuffle.wat": "ce2af411702310c035dc1a3133feaa096b40fe43def12806e1bac0915dfe877a",
+        "tools/wtime-bench/fixtures/simd/typed_f64.wat": "486ba5030a6eebb0c08bc2dd530b2492c916c0ecc07614ba92479541517e8e9f",
+        "tools/wtime-bench/fixtures/simd/typed_v128.wat": "faea7f37b608c510fbba7a2fc6bcb1491df12b6741421f8636c0a637353787d2",
+        "tools/wtime-bench/fixtures/threads/atomic_add.wat": "f821deb4c8c142de5972053b9644029f7092a1be1468eb1ed10c1002d7e2776c",
+        "tools/wtime-bench/fixtures/threads/atomic_load_store.wat": "400f2e0826eff320b781ebd216dcf45a61fcccc73e8f60f8ef0af19e9ead330d",
+        "tools/wtime-bench/fixtures/threads/ordinary_rw.wat": "0a0d74f8b24c53299ac14d0094f13e38129326cfc421a41399e4a3ab9653f002",
+        "tools/wtime-bench/fixtures/threads/sc_store_buffering.wat": "fc6f24e92a0904de4797731ce2642e47adb46eeac2f8a62549db67889b63a12e",
+        "tools/wtime-bench/fixtures/threads/wait_notify.wat": "94ce5b5bd02b46b71b0677795e79beb85081b928edc154bda30f2b3daadaebcb",
+        "tools/wtime-bench/focused_compare.py": "7435f1ab8edc24ca96a9eb3c79b857e095a3f6903f40554b511e0930ebaeb4b6",
+        "tools/wtime-bench/gc_cold_adapter.py": "4f09ca9a30dff35caefb986660ecbb9266cbaf668d550d4e698d6a4e133f4690",
+        "tools/wtime-bench/gc_compare.py": "fa3188d062f6deb7f30bcfa0f43ad164f344cc2407a84b967c88f4f1c0bf4114",
+        "tools/wtime-bench/gc_layout_workloads.py": "baec9bb0c29c923aece9125ed8507f466ea31f319048dd40cedcddd431c066bf",
+        "tools/wtime-bench/gc_scaling.py": "58a6f5419f016a4f1f35512d8ae713041620449bd39d48a98685b251f5701f7e",
+        "tools/wtime-bench/gc_warm_workloads.py": "7082bd76a060337ecc491c69bf7c177648ac1cbfc8835a7dc7a75c26e00464fc",
+        "tools/wtime-bench/gc_workloads.py": "aedd39f75c5c407690251ccd40b8a00139d9a6b9b41f3a1b9980df90b37f543c",
+        "tools/wtime-bench/integration_compare.py": "12d510c973a235f36480c88a6fbb174cf7e60c829f3cbcfd71de8e6a1731e805",
+        "tools/wtime-bench/integration_workflow.py": "2d92417766b2a9786fc94cfb783405c7f7e9d4e31cbba186197ecac5c8dbda8e",
+        "tools/wtime-bench/integration_workloads.py": "9a8fd65d3041a42fabfedafe61480f517249668e371dbfcea757739867e94f38",
+        "tools/wtime-bench/memory_scaling.py": "04d18293b0c17b787f020b91dfa546430958f57aa59ee85f52c5bbad72699fa5",
+        "tools/wtime-bench/memory_workloads.py": "4226fe8a0b365f5d0d2b94403f392ec870e1c3bb790e17476e834a75a14d62ef",
+        "tools/wtime-bench/p027_memory_workloads.py": "2b7bf4e7c9cb6c7674c4f465bdca0c9b498f6a1f8bb4843720d0dcc2aee66336",
+        "tools/wtime-bench/p043_fixtures.py": "60e2363a7674ed1451d59e0af0ea925e24c8a711573b0538c46d67886569388d",
+        "tools/wtime-bench/p127_fuel_policy.py": "9701aa1a9b7c0aed39b9fe46bfe5475cce3c86ac8064835ec93d49ef6fdbe1bf",
+        "tools/wtime-bench/p128_scalar_scaling.py": "664feb00a1da4f0affb757e84e4c13fa948dd477d68b53e61b2e3457bbeb84d7",
+        "tools/wtime-bench/p140_entry_policy.py": "578aefb67f2dadfcd32986625d6e459ce7c7aa99aa9e863a97cb2099d7f4ffe3",
+        "tools/wtime-bench/representative_compare.py": "dce3cb56e309a3a15084f472aa23ac0e82dfae22aac2a74bb9643bae82671c7d",
+        "tools/wtime-bench/representative_scaling.py": "a2fe1dfc4406aaf3f56124cf58423a56b8add89d0874de43968e21efac360b63",
+        "tools/wtime-bench/representative_workloads.py": "7ca9e9c08928d7098a85a228a8dbf2081361b3730010e460cf8ea60afdd1204e",
+        "tools/wtime-bench/root_compare.py": "4b3d677346c249bcdb3d343893344bd23d7cb34a172a1009db19ef76171975a8",
+        "tools/wtime-bench/root_workloads.py": "d22adf45b6ffc06fcb1448526b3911e8f09bf1e561588b5e9ec87c47bff16de3",
+        "tools/wtime-bench/run.py": "f793c150ae38031467c91a70cddf66e85b6cd6d9782e227b773b4da6ff564bea",
+        "tools/wtime-bench/scalar_p128_workloads.py": "a1b308d0ec22676979f6baf3171dfefe2fd5c30d2b9bc2d84857f9efcc55f08a",
+        "tools/wtime-bench/scalar_workloads.py": "599819678932a67159c9815428a35e8bb70c63ac5e3fada1db210927e38320b4",
+        "tools/wtime-bench/scaling.py": "0a9415ddef9c3900c0ce9c64e286fc767367d0a4ce3dddaf483d04494ef630a3",
+        "tools/wtime-bench/selection_manifest.py": "3a53307ec7a3c275e19148840bd2cc7af59be1903a6cb763e8fc66c813c4a48d",
+        "tools/wtime-bench/semantic_receipt.py": "41cc0037143d57ec8f0459d6941c9b6f2dd6bda77789fb7429011f4ff262b25a",
+        "tools/wtime-bench/simd_scaling.py": "08f46134c5bf53cbb58e4a4d9180eda5dc9290004526597dd0e095a22c6004ae",
+        "tools/wtime-bench/simd_workloads.py": "c43645c67deb4efc566602800d50913a25d434c3146df5ee686fc4bb7b555f2b",
+        "tools/wtime-bench/src/continuation_driver.rs": "2cc5818b256463ef062ad1f36f8a858e3905ce961ffb8b56bae06b143965119a",
+        "tools/wtime-bench/src/continuation_live_driver.rs": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+        "tools/wtime-bench/src/entry_batch_driver.rs": "db4e943f6130225ac5f3d2dbb749828f789f6948748063904fb5d8c6a2a22bb9",
+        "tools/wtime-bench/src/entry_sequence_driver.rs": "13353045964e17d9e92c68fe3aea7d9f8053cd0e2086c900c9ca8c101a2e173f",
+        "tools/wtime-bench/src/fuel_policy.rs": "fd1f2721c9a9f0bfb9b2e4a67bc74f9153c43d6aa20e95d6a2f1b0309bc71ce5",
+        "tools/wtime-bench/src/gc_exception_driver.rs": "63c192dd2f0f5a376dba96b66ac3e55c40303512374b02fe96b782e33ace369f",
+        "tools/wtime-bench/src/gc_roots_driver.rs": "5561e27d8460541da683c66d59d22ad3eba6e2cefafb20b55cb6babfc3e259c3",
+        "tools/wtime-bench/src/gc_warm_driver.rs": "9fc4b6ef80c4e4aca86bff36a8fdec32a0d9b4871cf1d757e0d374dbf89bb5b7",
+        "tools/wtime-bench/src/integration_driver.rs": "53ed517b031cbfe33eac6a33c1a410284398e21e1afe8d2e3b0f4c8577675710",
+        "tools/wtime-bench/src/main.rs": "9f9496929d3c60165fa061030336397d1825d9b0545a70aadeaf07208c3768e5",
+        "tools/wtime-bench/src/memory_driver.rs": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+        "tools/wtime-bench/src/p140_tests.rs": "7250e09961de6d3e1578ebee0f135c883f9db48f172b79c67f990e7bba4217ea",
+        "tools/wtime-bench/src/protocol.rs": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+        "tools/wtime-bench/src/representative_driver.rs": "3a4e9e55184618f36c1ec9bfcc32d9acc98e4666af533219e11e7380a7715ff9",
+        "tools/wtime-bench/src/scalar_driver.rs": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175",
+        "tools/wtime-bench/src/thread_driver.rs": "96801dbc985a214e335c2be69dedce48a1cd2acf37055547f3d5fc87a21f4ee3",
+        "tools/wtime-bench/src/tier_state_driver.rs": "6215becc3a74f02bbea2dbb8d342afe879bd9b9787d2c3c777fea9b871678525",
+        "tools/wtime-bench/thread_compare.py": "378c89369a9e42061a2846acd08ba99431730d45d7982c7e4130cc5402abf150",
+        "tools/wtime-bench/thread_scaling.py": "b8384bab6beedb5fc524ac26a91d9033be48a3c4a0b385834e8d94a83bdbc35d",
+        "tools/wtime-bench/thread_workloads.py": "f50f832f5f0eed010b3277fdcb15cacd0b600298026df1ebac1e00265864f21c",
+        "tools/wtime-bench/workloads.json": "ae3550e2f3b47d4d7a2cba1cbcf9702d7c6dfc23789bef3823b0c6a1a70ac1c2",
+        "tools/wtime-bench/workloads.py": "c08faf6b9295f22b3b554819b59d2367c5a436c16308029bccbf85095f425096",
+        "tools/wtime-conformance/Cargo.toml": "4a097bcb388a22fac6458881519b247fc5287ab23fcb7cd569632a5519f4d787",
+        "tools/wtime-conformance/build.rs": "1e37a8f6ec1af7964228b03abb3e9675c2c5218edf3bb43a94d76243cc893ef1",
+        "tools/wtime-conformance/src/adapter.rs": "3ca4eb2250ad0e5a0425c2f975d550668b9ef66fba947eba2d4e340f3eed1efe",
+        "tools/wtime-conformance/src/bin/wtime-allocation-check.rs": "1a20e70ac081c7792732bc1cffded19935e19d0141bca5ea78a6b6086f4c6034",
+        "tools/wtime-conformance/src/bin/wtime-probe.rs": "f1884d2cca082353bf2fc33e9765a814189920ba0ea6847546b6bf386e671c4e",
+        "tools/wtime-conformance/src/cli.rs": "f515e783e967846b6506be51c0f7444c196acfea229ff880b595e339d1e340cd",
+        "tools/wtime-conformance/src/corpus.rs": "b1d2a7947b5904b9bd80c0109bc8b5e0f5f8329ba92a693db3f4409cd93cbc1e",
+        "tools/wtime-conformance/src/main.rs": "ecf37373cd8988e4f45569d49a0a971fc85a5b687c091ae2ec7964ec8f35c169",
+        "tools/wtime-conformance/src/report.rs": "6ce29903b6774cf096d579846e60f97546728fadd66812a43aabe79aba9c5b70",
+        "tools/wtime-conformance/src/script.rs": "a19dc275414fc1479b431767ed696426982a284e5007e504f47a4769d33b4d16",
+        "tools/wtime-conformance/src/spectest.rs": "1403166f4be6ce443b47d4a7ba4a44da553c67e280dfa2876b3f2ad1e64e8883",
+        "tools/wtime-conformance/tests/annotations.rs": "5eb54a28e57e7e929bcb2342d65c28e23c2ae112b7c10b36f707fa580f489b08",
+        "tools/wtime-conformance/tests/interactions.rs": "fd36710c8cd2ef7f3a2883d3f0ab6cbfecace3ae80adf693095228e4f4641938",
+        "tools/wtime-conformance/tests/p121_compact_counts.rs": "96ba2a7b5ded8a05bfa6e360de283ddaea777fedf39348bae0cf5c6d414c4782"
+      },
+      "capabilities": {
+        "baseline": {
+          "batch_limits": {
+            "typed_memory": 100000,
+            "typed_numeric": 1000000
+          },
+          "engine": "wtime",
+          "features": [
+            "mvp",
+            "stable-core",
+            "all-phase3-core",
+            "mvp-saturating",
+            "simd",
+            "simd-relaxed"
+          ],
+          "instrumented": false,
+          "modes": [
+            "decoded",
+            "portable"
+          ],
+          "schema_version": 2,
+          "source_fuel_contract": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          },
+          "thread_driver": true,
+          "types": [
+            "i32",
+            "i64",
+            "f32_bits",
+            "f64_bits",
+            "v128_bits",
+            "reference"
+          ]
+        },
+        "candidate": {
+          "batch_limits": {
+            "typed_memory": 100000,
+            "typed_numeric": 1000000
+          },
+          "engine": "wtime",
+          "features": [
+            "mvp",
+            "stable-core",
+            "all-phase3-core",
+            "mvp-saturating",
+            "simd",
+            "simd-relaxed"
+          ],
+          "instrumented": false,
+          "modes": [
+            "decoded",
+            "portable"
+          ],
+          "schema_version": 2,
+          "source_fuel_contract": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          },
+          "thread_driver": true,
+          "types": [
+            "i32",
+            "i64",
+            "f32_bits",
+            "f64_bits",
+            "v128_bits",
+            "reference"
+          ]
+        }
+      },
+      "fixture_encoder": {
+        "path": "/workspace/wtime/target/debug/wtime-conformance",
+        "sha256": "a6a4bb59775700e6805fc66bd64bb91f4126729554c639b26e7c17e768087757"
+      },
+      "hardware": {
+        "cpu_affinity_available": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "cpu_quota": "400000 100000",
+        "physical_core_idle": "unknown/shared cloud",
+        "selected_cpu": 1,
+        "thread_cpu_affinity": null
+      },
+      "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+      "settings": {
+        "baseline_mode": "decoded",
+        "cancellation_policy": 1,
+        "candidate_mode": "decoded",
+        "fuel_policy": false,
+        "instrumented": false,
+        "profile": "release",
+        "thread_cpu_affinity": null,
+        "workload_profiles": {
+          "call_overhead": "mvp",
+          "continuation_live_1": "all-phase3-core",
+          "continuation_live_512": "all-phase3-core",
+          "continuation_live_73": "all-phase3-core",
+          "continuation_live_8": "all-phase3-core",
+          "prepare_large": "mvp"
+        }
+      }
+    },
+    "per_run": [
+      {
+        "baseline_ns_per_operation": {
+          "mad": 10.5,
+          "median": 511.0,
+          "p25": 501.0,
+          "p75": 531.0
+        },
+        "candidate_ns_per_operation": {
+          "mad": 20.0,
+          "median": 521.0,
+          "p25": 501.0,
+          "p75": 541.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.05549009537045424,
+          "median": 1.019764775732293,
+          "p25": 0.9679837211450625,
+          "p75": 1.0714672350214824
+        },
+        "decision": "within_budget",
+        "fixture": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "input": "100",
+        "median_ratio_95ci": {
+          "lower": 0.9802352048113084,
+          "upper": 1.049994998252276
+        },
+        "paired_log_ratio": {
+          "mad": 0.054424233347389515,
+          "median": 0.019571970334251156,
+          "p25": -0.03256104901590996,
+          "p75": 0.06900937134982198
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 150.0,
+          "median": 4707.0,
+          "p25": 4557.0,
+          "p75": 4842.0
+        },
+        "candidate_ns_per_operation": {
+          "mad": 65.5,
+          "median": 4757.0,
+          "p25": 4696.25,
+          "p75": 4832.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.028443250643487628,
+          "median": 1.0139396171487833,
+          "p25": 0.9793609886566687,
+          "p75": 1.04119204722626
+        },
+        "decision": "within_budget",
+        "fixture": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "input": "100",
+        "median_ratio_95ci": {
+          "lower": 0.9927003516192401,
+          "upper": 1.0344838898423478
+        },
+        "paired_log_ratio": {
+          "mad": 0.02769370116157429,
+          "median": 0.01381541236669798,
+          "p25": -0.02088067231580258,
+          "p75": 0.0403658594641666
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 31.0,
+          "median": 1553.0,
+          "p25": 1522.0,
+          "p75": 1589.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 35.0,
+          "median": 1582.5,
+          "p25": 1552.0,
+          "p75": 1635.25
+        },
+        "candidate_over_baseline": {
+          "mad": 0.03155830666532922,
+          "median": 1.0060824250725844,
+          "p25": 0.9872974590092742,
+          "p75": 1.0549596251504183
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "1",
+        "median_ratio_95ci": {
+          "lower": 0.9905616550040452,
+          "upper": 1.0421594463070838
+        },
+        "paired_log_ratio": {
+          "mad": 0.03136688278952539,
+          "median": 0.006063937462894275,
+          "p25": -0.012783908666482796,
+          "p75": 0.053495393557283215
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "capture",
+        "workload": "continuation_live_1"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 2118.0,
+          "median": 44025.0,
+          "p25": 41972.0,
+          "p75": 46055.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 2403.5,
+          "median": 46498.5,
+          "p25": 44420.25,
+          "p75": 51388.75
+        },
+        "candidate_over_baseline": {
+          "mad": 0.08327406929488307,
+          "median": 1.0483007502436474,
+          "p25": 0.9658766374379939,
+          "p75": 1.1310119608308473
+        },
+        "decision": "inconclusive",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "1",
+        "median_ratio_95ci": {
+          "lower": 0.9936409451777509,
+          "upper": 1.1035899785310472
+        },
+        "paired_log_ratio": {
+          "mad": 0.08144962332596355,
+          "median": 0.04716405847829883,
+          "p25": -0.03471943989306886,
+          "p75": 0.12311161359373723
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "setup",
+        "workload": "continuation_live_1"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 1076.5,
+          "median": 14230.5,
+          "p25": 13470.0,
+          "p75": 15575.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 916.5,
+          "median": 8082.0,
+          "p25": 7686.25,
+          "p75": 10250.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.09119627683362341,
+          "median": 0.5980363902571473,
+          "p25": 0.5221204778203051,
+          "p75": 0.730881058661065
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "512",
+        "median_ratio_95ci": {
+          "lower": 0.5343195857942701,
+          "upper": 0.6458873883440065
+        },
+        "paired_log_ratio": {
+          "mad": 0.15480867041740795,
+          "median": -0.5141320437783126,
+          "p25": -0.6498609453634488,
+          "p75": -0.3138333316403828
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "capture",
+        "workload": "continuation_live_512"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 130502.5,
+          "median": 3033597.0,
+          "p25": 2931608.25,
+          "p75": 3194296.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 73739.0,
+          "median": 1055127.5,
+          "p25": 1000793.75,
+          "p75": 1140045.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.017278328020846084,
+          "median": 0.33713353096955495,
+          "p25": 0.325603828827116,
+          "p75": 0.3760649045574274
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "512",
+        "median_ratio_95ci": {
+          "lower": 0.3271591825901777,
+          "upper": 0.3562414879960553
+        },
+        "paired_log_ratio": {
+          "mad": 0.05136359866188989,
+          "median": -1.0872762889076346,
+          "p25": -1.1220743653911436,
+          "p75": -0.9782698363793572
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "setup",
+        "workload": "continuation_live_512"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 25.5,
+          "median": 2098.0,
+          "p25": 2073.0,
+          "p75": 2131.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 29.5,
+          "median": 1241.5,
+          "p25": 1222.0,
+          "p75": 1272.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.013681509068088238,
+          "median": 0.5903193077405007,
+          "p25": 0.575420147602503,
+          "p75": 0.6010756507071628
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "73",
+        "median_ratio_95ci": {
+          "lower": 0.5830252107821691,
+          "upper": 0.5975283389187562
+        },
+        "paired_log_ratio": {
+          "mad": 0.02345810748100774,
+          "median": -0.5270917521571796,
+          "p25": -0.5526615115489111,
+          "p75": -0.5090344778228366
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "capture",
+        "workload": "continuation_live_73"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 12358.5,
+          "median": 216865.0,
+          "p25": 207826.25,
+          "p75": 246792.0
+        },
+        "candidate_ns_per_operation": {
+          "mad": 4396.5,
+          "median": 178488.5,
+          "p25": 176065.0,
+          "p75": 200928.25
+        },
+        "candidate_over_baseline": {
+          "mad": 0.09100562291619024,
+          "median": 0.8366558867167371,
+          "p25": 0.7562302699457659,
+          "p75": 0.9209886305187955
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "73",
+        "median_ratio_95ci": {
+          "lower": 0.7676381344814085,
+          "upper": 0.870134698299135
+        },
+        "paired_log_ratio": {
+          "mad": 0.10815765589607125,
+          "median": -0.17834264228380792,
+          "p25": -0.2794262205370149,
+          "p75": -0.08269884349831641
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "setup",
+        "workload": "continuation_live_73"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 110.0,
+          "median": 2449.0,
+          "p25": 2361.5,
+          "p75": 2601.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 99.5,
+          "median": 2413.0,
+          "p25": 2321.5,
+          "p75": 2500.5
+        },
+        "candidate_over_baseline": {
+          "mad": 0.04304581519511114,
+          "median": 0.9660252315554136,
+          "p25": 0.9226680148520201,
+          "p75": 1.005777251832326
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "8",
+        "median_ratio_95ci": {
+          "lower": 0.9351964405850443,
+          "upper": 0.9963608807245816
+        },
+        "paired_log_ratio": {
+          "mad": 0.04558274205116822,
+          "median": -0.03456583113858472,
+          "p25": -0.08048596051391765,
+          "p75": 0.005754311418183418
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "capture",
+        "workload": "continuation_live_8"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 2458.5,
+          "median": 59212.5,
+          "p25": 57747.75,
+          "p75": 63674.25
+        },
+        "candidate_ns_per_operation": {
+          "mad": 2273.5,
+          "median": 61421.0,
+          "p25": 59865.5,
+          "p75": 65972.25
+        },
+        "candidate_over_baseline": {
+          "mad": 0.05986151177239035,
+          "median": 1.031912611837472,
+          "p25": 0.9729452107661746,
+          "p75": 1.0847091240508022
+        },
+        "decision": "inconclusive",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "8",
+        "median_ratio_95ci": {
+          "lower": 1.0093943731817943,
+          "upper": 1.0714053174756952
+        },
+        "paired_log_ratio": {
+          "mad": 0.058454404572004764,
+          "median": 0.0314125396053142,
+          "p25": -0.027517358949360665,
+          "p75": 0.08131166823117553
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "setup",
+        "workload": "continuation_live_8"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 355119.5,
+          "median": 6953692.0,
+          "p25": 6577258.0,
+          "p75": 7216176.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 389475.0,
+          "median": 6929922.0,
+          "p25": 6624733.25,
+          "p75": 7329807.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.04924326436113563,
+          "median": 1.0134688627533053,
+          "p25": 0.968362651209945,
+          "p75": 1.0711886316435932
+        },
+        "decision": "within_budget",
+        "fixture": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0",
+        "input": "0",
+        "median_ratio_95ci": {
+          "lower": 0.976084998296632,
+          "upper": 1.0469780394043287
+        },
+        "paired_log_ratio": {
+          "mad": 0.04844495979962597,
+          "median": 0.0133737080905683,
+          "p25": -0.03214866097992078,
+          "p75": 0.06876572637617244
+        },
+        "pairs": 30,
+        "run": 1,
+        "seed": 72001,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 19.0,
+          "median": 500.0,
+          "p25": 483.5,
+          "p75": 518.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 20.0,
+          "median": 521.0,
+          "p25": 500.25,
+          "p75": 531.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.06405660017544529,
+          "median": 1.0397105995908391,
+          "p25": 0.978911862043012,
+          "p75": 1.0994752682034585
+        },
+        "decision": "inconclusive",
+        "fixture": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "input": "100",
+        "median_ratio_95ci": {
+          "lower": 1.0086178417267035,
+          "upper": 1.061549802744422
+        },
+        "paired_log_ratio": {
+          "mad": 0.06154632885857084,
+          "median": 0.03894238449246634,
+          "p25": -0.021314846886280072,
+          "p75": 0.09477718049062361
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 70.0,
+          "median": 4717.0,
+          "p25": 4647.0,
+          "p75": 4794.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 110.0,
+          "median": 4672.0,
+          "p25": 4619.25,
+          "p75": 4798.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.024532838876628937,
+          "median": 0.9945922198158125,
+          "p25": 0.9750931475141849,
+          "p75": 1.0202076219585265
+        },
+        "decision": "within_budget",
+        "fixture": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+        "input": "100",
+        "median_ratio_95ci": {
+          "lower": 0.9798648991079333,
+          "upper": 1.0096472280345619
+        },
+        "paired_log_ratio": {
+          "mad": 0.024370030119867707,
+          "median": -0.005427813273432164,
+          "p25": -0.025222638710255575,
+          "p75": 0.020004466160752184
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 20.5,
+          "median": 1582.5,
+          "p25": 1554.5,
+          "p75": 1603.0
+        },
+        "candidate_ns_per_operation": {
+          "mad": 30.5,
+          "median": 1577.5,
+          "p25": 1542.0,
+          "p75": 1602.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.03202205544694753,
+          "median": 1.002518659657107,
+          "p25": 0.9701292584301668,
+          "p75": 1.0297051983201375
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "1",
+        "median_ratio_95ci": {
+          "lower": 0.9810455870170257,
+          "upper": 1.0183793390254852
+        },
+        "paired_log_ratio": {
+          "mad": 0.03161980627473649,
+          "median": 0.002510504141715103,
+          "p25": -0.030329714007538137,
+          "p75": 0.029260338879403436
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "capture",
+        "workload": "continuation_live_1"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 1963.0,
+          "median": 43930.0,
+          "p25": 42389.75,
+          "p75": 46774.75
+        },
+        "candidate_ns_per_operation": {
+          "mad": 2943.5,
+          "median": 46949.5,
+          "p25": 44480.25,
+          "p75": 50369.5
+        },
+        "candidate_over_baseline": {
+          "mad": 0.05803602900216098,
+          "median": 1.0407701146659822,
+          "p25": 0.9927072021659317,
+          "p75": 1.1505756842443962
+        },
+        "decision": "inconclusive",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "1",
+        "median_ratio_95ci": {
+          "lower": 1.0044781817876414,
+          "upper": 1.097364110480726
+        },
+        "paired_log_ratio": {
+          "mad": 0.05547235747896071,
+          "median": 0.03995817243765644,
+          "p25": -0.007319706869760532,
+          "p75": 0.14021012617196296
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "setup",
+        "workload": "continuation_live_1"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 425.5,
+          "median": 12688.5,
+          "p25": 12315.5,
+          "p75": 13151.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 380.5,
+          "median": 7245.5,
+          "p25": 6857.75,
+          "p75": 7586.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.033710370690040015,
+          "median": 0.5564197451503168,
+          "p25": 0.5297810511072706,
+          "p75": 0.6014137509549273
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "512",
+        "median_ratio_95ci": {
+          "lower": 0.533487361655428,
+          "upper": 0.585895671369319
+        },
+        "paired_log_ratio": {
+          "mad": 0.061077173180417166,
+          "median": -0.5863055125289527,
+          "p25": -0.6352937698403684,
+          "p75": -0.5085782156072225
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "capture",
+        "workload": "continuation_live_512"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 113171.5,
+          "median": 2865353.5,
+          "p25": 2757637.0,
+          "p75": 2999468.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 58992.5,
+          "median": 997592.0,
+          "p25": 962913.75,
+          "p75": 1091445.5
+        },
+        "candidate_over_baseline": {
+          "mad": 0.021705046938851696,
+          "median": 0.346558689768206,
+          "p25": 0.33578304132865616,
+          "p75": 0.3807499282559558
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "512",
+        "median_ratio_95ci": {
+          "lower": 0.3436703007810793,
+          "upper": 0.3741958167348304
+        },
+        "paired_log_ratio": {
+          "mad": 0.06074712526750725,
+          "median": -1.059703126310811,
+          "p25": -1.0912991121082025,
+          "p75": -0.9656126373091403
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "setup",
+        "workload": "continuation_live_512"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 30.0,
+          "median": 2093.0,
+          "p25": 2055.5,
+          "p75": 2113.0
+        },
+        "candidate_ns_per_operation": {
+          "mad": 20.5,
+          "median": 1231.5,
+          "p25": 1204.25,
+          "p75": 1248.75
+        },
+        "candidate_over_baseline": {
+          "mad": 0.014125003303321615,
+          "median": 0.5891801372765555,
+          "p25": 0.5726301576075349,
+          "p75": 0.597567520229083
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "73",
+        "median_ratio_95ci": {
+          "lower": 0.5756721486197753,
+          "upper": 0.595531584904952
+        },
+        "paired_log_ratio": {
+          "mad": 0.024009569358839133,
+          "median": -0.5290237441978733,
+          "p25": -0.5575153411711583,
+          "p75": -0.5148880259328159
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "capture",
+        "workload": "continuation_live_73"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 3966.0,
+          "median": 210015.0,
+          "p25": 207746.25,
+          "p75": 234068.5
+        },
+        "candidate_ns_per_operation": {
+          "mad": 3641.0,
+          "median": 177687.0,
+          "p25": 175856.75,
+          "p75": 181583.5
+        },
+        "candidate_over_baseline": {
+          "mad": 0.048593752042918215,
+          "median": 0.8420256246517297,
+          "p25": 0.7748129080878714,
+          "p75": 0.868457142012969
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "73",
+        "median_ratio_95ci": {
+          "lower": 0.8039010883358801,
+          "upper": 0.85735847611107
+        },
+        "paired_log_ratio": {
+          "mad": 0.0594552757770134,
+          "median": -0.17194680163334694,
+          "p25": -0.25519038942125816,
+          "p75": -0.14104138988173084
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "setup",
+        "workload": "continuation_live_73"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 140.0,
+          "median": 2458.0,
+          "p25": 2363.25,
+          "p75": 2624.0
+        },
+        "candidate_ns_per_operation": {
+          "mad": 101.0,
+          "median": 2354.0,
+          "p25": 2296.5,
+          "p75": 2534.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.0583405062330995,
+          "median": 0.9690166759592478,
+          "p25": 0.9224798153715639,
+          "p75": 1.0395834850471497
+        },
+        "decision": "within_budget",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "8",
+        "median_ratio_95ci": {
+          "lower": 0.9473299178441119,
+          "upper": 1.0066470960681566
+        },
+        "paired_log_ratio": {
+          "mad": 0.062089688282631325,
+          "median": -0.03148639091426773,
+          "p25": -0.0808047580602538,
+          "p75": 0.03867591145807027
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "capture",
+        "workload": "continuation_live_8"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 2379.5,
+          "median": 57354.5,
+          "p25": 56408.75,
+          "p75": 63153.75
+        },
+        "candidate_ns_per_operation": {
+          "mad": 2754.5,
+          "median": 61025.5,
+          "p25": 58501.25,
+          "p75": 64142.5
+        },
+        "candidate_over_baseline": {
+          "mad": 0.06364895234626905,
+          "median": 1.0510431061015122,
+          "p25": 0.9919840354799631,
+          "p75": 1.1272270752557296
+        },
+        "decision": "inconclusive",
+        "fixture": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+        "input": "8",
+        "median_ratio_95ci": {
+          "lower": 1.012597800985765,
+          "upper": 1.0930554562183636
+        },
+        "paired_log_ratio": {
+          "mad": 0.06045768845823672,
+          "median": 0.04978173932295188,
+          "p25": -0.008048562232760927,
+          "p75": 0.11974879195888609
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "setup",
+        "workload": "continuation_live_8"
+      },
+      {
+        "baseline_ns_per_operation": {
+          "mad": 192103.5,
+          "median": 6731799.0,
+          "p25": 6538265.75,
+          "p75": 6883193.25
+        },
+        "candidate_ns_per_operation": {
+          "mad": 208823.0,
+          "median": 6688896.0,
+          "p25": 6546466.5,
+          "p75": 6976430.0
+        },
+        "candidate_over_baseline": {
+          "mad": 0.04086271062669805,
+          "median": 1.0115808623300877,
+          "p25": 0.9640287161755403,
+          "p75": 1.033159227835143
+        },
+        "decision": "within_budget",
+        "fixture": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0",
+        "input": "0",
+        "median_ratio_95ci": {
+          "lower": 0.9786463371748167,
+          "upper": 1.0266439173376618
+        },
+        "paired_log_ratio": {
+          "mad": 0.04040088890119497,
+          "median": 0.011497960960127611,
+          "p25": -0.036637755371976895,
+          "p75": 0.03262002681422048
+        },
+        "pairs": 30,
+        "run": 2,
+        "seed": 72002,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      }
+    ],
+    "schema_version": 1,
+    "source_schema_version": 2
+  },
+  "decision": {
+    "build": {
+      "attestation": {
+        "binary_sha256": "f5112aad50edbfceb84876af8ca07b95a222841fc3082901e6bfce17cb1c91cc",
+        "command_features": [],
+        "protocol": {
+          "batch_limits": {
+            "typed_memory": 100000,
+            "typed_numeric": 1000000
+          },
+          "engine": "wtime",
+          "features": [
+            "mvp",
+            "stable-core",
+            "all-phase3-core",
+            "mvp-saturating",
+            "simd",
+            "simd-relaxed"
+          ],
+          "instrumented": false,
+          "modes": [
+            "decoded",
+            "portable"
+          ],
+          "schema_version": 2,
+          "source_fuel_contract": {
+            "accepted": [
+              {
+                "name": "unmetered",
+                "source_fuel": null
+              },
+              {
+                "name": "metered",
+                "source_fuel": 50000000
+              }
+            ],
+            "schema_version": 1
+          },
+          "thread_driver": true,
+          "types": [
+            "i32",
+            "i64",
+            "f32_bits",
+            "f64_bits",
+            "v128_bits",
+            "reference"
+          ]
+        },
+        "protocol_sha256": "16b22ce0ce0b84ae8d0b33cdd976eb06e678f0520b75bf5344651a4b1ca436df",
+        "record": {
+          "bytes": 64725,
+          "path": "/workspace/wtime/target/verification/runs/P072/verify/attempt-0003/reused-builds/production/build-record.json",
+          "sha256": "7cdc7ae6d0f6d5820da522801d5b28d7f7407f81fedf15318a8ad381c3d1b6b6"
+        },
+        "runtime_features": [],
+        "runtime_source_sha256": "8031145261a37b254fbaaa2610bb9bf871038e9833078c303e870904852e1e1e"
+      },
+      "relative_growth": {
+        "default": {},
+        "optional": {}
+      }
+    },
+    "cold_products": {
+      "aliases": 0,
+      "groups": [
+        {
+          "members": [
+            "continuation_live_1"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_1"
+          },
+          "product_sha256": "05d63c8271e129f17c2ca5dc1608c520b3be9eacfc4225847acee1fee30261a7",
+          "sample_workload": "continuation_live_1",
+          "stage": "capture"
+        },
+        {
+          "members": [
+            "continuation_live_512"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_512"
+          },
+          "product_sha256": "86f30c1fd3bba84add7202448df3edf35a8b16a41fe80af1155de94c270aada5",
+          "sample_workload": "continuation_live_512",
+          "stage": "capture"
+        },
+        {
+          "members": [
+            "continuation_live_8"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_8"
+          },
+          "product_sha256": "9c920177dfb1a5c9219b068a1e4aa32e006fe5a3d96aa2a97d4ad1d5d3f8bb55",
+          "sample_workload": "continuation_live_8",
+          "stage": "capture"
+        },
+        {
+          "members": [
+            "continuation_live_73"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_73"
+          },
+          "product_sha256": "d577940e9edaa951cfd222ed104ed10db4cc4aab8c3bd77c642e864aa3a2c003",
+          "sample_workload": "continuation_live_73",
+          "stage": "capture"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+            "workload": "call_overhead"
+          },
+          "product_sha256": "d1b60859876da13e3eb8d90a93af288b6fcefdaeb34a7a028485e76933291f2d",
+          "sample_workload": "call_overhead",
+          "stage": "first_call"
+        },
+        {
+          "members": [
+            "call_overhead"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "run.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "run.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "0815ca7d6026206d0773fe10c6b9643862bfffe8ba361c9789369ef9668ee746",
+            "workload": "call_overhead"
+          },
+          "product_sha256": "20b0b22f38fb6fb1bdf66566c5ee497ae0b1cd50bc910b9fbb9d0d0e177a3a91",
+          "sample_workload": "call_overhead",
+          "stage": "load_and_call"
+        },
+        {
+          "members": [
+            "prepare_large"
+          ],
+          "product": {
+            "profile": "mvp",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "workloads.py",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "c489fe06970f8e1c60e4992774aaadb571f676833d6579de1f67a5facf3fe9b0"
+          },
+          "product_sha256": "f46c71639e98fd2200a6271046439ea66805feba373379f4249977b443abe4e4",
+          "sample_workload": "prepare_large",
+          "stage": "prepare"
+        },
+        {
+          "members": [
+            "continuation_live_1"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_1"
+          },
+          "product_sha256": "0f8771e2a69d81a767cd667566035c29201fa9a8c269306106a35fad7afe18b4",
+          "sample_workload": "continuation_live_1",
+          "stage": "setup"
+        },
+        {
+          "members": [
+            "continuation_live_8"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_8"
+          },
+          "product_sha256": "54c1ea8302e7897d3563e68e66d5e6e88b6a1f421b9cef0b0679c79b817d35cf",
+          "sample_workload": "continuation_live_8",
+          "stage": "setup"
+        },
+        {
+          "members": [
+            "continuation_live_73"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_73"
+          },
+          "product_sha256": "74073968375f5c79d6ea4e3094d70123ea42ea935c2b05d93dc032323e2765f3",
+          "sample_workload": "continuation_live_73",
+          "stage": "setup"
+        },
+        {
+          "members": [
+            "continuation_live_512"
+          ],
+          "product": {
+            "profile": "all-phase3-core",
+            "runtime_settings": {
+              "baseline_mode": "decoded",
+              "cancellation_policy": 1,
+              "candidate_mode": "decoded",
+              "fuel_policy": false,
+              "instrumented": false,
+              "profile": "release",
+              "thread_cpu_affinity": null,
+              "workload_profiles": {
+                "call_overhead": "mvp",
+                "continuation_live_1": "all-phase3-core",
+                "continuation_live_512": "all-phase3-core",
+                "continuation_live_73": "all-phase3-core",
+                "continuation_live_8": "all-phase3-core",
+                "prepare_large": "mvp"
+              }
+            },
+            "setup": {
+              "canonical_row": "lexicographically first equivalent declared workload",
+              "policy": "fresh process; canonical product row preflight; fresh Engine compile"
+            },
+            "timer": {
+              "driver": "continuation_live",
+              "live_driver_sha256": "31d2b4f4a8ec1a26a66169c74ab443bc3a1d490b5ade6387d44505a3e3920580",
+              "live_fixture_wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+              "live_fixture_wat_sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+              "live_model_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "live_validator_sha256": "f4c6afe0e2709af4ea0cafe255818c2fe55fa7fd466749eb30640e7b2180e908",
+              "measurement_policy": "decoded; exact selected setup_ns/capture_ns; fresh process; batch one",
+              "memory_sha256": "5e6b95e8cb792a370875d48c70c5e8cdb65df32de3e4cd1d6d00c56766575b39",
+              "module": "continuation_live_workloads.py",
+              "protocol_sha256": "8351e5d0631ec906f2c2b2773b2b476056cb7602d28c32b59ac7bebb5c17d402",
+              "scalar_sha256": "de2ff479399ec7cd53a3b78571cc702fdd3c35a1a4bc78d618e0ba6d6fd96175"
+            },
+            "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3",
+            "workload": "continuation_live_512"
+          },
+          "product_sha256": "ac2a182b1fc9e0daa1e3c46de4c0ca419e3ad2053ea84445ec55dc38c8bcb446",
+          "sample_workload": "continuation_live_512",
+          "stage": "setup"
+        }
+      ],
+      "logical_groups": 11,
+      "schema": "wtime-cold-products-v1",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_groups": 11
+    },
+    "controls": [
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05549009537045424,
+          "median": 1.019764775732293,
+          "p25": 0.9679837211450625,
+          "p75": 1.0714672350214824
+        },
+        "run": 1,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.028443250643487628,
+          "median": 1.0139396171487833,
+          "p25": 0.9793609886566687,
+          "p75": 1.04119204722626
+        },
+        "run": 1,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03155830666532922,
+          "median": 1.0060824250725844,
+          "p25": 0.9872974590092742,
+          "p75": 1.0549596251504183
+        },
+        "run": 1,
+        "stage": "capture",
+        "workload": "continuation_live_1"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.08327406929488307,
+          "median": 1.0483007502436474,
+          "p25": 0.9658766374379939,
+          "p75": 1.1310119608308473
+        },
+        "run": 1,
+        "stage": "setup",
+        "workload": "continuation_live_1"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.09119627683362341,
+          "median": 0.5980363902571473,
+          "p25": 0.5221204778203051,
+          "p75": 0.730881058661065
+        },
+        "run": 1,
+        "stage": "capture",
+        "workload": "continuation_live_512"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.017278328020846084,
+          "median": 0.33713353096955495,
+          "p25": 0.325603828827116,
+          "p75": 0.3760649045574274
+        },
+        "run": 1,
+        "stage": "setup",
+        "workload": "continuation_live_512"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.013681509068088238,
+          "median": 0.5903193077405007,
+          "p25": 0.575420147602503,
+          "p75": 0.6010756507071628
+        },
+        "run": 1,
+        "stage": "capture",
+        "workload": "continuation_live_73"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.09100562291619024,
+          "median": 0.8366558867167371,
+          "p25": 0.7562302699457659,
+          "p75": 0.9209886305187955
+        },
+        "run": 1,
+        "stage": "setup",
+        "workload": "continuation_live_73"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.04304581519511114,
+          "median": 0.9660252315554136,
+          "p25": 0.9226680148520201,
+          "p75": 1.005777251832326
+        },
+        "run": 1,
+        "stage": "capture",
+        "workload": "continuation_live_8"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05986151177239035,
+          "median": 1.031912611837472,
+          "p25": 0.9729452107661746,
+          "p75": 1.0847091240508022
+        },
+        "run": 1,
+        "stage": "setup",
+        "workload": "continuation_live_8"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.04924326436113563,
+          "median": 1.0134688627533053,
+          "p25": 0.968362651209945,
+          "p75": 1.0711886316435932
+        },
+        "run": 1,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.06405660017544529,
+          "median": 1.0397105995908391,
+          "p25": 0.978911862043012,
+          "p75": 1.0994752682034585
+        },
+        "run": 2,
+        "stage": "first_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.024532838876628937,
+          "median": 0.9945922198158125,
+          "p25": 0.9750931475141849,
+          "p75": 1.0202076219585265
+        },
+        "run": 2,
+        "stage": "load_and_call",
+        "workload": "call_overhead"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.03202205544694753,
+          "median": 1.002518659657107,
+          "p25": 0.9701292584301668,
+          "p75": 1.0297051983201375
+        },
+        "run": 2,
+        "stage": "capture",
+        "workload": "continuation_live_1"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.05803602900216098,
+          "median": 1.0407701146659822,
+          "p25": 0.9927072021659317,
+          "p75": 1.1505756842443962
+        },
+        "run": 2,
+        "stage": "setup",
+        "workload": "continuation_live_1"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.033710370690040015,
+          "median": 0.5564197451503168,
+          "p25": 0.5297810511072706,
+          "p75": 0.6014137509549273
+        },
+        "run": 2,
+        "stage": "capture",
+        "workload": "continuation_live_512"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.021705046938851696,
+          "median": 0.346558689768206,
+          "p25": 0.33578304132865616,
+          "p75": 0.3807499282559558
+        },
+        "run": 2,
+        "stage": "setup",
+        "workload": "continuation_live_512"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.014125003303321615,
+          "median": 0.5891801372765555,
+          "p25": 0.5726301576075349,
+          "p75": 0.597567520229083
+        },
+        "run": 2,
+        "stage": "capture",
+        "workload": "continuation_live_73"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.048593752042918215,
+          "median": 0.8420256246517297,
+          "p25": 0.7748129080878714,
+          "p75": 0.868457142012969
+        },
+        "run": 2,
+        "stage": "setup",
+        "workload": "continuation_live_73"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.0583405062330995,
+          "median": 0.9690166759592478,
+          "p25": 0.9224798153715639,
+          "p75": 1.0395834850471497
+        },
+        "run": 2,
+        "stage": "capture",
+        "workload": "continuation_live_8"
+      },
+      {
+        "limit": 1.05,
+        "ratio": {
+          "mad": 0.06364895234626905,
+          "median": 1.0510431061015122,
+          "p25": 0.9919840354799631,
+          "p75": 1.1272270752557296
+        },
+        "run": 2,
+        "stage": "setup",
+        "workload": "continuation_live_8"
+      },
+      {
+        "limit": 1.25,
+        "ratio": {
+          "mad": 0.04086271062669805,
+          "median": 1.0115808623300877,
+          "p25": 0.9640287161755403,
+          "p75": 1.033159227835143
+        },
+        "run": 2,
+        "stage": "prepare",
+        "workload": "prepare_large"
+      }
+    ],
+    "decision": "inconclusive",
+    "primary": [
+      {
+        "bootstrap_resamples": 10000,
+        "lower": 0.7188082331415542,
+        "median": 0.7600668132015894,
+        "run": 1,
+        "stages": {
+          "continuation_live_512": "capture",
+          "continuation_live_8": "capture"
+        },
+        "upper": 0.7948179766239376,
+        "weighting": "equal declared targeted workload weights"
+      },
+      {
+        "bootstrap_resamples": 10000,
+        "lower": 0.7149677044985281,
+        "median": 0.7342571642456861,
+        "run": 2,
+        "stages": {
+          "continuation_live_512": "capture",
+          "continuation_live_8": "capture"
+        },
+        "upper": 0.7633980087492336,
+        "weighting": "equal declared targeted workload weights"
+      }
+    ],
+    "reasons": [
+      "continuation_live_1/setup: regression bound is inconclusive",
+      "continuation_live_8/setup: regression bound is inconclusive",
+      "call_overhead/first_call: regression bound is inconclusive",
+      "continuation_live_1/setup: regression bound is inconclusive",
+      "continuation_live_8/setup: regression bound is inconclusive"
+    ],
+    "sample_counts": {
+      "extra_samples": 0,
+      "logical_pair_references": 660,
+      "sampling_note": "aliases reuse the planned raw pairs; no extra samples are added",
+      "uncertainty": "aliases share raw pairs and uncertainty; not independent samples",
+      "unique_pair_count": 660
+    },
+    "scope": "predeclared candidate only; no milestone or P001 total claim",
+    "statistics_computations": 1,
+    "status": "passed",
+    "task": "P072"
+  },
+  "inputs": {
+    "analyzer": {
+      "bytes": 26399,
+      "path": "/workspace/wtime/tools/wtime-bench/analyze.py",
+      "sha256": "2db2f2b2a5f535d3e938b20abc37a8ff73d41c9556ff4ef0bff48d2363ab4734"
+    },
+    "bootstrap": {
+      "bytes": 2374,
+      "path": "/workspace/wtime/tools/wtime-bench/bootstrap.py",
+      "sha256": "2dcb988c2d00cb06a7afc4a5076ea3ec443618c6a0fbd47bb8651d9f804bb3e2"
+    },
+    "build": {
+      "bytes": 333723,
+      "path": "/workspace/wtime/target/verification/runs/P072/verify/attempt-0003/reused-builds/build.json",
+      "sha256": "6bf21720129e0242a5effe0e582019d18c5775a8d39087cbc29e17ad121080bc"
+    },
+    "candidate_build": {
+      "bytes": 64725,
+      "path": "/workspace/wtime/target/verification/runs/P072/verify/attempt-0003/reused-builds/production/build-record.json",
+      "sha256": "7cdc7ae6d0f6d5820da522801d5b28d7f7407f81fedf15318a8ad381c3d1b6b6"
+    },
+    "contract": {
+      "bytes": 3244,
+      "path": "/workspace/wtime/docs/benchmarks/performance/P072-selection.json",
+      "sha256": "df3b33d8f6a3f18aa095a1b2cf85678e0776e73105ce64efad3f26edd86df9ed"
+    },
+    "gate": {
+      "bytes": 30418,
+      "path": "/workspace/wtime/tools/wtime-bench/candidate_gate.py",
+      "sha256": "a90bc56fc0f2a838e53c44a7e12a3f876e5c045d920cc3c99003ecb8345b1334"
+    },
+    "helper_build_budget": {
+      "bytes": 13651,
+      "path": "/workspace/wtime/tools/checks/build_budget.py",
+      "sha256": "71c9c99e8d655d2ce031b8ad7808816f7cd55deff76f4518bb61f088d4ce7f01"
+    },
+    "helper_cold_products": {
+      "bytes": 7772,
+      "path": "/workspace/wtime/tools/wtime-bench/cold_products.py",
+      "sha256": "a69ec2c0864539c6bb7721a86bd6810ffb77058c724fe7ecd5f2832a0184d4ab"
+    },
+    "helper_dependency_budget": {
+      "bytes": 2144,
+      "path": "/workspace/wtime/tools/checks/dependency_budget.py",
+      "sha256": "376d32092f1a197beadba7904b1a493655174784fee89b86c76e103789ec8aa6"
+    },
+    "helper_execution_identity": {
+      "bytes": 8127,
+      "path": "/workspace/wtime/tools/wtime-bench/execution_identity.py",
+      "sha256": "906837962752ca92ed1cff93649601a52d97bf29ad170e04b95c9ae3f28b5b77"
+    },
+    "helper_focused_compare": {
+      "bytes": 39704,
+      "path": "/workspace/wtime/tools/wtime-bench/focused_compare.py",
+      "sha256": "7435f1ab8edc24ca96a9eb3c79b857e095a3f6903f40554b511e0930ebaeb4b6"
+    },
+    "helper_gates": {
+      "bytes": 43491,
+      "path": "/workspace/wtime/tools/wtime-bench/gates.py",
+      "sha256": "0fe1ed560b1882fd1580c8decedd5fa19f4775a4d7c5466b9b83c27411fd7f23"
+    },
+    "helper_selection_manifest": {
+      "bytes": 20728,
+      "path": "/workspace/wtime/tools/wtime-bench/selection_manifest.py",
+      "sha256": "3a53307ec7a3c275e19148840bd2cc7af59be1903a6cb763e8fc66c813c4a48d"
+    },
+    "producer": {
+      "bytes": 12406,
+      "path": "/workspace/wtime/tools/verification/statistics.py",
+      "sha256": "1af5b40da112362232596ef69c1d4408324fa8824a94a6adb522312fff6e4339"
+    },
+    "report": {
+      "bytes": 12830243,
+      "path": "/workspace/wtime/target/verification/runs/P072/measure/attempt-0002/comparison/report.json",
+      "sha256": "3556e843d566bfe0bb41e1d95e1fec038e0a4c0325ea0c4f9899a45bf202ef14"
+    },
+    "task_plan": {
+      "bytes": 4369483,
+      "path": "/workspace/tasks/performance/TASKS.json",
+      "sha256": "2b32bf9d8e359247db76eab32e4bece7bc0b0522dad7bfe6380be754c620fa47"
+    }
+  },
+  "schema": "wtime-verification-statistics-v1",
+  "source_binding": {
+    "scope": "frozen candidate declaration"
+  },
+  "statistics_computations": 1,
+  "status": "passed",
+  "task": "P072",
+  "timing_evidence": true
+}

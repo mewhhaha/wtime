@@ -41,11 +41,21 @@ def expected(entry):
 
 
 def check_observation(entry, observation, mode, root, stage=None, thread_cpus=None, fuel_setting=None):
+    module = entry['oracle']['module']
+    if module == 'continuation_live_workloads.py':
+        import continuation_live_workloads as model
+        need(mode == model.MODE and stage in model.STAGES,
+             'live-continuation observation mode/stage differs')
+        wire = observation.get('raw_wire_observation')
+        need(isinstance(wire, dict), 'live-continuation raw wire observation is missing')
+        verified = model.validate_observation(entry, wire, stage)
+        need(verified == observation,
+             'live-continuation normalized timer/oracle differs from raw wire')
+        return
     need(observation.get('mode') == mode and observation.get('result') == expected(entry), 'observation mode/oracle differs')
     if fuel_setting is not None:
         import p127_fuel_policy
         p127_fuel_policy.validate_wire_setting(observation, fuel_setting)
-    module = entry['oracle']['module']
     if module == 'root_workloads.py':
         import root_compare
         root_compare.revalidate_observation(entry, observation)
@@ -340,11 +350,21 @@ def validate(path):
          'selected input correctness probes are incomplete')
     for row in probes:
         validate_entry_observation(row['observation'], entry_setting[row['side']] if entry_setting is not None else None)
-        need(row.get('timing_excluded') is True and row['observation']['result'] == expected(by_id[row['workload']]),
-             'untimed input oracle differs')
         check_observation(by_id[row['workload']],row['observation'],settings[row['side']+'_mode'],
                           path.parent,stage=row.get('stage'),thread_cpus=thread_cpus,
                           fuel_setting=explicit_fuel)
+        probe_entry = by_id[row['workload']]
+        if probe_entry['oracle']['module'] == 'continuation_live_workloads.py':
+            lifecycle = expected(probe_entry)
+            wire = row['observation']['raw_wire_observation']
+            need(row.get('timing_excluded') is True
+                 and wire['payloads'] == lifecycle['payloads']
+                 and wire['results'] == lifecycle['results'],
+                 'untimed live-continuation lifecycle oracle differs')
+        else:
+            need(row.get('timing_excluded') is True
+                 and row['observation']['result'] == expected(probe_entry),
+                 'untimed input oracle differs')
     needed_calibrations = {(run['run_id'],wid,stage) for run in report['runs']
                            for wid,stage in required if stage in ('warm_call','run_after_setup')
                            or (by_id[wid]['oracle']['module'] == 'thread_workloads.py'
@@ -390,6 +410,9 @@ def decision(report):
             target_stages[wid] = 'run_after_setup'
         elif selected[wid].get('family') == 'threads' and declared == ['steady_state_group']:
             target_stages[wid] = 'steady_state_group'
+        elif (selected[wid].get('family') == 'continuations'
+              and declared == ['setup', 'capture']):
+            target_stages[wid] = 'capture'
         else:
             need(selected[wid].get('family') == 'gc-exceptions' and declared == ['load_and_call'],
                  'target needs a warm stage or the explicit legacy GC cold stage')

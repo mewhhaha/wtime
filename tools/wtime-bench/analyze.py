@@ -106,7 +106,8 @@ def _seed_for(seed: int, key: tuple[str, ...]) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
-def _pair_key(pair: dict[str, Any], run_index: int) -> tuple[str, str, str, str]:
+def _pair_key(pair: dict[str, Any], run_index: int,
+              extra_stages: tuple[str, ...] = ()) -> tuple[str, str, str, str]:
     names = ("workload", "stage", "input")
     values = []
     for name in names:
@@ -114,7 +115,7 @@ def _pair_key(pair: dict[str, Any], run_index: int) -> tuple[str, str, str, str]
         if value is None or isinstance(value, (dict, list)):
             raise ReportError(f"run {run_index} pair {pair.get('pair_id')!r}: missing or invalid {name}")
         values.append(str(value))
-    if values[1] not in STAGES:
+    if values[1] not in STAGES and values[1] not in extra_stages:
         raise ReportError(f"unknown stage {values[1]!r}")
     fixture = pair.get("fixture", pair.get("wasm_sha256"))
     if not isinstance(fixture, (str, int)) or isinstance(fixture, bool):
@@ -141,6 +142,49 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
     if metadata_settings.get("instrumented") is not False:
         raise ReportError("metadata.settings.instrumented must be false for comparable production timings")
     metadata_policy = _policy_settings(metadata_settings, "metadata.settings")
+    raw_pairs = []
+    for run in runs:
+        if isinstance(run, dict) and isinstance(run.get("pairs"), list):
+            raw_pairs.extend(pair for pair in run["pairs"] if isinstance(pair, dict))
+    live_ids = {str(pair.get("workload")) for pair in raw_pairs
+                if str(pair.get("workload", "")).startswith("continuation_live_")}
+    legacy_live_selection = report.get("selection") == "p072-live"
+    focused_p072 = (report.get("schema") == "wtime-focused-comparison-v1"
+                    and report.get("selection") == "P072")
+    live_entries: dict[str, dict[str, Any]] = {}
+    selected_ids: set[str] = set()
+    if focused_p072:
+        import selection_manifest
+        declaration = report.get("declaration")
+        if not isinstance(declaration, dict) or declaration.get("task") != "P072":
+            raise ReportError("focused live-continuation report lacks its P072 selection declaration")
+        try:
+            selected_entries = selection_manifest.rows(declaration)
+        except (ValueError, KeyError) as exc:
+            raise ReportError(f"cannot resolve source-current P072 registry rows: {exc}") from exc
+        selected_ids = {entry["id"] for entry in selected_entries}
+    elif legacy_live_selection:
+        import workloads
+        try:
+            selected_entries = workloads.selection("p072-live")
+        except (ValueError, KeyError) as exc:
+            raise ReportError(f"cannot resolve live-continuation registry selection: {exc}") from exc
+        selected_ids = {entry["id"] for entry in selected_entries}
+    elif live_ids:
+        raise ReportError("live-continuation pairs require a P072 focused declaration")
+    else:
+        selected_entries = []
+    if focused_p072 or legacy_live_selection or live_ids:
+        live_entries = {entry["id"]: entry for entry in selected_entries
+                        if entry.get("oracle", {}).get("module") == "continuation_live_workloads.py"}
+        if not live_entries:
+            raise ReportError("live-continuation report selection has no registered lifecycle rows")
+        if live_ids - set(live_entries):
+            raise ReportError("live-continuation pair is absent from its actual registry selection")
+        if (focused_p072 or legacy_live_selection) and live_ids != set(live_entries):
+            raise ReportError("live-continuation report omits or substitutes a selected registry row")
+        if selected_ids and any(str(pair.get("workload")) not in selected_ids for pair in raw_pairs):
+            raise ReportError("P072 report contains a workload outside its frozen selection")
     seen_seeds: set[int] = set()
     result_runs = []
     reference_groups: set[tuple[str, str, str, str]] | None = None
@@ -168,13 +212,30 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
             if pair_id in pair_ids:
                 raise ReportError(f"run {run_index} has duplicate pair_id {pair_id!r}")
             pair_ids.add(pair_id)
-            key = _pair_key(pair, run_index)
+            live_entry = live_entries.get(str(pair.get("workload")))
+            live_stages: tuple[str, ...] = ()
+            if live_entry is not None:
+                import continuation_live_workloads as live_model
+                live_stages = live_model.STAGES
+            key = _pair_key(pair, run_index, live_stages)
             if key in indexed and any(item["pair_id"] == pair_id for item in indexed[key]):
                 raise ReportError(f"run {run_index} has duplicate pair_id {pair_id!r}")
             expected = pair.get("expected")
             if "expected" not in pair:
                 raise ReportError(f"pair {pair_id!r} is missing expected oracle result")
             _canonical(expected)
+            if live_entry is not None:
+                import continuation_live_workloads as live_model
+                input_value = pair.get("input")
+                wanted_input = live_entry.get("params", [{}])[0].get("baseline")
+                if type(input_value) is not int or input_value != wanted_input:
+                    raise ReportError(f"pair {pair_id!r} live-continuation input differs from registry")
+                try:
+                    lifecycle = live_model.oracle(live_entry["id"], wanted_input)
+                except (ValueError, KeyError, TypeError) as exc:
+                    raise ReportError(f"pair {pair_id!r} live-continuation registry oracle is invalid: {exc}") from exc
+                if _canonical(expected) != _canonical(lifecycle):
+                    raise ReportError(f"pair {pair_id!r} live-continuation expected lifecycle differs from oracle")
             normalized = dict(pair, pair_id=pair_id)
             order = pair.get("order")
             if not isinstance(order, (list, tuple)) or len(order) != 2 or set(order) != {"baseline", "candidate"}:
@@ -185,10 +246,22 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
                     raise ReportError(f"pair {pair_id!r} is missing {side_name} observation")
                 _finite_number(side.get("ns_per_operation"), f"{side_name} ns_per_operation", positive=True)
                 _positive_int(side.get("batch"), f"{side_name} batch")
-                if "result" not in side:
-                    raise ReportError(f"pair {pair_id!r} {side_name} observation is missing result")
-                if _canonical(side.get("result")) != _canonical(expected):
-                    raise ReportError(f"pair {pair_id!r} {side_name} result does not match oracle")
+                if live_entry is not None:
+                    import continuation_live_workloads as live_model
+                    wire = side.get("raw_wire_observation")
+                    if not isinstance(wire, dict):
+                        raise ReportError(f"pair {pair_id!r} {side_name} live-continuation wire is missing")
+                    try:
+                        exact_view = live_model.validate_observation(live_entry, wire, key[1])
+                    except (ValueError, KeyError, TypeError) as exc:
+                        raise ReportError(f"pair {pair_id!r} {side_name} live-continuation wire is invalid: {exc}") from exc
+                    if _canonical(side) != _canonical(exact_view):
+                        raise ReportError(f"pair {pair_id!r} {side_name} live-continuation view differs from raw wire")
+                else:
+                    if "result" not in side:
+                        raise ReportError(f"pair {pair_id!r} {side_name} observation is missing result")
+                    if _canonical(side.get("result")) != _canonical(expected):
+                        raise ReportError(f"pair {pair_id!r} {side_name} result does not match oracle")
                 if "settings" in side and not isinstance(side["settings"], dict):
                     raise ReportError(f"pair {pair_id!r} {side_name}.settings must be an object")
             base_settings = pair["baseline"].get("settings")
@@ -208,12 +281,24 @@ def _validated_runs(report: dict[str, Any]) -> tuple[dict[str, Any], list[dict[s
             for side_name, side in (("baseline", pair["baseline"]), ("candidate", pair["candidate"])):
                 mode = side.get("mode")
                 expected_mode = metadata_settings.get(f"{side_name}_mode")
+                if live_entry is not None:
+                    mode = side["raw_wire_observation"].get("mode")
                 if expected_mode is not None and mode != expected_mode:
                     raise ReportError(f"pair {pair_id!r} {side_name} mode differs from report metadata")
             indexed.setdefault(key, []).append(normalized)
         if len(pair_ids) == 0:
             raise ReportError(f"run {run_index} has no observations")
         groups = set(indexed)
+        if focused_p072 or legacy_live_selection:
+            expected_live_groups = {
+                (entry["id"], stage,
+                 str(entry["params"][0]["baseline"]),
+                 entry["source"]["wasm_sha256"])
+                for entry in live_entries.values() for stage in entry["stages"]
+            }
+            actual_live_groups = {group for group in groups if group[0] in live_entries}
+            if actual_live_groups != expected_live_groups:
+                raise ReportError("live-continuation run groups differ from the complete registry schedule")
         if reference_groups is None:
             reference_groups = groups
         elif groups != reference_groups:

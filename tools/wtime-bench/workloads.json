@@ -729,6 +729,15 @@
         "gc_root_snapshots_reference_512_n17",
         "gc_root_snapshots_reference_512_n32"
       ]
+    },
+    "p072-live": {
+      "status": "ready",
+      "workloads": [
+        "continuation_live_1",
+        "continuation_live_8",
+        "continuation_live_73",
+        "continuation_live_512"
+      ]
     }
   },
   "value_encoding": {
@@ -33672,6 +33681,266 @@
         "bytes_oracle": "expected_memory"
       },
       "expected_outcome": "return"
+    },
+    {
+      "batch_policy": {
+        "fixed": 1,
+        "fresh_process_per_sample": true
+      },
+      "comparators": {
+        "wasmtime": {
+          "reason": "Pinned comparator has no equivalent stack-switching executor.",
+          "status": "unsupported"
+        }
+      },
+      "driver": {
+        "cli_flag": "--continuation-live-set",
+        "kind": "continuation_live",
+        "profile": "all-phase3-core",
+        "profile_policy": "all-phase3-core",
+        "protocol": "wtime-continuation-live-v1"
+      },
+      "family": "continuations",
+      "id": "continuation_live_1",
+      "oracle": {
+        "expected_payload": "i32:7",
+        "expected_resume": "i32:1009",
+        "function": "continuation_live_workloads.py",
+        "independent": true,
+        "kind": "semantic",
+        "module": "continuation_live_workloads.py"
+      },
+      "params": [
+        {
+          "baseline": 1,
+          "max": 1,
+          "min": 1,
+          "name": "live_count",
+          "type": "i32"
+        }
+      ],
+      "profile": {
+        "reason": "dedicated multi-continuation lifecycle driver",
+        "status": "ready"
+      },
+      "required_features": [
+        "mvp",
+        "stack_switching"
+      ],
+      "reset_policy": "fresh_instance_per_invocation",
+      "result": {
+        "type": "none"
+      },
+      "schema_version": 2,
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/continuations/depth_0.wat",
+        "sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+        "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3"
+      },
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "work_units": {
+        "count_from_param": "live_count",
+        "unit": "continuation lifecycle"
+      }
+    },
+    {
+      "batch_policy": {
+        "fixed": 1,
+        "fresh_process_per_sample": true
+      },
+      "comparators": {
+        "wasmtime": {
+          "reason": "Pinned comparator has no equivalent stack-switching executor.",
+          "status": "unsupported"
+        }
+      },
+      "driver": {
+        "cli_flag": "--continuation-live-set",
+        "kind": "continuation_live",
+        "profile": "all-phase3-core",
+        "profile_policy": "all-phase3-core",
+        "protocol": "wtime-continuation-live-v1"
+      },
+      "family": "continuations",
+      "id": "continuation_live_8",
+      "oracle": {
+        "expected_payload": "i32:7",
+        "expected_resume": "i32:1009",
+        "function": "continuation_live_workloads.py",
+        "independent": true,
+        "kind": "semantic",
+        "module": "continuation_live_workloads.py"
+      },
+      "params": [
+        {
+          "baseline": 8,
+          "max": 8,
+          "min": 8,
+          "name": "live_count",
+          "type": "i32"
+        }
+      ],
+      "profile": {
+        "reason": "dedicated multi-continuation lifecycle driver",
+        "status": "ready"
+      },
+      "required_features": [
+        "mvp",
+        "stack_switching"
+      ],
+      "reset_policy": "fresh_instance_per_invocation",
+      "result": {
+        "type": "none"
+      },
+      "schema_version": 2,
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/continuations/depth_0.wat",
+        "sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+        "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3"
+      },
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "work_units": {
+        "count_from_param": "live_count",
+        "unit": "continuation lifecycle"
+      }
+    },
+    {
+      "batch_policy": {
+        "fixed": 1,
+        "fresh_process_per_sample": true
+      },
+      "comparators": {
+        "wasmtime": {
+          "reason": "Pinned comparator has no equivalent stack-switching executor.",
+          "status": "unsupported"
+        }
+      },
+      "driver": {
+        "cli_flag": "--continuation-live-set",
+        "kind": "continuation_live",
+        "profile": "all-phase3-core",
+        "profile_policy": "all-phase3-core",
+        "protocol": "wtime-continuation-live-v1"
+      },
+      "family": "continuations",
+      "id": "continuation_live_73",
+      "oracle": {
+        "expected_payload": "i32:7",
+        "expected_resume": "i32:1009",
+        "function": "continuation_live_workloads.py",
+        "independent": true,
+        "kind": "semantic",
+        "module": "continuation_live_workloads.py"
+      },
+      "params": [
+        {
+          "baseline": 73,
+          "max": 73,
+          "min": 73,
+          "name": "live_count",
+          "type": "i32"
+        }
+      ],
+      "profile": {
+        "reason": "dedicated multi-continuation lifecycle driver",
+        "status": "ready"
+      },
+      "required_features": [
+        "mvp",
+        "stack_switching"
+      ],
+      "reset_policy": "fresh_instance_per_invocation",
+      "result": {
+        "type": "none"
+      },
+      "schema_version": 2,
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/continuations/depth_0.wat",
+        "sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+        "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3"
+      },
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "work_units": {
+        "count_from_param": "live_count",
+        "unit": "continuation lifecycle"
+      }
+    },
+    {
+      "batch_policy": {
+        "fixed": 1,
+        "fresh_process_per_sample": true
+      },
+      "comparators": {
+        "wasmtime": {
+          "reason": "Pinned comparator has no equivalent stack-switching executor.",
+          "status": "unsupported"
+        }
+      },
+      "driver": {
+        "cli_flag": "--continuation-live-set",
+        "kind": "continuation_live",
+        "profile": "all-phase3-core",
+        "profile_policy": "all-phase3-core",
+        "protocol": "wtime-continuation-live-v1"
+      },
+      "family": "continuations",
+      "id": "continuation_live_512",
+      "oracle": {
+        "expected_payload": "i32:7",
+        "expected_resume": "i32:1009",
+        "function": "continuation_live_workloads.py",
+        "independent": true,
+        "kind": "semantic",
+        "module": "continuation_live_workloads.py"
+      },
+      "params": [
+        {
+          "baseline": 512,
+          "max": 512,
+          "min": 512,
+          "name": "live_count",
+          "type": "i32"
+        }
+      ],
+      "profile": {
+        "reason": "dedicated multi-continuation lifecycle driver",
+        "status": "ready"
+      },
+      "required_features": [
+        "mvp",
+        "stack_switching"
+      ],
+      "reset_policy": "fresh_instance_per_invocation",
+      "result": {
+        "type": "none"
+      },
+      "schema_version": 2,
+      "source": {
+        "kind": "wat_file",
+        "path": "fixtures/continuations/depth_0.wat",
+        "sha256": "c4d1378e50d36ff9ec82b4f78a0f83783664c002c31e27ccfb751da5d97451ac",
+        "wasm_sha256": "2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3"
+      },
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "work_units": {
+        "count_from_param": "live_count",
+        "unit": "continuation lifecycle"
+      }
     }
   ]
 }

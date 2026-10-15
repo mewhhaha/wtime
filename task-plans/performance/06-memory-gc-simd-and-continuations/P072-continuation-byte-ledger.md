@@ -1,8 +1,8 @@
 # P072 — Maintain continuation bytes incrementally and transactionally
 
-Status: **todo**
+Status: **done**
 
-Outcome: **pending**
+Outcome: **inconclusive**
 
 Kind: `candidate` · Branch: `portable` · Model: **Sol 6.1 Low**
 
@@ -106,4 +106,90 @@ in its `freeze` phase without replacing it after implementation.
 
 Record actual command/status/settings/counts and artifact/source/binary/fixture hashes; at least three named focused cases, no stale or zero-work pass; speed claims need MEASUREMENT.md.
 
-Update this file and TASKS.json with status/outcome, exact artifacts and limitations. No commands in this planning file have been executed as implementation evidence.
+Update this file and TASKS.json with status/outcome, exact artifacts and limitations. Executed evidence is recorded below.
+
+## Executed evidence
+
+```json
+{
+  "artifact_hashes": {
+    "/workspace/wtime/target/performance/P072/shared-finalization/attempt-0003/evidence.json": "08418ee2689db4cbb84a110b048c0eee0c6c830e169be2486624dc90e4139125"
+  },
+  "evidence": [
+    {
+      "bytes": 2168,
+      "path": "/workspace/wtime/target/performance/P072/shared-finalization/attempt-0003/evidence.json",
+      "sha256": "08418ee2689db4cbb84a110b048c0eee0c6c830e169be2486624dc90e4139125"
+    }
+  ],
+  "outcome": "inconclusive",
+  "status": "done",
+  "task": "P072"
+}
+```
+
+
+## Evaluated candidate and restoration (2026-10-15)
+
+P072 was executed and is **inconclusive**; the incremental ledger is not retained
+in the default runtime. The task added the source-bound live-set driver and
+independent lifecycle model, then evaluated checked Store/per-state charges,
+transactional capture/bind/consume updates, and GC reclamation against a full
+storage recomputation. Candidate tests include 1,024 randomized transitions,
+near-limit capture/bind failures, failed install reservation, failed GC,
+one-shot consumption, source-fuel prefixes, cancellation, and repeated cleanup.
+
+The pre-edit archive is commit `4f6d232e280972f2efa27b014d2644c270ba3b95`,
+manifest SHA-256 `995a4cb27dfd9fe78c59f6127848ddf6e0988ce3a3f8c7ba5a03a898d657c912`.
+Selection SHA-256 `df3b33d8f6a3f18aa095a1b2cf85678e0776e73105ce64efad3f26edd86df9ed`
+was frozen before runtime edits. The immutable depth-zero guest has Wasm SHA-256
+`2e30292dab3ac305fd029a6b8ff92d5af14f96900b40d5053317c75e8ba589a3`.
+
+The full candidate closure passed with 105 unfiltered default runtime unit tests,
+four focused cases with Compact/Register/reference/counters compiled, three
+production driver tests, five model checks, eight lifecycle/analyzer checks,
+15 existing candidate-gate checks, and five producer checks. There were no
+failed or ignored tests in the final receipts. All build/dependency commands
+succeeded. A contract flag error and an incomplete semantic input declaration
+were corrected before candidate timing; unchanged successful builds were
+revalidated by pinned receipts rather than rebuilt. The first measurement
+attempt failed its source-binding preflight before timing. Failed attempts and
+the initial driver/test drafts remain in the retained record.
+
+The executed focused comparison collected **660 complete pairs**: 11 groups,
+30 pairs per group in each of two runs (seeds 72001/72002), decoded execution,
+production binaries, fresh-process batch one, and full suspension/root/resume/GC
+oracles. No warm calibration or synthetic per-call division was used. Statistics
+were computed once with 10,000 resamples. Target capture ratios were
+0.7600668132 (95% CI 0.7188082331–0.7948179766) and 0.7342571642
+(0.7149677045–0.7633980087). The 512-live capture medians improved about
+40–44%, and its setup medians about 65–66%; small live-set setup and a tiny
+first-call control could not establish the required regression bound.
+These results do not promote the candidate or imply a general Wasmtime gain.
+
+Candidate clean build: 2.726194269 seconds; touched CLI leaf: 0.143437581 seconds;
+stripped CLI: 1008344 bytes; zero external default-core dependencies.
+The candidate binary SHA-256 is
+`f5112aad50edbfceb84876af8ca07b95a222841fc3082901e6bfce17cb1c91cc`;
+the separately built frozen-core adapter is
+`b11e2322e486a74b1242d0f7a7d8fde78b753892487696b0742b88032492631b`.
+The raw report SHA-256 is
+`3556e843d566bfe0bb41e1d95e1fec038e0a4c0325ea0c4f9899a45bf202ef14`;
+statistics SHA-256 is
+`a18e4eaf8889f0bbed4e2cd94585c0a2e6e65ca27d399ce335198d8134f45904`.
+
+After publication, both changed runtime files were restored from the verified
+predecessor with fresh modification times. A separate full restoration closure
+passed 101 default and 173 optional-feature unit tests (both unfiltered), plus
+three driver tests and a fresh production build. All 174 archived crate/root
+source entries match the predecessor. The restored production binary SHA-256 is
+`ad8171499be51c4aec8105bcecbf54b674371b617aad0cca9ff62a17ca10714b`.
+Restoration evidence SHA-256 is
+`c68873d22464596845b0f7668d9abff39985fb83eaf99890b5d67963567c8719`.
+Candidate source snapshots and their successful semantic receipts are retained
+as historical evidence; restoration is separately verified and is not promotion.
+
+Artifacts: `docs/benchmarks/performance/P072-{completion,evidence,freeze,proof,statistics,restoration}.json`,
+`docs/benchmarks/performance/P072-records.json.gz`, and both task-owned
+verification contracts. Native AArch64 verification remains outstanding in the
+original plan and is unrelated to this portable candidate outcome.

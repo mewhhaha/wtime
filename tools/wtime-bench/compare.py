@@ -93,6 +93,10 @@ def sources(*, include_memory=False, include_simd=False, include_representative=
     paths += list((HERE/'fixtures'/'gc').rglob('*.wat'))
     paths += list((HERE/'fixtures'/'gc').rglob('*.wasm'))
     paths += list((HERE/'fixtures'/'exceptions').rglob('*.wat'))
+    # Continuation live-set timers consume the immutable P012 guest on both
+    # sides; bind source and encoded bytes along with the typed host driver.
+    paths += list((HERE/'fixtures'/'continuations').rglob('*.wat'))
+    paths += list((HERE/'fixtures'/'continuations').rglob('*.wasm'))
     paths += [ROOT/'docs/benchmarks/performance'/name for name in
               ('P033-contract.json', 'P034-contract.json',
                'P034-measurement-contract.json', 'P034-registry-preservation.json')]

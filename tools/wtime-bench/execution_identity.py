@@ -42,7 +42,8 @@ _KNOWN_FAST_PATH = {
 # inputs remain bound independently of this list.
 _LEGACY_TIMING = {
     "checkpoint.py", "compare.py", "continuation_scaling.py", "gc_cold_adapter.py",
-    "continuation_workloads.py", "gc_compare.py", "gc_layout_workloads.py",
+    "continuation_workloads.py", "continuation_live_workloads.py",
+    "gc_compare.py", "gc_layout_workloads.py",
     "gc_scaling.py", "gc_warm_workloads.py", "gc_workloads.py",
     "integration_compare.py", "integration_workflow.py",
     "integration_workloads.py", "memory_scaling.py", "memory_workloads.py",

@@ -14,7 +14,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 DEFAULT_REGISTRY = HERE / "workloads.json"
 SCHEMA = "wtime-candidate-selection-v1"
-FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads"}
+FAMILIES = {"scalar", "memory", "simd", "representative", "original-mvp", "gc-exceptions", "gc-root-snapshots", "threads", "continuations"}
 ROW_FIELDS = {"family", "id", "role", "scale", "stages", "row_sha256"}
 MANIFEST_FIELDS = {"schema", "task", "lane", "rationale", "registry_sha256", "rows", "semantic_cases"}
 OPTIONAL_MANIFEST_FIELDS = {"fixture_models", "execution_settings"}
@@ -110,6 +110,10 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
         if wid in model_rows:
             if fam != "scalar":
                 raise ValueError(f"fixed model workload {wid} must use virtual scalar family")
+        elif by_id[wid].get("oracle", {}).get("module") == "continuation_live_workloads.py":
+            if (fam != "continuations"
+                    or wid not in {f"continuation_live_{n}" for n in (1, 8, 73, 512)}):
+                raise ValueError(f"invalid live-continuation family or fixed row: {wid}")
         else:
             selection = registry["selections"].get(fam)
             if not isinstance(selection, dict) or wid not in selection.get("workloads", []):
@@ -125,6 +129,10 @@ def _validate_object(manifest: dict[str, Any], registry_path: str | Path) -> dic
             raise ValueError(f"stages must be a unique subset of registry stages for {wid}")
         if fam == "threads" and (full_stages != ["steady_state_group"] or stages != ["steady_state_group"]):
             raise ValueError(f"thread row {wid} must select its exact steady_state_group stage")
+        if by_id[wid].get("oracle", {}).get("module") == "continuation_live_workloads.py":
+            if (fam != "continuations" or wid not in {f"continuation_live_{n}" for n in (1, 8, 73, 512)}
+                    or full_stages != ["setup", "capture"] or stages != ["setup", "capture"]):
+                raise ValueError(f"live-continuation row {wid} must select its exact setup/capture stages")
         digest = item["row_sha256"]
         if not isinstance(digest, str) or not _SHA.fullmatch(digest) or digest != _canonical_sha(by_id[wid]):
             raise ValueError(f"row_sha256 mismatch for {wid}")

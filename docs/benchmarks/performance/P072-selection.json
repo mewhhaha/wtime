@@ -1,0 +1,92 @@
+{
+  "schema": "wtime-candidate-selection-v1",
+  "task": "P072",
+  "lane": "candidate",
+  "rationale": "Predeclared decoded-only continuation lifecycle comparison. Target live set sizes 8 (small) and 512 (large), hold out 73, and protect size 1; every live row measures both setup and capture. Keep the mandatory first-call/load-and-call and prepare controls. The same immutable P012 depth-zero fixture and complete lifecycle oracles apply to every live count. No alternate backend or warm guest-speed claim is included.",
+  "registry_sha256": "ae3550e2f3b47d4d7a2cba1cbcf9702d7c6dfc23789bef3823b0c6a1a70ac1c2",
+  "rows": [
+    {
+      "family": "continuations",
+      "id": "continuation_live_8",
+      "role": "targeted",
+      "scale": "small",
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "row_sha256": "08695c80bf89746a728bcc4d9f2f878f59134f40543375a08d18b7229cb90ffe"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_live_512",
+      "role": "targeted",
+      "scale": "large",
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "row_sha256": "20f902a815c8d9e51babc12523e65fdbffbefd37eb02dbd2e7f324fecb2d7bce"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_live_73",
+      "role": "held_out",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "row_sha256": "8b816c6e337add35bec910e22ddc6144e35f8e231db3f1cd7191757eb3c72e60"
+    },
+    {
+      "family": "continuations",
+      "id": "continuation_live_1",
+      "role": "protected",
+      "scale": "other",
+      "stages": [
+        "setup",
+        "capture"
+      ],
+      "row_sha256": "48baefcc4740ec475af67bc8ed978e468abe7e9d42840c9ca9432ff171842770"
+    },
+    {
+      "family": "original-mvp",
+      "id": "call_overhead",
+      "role": "protected",
+      "scale": "small",
+      "stages": [
+        "first_call",
+        "load_and_call"
+      ],
+      "row_sha256": "0c13c67e8aa8bd0a31f1329e88da2d9971e7908d61ad498191aae8787c32ae62"
+    },
+    {
+      "family": "original-mvp",
+      "id": "prepare_large",
+      "role": "protected",
+      "scale": "large",
+      "stages": [
+        "prepare"
+      ],
+      "row_sha256": "8468d1b2ef4e10c976d4d8b4baf1d648e8d779dd124825dbc90eb5b0a57a2cab"
+    }
+  ],
+  "semantic_cases": [
+    "p072_live_count_and_cleanup_are_checked",
+    "p072_live_oracles_reject_corrupted_guest_results",
+    "p072_live_parser_bounds_and_policy_are_checked",
+    "p072_ledger_matches_scan_through_randomized_transitions",
+    "p072_near_limit_failures_preserve_ledger_and_capability",
+    "p072_gc_reclaims_consumed_and_unreachable_continuations_once",
+    "p072_source_fuel_and_cancellation_preserve_ledger",
+    "t140_second_resume_traps",
+    "t140_failed_resume_reservation_does_not_consume",
+    "t140_aggregate_bytes_fail_before_capture_and_release_after_drop",
+    "t141_suspend_skips_same_tag_switch_prompt",
+    "t141_multiple_bind_preserves_order_and_invalidates_old_capabilities",
+    "t145_detached_frame_keeps_gc_local_alive",
+    "t145_suspension_carries_remaining_fuel",
+    "t145_resume_throw_ref_uncaught_consumes_and_cleans_segment",
+    "t147_repeated_suspension_release_and_cancel_do_not_retain_segments"
+  ]
+}
