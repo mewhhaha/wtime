@@ -1,0 +1,61 @@
+ compile-squares r0                   wasmtime: wall     6480.3 ms  prep    6460.9 ms  run        1.5 ms
+ compile-squares r0              wtime-decoded: wall     3993.0 ms  prep    3589.3 ms  run      142.9 ms
+ compile-squares r0              wtime-compact: wall     2986.2 ms  prep    2687.8 ms  run      118.6 ms
+ compile-squares r0  wtime-register-adaptive=3: wall     3600.4 ms  prep    3194.0 ms  run      160.6 ms
+ compile-squares r0             wtime-register: wall     3319.3 ms  prep    2904.7 ms  run      158.2 ms
+ compile-squares r1             wtime-register: wall     3206.0 ms  prep    2843.2 ms  run      167.5 ms
+ compile-squares r1  wtime-register-adaptive=3: wall     3359.9 ms  prep    3025.8 ms  run      145.1 ms
+ compile-squares r1              wtime-compact: wall     3705.3 ms  prep    3311.9 ms  run      158.8 ms
+ compile-squares r1              wtime-decoded: wall     3512.0 ms  prep    3032.9 ms  run      207.1 ms
+ compile-squares r1                   wasmtime: wall     6675.8 ms  prep    6656.5 ms  run        1.4 ms
+ compile-squares r2                   wasmtime: wall     6423.0 ms  prep    6399.3 ms  run        1.7 ms
+ compile-squares r2              wtime-decoded: wall     3444.4 ms  prep    3096.3 ms  run      137.4 ms
+ compile-squares r2              wtime-compact: wall     3807.4 ms  prep    3431.4 ms  run      144.5 ms
+ compile-squares r2  wtime-register-adaptive=3: wall     3763.7 ms  prep    3345.4 ms  run      181.7 ms
+ compile-squares r2             wtime-register: wall     3262.6 ms  prep    2925.3 ms  run      141.6 ms
+      compile-vm r0                   wasmtime: wall     7052.5 ms  prep    7021.0 ms  run        8.3 ms
+      compile-vm r0              wtime-decoded: wall     6898.9 ms  prep    3560.7 ms  run     3058.9 ms
+      compile-vm r0              wtime-compact: wall     5944.2 ms  prep    3188.4 ms  run     2562.0 ms
+      compile-vm r0  wtime-register-adaptive=3: wall     5429.3 ms  prep    2653.1 ms  run     2546.4 ms
+      compile-vm r0             wtime-register: wall     5957.7 ms  prep    2708.1 ms  run     2983.9 ms
+      compile-vm r1             wtime-register: wall     6511.2 ms  prep    2722.8 ms  run     3473.2 ms
+      compile-vm r1  wtime-register-adaptive=3: wall     5595.7 ms  prep    2741.7 ms  run     2658.4 ms
+      compile-vm r1              wtime-compact: wall     6216.2 ms  prep    2855.9 ms  run     3073.1 ms
+      compile-vm r1              wtime-decoded: wall     5875.9 ms  prep    2902.8 ms  run     2769.1 ms
+      compile-vm r1                   wasmtime: wall     6848.6 ms  prep    6822.5 ms  run        7.8 ms
+      compile-vm r2                   wasmtime: wall     6963.7 ms  prep    6930.5 ms  run       11.4 ms
+      compile-vm r2              wtime-decoded: wall     6459.4 ms  prep    3304.3 ms  run     2916.6 ms
+      compile-vm r2              wtime-compact: wall     5971.7 ms  prep    2592.3 ms  run     3093.3 ms
+      compile-vm r2  wtime-register-adaptive=3: wall     6630.7 ms  prep    3125.3 ms  run     3299.8 ms
+      compile-vm r2             wtime-register: wall     5440.5 ms  prep    2753.6 ms  run     2491.1 ms
+  compile-sudoku r0                   wasmtime: wall     6890.3 ms  prep    6869.3 ms  run        5.2 ms
+  compile-sudoku r0              wtime-decoded: wall     5648.6 ms  prep    3303.8 ms  run     2140.2 ms
+  compile-sudoku r0              wtime-compact: wall     5125.7 ms  prep    2821.8 ms  run     2044.9 ms
+  compile-sudoku r0  wtime-register-adaptive=3: wall     5160.2 ms  prep    2916.9 ms  run     2036.9 ms
+  compile-sudoku r0             wtime-register: wall     5090.0 ms  prep    2788.4 ms  run     2087.3 ms
+  compile-sudoku r1             wtime-register: wall     5372.1 ms  prep    2927.4 ms  run     2235.9 ms
+  compile-sudoku r1  wtime-register-adaptive=3: wall     5694.6 ms  prep    2840.9 ms  run     2569.7 ms
+  compile-sudoku r1              wtime-compact: wall     5329.4 ms  prep    2839.4 ms  run     2235.4 ms
+  compile-sudoku r1              wtime-decoded: wall     5182.7 ms  prep    2886.9 ms  run     2082.1 ms
+  compile-sudoku r1                   wasmtime: wall     6841.3 ms  prep    6818.5 ms  run        5.0 ms
+  compile-sudoku r2                   wasmtime: wall     7173.1 ms  prep    7150.3 ms  run        5.4 ms
+  compile-sudoku r2              wtime-decoded: wall     5467.5 ms  prep    3083.1 ms  run     2137.3 ms
+  compile-sudoku r2              wtime-compact: wall     4831.6 ms  prep    2804.8 ms  run     1839.4 ms
+  compile-sudoku r2  wtime-register-adaptive=3: wall     4788.7 ms  prep    2665.5 ms  run     1924.7 ms
+  compile-sudoku r2             wtime-register: wall     4854.8 ms  prep    2767.0 ms  run     1893.6 ms
+compile-functions r0                   wasmtime: wall     6511.5 ms  prep    6458.0 ms  run       32.1 ms
+compile-functions r0              wtime-decoded: wall    16221.3 ms  prep    2930.0 ms  run    13069.0 ms
+compile-functions r0              wtime-compact: wall    16191.7 ms  prep    2931.4 ms  run    13050.0 ms
+compile-functions r0  wtime-register-adaptive=3: wall    15807.6 ms  prep    2681.8 ms  run    12920.0 ms
+compile-functions r0             wtime-register: wall    16705.3 ms  prep    2802.6 ms  run    13713.1 ms
+compile-functions r1             wtime-register: wall    15006.8 ms  prep    2723.4 ms  run    12079.9 ms
+compile-functions r1  wtime-register-adaptive=3: wall    14873.6 ms  prep    2742.8 ms  run    11943.2 ms
+compile-functions r1              wtime-compact: wall    15730.7 ms  prep    2829.3 ms  run    12647.1 ms
+compile-functions r1              wtime-decoded: wall    15653.0 ms  prep    2647.4 ms  run    12721.8 ms
+compile-functions r1                   wasmtime: wall     6284.7 ms  prep    6243.2 ms  run       25.5 ms
+compile-functions r2                   wasmtime: wall     8005.3 ms  prep    7954.6 ms  run       28.2 ms
+compile-functions r2              wtime-decoded: wall    16164.7 ms  prep    3277.2 ms  run    12695.0 ms
+compile-functions r2              wtime-compact: wall    16691.3 ms  prep    2614.4 ms  run    13862.0 ms
+compile-functions r2  wtime-register-adaptive=3: wall    17215.4 ms  prep    2777.7 ms  run    14232.9 ms
+compile-functions r2             wtime-register: wall    16274.1 ms  prep    2839.8 ms  run    13148.9 ms
+EXIT 0

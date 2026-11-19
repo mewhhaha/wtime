@@ -1,0 +1,66 @@
+[
+ {
+  "name": "compile-squares",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/squares.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/squares.goose to Wasm"
+ },
+ {
+  "name": "compile-vm",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/vm.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/vm.goose to Wasm"
+ },
+ {
+  "name": "compile-sudoku",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/sudoku.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/sudoku.goose to Wasm"
+ },
+ {
+  "name": "compile-functions",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/functions.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/functions.goose to Wasm"
+ }
+]

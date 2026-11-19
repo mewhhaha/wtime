@@ -2,7 +2,9 @@
 
 This page preserves the original baseline. See the
 [current four-tier comparison](wasmtime-current/README.md) for new measurements
-of the selected runtime core against Wasmtime 49.0.2.
+of the selected runtime core against Wasmtime 49.0.2, and the
+[Goose program comparison](../../tools/wtime-goose/README.md) for real compiler-generated
+modules (goose-to-wasm examples and the Goose compiler itself) against Wasmtime 50.0.1.
 
 **wtime prepares modules faster; Wasmtime executes these compute workloads much faster.**
 

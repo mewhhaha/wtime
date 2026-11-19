@@ -1,0 +1,72 @@
+[
+ {
+  "name": "squares",
+  "module": "/home/user/goose-to-wasm/build/cmp/squares.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/squares.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/squares.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "tour",
+  "module": "/home/user/goose-to-wasm/build/cmp/tour.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/tour.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/tour.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "functions",
+  "module": "/home/user/goose-to-wasm/build/cmp/functions.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/functions.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/functions.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "errors",
+  "module": "/home/user/goose-to-wasm/build/cmp/errors.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/errors.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/errors.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "sieve",
+  "module": "/home/user/goose-to-wasm/build/cmp/sieve.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/sieve.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/sieve.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "sorting",
+  "module": "/home/user/goose-to-wasm/build/cmp/sorting.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/sorting.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/sorting.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "life",
+  "module": "/home/user/goose-to-wasm/build/cmp/life.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/life.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/life.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "maze",
+  "module": "/home/user/goose-to-wasm/build/cmp/maze.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/maze.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/maze.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "sudoku",
+  "module": "/home/user/goose-to-wasm/build/cmp/sudoku.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/sudoku.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/sudoku.goose, direct Wasm -O2 (memory32)"
+ },
+ {
+  "name": "vm",
+  "module": "/home/user/goose-to-wasm/build/cmp/vm.wasm",
+  "expected": "/home/user/goose-to-wasm/examples/expected/vm.out",
+  "cwd": "/home/user/goose-to-wasm",
+  "description": "goose-to-wasm examples/vm.goose, direct Wasm -O2 (memory32)"
+ }
+]

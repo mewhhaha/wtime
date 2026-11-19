@@ -1,0 +1,24 @@
+[package]
+name = "wtime-goose"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Runs direct Goose WebAssembly modules (goose-to-wasm) on the wtime interpreter"
+
+# Isolated from the production workspace, like the other benchmark tools.
+[workspace]
+
+[features]
+default = []
+compact-executor = ["wtime-runtime/compact-executor"]
+register-executor = ["wtime-runtime/register-executor"]
+experimental-executors = ["compact-executor", "register-executor"]
+
+[dependencies]
+wtime-runtime = { path = "../../crates/wtime-runtime" }
+wtime-types = { path = "../../crates/wtime-types" }
+wtime-validate = { path = "../../crates/wtime-validate" }
+
+[profile.release]
+debug = 1
