@@ -475,9 +475,7 @@ impl Store {
                                     if !shared.grow(bytes)? {
                                         result = u64::MAX
                                     }
-                                } else if mem.bytes.try_reserve(bytes - mem.bytes.len()).is_ok() {
-                                    mem.bytes.resize(bytes, 0)
-                                } else {
+                                } else if !mem.grow_unshared(bytes) {
                                     result = u64::MAX
                                 }
                             } else {

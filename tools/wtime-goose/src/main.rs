@@ -106,8 +106,8 @@ fn config() -> Config {
     limits.max_call_depth = 4_000_000;
     limits.max_stack_height = 64_000_000;
     limits.max_memory_pages = 1 << 20;
-    limits.max_memory_bytes = 12 << 30;
-    limits.max_store_memory_bytes = 12 << 30;
+    limits.max_memory_bytes = 64 << 30;
+    limits.max_store_memory_bytes = 64 << 30;
     limits.max_instructions = 1 << 30;
     limits.max_module_bytes = 256 << 20;
     config
@@ -147,12 +147,9 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
     let result = (|| -> Result<(), String> {
         let module = engine.compile(data).map_err(|error| error.to_string())?;
         compiled = Instant::now();
-        // The import list, which the runtime's Module does not expose.
-        let config = config();
-        let decoded = wtime_validate::decode(data, &config.features, &config.limits).map_err(|error| error.to_string())?;
         let store = store_slot.insert(Store::new(&engine));
         let mut linker = Linker::new(&engine);
-        for (module_name, name, function) in define_imports(store, &module, &decoded, &state)? {
+        for (module_name, name, function) in define_imports(store, &module, &state)? {
             linker.define(&module_name, &name, External::Func(function)).map_err(|error| error.to_string())?;
         }
         let instance = linker.instantiate(store, &module).map_err(|error| error.to_string())?;
@@ -174,7 +171,21 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
             return Err("'_start' is not a function".into());
         };
         instantiated = Instant::now();
-        match store.invoke(start, &[]).map_err(|error| error.to_string())? {
+        let outcome = store.invoke(start, &[]).map_err(|error| error.to_string());
+        #[cfg(feature = "diagnostics")]
+        if std::env::var_os("WTIME_GOOSE_STATS").is_some() {
+            eprintln!(
+                "register: dispatches {} exits {} fallback frames {}; compact: dispatches {} fused {} inline {} memory {}",
+                store.register_dispatches(),
+                store.register_exits(),
+                store.register_fallback_frames(),
+                store.compact_dispatches(),
+                store.compact_fused_groups(),
+                store.compact_inline_leaf_calls(),
+                store.compact_memory_accesses()
+            );
+        }
+        match outcome? {
             RunOutcome::Returned(_) => Ok(()),
             RunOutcome::Exception(exception) => Err(format!("uncaught guest exception: {exception:?}")),
             RunOutcome::Suspended { tag, .. } => Err(format!("guest suspended at {tag:?}")),

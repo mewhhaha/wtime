@@ -221,17 +221,21 @@ fn p027_mixed_memory64_custom_page_copy_prechecks_both_full_ranges() {
 
 #[cfg(feature = "performance-counters")]
 const EXPECT_DIRECT_BULK: bool = false;
+/// Unshared memory.copy and memory.fill copy slices directly (one reused
+/// buffer between two distinct memories); tables still snapshot.
+#[cfg(feature = "performance-counters")]
+const EXPECT_DIRECT_MEMORY_BULK: bool = true;
 fn copy_path(_s: &Store, _chunks: u64) {
     #[cfg(feature = "performance-counters")]
     {
         let c = _s.performance_counters();
         assert_eq!(
             c.read_vec_operations,
-            if EXPECT_DIRECT_BULK { 0 } else { _chunks }
+            if EXPECT_DIRECT_MEMORY_BULK { 0 } else { _chunks }
         );
         assert_eq!(
             c.bulk_slice_chunks,
-            if EXPECT_DIRECT_BULK { _chunks } else { 0 }
+            if EXPECT_DIRECT_MEMORY_BULK { _chunks } else { 0 }
         );
         assert_eq!(c.table_copy_snapshot_chunks, 0);
     }
@@ -279,7 +283,7 @@ fn p027_fill_exact_images_zero_odd_and_multiple_chunks() {
                 assert_eq!(c.read_vec_operations, 0);
                 assert_eq!(
                     c.bulk_slice_chunks,
-                    if EXPECT_DIRECT_BULK {
+                    if EXPECT_DIRECT_MEMORY_BULK {
                         ((n + 65535) / 65536 * reps) as u64
                     } else {
                         0

@@ -14,11 +14,12 @@ default = []
 compact-executor = ["wtime-runtime/compact-executor"]
 register-executor = ["wtime-runtime/register-executor"]
 experimental-executors = ["compact-executor", "register-executor"]
+# Tier dispatch counters on stderr when WTIME_GOOSE_STATS is set.
+diagnostics = ["experimental-executors", "wtime-runtime/execution-reference"]
 
 [dependencies]
 wtime-runtime = { path = "../../crates/wtime-runtime" }
 wtime-types = { path = "../../crates/wtime-types" }
-wtime-validate = { path = "../../crates/wtime-validate" }
 
 [profile.release]
 debug = 1

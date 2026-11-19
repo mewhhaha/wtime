@@ -1,11 +1,15 @@
 use super::*;
 pub(super) fn exec(op: u16, s: &mut Vec<Value>) -> Result<()> {
+    // Operands are rewritten in place: a unary operation replaces the top
+    // value and a binary one pops its right operand and replaces the left.
+    // Errors and their order match pop/check/push.
     macro_rules! unary {
         ($v:ident,$e:expr) => {{
-            let Value::$v(a) = pop(s)? else {
+            let slot = s.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
+            let Value::$v(a) = *slot else {
                 return Err(trap("numeric type mismatch"));
             };
-            s.push($e(a));
+            *slot = $e(a);
         }};
     }
     macro_rules! binary {
@@ -13,10 +17,11 @@ pub(super) fn exec(op: u16, s: &mut Vec<Value>) -> Result<()> {
             let Value::$v(b) = pop(s)? else {
                 return Err(trap("numeric type mismatch"));
             };
-            let Value::$v(a) = pop(s)? else {
+            let slot = s.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
+            let Value::$v(a) = *slot else {
                 return Err(trap("numeric type mismatch"));
             };
-            s.push($e(a, b));
+            *slot = $e(a, b);
         }};
     }
     macro_rules! intops {

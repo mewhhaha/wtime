@@ -37,12 +37,19 @@ def sha256(path: Path) -> str:
 def run_once(argv: list[str], stdin: bytes, cwd: Path, cpu: str, timeout: float) -> dict:
     with tempfile.TemporaryDirectory() as scratch:
         timing = Path(scratch) / "timing.json"
-        command = ["taskset", "-c", cpu, argv[0], "--timing-json", str(timing), *argv[1:]]
-        started = time.perf_counter_ns()
-        done = subprocess.run(command, input=stdin, cwd=cwd, capture_output=True, timeout=timeout)
-        wall = time.perf_counter_ns() - started
+        command = ["timeout", str(int(timeout)), "taskset", "-c", cpu, argv[0], "--timing-json", str(timing), *argv[1:]]
+        with open(Path(scratch) / "out", "wb") as out, open(Path(scratch) / "err", "wb") as err:
+            started = time.perf_counter_ns()
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=cwd)
+            process.stdin.write(stdin)
+            process.stdin.close()
+            _, status, usage = os.wait4(process.pid, 0)
+            wall = time.perf_counter_ns() - started
         engine = json.loads(timing.read_text()) if timing.exists() else {}
-    return {"wall_ns": wall, "exit": done.returncode, "stdout": done.stdout, "stderr": done.stderr.decode(errors="replace"), **engine}
+        stdout = (Path(scratch) / "out").read_bytes()
+        stderr = (Path(scratch) / "err").read_bytes().decode(errors="replace")
+    return {"wall_ns": wall, "exit": os.waitstatus_to_exitcode(status), "max_rss_kib": usage.ru_maxrss,
+            "stdout": stdout, "stderr": stderr, **engine}
 
 
 def main() -> int:
@@ -50,6 +57,7 @@ def main() -> int:
     parser.add_argument("--cases", type=Path, required=True, help="JSON list of cases")
     parser.add_argument("--wtime", type=Path, required=True)
     parser.add_argument("--wasmtime", type=Path, required=True)
+    parser.add_argument("--wtime-before", type=Path, help="also run this earlier wtime-goose build (engine wtime-before-<tier>)")
     parser.add_argument("--tiers", default="decoded", help="comma-separated wtime tiers")
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--cpu", default="1")
@@ -59,6 +67,8 @@ def main() -> int:
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
     args.wtime, args.wasmtime = args.wtime.resolve(), args.wasmtime.resolve()
+    if args.wtime_before:
+        args.wtime_before = args.wtime_before.resolve()
 
     cases = json.loads(args.cases.read_text())
     if args.only:
@@ -72,7 +82,9 @@ def main() -> int:
                  "model": next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
                                 if line.startswith("model name")), "")},
         "binaries": {"wtime": {"path": str(args.wtime), "sha256": sha256(args.wtime)},
-                     "wasmtime": {"path": str(args.wasmtime), "sha256": sha256(args.wasmtime)}},
+                     "wasmtime": {"path": str(args.wasmtime), "sha256": sha256(args.wasmtime)},
+                     **({"wtime_before": {"path": str(args.wtime_before), "sha256": sha256(args.wtime_before)}}
+                        if args.wtime_before else {})},
         "rounds": args.rounds,
         "cases": [],
     }
@@ -89,6 +101,8 @@ def main() -> int:
             run_once(engines["wasmtime-cached"], stdin, cwd, args.cpu, args.timeout)  # warm the cache
         for tier in tiers:
             engines[f"wtime-{tier}"] = [str(args.wtime), "--tier", tier, str(module), *program]
+            if args.wtime_before:
+                engines[f"wtime-before-{tier}"] = [str(args.wtime_before), "--tier", tier, str(module), *program]
         expected = Path(case["expected"]).read_bytes() if case.get("expected") else None
         rows = {name: [] for name in engines}
         failures = []
@@ -112,7 +126,8 @@ def main() -> int:
         summary = {}
         for name, samples in rows.items():
             summary[name] = {key: statistics.median(sample[key] for sample in samples)
-                             for key in ("wall_ns", "compile_instantiate_ns", "start_function_ns") if all(key in s for s in samples)}
+                             for key in ("wall_ns", "compile_instantiate_ns", "start_function_ns", "max_rss_kib")
+                             if all(key in s for s in samples)}
         for name in names[1:]:
             ratios = {}
             for key in ("wall_ns", "start_function_ns", "compile_instantiate_ns"):

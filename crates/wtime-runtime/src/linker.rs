@@ -159,7 +159,7 @@ impl Linker {
                 host_type_instance: None,
                 host_type_module: None,
                 canonical: m.data.canonical[t.as_usize()],
-                ty: d.types[t.as_usize()].clone(),
+                ty: Arc::new(d.types[t.as_usize()].clone()),
                 instance: ii,
                 body,
                 host: None,

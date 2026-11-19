@@ -62,5 +62,37 @@
    "/dev/null"
   ],
   "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/functions.goose to Wasm"
+ },
+ {
+  "name": "compile64-vm",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler64.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/vm.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as default memory64 Wasm, compiling examples/vm.goose to Wasm"
+ },
+ {
+  "name": "compile64-functions",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler64.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/functions.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as default memory64 Wasm, compiling examples/functions.goose to Wasm"
  }
 ]

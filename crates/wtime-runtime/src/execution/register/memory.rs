@@ -61,11 +61,11 @@ pub(super) fn access(
         .ok_or_else(|| trap("address overflow"))?;
     let range = range(offset, width, memory.bytes.len())?;
     if store {
-        memory.bytes[range].copy_from_slice(&value.to_le_bytes()[..width]);
+        memory.bytes.write(range.start, &value.to_le_bytes()[..width]);
         Ok(None)
     } else {
         let mut buffer = [0; 8];
-        buffer[..width].copy_from_slice(&memory.bytes[range]);
+        memory.bytes.read(range.start, &mut buffer[..width]);
         let value = u64::from_le_bytes(buffer);
         Ok(Some(match opcode {
             0x2c => value as i8 as i32 as u32 as u64,

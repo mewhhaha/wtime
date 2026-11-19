@@ -14,8 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use wtime_runtime::{Caller, Error, ErrorKind, External, ExternalType, Func, Memory, Module, RunOutcome, Store, Value};
-use wtime_types::{CompositeType, FuncType, ValType};
-use wtime_validate::DecodedModule;
+use wtime_types::{FuncType, ValType};
 
 use crate::float::{f32_text, f64_text};
 use crate::pytext::{normalized_path, parse_float, parse_int};
@@ -135,37 +134,17 @@ enum Out {
 
 type Handler = fn(&mut Cx<'_, '_>, &[Value]) -> Result<Out, Error>;
 
-/// The function type of each function import of `decoded`, by its module and
-/// name.
-fn import_types(decoded: &DecodedModule) -> Vec<(String, String, wtime_types::TypeIdx, FuncType)> {
-    let types: Vec<&CompositeType> = decoded.type_groups.iter().flat_map(|group| &group.types).map(|t| &t.composite).collect();
-    decoded
-        .imports
-        .iter()
-        .filter_map(|import| {
-            let (wtime_validate::ImportKind::Func(index) | wtime_validate::ImportKind::ExactFunc(index)) = import.kind
-            else {
-                return None;
-            };
-            let CompositeType::Func(ty) = types.get(index.as_usize())? else { return None };
-            Some((import.module.clone(), import.name.clone(), index, ty.clone()))
-        })
-        .collect()
-}
-
-/// Creates a host function for every import of `module` (decoded as
-/// `decoded`), as `(module, name, function)` for the linker.
-pub fn define_imports(
-    store: &mut Store,
-    module: &Module,
-    decoded: &DecodedModule,
-    state: &Shared,
-) -> Result<Vec<(String, String, Func)>, String> {
-    if decoded.imports.len() != import_types(decoded).len() {
-        return Err("direct Goose modules import only functions".into());
-    }
+/// Creates a host function for every function import of `module`, as
+/// `(module, name, function)` for the linker. Other imports are left to the
+/// linker, which refuses them as missing.
+pub fn define_imports(store: &mut Store, module: &Module, state: &Shared) -> Result<Vec<(String, String, Func)>, String> {
+    let imports: Vec<(String, String, wtime_types::TypeIdx, FuncType)> = module
+        .function_imports()
+        .into_iter()
+        .map(|(module_name, name, index, ty)| (module_name.to_string(), name.to_string(), index, ty.clone()))
+        .collect();
     let mut defined = Vec::new();
-    for (module_name, name, index, ty) in import_types(decoded) {
+    for (module_name, name, index, ty) in imports {
         let Some(handler) = handler_for(&module_name, &name) else {
             return Err(format!("unsupported direct host import: {module_name}.{name}"));
         };

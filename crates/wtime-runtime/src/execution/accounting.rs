@@ -12,7 +12,9 @@ pub(super) fn next_source(
     operand_height: usize,
     prompts: &mut Vec<Prompt>,
 ) -> Result<()> {
-    if let Some(saved) = store.resume_fuel.take() {
+    if store.resume_fuel.is_some()
+        && let Some(saved) = store.resume_fuel.take()
+    {
         *fuel = match (*fuel, saved) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, None) => a,

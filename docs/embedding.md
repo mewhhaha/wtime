@@ -51,6 +51,14 @@ against its allocated byte length before conversion to a host index; choosing
 indices and the same explicit element budget. Failed guest growth returns the
 specified failure sentinel.
 
+An unshared linear memory is stored as 64 KiB pages that are allocated on the
+first write to them; unwritten pages read as zeros. Host memory use therefore
+follows the bytes a guest writes, not its declared or grown size: a module with
+a 4 GiB initial memory, or a memory64 module that grows to many GiB but touches
+little of it, does not reserve or zero that much host memory. Memory byte
+budgets still count the full logical size. Shared memories keep a contiguous,
+zero-filled backing.
+
 Obtain a `CancellationToken` from the store and send its clone to another host
 thread. `cancel()` requests cancellation at guest instruction boundaries;
 `reset()` permits later calls. Cancellation is a resource outcome and cleans

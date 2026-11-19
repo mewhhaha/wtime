@@ -178,6 +178,8 @@ impl Store {
         let mut stack = vec![];
         let mut fuel = self.engine.config.limits.fuel;
         let mut prompts = Vec::new();
+        let mut module_cache: Option<(usize, Module)> = None;
+        let mut module_stale = true;
         loop {
             #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
             register_capacity_scope.observe(&frames);
@@ -307,16 +309,30 @@ impl Store {
                     }
                 }
             }
-            let module = self.instances[inst_id].module.clone();
+            // Instructions are borrowed from a module handle held outside the
+            // store, refreshed only when execution moves to another module, so
+            // dispatch neither clones the handle nor the instruction.
+            // Instances are append-only while published, so the cache is keyed
+            // by instance index. After an instruction that may run host code
+            // (which can instantiate or roll back unpublished instances) the
+            // handle is compared again before reuse.
+            if module_stale || module_cache.as_ref().is_none_or(|(id, _)| *id != inst_id) {
+                let current = &self.instances[inst_id].module;
+                if !module_cache.as_ref().is_some_and(|(_, cached)| Arc::ptr_eq(&cached.data, &current.data)) {
+                    module_cache = Some((inst_id, current.clone()));
+                } else if let Some(cached) = module_cache.as_mut() {
+                    cached.0 = inst_id;
+                }
+            }
+            let module: &Module = &module_cache.as_ref().expect("module cache was just filled").1;
             let ops = &module.data.inner.decoded().code[frame.function.body].instructions;
             #[cfg(feature = "compact-executor")]
-            let (op, pc) = match prepared_instruction {
-                Some(value) => value,
+            let (op, pc): (&Instruction, usize) = match &prepared_instruction {
+                Some((op, pc)) => (op, *pc),
                 None => {
             let op = ops
                 .get(frame.pc)
-                .ok_or_else(|| trap("instruction pointer out of bounds"))?
-                .clone();
+                .ok_or_else(|| trap("instruction pointer out of bounds"))?;
             #[cfg(feature = "performance-counters")]
             {
                 self.perf.record(perf::Event::Dispatch, 1);
@@ -339,7 +355,7 @@ impl Store {
             let op = ops
                 .get(frame.pc)
                 .ok_or_else(|| trap("instruction pointer out of bounds"))?
-                .clone();
+                ;
             #[cfg(feature = "performance-counters")]
             {
                 self.perf.record(perf::Event::Dispatch, 1);
@@ -356,12 +372,14 @@ impl Store {
             frame.pc += 1;
             (op, pc)
             };
+            // Calls may reach host code; continuation resumption may too.
+            module_stale = matches!(op.opcode, 0x10..=0x15 | 0xe0..=0xe6);
             match op.opcode {
                 0x1f => {
                     let Immediate::TryTable { block, catches } = &op.immediate else {
                         return Err(trap("try_table immediate"));
                     };
-                    let (a, r) = arity(block, &module);
+                    let (a, r) = arity(block, module);
                     let (end, _) = module.data.control[frame.function.body][pc]
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
@@ -416,7 +434,7 @@ impl Store {
                 0 => return Err(trap("unreachable")),
                 1 => {}
                 2..=4 => {
-                    let (a, r) = arity(&op.immediate, &module);
+                    let (a, r) = arity(&op.immediate, module);
                     let cond = if op.opcode == 4 {
                         address(pop(&mut stack)?)? != 0
                     } else {
@@ -550,7 +568,7 @@ impl Store {
                             };
                             #[cfg(feature = "compact-executor")]
                             let compatible = self.compact_indirect_compatible(
-                                inst_id, &module, frame.function.body, pc, op.opcode, t as usize, f)?;
+                                inst_id, module, frame.function.body, pc, op.opcode, t as usize, f)?;
                             #[cfg(not(feature = "compact-executor"))]
                             let compatible = self
                                 .engine
@@ -575,7 +593,7 @@ impl Store {
                             };
                             #[cfg(feature = "compact-executor")]
                             let compatible = self.compact_indirect_compatible(
-                                inst_id, &module, frame.function.body, pc, op.opcode, t as usize, f)?;
+                                inst_id, module, frame.function.body, pc, op.opcode, t as usize, f)?;
                             #[cfg(not(feature = "compact-executor"))]
                             let compatible = self
                                 .engine
@@ -645,9 +663,13 @@ impl Store {
                         self.check_function_values(&self.funcs[fun.0.index], &args, &ty.params)?;
                         let caller_base = frame.base;
                         let caller_results = frame.function.ty.results.len();
-                        let mut roots = stack.clone();
-                        roots.extend_from_slice(&args);
-                        roots.extend(frames.iter().flat_map(|f| f.locals.iter().copied()));
+                        // Collection only marks references, so only they are
+                        // retained; scalars would make every host call copy the
+                        // whole operand stack and every frame's locals.
+                        let is_ref = |value: &&Value| matches!(value, Value::Ref(_));
+                        let mut roots: Vec<Value> = stack.iter().filter(is_ref).copied().collect();
+                        roots.extend(args.iter().filter(is_ref).copied());
+                        roots.extend(frames.iter().flat_map(|f| f.locals.iter().filter(is_ref).copied()));
                         #[cfg(feature = "performance-counters")]
                         self.perf
                             .record(perf::Event::Roots, u64::from(!roots.is_empty()));
@@ -718,17 +740,35 @@ impl Store {
                     let a = pop(&mut stack)?;
                     stack.push(if c != 0 { a } else { b })
                 }
-                0x20..=0x26 => {
+                // The most frequent instructions, without the shared arm's
+                // second dispatch.
+                0x20 => {
+                    let Immediate::Index(x) = op.immediate else {
+                        return Err(trap("index immediate"));
+                    };
+                    let value = *frame.locals.get(x as usize).ok_or_else(|| trap("local index"))?;
+                    stack.push(value)
+                }
+                0x21 => {
+                    let Immediate::Index(x) = op.immediate else {
+                        return Err(trap("index immediate"));
+                    };
+                    let value = pop(&mut stack)?;
+                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                }
+                0x22 => {
+                    let Immediate::Index(x) = op.immediate else {
+                        return Err(trap("index immediate"));
+                    };
+                    let value = *stack.last().ok_or_else(|| trap("empty stack"))?;
+                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                }
+                0x23..=0x26 => {
                     let Immediate::Index(x) = op.immediate else {
                         return Err(trap("index immediate"));
                     };
                     let x = x as usize;
                     match op.opcode {
-                        0x20 => stack.push(frame.locals[x]),
-                        0x21 => frame.locals[x] = pop(&mut stack)?,
-                        0x22 => {
-                            frame.locals[x] = *stack.last().ok_or_else(|| trap("empty stack"))?
-                        }
                         0x23 => stack.push(self.get_global(self.instances[inst_id].globals[x])?),
                         0x24 => {
                             let v = pop(&mut stack)?;
@@ -753,7 +793,7 @@ impl Store {
                         }
                     }
                 }
-                0x28..=0x3e => self.load_store(inst_id, &op, &mut stack)?,
+                0x28..=0x3e => self.load_store(inst_id, op, &mut stack)?,
                 0x3f | 0x40 => {
                     let remaining_memory = self
                         .engine
@@ -790,9 +830,7 @@ impl Store {
                                     if !shared.grow(bytes)? {
                                         result = u64::MAX
                                     }
-                                } else if mem.bytes.try_reserve(bytes - mem.bytes.len()).is_ok() {
-                                    mem.bytes.resize(bytes, 0)
-                                } else {
+                                } else if !mem.grow_unshared(bytes) {
                                     result = u64::MAX
                                 }
                             } else {
@@ -882,7 +920,7 @@ impl Store {
                 }
                 0xe0..=0xe6 => {
                     if let Some(ex) =
-                        self.cont_step(inst_id, &op, &mut frames, &mut stack, &mut prompts)?
+                        self.cont_step(inst_id, op, &mut frames, &mut stack, &mut prompts)?
                     {
                         self.published.push(Value::Ref(RefValue::Exn(ex)));
                         return Ok(RunOutcome::Exception(ex));
@@ -938,11 +976,11 @@ impl Store {
                         return Ok(RunOutcome::Returned(stack));
                     }
                 }
-                0xfb00..=0xfb26 => self.gc_exec(inst_id, &op, &mut stack)?,
-                0xfe00..=0xfe4e => self.atomic(inst_id, &op, &mut stack)?,
+                0xfb00..=0xfb26 => self.gc_exec(inst_id, op, &mut stack)?,
+                0xfe00..=0xfe4e => self.atomic(inst_id, op, &mut stack)?,
                 0xfc13..=0xfc16 => crate::wide::execute(op.opcode, &mut stack)?,
-                0xfc08..=0xfc11 => self.bulk(inst_id, &op, &mut stack)?,
-                0xfd00..=0xfd0b | 0xfd54..=0xfd5d => self.simd_memory(inst_id, &op, &mut stack)?,
+                0xfc08..=0xfc11 => self.bulk(inst_id, op, &mut stack)?,
+                0xfd00..=0xfd0b | 0xfd54..=0xfd5d => self.simd_memory(inst_id, op, &mut stack)?,
                 n if n & 0xff00 == 0xfd00 || n & 0xff00 == 0xfa00 => {
                     crate::simd::execute(n, &op.immediate, &mut stack)?
                 }
@@ -988,7 +1026,7 @@ impl Store {
             let _ = r;
             #[cfg(feature = "performance-counters")]
             self.perf.record(perf::Event::ReadVec, 1);
-            b[..n].copy_from_slice(&mem.read(off, n)?);
+            mem.read_into(off, &mut b[..n])?;
             let x = u64::from_le_bytes(b);
             s.push(match code {
                 0x28 => Value::I32(x as i32),
@@ -1078,6 +1116,8 @@ impl Store {
                     0xfc0a => {
                         let source = self.instances[ii].mems[b].0.index;
                         range(src, n, self.mems[source].len()?)?;
+                        let same_unshared = source == dest && self.mems[dest].shared.is_none();
+                        let mut scratch = Vec::new();
                         let mut done = 0;
                         while done < n {
                             if self.cancellation.is_cancelled() {
@@ -1085,22 +1125,49 @@ impl Store {
                             }
                             let amount = (n - done).min(65536);
                             let chunk = if dst > src { n - done - amount } else { done };
-                            #[cfg(feature = "performance-counters")]
-                            self.perf.record(perf::Event::ReadVec, 1);
-                            let bytes = self.mems[source].read(src + chunk as u64, amount)?;
-                            self.mems[dest].write(dst + chunk as u64, &bytes)?;
+                            let from = src as usize + chunk;
+                            if same_unshared {
+                                // Ranges were checked above; overlap is handled
+                                // by the chunk order and copy_within.
+                                #[cfg(feature = "performance-counters")]
+                                self.perf.record(perf::Event::BulkSliceChunk, 1);
+                                self.mems[dest].bytes.copy_within(from, dst as usize + chunk, amount, &mut scratch);
+                            } else if self.mems[source].shared.is_none() && self.mems[dest].shared.is_none() {
+                                // Two unshared memories: one reused buffer.
+                                #[cfg(feature = "performance-counters")]
+                                self.perf.record(perf::Event::BulkSliceChunk, 1);
+                                scratch.resize(amount, 0);
+                                self.mems[source].read_into(from as u64, &mut scratch)?;
+                                self.mems[dest].write(dst + chunk as u64, &scratch)?;
+                            } else {
+                                #[cfg(feature = "performance-counters")]
+                                self.perf.record(perf::Event::ReadVec, 1);
+                                let bytes = self.mems[source].read(from as u64, amount)?;
+                                self.mems[dest].write(dst + chunk as u64, &bytes)?;
+                            }
                             done += amount;
                         }
                     }
                     _ => {
-                        let buffer = [src as u8; 65536];
+                        const FILL_CHUNK: usize = 65536;
+                        let unshared = self.mems[dest].shared.is_none();
+                        // Shared memories take their writes from a buffer, sized
+                        // to the fill rather than to a whole chunk.
+                        let buffer = if unshared { Vec::new() } else { vec![src as u8; n.min(FILL_CHUNK)] };
                         let mut done = 0;
                         while done < n {
                             if self.cancellation.is_cancelled() {
                                 return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
                             }
-                            let amount = (n - done).min(buffer.len());
-                            self.mems[dest].write(dst + done as u64, &buffer[..amount])?;
+                            let amount = (n - done).min(FILL_CHUNK);
+                            let at = dst as usize + done;
+                            if unshared {
+                                #[cfg(feature = "performance-counters")]
+                                self.perf.record(perf::Event::BulkSliceChunk, 1);
+                                self.mems[dest].bytes.fill(at, amount, src as u8);
+                            } else {
+                                self.mems[dest].write(at as u64, &buffer[..amount])?;
+                            }
                             done += amount;
                             #[cfg(test)]
                             if self
@@ -1319,7 +1386,7 @@ impl Store {
                 usize::try_from(self.engine.config.limits.max_memory_bytes).unwrap_or(usize::MAX),
             );
             let backing = shared_memory::SharedMemory::new(mem.bytes.len(), max)?;
-            backing.write(0, &mem.bytes)?;
+            backing.write(0, &mem.bytes.to_vec())?;
             mem.bytes.clear();
             mem.shared = Some(backing);
         }

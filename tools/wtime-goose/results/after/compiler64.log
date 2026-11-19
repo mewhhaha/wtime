@@ -1,0 +1,19 @@
+    compile64-vm r0                   wasmtime: wall    10931.2 ms  prep   10901.5 ms  run        9.3 ms
+    compile64-vm r0            wasmtime-cached: wall       28.5 ms  prep       9.2 ms  run        9.2 ms
+    compile64-vm r0              wtime-decoded: wall     1660.2 ms  prep     465.7 ms  run     1122.7 ms
+    compile64-vm r1              wtime-decoded: wall     1773.4 ms  prep     444.9 ms  run     1269.7 ms
+    compile64-vm r1            wasmtime-cached: wall       30.4 ms  prep       8.7 ms  run        9.4 ms
+    compile64-vm r1                   wasmtime: wall    10555.0 ms  prep   10514.3 ms  run       12.9 ms
+    compile64-vm r2                   wasmtime: wall    11476.6 ms  prep   11445.9 ms  run        9.6 ms
+    compile64-vm r2            wasmtime-cached: wall       27.1 ms  prep       8.6 ms  run        8.7 ms
+    compile64-vm r2              wtime-decoded: wall     1653.4 ms  prep     442.5 ms  run     1141.8 ms
+compile64-functions r0                   wasmtime: wall    10738.2 ms  prep   10681.0 ms  run       36.8 ms
+compile64-functions r0            wasmtime-cached: wall       58.1 ms  prep       9.1 ms  run       38.3 ms
+compile64-functions r0              wtime-decoded: wall     6137.8 ms  prep     433.8 ms  run     5639.3 ms
+compile64-functions r1              wtime-decoded: wall     5987.9 ms  prep     511.6 ms  run     5413.5 ms
+compile64-functions r1            wasmtime-cached: wall       53.9 ms  prep       8.5 ms  run       35.1 ms
+compile64-functions r1                   wasmtime: wall    10926.8 ms  prep   10862.7 ms  run       41.8 ms
+compile64-functions r2                   wasmtime: wall    10483.0 ms  prep   10426.7 ms  run       35.8 ms
+compile64-functions r2            wasmtime-cached: wall       61.6 ms  prep      11.5 ms  run       39.7 ms
+compile64-functions r2              wtime-decoded: wall     5584.2 ms  prep     447.1 ms  run     5071.1 ms
+EXIT 0

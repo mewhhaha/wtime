@@ -28,6 +28,7 @@ pub use register_cache_diagnostics::{
 };
 mod continuation;
 mod exceptions;
+mod linear;
 mod gc;
 mod gc_exec;
 mod numeric;
@@ -325,14 +326,15 @@ struct Function {
     host_type_instance: Option<usize>,
     host_type_module: Option<Module>,
     canonical: CanonicalTypeId,
-    ty: FuncType,
+    /// Shared so that a frame's copy of its function is cheap to make.
+    ty: Arc<FuncType>,
     instance: usize,
     body: usize,
     host: Option<HostCallback>,
 }
 struct Mem {
     ty: MemoryType,
-    bytes: Vec<u8>,
+    bytes: linear::LinearBytes,
     shared: Option<shared_memory::SharedMemory>,
 }
 impl Mem {
@@ -357,28 +359,45 @@ impl Mem {
         } else {
             None
         };
-        let mut bytes = Vec::new();
-        if shared.is_none() {
-            bytes
-                .try_reserve_exact(initial)
-                .map_err(|_| err(ErrorKind::ResourceLimit, "memory allocation failed"))?;
-            bytes.resize(initial, 0);
-        }
+        let bytes = if shared.is_none() {
+            linear::LinearBytes::zeroed(initial)
+                .ok_or_else(|| err(ErrorKind::ResourceLimit, "memory allocation failed"))?
+        } else {
+            linear::LinearBytes::default()
+        };
         Ok(Self { ty, bytes, shared })
+    }
+    /// Grows an unshared memory to `bytes`; false when it cannot be allocated.
+    fn grow_unshared(&mut self, bytes: usize) -> bool {
+        self.bytes.grow_to(bytes)
     }
     fn read(&self, off: u64, n: usize) -> Result<Vec<u8>> {
         if let Some(m) = &self.shared {
             m.read(off, n)
         } else {
-            Ok(self.bytes[range(off, n, self.bytes.len())?].to_vec())
+            let r = range(off, n, self.bytes.len())?;
+            let mut out = vec![0; n];
+            self.bytes.read(r.start, &mut out);
+            Ok(out)
         }
+    }
+    /// Reads `out.len()` bytes at `off` without allocating.
+    #[inline]
+    fn read_into(&self, off: u64, out: &mut [u8]) -> Result<()> {
+        if let Some(m) = &self.shared {
+            out.copy_from_slice(&m.read(off, out.len())?);
+        } else {
+            let r = range(off, out.len(), self.bytes.len())?;
+            self.bytes.read(r.start, out);
+        }
+        Ok(())
     }
     fn write(&mut self, off: u64, b: &[u8]) -> Result<()> {
         if let Some(m) = &self.shared {
             m.write(off, b)
         } else {
             let r = range(off, b.len(), self.bytes.len())?;
-            self.bytes[r].copy_from_slice(b);
+            self.bytes.write(r.start, b);
             Ok(())
         }
     }
@@ -770,7 +789,7 @@ impl Store {
             host_type_instance: None,
             host_type_module: None,
             canonical: self.canonical_func(&ty)?,
-            ty,
+            ty: Arc::new(ty),
             instance: 0,
             body: 0,
             host: Some(Arc::new(move |_, args| {
@@ -1165,7 +1184,7 @@ impl Store {
             host_type_instance: None,
             host_type_module: None,
             canonical: self.canonical_func(&ty)?,
-            ty,
+            ty: Arc::new(ty),
             instance: 0,
             body: 0,
             host: Some(Arc::new(move |store, args| {
@@ -1261,7 +1280,7 @@ impl Store {
             host_type_instance: None,
             host_type_module: None,
             canonical: self.canonical_func(&ty)?,
-            ty,
+            ty: Arc::new(ty),
             instance: 0,
             body: 0,
             host: Some(Arc::new(move |store, args| {
@@ -1365,7 +1384,7 @@ impl Store {
         ty.limits.min = (memory.backend.len()? as u64) >> ty.page_size_log2;
         self.mems.push(Mem {
             ty,
-            bytes: vec![],
+            bytes: linear::LinearBytes::default(),
             shared: Some(memory.backend.clone()),
         });
         Ok(h)
@@ -1479,7 +1498,7 @@ impl Store {
     pub fn external_type(&self, item: External) -> Result<ExternalType> {
         Ok(match item {
             External::Func(f) => {
-                ExternalType::Func(self.funcs[self.check(f.0, &self.funcs)?].ty.clone())
+                ExternalType::Func(self.funcs[self.check(f.0, &self.funcs)?].ty.as_ref().clone())
             }
             External::Memory(m) => {
                 let m = &self.mems[self.check(m.0, &self.mems)?];
@@ -1541,6 +1560,28 @@ impl Module {
 
     pub fn branch_hints(&self) -> wtime_validate::BranchHints {
         wtime_validate::inspect_branch_hints(self.data.inner.decoded())
+    }
+
+    /// The module's function imports in declaration order: import module,
+    /// name, type index (for `Store::create_module_host_func`) and signature.
+    /// Imports of other kinds are omitted.
+    pub fn function_imports(&self) -> Vec<(&str, &str, TypeIdx, &FuncType)> {
+        let decoded = self.data.inner.decoded();
+        let mut types = decoded.type_groups.iter().flat_map(|group| &group.types);
+        let types: Vec<&CompositeType> = types.by_ref().map(|t| &t.composite).collect();
+        decoded
+            .imports
+            .iter()
+            .filter_map(|import| {
+                let (ImportKind::Func(index) | ImportKind::ExactFunc(index)) = import.kind else {
+                    return None;
+                };
+                let CompositeType::Func(ty) = types.get(index.as_usize())? else {
+                    return None;
+                };
+                Some((import.module.as_str(), import.name.as_str(), index, ty))
+            })
+            .collect()
     }
 }
 impl Instance {
@@ -1958,7 +1999,7 @@ impl Store {
             host_type_instance: Some(ii),
             host_type_module: None,
             canonical: module.data.canonical[ty.as_usize()],
-            ty: signature.clone(),
+            ty: Arc::new(signature.clone()),
             instance: ii,
             body: 0,
             host: Some(Arc::new(move |store, args| {
@@ -1996,7 +2037,7 @@ impl Store {
             host_type_instance: None,
             host_type_module: Some(module.clone()),
             canonical: module.data.canonical[ty.as_usize()],
-            ty: signature.clone(),
+            ty: Arc::new(signature.clone()),
             instance: 0,
             body: 0,
             host: Some(Arc::new(move |store, args| {

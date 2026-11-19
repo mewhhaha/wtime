@@ -489,7 +489,7 @@ impl Store {
                 #[cfg(feature = "performance-counters")]
                 self.perf.record(perf::Event::CompactSharedMemoryAccess, 1);
             } else {
-                mem.bytes[whole].copy_from_slice(&bits.to_le_bytes()[..width]);
+                mem.bytes.write(whole.start, &bits.to_le_bytes()[..width]);
             }
         } else {
             let mut bytes = [0u8; 8];
@@ -501,7 +501,7 @@ impl Store {
                     self.perf.record(perf::Event::CompactSharedMemoryAccess, 1);
                 }
             } else {
-                bytes[..width].copy_from_slice(&mem.bytes[whole]);
+                mem.bytes.read(whole.start, &mut bytes[..width]);
                 #[cfg(feature = "performance-counters")]
                 self.perf.record(perf::Event::ReadFixed, 1);
             }
