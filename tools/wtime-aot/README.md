@@ -17,6 +17,18 @@ The generated program runs a direct Goose module (goose-to-wasm) the way
 output, exit codes and timing JSON. `tools/wtime-goose/bench.py --aot-dir`
 benchmarks such programs as engine `wtime-aot`.
 
+## Output
+
+The generated directory is a Cargo workspace: `core` holds the instance,
+the host imports and the trait `Fns<M>`, which declares every function;
+the crates `p0`, `p1`, ... hold the functions, about 12 MiB of source each,
+generic over `M` and calling each other through `Fns<M>`; the program crate
+implements `Fns` for its marker, which monomorphizes every function there
+with direct calls. rustc's front end is sequential within a crate, so the
+parts build in parallel and each in a fraction of the memory: the 64-bit
+Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
+(about 9 minutes on four cores) as nine.
+
 ## Translation
 
 - **Functions** become methods of `Instance`. The operand stack becomes typed
@@ -48,8 +60,9 @@ benchmarks such programs as engine `wtime-aot`.
     every address a 32-bit access can form (8 GiB of address space, touched
     only where the program writes). An access checks a single bound, the
     current length; `memory.grow` moves the length.
-  - A 64-bit memory (`Memory`) is a vector as long as the memory, with its
-    capacity reserved up to 4 GiB. Growing it writes the new zero bytes.
+  - A 64-bit memory (`Memory`) is a lazily zeroed allocation covering its
+    maximum up to 4 GiB, and its length. Growing within the allocation moves
+    the length; growing past it moves the live bytes to a larger allocation.
 
 ## Supported
 

@@ -59,14 +59,11 @@ impl State {
     }
 }
 
+/// Instantiates a compiled module (see `main`).
+pub type Instantiate<G> = fn(&mut State) -> R<G>;
+
 /// A compiled module as the host and the driver see it.
 pub trait Guest {
-    /// Instantiates the module: memory, globals, data, start function. The
-    /// instance takes `state`; if instantiation fails, `state` holds what the
-    /// module wrote and the host's failure.
-    fn instantiate(state: &mut State) -> R<Self>
-    where
-        Self: Sized;
     /// The exported memory, if any.
     fn memory(&mut self) -> Option<&mut dyn LinearMemory>;
     fn state(&mut self) -> &mut State;
@@ -547,7 +544,11 @@ const USAGE: &str = "usage: <program> [--timing-json path] [-- program arguments
 /// from (`module` is the module's path, the program's first argument when
 /// it is given arguments): the same output, exit code and timing JSON. Guest
 /// calls nest on a native stack of `stack_bytes`.
-pub fn main<G: Guest>(module: &str, stack_bytes: usize) -> ! {
+///
+/// `instantiate` instantiates the module: memory, globals, segments and
+/// start function. The instance takes the state; if instantiation fails,
+/// the state holds what the module wrote and the host's failure.
+pub fn main<G: Guest + 'static>(module: &str, stack_bytes: usize, instantiate: Instantiate<G>) -> ! {
     let mut own: Vec<Vec<u8>> = std::env::args_os().skip(1).map(std::ffi::OsString::into_vec).collect();
     let arguments = own.iter().position(|argument| argument == b"--").map(|at| {
         let rest = own.split_off(at + 1);
@@ -579,7 +580,7 @@ pub fn main<G: Guest>(module: &str, stack_bytes: usize) -> ! {
             program
         }
     };
-    let worker = std::thread::Builder::new().stack_size(stack_bytes).spawn(move || run::<G>(input, program));
+    let worker = std::thread::Builder::new().stack_size(stack_bytes).spawn(move || run(input, program, instantiate));
     let outcome = match worker.map(|handle| handle.join()) {
         Ok(Ok(outcome)) => outcome,
         _ => {
@@ -612,13 +613,13 @@ struct Outcome {
     start_ns: u128,
 }
 
-fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>) -> Outcome {
+fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>, instantiate: Instantiate<G>) -> Outcome {
     let started = Instant::now();
     let mut instantiated = started;
     let mut guest = None;
     let mut state = State::new(input, program);
     let result = (|| -> R<()> {
-        let g = guest.insert(G::instantiate(&mut state)?);
+        let g = guest.insert(instantiate(&mut state)?);
         instantiated = Instant::now();
         g.start()
     })();

@@ -111,18 +111,22 @@ pub enum Val {
     F64(f64),
 }
 
-/// The linear memory of a module: a vector as long as the memory, whose
-/// capacity is reserved up to the memory's maximum (at most `RESERVE`) by
-/// one zeroed allocation that the OS zeroes lazily. An access checks one
-/// bound, the vector's length.
+/// The linear memory of a module (64-bit memories use it): one zeroed
+/// allocation, which the OS zeroes lazily, and the memory's current length.
+/// The allocation covers the memory's maximum up to `RESERVE`, so growing
+/// within it only moves the length and touches nothing; growing past it
+/// moves the live bytes to a larger zeroed allocation. An access checks one
+/// bound, the length.
 pub struct Memory {
+    /// Zero beyond `len`.
     bytes: Vec<u8>,
+    len: usize,
     /// The most pages it may grow to.
     max_pages: u64,
 }
 
 pub const PAGE: u64 = 65536;
-/// Bytes reserved up front; a memory that grows past them is reallocated.
+/// Bytes allocated up front at most.
 const RESERVE: u64 = 4 << 30;
 
 impl Memory {
@@ -131,19 +135,20 @@ impl Memory {
     pub fn new(min: u64, max: Option<u64>, memory64: bool) -> R<Memory> {
         let limit = if memory64 { 1 << 48 } else { 1 << 16 };
         let max_pages = max.unwrap_or(limit).min(limit);
+        if min > max_pages {
+            return trap(Trap::MemoryTooLarge);
+        }
         let len = min.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok());
         let Some(len) = len else { return trap(Trap::MemoryTooLarge) };
         let reserve = usize::try_from(max_pages.saturating_mul(PAGE).min(RESERVE)).unwrap_or(len).max(len);
-        let mut bytes = zeroed(reserve)?;
-        bytes.truncate(len);
-        Ok(Memory { bytes, max_pages })
+        Ok(Memory { bytes: zeroed(reserve)?, len, max_pages })
     }
 
     /// The effective address of an access of `n` bytes, or the trap.
     #[inline(always)]
     fn at(&self, address: u64, offset: u64, n: usize) -> R<usize> {
         match address.checked_add(offset).and_then(|a| usize::try_from(a).ok()) {
-            Some(at) if at <= self.bytes.len() && n <= self.bytes.len() - at => Ok(at),
+            Some(at) if at <= self.len && n <= self.len - at => Ok(at),
             _ => trap(Trap::OutOfBounds),
         }
     }
@@ -219,7 +224,7 @@ impl Memory {
 
     /// The size in pages.
     pub fn size(&self) -> u64 {
-        self.bytes.len() as u64 / PAGE
+        self.len as u64 / PAGE
     }
 
     /// Grows by `delta` pages; the old size, or -1 when it cannot.
@@ -227,19 +232,22 @@ impl Memory {
         let old = self.size();
         let Some(new) = old.checked_add(delta).filter(|&n| n <= self.max_pages) else { return -1 };
         let Some(len) = new.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else { return -1 };
-        // The new bytes are written as zeros: a vector cannot take on bytes
-        // it has not written. Its reserved capacity (or a reallocation that
-        // moves the pages) holds them.
-        if self.bytes.try_reserve(len - self.bytes.len()).is_err() {
-            return -1;
+        if len > self.bytes.len() {
+            // Past the allocation: a larger one, at least twice the size,
+            // up to the maximum, takes the live bytes.
+            let max = usize::try_from(self.max_pages.saturating_mul(PAGE)).unwrap_or(usize::MAX);
+            let size = len.max(self.bytes.len().saturating_mul(2).min(max));
+            let Ok(mut bytes) = zeroed(size) else { return -1 };
+            bytes[..self.len].copy_from_slice(&self.bytes[..self.len]);
+            self.bytes = bytes;
         }
-        self.bytes.resize(len, 0);
+        self.len = len;
         old as i64
     }
 
     /// The current bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        &self.bytes[..self.len]
     }
 
     pub fn fill(&mut self, destination: u64, value: u8, n: u64) -> R<()> {
@@ -671,5 +679,22 @@ mod tests {
         assert_eq!(m.grow(1), 1);
         assert_eq!(m.grow(1), -1);
         assert!(m.store::<8>(131064, 0, [1; 8]).is_ok());
+        assert_eq!(m.bytes().len(), 131072);
+    }
+
+    #[test]
+    fn memory64_grows_lazily_and_keeps_its_bytes() {
+        // A memory with no maximum allocates up front to the reserve and
+        // grows within it by moving the length; the bytes past the length
+        // stay out of reach until then.
+        let mut m = Memory::new(1, None, true).unwrap();
+        m.s64(8, 0, 42).unwrap();
+        assert_eq!(m.l64(65536, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m.grow(1 << 14), 1);
+        assert_eq!(m.size(), (1 << 14) + 1);
+        assert_eq!(m.l64(8, 0), Ok(42));
+        assert_eq!(m.l64(((1 << 14) + 1) * 65536 - 8, 0), Ok(0));
+        assert_eq!(m.l64(((1 << 14) + 1) * 65536 - 7, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m.grow(1 << 48), -1);
     }
 }
