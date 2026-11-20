@@ -60,6 +60,8 @@ pub(crate) enum Op {
     I32AddLocalSet(u32),
     LocalGetLocalSet { from: u32, to: u32 },
     LocalGetGlobalSet { local: u32, global: u32 },
+    /// `i32.add; load` on memory 0 with a 32-bit static offset.
+    I32AddLoad { offset: u32, opcode: u16 },
     // Fused expressions over locals: the op at the first instruction runs
     // them all without materializing intermediate operands, charging each
     // later instruction before it runs with the operand-stack height it
@@ -101,6 +103,9 @@ fn fuse(first: Op, second: Op) -> Option<Op> {
         (Op::LocalGet(first), Op::LocalGet(second)) => Op::LocalGetGet { first, second },
         (Op::LocalGet(from), Op::LocalSet(to)) => Op::LocalGetLocalSet { from, to },
         (Op::LocalGet(local), Op::GlobalSet(global)) => Op::LocalGetGlobalSet { local, global },
+        (Op::Int(0x6a), Op::Memory0 { opcode, offset }) if is_load(opcode) => {
+            Op::I32AddLoad { offset: u32::try_from(offset).ok()?, opcode }
+        }
         (Op::LocalGet(local), Op::I32Eqz) => Op::LocalUnary { local, opcode: 0x45 },
         (Op::LocalGet(local), Op::Int(opcode)) if is_unary(opcode) => Op::LocalUnary { local, opcode },
         (Op::Int(opcode), Op::If { end, other, params, results }) => Op::IntIf { opcode, end, other, params, results },
@@ -331,6 +336,10 @@ mod tests {
             ([Op::Int(0x6a), Op::LocalSet(1), Op::End], Op::I32AddLocalSet(1)),
             ([Op::LocalGet(0), Op::LocalSet(1), Op::End], Op::LocalGetLocalSet { from: 0, to: 1 }),
             ([Op::LocalGet(0), Op::GlobalSet(1), Op::End], Op::LocalGetGlobalSet { local: 0, global: 1 }),
+            (
+                [Op::Int(0x6a), Op::Memory0 { opcode: 0x28, offset: 4 }, Op::End],
+                Op::I32AddLoad { offset: 4, opcode: 0x28 },
+            ),
         ];
         for (mut ops, pair) in cases {
             let original = ops;
@@ -366,6 +375,55 @@ mod tests {
         expected[7] = Op::LocalUnary { local: 1, opcode: 0xa7 };
         expected[10] = Op::LocalWrapConstBin { local: 1, value: 3, opcode: 0x6c };
         assert_eq!(ops, expected);
+    }
+
+    /// Every group of up to four ops drawn from a mix of control and other
+    /// ops: none starts with a control op, and only its last op may be one
+    /// (an if or br_if after a computation).
+    #[test]
+    fn groups_hold_control_only_last() {
+        let alphabet = [
+            Op::LocalGet(0),
+            Op::LocalSet(1),
+            Op::I32Const(1),
+            Op::I64Const(1),
+            Op::Int(0x6a),
+            Op::Int(0x7c),
+            Op::Int(0xa7),
+            Op::I32Eqz,
+            Op::Memory0 { opcode: 0x28, offset: 0 },
+            Op::Memory0 { opcode: 0x36, offset: 0 },
+            Op::GlobalGet(0),
+            Op::GlobalSet(0),
+            Op::Block { end: 9, params: 0, results: 0 },
+            Op::Loop { end: 9, params: 0, results: 0 },
+            Op::If { end: 9, other: NO_ELSE, params: 0, results: 0 },
+            Op::Else,
+            Op::End,
+            Op::Br(0),
+            Op::BrIf(0),
+            Op::Leave,
+            Op::Slow,
+        ];
+        let control = |op: Op| {
+            matches!(
+                op,
+                Op::Block { .. } | Op::Loop { .. } | Op::If { .. } | Op::Else | Op::End | Op::Br(_) | Op::BrIf(_) | Op::Leave | Op::Slow
+            )
+        };
+        let n = alphabet.len();
+        let mut groups = 0;
+        for code in 0..n.pow(4) {
+            let ops: Vec<Op> = (0..4).map(|i| alphabet[code / n.pow(i) % n]).collect();
+            for (len, _) in candidates(&ops, 0).into_iter().flatten() {
+                groups += 1;
+                assert!(len >= 2 && len <= ops.len(), "{ops:?}");
+                assert!(!control(ops[0]), "{ops:?}");
+                assert!(ops[1..len - 1].iter().all(|&op| !control(op)), "{ops:?}");
+                assert!(!control(ops[len - 1]) || matches!(ops[len - 1], Op::If { .. } | Op::BrIf(_)), "{ops:?}");
+            }
+        }
+        assert!(groups > 1000);
     }
 
     #[test]

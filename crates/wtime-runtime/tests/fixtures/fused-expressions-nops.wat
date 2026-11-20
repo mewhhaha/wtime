@@ -166,6 +166,18 @@
     local.get $c
     nop
     i32.store
+    nop
+    i32.const 16
+    nop
+    i32.const 4
+    nop
+    local.get $b
+    nop
+    i32.add
+    nop
+    i32.load
+    nop
+    i32.store
     nop)
   (func $g (export "g") (param $a i32) (param $p i64) (result i64)
     (local $x i32) (local $y i64)
@@ -290,6 +302,20 @@
       local.get $y
       nop
     end
+    nop
+    local.get $x
+    nop
+    i32.const 0
+    nop
+    if (param i32) (result i32)
+    nop
+      i32.const 1
+      nop
+      i32.add
+      nop
+    end
+    nop
+    drop
     nop
     i32.const 5
     nop

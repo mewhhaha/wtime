@@ -64,7 +64,7 @@
     drop
     drop
     local.get $r)
-;; Fused pairs, with their effects stored: 25 instructions and the end.
+;; Fused pairs, with their effects stored: 31 instructions and the end.
   (func (export "h") (param $a i32) (local $b i32) (local $c i32)
     i32.const 0       ;; stays below until the store at offset 8
     local.get $a      ;; local.get + local.set
@@ -90,6 +90,12 @@
     i32.store offset=8
     i32.const 12
     local.get $c
+    i32.store
+    i32.const 16
+    i32.const 4
+    local.get $b
+    i32.add           ;; i32.add + i32.load
+    i32.load
     i32.store)
   ;; Conditionals closing groups: compare + br_if (not taken, taken, and
   ;; taken out of the function) and compare + if (true, false with no else,
@@ -157,6 +163,13 @@
     else
       local.get $y
     end
+    local.get $x      ;; false, no else, with a param: its end is skipped
+    i32.const 0
+    if (param i32) (result i32)
+      i32.const 1
+      i32.add
+    end
+    drop
     i32.const 5       ;; i32.eq + br_if out of the function
     local.get $a
     i32.eq

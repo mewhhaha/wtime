@@ -41,7 +41,13 @@ impl Store {
         // reference to one (9-13% wall time on sieve and sudoku), although
         // the clone costs an atomic increment and decrement per run.
         let cancel = self.cancellation.clone();
-        let result = self.run_straight_inner(inst_id, frame, module, ops, stack, &mut local_fuel, &mut pc, &cancel.0);
+        // Without a fuel limit there is nothing to charge but the checks, so
+        // that case runs a copy of the loop without the fuel test.
+        let result = if local_fuel.is_some() {
+            self.run_straight_inner::<true>(inst_id, frame, module, ops, stack, &mut local_fuel, &mut pc, &cancel.0)
+        } else {
+            self.run_straight_inner::<false>(inst_id, frame, module, ops, stack, &mut local_fuel, &mut pc, &cancel.0)
+        };
         frame.pc = pc;
         *fuel = local_fuel;
         self.current_fuel = local_fuel;
@@ -49,7 +55,7 @@ impl Store {
     }
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn run_straight_inner(
+    fn run_straight_inner<const FUEL: bool>(
         &mut self,
         inst_id: usize,
         frame: &mut Frame,
@@ -187,7 +193,7 @@ impl Store {
             }
             macro_rules! global_get {
                 ($x:expr) => {{
-                    stack.push(self.get_global(self.instances[inst_id].globals[$x as usize])?)
+                    stack.push(self.global_value(self.instances[inst_id].globals[$x as usize])?)
                 }};
             }
             macro_rules! global_set {
@@ -195,19 +201,25 @@ impl Store {
                     let v = pop(stack)?;
                     let global = self.instances[inst_id].globals[$x as usize];
                     // A number into a mutable global of its type, as set_global
-                    // accepts it; anything else takes set_global's checks.
-                    let i = self.check(global.0, &self.globals)?;
-                    let slot = &mut self.globals[i];
-                    if slot.ty.mutable && !matches!(v, Value::Ref(_)) && v.ty() == slot.ty.value {
-                        slot.value = v
-                    } else {
-                        self.set_global(global, v)?
+                    // accepts it; anything else takes set_global's checks,
+                    // after the handle check that came first.
+                    let id = self.id;
+                    match self.globals.get_live_mut(global.0.index, global.0.generation) {
+                        Some(slot)
+                            if global.0.store == id
+                                && slot.ty.mutable
+                                && !matches!(v, Value::Ref(_))
+                                && v.ty() == slot.ty.value =>
+                        {
+                            slot.value = v
+                        }
+                        _ => {
+                            self.check(global.0, &self.globals)?;
+                            self.set_global(global, v)?
+                        }
                     }
                 }};
             }
-            // Charges instruction `pc + k` of a fused group, as the bottom of
-            // the loop charges the next instruction, and counts it; `extra`
-            // operands of the group are held outside the operand stack.
             // Charges the instruction at `at` (later in a fused group, or the
             // end an `if` skips to), as the bottom of the loop charges the next
             // instruction, and counts it; `extra` operands of the group are
@@ -219,7 +231,7 @@ impl Store {
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
                     }
-                    if let Some(n) = fuel {
+                    if FUEL && let Some(n) = fuel {
                         if *n == 0 {
                             return Err(err(ErrorKind::ResourceLimit, "fuel exhausted"));
                         }
@@ -324,6 +336,11 @@ impl Store {
                     local_get!(local);
                     charge_second!();
                     global_set!(global)
+                }
+                lowered::Op::I32AddLoad { offset, opcode } => {
+                    binary!(I32, |a, b| Value::I32(a.wrapping_add(b)));
+                    charge_second!();
+                    memory0!(opcode, u64::from(offset))
                 }
                 lowered::Op::LocalConstBin { local, value, opcode } => {
                     let a = local!(local);
@@ -718,7 +735,7 @@ impl Store {
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
             }
-            if let Some(n) = fuel {
+            if FUEL && let Some(n) = fuel {
                 if *n == 0 {
                     return Err(err(ErrorKind::ResourceLimit, "fuel exhausted"));
                 }

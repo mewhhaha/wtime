@@ -30,6 +30,26 @@ impl<T> Arena<T> {
             .get(index)
             .and_then(|s| s.value.as_ref().map(|_| s.generation))
     }
+    /// The live value at `index` if it has generation `generation`.
+    #[cfg(not(feature = "execution-reference"))]
+    #[inline(always)]
+    pub fn get_live(&self, index: usize, generation: u64) -> Option<&T> {
+        let slot = self.slots.get(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.value.as_ref()
+    }
+    /// `get_live`, mutably.
+    #[cfg(not(feature = "execution-reference"))]
+    #[inline(always)]
+    pub fn get_live_mut(&mut self, index: usize, generation: u64) -> Option<&mut T> {
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.value.as_mut()
+    }
     pub fn get(&self, index: usize) -> Option<&T> {
         self.slots.get(index)?.value.as_ref()
     }

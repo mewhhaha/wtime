@@ -710,6 +710,15 @@ impl Store {
     pub fn get_global(&self, g: Global) -> Result<Value> {
         Ok(self.globals[self.check(g.0, &self.globals)?].value)
     }
+    /// `get_global` with one arena lookup.
+    #[cfg(not(feature = "execution-reference"))]
+    #[inline(always)]
+    fn global_value(&self, g: Global) -> Result<Value> {
+        match self.globals.get_live(g.0.index, g.0.generation) {
+            Some(slot) if g.0.store == self.id => Ok(slot.value),
+            _ => Err(err(ErrorKind::Host, "foreign or stale handle")),
+        }
+    }
     pub fn set_global(&mut self, g: Global, v: Value) -> Result<()> {
         self.validate_value(v)?;
         let i = self.check(g.0, &self.globals)?;
