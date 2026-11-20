@@ -165,6 +165,8 @@ impl Engine {
         }
         drop(registry);
         let control = lower_control(&validated)?;
+        #[cfg(not(feature = "execution-reference"))]
+        let lowered = (0..validated.decoded().code.len()).map(|_| std::sync::OnceLock::new()).collect();
         let plans = execution::plan::FunctionPlans::prepare(&validated);
         let module = Module {
             data: Arc::new(ModuleData {
@@ -177,6 +179,8 @@ impl Engine {
                 #[cfg(feature = "register-executor")]
                 register_cache: None,
                 control,
+                #[cfg(not(feature = "execution-reference"))]
+                lowered,
                 canonical: ids,
                 inner: validated,
             }),
@@ -264,6 +268,10 @@ struct ModuleData {
     #[cfg(feature = "register-executor")]
     register_cache: Option<Arc<execution::register::Cache>>,
     control: ControlMap,
+    /// Lowered bodies for straight-line runs, built on first use and shared
+    /// by every store using the module.
+    #[cfg(not(feature = "execution-reference"))]
+    lowered: Box<[std::sync::OnceLock<Box<[execution::lowered::Op]>>]>,
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,
 }

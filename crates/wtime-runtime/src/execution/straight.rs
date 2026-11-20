@@ -83,11 +83,13 @@ impl Store {
                 *slot = $e;
             }};
         }
-        let Some(mut op) = ops.get(*pc_ref) else {
+        let body = frame.function.body;
+        let lowered: &[lowered::Op] = module.data.lowered[body].get_or_init(|| lowered::lower(module, body));
+        let Some(mut lop) = lowered.get(*pc_ref).copied() else {
             return Ok(Straight::Declined);
         };
         loop {
-            let opcode = op.opcode;
+            let pc = *pc_ref;
             // Counted before it runs, as the general loop counts it, so that
             // an instruction that traps is counted too. One that is declined
             // below is not counted again by the general loop.
@@ -97,12 +99,11 @@ impl Store {
                 self.perf.record(perf::Event::InstructionClone, 1);
                 self.perf.record(
                     perf::Event::InstructionBytes,
-                    perf::immediate_copy_bytes(&op.immediate),
+                    perf::immediate_copy_bytes(&ops[pc].immediate),
                 );
             }
             #[cfg(feature = "opcode-coverage")]
-            crate::coverage::record(opcode);
-            let pc = *pc_ref;
+            crate::coverage::record(ops[pc].opcode);
             *pc_ref = pc + 1;
             // Leaves the instruction at the program counter for the general
             // loop: charged, unless it is the instruction the loop charged.
@@ -112,115 +113,56 @@ impl Store {
                     return Ok(if first { Straight::Declined } else { Straight::Charged });
                 }};
             }
-            match opcode {
-                0x01 => {}
-                // Structured control within the frame, as the general loop
-                // runs it; whatever would leave the function stays there.
-                0x02..=0x04 => {
-                    let (a, r) = arity(&op.immediate, module);
-                    let cond = if opcode == 4 { address(pop(stack)?)? != 0 } else { true };
-                    let (end, other) = module.data.control.get(frame.function.body, pc)
-                        .ok_or_else(|| trap("missing control boundary"))?;
+            // A branch to label `depth`, as the general loop takes it; one
+            // that leaves the function stays there.
+            macro_rules! branch {
+                ($depth:expr) => {{
+                    let depth = $depth as usize;
+                    let pos = frame.labels.len().checked_sub(depth + 1).ok_or_else(|| trap("branch depth"))?;
+                    let l = &frame.labels[pos];
+                    keep(stack, l.height, if l.loop_ { l.params } else { l.results })?;
+                    *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
+                    let retain = pos + usize::from(l.loop_);
+                    frame.labels.truncate(retain)
+                }};
+            }
+            macro_rules! label {
+                ($end:expr, $params:expr, $results:expr, $loop_:expr) => {{
+                    let a = $params as usize;
                     let height = stack.len().checked_sub(a).ok_or_else(|| trap("block stack underflow"))?;
                     frame.labels.push(Label {
                         catches: vec![],
                         start: pc + 1,
-                        end,
+                        end: $end as usize,
                         height,
                         params: a,
-                        results: r,
-                        loop_: opcode == 3,
+                        results: $results as usize,
+                        loop_: $loop_,
                     });
-                    if !cond {
-                        *pc_ref = other.map_or(end, |x| x + 1)
-                    }
-                }
-                0x05 => *pc_ref = frame.labels.last().ok_or_else(|| trap("else without label"))?.end,
-                0x0b => {
-                    let Some(l) = frame.labels.pop() else { decline!() };
-                    #[cfg(feature = "performance-counters")]
-                    self.perf.record(perf::Event::Branch, u64::from(l.results != 0));
-                    keep(stack, l.height, l.results)?;
-                }
-                0x0c..=0x0e => {
-                    // The depth, read without consuming the operand, so that a
-                    // branch out of the function can be left untouched.
-                    let operand = || -> Result<u64> {
-                        address(*stack.last().ok_or_else(|| trap("operand stack underflow"))?)
-                    };
-                    let depth = match &op.immediate {
-                        Immediate::Index(x) if opcode == 0x0d => {
-                            if operand()? == 0 {
-                                stack.pop();
-                                None
-                            } else {
-                                Some(*x as usize)
-                            }
-                        }
-                        Immediate::Index(x) => Some(*x as usize),
-                        Immediate::BrTable(v, d) => {
-                            let n = operand()?;
-                            Some(v.get(n as usize).copied().unwrap_or(*d) as usize)
-                        }
-                        _ => return Err(trap("branch immediate")),
-                    };
-                    if let Some(depth) = depth {
-                        if depth == frame.labels.len() {
-                            decline!()
-                        }
-                        if opcode != 0x0c {
-                            stack.pop();
-                        }
-                        let pos = frame.labels.len().checked_sub(depth + 1).ok_or_else(|| trap("branch depth"))?;
-                        let l = &frame.labels[pos];
-                        keep(stack, l.height, if l.loop_ { l.params } else { l.results })?;
-                        *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
-                        let retain = pos + usize::from(l.loop_);
-                        frame.labels.truncate(retain)
-                    }
-                }
-                0x1a => {
-                    pop(stack)?;
-                }
-                0x1b | 0x1c => {
-                    let c = address(pop(stack)?)?;
-                    let b = pop(stack)?;
-                    let a = pop(stack)?;
-                    stack.push(if c != 0 { a } else { b })
-                }
-                0x20 => {
-                    let Immediate::Index(x) = op.immediate else {
-                        return Err(trap("index immediate"));
-                    };
-                    let value = *frame.locals.get(x as usize).ok_or_else(|| trap("local index"))?;
+                }};
+            }
+            // Single instructions, shared by their own ops and fused pairs.
+            macro_rules! local_get {
+                ($x:expr) => {{
+                    let value = *frame.locals.get($x as usize).ok_or_else(|| trap("local index"))?;
                     stack.push(value)
-                }
-                0x21 => {
-                    let Immediate::Index(x) = op.immediate else {
-                        return Err(trap("index immediate"));
-                    };
+                }};
+            }
+            macro_rules! local_set {
+                ($x:expr) => {{
                     let value = pop(stack)?;
-                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
-                }
-                0x22 => {
-                    let Immediate::Index(x) = op.immediate else {
-                        return Err(trap("index immediate"));
-                    };
-                    let value = *stack.last().ok_or_else(|| trap("empty stack"))?;
-                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
-                }
-                0x23 => {
-                    let Immediate::Index(x) = op.immediate else {
-                        return Err(trap("index immediate"));
-                    };
-                    stack.push(self.get_global(self.instances[inst_id].globals[x as usize])?)
-                }
-                0x24 => {
-                    let Immediate::Index(x) = op.immediate else {
-                        return Err(trap("index immediate"));
-                    };
+                    *frame.locals.get_mut($x as usize).ok_or_else(|| trap("local index"))? = value
+                }};
+            }
+            macro_rules! global_get {
+                ($x:expr) => {{
+                    stack.push(self.get_global(self.instances[inst_id].globals[$x as usize])?)
+                }};
+            }
+            macro_rules! global_set {
+                ($x:expr) => {{
                     let v = pop(stack)?;
-                    let global = self.instances[inst_id].globals[x as usize];
+                    let global = self.instances[inst_id].globals[$x as usize];
                     // A number into a mutable global of its type, as set_global
                     // accepts it; anything else takes set_global's checks.
                     let i = self.check(global.0, &self.globals)?;
@@ -230,84 +172,384 @@ impl Store {
                     } else {
                         self.set_global(global, v)?
                     }
-                }
-                0x28..=0x3e => match op.immediate {
-                    Immediate::MemArg { memory: 0, .. } => {
-                        let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
-                        self.memory_access(index, op, stack)?
+                }};
+            }
+            // Charges the second instruction of a fused pair, as the bottom of
+            // the loop charges the next instruction, and counts it.
+            macro_rules! charge_second {
+                () => {{
+                    *pc_ref = pc + 1;
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
                     }
-                    _ => self.load_store(inst_id, op, stack)?,
-                },
-                0x41 => {
-                    if let Immediate::I32(x) = op.immediate {
-                        stack.push(Value::I32(x))
+                    if let Some(n) = fuel {
+                        if *n == 0 {
+                            return Err(err(ErrorKind::ResourceLimit, "fuel exhausted"));
+                        }
+                        *n -= 1;
+                    }
+                    if stack.len() > max_height {
+                        return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
+                    }
+                    #[cfg(feature = "performance-counters")]
+                    {
+                        self.perf.record(perf::Event::Dispatch, 1);
+                        self.perf.record(perf::Event::InstructionClone, 1);
+                        self.perf.record(
+                            perf::Event::InstructionBytes,
+                            perf::immediate_copy_bytes(&ops[pc + 1].immediate),
+                        );
+                    }
+                    #[cfg(feature = "opcode-coverage")]
+                    crate::coverage::record(ops[pc + 1].opcode);
+                    *pc_ref = pc + 2;
+                }};
+            }
+            match lop {
+                lowered::Op::LocalSetGet { set, get } => {
+                    local_set!(set);
+                    charge_second!();
+                    local_get!(get)
+                }
+                lowered::Op::LocalGetGet { first, second } => {
+                    local_get!(first);
+                    charge_second!();
+                    local_get!(second)
+                }
+                lowered::Op::LocalGetI32Const { local, value } => {
+                    local_get!(local);
+                    charge_second!();
+                    stack.push(Value::I32(value))
+                }
+                lowered::Op::I32ConstAdd(value) => {
+                    stack.push(Value::I32(value));
+                    charge_second!();
+                    binary!(I32, |a, b| Value::I32(a.wrapping_add(b)))
+                }
+                lowered::Op::GlobalGetLocalSet { global, local } => {
+                    global_get!(global);
+                    charge_second!();
+                    local_set!(local)
+                }
+                lowered::Op::I32AddLocalSet(local) => {
+                    binary!(I32, |a, b| Value::I32(a.wrapping_add(b)));
+                    charge_second!();
+                    local_set!(local)
+                }
+                lowered::Op::LocalGetLocalSet { from, to } => {
+                    local_get!(from);
+                    charge_second!();
+                    local_set!(to)
+                }
+                lowered::Op::LocalGetGlobalSet { local, global } => {
+                    local_get!(local);
+                    charge_second!();
+                    global_set!(global)
+                }
+                lowered::Op::Leave => decline!(),
+                lowered::Op::Nop => {}
+                lowered::Op::Block { end, params, results } => label!(end, params, results, false),
+                lowered::Op::Loop { end, params, results } => label!(end, params, results, true),
+                lowered::Op::If { end, other, params, results } => {
+                    let cond = address(pop(stack)?)? != 0;
+                    label!(end, params, results, false);
+                    if !cond {
+                        *pc_ref = if other == lowered::NO_ELSE { end as usize } else { other as usize + 1 }
                     }
                 }
-                0x42 => {
-                    if let Immediate::I64(x) = op.immediate {
-                        stack.push(Value::I64(x))
+                lowered::Op::Else => *pc_ref = frame.labels.last().ok_or_else(|| trap("else without label"))?.end,
+                lowered::Op::End => {
+                    let Some(l) = frame.labels.pop() else { decline!() };
+                    #[cfg(feature = "performance-counters")]
+                    self.perf.record(perf::Event::Branch, u64::from(l.results != 0));
+                    keep(stack, l.height, l.results)?;
+                }
+                lowered::Op::Br(depth) => {
+                    if depth as usize == frame.labels.len() {
+                        decline!()
+                    }
+                    branch!(depth)
+                }
+                lowered::Op::BrIf(depth) => {
+                    // The condition is read without consuming it, so that a
+                    // branch out of the function can be left untouched.
+                    let taken = address(*stack.last().ok_or_else(|| trap("operand stack underflow"))?)? != 0;
+                    if taken && depth as usize == frame.labels.len() {
+                        decline!()
+                    }
+                    stack.pop();
+                    if taken {
+                        branch!(depth)
                     }
                 }
-                0x43 => {
-                    if let Immediate::F32(x) = op.immediate {
-                        stack.push(Value::F32(x))
-                    }
+                lowered::Op::Drop => {
+                    pop(stack)?;
                 }
-                0x44 => {
-                    if let Immediate::F64(x) = op.immediate {
-                        stack.push(Value::F64(x))
-                    }
+                lowered::Op::Select => {
+                    let c = address(pop(stack)?)?;
+                    let b = pop(stack)?;
+                    let a = pop(stack)?;
+                    stack.push(if c != 0 { a } else { b })
                 }
-                // The most frequent integer operators, as numeric::exec
-                // computes them; the rest go through it.
-                0x45 => {
+                lowered::Op::LocalGet(x) => local_get!(x),
+                lowered::Op::LocalSet(x) => local_set!(x),
+                lowered::Op::LocalTee(x) => {
+                    let value = *stack.last().ok_or_else(|| trap("empty stack"))?;
+                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                }
+                lowered::Op::GlobalGet(x) => global_get!(x),
+                lowered::Op::GlobalSet(x) => global_set!(x),
+                lowered::Op::Memory0 { opcode, offset } => {
+                    let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
+                    self.memory_access_raw(index, opcode, offset, stack)?
+                }
+                lowered::Op::I32Const(x) => stack.push(Value::I32(x)),
+                lowered::Op::I64Const(x) => stack.push(Value::I64(x)),
+                lowered::Op::F32Const(x) => stack.push(Value::F32(x)),
+                lowered::Op::F64Const(x) => stack.push(Value::F64(x)),
+                lowered::Op::I32Eqz => {
                     let slot = stack.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
                     let Value::I32(a) = *slot else {
                         return Err(trap("numeric type mismatch"));
                     };
                     *slot = Value::I32((a == 0) as i32)
                 }
-                0x46 => binary!(I32, |a, b| Value::I32((a == b) as i32)),
-                0x47 => binary!(I32, |a, b| Value::I32((a != b) as i32)),
-                0x48 => binary!(I32, |a, b| Value::I32((a < b) as i32)),
-                0x49 => binary!(I32, |a, b| Value::I32(((a as u32) < (b as u32)) as i32)),
-                0x4a => binary!(I32, |a, b| Value::I32((a > b) as i32)),
-                0x4b => binary!(I32, |a, b| Value::I32(((a as u32) > (b as u32)) as i32)),
-                0x4c => binary!(I32, |a, b| Value::I32((a <= b) as i32)),
-                0x4d => binary!(I32, |a, b| Value::I32(((a as u32) <= (b as u32)) as i32)),
-                0x4e => binary!(I32, |a, b| Value::I32((a >= b) as i32)),
-                0x4f => binary!(I32, |a, b| Value::I32(((a as u32) >= (b as u32)) as i32)),
-                0x6a => binary!(I32, |a, b| Value::I32(a.wrapping_add(b))),
-                0x6b => binary!(I32, |a, b| Value::I32(a.wrapping_sub(b))),
-                0x6c => binary!(I32, |a, b| Value::I32(a.wrapping_mul(b))),
-                0x71 => binary!(I32, |a, b| Value::I32(a & b)),
-                0x72 => binary!(I32, |a, b| Value::I32(a | b)),
-                0x73 => binary!(I32, |a, b| Value::I32(a ^ b)),
-                0x74 => binary!(I32, |a, b| Value::I32(a.wrapping_shl(b as u32))),
-                0x75 => binary!(I32, |a, b| Value::I32(a.wrapping_shr(b as u32))),
-                0x76 => binary!(I32, |a, b| Value::I32((a as u32).wrapping_shr(b as u32) as i32)),
-                0x51 => binary!(I64, |a, b| Value::I32((a == b) as i32)),
-                0x52 => binary!(I64, |a, b| Value::I32((a != b) as i32)),
-                0x53 => binary!(I64, |a, b| Value::I32((a < b) as i32)),
-                0x54 => binary!(I64, |a, b| Value::I32(((a as u64) < (b as u64)) as i32)),
-                0x7c => binary!(I64, |a, b| Value::I64(a.wrapping_add(b))),
-                0x7d => binary!(I64, |a, b| Value::I64(a.wrapping_sub(b))),
-                0x7e => binary!(I64, |a, b| Value::I64(a.wrapping_mul(b))),
-                0x83 => binary!(I64, |a, b| Value::I64(a & b)),
-                0x84 => binary!(I64, |a, b| Value::I64(a | b)),
-                0x86 => binary!(I64, |a, b| Value::I64(a.wrapping_shl(b as u32))),
-                0x88 => binary!(I64, |a, b| Value::I64((a as u64).wrapping_shr(b as u32) as i64)),
-                _ if (0x45..=0xc4).contains(&opcode) => numeric::exec(opcode, stack)?,
-                // Not a straight-line instruction: it stays at the program
-                // counter for the general loop, charged unless it is the
-                // instruction the loop charged.
-                _ => decline!(),
+                lowered::Op::Int(opcode) => match opcode {
+                    0x46 => binary!(I32, |a, b| Value::I32((a == b) as i32)),
+                    0x47 => binary!(I32, |a, b| Value::I32((a != b) as i32)),
+                    0x48 => binary!(I32, |a, b| Value::I32((a < b) as i32)),
+                    0x49 => binary!(I32, |a, b| Value::I32(((a as u32) < (b as u32)) as i32)),
+                    0x4a => binary!(I32, |a, b| Value::I32((a > b) as i32)),
+                    0x4b => binary!(I32, |a, b| Value::I32(((a as u32) > (b as u32)) as i32)),
+                    0x4c => binary!(I32, |a, b| Value::I32((a <= b) as i32)),
+                    0x4d => binary!(I32, |a, b| Value::I32(((a as u32) <= (b as u32)) as i32)),
+                    0x4e => binary!(I32, |a, b| Value::I32((a >= b) as i32)),
+                    0x4f => binary!(I32, |a, b| Value::I32(((a as u32) >= (b as u32)) as i32)),
+                    0x6a => binary!(I32, |a, b| Value::I32(a.wrapping_add(b))),
+                    0x6b => binary!(I32, |a, b| Value::I32(a.wrapping_sub(b))),
+                    0x6c => binary!(I32, |a, b| Value::I32(a.wrapping_mul(b))),
+                    0x71 => binary!(I32, |a, b| Value::I32(a & b)),
+                    0x72 => binary!(I32, |a, b| Value::I32(a | b)),
+                    0x73 => binary!(I32, |a, b| Value::I32(a ^ b)),
+                    0x74 => binary!(I32, |a, b| Value::I32(a.wrapping_shl(b as u32))),
+                    0x75 => binary!(I32, |a, b| Value::I32(a.wrapping_shr(b as u32))),
+                    0x76 => binary!(I32, |a, b| Value::I32((a as u32).wrapping_shr(b as u32) as i32)),
+                    0x51 => binary!(I64, |a, b| Value::I32((a == b) as i32)),
+                    0x52 => binary!(I64, |a, b| Value::I32((a != b) as i32)),
+                    0x53 => binary!(I64, |a, b| Value::I32((a < b) as i32)),
+                    0x54 => binary!(I64, |a, b| Value::I32(((a as u64) < (b as u64)) as i32)),
+                    0x7c => binary!(I64, |a, b| Value::I64(a.wrapping_add(b))),
+                    0x7d => binary!(I64, |a, b| Value::I64(a.wrapping_sub(b))),
+                    0x7e => binary!(I64, |a, b| Value::I64(a.wrapping_mul(b))),
+                    0x83 => binary!(I64, |a, b| Value::I64(a & b)),
+                    0x84 => binary!(I64, |a, b| Value::I64(a | b)),
+                    0x86 => binary!(I64, |a, b| Value::I64(a.wrapping_shl(b as u32))),
+                    0x88 => binary!(I64, |a, b| Value::I64((a as u64).wrapping_shr(b as u32) as i64)),
+                    _ => numeric::exec(opcode, stack)?,
+                },
+                lowered::Op::Numeric(opcode) => numeric::exec(opcode, stack)?,
+                // Run from the source instruction, exactly as before lowering.
+                lowered::Op::Slow => {
+                            let op = &ops[pc];
+                            let opcode = op.opcode;
+                            match opcode {
+                        0x01 => {}
+                        // Structured control within the frame, as the general loop
+                        // runs it; whatever would leave the function stays there.
+                        0x02..=0x04 => {
+                            let (a, r) = arity(&op.immediate, module);
+                            let cond = if opcode == 4 { address(pop(stack)?)? != 0 } else { true };
+                            let (end, other) = module.data.control.get(frame.function.body, pc)
+                                .ok_or_else(|| trap("missing control boundary"))?;
+                            let height = stack.len().checked_sub(a).ok_or_else(|| trap("block stack underflow"))?;
+                            frame.labels.push(Label {
+                                catches: vec![],
+                                start: pc + 1,
+                                end,
+                                height,
+                                params: a,
+                                results: r,
+                                loop_: opcode == 3,
+                            });
+                            if !cond {
+                                *pc_ref = other.map_or(end, |x| x + 1)
+                            }
+                        }
+                        0x05 => *pc_ref = frame.labels.last().ok_or_else(|| trap("else without label"))?.end,
+                        0x0b => {
+                            let Some(l) = frame.labels.pop() else { decline!() };
+                            #[cfg(feature = "performance-counters")]
+                            self.perf.record(perf::Event::Branch, u64::from(l.results != 0));
+                            keep(stack, l.height, l.results)?;
+                        }
+                        0x0c..=0x0e => {
+                            // The depth, read without consuming the operand, so that a
+                            // branch out of the function can be left untouched.
+                            let operand = || -> Result<u64> {
+                                address(*stack.last().ok_or_else(|| trap("operand stack underflow"))?)
+                            };
+                            let depth = match &op.immediate {
+                                Immediate::Index(x) if opcode == 0x0d => {
+                                    if operand()? == 0 {
+                                        stack.pop();
+                                        None
+                                    } else {
+                                        Some(*x as usize)
+                                    }
+                                }
+                                Immediate::Index(x) => Some(*x as usize),
+                                Immediate::BrTable(v, d) => {
+                                    let n = operand()?;
+                                    Some(v.get(n as usize).copied().unwrap_or(*d) as usize)
+                                }
+                                _ => return Err(trap("branch immediate")),
+                            };
+                            if let Some(depth) = depth {
+                                if depth == frame.labels.len() {
+                                    decline!()
+                                }
+                                if opcode != 0x0c {
+                                    stack.pop();
+                                }
+                                let pos = frame.labels.len().checked_sub(depth + 1).ok_or_else(|| trap("branch depth"))?;
+                                let l = &frame.labels[pos];
+                                keep(stack, l.height, if l.loop_ { l.params } else { l.results })?;
+                                *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
+                                let retain = pos + usize::from(l.loop_);
+                                frame.labels.truncate(retain)
+                            }
+                        }
+                        0x1a => {
+                            pop(stack)?;
+                        }
+                        0x1b | 0x1c => {
+                            let c = address(pop(stack)?)?;
+                            let b = pop(stack)?;
+                            let a = pop(stack)?;
+                            stack.push(if c != 0 { a } else { b })
+                        }
+                        0x20 => {
+                            let Immediate::Index(x) = op.immediate else {
+                                return Err(trap("index immediate"));
+                            };
+                            let value = *frame.locals.get(x as usize).ok_or_else(|| trap("local index"))?;
+                            stack.push(value)
+                        }
+                        0x21 => {
+                            let Immediate::Index(x) = op.immediate else {
+                                return Err(trap("index immediate"));
+                            };
+                            let value = pop(stack)?;
+                            *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                        }
+                        0x22 => {
+                            let Immediate::Index(x) = op.immediate else {
+                                return Err(trap("index immediate"));
+                            };
+                            let value = *stack.last().ok_or_else(|| trap("empty stack"))?;
+                            *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                        }
+                        0x23 => {
+                            let Immediate::Index(x) = op.immediate else {
+                                return Err(trap("index immediate"));
+                            };
+                            stack.push(self.get_global(self.instances[inst_id].globals[x as usize])?)
+                        }
+                        0x24 => {
+                            let Immediate::Index(x) = op.immediate else {
+                                return Err(trap("index immediate"));
+                            };
+                            let v = pop(stack)?;
+                            let global = self.instances[inst_id].globals[x as usize];
+                            // A number into a mutable global of its type, as set_global
+                            // accepts it; anything else takes set_global's checks.
+                            let i = self.check(global.0, &self.globals)?;
+                            let slot = &mut self.globals[i];
+                            if slot.ty.mutable && !matches!(v, Value::Ref(_)) && v.ty() == slot.ty.value {
+                                slot.value = v
+                            } else {
+                                self.set_global(global, v)?
+                            }
+                        }
+                        0x28..=0x3e => match op.immediate {
+                            Immediate::MemArg { memory: 0, .. } => {
+                                let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
+                                self.memory_access(index, op, stack)?
+                            }
+                            _ => self.load_store(inst_id, op, stack)?,
+                        },
+                        0x41 => {
+                            if let Immediate::I32(x) = op.immediate {
+                                stack.push(Value::I32(x))
+                            }
+                        }
+                        0x42 => {
+                            if let Immediate::I64(x) = op.immediate {
+                                stack.push(Value::I64(x))
+                            }
+                        }
+                        0x43 => {
+                            if let Immediate::F32(x) = op.immediate {
+                                stack.push(Value::F32(x))
+                            }
+                        }
+                        0x44 => {
+                            if let Immediate::F64(x) = op.immediate {
+                                stack.push(Value::F64(x))
+                            }
+                        }
+                        // The most frequent integer operators, as numeric::exec
+                        // computes them; the rest go through it.
+                        0x45 => {
+                            let slot = stack.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
+                            let Value::I32(a) = *slot else {
+                                return Err(trap("numeric type mismatch"));
+                            };
+                            *slot = Value::I32((a == 0) as i32)
+                        }
+                        0x46 => binary!(I32, |a, b| Value::I32((a == b) as i32)),
+                        0x47 => binary!(I32, |a, b| Value::I32((a != b) as i32)),
+                        0x48 => binary!(I32, |a, b| Value::I32((a < b) as i32)),
+                        0x49 => binary!(I32, |a, b| Value::I32(((a as u32) < (b as u32)) as i32)),
+                        0x4a => binary!(I32, |a, b| Value::I32((a > b) as i32)),
+                        0x4b => binary!(I32, |a, b| Value::I32(((a as u32) > (b as u32)) as i32)),
+                        0x4c => binary!(I32, |a, b| Value::I32((a <= b) as i32)),
+                        0x4d => binary!(I32, |a, b| Value::I32(((a as u32) <= (b as u32)) as i32)),
+                        0x4e => binary!(I32, |a, b| Value::I32((a >= b) as i32)),
+                        0x4f => binary!(I32, |a, b| Value::I32(((a as u32) >= (b as u32)) as i32)),
+                        0x6a => binary!(I32, |a, b| Value::I32(a.wrapping_add(b))),
+                        0x6b => binary!(I32, |a, b| Value::I32(a.wrapping_sub(b))),
+                        0x6c => binary!(I32, |a, b| Value::I32(a.wrapping_mul(b))),
+                        0x71 => binary!(I32, |a, b| Value::I32(a & b)),
+                        0x72 => binary!(I32, |a, b| Value::I32(a | b)),
+                        0x73 => binary!(I32, |a, b| Value::I32(a ^ b)),
+                        0x74 => binary!(I32, |a, b| Value::I32(a.wrapping_shl(b as u32))),
+                        0x75 => binary!(I32, |a, b| Value::I32(a.wrapping_shr(b as u32))),
+                        0x76 => binary!(I32, |a, b| Value::I32((a as u32).wrapping_shr(b as u32) as i32)),
+                        0x51 => binary!(I64, |a, b| Value::I32((a == b) as i32)),
+                        0x52 => binary!(I64, |a, b| Value::I32((a != b) as i32)),
+                        0x53 => binary!(I64, |a, b| Value::I32((a < b) as i32)),
+                        0x54 => binary!(I64, |a, b| Value::I32(((a as u64) < (b as u64)) as i32)),
+                        0x7c => binary!(I64, |a, b| Value::I64(a.wrapping_add(b))),
+                        0x7d => binary!(I64, |a, b| Value::I64(a.wrapping_sub(b))),
+                        0x7e => binary!(I64, |a, b| Value::I64(a.wrapping_mul(b))),
+                        0x83 => binary!(I64, |a, b| Value::I64(a & b)),
+                        0x84 => binary!(I64, |a, b| Value::I64(a | b)),
+                        0x86 => binary!(I64, |a, b| Value::I64(a.wrapping_shl(b as u32))),
+                        0x88 => binary!(I64, |a, b| Value::I64((a as u64).wrapping_shr(b as u32) as i64)),
+                        _ if (0x45..=0xc4).contains(&opcode) => numeric::exec(opcode, stack)?,
+                        // Not a straight-line instruction: it stays at the program
+                        // counter for the general loop, charged unless it is the
+                        // instruction the loop charged.
+                        _ => decline!(),
+                    }
+                }
             }
             first = false;
             // Charge the next instruction before it runs, with the checks of
             // `next_source` in its order.
-            op = match ops.get(*pc_ref) {
-                Some(op) => op,
+            lop = match lowered.get(*pc_ref) {
+                Some(&op) => op,
                 // Validated code ends with `end`; let the general loop report it.
                 None => return Ok(Straight::Ran),
             };

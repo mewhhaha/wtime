@@ -176,3 +176,28 @@ fn grow_then_atomic_access_keeps_contents() {
     assert_eq!(call(&mut s, i, "aload", &[Value::I32(0)]).unwrap(), [Value::I32(0x04030201)]);
     assert_eq!(s.read_memory(memory, 0, 5).unwrap(), [1, 2, 3, 4, 0]);
 }
+
+/// Every instruction of straight-line code is charged exactly once, through
+/// the lowered and fused paths alike: the least fuel that completes the
+/// function is its instruction count, and every smaller budget runs out.
+#[test]
+fn fused_pairs_charge_each_instruction_once() {
+    let bytes = include_bytes!("fixtures/fused-pairs.wasm");
+    let run = |fuel| {
+        let mut config = Config::default();
+        config.limits.fuel = Some(fuel);
+        let e = Engine::new(config).unwrap();
+        let m = e.compile(bytes).unwrap();
+        let mut s = Store::new(&e);
+        let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+        call(&mut s, i, "f", &[Value::I32(10)])
+    };
+    // b = 10; c = b + 3 = 13; c = c + b = 23; g = c = 23; b = g = 23;
+    // g = b = 23; c = 7 + g + c = 53.
+    assert_eq!(run(24).unwrap(), [Value::I32(53)]);
+    for fuel in 0..24 {
+        let error = run(fuel).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ResourceLimit, "fuel {fuel}");
+        assert!(error.message.contains("fuel"), "fuel {fuel}: {error}");
+    }
+}

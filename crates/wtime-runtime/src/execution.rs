@@ -1,6 +1,8 @@
 mod accounting;
 #[cfg(not(feature = "execution-reference"))]
 mod straight;
+#[cfg(not(feature = "execution-reference"))]
+pub(crate) mod lowered;
 #[cfg(feature = "register-executor")]
 #[allow(dead_code)]
 pub(super) mod register;
@@ -1095,7 +1097,17 @@ impl Store {
         let Immediate::MemArg { offset, .. } = op.immediate else {
             return Err(trap("memory argument"));
         };
-        let code = op.opcode;
+        self.memory_access_raw(index, op.opcode, offset, s)
+    }
+    /// `memory_access` with the opcode and static offset already decoded.
+    #[inline]
+    pub(super) fn memory_access_raw(
+        &mut self,
+        index: usize,
+        code: u16,
+        offset: u64,
+        s: &mut Vec<Value>,
+    ) -> Result<()> {
         // Fixed-width accesses to an unshared memory that stay within one
         // allocated page; everything else, with every error, falls through.
         {
