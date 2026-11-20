@@ -72,6 +72,9 @@ def main() -> int:
     parser.add_argument("--wasmtime-cache", type=Path, help="also run Wasmtime from a warmed compiled-module cache in this directory")
     parser.add_argument("--deno", type=Path, help="also run V8 through this Deno binary (engine v8), with --v8-host")
     parser.add_argument("--v8-host", type=Path, help="goose-to-wasm's scripts/run_wasm.mjs, the V8 host Deno runs")
+    parser.add_argument("--aot-dir", type=Path,
+                        help="also run programs compiled ahead of time by tools/wtime-aot (engine wtime-aot): "
+                             "aot-<module stem> in this directory for each case")
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
     args.wtime, args.wasmtime = args.wtime.resolve(), args.wasmtime.resolve()
@@ -116,6 +119,9 @@ def main() -> int:
             cache = args.wasmtime_cache.resolve() / f"{case['name']}.cwasm"
             engines["wasmtime-cached"] = [str(args.wasmtime), str(module), "--cache", str(cache), *program]
             run_once(engines["wasmtime-cached"], stdin, cwd, args.cpu, args.timeout)  # warm the cache
+        if args.aot_dir:
+            stem = "".join(c if c.isascii() and c.isalnum() else "-" for c in module.stem)
+            engines["wtime-aot"] = [str(args.aot_dir.resolve() / f"aot-{stem}"), *program]
         if args.deno:
             # Deno's V8 with its default tiers (Liftoff, then TurboFan), all
             # permissions for the host's file access, the module's memory64
