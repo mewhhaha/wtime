@@ -108,33 +108,40 @@ gap by generating code at run time.
 
 ### Ahead of time (wtime-aot)
 
-[`tools/wtime-aot`](../wtime-aot/README.md) closes it before run time instead: it
-translates a module to a safe Rust crate (bounds-checked memory, Wasm's numeric
+[`tools/wtime-aot`](../wtime-aot/README.md) closes the gap before run time instead: it
+translates a module to safe Rust crates (bounds-checked memory, Wasm's numeric
 semantics, no `unsafe`) that rustc compiles once. Preparation is then 0.3 ms. Every
-output below matches Wasmtime's, and the AOT-compiled Goose compiler emits Wasm
-byte-identical to the native compiler's. Same machine, one CPU per engine
-(`5be3c27`; [tables](results/aot-5be3c27/tables.md)); the VM is noisy, V8 most of all.
+output below matches Wasmtime's, and the AOT-compiled Goose compilers emit Wasm
+byte-identical to the native (32-bit) and interpreter-run (64-bit) compilers'. Same
+machine, one CPU per engine (`1402583`; [tables](results/aot-1402583/tables.md)); the
+VM is noisy, V8 most of all. Process is the whole process, run the guest's `_start`.
 
-| Example | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime | aot / V8 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| squares, tour, functions, errors, maze, vm | 0.0–0.1 ms | 0.4–3.5 ms | 0.0–0.1 ms | 0.11–0.74× | ≤ 0.05× |
-| sieve | 0.9 ms | 7.1 ms | 0.9 ms | 1.04× | 0.13× |
-| sudoku | 14.2 ms | 23.0 ms | 12.2 ms | **0.84×** | 0.53× |
-| life | 22.9 ms | 26.4 ms | 14.1 ms | **0.60×** | 0.53× |
-| sorting | 183 ms | 657 ms | 134 ms | **0.68×** | 0.20× |
+| Example | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| squares, tour, functions, errors, maze, vm | 0.0–0.1 ms | 0.3–3.2 ms | 0.0–0.1 ms | 0.11–0.70× | 4.7–5.7 ms | 46–70 ms | **3.7–4.4 ms** |
+| sieve | 0.7 ms | 6.7 ms | 0.8 ms | 1.17× | 5.3 ms | 54 ms | **4.6 ms** |
+| sudoku | 9.2 ms | 15.5 ms | 9.6 ms | 0.99× | 15.5 ms | 65 ms | **13.8 ms** |
+| life | 22.5 ms | 25.9 ms | 13.7 ms | **0.59×** | 27.3 ms | 75 ms | **18.4 ms** |
+| sorting | 192 ms | 233 ms | 129 ms | **0.68×** | 182 ms | 282 ms | **134 ms** |
 
 | Case | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| compile-squares | 1.1 ms | 152 ms | 1.7 ms | 1.41× | 18.5 ms | 344 ms | **6.8 ms** |
-| compile-vm | 6.2 ms | 506 ms | 7.3 ms | 1.19× | 24.2 ms | 686 ms | **12.4 ms** |
-| compile-sudoku | 4.9 ms | 395 ms | 5.6 ms | 1.14× | 23.5 ms | 567 ms | **10.9 ms** |
-| compile-functions | 34.1 ms | 742 ms | 40.5 ms | 1.18× | 52.4 ms | 927 ms | **47.1 ms** |
+| compile-squares | 1.1 ms | 112 ms | 1.5 ms | 1.22× | 17.8 ms | 283 ms | **6.6 ms** |
+| compile-vm | 5.8 ms | 376 ms | 6.9 ms | 1.12× | 21.3 ms | 540 ms | **11.8 ms** |
+| compile-sudoku | 4.6 ms | 351 ms | 5.1 ms | 1.07× | 19.8 ms | 512 ms | **10.0 ms** |
+| compile-functions | 22.8 ms | 533 ms | 25.9 ms | 1.14× | 38.5 ms | 680 ms | **32.6 ms** |
+| compile64-vm | 8.7 ms | 1,133 ms | 17.1 ms | 1.81× | 30.1 ms | 1,316 ms | **22.3 ms** |
+| compile64-functions | 35.2 ms | 1,578 ms | 58.4 ms | 1.63× | 52.3 ms | 1,737 ms | 64.4 ms |
 
-Compiled ahead of time, the examples run as fast as Wasmtime's code or faster, and
-every case beats V8. The Goose compiler's own run stays 1.1–1.4× Wasmtime's: its
-large functions spill and every memory access carries an explicit bounds check, which
-Wasmtime replaces with guard pages. Whole processes are faster than both everywhere.
-Building the compiler's crate takes about 12 minutes and 11.5 GB with rustc 1.97.0.
+Compiled ahead of time, the examples run as fast as Wasmtime's code or faster, every
+case beats V8, and the whole process beats both everywhere but compile64-functions.
+The Goose compilers' own runs stay behind Wasmtime's: 1.1–1.2× for the 32-bit
+compiler, whose large functions spill and whose every memory access carries an
+explicit bounds check (Wasmtime uses guard pages); 1.6–1.8× for the 64-bit one, which
+also grows its memory to about 17 GB, more than one allocation can span here, so
+accesses above the contiguous base take a slower path. The generated crates build
+with rustc 1.97.0 in about 3 minutes (32-bit compiler, 3.2 GB) and 9 minutes (64-bit,
+6 GB) on four cores.
 
 ## Fixes
 
