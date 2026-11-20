@@ -135,19 +135,41 @@ impl Store {
                     frame.labels.truncate(retain)
                 }};
             }
+            // The label of the block, loop or if at `at`.
             macro_rules! label {
-                ($end:expr, $params:expr, $results:expr, $loop_:expr) => {{
+                ($at:expr, $end:expr, $params:expr, $results:expr, $loop_:expr) => {{
                     let a = $params as usize;
                     let height = stack.len().checked_sub(a).ok_or_else(|| trap("block stack underflow"))?;
                     frame.labels.push(Label {
                         catches: vec![],
-                        start: pc + 1,
+                        start: $at + 1,
                         end: $end as usize,
                         height,
                         params: a,
                         results: $results as usize,
                         loop_: $loop_,
                     });
+                }};
+            }
+            // The `if` at `at`, whose condition is `cond`. A false condition
+            // with no else goes to the if's end, which pops the label the if
+            // pushes, keeping the values above its height: with as many
+            // results as params, which validation requires of an if without
+            // else, that end changes nothing, so the label is not pushed and
+            // the end is charged here and skipped.
+            macro_rules! if_ {
+                ($at:expr, $cond:expr, $end:expr, $other:expr, $params:expr, $results:expr) => {{
+                    let at: usize = $at;
+                    if $cond {
+                        label!(at, $end, $params, $results, false)
+                    } else if $other == lowered::NO_ELSE && $params == $results && stack.len() >= $params as usize {
+                        charge_pos!($end as usize, 0);
+                        #[cfg(feature = "performance-counters")]
+                        self.perf.record(perf::Event::Branch, u64::from($results != 0));
+                    } else {
+                        label!(at, $end, $params, $results, false);
+                        *pc_ref = if $other == lowered::NO_ELSE { $end as usize } else { $other as usize + 1 }
+                    }
                 }};
             }
             // Single instructions, shared by their own ops and fused pairs.
@@ -186,9 +208,14 @@ impl Store {
             // Charges instruction `pc + k` of a fused group, as the bottom of
             // the loop charges the next instruction, and counts it; `extra`
             // operands of the group are held outside the operand stack.
-            macro_rules! charge_at {
-                ($k:literal, $extra:literal) => {{
-                    *pc_ref = pc + $k;
+            // Charges the instruction at `at` (later in a fused group, or the
+            // end an `if` skips to), as the bottom of the loop charges the next
+            // instruction, and counts it; `extra` operands of the group are
+            // held outside the operand stack.
+            macro_rules! charge_pos {
+                ($at:expr, $extra:expr) => {{
+                    let at: usize = $at;
+                    *pc_ref = at;
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
                     }
@@ -205,15 +232,18 @@ impl Store {
                     {
                         self.perf.record(perf::Event::Dispatch, 1);
                         self.perf.record(perf::Event::InstructionClone, 1);
-                        self.perf.record(
-                            perf::Event::InstructionBytes,
-                            perf::immediate_copy_bytes(&ops[pc + $k].immediate),
-                        );
+                        self.perf.record(perf::Event::InstructionBytes, perf::immediate_copy_bytes(&ops[at].immediate));
                     }
                     #[cfg(feature = "opcode-coverage")]
-                    crate::coverage::record(ops[pc + $k].opcode);
-                    *pc_ref = pc + $k + 1;
+                    crate::coverage::record(ops[at].opcode);
+                    *pc_ref = at + 1;
                 }};
+            }
+            // Charges instruction `pc + k` of a fused group.
+            macro_rules! charge_at {
+                ($k:literal, $extra:literal) => {
+                    charge_pos!(pc + $k, $extra)
+                };
             }
             macro_rules! charge_second {
                 () => {
@@ -336,14 +366,52 @@ impl Store {
                 }
                 lowered::Op::Leave => decline!(),
                 lowered::Op::Nop => {}
-                lowered::Op::Block { end, params, results } => label!(end, params, results, false),
-                lowered::Op::Loop { end, params, results } => label!(end, params, results, true),
+                lowered::Op::Block { end, params, results } => label!(pc, end, params, results, false),
+                lowered::Op::Loop { end, params, results } => label!(pc, end, params, results, true),
                 lowered::Op::If { end, other, params, results } => {
                     let cond = address(pop(stack)?)? != 0;
-                    label!(end, params, results, false);
-                    if !cond {
-                        *pc_ref = if other == lowered::NO_ELSE { end as usize } else { other as usize + 1 }
+                    if_!(pc, cond, end, other, params, results)
+                }
+                lowered::Op::IntIf { opcode, end, other, params, results } => {
+                    let c = int_op(opcode, stack)?;
+                    charge_at!(1, 1);
+                    let cond = address(c)? != 0;
+                    if_!(pc + 1, cond, end, other, params, results)
+                }
+                lowered::Op::IntBrIf { opcode, depth } => {
+                    let c = int_op(opcode, stack)?;
+                    charge_at!(1, 1);
+                    let taken = address(c)? != 0;
+                    if taken {
+                        if depth as usize == frame.labels.len() {
+                            // A branch out of the function: the general loop
+                            // runs the charged br_if with its operand.
+                            stack.push(c);
+                            *pc_ref = pc + 1;
+                            return Ok(Straight::Charged);
+                        }
+                        branch!(depth)
                     }
+                }
+                lowered::Op::LocalLocalBin { a, b, opcode } => {
+                    let x = local!(a);
+                    charge_at!(1, 1);
+                    let y = local!(b);
+                    charge_at!(2, 2);
+                    stack.push(int_binop(opcode, x, y)?)
+                }
+                lowered::Op::LocalUnary { local, opcode } => {
+                    let x = local!(local);
+                    charge_at!(1, 1);
+                    stack.push(int_unary(opcode, x)?)
+                }
+                lowered::Op::LocalWrapConstBin { local, value, opcode } => {
+                    let x = local!(local);
+                    charge_at!(1, 1);
+                    let w = int_unary(0xa7, x)?;
+                    charge_at!(2, 1);
+                    charge_at!(3, 2);
+                    stack.push(const_binop(opcode, w, value)?)
                 }
                 lowered::Op::Else => *pc_ref = frame.labels.last().ok_or_else(|| trap("else without label"))?.end,
                 lowered::Op::End => {
@@ -663,13 +731,49 @@ impl Store {
     }
 }
 
+/// Pops the operands of inline integer operator `opcode` (or i32.eqz) and
+/// returns its result, with the errors of the operator's own arm.
+#[inline(always)]
+fn int_op(opcode: u16, stack: &mut Vec<Value>) -> Result<Value> {
+    if opcode == 0x45 || lowered::is_unary(opcode) {
+        let a = stack.pop().ok_or_else(|| trap("operand stack underflow"))?;
+        return int_unary(opcode, a);
+    }
+    let b = stack.pop().ok_or_else(|| trap("operand stack underflow"))?;
+    let typed = if lowered::i32_binop(opcode) { matches!(b, Value::I32(_)) } else { matches!(b, Value::I64(_)) };
+    if !typed {
+        return Err(trap("numeric type mismatch"));
+    }
+    let a = stack.pop().ok_or_else(|| trap("operand stack underflow"))?;
+    int_binop(opcode, a, b)
+}
+
+/// i32.eqz or an inline integer conversion of `a`.
+#[inline(always)]
+fn int_unary(opcode: u16, a: Value) -> Result<Value> {
+    Ok(match (opcode, a) {
+        (0x45, Value::I32(a)) => Value::I32((a == 0) as i32),
+        (0xa7, Value::I64(a)) => Value::I32(a as i32),
+        (0xac, Value::I32(a)) => Value::I64(a as i64),
+        (0xad, Value::I32(a)) => Value::I64(a as u32 as i64),
+        _ => return Err(trap("numeric type mismatch")),
+    })
+}
+
 /// `a op b` for an inline integer binop whose second operand is the
-/// constant `b` (sign-extended for i64 operators), with the error the
-/// operator reports when `a` is not of its type.
+/// constant `b` (sign-extended for i64 operators).
 #[inline(always)]
 fn const_binop(opcode: u16, a: Value, b: i32) -> Result<Value> {
+    let b = if lowered::i32_binop(opcode) { Value::I32(b) } else { Value::I64(i64::from(b)) };
+    int_binop(opcode, a, b)
+}
+
+/// `a op b` for an inline integer binop, checking `b`'s type first, then
+/// `a`'s, as the operator's own arm does.
+#[inline(always)]
+fn int_binop(opcode: u16, a: Value, b: Value) -> Result<Value> {
     if lowered::i32_binop(opcode) {
-        let Value::I32(a) = a else {
+        let (Value::I32(b), Value::I32(a)) = (b, a) else {
             return Err(trap("numeric type mismatch"));
         };
         Ok(match opcode {
@@ -695,10 +799,9 @@ fn const_binop(opcode: u16, a: Value, b: i32) -> Result<Value> {
             _ => return Err(trap("fused operator")),
         })
     } else {
-        let Value::I64(a) = a else {
+        let (Value::I64(b), Value::I64(a)) = (b, a) else {
             return Err(trap("numeric type mismatch"));
         };
-        let b = i64::from(b);
         Ok(match opcode {
             0x51 => Value::I32((a == b) as i32),
             0x52 => Value::I32((a != b) as i32),

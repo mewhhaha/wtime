@@ -48,6 +48,15 @@ allocations (argument vectors, frames, error messages) still use infallible
 allocation and can abort the process at the exact point of exhaustion. The
 report includes the actual worker exit/output and its executable fingerprint.
 
+The Decoded tier lowers a function body the first time a straight-line run
+reaches it: 16 bytes per instruction, kept with the module for its lifetime and
+shared by every store that uses it, plus about 5 bytes per instruction of
+scratch while grouping. This is module-sized bookkeeping, bounded by
+`max_instructions` like the decoded code itself (32 bytes per instruction), but
+it is allocated infallibly during execution, is not charged to fuel or checked
+for cancellation, and is not counted by store budgets or by the retained-bytes
+reports (`lowered_control_bytes`, `function_plan_bytes`).
+
 Rooting includes GC, external, function and exception references through
 `root_value`; owned external resources are reclaimed exactly once. Aggregate
 store memory/table/object budgets, canonical type storage, collector work and

@@ -51,7 +51,7 @@ pub(crate) enum Op {
     // instructions, charging the second before it runs exactly as the loop
     // would. The second instruction keeps its own op, so the array stays one
     // op per instruction; no pair's second instruction is a branch target,
-    // because no first instruction is a control instruction.
+    // because no first instruction is a control instruction (see `group`).
     LocalSetGet { set: u32, get: u32 },
     LocalGetGet { first: u32, second: u32 },
     LocalGetI32Const { local: u32, value: i32 },
@@ -75,6 +75,19 @@ pub(crate) enum Op {
     LocalLoadSet { local: u32, offset: u32, to: u32, opcode: u16 },
     /// `local.get addr; local.get value; store` on memory 0.
     LocalLocalStore { addr: u32, value: u32, offset: u32, opcode: u16 },
+    /// `local.get a; local.get b; binop` for an inline integer binop.
+    LocalLocalBin { a: u32, b: u32, opcode: u16 },
+    /// `local.get local; unop` for i32.eqz or an inline integer conversion.
+    LocalUnary { local: u32, opcode: u16 },
+    /// `local.get local; i32.wrap_i64; i32.const value; binop`.
+    LocalWrapConstBin { local: u32, value: i32, opcode: u16 },
+    // A computation ending in a conditional: the control instruction may
+    // close a group because it is preceded by an instruction of the group,
+    // so it is neither a branch target nor a resumption point either.
+    /// An inline integer operator or i32.eqz, then `if` with these fields.
+    IntIf { opcode: u16, end: u32, other: u32, params: u16, results: u16 },
+    /// An inline integer operator or i32.eqz, then `br_if depth`.
+    IntBrIf { opcode: u16, depth: u32 },
 }
 
 /// The fused op for two consecutive lowered ops, if any.
@@ -88,6 +101,12 @@ fn fuse(first: Op, second: Op) -> Option<Op> {
         (Op::LocalGet(first), Op::LocalGet(second)) => Op::LocalGetGet { first, second },
         (Op::LocalGet(from), Op::LocalSet(to)) => Op::LocalGetLocalSet { from, to },
         (Op::LocalGet(local), Op::GlobalSet(global)) => Op::LocalGetGlobalSet { local, global },
+        (Op::LocalGet(local), Op::I32Eqz) => Op::LocalUnary { local, opcode: 0x45 },
+        (Op::LocalGet(local), Op::Int(opcode)) if is_unary(opcode) => Op::LocalUnary { local, opcode },
+        (Op::Int(opcode), Op::If { end, other, params, results }) => Op::IntIf { opcode, end, other, params, results },
+        (Op::I32Eqz, Op::If { end, other, params, results }) => Op::IntIf { opcode: 0x45, end, other, params, results },
+        (Op::Int(opcode), Op::BrIf(depth)) => Op::IntBrIf { opcode, depth },
+        (Op::I32Eqz, Op::BrIf(depth)) => Op::IntBrIf { opcode: 0x45, depth },
         _ => return None,
     })
 }
@@ -121,8 +140,19 @@ fn fuse_expression(ops: &[Op], pc: usize) -> Option<(usize, Op)> {
         (Some(Op::LocalGet(value)), Some(Op::Memory0 { opcode, offset }), _) if !is_load(opcode) => {
             Some((3, Op::LocalLocalStore { addr: local, value, offset: offset32(offset)?, opcode }))
         }
+        (Some(Op::LocalGet(b)), Some(Op::Int(opcode)), _) if !is_unary(opcode) => {
+            Some((3, Op::LocalLocalBin { a: local, b, opcode }))
+        }
+        (Some(Op::Int(0xa7)), Some(Op::I32Const(value)), Some(Op::Int(opcode))) if i32_binop(opcode) => {
+            Some((4, Op::LocalWrapConstBin { local, value, opcode }))
+        }
         _ => None,
     }
+}
+
+/// Of the inline integer operators (`Op::Int`), the unary ones.
+pub(crate) fn is_unary(opcode: u16) -> bool {
+    matches!(opcode, 0xa7 | 0xac | 0xad)
 }
 
 /// A scalar load opcode (0x28..=0x35); stores are 0x36..=0x3e.
@@ -169,38 +199,43 @@ pub(crate) fn lower(module: &Module, body: usize) -> Box<[Op]> {
 /// Replaces the first op of each chosen group with its fused op.
 fn group(ops: &mut [Op]) {
     // Group instructions into the fewest dispatches: best[pc] is the
-    // number of ops dispatched from pc to the end, choice[pc] the group
-    // starting there. Groups contain no control instruction, so only their
-    // first instruction can be a branch target or a resumption point.
+    // number of ops dispatched from pc to the end, len[pc] the length of the
+    // group starting there (0 for none); the fused op is formed again when
+    // applied, which keeps the scratch at five bytes per instruction. No
+    // group starts with a control instruction or holds one before its last
+    // instruction, so only its first instruction can be a branch target or a
+    // resumption point.
     let n = ops.len();
     let mut best = vec![0u32; n + 1];
-    let mut choice: Vec<Option<(usize, Op)>> = vec![None; n];
+    let mut len = vec![0u8; n];
     for pc in (0..n).rev() {
         best[pc] = 1 + best[pc + 1];
-        let mut consider = |candidate: (usize, Op)| {
-            let cost = 1 + best[pc + candidate.0];
-            if cost < best[pc] || (cost == best[pc] && choice[pc].is_some_and(|c| c.0 < candidate.0)) {
+        for (k, _) in candidates(ops, pc).into_iter().flatten() {
+            let cost = 1 + best[pc + k];
+            if cost < best[pc] || (cost == best[pc] && len[pc] != 0 && usize::from(len[pc]) < k) {
                 best[pc] = cost;
-                choice[pc] = Some(candidate);
+                len[pc] = k as u8;
             }
-        };
-        if let Some(candidate) = fuse_expression(ops, pc) {
-            consider(candidate)
-        }
-        if let Some(op) = ops.get(pc + 1).and_then(|&second| fuse(ops[pc], second)) {
-            consider((2, op))
         }
     }
     let mut pc = 0;
     while pc < n {
-        match choice[pc] {
-            Some((len, op)) => {
-                ops[pc] = op;
-                pc += len;
-            }
-            None => pc += 1,
+        let k = usize::from(len[pc]);
+        if k == 0 {
+            pc += 1;
+            continue;
         }
+        if let Some((_, op)) = candidates(ops, pc).into_iter().flatten().find(|c| c.0 == k) {
+            ops[pc] = op;
+        }
+        pc += k;
     }
+}
+
+/// The groups that can start at `pc`, as (instructions covered, fused op).
+fn candidates(ops: &[Op], pc: usize) -> [Option<(usize, Op)>; 2] {
+    let pair = ops.get(pc + 1).and_then(|&second| fuse(ops[pc], second)).map(|op| (2, op));
+    [fuse_expression(ops, pc), pair]
 }
 
 fn lower_one(module: &Module, body: usize, pc: usize, i: &Instruction) -> Option<Op> {
@@ -280,6 +315,56 @@ mod tests {
         expected[7] = Op::LocalConstBin { local: 3, value: -3, opcode: 0x7c };
         // An offset beyond 32 bits leaves the store unfused.
         expected[10] = Op::LocalGetGet { first: 0, second: 1 };
+        assert_eq!(ops, expected);
+    }
+
+    #[test]
+    fn every_pair_forms() {
+        let store = Op::Memory0 { opcode: 0x36, offset: 0 };
+        // Each pair, then an op that groups with neither of its instructions.
+        let cases = [
+            ([Op::LocalSet(0), Op::LocalGet(1), store], Op::LocalSetGet { set: 0, get: 1 }),
+            ([Op::LocalGet(0), Op::LocalGet(1), Op::End], Op::LocalGetGet { first: 0, second: 1 }),
+            ([Op::LocalGet(0), Op::I32Const(7), Op::End], Op::LocalGetI32Const { local: 0, value: 7 }),
+            ([Op::I32Const(7), Op::Int(0x6a), Op::End], Op::I32ConstAdd(7)),
+            ([Op::GlobalGet(0), Op::LocalSet(1), Op::End], Op::GlobalGetLocalSet { global: 0, local: 1 }),
+            ([Op::Int(0x6a), Op::LocalSet(1), Op::End], Op::I32AddLocalSet(1)),
+            ([Op::LocalGet(0), Op::LocalSet(1), Op::End], Op::LocalGetLocalSet { from: 0, to: 1 }),
+            ([Op::LocalGet(0), Op::GlobalSet(1), Op::End], Op::LocalGetGlobalSet { local: 0, global: 1 }),
+        ];
+        for (mut ops, pair) in cases {
+            let original = ops;
+            group(&mut ops);
+            assert_eq!(ops, [pair, original[1], original[2]]);
+        }
+    }
+
+    #[test]
+    fn conditionals_close_groups() {
+        let mut ops = [
+            Op::I32Const(5),
+            Op::LocalGet(0),
+            Op::Int(0x46),
+            Op::BrIf(1),
+            Op::LocalGet(0),
+            Op::I32Eqz,
+            Op::If { end: 9, other: NO_ELSE, params: 0, results: 0 },
+            Op::LocalGet(1),
+            Op::Int(0xa7),
+            Op::End,
+            Op::LocalGet(1),
+            Op::Int(0xa7),
+            Op::I32Const(3),
+            Op::Int(0x6c),
+            Op::End,
+        ];
+        let original = ops;
+        group(&mut ops);
+        let mut expected = original;
+        expected[2] = Op::IntBrIf { opcode: 0x46, depth: 1 };
+        expected[5] = Op::IntIf { opcode: 0x45, end: 9, other: NO_ELSE, params: 0, results: 0 };
+        expected[7] = Op::LocalUnary { local: 1, opcode: 0xa7 };
+        expected[10] = Op::LocalWrapConstBin { local: 1, value: 3, opcode: 0x6c };
         assert_eq!(ops, expected);
     }
 

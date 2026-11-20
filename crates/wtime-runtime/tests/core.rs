@@ -247,6 +247,30 @@ fn fused_expressions_match_unfused_instructions() {
     }
     assert!(run(fused, "deep", &args, None, Some(6)).0.unwrap_err().contains("stack"));
     assert_eq!(run(fused, "deep", &args, None, Some(16)).0, Ok(vec![Value::I64(787)]));
+    // h's pairs: 25 instructions and the end, each effect stored.
+    let complete = run(fused, "h", &[Value::I32(5)], Some(26), None);
+    assert_eq!(complete.0, Ok(vec![]));
+    assert_eq!((&complete.1[4..16]), [1, 0, 0, 0, 5, 0, 0, 0, 10, 0, 0, 0]);
+    assert_eq!(complete, run(plain, "h", &[Value::I32(5)], Some(51), None));
+    for fuel in 0..26 {
+        let partial = run(fused, "h", &[Value::I32(5)], Some(fuel), None);
+        assert!(partial.0.as_ref().unwrap_err().contains("fuel"), "h fuel {fuel}: {:?}", partial.0);
+        assert_eq!(partial, run(plain, "h", &[Value::I32(5)], Some(2 * fuel), None), "h fuel {fuel}");
+    }
+    // g's conditionals: 56 instructions run, the last a br_if out of the
+    // function; skipped ends of false ifs are charged as they run.
+    let complete = run(fused, "g", &args, Some(56), None);
+    assert_eq!(complete.0, Ok(vec![Value::I64(30)]));
+    assert_eq!(complete.0, run(plain, "g", &args, None, None).0);
+    for fuel in 0..56 {
+        let partial = run(fused, "g", &args, Some(fuel), None).0;
+        assert!(partial.as_ref().unwrap_err().contains("fuel"), "g fuel {fuel}: {partial:?}");
+    }
+    for height in 0..16 {
+        let limited = run(fused, "deepg", &args, None, Some(height));
+        assert_eq!(limited, run(plain, "deepg", &args, None, Some(height)), "g height {height}");
+    }
+    assert_eq!(run(fused, "deepg", &args, None, Some(16)).0, Ok(vec![Value::I64(30)]));
     for (name, address) in [("load", 65532), ("load", 65536), ("store", 65534), ("store", -1)] {
         let fused = run(fused, name, &[Value::I32(address)], None, None);
         assert_eq!(fused, run(plain, name, &[Value::I32(address)], None, None), "{name} {address}");

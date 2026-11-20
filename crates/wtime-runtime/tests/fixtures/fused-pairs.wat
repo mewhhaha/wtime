@@ -1,6 +1,8 @@
-;; Straight-line code containing every fused pair of the lowered Decoded
-;; tier, so that each instruction executes exactly once: 24 instructions,
-;; counting the function's end.
+;; Straight-line code built from the lowered Decoded tier's fused pairs, so
+;; that each instruction executes exactly once: 24 instructions, counting the
+;; function's end. Grouping decides which pairs actually form; the unit tests
+;; in execution/lowered.rs check that each pair forms, and
+;; fused-expressions.wat runs them against unfused code.
 (module
   (global $g (mut i32) (i32.const 5))
   (func (export "f") (param $a i32) (result i32) (local $b i32) (local $c i32)
