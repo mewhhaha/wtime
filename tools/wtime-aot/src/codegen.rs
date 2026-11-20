@@ -406,6 +406,9 @@ impl Module {
             Some(f) if self.types[f as usize].params.is_empty() => {
                 writeln!(s, "fn start(this: &mut Instance) -> R<()> {{ this.f{f}().map(|_| ()) }}\n").unwrap()
             }
+            Some(f) if (f as usize) < self.imports.len() => {
+                s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::StartImportArguments) }\n\n")
+            }
             Some(_) => s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::StartArguments) }\n\n"),
             None if m.exports.iter().any(|e| e.name == "_start") => {
                 s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::StartNotFunction) }\n\n")

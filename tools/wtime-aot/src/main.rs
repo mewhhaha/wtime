@@ -59,6 +59,15 @@ fn main() {
         format!("aot-{}", stem.replace(|c: char| !c.is_ascii_alphanumeric(), "-"))
     });
     let rt = rt.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt"));
+    // The generated crates sit at different depths: they need the runtime's
+    // absolute path.
+    let rt = match rt.canonicalize() {
+        Ok(rt) => rt,
+        Err(error) => {
+            eprintln!("{}: {error}", rt.display());
+            exit(1)
+        }
+    };
     let module_path = module_path.unwrap_or_else(|| module.to_string_lossy().into_owned());
     let bytes = match std::fs::read(&module) {
         Ok(bytes) => bytes,

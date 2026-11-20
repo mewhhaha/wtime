@@ -25,8 +25,14 @@ pub enum Trap {
     InvalidConversion,
     CallStackExhausted,
     MemoryTooLarge,
+    /// The minimum size overflows 64 bits.
+    MemoryAllocationOverflow,
+    /// The minimum size exceeds `MEMORY_LIMIT_PAGES`.
+    MemoryLimit,
     AllocationFailed,
     NoStart,
+    /// `_start` is an imported function that takes parameters.
+    StartImportArguments,
     /// The module exports `_start`, but not as a function.
     StartNotFunction,
     /// `_start` takes parameters.
@@ -55,10 +61,13 @@ impl Trap {
             Trap::InvalidConversion => "Trap: invalid integer conversion",
             Trap::CallStackExhausted => "ResourceLimit: call depth exhausted",
             Trap::MemoryTooLarge => "ResourceLimit: memory too large",
+            Trap::MemoryAllocationOverflow => "ResourceLimit: memory allocation overflow",
+            Trap::MemoryLimit => "ResourceLimit: memory limit",
             Trap::AllocationFailed => "ResourceLimit: memory allocation failed",
             Trap::NoStart => "module does not export _start",
             Trap::StartNotFunction => "'_start' is not a function",
             Trap::StartArguments => "Host: argument type mismatch",
+            Trap::StartImportArguments => "Host: function value count mismatch",
             Trap::ResultMismatch => "host import result does not fit its declared type",
             Trap::ExtraResults => "callback produced results when it shouldn't",
             Trap::Host => "Host: host failure",
@@ -135,6 +144,24 @@ pub struct Memory {
 pub const PAGE: u64 = 65536;
 /// The base is at most this large.
 const RESERVE: u64 = 64 << 30;
+/// A memory never exceeds this many pages (64 GiB), as under wtime-goose.
+pub const MEMORY_LIMIT_PAGES: u64 = 1 << 20;
+/// Blocks of bulk operations at least this long that would only write
+/// zeros over zeros are skipped, so they leave untouched pages untouched.
+const BLOCK: usize = 1 << 16;
+
+/// The machine's memory (Linux's MemTotal), if known.
+fn ram_bytes() -> Option<usize> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: usize = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+/// All bytes are zero.
+fn all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().fold(0, |any, &byte| any | byte) == 0
+}
 const CHUNK_BITS: u32 = 32;
 const CHUNK: usize = 1 << CHUNK_BITS;
 
@@ -142,13 +169,24 @@ impl Memory {
     /// A memory of `min` pages that may grow to `max` (the index type's
     /// limit when absent).
     pub fn new(min: u64, max: Option<u64>, memory64: bool) -> R<Memory> {
+        // wtime-goose's limits, in its order and words.
+        if min.checked_mul(PAGE).is_none() {
+            return trap(Trap::MemoryAllocationOverflow);
+        }
+        if min > MEMORY_LIMIT_PAGES {
+            return trap(Trap::MemoryLimit);
+        }
         let limit = if memory64 { 1 << 48 } else { 1 << 16 };
-        let max_pages = max.unwrap_or(limit).min(limit);
+        let max_pages = max.unwrap_or(limit).min(limit).min(MEMORY_LIMIT_PAGES);
         if min > max_pages {
             return trap(Trap::MemoryTooLarge);
         }
-        // The largest base the OS grants, up to the maximum and RESERVE.
+        // The largest base the OS grants, up to the maximum, RESERVE and the
+        // machine's memory (larger requests are refused anyway).
         let mut size = usize::try_from(max_pages.saturating_mul(PAGE).min(RESERVE)).unwrap_or(usize::MAX);
+        if let Some(ram) = ram_bytes() {
+            size = size.min(ram & !(PAGE as usize - 1)).max(min as usize * PAGE as usize);
+        }
         let base = loop {
             match zeroed(size) {
                 Ok(base) => break base,
@@ -198,36 +236,75 @@ impl Memory {
         }
     }
 
+    /// The `N` bytes of an access that ends within the base and the
+    /// length, or None.
+    #[inline(always)]
+    fn direct<const N: usize>(&self, address: u64, offset: u64) -> Option<&[u8; N]> {
+        // At most the base's length, which lets the slices below go
+        // unchecked.
+        let limit = self.fast.min(self.base.len()).min(isize::MAX as usize);
+        // `offset` is a constant where generated code calls this, so the
+        // first test folds away. `address` is below `limit`, a slice's
+        // length, so the sum cannot overflow.
+        if offset < (1 << 62) && address < limit as u64 {
+            let end = address + (offset + N as u64);
+            if end <= limit as u64 {
+                return self.base[..limit][end as usize - N..].first_chunk::<N>();
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    fn direct_mut<const N: usize>(&mut self, address: u64, offset: u64) -> Option<&mut [u8; N]> {
+        let limit = self.fast.min(self.base.len()).min(isize::MAX as usize);
+        if offset < (1 << 62) && address < limit as u64 {
+            let end = address + (offset + N as u64);
+            if end <= limit as u64 {
+                return self.base[..limit][end as usize - N..].first_chunk_mut::<N>();
+            }
+        }
+        None
+    }
+
     #[inline(always)]
     fn get<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
-        let mut out = [0; N];
-        // Both below `fast` (far below 2^63): their sum cannot overflow.
-        if address < self.fast as u64 && offset < self.fast as u64 && (address + offset) as usize + N <= self.fast {
-            let at = (address + offset) as usize;
-            out.copy_from_slice(&self.base[at..at + N]);
-            return Ok(out);
+        match self.direct::<N>(address, offset) {
+            Some(bytes) => Ok(*bytes),
+            None => self.get_slow::<N>(address, offset),
         }
-        self.get_slow(address, offset, &mut out)?;
-        Ok(out)
     }
 
     #[cold]
     #[inline(never)]
-    fn get_slow(&self, address: u64, offset: u64, out: &mut [u8]) -> R<()> {
-        let at = self.at(address, offset, out.len())?;
-        self.read_into(at, out);
-        Ok(())
+    fn get_slow<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
+        let mut out = [0; N];
+        let at = self.at(address, offset, N)?;
+        self.read_into(at, &mut out);
+        Ok(out)
+    }
+
+    /// The `n` (at most 8) bytes of an access outside the direct range, as
+    /// a little-endian integer: an integer, not an array, crosses the
+    /// Result in registers.
+    #[cold]
+    #[inline(never)]
+    fn word_slow(&self, address: u64, offset: u64, n: usize) -> R<u64> {
+        let mut out = [0; 8];
+        let at = self.at(address, offset, n)?;
+        self.read_into(at, &mut out[..n]);
+        Ok(u64::from_le_bytes(out))
     }
 
     #[inline(always)]
     fn put<const N: usize>(&mut self, address: u64, offset: u64, value: [u8; N]) -> R<()> {
-        // Both below `fast` (far below 2^63): their sum cannot overflow.
-        if address < self.fast as u64 && offset < self.fast as u64 && (address + offset) as usize + N <= self.fast {
-            let at = (address + offset) as usize;
-            self.base[at..at + N].copy_from_slice(&value);
-            return Ok(());
+        match self.direct_mut::<N>(address, offset) {
+            Some(bytes) => {
+                *bytes = value;
+                Ok(())
+            }
+            None => self.put_slow(address, offset, &value),
         }
-        self.put_slow(address, offset, &value)
     }
 
     #[cold]
@@ -236,6 +313,12 @@ impl Memory {
         let at = self.at(address, offset, value.len())?;
         self.write_from(at, value);
         Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_word_slow(&mut self, address: u64, offset: u64, value: u64, n: usize) -> R<()> {
+        self.put_slow(address, offset, &value.to_le_bytes()[..n])
     }
 
     /// Copies the bytes at `at` (in bounds) into `out`, across parts.
@@ -263,7 +346,27 @@ impl Memory {
 
     #[inline(always)]
     pub fn load<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
-        self.get(address, offset)
+        match self.direct::<N>(address, offset) {
+            Some(bytes) => Ok(*bytes),
+            None => {
+                // Word by word, so that integers, not the array, cross the
+                // Results and the array stays out of memory on the direct
+                // path. A load has no effect, so the access is in bounds
+                // exactly when each of its words is.
+                let mut out = [0; N];
+                let mut k = 0;
+                while k < N {
+                    let n = if N - k < 8 { N - k } else { 8 };
+                    let Some(offset) = offset.checked_add(k as u64) else { return trap(Trap::OutOfBounds) };
+                    match self.word_slow(address, offset, n) {
+                        Ok(word) => out[k..k + n].copy_from_slice(&word.to_le_bytes()[..n]),
+                        Err(error) => return Err(error),
+                    }
+                    k += n;
+                }
+                Ok(out)
+            }
+        }
     }
 
     #[inline(always)]
@@ -275,35 +378,115 @@ impl Memory {
     // the Result.
     #[inline(always)]
     pub fn l8(&self, address: u64, offset: u64) -> R<u8> {
-        Ok(self.get::<1>(address, offset)?[0])
+        match self.direct::<1>(address, offset) {
+            Some(bytes) => Ok(u8::from_le_bytes(*bytes)),
+            None => match self.word_slow(address, offset, 1) {
+                Ok(word) => Ok(word as u8),
+                Err(trap) => Err(trap),
+            },
+        }
     }
     #[inline(always)]
     pub fn l16(&self, address: u64, offset: u64) -> R<u16> {
-        Ok(u16::from_le_bytes(self.get(address, offset)?))
+        match self.direct::<2>(address, offset) {
+            Some(bytes) => Ok(u16::from_le_bytes(*bytes)),
+            None => match self.word_slow(address, offset, 2) {
+                Ok(word) => Ok(word as u16),
+                Err(trap) => Err(trap),
+            },
+        }
     }
     #[inline(always)]
     pub fn l32(&self, address: u64, offset: u64) -> R<u32> {
-        Ok(u32::from_le_bytes(self.get(address, offset)?))
+        match self.direct::<4>(address, offset) {
+            Some(bytes) => Ok(u32::from_le_bytes(*bytes)),
+            None => match self.word_slow(address, offset, 4) {
+                Ok(word) => Ok(word as u32),
+                Err(trap) => Err(trap),
+            },
+        }
     }
     #[inline(always)]
     pub fn l64(&self, address: u64, offset: u64) -> R<u64> {
-        Ok(u64::from_le_bytes(self.get(address, offset)?))
+        match self.direct::<8>(address, offset) {
+            Some(bytes) => Ok(u64::from_le_bytes(*bytes)),
+            None => match self.word_slow(address, offset, 8) {
+                Ok(word) => Ok(word as u64),
+                Err(trap) => Err(trap),
+            },
+        }
     }
     #[inline(always)]
     pub fn s8(&mut self, address: u64, offset: u64, value: u8) -> R<()> {
-        self.put(address, offset, [value])
+        match self.direct_mut::<1>(address, offset) {
+            Some(bytes) => {
+                *bytes = value.to_le_bytes();
+                Ok(())
+            }
+            None => self.put_word_slow(address, offset, value as u64, 1),
+        }
     }
     #[inline(always)]
     pub fn s16(&mut self, address: u64, offset: u64, value: u16) -> R<()> {
-        self.put(address, offset, value.to_le_bytes())
+        match self.direct_mut::<2>(address, offset) {
+            Some(bytes) => {
+                *bytes = value.to_le_bytes();
+                Ok(())
+            }
+            None => self.put_word_slow(address, offset, value as u64, 2),
+        }
     }
     #[inline(always)]
     pub fn s32(&mut self, address: u64, offset: u64, value: u32) -> R<()> {
-        self.put(address, offset, value.to_le_bytes())
+        match self.direct_mut::<4>(address, offset) {
+            Some(bytes) => {
+                *bytes = value.to_le_bytes();
+                Ok(())
+            }
+            None => self.put_word_slow(address, offset, value as u64, 4),
+        }
     }
     #[inline(always)]
     pub fn s64(&mut self, address: u64, offset: u64, value: u64) -> R<()> {
-        self.put(address, offset, value.to_le_bytes())
+        match self.direct_mut::<8>(address, offset) {
+            Some(bytes) => {
+                *bytes = value.to_le_bytes();
+                Ok(())
+            }
+            None => self.put_word_slow(address, offset, value as u64, 8),
+        }
+    }
+
+    /// A 16-byte load as an integer: its halves cross the Results in
+    /// registers.
+    #[inline(always)]
+    pub fn l128(&self, address: u64, offset: u64) -> R<u128> {
+        match self.direct::<16>(address, offset) {
+            Some(bytes) => Ok(u128::from_le_bytes(*bytes)),
+            None => {
+                // A load has no effect, so the access is in bounds exactly
+                // when both halves are.
+                let low = match self.word_slow(address, offset, 8) {
+                    Ok(word) => word,
+                    Err(error) => return Err(error),
+                };
+                let Some(offset) = offset.checked_add(8) else { return trap(Trap::OutOfBounds) };
+                match self.word_slow(address, offset, 8) {
+                    Ok(high) => Ok(low as u128 | (high as u128) << 64),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+    #[inline(always)]
+    pub fn s128(&mut self, address: u64, offset: u64, value: u128) -> R<()> {
+        match self.direct_mut::<16>(address, offset) {
+            Some(bytes) => {
+                *bytes = value.to_le_bytes();
+                Ok(())
+            }
+            None => self.put_slow(address, offset, &value.to_le_bytes()),
+        }
     }
 
     /// The size in pages.
@@ -351,8 +534,12 @@ impl Memory {
         let end = at + n;
         while at < end {
             let (part, o) = self.part_mut(at);
-            let k = (end - at).min(part.len() - o);
-            part[o..o + k].fill(value);
+            let k = (end - at).min(part.len() - o).min(BLOCK);
+            let bytes = &mut part[o..o + k];
+            // Zeros over a block of zeros: left untouched.
+            if !(value == 0 && k == BLOCK && all_zero(bytes)) {
+                bytes.fill(value);
+            }
             at += k;
         }
         Ok(())
@@ -362,17 +549,21 @@ impl Memory {
     /// `Memory32::copy_n`; ranges beyond the base take `copy`.
     #[inline(always)]
     pub fn copy_n<const N: usize>(&mut self, destination: u64, source: u64) -> R<()> {
-        let fast = self.fast as u64;
-        if destination < fast && source < fast && destination as usize + N <= self.fast && source as usize + N <= self.fast {
+        let limit = self.fast.min(self.base.len());
+        if destination < limit as u64 && source < limit as u64 && destination as usize + N <= limit && source as usize + N <= limit {
+            let base = &mut self.base[..limit];
             let (to, from) = (destination as usize, source as usize);
             if N <= 64 {
-                let mut value = [0; N];
-                value.copy_from_slice(&self.base[from..from + N]);
-                self.base[to..to + N].copy_from_slice(&value);
+                if let Some(value) = base[from..].first_chunk::<N>().copied() {
+                    if let Some(bytes) = base[to..].first_chunk_mut::<N>() {
+                        *bytes = value;
+                        return Ok(());
+                    }
+                }
             } else {
-                self.base.copy_within(from..from + N, to);
+                base.copy_within(from..from + N, to);
+                return Ok(());
             }
-            return Ok(());
         }
         self.copy(destination, source, N as u64)
     }
@@ -381,14 +572,29 @@ impl Memory {
         let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
         let to = self.at(destination, 0, n)?;
         let from = self.at(source, 0, n)?;
-        if to + n <= self.fast && from + n <= self.fast {
+        if n < BLOCK && to + n <= self.fast && from + n <= self.fast {
             self.base.copy_within(from..from + n, to);
-        } else {
-            // Across parts: through a copy, which also keeps overlapping
-            // ranges right.
-            let mut bytes = vec![0; n];
-            self.read_into(from, &mut bytes);
-            self.write_from(to, &bytes);
+            return Ok(());
+        }
+        // Block by block through a bounded buffer, in memmove's direction so
+        // that overlapping ranges copy right; a block of zeros over zeros is
+        // skipped.
+        let mut block = vec![0; BLOCK.min(n)];
+        let mut there = vec![0; BLOCK.min(n)];
+        let mut done = 0;
+        while done < n {
+            let k = BLOCK.min(n - done);
+            let at = if to <= from { done } else { n - done - k };
+            self.read_into(from + at, &mut block[..k]);
+            if all_zero(&block[..k]) {
+                self.read_into(to + at, &mut there[..k]);
+                if all_zero(&there[..k]) {
+                    done += k;
+                    continue;
+                }
+            }
+            self.write_from(to + at, &block[..k]);
+            done += k;
         }
         Ok(())
     }
@@ -793,6 +999,33 @@ mod tests {
         assert_eq!(m.grow(1), 1);
         assert_eq!(m.grow(1), -1);
         assert!(m.store::<8>(131064, 0, [1; 8]).is_ok());
+    }
+
+    #[test]
+    fn memory64_limits_match_wtime_goose() {
+        assert_eq!(Memory::new(1 << 48, None, true).err(), Some(Trap::MemoryAllocationOverflow));
+        assert_eq!(Memory::new((1 << 20) + 1, None, true).err(), Some(Trap::MemoryLimit));
+        let mut m = Memory::new(1, None, true).unwrap();
+        assert_eq!(m.grow(1 << 20), -1);
+        assert_eq!(m.grow((1 << 20) - 1), 1);
+        assert_eq!(m.size(), 1 << 20);
+    }
+
+    #[test]
+    fn long_copies_overlap_both_ways_across_parts() {
+        let page = PAGE as usize;
+        for (to, from) in [(1000usize, 0usize), (0, 1000), (page - 7, 3 * page / 2), (3 * page / 2, page - 7)] {
+            let mut m = Memory::with_base(8, 1 << 20, vec![0; 2 * page]).unwrap();
+            let mut model = vec![0u8; 8 * page];
+            for (k, byte) in model.iter_mut().enumerate().take(5 * page) {
+                *byte = (k % 251) as u8;
+            }
+            m.write(0, &model).unwrap();
+            let n = 3 * page + 123;
+            model.copy_within(from..from + n, to);
+            m.copy(to as u64, from as u64, n as u64).unwrap();
+            assert_eq!(m.read(0, model.len() as u64).unwrap(), model, "copy {from} -> {to}");
+        }
     }
 
     #[test]
