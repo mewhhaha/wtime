@@ -102,7 +102,7 @@ fn p043_private_binding_identity_generations_classes_and_unshared_growth_are_liv
     // Atomics are allowed on unshared memory and promote its backing to the
     // synchronized representation. Static Wasm type and local handle persist.
     let (mut promoted,_,pi)=prepared();
-    let instruction=Instruction{opcode:0xfe12,immediate:Immediate::MemArg{align:0,offset:0,memory:0},span:Span{start:0,end:0}};
+    let instruction=Instruction{opcode:0xfe12,immediate:Immediate::MemArg{align:0,offset:0,memory:0}};
     let mut stack=vec![Value::I32(0)];
     promoted.atomic(pi.0.index,&instruction,&mut stack).unwrap();
     assert_eq!(stack,[Value::I32(128)]);

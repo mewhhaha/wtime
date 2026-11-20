@@ -621,7 +621,6 @@ mod tests {
                 &Instruction {
                     opcode,
                     immediate,
-                    span: Span::default(),
                 },
                 s,
             )
@@ -662,7 +661,6 @@ mod tests {
                     &Instruction {
                         opcode: 0xfb0d,
                         immediate: Immediate::Index(1),
-                        span: Span::default()
                     },
                     &mut s
                 )

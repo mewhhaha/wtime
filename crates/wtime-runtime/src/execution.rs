@@ -311,7 +311,7 @@ impl Store {
                         if source.opcode != opcode || !matches!(source.immediate, Immediate::Index(value) if value == index) {
                             return Err(trap("compact call source identity"));
                         }
-                        prepared_instruction = Some((Instruction { opcode, immediate: Immediate::Index(index), span: source.span }, pc));
+                        prepared_instruction = Some((Instruction { opcode, immediate: Immediate::Index(index) }, pc));
                         bound_call = Some(binding);
                         #[cfg(feature = "execution-reference")]
                         { self.compact_bound_calls = self.compact_bound_calls.saturating_add(1); }
@@ -445,9 +445,10 @@ impl Store {
             module_stale = matches!(op.opcode, 0x10..=0x15 | 0xe0..=0xe6);
             match op.opcode {
                 0x1f => {
-                    let Immediate::TryTable { block, catches } = &op.immediate else {
+                    let Immediate::TryTable(table) = &op.immediate else {
                         return Err(trap("try_table immediate"));
                     };
+                    let (block, catches) = (&table.block, &table.catches);
                     let (a, r) = arity(block, module);
                     let (end, _) = module.data.control.get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;

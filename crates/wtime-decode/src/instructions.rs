@@ -1,10 +1,25 @@
 use crate::Reader;
 use wtime_types::*;
+/// A decoded instruction: 32 bytes, so that two share a cache line. Its
+/// source position is kept beside it, in `FunctionBody::offsets`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instruction {
     pub opcode: u16,
     pub immediate: Immediate,
-    pub span: Span,
+}
+/// The immediate of `try_table`, boxed: it is rare and large.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TryTableImmediate {
+    pub block: Immediate,
+    pub catches: Vec<Catch>,
+}
+/// The immediate of `resume`, `resume_throw` and `switch`, boxed: it is rare
+/// and large.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResumeImmediate {
+    pub ty: u32,
+    pub tag: Option<u32>,
+    pub handlers: Vec<(u32, Option<u32>)>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Catch {
@@ -14,15 +29,8 @@ pub struct Catch {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Immediate {
-    TryTable {
-        block: Box<Immediate>,
-        catches: Vec<Catch>,
-    },
-    Resume {
-        ty: u32,
-        tag: Option<u32>,
-        handlers: Vec<(u32, Option<u32>)>,
-    },
+    TryTable(Box<TryTableImmediate>),
+    Resume(Box<ResumeImmediate>),
     Cast {
         flags: u8,
         label: u32,
@@ -34,7 +42,7 @@ pub enum Immediate {
     Pair(u32, u32),
     Block(i64),
     BlockType(ValType),
-    BrTable(Vec<u32>, u32),
+    BrTable(Box<[u32]>, u32),
     MemLane {
         align: u32,
         offset: u64,
@@ -50,9 +58,9 @@ pub enum Immediate {
     I64(i64),
     F32(u32),
     F64(u64),
-    Types(Vec<ValType>),
+    Types(Box<[ValType]>),
     Heap(HeapType),
-    Bytes(Vec<u8>),
+    Bytes(Box<[u8]>),
 }
 pub(crate) fn val(r: &mut Reader) -> Result<ValType> {
     if matches!(r.peek()?,0x68..=0x6e|0x71..=0x75) {
@@ -122,18 +130,30 @@ fn memarg(r: &mut Reader) -> Result<Immediate> {
 pub(crate) fn expression(r: &mut Reader) -> Result<Vec<Instruction>> {
     expression_with_capacity(r, 0)
 }
-/// A function body: the reader holds just the body, and instructions average
-/// about three bytes, so reserving for that avoids most regrowth copies.
-pub(crate) fn body_expression(r: &mut Reader) -> Result<Vec<Instruction>> {
+/// A function body's instructions and the absolute offset of each in the
+/// module. The reader holds just the body, and instructions average about
+/// three bytes, so reserving for that avoids most regrowth copies.
+pub(crate) fn body_expression(r: &mut Reader) -> Result<(Vec<Instruction>, Vec<u32>)> {
     // Capped so that a huge body cannot reserve far ahead of decoding.
     let estimate = (r.remaining() / 3).min(1 << 16);
-    let mut instructions = expression_with_capacity(r, estimate)?;
+    let mut instructions = Vec::new();
+    let mut offsets = Vec::new();
+    // Hints only: a failed reservation leaves growth to push.
+    let _ = instructions.try_reserve_exact(estimate);
+    let _ = offsets.try_reserve_exact(estimate);
+    let mut depth = 1usize;
+    while depth > 0 {
+        let offset = u32::try_from(r.offset()).map_err(|_| r.error("module too large for instruction offsets"))?;
+        instructions.push(read_instruction(r, &mut depth)?);
+        offsets.push(offset);
+    }
     // A body of few, long instructions (one large br_table) would otherwise
     // keep the estimate reserved for the module's lifetime.
     if instructions.capacity() > instructions.len().saturating_mul(2).max(16) {
         instructions.shrink_to_fit();
+        offsets.shrink_to_fit();
     }
-    Ok(instructions)
+    Ok((instructions, offsets))
 }
 fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instruction>> {
     let mut out = Vec::new();
@@ -146,12 +166,10 @@ fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instr
     Ok(out)
 }
 /// Decode one instruction and its immediates, without validating control nesting.
-/// The returned span is absolute within the reader's original module.
 pub fn decode_instruction(r: &mut Reader) -> Result<Instruction> {
     read_instruction(r, &mut 1)
 }
 fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
-    let start = r.offset();
     let first = r.byte()?;
     let mut opcode = first as u16;
     let immediate = match first {
@@ -176,7 +194,7 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
             for _ in 0..n {
                 v.push(r.u32()?)
             }
-            Immediate::BrTable(v, r.u32()?)
+            Immediate::BrTable(v.into_boxed_slice(), r.u32()?)
         }
         0x11 | 0x13 => Immediate::Pair(r.u32()?, r.u32()?),
         0x1c => {
@@ -185,7 +203,7 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
             for _ in 0..n {
                 v.push(val(r)?)
             }
-            Immediate::Types(v)
+            Immediate::Types(v.into_boxed_slice())
         }
         0x28..=0x3e => memarg(r)?,
         0x3f | 0x40 => Immediate::Index(r.u32()?),
@@ -241,7 +259,7 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
             };
             match sub {
                 0..=11 | 92 | 93 => memarg(r)?,
-                12 | 13 => Immediate::Bytes(r.take(16)?.to_vec()),
+                12 | 13 => Immediate::Bytes(r.take(16)?.into()),
                 21..=34 => Immediate::Index(r.byte()? as u32),
                 84..=91 => {
                     let m = memarg(r)?;
@@ -307,7 +325,7 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
                 let t = r.u32()?;
                 handlers.push((t, if switch == 0 { Some(r.u32()?) } else { None }));
             }
-            Immediate::Resume { ty, tag, handlers }
+            Immediate::Resume(Box::new(ResumeImmediate { ty, tag, handlers }))
         }
         0x1f => {
             *depth += 1;
@@ -329,10 +347,7 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
                     label: r.u32()?,
                 });
             }
-            Immediate::TryTable {
-                block: Box::new(block),
-                catches,
-            }
+            Immediate::TryTable(Box::new(TryTableImmediate { block, catches }))
         }
         0x0a => Immediate::None,
         0xfe => {
@@ -354,11 +369,7 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
         }
         _ => return Err(r.error("unknown opcode")),
     };
-    Ok(Instruction {
-        opcode,
-        immediate,
-        span: Span::new(start, r.offset()),
-    })
+    Ok(Instruction { opcode, immediate })
 }
 
 #[cfg(test)]

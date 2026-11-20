@@ -448,7 +448,7 @@ impl Store {
             let instruction = &module.data.inner.decoded().code[frame.function.body].instructions
                 [block.start - 1];
             let immediate = match &instruction.immediate {
-                Immediate::TryTable { block, .. } => block.as_ref(),
+                Immediate::TryTable(table) => &table.block,
                 x => x,
             };
             match immediate {
@@ -703,9 +703,10 @@ impl Store {
                 operands.push(Value::Ref(RefValue::Gc(new)))
             }
             0xe3..=0xe5 => {
-                let Immediate::Resume { ty, tag, handlers } = &i.immediate else {
+                let Immediate::Resume(resume) = &i.immediate else {
                     return Err(trap("resume immediate"));
                 };
+                let (ty, tag, handlers) = (&resume.ty, &resume.tag, &resume.handlers);
                 let (_, signature) = self.continuation_type(ii, *ty as usize)?;
                 let r = handle(operands)?;
                 self.continuation_ready(r)?;
@@ -1069,7 +1070,6 @@ mod tests {
             &Instruction {
                 opcode: 0xe0,
                 immediate: Immediate::Index(1),
-                span: Span::default(),
             },
             &mut frames,
             &mut values,
@@ -1085,12 +1085,7 @@ mod tests {
                 0,
                 &Instruction {
                     opcode: 0xe3,
-                    immediate: Immediate::Resume {
-                        ty: 1,
-                        tag: None,
-                        handlers: vec![]
-                    },
-                    span: Span::default()
+                    immediate: Immediate::Resume(Box::new(wtime_validate::ResumeImmediate { ty: 1, tag: None, handlers: vec![] })),
                 },
                 &mut frames,
                 &mut values,
@@ -1227,12 +1222,7 @@ mod tests {
                 instance.0.index,
                 &Instruction {
                     opcode: 0xe5,
-                    immediate: Immediate::Resume {
-                        ty: 2,
-                        tag: None,
-                        handlers: vec![],
-                    },
-                    span: Span::default(),
+                    immediate: Immediate::Resume(Box::new(wtime_validate::ResumeImmediate { ty: 2, tag: None, handlers: vec![] })),
                 },
                 &mut frames,
                 &mut values,
@@ -1271,7 +1261,6 @@ mod tests {
         let bind = |target| Instruction {
             opcode: 0xe1,
             immediate: Immediate::Pair(1, target),
-            span: Span::default(),
         };
         store
             .cont_step(

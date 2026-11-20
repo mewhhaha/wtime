@@ -110,9 +110,10 @@ impl Store {
             frame.pc += 1;
             match op.opcode {
                 0x1f => {
-                    let Immediate::TryTable { block, catches } = &op.immediate else {
+                    let Immediate::TryTable(table) = &op.immediate else {
                         return Err(trap("try_table immediate"));
                     };
+                    let (block, catches) = (&table.block, &table.catches);
                     let (a, r) = arity(block, &module);
                     let (end, _) = module.data.control.get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;

@@ -76,7 +76,8 @@ fn parse(module: &DecodedModule, bytes: &[u8]) -> Result<Vec<BranchHint>> {
             if !body
                 .instructions
                 .iter()
-                .any(|i| i.span.start == absolute && matches!(i.opcode, 0x04 | 0x0d))
+                .zip(&body.offsets)
+                .any(|(i, &start)| start as usize == absolute && matches!(i.opcode, 0x04 | 0x0d))
             {
                 return Err(invalid("hint does not target if or br_if"));
             }

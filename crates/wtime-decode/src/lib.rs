@@ -3,7 +3,7 @@
 mod instructions;
 mod module;
 mod reader;
-pub use instructions::{Catch, Immediate, Instruction, decode_instruction};
+pub use instructions::{Catch, Immediate, Instruction, ResumeImmediate, TryTableImmediate, decode_instruction};
 pub use module::*;
 pub use reader::Reader;
 

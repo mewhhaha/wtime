@@ -27,10 +27,11 @@ impl Context<'_> {
                 s.dead()
             }
             0x1f => {
-                let Immediate::TryTable { block, catches } = &i.immediate else {
+                let Immediate::TryTable(table) = &i.immediate else {
                     return Err(invalid("invalid try_table immediate"));
                 };
-                let (params, results) = match block.as_ref() {
+                let (block, catches) = (&table.block, &table.catches);
+                let (params, results) = match block {
                     Immediate::Block(-64) => (vec![], vec![]),
                     Immediate::Block(-1) => (vec![], vec![ValType::I32]),
                     Immediate::Block(-2) => (vec![], vec![ValType::I64]),

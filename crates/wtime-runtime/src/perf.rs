@@ -168,16 +168,18 @@ pub(super) fn immediate_copy_bytes(i: &Immediate) -> u64 {
             .len()
             .saturating_mul(std::mem::size_of::<crate::ValType>()),
         Immediate::Bytes(v) => v.len(),
-        Immediate::TryTable { block, catches } => std::mem::size_of::<Immediate>()
+        Immediate::TryTable(table) => std::mem::size_of::<wtime_validate::TryTableImmediate>()
             .saturating_add(
-                catches
+                table
+                    .catches
                     .len()
                     .saturating_mul(std::mem::size_of::<wtime_validate::Catch>()),
             )
-            .saturating_add(immediate_copy_bytes(block) as usize),
-        Immediate::Resume { handlers, .. } => handlers
+            .saturating_add(immediate_copy_bytes(&table.block) as usize),
+        Immediate::Resume(resume) => std::mem::size_of::<wtime_validate::ResumeImmediate>().saturating_add(resume
+            .handlers
             .len()
-            .saturating_mul(std::mem::size_of::<(u32, Option<u32>)>()),
+            .saturating_mul(std::mem::size_of::<(u32, Option<u32>)>())),
         _ => 0,
     };
     u64::try_from(bytes).unwrap_or(u64::MAX)

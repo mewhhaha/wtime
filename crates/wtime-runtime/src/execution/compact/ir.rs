@@ -105,16 +105,17 @@ impl SideImmediate {
         Ok(match immediate {
             Immediate::BlockType(value) => Self::BlockType(*value),
             Immediate::BrTable(targets, default) => Self::Branches { targets: copy_vector(targets)?, default: *default },
-            Immediate::TryTable { block, catches } => {
-                let block = match block.as_ref() {
+            Immediate::TryTable(table) => {
+                let catches = &table.catches;
+                let block = match &table.block {
                     Immediate::Block(value) => BlockImmediate::Signed(*value),
                     Immediate::BlockType(value) => BlockImmediate::Value(*value),
                     _ => return Err(Declined::Unsupported),
                 };
                 Self::Catches { block, catches: copy_vector(catches)? }
             }
-            Immediate::Resume { ty, tag, handlers } => Self::Resume { ty: *ty, tag: *tag, handlers: copy_vector(handlers)? },
-            Immediate::Bytes(bytes) => Self::Vector(bytes.as_slice().try_into().map_err(|_| Declined::Unsupported)?),
+            Immediate::Resume(resume) => Self::Resume { ty: resume.ty, tag: resume.tag, handlers: copy_vector(&resume.handlers)? },
+            Immediate::Bytes(bytes) => Self::Vector(bytes[..].try_into().map_err(|_| Declined::Unsupported)?),
             Immediate::MemArg { align, offset, memory } => Self::Memory { align: *align, offset: *offset, memory: *memory },
             Immediate::MemLane { align, offset, memory, lane } => Self::Lane { align: *align, offset: *offset, memory: *memory, lane: *lane },
             Immediate::Types(types) => Self::Types(copy_vector(types)?),
@@ -127,19 +128,19 @@ impl SideImmediate {
     fn matches(&self, immediate: &Immediate) -> bool {
         match (self, immediate) {
             (Self::BlockType(a), Immediate::BlockType(b)) => a == b,
-            (Self::Branches { targets: a, default: x }, Immediate::BrTable(b, y)) => a == b && x == y,
-            (Self::Catches { block: a, catches: x }, Immediate::TryTable { block: b, catches: y }) => {
-                x == y && match (a, b.as_ref()) {
+            (Self::Branches { targets: a, default: x }, Immediate::BrTable(b, y)) => a[..] == b[..] && x == y,
+            (Self::Catches { block: a, catches: x }, Immediate::TryTable(table)) => {
+                *x == table.catches && match (a, &table.block) {
                     (BlockImmediate::Signed(a), Immediate::Block(b)) => a == b,
                     (BlockImmediate::Value(a), Immediate::BlockType(b)) => a == b,
                     _ => false,
                 }
             }
-            (Self::Resume { ty: a, tag: x, handlers: p }, Immediate::Resume { ty: b, tag: y, handlers: q }) => a == b && x == y && p == q,
-            (Self::Vector(a), Immediate::Bytes(b)) => a.as_slice() == b.as_slice(),
+            (Self::Resume { ty: a, tag: x, handlers: p }, Immediate::Resume(resume)) => *a == resume.ty && *x == resume.tag && *p == resume.handlers,
+            (Self::Vector(a), Immediate::Bytes(b)) => a[..] == b[..],
             (Self::Memory { align: a, offset: x, memory: p }, Immediate::MemArg { align: b, offset: y, memory: q }) => a == b && x == y && p == q,
             (Self::Lane { align: a, offset: x, memory: p, lane: i }, Immediate::MemLane { align: b, offset: y, memory: q, lane: j }) => a == b && x == y && p == q && i == j,
-            (Self::Types(a), Immediate::Types(b)) => a == b,
+            (Self::Types(a), Immediate::Types(b)) => a[..] == b[..],
             (Self::Heap(a), Immediate::Heap(b)) => a == b,
             (Self::Cast { flags: a, label: x, from: p, to: i }, Immediate::Cast { flags: b, label: y, from: q, to: j }) => a == b && x == y && p == q && i == j,
             _ => false,
@@ -166,11 +167,11 @@ fn inline(opcode: u16, immediate: &Immediate) -> Option<CompactOp> {
 fn shape(immediate: &Immediate) -> Option<(usize, usize)> {
     let (count, bytes) = match immediate {
         Immediate::BrTable(targets, _) => (targets.len(), vector_bytes::<u32>(targets.len())?),
-        Immediate::TryTable { block, catches } => {
-            if !matches!(block.as_ref(), Immediate::Block(_) | Immediate::BlockType(_)) { return None; }
-            (catches.len(), vector_bytes::<wtime_validate::Catch>(catches.len())?)
+        Immediate::TryTable(table) => {
+            if !matches!(&table.block, Immediate::Block(_) | Immediate::BlockType(_)) { return None; }
+            (table.catches.len(), vector_bytes::<wtime_validate::Catch>(table.catches.len())?)
         },
-        Immediate::Resume { handlers, .. } => (handlers.len(), vector_bytes::<(u32, Option<u32>)>(handlers.len())?),
+        Immediate::Resume(resume) => (resume.handlers.len(), vector_bytes::<(u32, Option<u32>)>(resume.handlers.len())?),
         Immediate::Types(types) => (types.len(), vector_bytes::<ValType>(types.len())?),
         Immediate::Bytes(bytes) if bytes.len() != 16 => return None,
         _ => (0, 0),

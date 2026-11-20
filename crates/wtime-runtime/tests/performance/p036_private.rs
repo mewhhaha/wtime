@@ -102,8 +102,8 @@ fn p036_wide_compound_storage_preserves_bits_and_declines_unknown_shapes() {
     // values complement the validated-module constructor cases above.
     let cases = [
         Immediate::Bytes((0..16).map(|byte| byte * 17).collect()),
-        Immediate::Types(vec![ValType::I32, ValType::V128, ValType::Ref(RefType::new(false, HeapType::ExactDefined(TypeIdx(u32::MAX))))]),
-        Immediate::Resume { ty: u32::MAX, tag: Some(u32::MAX), handlers: vec![(u32::MAX, Some(u32::MAX)), (1, None)] },
+        Immediate::Types(vec![ValType::I32, ValType::V128, ValType::Ref(RefType::new(false, HeapType::ExactDefined(TypeIdx(u32::MAX))))].into_boxed_slice()),
+        Immediate::Resume(Box::new(wtime_validate::ResumeImmediate { ty: u32::MAX, tag: Some(u32::MAX), handlers: vec![(u32::MAX, Some(u32::MAX)), (1, None)] })),
         Immediate::Cast { flags: 3, label: u32::MAX, from: HeapType::ExactDefined(TypeIdx(u32::MAX)), to: HeapType::Defined(TypeIdx(70_000)) },
         Immediate::MemLane { align: u32::MAX, offset: u64::MAX, memory: u32::MAX, lane: 15 },
         Immediate::Heap(HeapType::ExactDefined(TypeIdx(u32::MAX))),
@@ -114,8 +114,8 @@ fn p036_wide_compound_storage_preserves_bits_and_declines_unknown_shapes() {
         assert!(side.matches(&immediate));
         assert!(side.dynamic_bytes().is_some());
     }
-    assert!(matches!(SideImmediate::from_immediate(&Immediate::Bytes(vec![0; 17])), Err(Declined::Unsupported)));
-    assert!(matches!(SideImmediate::from_immediate(&Immediate::TryTable { block: Box::new(Immediate::I32(0)), catches: vec![] }), Err(Declined::Unsupported)));
+    assert!(matches!(SideImmediate::from_immediate(&Immediate::Bytes(vec![0; 17].into_boxed_slice())), Err(Declined::Unsupported)));
+    assert!(matches!(SideImmediate::from_immediate(&Immediate::TryTable(Box::new(wtime_validate::TryTableImmediate { block: Immediate::I32(0), catches: vec![] }))), Err(Declined::Unsupported)));
     let (_, module) = p036_module(include_bytes!("../fixtures/performance/simd/lane_loads_oob.wasm"));
     for (body, lane) in [(0, 5), (1, 3), (2, 2), (3, 1)] {
         let function = CompactFunction::from_module(&module, body, MAX_WORK, MAX_BYTES).unwrap();

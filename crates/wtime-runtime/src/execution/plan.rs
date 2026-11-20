@@ -61,8 +61,8 @@ impl Module {
             .get(pc)?
             .immediate
         {
-            Immediate::TryTable { catches, .. } => Some(0..catches.len()),
-            Immediate::Resume { handlers, .. } => Some(0..handlers.len()),
+            Immediate::TryTable(table) => Some(0..table.catches.len()),
+            Immediate::Resume(resume) => Some(0..resume.handlers.len()),
             _ => None,
         }
     }
@@ -184,7 +184,7 @@ impl FunctionPlans {
                     continue;
                 }
                 let (immediate, n) = match &i.immediate {
-                    Immediate::TryTable { block, catches } => (block.as_ref(), catches.len()),
+                    Immediate::TryTable(table) => (&table.block, table.catches.len()),
                     other => (other, 0),
                 };
                 let (params, results) = layout(immediate, m)?;

@@ -246,8 +246,8 @@ impl ControlMap {
     fn set(&mut self, body: usize, pc: usize, value: Option<(usize, Option<usize>)>) {
         self.bodies[body][pc] = match value {
             Some((end, other)) => ControlEntry {
-                end: end as u32,
-                other: other.map_or(ControlEntry::NONE, |other| other as u32),
+                end: u32::try_from(end).expect("test control position fits u32"),
+                other: other.map_or(ControlEntry::NONE, |other| u32::try_from(other).expect("test control position fits u32")),
             },
             None => ControlEntry::EMPTY,
         };

@@ -611,7 +611,10 @@ impl Context<'_> {
             stack_peak: 0,
             maximum_nesting: 1,
         };
-        for i in &b.instructions {
+        for (n, i) in b.instructions.iter().enumerate() {
+            // Absolute module offset for error reports; a body built without
+            // offsets reports its own start.
+            let at = b.offsets.get(n).map_or(b.span.start, |&offset| offset as usize);
             if i.opcode == 0xd2 {
                 let n = index(i)? as u32;
                 check(
@@ -641,7 +644,7 @@ impl Context<'_> {
             }
             if !fast_instruction(&mut s, &locals, i) {
                 self.instruction(&mut s, &locals, i)
-                    .map_err(|e| e.at(i.span.start))?;
+                    .map_err(|e| e.at(at))?;
             }
             bounds.stack_peak = bounds.stack_peak.max(s.values.len());
             bounds.maximum_nesting = bounds.maximum_nesting.max(s.controls.len());

@@ -67,6 +67,8 @@ pub struct Global {
 pub struct FunctionBody {
     pub locals: Vec<ValType>,
     pub instructions: Vec<Instruction>,
+    /// The absolute module offset at which each instruction starts.
+    pub offsets: Vec<u32>,
     pub span: Span,
 }
 #[derive(Clone, Debug)]
@@ -510,18 +512,15 @@ pub fn decode(
                         init.push(if expr {
                             expression(&mut s)?
                         } else {
-                            let start = s.offset();
                             let index = s.u32()?;
                             vec![
                                 Instruction {
                                     opcode: 0xd2,
                                     immediate: Immediate::Index(index),
-                                    span: Span::new(start, s.offset()),
                                 },
                                 Instruction {
                                     opcode: 0x0b,
                                     immediate: Immediate::None,
-                                    span: Span::new(s.offset(), s.offset()),
                                 },
                             ]
                         })
@@ -546,7 +545,7 @@ pub fn decode(
                             .ok_or_else(|| b.error("local count overflow"))?;
                         local_groups.push((n, ty));
                     }
-                    let instructions = body_expression(&mut b)?;
+                    let (instructions, offsets) = body_expression(&mut b)?;
                     b.finish()?;
                     if total as usize > policy.max_locals {
                         return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
@@ -558,6 +557,7 @@ pub fn decode(
                     m.code.push(FunctionBody {
                         locals,
                         instructions,
+                        offsets,
                         span: Span::new(start, b.offset()),
                     })
                 }
@@ -656,8 +656,10 @@ mod tests {
         ]);
         let m = parse(&b).unwrap();
         assert_eq!(m.code[0].instructions[0].immediate, Immediate::I32(42));
-        let s = m.code[0].instructions[0].span;
-        assert_eq!(&b[s.start..s.end], &[0x41, 42]);
+        let start = m.code[0].offsets[0] as usize;
+        assert_eq!(&b[start..start + 2], &[0x41, 42]);
+        assert_eq!(m.code[0].offsets.len(), m.code[0].instructions.len());
+        assert_eq!(b[m.code[0].offsets[1] as usize], 0x0b);
     }
     #[test]
     fn t018_malformed_sections() {
@@ -732,7 +734,7 @@ mod tests {
     fn t142_extension_immediates() {
         let mut r = Reader::new(&[0xe3, 0, 1, 0, 2, 3, 0x0b]);
         assert!(
-            matches!(&expression(&mut r).unwrap()[0].immediate,Immediate::Resume{ty:0,tag:None,handlers} if handlers==&vec![(2,Some(3))])
+            matches!(&expression(&mut r).unwrap()[0].immediate,Immediate::Resume(resume) if resume.ty == 0 && resume.tag.is_none() && resume.handlers==vec![(2,Some(3))])
         );
         let mut r = Reader::new(&[0xfb, 24, 3, 0, 0x70, 0x6f, 0x0b]);
         assert!(matches!(

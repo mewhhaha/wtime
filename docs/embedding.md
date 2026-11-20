@@ -66,7 +66,8 @@ store, `memory.fill`, `memory.copy`, data segment initialization or
 allocation failed"), and the access writes nothing. Bulk operations work in
 64 KiB chunks, so, as with cancellation, chunks completed before the failure
 remain written. `memory.grow` itself still returns -1 when the configured
-budgets or the page table cannot accommodate the new size.
+budgets or the page table cannot accommodate the new size, or when a written
+partial last page (with custom page sizes) cannot be extended.
 
 Obtain a `CancellationToken` from the store and send its clone to another host
 thread. `cancel()` requests cancellation at guest instruction boundaries;

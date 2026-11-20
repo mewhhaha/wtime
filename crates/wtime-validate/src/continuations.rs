@@ -62,13 +62,8 @@ impl Context<'_> {
                 s.op(&t.params, &t.results)?
             }
             0xe3..=0xe5 => {
-                let (ty, tag, handlers) = if let Immediate::Resume {
-                    ty,
-                    tag,
-                    ref handlers,
-                } = i.immediate
-                {
-                    (ty as usize, tag, handlers)
+                let (ty, tag, handlers) = if let Immediate::Resume(ref resume) = i.immediate {
+                    (resume.ty as usize, resume.tag, &resume.handlers)
                 } else {
                     return Err(invalid("invalid resume immediate"));
                 };

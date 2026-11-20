@@ -39,7 +39,7 @@ pub(super) fn execute(opcode: u16, immediate: &Immediate, s: &mut Vec<Value>) ->
     let out = match op {
         12 => {
             if let Immediate::Bytes(b) = immediate {
-                b.as_slice()
+                (&b[..])
                     .try_into()
                     .map_err(|_| trap("invalid v128 constant"))?
             } else {
@@ -1682,7 +1682,7 @@ mod tests {
     #[test]
     fn t093_shuffle_validates_lanes() {
         let mut s = vec![v([0; 16]), v([1; 16])];
-        assert!(execute(0xfd0d, &Immediate::Bytes(vec![32; 16]), &mut s).is_err());
+        assert!(execute(0xfd0d, &Immediate::Bytes(vec![32; 16].into_boxed_slice()), &mut s).is_err());
     }
 }
 

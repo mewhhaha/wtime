@@ -163,18 +163,35 @@ impl LinearBytes {
     /// Allocates every page that a write of `data` at `at` will store
     /// nonzero bytes into, so that the write itself cannot fail half-way.
     fn allocate_for(&mut self, at: usize, data: &[u8]) -> Result<(), AllocationFailed> {
+        let first = at >> PAGE_BITS;
         let mut at = at;
         let mut data = data;
         while !data.is_empty() {
             let amount = data.len().min(PAGE - (at & MASK));
             let index = at >> PAGE_BITS;
-            if self.pages[index].is_none() && data[..amount].iter().any(|&byte| byte != 0) {
-                self.page_mut(index)?;
+            if self.pages[index].is_none()
+                && data[..amount].iter().any(|&byte| byte != 0)
+                && self.page_mut(index).is_err()
+            {
+                self.release(first, index);
+                return Err(AllocationFailed);
             }
             data = &data[amount..];
             at += amount;
         }
         Ok(())
+    }
+
+    /// After a failed call allocated pages `first..end` itself (all still
+    /// zero), releases the ones that are entirely zero again, so that a failed
+    /// write leaves no committed storage behind. Pages written earlier hold
+    /// nonzero bytes and are kept.
+    fn release(&mut self, first: usize, end: usize) {
+        for page in &mut self.pages[first..end] {
+            if page.as_deref().is_some_and(|bytes| bytes.iter().all(|&byte| byte == 0)) {
+                *page = None;
+            }
+        }
     }
 
     /// Copies `data` to `at`. Either every byte is written or, when a page
@@ -232,8 +249,9 @@ impl LinearBytes {
         };
         if byte != 0 {
             for (index, _, _) in pieces(at, count) {
-                if self.pages[index].is_none() {
-                    self.page_mut(index)?;
+                if self.pages[index].is_none() && self.page_mut(index).is_err() {
+                    self.release(at >> PAGE_BITS, index);
+                    return Err(AllocationFailed);
                 }
             }
         }
