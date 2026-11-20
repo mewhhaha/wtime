@@ -18,6 +18,9 @@ const STACK_BYTES: u64 = 8 << 30;
 /// grows with the file.
 const FILE_BYTES: usize = 1 << 20;
 
+/// `memory.copy`s of a constant length up to this many bytes are inlined.
+const COPY_INLINE: usize = 256;
+
 pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &str) -> Res<()> {
     let limits = ResourceLimits {
         max_module_bytes: 1 << 30,
@@ -984,8 +987,18 @@ impl<'a> Function<'a> {
                 let (n, _) = e.pop()?;
                 let (src, _) = e.pop()?;
                 let (dst, _) = e.pop()?;
-                let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));
-                e.line(&format!("self.mem.copy({dst}, {src}, {n})?;"));
+                // A short copy of constant length moves its bytes inline,
+                // through a value, instead of calling memmove.
+                let constant = n.trim_matches(['(', ')']).strip_suffix("i32").and_then(|k| k.parse::<usize>().ok());
+                match constant {
+                    Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
+                        e.line(&format!("self.mem.copy_n::<{k}>({dst} as u32, {src} as u32)?;"))
+                    }
+                    _ => {
+                        let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));
+                        e.line(&format!("self.mem.copy({dst}, {src}, {n})?;"));
+                    }
+                }
             }
             0xfc0b => {
                 let (n, _) = e.pop()?;

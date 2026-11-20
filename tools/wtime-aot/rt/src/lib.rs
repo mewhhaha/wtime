@@ -328,6 +328,17 @@ impl Memory32 {
         self.store32::<8>(address, offset, value.to_le_bytes())
     }
 
+    /// `memory.copy` of a constant `N` bytes (at least 1): both ranges are
+    /// checked before anything is written, and the bytes pass through a
+    /// value, so overlapping ranges copy as memmove does.
+    #[inline(always)]
+    pub fn copy_n<const N: usize>(&mut self, destination: u32, source: u32) -> R<()> {
+        let to = self.at::<N>(destination, 0)?;
+        let value = self.load32::<N>(source, 0)?;
+        self.bytes[to..to + N].copy_from_slice(&value);
+        Ok(())
+    }
+
     /// The size in pages.
     pub fn size(&self) -> u64 {
         self.len as u64 / PAGE
@@ -534,6 +545,26 @@ mod tests {
         assert_eq!(m.l64(131060, 4), Ok(7));
         assert!(m.copy(0, 131064, 8).is_ok());
         assert_eq!(m.l64(0, 0), Ok(7));
+    }
+
+    #[test]
+    fn constant_copies_overlap_and_check_both_ranges() {
+        let mut m = Memory32::new(1, Some(1)).unwrap();
+        for k in 0..8u8 {
+            m.s8(k as u32, 0, k + 1).unwrap();
+        }
+        // Forward and backward overlap, as memmove.
+        m.copy_n::<6>(2, 0).unwrap();
+        assert_eq!(m.l64(0, 0), Ok(u64::from_le_bytes([1, 2, 1, 2, 3, 4, 5, 6])));
+        m.copy_n::<6>(0, 2).unwrap();
+        assert_eq!(m.l64(0, 0), Ok(u64::from_le_bytes([1, 2, 3, 4, 5, 6, 5, 6])));
+        // Either range out of bounds traps and writes nothing.
+        assert_eq!(m.copy_n::<4>(65533, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m.copy_n::<4>(0, 65533), Err(Trap::OutOfBounds));
+        assert_eq!(m.copy_n::<4>(u32::MAX, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m.l64(0, 0), Ok(u64::from_le_bytes([1, 2, 3, 4, 5, 6, 5, 6])));
+        assert!(m.copy_n::<4>(65532, 0).is_ok());
+        assert_eq!(m.l32(65532, 0), Ok(u32::from_le_bytes([1, 2, 3, 4])));
     }
 
     #[test]
