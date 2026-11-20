@@ -1248,6 +1248,22 @@ mod tests {
         assert_eq!(s.invoke(f, &[Value::I32(iterations)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
         assert_eq!(s.invoke(f, &[Value::I32(5)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
         assert!(m.data.lowered[0].get().is_some());
+        // Every instruction is counted once, cold or lowered, before or past
+        // the static ops: n nops, 8 per iteration and 7 more.
+        #[cfg(feature = "performance-counters")]
+        {
+            let m = e.compile(&bytes).unwrap();
+            let mut fresh = Store::new(&e);
+            let i = Linker::new(&e).instantiate(&mut fresh, &m).unwrap();
+            let External::Func(f) = i.export(&fresh, "f").unwrap() else { panic!() };
+            fresh.invoke(f, &[Value::I32(5)]).unwrap();
+            assert_eq!(fresh.performance_counters().source_dispatches, (n + 8 * 5 + 7) as u64);
+            fresh.invoke(f, &[Value::I32(iterations)]).unwrap();
+            fresh.invoke(f, &[Value::I32(5)]).unwrap();
+            assert!(m.data.lowered[0].get().is_some());
+            let total = (n + 8 * 5 + 7) as u64 * 2 + (n + 8 * iterations as usize + 7) as u64;
+            assert_eq!(fresh.performance_counters().source_dispatches, total);
+        }
         let limits = ResourceLimits { fuel: Some(n as u64 + 8 * 5 + 7), ..ResourceLimits::default() };
         assert!(run_with(&bytes, &[Value::I32(5)], limits).is_ok());
         let limits = ResourceLimits { fuel: Some(n as u64 + 8 * 5 + 6), ..ResourceLimits::default() };

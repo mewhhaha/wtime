@@ -133,8 +133,22 @@ impl Store {
             };
         }
         let Some(mut lop) = lowered.get(*pc_ref).copied() else {
+            // Past the cold ops of a long body the general loop runs the
+            // instruction, which warms the body. Declined promises that it
+            // has been counted, as the top of the loop counts it.
             if cold {
                 heat.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            #[cfg(any(feature = "performance-counters", feature = "opcode-coverage"))]
+            if let Some(op) = ops.get(*pc_ref) {
+                #[cfg(feature = "performance-counters")]
+                {
+                    self.perf.record(perf::Event::Dispatch, 1);
+                    self.perf.record(perf::Event::InstructionClone, 1);
+                    self.perf.record(perf::Event::InstructionBytes, perf::immediate_copy_bytes(&op.immediate));
+                }
+                #[cfg(feature = "opcode-coverage")]
+                crate::coverage::record(op.opcode);
             }
             return Ok(Straight::Declined);
         };
