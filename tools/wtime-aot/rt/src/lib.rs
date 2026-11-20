@@ -76,6 +76,21 @@ impl fmt::Display for Trap {
 
 pub type R<T> = Result<T, Trap>;
 
+/// `expr?` for generated code: the value of an `Ok`, or a return of the
+/// `Err`. Written as a match, it gives rustc one branch to build and check,
+/// where `?` adds `Try` and `FromResidual` calls for its MIR inliner; on a
+/// crate the size of the Goose compiler that is gigabytes of compile-time
+/// memory.
+#[macro_export]
+macro_rules! t {
+    ($e:expr) => {
+        match $e {
+            Ok(value) => value,
+            Err(error) => return Err(error),
+        }
+    };
+}
+
 /// `Err(trap)`, inlined where it is returned. Marking it `#[cold]` and
 /// out of line made every bounds check's failure path a call LLVM could not
 /// see into: it returned an `R<T>` of unknown variant into the fast path,
