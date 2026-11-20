@@ -27,8 +27,14 @@ pub enum Trap {
     MemoryTooLarge,
     AllocationFailed,
     NoStart,
+    /// The module exports `_start`, but not as a function.
+    StartNotFunction,
+    /// `_start` takes parameters.
+    StartArguments,
     /// A host import's result does not fit its declared type.
     ResultMismatch,
+    /// A host import declared without results got one.
+    ExtraResults,
     /// The host refused; its text is in the host's state.
     Host,
     /// The program ended itself; the code is in the host's state.
@@ -50,8 +56,11 @@ impl Trap {
             Trap::CallStackExhausted => "ResourceLimit: call depth exhausted",
             Trap::MemoryTooLarge => "ResourceLimit: memory too large",
             Trap::AllocationFailed => "ResourceLimit: memory allocation failed",
-            Trap::NoStart => "Host: module does not export _start",
-            Trap::ResultMismatch => "Host: host import result does not fit its declared type",
+            Trap::NoStart => "module does not export _start",
+            Trap::StartNotFunction => "'_start' is not a function",
+            Trap::StartArguments => "Host: argument type mismatch",
+            Trap::ResultMismatch => "host import result does not fit its declared type",
+            Trap::ExtraResults => "callback produced results when it shouldn't",
             Trap::Host => "Host: host failure",
             Trap::Exit => "program exit",
             Trap::StopIteration => "Host: generator raised StopIteration",

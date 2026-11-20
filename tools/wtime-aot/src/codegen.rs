@@ -249,29 +249,10 @@ impl Module {
         } else {
             "    fn memory(&mut self) -> Option<&mut dyn LinearMemory> { None }\n"
         });
-        // The instantiation steps that can run code or trap: active data and
-        // element segments in order, then the start function.
+        // The instantiation steps that can run code or trap, in the spec's
+        // order: active element segments, active data segments, then the
+        // start function.
         let mut init = String::from("impl Instance {\n    fn initialize(&mut self) -> R<()> {\n");
-        for segment in &m.data {
-            let bytes = &m.bytes[segment.bytes.start..segment.bytes.end];
-            let at = data.len();
-            data.extend_from_slice(bytes);
-            match &segment.mode {
-                SegmentMode::Active { index: 0, offset } => {
-                    let offset = constant(offset, &self.globals)?;
-                    let address = if self.memory64 { format!("({offset}) as u64") } else { format!("({offset}) as u32 as u64") };
-                    writeln!(
-                        init,
-                        "        self.mem.init({address}, &DATA[{at}..{}], 0, {})?;",
-                        at + bytes.len(),
-                        bytes.len()
-                    )
-                    .unwrap();
-                }
-                SegmentMode::Passive => {}
-                _ => return Err("data segments for other memories are not supported".into()),
-            }
-        }
         // No instruction reads a table, so an active element segment only
         // needs its bounds check: it traps if it does not fit the table.
         for element in &m.elements {
@@ -290,6 +271,26 @@ impl Module {
                     table.limits.min
                 )
                 .unwrap();
+            }
+        }
+        for segment in &m.data {
+            let bytes = &m.bytes[segment.bytes.start..segment.bytes.end];
+            let at = data.len();
+            data.extend_from_slice(bytes);
+            match &segment.mode {
+                SegmentMode::Active { index: 0, offset } => {
+                    let offset = constant(offset, &self.globals)?;
+                    let address = if self.memory64 { format!("({offset}) as u64") } else { format!("({offset}) as u32 as u64") };
+                    writeln!(
+                        init,
+                        "        self.mem.init({address}, &DATA[{at}..{}], 0, {})?;",
+                        at + bytes.len(),
+                        bytes.len()
+                    )
+                    .unwrap();
+                }
+                SegmentMode::Passive => {}
+                _ => return Err("data segments for other memories are not supported".into()),
             }
         }
         if let Some(start) = self.start {
@@ -316,7 +317,7 @@ impl Module {
                     ),
                     _ => return Err("goose.reserve is not (address, address) -> address".into()),
                 };
-                writeln!(s, "    fn reserve(&mut self, control: i64, count: i64) -> Option<R<i64>> {{ Some({call}{fit}) }}").unwrap();
+                writeln!(s, "    fn reserve(&mut self, control: i64, count: i64) -> Option<R<i64>> {{ if self.ready {{ Some({call}{fit}) }} else {{ None }} }}").unwrap();
             }
             None => s.push_str("    fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> { None }\n"),
         }
@@ -324,7 +325,11 @@ impl Module {
             Some(f) if self.types[f as usize].params.is_empty() => {
                 writeln!(s, "    fn start(&mut self) -> R<()> {{ self.f{f}().map(|_| ()) }}").unwrap()
             }
-            _ => s.push_str("    fn start(&mut self) -> R<()> { trap(Trap::NoStart) }\n"),
+            Some(_) => s.push_str("    fn start(&mut self) -> R<()> { trap(Trap::StartArguments) }\n"),
+            None if m.exports.iter().any(|e| e.name == "_start") => {
+                s.push_str("    fn start(&mut self) -> R<()> { trap(Trap::StartNotFunction) }\n")
+            }
+            None => s.push_str("    fn start(&mut self) -> R<()> { trap(Trap::NoStart) }\n"),
         }
         s.push_str("}\n\n");
         s.push_str(&init);

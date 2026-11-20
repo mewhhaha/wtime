@@ -111,7 +111,7 @@ impl Out {
     pub fn none(self) -> R<()> {
         match self {
             Out::Nothing => Ok(()),
-            _ => Err(Trap::ResultMismatch),
+            _ => Err(Trap::ExtraResults),
         }
     }
 }

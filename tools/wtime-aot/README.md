@@ -65,8 +65,10 @@ benchmarks such programs as engine `wtime-aot`.
 - The SIMD instructions that treat `v128` as 16 bytes: load, store, const,
   and i64x2 splat, extract_lane and replace_lane.
 
-The generator refuses anything else with an error naming the construct,
-in dead code as well as live code.
+The generator refuses anything else in live code with an error naming the
+construct. Dead code (after an unconditional branch) is skipped unread,
+except that exception-handling instructions are refused there too, since
+skipping relies on knowing where each block ends.
 
 ## Host parity with wtime-goose
 
