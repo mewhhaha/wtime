@@ -60,9 +60,12 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
     every address a 32-bit access can form (8 GiB of address space, touched
     only where the program writes). An access checks a single bound, the
     current length; `memory.grow` moves the length.
-  - A 64-bit memory (`Memory`) is a lazily zeroed allocation covering its
-    maximum up to 4 GiB, and its length. Growing within the allocation moves
-    the length; growing past it moves the live bytes to a larger allocation.
+  - A 64-bit memory (`Memory`) is a list of 4 GiB chunks, each one lazily
+    zeroed allocation, plus its length. `memory.grow` adds the chunks it
+    reaches and never moves or touches existing bytes, so a memory can grow
+    to many GiB (the 64-bit Goose compiler grows to about 17 GB) while the
+    program writes little of it. An access checks the length and finds its
+    chunk; one that straddles two chunks takes a slower path.
 
 ## Supported
 

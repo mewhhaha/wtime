@@ -111,23 +111,24 @@ pub enum Val {
     F64(f64),
 }
 
-/// The linear memory of a module (64-bit memories use it): one zeroed
-/// allocation, which the OS zeroes lazily, and the memory's current length.
-/// The allocation covers the memory's maximum up to `RESERVE`, so growing
-/// within it only moves the length and touches nothing; growing past it
-/// moves the live bytes to a larger zeroed allocation. An access checks one
-/// bound, the length.
+/// The linear memory of a module (64-bit memories use it): chunks of
+/// `CHUNK` bytes, each one zeroed allocation that the OS zeroes lazily, and
+/// the memory's current length. `memory.grow` adds the chunks it reaches and
+/// never moves or touches what is there, so a memory can grow to many GiB
+/// while the program writes little of it; no single allocation exceeds a
+/// chunk. An access checks the length, then finds its chunk; one that
+/// straddles two chunks takes a slower path.
 pub struct Memory {
-    /// Zero beyond `len`.
-    bytes: Vec<u8>,
+    /// Zero beyond `len`; the last may be shorter than CHUNK.
+    chunks: Vec<Vec<u8>>,
     len: usize,
     /// The most pages it may grow to.
     max_pages: u64,
 }
 
 pub const PAGE: u64 = 65536;
-/// Bytes allocated up front at most.
-const RESERVE: u64 = 4 << 30;
+const CHUNK_BITS: u32 = 32;
+const CHUNK: usize = 1 << CHUNK_BITS;
 
 impl Memory {
     /// A memory of `min` pages that may grow to `max` (the index type's
@@ -138,10 +139,11 @@ impl Memory {
         if min > max_pages {
             return trap(Trap::MemoryTooLarge);
         }
-        let len = min.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok());
-        let Some(len) = len else { return trap(Trap::MemoryTooLarge) };
-        let reserve = usize::try_from(max_pages.saturating_mul(PAGE).min(RESERVE)).unwrap_or(len).max(len);
-        Ok(Memory { bytes: zeroed(reserve)?, len, max_pages })
+        let mut memory = Memory { chunks: Vec::new(), len: 0, max_pages };
+        if memory.grow(min) < 0 {
+            return trap(Trap::AllocationFailed);
+        }
+        Ok(memory)
     }
 
     /// The effective address of an access of `n` bytes, or the trap.
@@ -154,41 +156,65 @@ impl Memory {
     }
 
     #[inline(always)]
-    pub fn load<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
+    fn get<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
         let at = self.at(address, offset, N)?;
-        match self.bytes.get(at..at + N) {
-            Some(bytes) => Ok(bytes.try_into().unwrap_or([0; N])),
-            None => trap(Trap::OutOfBounds),
+        let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
+        let mut out = [0; N];
+        match self.chunks[c].get(o..o + N) {
+            Some(bytes) => out.copy_from_slice(bytes),
+            None => self.read_into(at, &mut out),
         }
+        Ok(out)
+    }
+
+    #[inline(always)]
+    fn put<const N: usize>(&mut self, address: u64, offset: u64, value: [u8; N]) -> R<()> {
+        let at = self.at(address, offset, N)?;
+        let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
+        match self.chunks[c].get_mut(o..o + N) {
+            Some(bytes) => bytes.copy_from_slice(&value),
+            None => self.write_from(at, &value),
+        }
+        Ok(())
+    }
+
+    /// Copies the bytes at `at` (in bounds) into `out`, across chunks.
+    #[cold]
+    fn read_into(&self, mut at: usize, mut out: &mut [u8]) {
+        while !out.is_empty() {
+            let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
+            let n = out.len().min(self.chunks[c].len() - o);
+            let (now, rest) = out.split_at_mut(n);
+            now.copy_from_slice(&self.chunks[c][o..o + n]);
+            out = rest;
+            at += n;
+        }
+    }
+
+    /// Writes `data` at `at` (in bounds), across chunks.
+    #[cold]
+    fn write_from(&mut self, mut at: usize, mut data: &[u8]) {
+        while !data.is_empty() {
+            let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
+            let n = data.len().min(self.chunks[c].len() - o);
+            self.chunks[c][o..o + n].copy_from_slice(&data[..n]);
+            data = &data[n..];
+            at += n;
+        }
+    }
+
+    #[inline(always)]
+    pub fn load<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
+        self.get(address, offset)
     }
 
     #[inline(always)]
     pub fn store<const N: usize>(&mut self, address: u64, offset: u64, value: [u8; N]) -> R<()> {
-        let at = self.at(address, offset, N)?;
-        match self.bytes.get_mut(at..at + N) {
-            Some(bytes) => {
-                bytes.copy_from_slice(&value);
-                Ok(())
-            }
-            None => trap(Trap::OutOfBounds),
-        }
+        self.put(address, offset, value)
     }
 
     // Typed accesses, as for `Memory32`: integers, not byte arrays, cross
     // the Result.
-    #[inline(always)]
-    fn get<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
-        let at = self.at(address, offset, N)?;
-        let mut out = [0; N];
-        out.copy_from_slice(&self.bytes[at..at + N]);
-        Ok(out)
-    }
-    #[inline(always)]
-    fn put<const N: usize>(&mut self, address: u64, offset: u64, value: [u8; N]) -> R<()> {
-        let at = self.at(address, offset, N)?;
-        self.bytes[at..at + N].copy_from_slice(&value);
-        Ok(())
-    }
     #[inline(always)]
     pub fn l8(&self, address: u64, offset: u64) -> R<u8> {
         Ok(self.get::<1>(address, offset)?[0])
@@ -232,28 +258,44 @@ impl Memory {
         let old = self.size();
         let Some(new) = old.checked_add(delta).filter(|&n| n <= self.max_pages) else { return -1 };
         let Some(len) = new.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else { return -1 };
-        if len > self.bytes.len() {
-            // Past the allocation: a larger one, at least twice the size,
-            // up to the maximum, takes the live bytes.
-            let max = usize::try_from(self.max_pages.saturating_mul(PAGE)).unwrap_or(usize::MAX);
-            let size = len.max(self.bytes.len().saturating_mul(2).min(max));
-            let Ok(mut bytes) = zeroed(size) else { return -1 };
-            bytes[..self.len].copy_from_slice(&self.bytes[..self.len]);
-            self.bytes = bytes;
+        // Every chunk is allocated whole (lazily zeroed), except a last one
+        // that the maximum ends inside.
+        let max = usize::try_from(self.max_pages.saturating_mul(PAGE)).unwrap_or(usize::MAX);
+        while self.chunks.len() * CHUNK < len {
+            let start = self.chunks.len() * CHUNK;
+            let Ok(chunk) = zeroed(CHUNK.min(max - start)) else { return -1 };
+            self.chunks.push(chunk);
         }
         self.len = len;
         old as i64
     }
 
-    /// The current bytes.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+    /// The `n` bytes at `address`, for the host and bulk operations.
+    pub fn read(&self, address: u64, n: u64) -> R<Vec<u8>> {
+        let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
+        let at = self.at(address, 0, n)?;
+        let mut out = vec![0; n];
+        self.read_into(at, &mut out);
+        Ok(out)
+    }
+
+    /// Writes `data` at `address`, for the host and bulk operations.
+    pub fn write(&mut self, address: u64, data: &[u8]) -> R<()> {
+        let at = self.at(address, 0, data.len())?;
+        self.write_from(at, data);
+        Ok(())
     }
 
     pub fn fill(&mut self, destination: u64, value: u8, n: u64) -> R<()> {
         let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
-        let at = self.at(destination, 0, n)?;
-        self.bytes[at..at + n].fill(value);
+        let mut at = self.at(destination, 0, n)?;
+        let end = at + n;
+        while at < end {
+            let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
+            let k = (end - at).min(self.chunks[c].len() - o);
+            self.chunks[c][o..o + k].fill(value);
+            at += k;
+        }
         Ok(())
     }
 
@@ -261,7 +303,17 @@ impl Memory {
         let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
         let to = self.at(destination, 0, n)?;
         let from = self.at(source, 0, n)?;
-        self.bytes.copy_within(from..from + n, to);
+        let (c, o) = (from >> CHUNK_BITS, from & (CHUNK - 1));
+        let (d, p) = (to >> CHUNK_BITS, to & (CHUNK - 1));
+        if c == d && o + n <= self.chunks[c].len() && p + n <= self.chunks[c].len() {
+            self.chunks[c].copy_within(o..o + n, p);
+        } else {
+            // Across chunks: through a copy, which also keeps overlapping
+            // ranges right.
+            let mut bytes = vec![0; n];
+            self.read_into(from, &mut bytes);
+            self.write_from(to, &bytes);
+        }
         Ok(())
     }
 
@@ -272,21 +324,7 @@ impl Memory {
         let from = usize::try_from(from).ok().filter(|f| f.checked_add(n).is_some_and(|end| end <= data.len()));
         let Some(from) = from else { return trap(Trap::OutOfBounds) };
         let to = self.at(destination, 0, n)?;
-        self.bytes[to..to + n].copy_from_slice(&data[from..from + n]);
-        Ok(())
-    }
-
-    /// The `n` bytes at `address`, for the host.
-    pub fn read(&self, address: u64, n: u64) -> R<Vec<u8>> {
-        let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
-        let at = self.at(address, 0, n)?;
-        Ok(self.bytes[at..at + n].to_vec())
-    }
-
-    /// Writes `data` at `address`, for the host.
-    pub fn write(&mut self, address: u64, data: &[u8]) -> R<()> {
-        let at = self.at(address, 0, data.len())?;
-        self.bytes[at..at + data.len()].copy_from_slice(data);
+        self.write_from(to, &data[from..from + n]);
         Ok(())
     }
 }
@@ -679,7 +717,27 @@ mod tests {
         assert_eq!(m.grow(1), 1);
         assert_eq!(m.grow(1), -1);
         assert!(m.store::<8>(131064, 0, [1; 8]).is_ok());
-        assert_eq!(m.bytes().len(), 131072);
+    }
+
+    #[test]
+    fn memory64_accesses_straddle_chunks() {
+        let edge = 1u64 << 32;
+        let mut m = Memory::new(edge / PAGE + 1, None, true).unwrap();
+        m.s64(edge - 4, 0, 0x0102_0304_0506_0708).unwrap();
+        assert_eq!(m.l64(edge - 4, 0), Ok(0x0102_0304_0506_0708));
+        assert_eq!(m.l32(edge, 0), Ok(0x0102_0304));
+        assert_eq!(m.load::<16>(edge - 8, 0).map(|b| b[4..12].to_vec()), Ok(vec![8, 7, 6, 5, 4, 3, 2, 1]));
+        m.fill(edge - 2, 9, 4).unwrap();
+        assert_eq!(m.l32(edge - 2, 0), Ok(0x0909_0909));
+        // Overlapping copies across the boundary, both ways.
+        m.copy(edge - 3, edge - 4, 8).unwrap();
+        assert_eq!(m.read(edge - 4, 9).unwrap(), m.read(edge - 4, 1).unwrap().into_iter().chain(m.read(edge - 3, 8).unwrap()).collect::<Vec<_>>());
+        m.write(edge - 1, &[1, 2, 3]).unwrap();
+        assert_eq!(m.read(edge - 1, 3).unwrap(), vec![1, 2, 3]);
+        m.copy(edge - 10, edge - 1, 3).unwrap();
+        assert_eq!(m.read(edge - 10, 3).unwrap(), vec![1, 2, 3]);
+        assert_eq!(m.l8(edge + PAGE - 1, 0), Ok(0));
+        assert_eq!(m.l8(edge + PAGE, 0), Err(Trap::OutOfBounds));
     }
 
     #[test]
