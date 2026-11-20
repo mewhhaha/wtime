@@ -52,8 +52,9 @@ The Decoded tier lowers a function body once it has run four times its length
 in instructions (at least 64): 16 bytes per instruction, kept with the module
 for its lifetime and shared by every store that uses it, plus about 5 bytes per
 instruction of scratch while grouping. Until then the body runs from its source
-instructions through one shared all-`Slow` op array per module, 16 bytes per
-instruction of its longest body, allocated the first time any body runs cold. This is module-sized bookkeeping, bounded by
+instructions, through a static all-`Slow` op array of 65,536 entries (1 MiB of
+read-only data, paged in as used) for its first instructions and through the
+general loop past them. This is module-sized bookkeeping, bounded by
 `max_instructions` like the decoded code itself (32 bytes per instruction), but
 it is allocated infallibly during execution, is not charged to fuel or checked
 for cancellation, and is not counted by store budgets or by the retained-bytes

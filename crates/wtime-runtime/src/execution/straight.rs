@@ -117,12 +117,11 @@ impl Store {
         let lowered: &[lowered::Op] = match module.data.lowered[body].get() {
             Some(lowered) => lowered,
             None if !warm(heat.load(std::sync::atomic::Ordering::Relaxed), ops.len()) => {
-                // Bounds the body's program counters as its lowered ops would.
-                lowered::slow(module).get(..ops.len()).unwrap_or_default()
+                &lowered::SLOW[..ops.len().min(lowered::SLOW.len())]
             }
             None => module.data.lowered[body].get_or_init(|| lowered::lower(module, body)),
         };
-        let cold = module.data.slow.get().is_some_and(|slow| std::ptr::eq(lowered.as_ptr(), slow.as_ptr()));
+        let cold = std::ptr::eq(lowered.as_ptr(), lowered::SLOW.as_ptr());
         // Instructions run from their source in this run, added to the body's
         // heat when a cold run ends.
         let mut slow: u64 = 0;
@@ -134,6 +133,9 @@ impl Store {
             };
         }
         let Some(mut lop) = lowered.get(*pc_ref).copied() else {
+            if cold {
+                heat.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             return Ok(Straight::Declined);
         };
         loop {

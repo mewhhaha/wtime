@@ -204,8 +204,7 @@ impl Engine {
                 lowered,
                 #[cfg(not(feature = "execution-reference"))]
                 heat,
-                #[cfg(not(feature = "execution-reference"))]
-                slow: std::sync::OnceLock::new(),
+
                 canonical: ids,
                 inner: validated,
             }),
@@ -303,9 +302,7 @@ struct ModuleData {
     /// lowered (see execution/straight.rs).
     #[cfg(not(feature = "execution-reference"))]
     heat: Box<[std::sync::atomic::AtomicU64]>,
-    /// The ops of cold bodies (see execution/lowered.rs `slow`).
-    #[cfg(not(feature = "execution-reference"))]
-    slow: std::sync::OnceLock<Box<[execution::lowered::Op]>>,
+
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,
 }
@@ -1046,9 +1043,20 @@ impl Store {
 mod tests {
     use super::*;
     fn module(code: &[u8], params: &[u8], results: &[u8]) -> Vec<u8> {
+        fn leb(out: &mut Vec<u8>, mut n: usize) {
+            loop {
+                let byte = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(byte);
+                    break;
+                }
+                out.push(byte | 0x80);
+            }
+        }
         fn sec(out: &mut Vec<u8>, id: u8, p: &[u8]) {
             out.push(id);
-            out.push(p.len() as u8);
+            leb(out, p.len());
             out.extend(p)
         }
         let mut out = b"\0asm\x01\0\0\0".to_vec();
@@ -1059,7 +1067,9 @@ mod tests {
         sec(&mut out, 1, &t);
         sec(&mut out, 3, &[1, 0]);
         sec(&mut out, 7, &[1, 1, b'f', 0, 0]);
-        let mut c = vec![1, (code.len() + 1) as u8, 0];
+        let mut c = vec![1];
+        leb(&mut c, code.len() + 1);
+        c.push(0);
         c.extend(code);
         sec(&mut out, 10, &c);
         out
@@ -1213,6 +1223,35 @@ mod tests {
         assert_eq!(s.invoke(f, &[Value::I32(100)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
         assert!(m.data.lowered[0].get().is_some());
         assert_eq!(s.invoke(f, &[Value::I32(3)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+    }
+    /// A cold body longer than the static Slow ops runs its later
+    /// instructions in the general loop, which still warms and lowers it.
+    #[cfg(not(feature = "execution-reference"))]
+    #[test]
+    fn long_cold_bodies_run_and_warm() {
+        let n = execution::lowered::SLOW.len() + 100;
+        let mut code = vec![0x01; n];
+        code.extend([
+            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0,
+            0x0b, 0x0b, 0x20, 0, 0x0b,
+        ]);
+        let bytes = module(&code, &[0x7f], &[0x7f]);
+        let e = Engine::new(Config::default()).unwrap();
+        let m = e.compile(&bytes).unwrap();
+        let mut s = Store::new(&e);
+        let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+        let External::Func(f) = i.export(&s, "f").unwrap() else { panic!() };
+        assert_eq!(s.invoke(f, &[Value::I32(3)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert!(m.data.lowered[0].get().is_none());
+        // Enough iterations past the static ops to reach four times its length.
+        let iterations = (4 * code.len() / 8 + 1) as i32;
+        assert_eq!(s.invoke(f, &[Value::I32(iterations)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert_eq!(s.invoke(f, &[Value::I32(5)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert!(m.data.lowered[0].get().is_some());
+        let limits = ResourceLimits { fuel: Some(n as u64 + 8 * 5 + 7), ..ResourceLimits::default() };
+        assert!(run_with(&bytes, &[Value::I32(5)], limits).is_ok());
+        let limits = ResourceLimits { fuel: Some(n as u64 + 8 * 5 + 6), ..ResourceLimits::default() };
+        assert!(run_with(&bytes, &[Value::I32(5)], limits).is_err());
     }
     /// Counting loop: block, loop, then per iteration local.get, i32.eqz,
     /// br_if 1, local.get, i32.const 1, i32.sub, local.set, br 0; the exit

@@ -190,15 +190,11 @@ fn arity16(params: usize, results: usize) -> Option<(u16, u16)> {
 
 /// Lowers body `body` of `module`. Positions and arities that do not fit the
 /// compact fields leave the instruction `Slow`.
-/// The ops a cold body of `module` runs: Slow for every instruction of its
-/// longest body, so that each instruction runs from its source. Built on
-/// first use and shared by every cold body of the module.
-pub(crate) fn slow(module: &Module) -> &[Op] {
-    module.data.slow.get_or_init(|| {
-        let longest = module.data.inner.decoded().code.iter().map(|c| c.instructions.len()).max().unwrap_or(0);
-        vec![Op::Slow; longest].into_boxed_slice()
-    })
-}
+/// The ops of a cold body: Slow for each of its first `SLOW.len()`
+/// instructions, so that each runs from its source. Instructions past these
+/// leave the run to the general loop, as at the end of a body. Read-only
+/// data, paged in as far as cold bodies reach.
+pub(crate) static SLOW: [Op; 1 << 16] = [Op::Slow; 1 << 16];
 
 #[inline(never)]
 pub(crate) fn lower(module: &Module, body: usize) -> Box<[Op]> {
