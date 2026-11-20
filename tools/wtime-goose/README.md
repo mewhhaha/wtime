@@ -18,45 +18,56 @@ When the Goose compiler itself runs inside wtime, the Wasm it emits matches the 
 compiler's output byte for byte.
 
 Guest execution time (`_start`), default builds of the Decoded tier. "Original" is wtime
-`2e77f35`, "round 1" is `7451d25` (pathology fixes), "now" is `8f86fdb` (straight-line runs and
-the later rounds below). Ratios are medians of per-round wtime/Wasmtime pairs; averages are
-geometric means.
+`2e77f35`, "round 1" is `7451d25` (pathology fixes), `8f86fdb` added straight-line runs, and
+"now" is `fa2128c` (lowered straight-line code, below). Ratios are medians of per-round
+wtime/Wasmtime pairs; averages are geometric means.
 
-| Workload | Wasmtime 50.0.1 | Original | Round 1 | Now | Now / Wasmtime |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Ten example programs (average speedup vs original) | | | 5.1× | **9.2×** (3.4–20×) | 27× (was 226×) |
-| `sorting` example | 175 ms | 277 s | 97 s | 38.6 s | 221× (was 1,871×) |
-| `sudoku` example | 10 ms | 7.9 s | 2.6 s | 1.25 s | 126× (was 889×) |
-| `sieve` example | 0.6 ms | 598 ms | 173 ms | 83 ms | 139× (was 1,026×) |
-| Compiler (memory32) compiling 4 examples (average vs Wasmtime) | | 318× | 114× | **70×** | |
-| Compiler compiling `functions.goose` | 21 ms | 12.3 s | 4.9 s | 2.25 s | 103× (was 476×) |
-| Compiler type-checks its own sources (`--check`) | ≈2.5 s | 1,041 s | 379 s | 218–242 s | ≈90× (was ≈410×) |
-| Default **memory64** compiler compiling `functions.goose` | 33 ms | could not run | 5.4 s | 2.96 s | 89× |
-| Same memory64 compiler, `--check` on its own sources | | could not run | 442 s | 266–295 s | |
+| Workload | Wasmtime 50.0.1 | Original | Round 1 | `8f86fdb` | Now | Now / Wasmtime |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ten example programs (average vs Wasmtime) | | 226× | | 27× | 27× (1.1–123×) | |
+| `sorting` example | 175–299 ms | 277 s | 97 s | 38.6 s | 27.0 s | 104× (was 1,871×) |
+| `life` example | 22 ms | 16.2 s | | 2.44 s | 2.69 s | 119× (was 736×) |
+| `sudoku` example | 10–13 ms | 7.9 s | 2.6 s | 1.25 s | 1.78 s | 123× (was 889×) |
+| `sieve` example | 0.6–0.7 ms | 598 ms | 173 ms | 83 ms | 84 ms | 112× (was 1,026×) |
+| Compiler (memory32) compiling 4 examples (average vs Wasmtime) | | 318× | 114× | 70× | **57×** | |
+| Compiler compiling `functions.goose` | 21–29 ms | 12.3 s | 4.9 s | 2.25 s | 2.11 s | 68× (was 476×) |
+| Compiler type-checks its own sources (`--check`) | ≈2.5 s | 1,041 s | 379 s | 218–242 s | 164 s | ≈65× (was ≈410×) |
+| Default **memory64** compiler compiling `functions.goose` | 33–35 ms | could not run | 5.4 s | 2.96 s | 3.27 s | 87× |
+| Same memory64 compiler, `--check` on its own sources | | could not run | 442 s | 266–295 s | 244 s | |
+
+The `fa2128c` run fell in a slower period of this shared VM (Wasmtime's own `sorting` took
+299 ms instead of 175 ms), so compare ratios, or the `8f86fdb` build measured in the same
+run: there it took 49.6 s on `sorting`, 3.74 s on `life`, 2.08 s on `sudoku` and 130 ms on
+`sieve`, so the lowered code is 1.84×, 1.39×, 1.17× and 1.54× faster on them. The average over
+all ten examples stays near 27× because the four smallest programs run for well under a
+millisecond and are dominated by process start-up.
 
 Preparation and memory for the 7.3 MB compiler module:
 
 | | Wasmtime (uncached / cached) | Original | Now |
 | --- | ---: | ---: | ---: |
-| Preparation + instantiation | 5.4–6.8 s / 7 ms | 3.0–3.3 s | 0.29–0.36 s |
-| Whole process compiling `vm.goose` | 6.1 s / 26 ms | 5.8 s | 0.77 s |
-| Peak RSS (memory32 / memory64 compiler) | 137 / 242 MiB uncached | 4,645 MiB / — | 275 / 331 MiB (`a9ec1cd`) |
+| Preparation + instantiation | 5.4–7.5 s / 7 ms | 3.0–3.3 s | 0.20–0.29 s |
+| Whole process compiling `vm.goose` | 6.1 s / 26 ms | 5.8 s | 0.69–0.87 s |
+| Peak RSS (memory32 / memory64 compiler, `--check`) | 137 / 242 MiB uncached | 4,645 MiB / — | 410 / 448 MiB |
 
 Host instructions (callgrind, the most stable metric on this VM): `sieve` 5.57 G originally,
-2.80 G after round 1, 1.36 G now; the compiler compiling `vm.goose` 12.6 G after round 1, 6.3 G
-now. Full tables: [now](results/8f86fdb/tables.md), [round 1](results/after/tables.md) and
+2.80 G after round 1, 1.36 G at `8f86fdb`, 0.88 G now; the compiler compiling `vm.goose`
+12.6 G after round 1, 6.3 G at `8f86fdb`, 5.0 G now, of which about 1.0 G is decoding and
+validating the module. Full tables: [now](results/fa2128c/tables.md),
+[`8f86fdb`](results/8f86fdb/tables.md), [round 1](results/after/tables.md) and
 [original](results/before/tables.md). Raw samples, binary hashes and RSS are in
 `results/*/*.json`. Benchmarks ran on a shared 4-vCPU VM partly concurrently with builds and
 other benchmarks; self-check ranges span separate runs.
 
 **What remains.** wtime is still an interpreter; Wasmtime compiles to native code, and wtime
-excludes JIT compilation by design, so guest code stays roughly 10–200× slower on real
-programs. Decoded now spends about 70 host instructions per Wasm instruction (about 280
-originally), much of it in the 64-byte decoded `Instruction`, 32-byte `Value`s and per-instruction
-accounting that the fuel, cancellation and stack-limit contracts require. The experimental
-Compact and Register tiers do not help here: Compact admits nothing in these modules (its
-module-wide preparation budget is 100,000 work units) and Register falls back to Decoded for
-almost every frame.
+excludes JIT compilation by design, so guest code stays roughly 10–120× slower on real
+programs. A lowered dispatch still costs about 30 host instructions before its operation runs
+(fetch, bounds, cancellation, fuel and operand-stack checks, an indirect jump), and operands
+are 32-byte `Value`s on a `Vec`; grouping removes about a third of the dispatches. For short
+compiler runs, decoding and validating the 7.3 MB module (≈200–260 ms) now dominates. The
+experimental Compact and Register tiers do not help here: Compact admits nothing in these
+modules (its module-wide preparation budget is 100,000 work units) and Register falls back to
+Decoded for almost every frame.
 
 ## Fixes
 
@@ -115,8 +126,8 @@ loads no longer allocate.
 
 ### Later rounds (2026-11-20)
 
-Each batch went through the gate below and independent reviews by Opus 5 and Fable 5.2
-(1–2 rounds each); their findings are fixed in the commits listed.
+Each batch went through the gate below and two independent reviews (1–4 rounds each);
+their findings are fixed in the commits listed.
 
 - **Straight-line runs** (`execution/straight.rs`, `32f8093`): after the loop head has charged an
   instruction, consecutive locals, globals, constants, numeric operators, loads/stores,
@@ -127,7 +138,7 @@ Each batch went through the gate below and independent reviews by Opus 5 and Fab
 - **Calls, globals, validation** (`db077fa`): locals are allocated at full capacity at the call
   site and zeroed in runs; numeric `global.set` and memory 0 resolve directly; the validator no
   longer SipHashes its unknown-operand set on every pop.
-- **Fast paths proposed by Fable** (`8f86fdb`): fixed-width loads/stores within one page;
+- **Fast paths proposed in review** (`8f86fdb`): fixed-width loads/stores within one page;
   run state (pc, fuel, cancellation) kept in locals; a validator fast path for the commonest
   instructions; inline one-byte LEB128 decoding.
 - **Memory backing hardening** (`0a6c7eb`, `0ee73cb`, `a9ec1cd`, review findings): page
@@ -138,6 +149,21 @@ Each batch went through the gate below and independent reviews by Opus 5 and Fab
 - **Control map** (`d063d22`): 8 bytes per instruction instead of 24 (−53 MiB RSS for the
   compiler module).
 - **Host** (`70d4aaa`): `wtime-goose` skips teardown before exit.
+- **Lowered straight-line code** (`execution/lowered.rs`; `fa97dc8`, `0af0cfc`, `8bff02b`,
+  `cfd7912`, `fa2128c`): once a body has run four times its length in instructions, it is
+  lowered to one 16-byte op per instruction with operands resolved, and instructions are
+  grouped into the fewest dispatches: pairs (`local.set`+`local.get`, `global.get`+`local.set`,
+  `i32.add`+load, …), expressions over locals that keep their operands off the operand stack
+  (`local.get`+const+binop+`local.set`, `local.get`+load+`local.set`, two locals into a binop
+  or a store, …) and comparisons closed by `if`/`br_if`. Every instruction is still charged
+  before it runs, with the operand-stack height it would see, and only a group's first
+  instruction can be a branch target. A false `if` without `else` charges its `end` in place
+  instead of pushing and popping a label; unmetered runs use a copy of the loop without the
+  fuel test. Cold bodies run from their source instructions as before, so short programs do
+  not pay for lowering. Differential tests compare each group with the same code separated by
+  `nop`s, and the reviewers' fuzzers compared fuel, stack-limit, counter and coverage sweeps
+  against the previous commit and the reference executor (several hundred thousand runs per
+  round, no differences).
 
 ## Reproduce
 
