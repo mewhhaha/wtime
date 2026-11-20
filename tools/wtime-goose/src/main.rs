@@ -144,8 +144,9 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
     let mut instantiated = started;
     let mut compiled = started;
     let mut store_slot: Option<Store> = None;
+    let mut module_slot = None;
     let result = (|| -> Result<(), String> {
-        let module = engine.compile(data).map_err(|error| error.to_string())?;
+        let module = &*module_slot.insert(engine.compile(data).map_err(|error| error.to_string())?);
         compiled = Instant::now();
         let store = store_slot.insert(Store::new(&engine));
         let mut linker = Linker::new(&engine);
@@ -210,7 +211,7 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
         (Err(_), None, Some(failure)) => (1, failure),
         (Err(error), None, None) => (1, error),
     };
-    Ok(Outcome {
+    let outcome = Outcome {
         stdout: std::mem::take(&mut state.out),
         stderr: String::from_utf8_lossy(&state.err).into_owned() + &error,
         exit_code,
@@ -218,7 +219,12 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
         compile_ns: compiled.saturating_duration_since(started).as_nanos(),
         start_function_ns: (ended - instantiated).as_nanos(),
         engine_total_ns: (ended - started).as_nanos(),
-    })
+    };
+    drop(state);
+    // The process exits next: tearing down the decoded module and the store
+    // would only spend time freeing memory the exit releases anyway.
+    std::mem::forget((store_slot, module_slot, engine));
+    Ok(outcome)
 }
 
 fn run(options: &Options) -> Result<i64, String> {
