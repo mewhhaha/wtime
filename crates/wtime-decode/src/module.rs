@@ -1,6 +1,6 @@
 use crate::{
     Immediate, Instruction, Reader,
-    instructions::{count, expression, val},
+    instructions::{body_expression, count, expression, val},
 };
 use std::sync::Arc;
 use wtime_types::*;
@@ -546,7 +546,7 @@ pub fn decode(
                             .ok_or_else(|| b.error("local count overflow"))?;
                         local_groups.push((n, ty));
                     }
-                    let instructions = expression(&mut b)?;
+                    let instructions = body_expression(&mut b)?;
                     b.finish()?;
                     if total as usize > policy.max_locals {
                         return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));

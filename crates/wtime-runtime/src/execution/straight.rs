@@ -38,6 +38,9 @@ impl Store {
         // prompt retirement only follow continuation instructions, so the
         // charge of the run's first instruction settled them for the run.
         let max_height = self.engine.config.limits.max_stack_height;
+        // Store index of the instance's memory 0, resolved at its first access:
+        // nothing in a run can rebind it.
+        let mut memory0: Option<usize> = None;
         let mut first = true;
         // Errors in the order numeric::exec reports them.
         macro_rules! binary {
@@ -193,9 +196,24 @@ impl Store {
                         return Err(trap("index immediate"));
                     };
                     let v = pop(stack)?;
-                    self.set_global(self.instances[inst_id].globals[x as usize], v)?
+                    let global = self.instances[inst_id].globals[x as usize];
+                    // A number into a mutable global of its type, as set_global
+                    // accepts it; anything else takes set_global's checks.
+                    let i = self.check(global.0, &self.globals)?;
+                    let slot = &mut self.globals[i];
+                    if slot.ty.mutable && !matches!(v, Value::Ref(_)) && v.ty() == slot.ty.value {
+                        slot.value = v
+                    } else {
+                        self.set_global(global, v)?
+                    }
                 }
-                0x28..=0x3e => self.load_store(inst_id, op, stack)?,
+                0x28..=0x3e => match op.immediate {
+                    Immediate::MemArg { memory: 0, .. } => {
+                        let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
+                        self.memory_access(index, op, stack)?
+                    }
+                    _ => self.load_store(inst_id, op, stack)?,
+                },
                 0x41 => {
                     if let Immediate::I32(x) = op.immediate {
                         stack.push(Value::I32(x))

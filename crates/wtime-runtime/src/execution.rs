@@ -91,7 +91,14 @@ impl Store {
         let local_types = planned_layout
             .as_ref()
             .map_or(body.locals.as_slice(), |p| p.locals);
-        locals.extend(local_types.iter().map(|t| Value::zero(*t)));
+        // Zero values in runs of one type, reserved at once.
+        locals.reserve_exact(local_types.len());
+        let mut rest = local_types;
+        while let Some(&first) = rest.first() {
+            let run = rest.iter().take_while(|t| **t == first).count();
+            locals.resize(locals.len() + run, Value::zero(first));
+            rest = &rest[run..];
+        }
         #[cfg(feature = "compact-executor")]
         let compact = self.engine.policy == ExecutionPolicy::Compact
             && module.data.compact.as_ref().is_some_and(|program| program.contains(fun.body)
@@ -690,7 +697,20 @@ impl Store {
                     }
                     #[cfg(feature = "performance-counters")]
                     self.perf.record(perf::Event::Arguments, u64::from(n != 0));
-                    let args = stack.split_off(stack.len() - n);
+                    // The callee's frame takes this vector as its locals:
+                    // reserve room for its declared locals now so that the
+                    // frame does not reallocate.
+                    let declared = if self.funcs[checked].host.is_none() {
+                        let callee = &self.funcs[checked];
+                        self.instances[callee.instance].module.data.inner.decoded().code
+                            .get(callee.body).map_or(0, |body| body.locals.len())
+                    } else {
+                        0
+                    };
+                    let start = stack.len() - n;
+                    let mut args = Vec::with_capacity(n + declared);
+                    args.extend_from_slice(&stack[start..]);
+                    stack.truncate(start);
                     if let Some(host) = self.funcs[fun.0.index].host.clone() {
                         let ty = self.funcs[fun.0.index].ty.clone();
                         for value in &args {
@@ -1030,7 +1050,22 @@ impl Store {
         op: &Instruction,
         s: &mut Vec<Value>,
     ) -> Result<()> {
-        let Immediate::MemArg { offset, memory, .. } = op.immediate else {
+        let Immediate::MemArg { memory, .. } = op.immediate else {
+            return Err(trap("memory argument"));
+        };
+        let index = self.instances[ii].mems[memory as usize].0.index;
+        self.memory_access(index, op, s)
+    }
+    /// A scalar load or store on the memory at store index `index`, which the
+    /// caller resolved from the instruction's memory immediate.
+    #[inline]
+    pub(super) fn memory_access(
+        &mut self,
+        index: usize,
+        op: &Instruction,
+        s: &mut Vec<Value>,
+    ) -> Result<()> {
+        let Immediate::MemArg { offset, .. } = op.immediate else {
             return Err(trap("memory argument"));
         };
         let code = op.opcode;
@@ -1045,7 +1080,7 @@ impl Store {
             0x2c | 0x2d | 0x30 | 0x31 | 0x3a | 0x3c => 1,
             _ => 2,
         };
-        let mem = &mut self.mems[self.instances[ii].mems[memory as usize].0.index];
+        let mem = &mut self.mems[index];
         let r = range(off, n, mem.len()?)?;
         if let Some(v) = value {
             let bits = match v {

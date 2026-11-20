@@ -120,7 +120,18 @@ fn memarg(r: &mut Reader) -> Result<Immediate> {
     })
 }
 pub(crate) fn expression(r: &mut Reader) -> Result<Vec<Instruction>> {
+    expression_with_capacity(r, 0)
+}
+/// A function body: the reader holds just the body, and instructions average
+/// about three bytes, so reserving for that avoids most regrowth copies.
+pub(crate) fn body_expression(r: &mut Reader) -> Result<Vec<Instruction>> {
+    let estimate = r.remaining() / 3;
+    expression_with_capacity(r, estimate)
+}
+fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instruction>> {
     let mut out = Vec::new();
+    // A hint only: a failed reservation leaves growth to push.
+    let _ = out.try_reserve_exact(capacity);
     let mut depth = 1usize;
     while depth > 0 {
         out.push(read_instruction(r, &mut depth)?);

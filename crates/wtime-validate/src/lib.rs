@@ -143,7 +143,9 @@ impl Stack {
             .values
             .pop()
             .ok_or_else(|| invalid("operand stack underflow"))?;
-        let unknown = self.unknown.remove(&self.values.len());
+        // Unknown operands only arise in unreachable code; skip the hash
+        // lookup when there are none.
+        let unknown = !self.unknown.is_empty() && self.unknown.remove(&self.values.len());
         check(
             self.values.len() >= c.height && (unknown || value_subtype(v, t, &self.types)),
             "operand type mismatch",
@@ -159,7 +161,7 @@ impl Stack {
         } else {
             check(self.values.len() > c.height, "operand stack underflow")?;
             let v = self.values.pop();
-            if self.unknown.remove(&self.values.len()) {
+            if !self.unknown.is_empty() && self.unknown.remove(&self.values.len()) {
                 Ok(None)
             } else {
                 Ok(v)
@@ -180,7 +182,9 @@ impl Stack {
     fn dead(&mut self) {
         let c = self.controls.last_mut().unwrap();
         self.values.truncate(c.height);
-        self.unknown.retain(|i| *i < c.height);
+        if !self.unknown.is_empty() {
+            self.unknown.retain(|i| *i < c.height);
+        }
         c.unreachable = true;
     }
     fn label(&self, n: usize) -> Result<Vec<ValType>> {
