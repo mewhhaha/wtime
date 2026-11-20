@@ -8,9 +8,11 @@
 //! needs no large allocation and commits nothing it does not use. This is safe
 //! Rust with no reliance on how the operating system backs large allocations.
 //!
-//! The last page holds only the bytes up to the memory's length, so the
-//! storage allocated never exceeds the memory's accounted size, even for tiny
-//! memories with custom page sizes. Every allocation is fallible: running out
+//! The last page holds only the bytes up to the memory's length (rounded up
+//! by at most a factor of two when it grows), so the storage allocated stays
+//! within twice the memory's accounted size, even for tiny memories with
+//! custom page sizes. The page table itself, 16 bytes per 64 KiB, is reserved
+//! fallibly but not counted in memory budgets. Every allocation is fallible: running out
 //! of host memory is reported as `AllocationFailed`, never an abort.
 //!
 //! Callers check bounds against `len` before every access, as for the former
@@ -55,7 +57,8 @@ impl LinearBytes {
         self.len
     }
 
-    /// The bytes page `index` holds at the current length.
+    /// The bytes page `index` holds at the current length. An allocated last
+    /// page may hold more after growth; bytes past the length stay zero.
     fn page_size(&self, index: usize) -> usize {
         (self.len - index * PAGE).min(PAGE)
     }
@@ -70,14 +73,15 @@ impl LinearBytes {
         if self.pages.try_reserve(pages.saturating_sub(self.pages.len())).is_err() {
             return false;
         }
-        // A written last page that was shorter than a full page extends to the
-        // new length (or to a full page) before anything else changes.
+        // A written last page that was shorter than a full page extends to
+        // hold the new length (or a full page) before anything else changes.
+        // It at least doubles, so repeated small grows copy it O(log) times.
         if let Some(last) = self.pages.len().checked_sub(1)
             && let Some(page) = &self.pages[last]
         {
             let size = (new_len - last * PAGE).min(PAGE);
             if page.len() < size {
-                let Ok(mut extended) = zeroed_page(size) else {
+                let Ok(mut extended) = zeroed_page(size.max(page.len().saturating_mul(2)).min(PAGE)) else {
                     return false;
                 };
                 extended[..page.len()].copy_from_slice(page);
@@ -382,6 +386,33 @@ mod tests {
         assert_eq!(bytes(&memory, PAGE, 3), [0, 0, 9]);
         let pages: Vec<(usize, usize)> = memory.written_pages().map(|(at, page)| (at, page.len())).collect();
         assert_eq!(pages, [(0, PAGE), (PAGE, 3)]);
+    }
+
+    #[test]
+    fn growing_by_one_byte_reallocates_the_last_page_logarithmically() {
+        let mut memory = LinearBytes::zeroed(1).unwrap();
+        memory.write(0, &[1]).unwrap();
+        let mut reallocations = 0;
+        let mut previous = memory.allocated_bytes();
+        for len in 2..=PAGE {
+            assert!(memory.grow_to(len));
+            memory.write(len - 1, &[(len % 251) as u8]).unwrap();
+            let allocated = memory.allocated_bytes();
+            assert!(allocated >= len && allocated <= 2 * len, "len={len} allocated={allocated}");
+            if allocated != previous {
+                reallocations += 1;
+                previous = allocated;
+            }
+        }
+        assert!(reallocations <= 17, "{reallocations} reallocations");
+        assert_eq!(bytes(&memory, 0, 1), [1]);
+        assert_eq!(bytes(&memory, PAGE - 1, 1), [(PAGE % 251) as u8]);
+        // The bytes beyond the length in a doubled page read as zero once visible.
+        let mut memory = LinearBytes::zeroed(3).unwrap();
+        memory.write(0, &[5, 5, 5]).unwrap();
+        assert!(memory.grow_to(4));
+        assert!(memory.grow_to(6));
+        assert_eq!(bytes(&memory, 0, 6), [5, 5, 5, 0, 0, 0]);
     }
 
     #[test]
