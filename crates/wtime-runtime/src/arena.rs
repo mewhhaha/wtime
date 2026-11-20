@@ -83,6 +83,7 @@ impl<T> Arena<T> {
 }
 impl<T> Index<usize> for Arena<T> {
     type Output = T;
+    #[inline(always)]
     fn index(&self, index: usize) -> &T {
         self.slots[index]
             .value
@@ -91,6 +92,7 @@ impl<T> Index<usize> for Arena<T> {
     }
 }
 impl<T> IndexMut<usize> for Arena<T> {
+    #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut T {
         self.slots[index]
             .value

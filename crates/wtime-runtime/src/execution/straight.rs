@@ -10,6 +10,18 @@
 //! what the general loop computes for it, with the same errors.
 use super::*;
 
+/// Whether a body of `len` instructions that has run `heat` instructions
+/// from their source is warm enough to lower. Lowering costs about as much
+/// as running a few instructions from their source per instruction lowered,
+/// so a body is lowered once it has run `WARM` times its length, and at
+/// least `WARM_MIN` instructions: code that runs little is never lowered.
+#[inline(always)]
+fn warm(heat: u64, len: usize) -> bool {
+    heat >= (len as u64).saturating_mul(WARM).max(WARM_MIN)
+}
+const WARM: u64 = 4;
+const WARM_MIN: u64 = 64;
+
 /// How a straight-line run ended.
 pub(super) enum Straight {
     /// The charged instruction is not a straight-line one; nothing ran.
@@ -98,8 +110,29 @@ impl Store {
                 *slot = $e;
             }};
         }
+        // A body is lowered once warm (see `warm`). Until then its runs see
+        // every instruction as Slow, which runs it from its source.
         let body = frame.function.body;
-        let lowered: &[lowered::Op] = module.data.lowered[body].get_or_init(|| lowered::lower(module, body));
+        let heat = &module.data.heat[body];
+        let lowered: &[lowered::Op] = match module.data.lowered[body].get() {
+            Some(lowered) => lowered,
+            None if !warm(heat.load(std::sync::atomic::Ordering::Relaxed), ops.len()) => {
+                // Bounds the body's program counters as its lowered ops would.
+                lowered::slow(module).get(..ops.len()).unwrap_or_default()
+            }
+            None => module.data.lowered[body].get_or_init(|| lowered::lower(module, body)),
+        };
+        let cold = module.data.slow.get().is_some_and(|slow| std::ptr::eq(lowered.as_ptr(), slow.as_ptr()));
+        // Instructions run from their source in this run, added to the body's
+        // heat when a cold run ends.
+        let mut slow: u64 = 0;
+        macro_rules! cool {
+            () => {
+                if cold {
+                    heat.fetch_add(slow, std::sync::atomic::Ordering::Relaxed);
+                }
+            };
+        }
         let Some(mut lop) = lowered.get(*pc_ref).copied() else {
             return Ok(Straight::Declined);
         };
@@ -125,6 +158,7 @@ impl Store {
             macro_rules! decline {
                 () => {{
                     *pc_ref = pc;
+                    cool!();
                     return Ok(if first { Straight::Declined } else { Straight::Charged });
                 }};
             }
@@ -405,6 +439,7 @@ impl Store {
                             // runs the charged br_if with its operand.
                             stack.push(c);
                             *pc_ref = pc + 1;
+                            cool!();
                             return Ok(Straight::Charged);
                         }
                         branch!(depth)
@@ -529,6 +564,7 @@ impl Store {
                 lowered::Op::Numeric(opcode) => numeric::exec(opcode, stack)?,
                 // Run from the source instruction, exactly as before lowering.
                 lowered::Op::Slow => {
+                            slow += 1;
                             let op = &ops[pc];
                             let opcode = op.opcode;
                             match opcode {
@@ -594,8 +630,18 @@ impl Store {
                                 let l = &frame.labels[pos];
                                 keep(stack, l.height, if l.loop_ { l.params } else { l.results })?;
                                 *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
+                                let back = l.loop_;
                                 let retain = pos + usize::from(l.loop_);
-                                frame.labels.truncate(retain)
+                                frame.labels.truncate(retain);
+                                // A loop iteration of a cold body warms it. Once
+                                // warm, the body is lowered and the run ends with
+                                // nothing charged, so that the general loop goes
+                                // on and the next run is lowered.
+                                if cold && back && warm(heat.load(std::sync::atomic::Ordering::Relaxed) + slow, ops.len()) {
+                                    cool!();
+                                    module.data.lowered[body].get_or_init(|| lowered::lower(module, body));
+                                    return Ok(Straight::Ran);
+                                }
                             }
                         }
                         0x1a => {
@@ -730,7 +776,10 @@ impl Store {
             lop = match lowered.get(*pc_ref) {
                 Some(&op) => op,
                 // Validated code ends with `end`; let the general loop report it.
-                None => return Ok(Straight::Ran),
+                None => {
+                    cool!();
+                    return Ok(Straight::Ran);
+                }
             };
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));

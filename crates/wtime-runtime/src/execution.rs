@@ -50,6 +50,7 @@ fn arity(i: &Immediate, m: &Module) -> (usize, usize) {
         _ => (0, 0),
     }
 }
+#[inline(always)]
 pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
     if s.len() < n || height > s.len() - n {
         return Err(trap("stack underflow"));

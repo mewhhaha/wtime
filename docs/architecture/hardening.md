@@ -48,10 +48,12 @@ allocations (argument vectors, frames, error messages) still use infallible
 allocation and can abort the process at the exact point of exhaustion. The
 report includes the actual worker exit/output and its executable fingerprint.
 
-The Decoded tier lowers a function body the first time a straight-line run
-reaches it: 16 bytes per instruction, kept with the module for its lifetime and
-shared by every store that uses it, plus about 5 bytes per instruction of
-scratch while grouping. This is module-sized bookkeeping, bounded by
+The Decoded tier lowers a function body once it has run four times its length
+in instructions (at least 64): 16 bytes per instruction, kept with the module
+for its lifetime and shared by every store that uses it, plus about 5 bytes per
+instruction of scratch while grouping. Until then the body runs from its source
+instructions through one shared all-`Slow` op array per module, 16 bytes per
+instruction of its longest body, allocated the first time any body runs cold. This is module-sized bookkeeping, bounded by
 `max_instructions` like the decoded code itself (32 bytes per instruction), but
 it is allocated infallibly during execution, is not charged to fuel or checked
 for cancellation, and is not counted by store budgets or by the retained-bytes

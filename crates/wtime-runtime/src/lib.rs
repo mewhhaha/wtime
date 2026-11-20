@@ -167,6 +167,8 @@ impl Engine {
         let control = lower_control(&validated)?;
         #[cfg(not(feature = "execution-reference"))]
         let lowered = (0..validated.decoded().code.len()).map(|_| std::sync::OnceLock::new()).collect();
+        #[cfg(not(feature = "execution-reference"))]
+        let heat = (0..validated.decoded().code.len()).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
         let plans = execution::plan::FunctionPlans::prepare(&validated);
         let module = Module {
             data: Arc::new(ModuleData {
@@ -181,6 +183,10 @@ impl Engine {
                 control,
                 #[cfg(not(feature = "execution-reference"))]
                 lowered,
+                #[cfg(not(feature = "execution-reference"))]
+                heat,
+                #[cfg(not(feature = "execution-reference"))]
+                slow: std::sync::OnceLock::new(),
                 canonical: ids,
                 inner: validated,
             }),
@@ -272,6 +278,13 @@ struct ModuleData {
     /// by every store using the module.
     #[cfg(not(feature = "execution-reference"))]
     lowered: Box<[std::sync::OnceLock<Box<[execution::lowered::Op]>>]>,
+    /// Instructions each body has run from their source before it was
+    /// lowered (see execution/straight.rs).
+    #[cfg(not(feature = "execution-reference"))]
+    heat: Box<[std::sync::atomic::AtomicU64]>,
+    /// The ops of cold bodies (see execution/lowered.rs `slow`).
+    #[cfg(not(feature = "execution-reference"))]
+    slow: std::sync::OnceLock<Box<[execution::lowered::Op]>>,
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,
 }
@@ -790,6 +803,7 @@ fn range(off: u64, n: usize, len: usize) -> Result<std::ops::Range<usize>> {
     }
     Ok(a..b)
 }
+#[inline(always)]
 fn address(v: Value) -> Result<u64> {
     match v {
         Value::I32(x) => Ok(x as u32 as u64),
@@ -797,6 +811,7 @@ fn address(v: Value) -> Result<u64> {
         _ => Err(trap("expected integer address")),
     }
 }
+#[inline(always)]
 fn pop(s: &mut Vec<Value>) -> Result<Value> {
     s.pop().ok_or_else(|| trap("operand stack underflow"))
 }
@@ -1057,6 +1072,125 @@ mod tests {
         };
         s.invoke(f, args)
     }
+    /// Fused expressions behave exactly as the instructions they cover run one
+    /// at a time: the same fuel, the same memory effects before fuel runs out,
+    /// the same operand-stack limit and the same traps. The unfused reference
+    /// is the same code with a nop after every instruction, which no group of
+    /// the lowered Decoded tier contains.
+    #[cfg(not(feature = "execution-reference"))]
+    #[test]
+    fn fused_expressions_match_unfused_instructions() {
+        for lowered in [false, true] {
+            fused_expressions_match(lowered)
+        }
+    }
+    #[cfg(not(feature = "execution-reference"))]
+    fn fused_expressions_match(lowered: bool) {
+        let fused = include_bytes!("../tests/fixtures/fused-expressions.wasm").as_slice();
+        let plain = include_bytes!("../tests/fixtures/fused-expressions-nops.wasm").as_slice();
+        let run = |bytes: &[u8], name: &str, args: &[Value], fuel: Option<u64>, height: Option<usize>| {
+            let mut config = Config::default();
+            config.limits.fuel = fuel;
+            if let Some(height) = height {
+                config.limits.max_stack_height = height;
+            }
+            let e = Engine::new(config).unwrap();
+            let m = match e.compile(bytes) {
+                Ok(m) => m,
+                Err(error) => return (Err(error.message), vec![]),
+            };
+            // Lowered: every body of the fused module, as once warm; otherwise
+            // its bodies stay cold and run from their source instructions.
+            if lowered && bytes == fused {
+                for body in 0..m.data.lowered.len() {
+                    m.data.lowered[body].get_or_init(|| execution::lowered::lower(&m, body));
+                }
+            }
+            let mut s = Store::new(&e);
+            let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+            let External::Func(f) = i.export(&s, name).unwrap() else { panic!() };
+            let result = match s.invoke(f, args) {
+                Ok(RunOutcome::Returned(values)) => Ok(values),
+                Ok(other) => panic!("{other:?}"),
+                Err(error) => Err(format!("{:?}: {}", error.kind, error.message)),
+            };
+            let External::Memory(memory) = i.export(&s, "mem").unwrap() else { panic!() };
+            (result, s.read_memory(memory, 0, 128).unwrap())
+        };
+        let args = [Value::I32(5), Value::I64(100)];
+        // 44 instructions and the function's end.
+        let complete = run(fused, "f", &args, Some(45), None);
+        assert_eq!(complete.0, Ok(vec![Value::I64(787)]));
+        assert_eq!(complete, run(plain, "f", &args, Some(89), None));
+        for fuel in 0..45 {
+            let partial = run(fused, "f", &args, Some(fuel), None);
+            assert!(partial.0.as_ref().unwrap_err().contains("fuel"), "fuel {fuel}: {:?}", partial.0);
+            assert_eq!(partial, run(plain, "f", &args, Some(2 * fuel), None), "fuel {fuel}");
+            if fuel > 0 {
+                assert_eq!(partial, run(plain, "f", &args, Some(2 * fuel - 1), None), "fuel {fuel}");
+            }
+        }
+        for height in 0..16 {
+            let limited = run(fused, "deep", &args, None, Some(height));
+            assert_eq!(limited, run(plain, "deep", &args, None, Some(height)), "height {height}");
+        }
+        assert!(run(fused, "deep", &args, None, Some(6)).0.unwrap_err().contains("stack"));
+        assert_eq!(run(fused, "deep", &args, None, Some(16)).0, Ok(vec![Value::I64(787)]));
+        // h's pairs: 31 instructions and the end, each effect stored.
+        let complete = run(fused, "h", &[Value::I32(5)], Some(32), None);
+        assert_eq!(complete.0, Ok(vec![]));
+        assert_eq!((&complete.1[4..16]), [1, 0, 0, 0, 5, 0, 0, 0, 10, 0, 0, 0]);
+        assert_eq!(complete, run(plain, "h", &[Value::I32(5)], Some(63), None));
+        for fuel in 0..32 {
+            let partial = run(fused, "h", &[Value::I32(5)], Some(fuel), None);
+            assert!(partial.0.as_ref().unwrap_err().contains("fuel"), "h fuel {fuel}: {:?}", partial.0);
+            assert_eq!(partial, run(plain, "h", &[Value::I32(5)], Some(2 * fuel), None), "h fuel {fuel}");
+        }
+        // g's conditionals: 61 instructions run, the last a br_if out of the
+        // function; skipped ends of false ifs are charged as they run.
+        let complete = run(fused, "g", &args, Some(61), None);
+        assert_eq!(complete.0, Ok(vec![Value::I64(30)]));
+        assert_eq!(complete.0, run(plain, "g", &args, None, None).0);
+        for fuel in 0..61 {
+            let partial = run(fused, "g", &args, Some(fuel), None).0;
+            assert!(partial.as_ref().unwrap_err().contains("fuel"), "g fuel {fuel}: {partial:?}");
+        }
+        for height in 0..16 {
+            let limited = run(fused, "deepg", &args, None, Some(height));
+            assert_eq!(limited, run(plain, "deepg", &args, None, Some(height)), "g height {height}");
+        }
+        assert_eq!(run(fused, "deepg", &args, None, Some(16)).0, Ok(vec![Value::I64(30)]));
+        for (name, address) in [("load", 65532), ("load", 65536), ("store", 65534), ("store", -1)] {
+            let fused = run(fused, name, &[Value::I32(address)], None, None);
+            assert_eq!(fused, run(plain, name, &[Value::I32(address)], None, None), "{name} {address}");
+            assert!(fused.0.is_err() || name == "load" && address == 65532, "{name} {address}");
+        }
+    }
+    /// A body runs from its source instructions until it has run `WARM`
+    /// times its length (at least `WARM_MIN` instructions), then is lowered
+    /// in the middle of its loop, with the same result.
+    #[cfg(not(feature = "execution-reference"))]
+    #[test]
+    fn cold_bodies_are_lowered_once_warm() {
+        let code = [
+            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0,
+            0x0b, 0x0b, 0x20, 0, 0x0b,
+        ];
+        let bytes = module(&code, &[0x7f], &[0x7f]);
+        let e = Engine::new(Config::default()).unwrap();
+        let m = e.compile(&bytes).unwrap();
+        let mut s = Store::new(&e);
+        let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+        let External::Func(f) = i.export(&s, "f").unwrap() else { panic!() };
+        // 8 * 5 + 7 instructions: still cold.
+        assert_eq!(s.invoke(f, &[Value::I32(5)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert!(m.data.lowered[0].get().is_none());
+        assert!(m.data.heat[0].load(std::sync::atomic::Ordering::Relaxed) > 0);
+        // A long loop warms it within the call.
+        assert_eq!(s.invoke(f, &[Value::I32(100)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert!(m.data.lowered[0].get().is_some());
+        assert_eq!(s.invoke(f, &[Value::I32(3)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+    }
     /// Counting loop: block, loop, then per iteration local.get, i32.eqz,
     /// br_if 1, local.get, i32.const 1, i32.sub, local.set, br 0; the exit
     /// takes local.get, i32.eqz, br_if 1, then local.get and the function end.
@@ -1069,7 +1203,8 @@ mod tests {
             0x0b, 0x0b, 0x20, 0, 0x0b,
         ];
         let bytes = module(&code, &[0x7f], &[0x7f]);
-        for n in [0u64, 1, 5] {
+        // From n = 8 the body warms up and is lowered within the call.
+        for n in [0u64, 1, 5, 8, 9, 20, 200] {
             let needed = 8 * n + 7;
             for fuel in needed.saturating_sub(3)..=needed + 2 {
                 let limits = ResourceLimits { fuel: Some(fuel), ..ResourceLimits::default() };

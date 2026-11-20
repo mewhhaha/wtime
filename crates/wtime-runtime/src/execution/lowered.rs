@@ -1,7 +1,8 @@
 //! Lowered function bodies for the Decoded tier's straight-line runs.
 //!
-//! A body is lowered once, the first time a straight-line run reaches it, to
-//! one 16-byte `Op` per source instruction: the same program counters, with
+//! A body is lowered once it is warm (see straight.rs `warm`; until then its
+//! runs execute every instruction from its source, as `Slow`), to one
+//! 16-byte `Op` per source instruction: the same program counters, with
 //! operands resolved ahead of time (local and global indices, constants,
 //! memory-0 offsets, block arities and control boundaries). The straight-line
 //! loop dispatches on these instead of decoding immediates, looking up block
@@ -189,6 +190,17 @@ fn arity16(params: usize, results: usize) -> Option<(u16, u16)> {
 
 /// Lowers body `body` of `module`. Positions and arities that do not fit the
 /// compact fields leave the instruction `Slow`.
+/// The ops a cold body of `module` runs: Slow for every instruction of its
+/// longest body, so that each instruction runs from its source. Built on
+/// first use and shared by every cold body of the module.
+pub(crate) fn slow(module: &Module) -> &[Op] {
+    module.data.slow.get_or_init(|| {
+        let longest = module.data.inner.decoded().code.iter().map(|c| c.instructions.len()).max().unwrap_or(0);
+        vec![Op::Slow; longest].into_boxed_slice()
+    })
+}
+
+#[inline(never)]
 pub(crate) fn lower(module: &Module, body: usize) -> Box<[Op]> {
     let code = &module.data.inner.decoded().code[body];
     let mut ops: Box<[Op]> = code
