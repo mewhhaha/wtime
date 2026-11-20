@@ -30,7 +30,12 @@ pub struct State {
     pub failure: Option<String>,
     clock_origin: Instant,
     policy: Policy,
+    /// Bytes written to standard output, standard error and files so far.
+    written: u64,
 }
+
+/// The default of `Policy::output_limit`.
+pub const OUTPUT_LIMIT: u64 = 1 << 30;
 
 /// What the module may reach outside itself beyond its input, output,
 /// arguments and the clock. Nothing by default: the operator grants
@@ -44,12 +49,17 @@ pub struct Policy {
     pub directories: Vec<PathBuf>,
     /// Variables the module may read; `None` allows every variable.
     pub variables: Option<Vec<OsString>>,
+    /// The most bytes the module may write to standard output, standard
+    /// error and files together, and read from one file; past it, writing
+    /// fails with `ResourceLimit: output limit` and a larger file looks
+    /// unreadable.
+    pub output_limit: u64,
 }
 
 impl Default for Policy {
     /// Nothing granted.
     fn default() -> Policy {
-        Policy { directories: Vec::new(), variables: Some(Vec::new()) }
+        Policy { directories: Vec::new(), variables: Some(Vec::new()), output_limit: OUTPUT_LIMIT }
     }
 }
 
@@ -70,7 +80,12 @@ impl Policy {
         if self.directories.is_empty() {
             return None;
         }
+        // A trailing `/` (or `/.`) names a directory, which must exist.
+        let directory = path.ends_with(b"/") || path.ends_with(b"/.");
         let path = Path::new(OsStr::from_bytes(path));
+        if directory && !path.is_dir() {
+            return None;
+        }
         let resolved = match path.canonicalize() {
             Ok(resolved) => resolved,
             // A link that cannot be resolved (one pointing at a file that
@@ -110,6 +125,7 @@ impl State {
             failure: None,
             clock_origin: Instant::now(),
             policy: Policy::default(),
+            written: 0,
         }
     }
 
@@ -131,6 +147,17 @@ impl State {
         self.token_at = end;
         Ok(&self.input[start..end])
     }
+}
+
+thread_local! {
+    static STACK_FLOOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The lowest stack address guest code may use on this thread (0 where
+/// `main` did not start it): generated functions trap with
+/// `ResourceLimit: call depth exhausted` below it.
+pub fn stack_floor() -> usize {
+    STACK_FLOOR.with(|floor| floor.get())
 }
 
 /// Instantiates a compiled module (see `main`).
@@ -235,8 +262,22 @@ fn write64(guest: &mut dyn Guest, pointer: i64, value: i128) -> R<()> {
 }
 
 fn print(guest: &mut dyn Guest, text: &[u8]) -> R<Out> {
+    charge(guest, text.len() as u64)?;
     guest.state().out.extend_from_slice(text);
     Ok(Out::Nothing)
+}
+
+/// Counts `n` more bytes of output (standard output, standard error, files)
+/// against the output limit, before they are read from the module.
+fn charge(guest: &mut dyn Guest, n: u64) -> R<()> {
+    let state = guest.state();
+    match state.written.checked_add(n).filter(|&total| total <= state.policy.output_limit) {
+        Some(total) => {
+            state.written = total;
+            Ok(())
+        }
+        None => Err(fail(guest, "ResourceLimit: output limit")),
+    }
 }
 
 fn exit(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
@@ -445,7 +486,14 @@ fn os_read_file(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
         return Err(fail(guest, "embedded null byte"));
     }
     let Some(file) = guest.state().policy.file(&normalized_path(&path)) else { return Ok(Out::Integer(0)) };
-    match fs::read(file) {
+    // At most the output limit: a larger file is reported unreadable.
+    let limit = guest.state().policy.output_limit;
+    let read = fs::File::open(file).and_then(|file| {
+        let mut contents = Vec::new();
+        file.take(limit.saturating_add(1)).read_to_end(&mut contents)?;
+        Ok(contents)
+    });
+    match read.ok().filter(|contents| contents.len() as u64 <= limit).ok_or(()) {
         Ok(contents) => {
             append_bytes(guest, control, &contents)?;
             Ok(Out::Integer(1))
@@ -459,6 +507,7 @@ fn os_write_file(guest: &mut dyn Guest, values: &[Val], append: bool) -> R<Out> 
     let (path_pointer, path_length) = arguments.slice(guest)?;
     let (pointer, length) = arguments.slice(guest)?;
     let path = read(guest, path_pointer, path_length)?;
+    charge(guest, u64::try_from(length).unwrap_or(u64::MAX))?;
     let contents = read(guest, pointer, length)?;
     if path.contains(&0) {
         return Err(fail(guest, "embedded null byte"));
@@ -498,6 +547,7 @@ fn os_stat(guest: &mut dyn Guest, values: &[Val], is: fn(&fs::Metadata) -> bool)
 
 fn os_write(guest: &mut dyn Guest, values: &[Val], error: bool) -> R<Out> {
     let (pointer, length) = Arguments::new(values, 1).slice(guest)?;
+    charge(guest, u64::try_from(length).unwrap_or(u64::MAX))?;
     let text = read(guest, pointer, length)?;
     let state = guest.state();
     if error { &mut state.err } else { &mut state.out }.extend_from_slice(&text);
@@ -585,6 +635,7 @@ fn fd_write(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     }
     let mut total: i128 = 0;
     for (start, size) in iovecs(guest, pointer, count)? {
+        charge(guest, size)?;
         let text = read(guest, start.into(), size.into())?;
         let state = guest.state();
         if fd == 1 { &mut state.out } else { &mut state.err }.extend_from_slice(&text);
@@ -634,7 +685,7 @@ fn wall_ns() -> i64 {
 // The driver.
 
 const USAGE: &str = "usage: <program> [--timing-json path] [--allow-files DIR]... [--allow-env NAME|*]... \
-[--time-limit SECONDS] [--memory-limit-pages N] [-- program arguments]";
+[--time-limit SECONDS] [--memory-limit-pages N] [--output-limit BYTES] [--stack-limit-mib N] [-- program arguments]";
 
 /// Runs a compiled Goose program as `wtime-goose` runs the module it came
 /// from (`module` is the module's path, the program's first argument when
@@ -644,7 +695,7 @@ const USAGE: &str = "usage: <program> [--timing-json path] [--allow-files DIR]..
 /// `instantiate` instantiates the module: memory, globals, segments and
 /// start function. The instance takes the state; if instantiation fails,
 /// the state holds what the module wrote and the host's failure.
-pub fn main<G: Guest + 'static>(module: &str, stack_bytes: usize, instantiate: Instantiate<G>) -> ! {
+pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiate: Instantiate<G>) -> ! {
     let mut own: Vec<Vec<u8>> = std::env::args_os().skip(1).map(std::ffi::OsString::into_vec).collect();
     let arguments = own.iter().position(|argument| argument == b"--").map(|at| {
         let rest = own.split_off(at + 1);
@@ -685,6 +736,14 @@ pub fn main<G: Guest + 'static>(module: &str, stack_bytes: usize, instantiate: I
                 Ok(seconds) if seconds > 0.0 && seconds.is_finite() => time_limit = Some(std::time::Duration::from_secs_f64(seconds)),
                 _ => usage("--time-limit takes a positive number of seconds"),
             },
+            "--output-limit" => match value("--output-limit").to_string_lossy().parse::<u64>() {
+                Ok(bytes) => policy.output_limit = bytes,
+                Err(_) => usage("--output-limit takes a number of bytes"),
+            },
+            "--stack-limit-mib" => match value("--stack-limit-mib").to_string_lossy().parse::<usize>() {
+                Ok(mib) if mib >= 16 => stack_bytes = stack_bytes.min(mib << 20),
+                _ => usage("--stack-limit-mib takes a number of MiB, at least 16"),
+            },
             "--memory-limit-pages" => match value("--memory-limit-pages").to_string_lossy().parse::<u64>() {
                 Ok(pages) => crate::set_memory_limit_pages(pages),
                 Err(_) => usage("--memory-limit-pages takes a number of 64 KiB pages"),
@@ -706,6 +765,13 @@ pub fn main<G: Guest + 'static>(module: &str, stack_bytes: usize, instantiate: I
     // past the time limit the process ends without it.
     let (send, receive) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new().stack_size(stack_bytes).spawn(move || {
+        // Guest calls trap before they come within the margin of the stack's
+        // end: large frames cannot overflow it while calls stay below the
+        // depth limit.
+        let top = 0u8;
+        let here = &top as *const u8 as usize;
+        let margin = (stack_bytes / 8).max(4 << 20);
+        STACK_FLOOR.with(|floor| floor.set(here.saturating_sub(stack_bytes).saturating_add(margin)));
         let _ = send.send(run(input, program, instantiate, policy));
     });
     if worker.is_err() {
@@ -817,7 +883,7 @@ mod tests {
 
     #[test]
     fn variables_are_granted_by_name() {
-        let mut policy = Policy { directories: vec![], variables: Some(vec![]) };
+        let mut policy = Policy::default();
         assert!(!policy.variable(b"HOME"));
         policy.variables = Some(vec!["HOME".into()]);
         assert!(policy.variable(b"HOME") && !policy.variable(b"PATH"));

@@ -19,13 +19,22 @@ const FILE_BYTES: usize = 1 << 20;
 /// The defined functions are split into crates of about this many bytes.
 const PART_BYTES: usize = 12 << 20;
 
+/// Pending expressions on the operand stack at most (see `push_pure`).
+const MAX_PENDING: usize = 64;
+
+/// The generated functions' source is refused past this size (the 64-bit
+/// Goose compiler, a 9 MB module, makes about 130 MB).
+const MAX_SOURCE_BYTES: usize = 1 << 30;
+
 /// `memory.copy`s of a constant length up to this many bytes are inlined.
 const COPY_INLINE: usize = 256;
 
 pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &str) -> Res<()> {
+    // Room for programs several times the size of the 64-bit Goose compiler
+    // (9 MB, about 5 million instructions), and no more.
     let limits = ResourceLimits {
-        max_module_bytes: 1 << 30,
-        max_instructions: 1 << 30,
+        max_module_bytes: 256 << 20,
+        max_instructions: 100_000_000,
         max_memory_pages: 1 << 48,
         max_memory_bytes: u64::MAX,
         max_functions: 1 << 24,
@@ -174,7 +183,7 @@ impl Module {
                     types.push(m.types[t.0 as usize].clone());
                     imports.push((import.module.clone(), import.name.clone()));
                 }
-                _ => return Err(format!("import {}.{} is not a function", import.module, import.name)),
+                _ => return Err(format!("import {:?}.{:?} is not a function", import.module, import.name)),
             }
         }
         for t in &m.functions {
@@ -194,7 +203,7 @@ impl Module {
         }
         let mut globals = Vec::new();
         for (k, g) in m.globals.iter().enumerate() {
-            let init = constant(&g.init, &globals).map_err(|e| format!("global {k}: {e}"))?;
+            let init = constant(&g.init, k, "").map_err(|e| format!("global {k}: {e}"))?;
             globals.push((g.ty.value, init));
             rust_type(g.ty.value)?;
         }
@@ -240,6 +249,7 @@ impl Module {
         )
         .unwrap();
         writeln!(s, "    pub imports: [goose::Handler; {}],", self.imports.len()).unwrap();
+        s.push_str("    /// The lowest stack address guest code may use (`goose::stack_floor`).\n    pub stack_floor: usize,\n");
         s.push_str("    /// Runs `_start` (or reports why it cannot).\n    pub start: fn(&mut Instance) -> R<()>,\n");
         s.push_str("    /// The exported `goose.reserve`, if any.\n    pub reserve: Option<fn(&mut Instance, i64, i64) -> R<i64>>,\n");
         for (k, (t, _)) in self.globals.iter().enumerate() {
@@ -260,7 +270,7 @@ impl Module {
                         ValType::I64 => format!("Val::I64(p{i})"),
                         ValType::F32 => format!("Val::F32(p{i})"),
                         ValType::F64 => format!("Val::F64(p{i})"),
-                        _ => return Err(format!("import {module}.{name} takes a v128")),
+                        _ => return Err(format!("import {module:?}.{name:?} takes a v128")),
                     })
                 })
                 .collect::<Res<_>>()?;
@@ -270,7 +280,7 @@ impl Module {
                 [ValType::I64] => "i64",
                 [ValType::F32] => "f32",
                 [ValType::F64] => "f64",
-                _ => return Err(format!("import {module}.{name} has unsupported results")),
+                _ => return Err(format!("import {module:?}.{name:?} has unsupported results")),
             };
             writeln!(
                 s,
@@ -341,14 +351,18 @@ impl Module {
         }
         s.push_str("    let imports = imports.try_into().map_err(|_| Trap::Host)?;\n");
         s.push_str("    let owned = std::mem::replace(state, goose::State::new(Vec::new(), Vec::new()));\n");
+        // Globals in order, each initializer naming the earlier ones.
+        for (k, (t, init)) in self.globals.iter().enumerate() {
+            writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
+        }
         writeln!(
             s,
-            "    let mut instance = Instance {{ mem, state: owned, depth: 0, ready: false, imports, start, reserve: {},",
+            "    let mut instance = Instance {{ mem, state: owned, depth: 0, stack_floor: goose::stack_floor(), ready: false, imports, start, reserve: {},",
             if self.reserve.is_some() { "Some(reserve)" } else { "None" }
         )
         .unwrap();
-        for (k, (_, init)) in self.globals.iter().enumerate() {
-            writeln!(s, "        g{k}: {init},").unwrap();
+        for k in 0..self.globals.len() {
+            writeln!(s, "        g{k},").unwrap();
         }
         // wtime-goose refuses Emscripten standalone modules once they are
         // instantiated.
@@ -369,7 +383,7 @@ impl Module {
         for element in &m.elements {
             if let SegmentMode::Active { index, offset } = &element.mode {
                 let table = m.tables.get(*index as usize).ok_or("element segment for an imported table")?;
-                let offset = constant(offset, &self.globals)?.replace("self.", "this.");
+                let offset = constant(offset, self.globals.len(), "this.")?;
                 let offset = if table.index_type == wtime_types::IndexType::I64 {
                     format!("({offset}) as u64")
                 } else {
@@ -390,7 +404,7 @@ impl Module {
             data.extend_from_slice(bytes);
             match &segment.mode {
                 SegmentMode::Active { index: 0, offset } => {
-                    let offset = constant(offset, &self.globals)?.replace("self.", "this.");
+                    let offset = constant(offset, self.globals.len(), "this.")?;
                     let address = if self.memory64 { format!("({offset}) as u64") } else { format!("({offset}) as u32 as u64") };
                     writeln!(s, "    this.mem.init({address}, &DATA[{at}..{}], 0, {})?;", at + bytes.len(), bytes.len()).unwrap();
                 }
@@ -443,11 +457,16 @@ impl Module {
     fn functions(&self, m: &DecodedModule) -> Res<Vec<(usize, String)>> {
         let base = self.imports.len();
         let mut functions = Vec::new();
+        let mut total = 0;
         for (k, body) in m.code.iter().enumerate() {
             let index = base + k;
             let mut s = String::new();
             let f = Function::new(self, index, &body.locals)?;
             f.emit(&body.instructions, &mut s).map_err(|e| format!("function {index}: {e}"))?;
+            total += s.len();
+            if total > MAX_SOURCE_BYTES {
+                return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+            }
             functions.push((index, s));
         }
         Ok(functions)
@@ -514,7 +533,10 @@ fn bare_operands(line: &str) -> String {
 
 /// A constant expression as Rust: numeric constants, global.get and the
 /// extended constant operators (wrapping integer add, sub and mul).
-fn constant(expression: &[Instruction], globals: &[(ValType, String)]) -> Res<String> {
+/// Earlier globals are referred to by name (`{prefix}g{k}`), of which
+/// `globals` are defined, never by copying their initializers: those can
+/// refer to one another, and copies would grow exponentially.
+fn constant(expression: &[Instruction], globals: usize, prefix: &str) -> Res<String> {
     let mut stack: Vec<String> = Vec::new();
     for i in expression {
         let value = match (i.opcode, &i.immediate) {
@@ -523,10 +545,8 @@ fn constant(expression: &[Instruction], globals: &[(ValType, String)]) -> Res<St
             (0x42, Immediate::I64(v)) => format!("({v}i64)"),
             (0x43, Immediate::F32(v)) => format!("f32::from_bits({v:#x})"),
             (0x44, Immediate::F64(v)) => format!("f64::from_bits({v:#x})"),
-            (0x23, Immediate::Index(g)) => {
-                let Some((_, init)) = globals.get(*g as usize) else { return Err("global.get of a later global".into()) };
-                format!("({init})")
-            }
+            (0x23, Immediate::Index(g)) if (*g as usize) < globals => format!("{prefix}g{g}"),
+            (0x23, _) => return Err("global.get of a later global".into()),
             (op @ (0x6a..=0x6c | 0x7c..=0x7e), _) => {
                 let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
                     return Err("constant expression operator without operands".into());
@@ -589,6 +609,10 @@ struct Emitter {
     frames: Vec<Frame>,
     /// Nesting of blocks inside dead code being skipped.
     dead: usize,
+    /// Stack positions that held pending expressions when pushed, in
+    /// increasing order; some may since have been evaluated or popped.
+    /// `materialize` visits these instead of the whole stack.
+    pending: Vec<usize>,
 }
 
 /// What a pending pure expression reads, and so what must not change before
@@ -630,7 +654,9 @@ impl Emitter {
     }
 
     fn line(&mut self, text: &str) {
-        let depth = self.frames.len();
+        // Indentation stops deepening at 16 levels: deeply nested blocks
+        // would otherwise make the source grow with the square of the nesting.
+        let depth = self.frames.len().min(16);
         for _ in 0..depth {
             self.s.push_str("    ");
         }
@@ -669,16 +695,42 @@ impl Emitter {
         if expr.len() > MAX_EXPRESSION {
             return self.push(t, expr);
         }
+        // At most MAX_PENDING pending expressions: past that the oldest are
+        // evaluated into variables now (they are pure, so evaluating them
+        // early changes nothing), which keeps `materialize` cheap.
+        let at = self.stack.len();
+        while self.pending.last().is_some_and(|&k| k >= at) {
+            self.pending.pop();
+        }
+        if self.pending.len() >= MAX_PENDING {
+            let deps = &self.deps;
+            self.pending.retain(|&k| deps[k].pending);
+            let excess = self.pending.len().saturating_sub(MAX_PENDING / 2);
+            let oldest: Vec<usize> = self.pending[..excess].to_vec();
+            self.materialize(|_| true, Some(&oldest))?;
+        }
         self.stack.push((format!("({expr})"), t));
+        self.pending.push(at);
         self.deps.push(Dep { pending: true, ..dep });
         Ok(())
     }
 
     /// Evaluates the pending expressions that `reads` into variables, in
     /// stack order.
-    fn materialize(&mut self, reads: impl Fn(&Dep) -> bool) -> Res<()> {
-        for k in 0..self.stack.len() {
-            if self.deps[k].pending && reads(&self.deps[k]) {
+    fn materialize(&mut self, reads: impl Fn(&Dep) -> bool, only: Option<&[usize]>) -> Res<()> {
+        let len = self.stack.len();
+        self.pending.retain(|&k| k < len);
+        let pending = std::mem::take(&mut self.pending);
+        let mut still = Vec::with_capacity(pending.len());
+        for k in pending {
+            if !self.deps[k].pending {
+                continue;
+            }
+            if !reads(&self.deps[k]) || only.is_some_and(|only| !only.contains(&k)) {
+                still.push(k);
+                continue;
+            }
+            {
                 let (expr, t) = self.stack[k].clone();
                 let v = self.fresh("v");
                 self.line(&format!("let {v}: {} = {expr};", rust_type(t)?));
@@ -686,6 +738,7 @@ impl Emitter {
                 self.deps[k] = Dep::default();
             }
         }
+        self.pending = still;
         Ok(())
     }
 
@@ -783,7 +836,7 @@ impl<'a> Function<'a> {
             .enumerate()
             .map(|(i, t)| Ok(format!("mut l{i}: {}", rust_type(*t)?)))
             .collect::<Res<_>>()?;
-        let mut e = Emitter { s: String::new(), next: 0, stack: vec![], deps: vec![], frames: vec![], dead: 0 };
+        let mut e = Emitter { s: String::new(), next: 0, stack: vec![], deps: vec![], frames: vec![], dead: 0, pending: vec![] };
         let mut all = vec!["this: &mut Instance".to_string()];
         all.extend(params);
         writeln!(
@@ -794,7 +847,13 @@ impl<'a> Function<'a> {
             result_type(&ty.results)?
         )
         .unwrap();
-        writeln!(out, "    this.depth += 1;\n    if this.depth > MAX_DEPTH {{ return trap(Trap::CallStackExhausted); }}").unwrap();
+        // Calls count their depth and check the native stack left: a frame's
+        // own address below the floor traps as deep recursion does.
+        writeln!(
+            out,
+            "    this.depth += 1;\n    let frame = 0u8;\n    if this.depth > MAX_DEPTH || (&frame as *const u8 as usize) < this.stack_floor {{ return trap(Trap::CallStackExhausted); }}"
+        )
+        .unwrap();
         for (i, t) in self.locals.iter().enumerate().skip(self.n_params) {
             writeln!(out, "    let mut l{i}: {} = {};", rust_type(*t)?, zero(*t)?).unwrap();
         }
@@ -860,7 +919,7 @@ impl<'a> Function<'a> {
                 // Pending expressions are evaluated before the block: one
                 // read after it would see the block's assignments, and a
                 // variable bound inside it would end with it.
-                e.materialize(|_| true)?;
+                e.materialize(|_| true, None)?;
                 let (params, results) = self.block_type(&i.immediate)?;
                 e.next += 1;
                 let label = e.next;
@@ -898,7 +957,7 @@ impl<'a> Function<'a> {
             0x04 => {
                 let (params, results) = self.block_type(&i.immediate)?;
                 let (c, _) = e.pop()?;
-                e.materialize(|_| true)?;
+                e.materialize(|_| true, None)?;
                 e.next += 1;
                 let label = e.next;
                 let mut result_vars = vec![];
@@ -1003,7 +1062,7 @@ impl<'a> Function<'a> {
                 let args: Vec<String> = e.stack.drain(at..).map(|(v, _)| v).collect();
                 e.deps.truncate(at);
                 // The callee may set globals.
-                e.materialize(|d| d.globals)?;
+                e.materialize(|d| d.globals, None)?;
                 let call = format!("t!(self.f{f}({}))", args.join(", "));
                 match ty.results.as_slice() {
                     [] => e.line(&format!("{call};")),
@@ -1035,7 +1094,7 @@ impl<'a> Function<'a> {
             0x21 => {
                 let x = index()?;
                 let (v, _) = e.pop()?;
-                e.materialize(|d| d.locals.contains(&x))?;
+                e.materialize(|d| d.locals.contains(&x), None)?;
                 e.line(&format!("l{x} = {v};"));
             }
             0x22 => {
@@ -1043,7 +1102,7 @@ impl<'a> Function<'a> {
                 // The value stays on the stack: bound once, then copied.
                 let (v, t) = e.pop()?;
                 e.push(t, &v)?;
-                e.materialize(|d| d.locals.contains(&x))?;
+                e.materialize(|d| d.locals.contains(&x), None)?;
                 let v = e.top(1)?.remove(0);
                 e.line(&format!("l{x} = {v};"));
             }
@@ -1055,7 +1114,7 @@ impl<'a> Function<'a> {
             0x24 => {
                 let x = index()?;
                 let (v, _) = e.pop()?;
-                e.materialize(|d| d.globals)?;
+                e.materialize(|d| d.globals, None)?;
                 e.line(&format!("self.g{x} = {v};"));
             }
             0x28..=0x35 | 0xfd00 => self.load(e, i)?,

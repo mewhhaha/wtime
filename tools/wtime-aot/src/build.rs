@@ -21,12 +21,13 @@ use std::process::{Command, Stdio};
 
 use crate::sha256::Sha256;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS]";
 
 pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
     let mut arguments = arguments.into_iter();
     let (mut module, mut cache, mut toolchain, mut module_path, mut rt, mut jobs) =
         (None, None, String::from("stable"), None, default_rt, None);
+    let mut time_limit = std::time::Duration::from_secs(3600);
     while let Some(argument) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{USAGE}\n{argument} needs a value"));
         match argument.as_str() {
@@ -35,12 +36,17 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
             "--module-path" => module_path = Some(value()?),
             "--rt" => rt = PathBuf::from(value()?),
             "--jobs" => jobs = Some(value()?.parse::<u32>().map_err(|_| format!("{USAGE}\n--jobs takes a number"))?),
+            "--time-limit" => {
+                let seconds = value()?.parse::<f64>().ok().filter(|s| *s > 0.0 && s.is_finite());
+                let seconds = seconds.ok_or_else(|| format!("{USAGE}\n--time-limit takes a positive number of seconds"))?;
+                time_limit = std::time::Duration::from_secs_f64(seconds);
+            }
             _ if module.is_none() && !argument.starts_with('-') => module = Some(PathBuf::from(argument)),
             other => return Err(format!("{USAGE}\nunrecognized argument {other}")),
         }
     }
     let (Some(module), Some(cache)) = (module, cache) else { return Err(USAGE.into()) };
-    let program = build(&module, &cache, &toolchain, module_path.as_deref(), &rt, jobs)?;
+    let program = build(&module, &cache, &toolchain, module_path.as_deref(), &rt, jobs, time_limit)?;
     println!("{}", program.display());
     Ok(())
 }
@@ -53,6 +59,7 @@ pub fn build(
     module_path: Option<&str>,
     rt: &Path,
     jobs: Option<u32>,
+    time_limit: std::time::Duration,
 ) -> Result<PathBuf, String> {
     let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
     let wasm = read(module)?;
@@ -91,15 +98,48 @@ pub fn build(
         return Ok(program);
     }
 
-    // Generate and compile in a directory of this process's own, then move
-    // the program into place: concurrent builds of one key do not collide.
-    let name = format!("aot-{}", &key[..16]);
+    // Generate and compile in a directory of this build's own, target
+    // directory included, then move the program into place: builds of the
+    // same or of different modules share nothing while they run.
+    let name = format!("aot-{key}");
     let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
-    crate::codegen::generate(&wasm, &work, &name, &rt, &module_path)?;
-    let target = cache.join("target");
+    let result = generate_and_compile(&wasm, &work, &name, &rt, &module_path, toolchain, jobs, time_limit)
+        .and_then(|built| {
+            fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+            let staged = entry.join(format!("program.{}", std::process::id()));
+            fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
+            fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
+        });
+    let _ = fs::remove_dir_all(&work);
+    result?;
+    let record = format!(
+        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\n",
+        crate::sha256::hex(&wasm),
+        generator.display(),
+        rt.display(),
+        version.trim().replace('\n', "; ")
+    );
+    let _ = fs::write(entry.join("key.txt"), record);
+    Ok(program)
+}
+
+/// Generates the crates into `work` and compiles them there; the program.
+#[allow(clippy::too_many_arguments)]
+fn generate_and_compile(
+    wasm: &[u8],
+    work: &Path,
+    name: &str,
+    rt: &Path,
+    module_path: &str,
+    toolchain: &str,
+    jobs: Option<u32>,
+    time_limit: std::time::Duration,
+) -> Result<PathBuf, String> {
+    crate::codegen::generate(wasm, work, name, rt, module_path)?;
+    let target = work.join("target");
     let mut cargo = Command::new("cargo");
-    cargo.env_clear().current_dir(&work).stdin(Stdio::null());
+    cargo.env_clear().current_dir(work).stdin(Stdio::null());
     for variable in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME"] {
         if let Some(value) = std::env::var_os(variable) {
             cargo.env(variable, value);
@@ -110,26 +150,26 @@ pub fn build(
     if let Some(jobs) = jobs {
         cargo.args(["--jobs", &jobs.to_string()]);
     }
-    let status = cargo.status().map_err(|e| format!("cargo: {e}"))?;
+    // A process group of its own, so that the time limit ends rustc too.
+    std::os::unix::process::CommandExt::process_group(&mut cargo, 0);
+    let mut child = cargo.spawn().map_err(|e| format!("cargo: {e}"))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("cargo: {e}"))? {
+            break status;
+        }
+        if started.elapsed() > time_limit {
+            let group = format!("-{}", child.id());
+            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+            let _ = child.wait();
+            return Err(format!("the build exceeded its time limit of {:?}", time_limit));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     if !status.success() {
-        return Err(format!("cargo build failed ({status}); the generated crates are in {}", work.display()));
+        return Err(format!("cargo build failed ({status})"));
     }
-    fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
-    let built = target.join("release").join(&name);
-    let staged = entry.join(format!("program.{}", std::process::id()));
-    fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
-    fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
-    let _ = fs::remove_file(&built);
-    let _ = fs::remove_dir_all(&work);
-    let record = format!(
-        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\n",
-        crate::sha256::hex(&wasm),
-        generator.display(),
-        rt.display(),
-        version.trim().replace('\n', "; ")
-    );
-    let _ = fs::write(entry.join("key.txt"), record);
-    Ok(program)
+    Ok(target.join("release").join(name))
 }
 
 /// The runtime crate's manifest and sources, by relative path, in order.

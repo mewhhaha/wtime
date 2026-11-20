@@ -155,17 +155,40 @@ What makes an uploaded module safe to run:
     file that does not exist (or cannot be written).
   - `--allow-env NAME` (repeatable, `*` for all): the variables it may
     read; others look unset.
-- **The operator bounds its resources.** `--time-limit SECONDS` ends the
-  process (exit 1, `ResourceLimit: time limit`, its buffered output
-  dropped); `--memory-limit-pages N` lowers the memory limit below the
-  default 2^20 pages (64 GiB). Call depth is limited to 1,000,000. A
-  compiled program cannot be metered by fuel or cancelled from inside: run
-  it as a process of its own, as the host does, and use the time limit or
-  the OS for anything finer (CPU, address space, file sizes).
+- **The operator bounds its resources:**
+  - `--time-limit SECONDS` ends the process (exit 1, `ResourceLimit: time
+    limit`, its buffered output dropped).
+  - `--memory-limit-pages N` lowers the memory limit below the default 2^20
+    pages (64 GiB).
+  - `--output-limit BYTES` (default 1 GiB) bounds what the module writes to
+    standard output, standard error and files together, and the size of a
+    file it may read; output is buffered until the program ends, so this
+    also bounds the host's memory.
+  - `--stack-limit-mib N` (default 8192, at least 16) bounds the native
+    stack. Calls trap with `ResourceLimit: call depth exhausted` past
+    1,000,000 nested calls or when a frame comes within an eighth of the
+    stack's end (4 MiB at least), so large frames cannot overflow it.
 
-Not guarded against: another local process swapping links inside a granted
-directory between the check and the access; rustc or LLVM miscompiling the
-generated code (see Toolchain).
+  A compiled program cannot be metered by fuel or cancelled from inside:
+  run it as a process of its own and use the OS (a cgroup) for anything
+  finer, such as CPU or a hard bound on resident memory.
+- **The build is bounded too.** The generator refuses modules over 256 MiB
+  or 100 million instructions and generated source over 1 GiB, and its
+  work is linear in the module (nesting, operand stacks and constant
+  expressions cannot make it grow faster); `wtime-aot build --time-limit
+  SECONDS` (default 3600) ends a build, rustc included. Each build has its
+  own target directory, removed afterwards, success or not.
+
+Not guarded against:
+
+- Another local process swapping links inside a granted directory between
+  the check and the access.
+- Cargo configuration: Cargo reads `.cargo/config.toml` from every ancestor
+  of the cache directory and from `CARGO_HOME`, and a `rustc-wrapper` there
+  runs during builds. Keep the cache under directories only the operator
+  can write (not `/tmp`).
+- rustc or LLVM miscompiling the generated code: pin `--toolchain` to a
+  version you have checked (see Toolchain); the default, `stable`, moves.
 
 ## Toolchain
 
