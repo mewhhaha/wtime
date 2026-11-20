@@ -309,14 +309,14 @@ impl Module {
         writeln!(s, "use {core}::*;\n").unwrap();
         s.push_str("static DATA: &[u8] = include_bytes!(\"data.bin\");\n\n");
         s.push_str("pub struct Marker;\n\nimpl Fns<Marker> for Instance {\n");
-        for f in 0..self.types.len() {
+        for (f, path) in paths.iter().enumerate() {
             let args: Vec<String> = (0..self.types[f].params.len()).map(|i| format!("p{i}")).collect();
             let body = if f < self.imports.len() {
                 format!("self.import{f}({})", args.join(", "))
             } else {
                 let mut all = vec!["self".to_string()];
                 all.extend(args);
-                format!("{}::<Marker>({})", paths[f], all.join(", "))
+                format!("{path}::<Marker>({})", all.join(", "))
             };
             writeln!(s, "    #[inline]\n    fn f{f}{} {{ {body} }}", self.signature(f, "&mut self")?).unwrap();
         }

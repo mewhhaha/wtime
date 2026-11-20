@@ -1,0 +1,167 @@
+//! `wtime-aot build`: a module's Wasm in, the path of its compiled program
+//! out, through a cache keyed by content.
+//!
+//! This is the path for modules from untrusted sources. The uploader's only
+//! input is the Wasm: it is validated, translated by this generator,
+//! compiled against this runtime crate by the operator's toolchain, and
+//! cached under the SHA-256 of everything that determines the program (the
+//! Wasm, the module path the program reports, this generator's binary, the
+//! runtime crate's sources and the toolchain's version). Nothing native or
+//! textual from the uploader is compiled: names from the module reach the
+//! generated source only escaped, its data only as a data file.
+//!
+//! Cargo runs offline, with an environment reduced to what locating the
+//! toolchain needs, so no RUSTFLAGS, wrappers or registry access from the
+//! caller's environment apply. The generated crates have no build scripts
+//! and no dependencies other than the runtime crate.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use crate::sha256::Sha256;
+
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N]";
+
+pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
+    let mut arguments = arguments.into_iter();
+    let (mut module, mut cache, mut toolchain, mut module_path, mut rt, mut jobs) =
+        (None, None, String::from("stable"), None, default_rt, None);
+    while let Some(argument) = arguments.next() {
+        let mut value = || arguments.next().ok_or_else(|| format!("{USAGE}\n{argument} needs a value"));
+        match argument.as_str() {
+            "--cache" => cache = Some(PathBuf::from(value()?)),
+            "--toolchain" => toolchain = value()?,
+            "--module-path" => module_path = Some(value()?),
+            "--rt" => rt = PathBuf::from(value()?),
+            "--jobs" => jobs = Some(value()?.parse::<u32>().map_err(|_| format!("{USAGE}\n--jobs takes a number"))?),
+            _ if module.is_none() && !argument.starts_with('-') => module = Some(PathBuf::from(argument)),
+            other => return Err(format!("{USAGE}\nunrecognized argument {other}")),
+        }
+    }
+    let (Some(module), Some(cache)) = (module, cache) else { return Err(USAGE.into()) };
+    let program = build(&module, &cache, &toolchain, module_path.as_deref(), &rt, jobs)?;
+    println!("{}", program.display());
+    Ok(())
+}
+
+/// Builds (or finds in `cache`) the program for `module`; its path.
+pub fn build(
+    module: &Path,
+    cache: &Path,
+    toolchain: &str,
+    module_path: Option<&str>,
+    rt: &Path,
+    jobs: Option<u32>,
+) -> Result<PathBuf, String> {
+    let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
+    let wasm = read(module)?;
+    // The program reports the module's own name, not where the operator
+    // keeps it.
+    let module_path = match module_path {
+        Some(path) => path.to_string(),
+        None => module.file_name().map_or("module.wasm".into(), |name| name.to_string_lossy().into_owned()),
+    };
+    fs::create_dir_all(cache).map_err(|e| format!("{}: {e}", cache.display()))?;
+    let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
+    let rt = rt.canonicalize().map_err(|e| format!("{}: {e}", rt.display()))?;
+
+    // The key: everything the program depends on.
+    let mut key = Sha256::new();
+    let mut field = |name: &str, bytes: &[u8]| {
+        key.update(name.as_bytes());
+        key.update(&(bytes.len() as u64).to_le_bytes());
+        key.update(bytes);
+    };
+    field("wtime-aot build 1", &[]);
+    field("wasm", &wasm);
+    field("module path", module_path.as_bytes());
+    let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
+    field("generator", &read(&generator)?);
+    for (name, bytes) in runtime_sources(&rt)? {
+        field(&name, &bytes);
+    }
+    let version = rustc_version(toolchain)?;
+    field("toolchain", version.as_bytes());
+    let key = key.hex();
+
+    let entry = cache.join(&key);
+    let program = entry.join("program");
+    if program.is_file() {
+        return Ok(program);
+    }
+
+    // Generate and compile in a directory of this process's own, then move
+    // the program into place: concurrent builds of one key do not collide.
+    let name = format!("aot-{}", &key[..16]);
+    let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    crate::codegen::generate(&wasm, &work, &name, &rt, &module_path)?;
+    let target = cache.join("target");
+    let mut cargo = Command::new("cargo");
+    cargo.env_clear().current_dir(&work).stdin(Stdio::null());
+    for variable in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME"] {
+        if let Some(value) = std::env::var_os(variable) {
+            cargo.env(variable, value);
+        }
+    }
+    cargo.env("RUSTUP_TOOLCHAIN", toolchain).env("CARGO_TARGET_DIR", &target);
+    cargo.args(["build", "--release", "--offline", "--quiet"]);
+    if let Some(jobs) = jobs {
+        cargo.args(["--jobs", &jobs.to_string()]);
+    }
+    let status = cargo.status().map_err(|e| format!("cargo: {e}"))?;
+    if !status.success() {
+        return Err(format!("cargo build failed ({status}); the generated crates are in {}", work.display()));
+    }
+    fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+    let built = target.join("release").join(&name);
+    let staged = entry.join(format!("program.{}", std::process::id()));
+    fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
+    fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
+    let _ = fs::remove_file(&built);
+    let _ = fs::remove_dir_all(&work);
+    let record = format!(
+        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\n",
+        crate::sha256::hex(&wasm),
+        generator.display(),
+        rt.display(),
+        version.trim().replace('\n', "; ")
+    );
+    let _ = fs::write(entry.join("key.txt"), record);
+    Ok(program)
+}
+
+/// The runtime crate's manifest and sources, by relative path, in order.
+fn runtime_sources(rt: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut files = Vec::new();
+    let mut pending = vec![rt.join("Cargo.toml"), rt.join("src")];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            let entries = fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            for entry in entries {
+                pending.push(entry.map_err(|e| format!("{}: {e}", path.display()))?.path());
+            }
+        } else {
+            let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let name = path.strip_prefix(rt).unwrap_or(&path).to_string_lossy().into_owned();
+            files.push((name, bytes));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// `rustc -vV` of the toolchain.
+fn rustc_version(toolchain: &str) -> Result<String, String> {
+    let output = Command::new("rustc")
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .arg("-vV")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("rustc: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("toolchain {toolchain}: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}

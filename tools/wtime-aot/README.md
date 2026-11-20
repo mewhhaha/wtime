@@ -5,6 +5,16 @@ then compile it to native code. wtime's own decoder and validator check the
 module first. Nothing is generated or run at run time, and neither the
 generator, the runtime crate nor the generated code uses `unsafe`.
 
+For modules from untrusted sources, use `wtime-aot build` (see
+[Uploaded modules](#uploaded-modules)):
+
+```sh
+program=$(target/release/wtime-aot build upload.wasm --cache /srv/aot)
+$program --allow-files /srv/job/42 --time-limit 10 -- program arguments < input
+```
+
+To generate a crate by hand:
+
 ```sh
 cargo build --release                                       # the generator
 target/release/wtime-aot module.wasm -o out/ [--name NAME] [--module-path PATH]
@@ -94,7 +104,10 @@ The program reports what `wtime-goose` reports for the same module: the
 output written before a failure (also when the start function fails), the
 exit code, and the failure text (`Trap: integer divide by zero`,
 `ResourceLimit: call depth exhausted`, `unsupported direct host import:
-env.x`, ...). Like `wtime-goose`, the host reads and writes only the memory
+env.x`, ...). One difference is deliberate: files and environment variables are denied
+until the operator grants them (see Uploaded modules), where `wtime-goose`
+grants the process's own; `--allow-files / --allow-env '*'` gives a
+compiled program the same reach. Like `wtime-goose`, the host reads and writes only the memory
 exported as `memory`, and only once instantiation, start function included,
 has completed. Two differences remain: an access past the end of memory
 reports `Trap: out of bounds` where the interpreter may report
@@ -102,9 +115,57 @@ reports `Trap: out of bounds` where the interpreter may report
 
 ## Not covered
 
-- **Fuel and cancellation:** a compiled program runs unmetered and runs to
-  completion. Use the interpreter where fuel or cancellation matters.
-- **The interpreter's resource limits, other than call depth.**
+- **Fuel and cancellation:** a compiled program runs unmetered; only the
+  process's time limit (`--time-limit`) or the OS ends it early. Use the
+  interpreter where fuel or in-process cancellation matters.
+- **The interpreter's other resource limits:** only call depth and memory
+  pages (2^20, as under wtime-goose) are enforced.
+
+## Uploaded modules
+
+The uploader hands over the Wasm, and nothing else. `wtime-aot build
+module.wasm --cache DIR` validates it, generates the crates and compiles
+them against this runtime crate with the operator's toolchain
+(`--toolchain`, default `stable`; see Toolchain), then prints the path of
+the program. The program is cached under the SHA-256 of everything that
+determines it: the Wasm, the module name the program reports (the file's
+own name unless `--module-path`), the generator's binary, the runtime
+crate's sources and the toolchain's `rustc -vV`; a cached program is
+reused, a change to any input builds a new one.
+
+What makes an uploaded module safe to run:
+
+- **Only trusted code is compiled.** The generated source is a function of
+  the Wasm made by this generator: the module's names reach it only as
+  escaped string literals and comments, its data only as a data file. The
+  generated crates contain no `unsafe` (`#![forbid(unsafe_code)]` in every
+  crate, the runtime's included), no build scripts and no dependencies but
+  the runtime crate. Cargo runs `--offline` in an environment reduced to
+  `PATH`, `HOME`, `RUSTUP_HOME` and `CARGO_HOME`, so no `RUSTFLAGS`,
+  wrappers or registries from the caller apply.
+- **The module reaches only its host imports.** Its memory accesses are
+  bounds checked, its calls and branches stay inside its own functions, and
+  a trap ends it. The host gives it standard input and output, its
+  arguments and the clock. Files and environment variables it gets only
+  as the operator grants them:
+  - `--allow-files DIR` (repeatable): the module may read, write and test
+    files under DIR. Paths are resolved through links before the check, a
+    link that cannot be resolved is refused, and writes do not follow a
+    link in the last component. Anything else looks to the module like a
+    file that does not exist (or cannot be written).
+  - `--allow-env NAME` (repeatable, `*` for all): the variables it may
+    read; others look unset.
+- **The operator bounds its resources.** `--time-limit SECONDS` ends the
+  process (exit 1, `ResourceLimit: time limit`, its buffered output
+  dropped); `--memory-limit-pages N` lowers the memory limit below the
+  default 2^20 pages (64 GiB). Call depth is limited to 1,000,000. A
+  compiled program cannot be metered by fuel or cancelled from inside: run
+  it as a process of its own, as the host does, and use the time limit or
+  the OS for anything finer (CPU, address space, file sizes).
+
+Not guarded against: another local process swapping links inside a granted
+directory between the check and the access; rustc or LLVM miscompiling the
+generated code (see Toolchain).
 
 ## Toolchain
 

@@ -5,8 +5,9 @@
 //! Wasmtime host): the same imports, output, exit codes and timing JSON, with
 //! the module reached through `Guest` instead of the interpreter's store.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -28,6 +29,72 @@ pub struct State {
     /// Set by a failure of the host's own, reported by its text alone.
     pub failure: Option<String>,
     clock_origin: Instant,
+    policy: Policy,
+}
+
+/// What the module may reach outside itself beyond its input, output,
+/// arguments and the clock. Nothing by default: the operator grants
+/// directories and environment variables (`--allow-files`, `--allow-env`).
+/// A denied file is reported as missing (or unwritable), a denied variable
+/// as unset, as the module would see them on a machine without them.
+#[derive(Clone, Debug)]
+pub struct Policy {
+    /// Canonical directories whose files (and subdirectories') the module
+    /// may read, write and test.
+    pub directories: Vec<PathBuf>,
+    /// Variables the module may read; `None` allows every variable.
+    pub variables: Option<Vec<OsString>>,
+}
+
+impl Default for Policy {
+    /// Nothing granted.
+    fn default() -> Policy {
+        Policy { directories: Vec::new(), variables: Some(Vec::new()) }
+    }
+}
+
+impl Policy {
+    /// Grants the files under `directory`.
+    pub fn allow_directory(&mut self, directory: &Path) -> std::io::Result<()> {
+        self.directories.push(directory.canonicalize()?);
+        Ok(())
+    }
+
+    /// The file the module names by `path` (relative to the working
+    /// directory), resolved through symbolic links, if it lies under an
+    /// allowed directory. A file that does not exist yet resolves through
+    /// its parent directory, for writing; its own name must be a plain one.
+    /// (Another local process swapping links between this check and the
+    /// access is not guarded against.)
+    fn file(&self, path: &[u8]) -> Option<PathBuf> {
+        if self.directories.is_empty() {
+            return None;
+        }
+        let path = Path::new(OsStr::from_bytes(path));
+        let resolved = match path.canonicalize() {
+            Ok(resolved) => resolved,
+            // A link that cannot be resolved (one pointing at a file that
+            // does not exist yet, anywhere) is refused: writing through it
+            // would create its target.
+            Err(_) if fs::symlink_metadata(path).is_ok() => return None,
+            Err(_) => {
+                let name = match path.components().next_back()? {
+                    Component::Normal(name) => name,
+                    _ => return None,
+                };
+                let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                parent.canonicalize().ok()?.join(name)
+            }
+        };
+        self.directories.iter().any(|directory| resolved.starts_with(directory)).then_some(resolved)
+    }
+
+    fn variable(&self, name: &[u8]) -> bool {
+        match &self.variables {
+            None => true,
+            Some(names) => names.iter().any(|allowed| allowed.as_bytes() == name),
+        }
+    }
 }
 
 impl State {
@@ -42,7 +109,14 @@ impl State {
             exit: None,
             failure: None,
             clock_origin: Instant::now(),
+            policy: Policy::default(),
         }
+    }
+
+    /// The state with `policy` in force.
+    pub fn with_policy(mut self, policy: Policy) -> State {
+        self.policy = policy;
+        self
     }
 
     fn token(&mut self) -> R<&[u8]> {
@@ -370,7 +444,8 @@ fn os_read_file(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     if path.contains(&0) {
         return Err(fail(guest, "embedded null byte"));
     }
-    match fs::read(OsStr::from_bytes(&normalized_path(&path))) {
+    let Some(file) = guest.state().policy.file(&normalized_path(&path)) else { return Ok(Out::Integer(0)) };
+    match fs::read(file) {
         Ok(contents) => {
             append_bytes(guest, control, &contents)?;
             Ok(Out::Integer(1))
@@ -394,14 +469,31 @@ fn os_write_file(guest: &mut dyn Guest, values: &[Val], append: bool) -> R<Out> 
     } else {
         options.write(true).create(true).truncate(true);
     }
-    let written = options.open(OsStr::from_bytes(&path)).and_then(|mut file| file.write_all(&contents));
+    let Some(file) = guest.state().policy.file(&path) else { return Ok(Out::Integer(0)) };
+    // The checked path is opened without following a link in its last
+    // component, should one appear there after the check.
+    no_follow(&mut options);
+    let written = options.open(file).and_then(|mut file| file.write_all(&contents));
     Ok(Out::Integer(written.is_ok().into()))
+}
+
+/// O_NOFOLLOW, where its value is known.
+fn no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
+    options.custom_flags(0o400000);
+    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
+    options.custom_flags(0o100000);
+    #[cfg(target_os = "macos")]
+    options.custom_flags(0x100);
+    let _ = options;
 }
 
 fn os_stat(guest: &mut dyn Guest, values: &[Val], is: fn(&fs::Metadata) -> bool) -> R<Out> {
     let (pointer, length) = Arguments::new(values, 1).slice(guest)?;
     let path = read(guest, pointer, length)?;
-    Ok(Out::Integer(fs::metadata(OsStr::from_bytes(&path)).is_ok_and(|kind| is(&kind)).into()))
+    let Some(file) = guest.state().policy.file(&path) else { return Ok(Out::Integer(0)) };
+    Ok(Out::Integer(fs::metadata(file).is_ok_and(|kind| is(&kind)).into()))
 }
 
 fn os_write(guest: &mut dyn Guest, values: &[Val], error: bool) -> R<Out> {
@@ -426,6 +518,9 @@ fn os_getenv(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     let (pointer, length) = arguments.slice(guest)?;
     let control = arguments.integer(guest)?;
     let name = read(guest, pointer, length)?;
+    if !guest.state().policy.variable(&name) {
+        return Ok(Out::Integer(0));
+    }
     match std::env::var_os(OsStr::from_bytes(&name)) {
         Some(value) => {
             append_bytes(guest, control, &value.into_vec())?;
@@ -538,7 +633,8 @@ fn wall_ns() -> i64 {
 
 // The driver.
 
-const USAGE: &str = "usage: <program> [--timing-json path] [-- program arguments]";
+const USAGE: &str = "usage: <program> [--timing-json path] [--allow-files DIR]... [--allow-env NAME|*]... \
+[--time-limit SECONDS] [--memory-limit-pages N] [-- program arguments]";
 
 /// Runs a compiled Goose program as `wtime-goose` runs the module it came
 /// from (`module` is the module's path, the program's first argument when
@@ -556,18 +652,44 @@ pub fn main<G: Guest + 'static>(module: &str, stack_bytes: usize, instantiate: I
         rest
     });
     let mut timing_json = None;
-    let mut own = own.into_iter().map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let mut policy = Policy::default();
+    let mut time_limit = None;
+    let usage = |text: &str| -> ! {
+        eprintln!("{USAGE}\n{text}");
+        std::process::exit(2)
+    };
+    let mut own = own.into_iter().map(OsString::from_vec);
     while let Some(argument) = own.next() {
-        match argument.as_str() {
+        let mut value = |name: &str| own.next().unwrap_or_else(|| usage(&format!("{name} needs a value")));
+        match argument.to_string_lossy().as_ref() {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0)
             }
-            "--timing-json" => timing_json = own.next(),
-            other => {
-                eprintln!("{USAGE}\nunrecognized argument {other}");
-                std::process::exit(2)
+            "--timing-json" => timing_json = Some(value("--timing-json").to_string_lossy().into_owned()),
+            "--allow-files" => {
+                let directory = value("--allow-files");
+                if let Err(error) = policy.allow_directory(Path::new(&directory)) {
+                    usage(&format!("--allow-files {}: {error}", directory.to_string_lossy()))
+                }
             }
+            "--allow-env" => match value("--allow-env") {
+                all if all == "*" => policy.variables = None,
+                name => {
+                    if let Some(names) = &mut policy.variables {
+                        names.push(name)
+                    }
+                }
+            },
+            "--time-limit" => match value("--time-limit").to_string_lossy().parse::<f64>() {
+                Ok(seconds) if seconds > 0.0 && seconds.is_finite() => time_limit = Some(std::time::Duration::from_secs_f64(seconds)),
+                _ => usage("--time-limit takes a positive number of seconds"),
+            },
+            "--memory-limit-pages" => match value("--memory-limit-pages").to_string_lossy().parse::<u64>() {
+                Ok(pages) => crate::set_memory_limit_pages(pages),
+                Err(_) => usage("--memory-limit-pages takes a number of 64 KiB pages"),
+            },
+            other => usage(&format!("unrecognized argument {other}")),
         }
     }
     let mut input = Vec::new();
@@ -580,10 +702,27 @@ pub fn main<G: Guest + 'static>(module: &str, stack_bytes: usize, instantiate: I
             program
         }
     };
-    let worker = std::thread::Builder::new().stack_size(stack_bytes).spawn(move || run(input, program, instantiate));
-    let outcome = match worker.map(|handle| handle.join()) {
-        Ok(Ok(outcome)) => outcome,
-        _ => {
+    // The program runs on a thread of its own, which sends its outcome back;
+    // past the time limit the process ends without it.
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new().stack_size(stack_bytes).spawn(move || {
+        let _ = send.send(run(input, program, instantiate, policy));
+    });
+    if worker.is_err() {
+        eprintln!("wtime-aot Goose host: the program's thread failed");
+        std::process::exit(1)
+    }
+    let received = match time_limit {
+        Some(limit) => receive.recv_timeout(limit).map_err(|error| error == std::sync::mpsc::RecvTimeoutError::Timeout),
+        None => receive.recv().map_err(|_| false),
+    };
+    let outcome = match received {
+        Ok(outcome) => outcome,
+        Err(true) => {
+            eprintln!("ResourceLimit: time limit");
+            std::process::exit(1)
+        }
+        Err(false) => {
             eprintln!("wtime-aot Goose host: the program's thread failed");
             std::process::exit(1)
         }
@@ -613,11 +752,11 @@ struct Outcome {
     start_ns: u128,
 }
 
-fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>, instantiate: Instantiate<G>) -> Outcome {
+fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>, instantiate: Instantiate<G>, policy: Policy) -> Outcome {
     let started = Instant::now();
     let mut instantiated = started;
     let mut guest = None;
-    let mut state = State::new(input, program);
+    let mut state = State::new(input, program).with_policy(policy);
     let result = (|| -> R<()> {
         let g = guest.insert(instantiate(&mut state)?);
         instantiated = Instant::now();
@@ -643,4 +782,46 @@ fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>, instantiate: Instantiate
     // The process exits next: tearing down the memory would only spend time.
     std::mem::forget(guest);
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Policy;
+    use std::path::Path;
+
+    #[test]
+    fn files_stay_inside_granted_directories() {
+        let root = std::env::temp_dir().join(format!("wtime-aot-policy-{}", std::process::id()));
+        let (jail, outside) = (root.join("jail"), root.join("outside"));
+        std::fs::create_dir_all(jail.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(jail.join("in.txt"), b"in").unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), jail.join("to_secret")).unwrap();
+        std::os::unix::fs::symlink(outside.join("new.txt"), jail.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&outside, jail.join("to_outside")).unwrap();
+        let mut policy = Policy::default();
+        let at = |p: &Path| p.as_os_str().as_encoded_bytes().to_vec();
+        assert_eq!(policy.file(&at(&jail.join("in.txt"))), None, "nothing granted");
+        policy.allow_directory(&jail).unwrap();
+        let jail = jail.canonicalize().unwrap();
+        assert_eq!(policy.file(&at(&jail.join("in.txt"))), Some(jail.join("in.txt")));
+        assert_eq!(policy.file(&at(&jail.join("new.txt"))), Some(jail.join("new.txt")), "a new file inside");
+        assert_eq!(policy.file(&at(&jail.join("sub/../in.txt"))), Some(jail.join("in.txt")));
+        for escape in ["../outside/secret.txt", "sub/../../outside/secret.txt", "to_secret", "dangling", "to_outside/secret.txt", "to_outside/new.txt", ".."] {
+            assert_eq!(policy.file(&at(&jail.join(escape))), None, "{escape}");
+        }
+        assert_eq!(policy.file(b"/etc/passwd"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn variables_are_granted_by_name() {
+        let mut policy = Policy { directories: vec![], variables: Some(vec![]) };
+        assert!(!policy.variable(b"HOME"));
+        policy.variables = Some(vec!["HOME".into()]);
+        assert!(policy.variable(b"HOME") && !policy.variable(b"PATH"));
+        policy.variables = None;
+        assert!(policy.variable(b"PATH"));
+    }
 }

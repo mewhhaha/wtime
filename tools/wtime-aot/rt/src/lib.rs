@@ -144,8 +144,20 @@ pub struct Memory {
 pub const PAGE: u64 = 65536;
 /// The base is at most this large.
 const RESERVE: u64 = 64 << 30;
-/// A memory never exceeds this many pages (64 GiB), as under wtime-goose.
+/// A memory never exceeds this many pages (64 GiB), as under wtime-goose,
+/// or the operator's lower limit (`set_memory_limit_pages`).
 pub const MEMORY_LIMIT_PAGES: u64 = 1 << 20;
+static PAGE_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(MEMORY_LIMIT_PAGES);
+
+/// Lowers the most pages any memory may have (raising past
+/// `MEMORY_LIMIT_PAGES` has no effect). Set before instantiation.
+pub fn set_memory_limit_pages(pages: u64) {
+    PAGE_LIMIT.store(pages.min(MEMORY_LIMIT_PAGES), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn page_limit() -> u64 {
+    PAGE_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
 /// Blocks of bulk operations at least this long that would only write
 /// zeros over zeros are skipped, so they leave untouched pages untouched.
 const BLOCK: usize = 1 << 16;
@@ -173,11 +185,11 @@ impl Memory {
         if min.checked_mul(PAGE).is_none() {
             return trap(Trap::MemoryAllocationOverflow);
         }
-        if min > MEMORY_LIMIT_PAGES {
+        if min > page_limit() {
             return trap(Trap::MemoryLimit);
         }
         let limit = if memory64 { 1 << 48 } else { 1 << 16 };
-        let max_pages = max.unwrap_or(limit).min(limit).min(MEMORY_LIMIT_PAGES);
+        let max_pages = max.unwrap_or(limit).min(limit).min(page_limit());
         if min > max_pages {
             return trap(Trap::MemoryTooLarge);
         }
@@ -265,23 +277,6 @@ impl Memory {
             }
         }
         None
-    }
-
-    #[inline(always)]
-    fn get<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
-        match self.direct::<N>(address, offset) {
-            Some(bytes) => Ok(*bytes),
-            None => self.get_slow::<N>(address, offset),
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn get_slow<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
-        let mut out = [0; N];
-        let at = self.at(address, offset, N)?;
-        self.read_into(at, &mut out);
-        Ok(out)
     }
 
     /// The `n` (at most 8) bytes of an access outside the direct range, as
@@ -654,7 +649,10 @@ pub struct Memory32 {
 impl Memory32 {
     /// A memory of `min` pages that may grow to `max` (at most 65536).
     pub fn new(min: u64, max: Option<u64>) -> R<Memory32> {
-        let max_pages = max.unwrap_or(1 << 16).min(1 << 16);
+        if min > page_limit() {
+            return trap(Trap::MemoryLimit);
+        }
+        let max_pages = max.unwrap_or(1 << 16).min(1 << 16).min(page_limit());
         let Some(len) = min.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else {
             return trap(Trap::MemoryTooLarge);
         };

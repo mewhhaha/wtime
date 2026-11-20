@@ -23,15 +23,26 @@
 
 #![forbid(unsafe_code)]
 
+mod build;
 mod codegen;
+mod sha256;
 
 use std::path::PathBuf;
 use std::process::exit;
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N]";
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.first().is_some_and(|first| first == "build") {
+        let rt = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
+        if let Err(error) = build::main(all[1..].to_vec(), rt) {
+            eprintln!("wtime-aot build: {error}");
+            exit(1)
+        }
+        return;
+    }
+    let mut args = all.into_iter();
     let (mut module, mut out, mut name, mut rt, mut module_path) = (None, None, None, None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {

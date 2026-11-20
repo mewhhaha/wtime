@@ -121,7 +121,8 @@ def main() -> int:
             run_once(engines["wasmtime-cached"], stdin, cwd, args.cpu, args.timeout)  # warm the cache
         if args.aot_dir:
             stem = "".join(c if c.isascii() and c.isalnum() else "-" for c in module.stem)
-            engines["wtime-aot"] = [str(args.aot_dir.resolve() / f"aot-{stem}"), *program]
+            # The same access to files and variables as wtime-goose grants.
+            engines["wtime-aot"] = [str(args.aot_dir.resolve() / f"aot-{stem}"), "--allow-files", "/", "--allow-env", "*", *program]
         if args.deno:
             # Deno's V8 with its default tiers (Liftoff, then TurboFan), all
             # permissions for the host's file access, the module's memory64
