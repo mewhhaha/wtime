@@ -67,8 +67,13 @@ impl fmt::Display for Trap {
 
 pub type R<T> = Result<T, Trap>;
 
-#[cold]
-#[inline(never)]
+/// `Err(trap)`, inlined where it is returned. Marking it `#[cold]` and
+/// out of line made every bounds check's failure path a call LLVM could not
+/// see into: it returned an `R<T>` of unknown variant into the fast path,
+/// and LLVM had to assume memory changed on the way back, so each access
+/// reloaded the memory's length and pointer and repeated its checks (2.4
+/// times the instructions of the insertion sort in examples/sorting.goose).
+#[inline(always)]
 pub fn trap<T>(trap: Trap) -> R<T> {
     Err(trap)
 }
