@@ -59,6 +59,15 @@ little of it, does not reserve or zero that much host memory. Memory byte
 budgets still count the full logical size. Shared memories keep a contiguous,
 zero-filled backing.
 
+Because pages are allocated when first written, running out of host memory
+surfaces at that write rather than at creation or `memory.grow`: a guest
+store, `memory.fill`, `memory.copy`, data segment initialization or
+`Store::write_memory` then fails with a `ResourceLimit` error ("memory
+allocation failed"), and the access writes nothing. Bulk operations work in
+64 KiB chunks, so, as with cancellation, chunks completed before the failure
+remain written. `memory.grow` itself still returns -1 when the configured
+budgets or the page table cannot accommodate the new size.
+
 Obtain a `CancellationToken` from the store and send its clone to another host
 thread. `cancel()` requests cancellation at guest instruction boundaries;
 `reset()` permits later calls. Cancellation is a resource outcome and cleans

@@ -160,8 +160,26 @@ impl LinearBytes {
         Ok(self.pages[index].as_deref_mut().expect("allocated above"))
     }
 
-    /// Copies `data` to `at`. On allocation failure, bytes before the page
-    /// that could not be allocated have been written.
+    /// Allocates every page that a write of `data` at `at` will store
+    /// nonzero bytes into, so that the write itself cannot fail half-way.
+    fn allocate_for(&mut self, at: usize, data: &[u8]) -> Result<(), AllocationFailed> {
+        let mut at = at;
+        let mut data = data;
+        while !data.is_empty() {
+            let amount = data.len().min(PAGE - (at & MASK));
+            let index = at >> PAGE_BITS;
+            if self.pages[index].is_none() && data[..amount].iter().any(|&byte| byte != 0) {
+                self.page_mut(index)?;
+            }
+            data = &data[amount..];
+            at += amount;
+        }
+        Ok(())
+    }
+
+    /// Copies `data` to `at`. Either every byte is written or, when a page
+    /// cannot be allocated, none is. Zero bytes for a page that was never
+    /// written are not stored, so the page stays unallocated.
     #[inline]
     pub(crate) fn write(&mut self, at: usize, data: &[u8]) -> Result<(), AllocationFailed> {
         if data.is_empty() {
@@ -169,41 +187,66 @@ impl LinearBytes {
         }
         let offset = at & MASK;
         if offset + data.len() <= PAGE {
-            self.page_mut(at >> PAGE_BITS)?[offset..offset + data.len()].copy_from_slice(data);
+            let index = at >> PAGE_BITS;
+            if self.pages[index].is_none() && data.iter().all(|&byte| byte == 0) {
+                return Ok(());
+            }
+            self.page_mut(index)?[offset..offset + data.len()].copy_from_slice(data);
             Ok(())
         } else {
-            self.write_spanning(at, data)
+            self.allocate_for(at, data)?;
+            self.write_allocated(at, data);
+            Ok(())
         }
     }
 
-    fn write_spanning(&mut self, mut at: usize, mut data: &[u8]) -> Result<(), AllocationFailed> {
+    /// Stores `data` at `at` into pages that `allocate_for` prepared: pieces
+    /// for unallocated pages are all zero and are skipped.
+    fn write_allocated(&mut self, mut at: usize, mut data: &[u8]) {
         while !data.is_empty() {
             let offset = at & MASK;
             let amount = data.len().min(PAGE - offset);
-            self.page_mut(at >> PAGE_BITS)?[offset..offset + amount].copy_from_slice(&data[..amount]);
+            if let Some(page) = self.pages[at >> PAGE_BITS].as_deref_mut() {
+                page[offset..offset + amount].copy_from_slice(&data[..amount]);
+            }
             data = &data[amount..];
             at += amount;
         }
-        Ok(())
     }
 
-    /// Sets `count` bytes at `at` to `byte`. Zeroing a page that was never
-    /// written leaves it unallocated.
-    pub(crate) fn fill(&mut self, mut at: usize, mut count: usize, byte: u8) -> Result<(), AllocationFailed> {
-        while count > 0 {
-            let offset = at & MASK;
-            let amount = count.min(PAGE - offset);
-            let index = at >> PAGE_BITS;
-            if byte != 0 || self.pages[index].is_some() {
-                self.page_mut(index)?[offset..offset + amount].fill(byte);
+    /// Sets `count` bytes at `at` to `byte`, allocating every page it needs
+    /// before changing any. Zeroing a page that was never written leaves it
+    /// unallocated.
+    pub(crate) fn fill(&mut self, at: usize, count: usize, byte: u8) -> Result<(), AllocationFailed> {
+        let pieces = |mut at: usize, mut count: usize| {
+            std::iter::from_fn(move || {
+                (count > 0).then(|| {
+                    let offset = at & MASK;
+                    let amount = count.min(PAGE - offset);
+                    let piece = (at >> PAGE_BITS, offset, amount);
+                    count -= amount;
+                    at += amount;
+                    piece
+                })
+            })
+        };
+        if byte != 0 {
+            for (index, _, _) in pieces(at, count) {
+                if self.pages[index].is_none() {
+                    self.page_mut(index)?;
+                }
             }
-            count -= amount;
-            at += amount;
+        }
+        for (index, offset, amount) in pieces(at, count) {
+            if let Some(page) = self.pages[index].as_deref_mut() {
+                page[offset..offset + amount].fill(byte);
+            }
         }
         Ok(())
     }
 
-    /// Copies `count` bytes from `source` to `destination`, as `memmove`.
+    /// Copies `count` bytes from `source` to `destination`, as `memmove`, all
+    /// or nothing. Zero bytes copied onto never-written pages are not stored.
     /// `scratch` is reused between calls to avoid allocating.
     pub(crate) fn copy_within(
         &mut self,
@@ -218,12 +261,12 @@ impl LinearBytes {
         self.write(destination, scratch)
     }
 
-    /// The written pages, as their byte offsets and contents.
+    /// The written pages, as their byte offsets and the contents within the
+    /// memory's length (a grown last page may hold more).
     pub(crate) fn written_pages(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        self.pages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, page)| page.as_deref().map(|bytes| (index * PAGE, bytes)))
+        self.pages.iter().enumerate().filter_map(|(index, page)| {
+            page.as_deref().map(|bytes| (index * PAGE, &bytes[..bytes.len().min(self.len - index * PAGE)]))
+        })
     }
 
     /// Releases the storage; the memory becomes empty.
@@ -413,6 +456,31 @@ mod tests {
         assert!(memory.grow_to(4));
         assert!(memory.grow_to(6));
         assert_eq!(bytes(&memory, 0, 6), [5, 5, 5, 0, 0, 0]);
+    }
+
+    #[test]
+    fn written_pages_stop_at_the_length_after_growth() {
+        let mut memory = LinearBytes::zeroed(4).unwrap();
+        memory.write(0, &[1, 2, 3, 4]).unwrap();
+        assert!(memory.grow_to(5));
+        let pages: Vec<(usize, Vec<u8>)> = memory.written_pages().map(|(at, page)| (at, page.to_vec())).collect();
+        assert_eq!(pages, [(0, vec![1, 2, 3, 4, 0])]);
+    }
+
+    #[test]
+    fn zero_writes_and_copies_keep_unwritten_pages_unallocated() {
+        let mut memory = LinearBytes::zeroed(4 * PAGE).unwrap();
+        let mut scratch = Vec::new();
+        memory.write(PAGE / 2, &vec![0; 2 * PAGE]).unwrap();
+        memory.copy_within(0, 2 * PAGE, 2 * PAGE, &mut scratch).unwrap();
+        assert_eq!(memory.allocated_pages(), 0);
+        memory.write(10, &[3]).unwrap();
+        memory.copy_within(0, 2 * PAGE, PAGE, &mut scratch).unwrap();
+        assert_eq!(memory.allocated_pages(), 2);
+        assert_eq!(bytes(&memory, 2 * PAGE + 10, 1), [3]);
+        // Zeros over a written page are stored.
+        memory.write(2 * PAGE + 10, &[0]).unwrap();
+        assert_eq!(bytes(&memory, 2 * PAGE + 10, 1), [0]);
     }
 
     #[test]

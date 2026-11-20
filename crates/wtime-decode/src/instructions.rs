@@ -125,7 +125,8 @@ pub(crate) fn expression(r: &mut Reader) -> Result<Vec<Instruction>> {
 /// A function body: the reader holds just the body, and instructions average
 /// about three bytes, so reserving for that avoids most regrowth copies.
 pub(crate) fn body_expression(r: &mut Reader) -> Result<Vec<Instruction>> {
-    let estimate = r.remaining() / 3;
+    // Capped so that a huge body cannot reserve far ahead of decoding.
+    let estimate = (r.remaining() / 3).min(1 << 16);
     let mut instructions = expression_with_capacity(r, estimate)?;
     // A body of few, long instructions (one large br_table) would otherwise
     // keep the estimate reserved for the module's lifetime.
