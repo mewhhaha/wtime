@@ -12,8 +12,9 @@
 //! by at most a factor of two when it grows), so the storage allocated stays
 //! within twice the memory's accounted size, even for tiny memories with
 //! custom page sizes. The page table itself, 16 bytes per 64 KiB, is reserved
-//! fallibly but not counted in memory budgets. Every allocation is fallible: running out
-//! of host memory is reported as `AllocationFailed`, never an abort.
+//! fallibly but not counted in memory budgets. Every page and page-table allocation is fallible: running
+//! out of host memory there is reported as `AllocationFailed`, not an abort.
+//! (Small bookkeeping allocations elsewhere in the runtime remain infallible.)
 //!
 //! Callers check bounds against `len` before every access, as for the former
 //! contiguous backing; out-of-range offsets here panic rather than trap.

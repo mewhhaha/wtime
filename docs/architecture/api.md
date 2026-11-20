@@ -2,7 +2,10 @@
 
 The four production libraries have this dependency order: types → decode →
 validate → runtime. The runtime uses decoder definitions re-exported by the
-validator. Only validation can construct `ValidatedModule`; its decoded module
+validator. Decoded `Instruction`s are 32 bytes and carry no source span: a
+`FunctionBody` keeps the absolute start offset of each instruction in
+`offsets`, and the rare large immediates (`try_table`, `resume`) are boxed.
+Only validation can construct `ValidatedModule`; its decoded module
 is exposed through an immutable reference. `Module` is immutable and reusable.
 
 The initial concrete API is:

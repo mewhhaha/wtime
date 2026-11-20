@@ -43,6 +43,9 @@ two-object store budget, proving the failed construction left no partially
 registered memory. It then writes one byte to each page of the 512 MiB memory:
 once the address space is exhausted the write returns the same resource error
 instead of aborting, and the bytes already written remain readable. The
+guarantee covers linear-memory pages and page tables; other small runtime
+allocations (argument vectors, frames, error messages) still use infallible
+allocation and can abort the process at the exact point of exhaustion. The
 report includes the actual worker exit/output and its executable fingerprint.
 
 Rooting includes GC, external, function and exception references through
