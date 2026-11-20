@@ -145,6 +145,54 @@ impl Memory {
         }
     }
 
+    // Typed accesses, as for `Memory32`: integers, not byte arrays, cross
+    // the Result.
+    #[inline(always)]
+    fn get<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
+        let at = self.at(address, offset, N)?;
+        let mut out = [0; N];
+        out.copy_from_slice(&self.bytes[at..at + N]);
+        Ok(out)
+    }
+    #[inline(always)]
+    fn put<const N: usize>(&mut self, address: u64, offset: u64, value: [u8; N]) -> R<()> {
+        let at = self.at(address, offset, N)?;
+        self.bytes[at..at + N].copy_from_slice(&value);
+        Ok(())
+    }
+    #[inline(always)]
+    pub fn l8(&self, address: u64, offset: u64) -> R<u8> {
+        Ok(self.get::<1>(address, offset)?[0])
+    }
+    #[inline(always)]
+    pub fn l16(&self, address: u64, offset: u64) -> R<u16> {
+        Ok(u16::from_le_bytes(self.get(address, offset)?))
+    }
+    #[inline(always)]
+    pub fn l32(&self, address: u64, offset: u64) -> R<u32> {
+        Ok(u32::from_le_bytes(self.get(address, offset)?))
+    }
+    #[inline(always)]
+    pub fn l64(&self, address: u64, offset: u64) -> R<u64> {
+        Ok(u64::from_le_bytes(self.get(address, offset)?))
+    }
+    #[inline(always)]
+    pub fn s8(&mut self, address: u64, offset: u64, value: u8) -> R<()> {
+        self.put(address, offset, [value])
+    }
+    #[inline(always)]
+    pub fn s16(&mut self, address: u64, offset: u64, value: u16) -> R<()> {
+        self.put(address, offset, value.to_le_bytes())
+    }
+    #[inline(always)]
+    pub fn s32(&mut self, address: u64, offset: u64, value: u32) -> R<()> {
+        self.put(address, offset, value.to_le_bytes())
+    }
+    #[inline(always)]
+    pub fn s64(&mut self, address: u64, offset: u64, value: u64) -> R<()> {
+        self.put(address, offset, value.to_le_bytes())
+    }
+
     /// The size in pages.
     pub fn size(&self) -> u64 {
         self.bytes.len() as u64 / PAGE

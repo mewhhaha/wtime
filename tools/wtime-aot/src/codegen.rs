@@ -1085,10 +1085,11 @@ impl<'a> Function<'a> {
         };
         let loaded = if !self.module.memory64 && n == 16 {
             format!("u128::from_le_bytes(self.mem.load32::<16>({a} as u32, {offset})?)")
-        } else if self.module.memory64 {
-            let unsigned = ["", "u8", "u16", "", "u32", "", "", "", "u64"].get(n).copied().unwrap_or("u128");
+        } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
-            format!("{unsigned}::from_le_bytes(self.mem.load::<{n}>({address}, {offset})?)")
+            format!("u128::from_le_bytes(self.mem.load::<16>({address}, {offset})?)")
+        } else if self.module.memory64 {
+            format!("self.mem.l{}({}, {offset})?", n * 8, self.address(&a))
         } else {
             format!("self.mem.l{}({a} as u32, {offset})?", n * 8)
         };
@@ -1113,9 +1114,11 @@ impl<'a> Function<'a> {
         };
         let store = if !self.module.memory64 && n == 16 {
             format!("self.mem.store32::<16>({a} as u32, {offset}, ({value}).to_le_bytes())?;")
-        } else if self.module.memory64 {
+        } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
-            format!("self.mem.store::<{n}>({address}, {offset}, ({value}).to_le_bytes())?;")
+            format!("self.mem.store::<16>({address}, {offset}, ({value}).to_le_bytes())?;")
+        } else if self.module.memory64 {
+            format!("self.mem.s{}({}, {offset}, {value})?;", n * 8, self.address(&a))
         } else {
             format!("self.mem.s{}({a} as u32, {offset}, {value})?;", n * 8)
         };
