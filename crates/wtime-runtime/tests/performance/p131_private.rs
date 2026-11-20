@@ -150,7 +150,7 @@ fn p131_compare(bytes: &[u8], body: usize, args: &[Value]) -> P131Counts {
         match source.opcode {
             2 | 3 => {
                 let (params, returns) = crate::execution::arity(&source.immediate, &module);
-                let (end, _) = module.data.control[body][pc].unwrap();
+                let (end, _) = module.data.control.get(body, pc).unwrap();
                 labels.push((
                     pc + 1,
                     end,
@@ -247,7 +247,7 @@ fn p131_invalid_barriers_and_budgets_decline() {
     let mut malformed = engine.compile(P131_LOOP).unwrap();
     std::sync::Arc::get_mut(&mut malformed.data)
         .unwrap()
-        .control[1][2] = Some((0, None));
+        .control.set(1, 2, Some((0, None)));
     let mut budget = Budget::new(100_000, 1024 * 1024);
     assert!(LoweredFunction::lower_prefix(&malformed, 1, &mut budget).is_err());
     assert_eq!(budget.remaining(), (100_000, 1024 * 1024));

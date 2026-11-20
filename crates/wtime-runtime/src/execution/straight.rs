@@ -116,7 +116,7 @@ impl Store {
                 0x02..=0x04 => {
                     let (a, r) = arity(&op.immediate, module);
                     let cond = if opcode == 4 { address(pop(stack)?)? != 0 } else { true };
-                    let (end, other) = module.data.control[frame.function.body][pc]
+                    let (end, other) = module.data.control.get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack.len().checked_sub(a).ok_or_else(|| trap("block stack underflow"))?;
                     frame.labels.push(Label {

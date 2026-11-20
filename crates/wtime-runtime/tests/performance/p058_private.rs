@@ -320,7 +320,7 @@ fn p058_declines_invalid_joins_and_preserves_shared_budgets() {
     );
     assert_eq!(stack, vec![NumericType::I32, NumericType::I64]);
     let mut corrupt = engine.compile(MULTIVALUE).unwrap();
-    std::sync::Arc::get_mut(&mut corrupt.data).unwrap().control[0][3] = Some((0, None));
+    std::sync::Arc::get_mut(&mut corrupt.data).unwrap().control.set(0, 3, Some((0, None)));
     let mut budget = Budget::new(100_000, 1024 * 1024);
     assert!(matches!(
         LoweredFunction::lower(&corrupt, 0, &mut budget),

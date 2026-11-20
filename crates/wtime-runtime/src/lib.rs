@@ -211,7 +211,48 @@ impl Engine {
     }
 }
 
-type ControlMap = Vec<Vec<Option<(usize, Option<usize>)>>>;
+/// For each function body and instruction: where a block, loop, if,
+/// try_table or try that starts there ends, and where its else, catch or
+/// delegate is. Stored as two u32s per instruction (8 bytes, not the 24 of
+/// `Option<(usize, Option<usize>)>`): a large module holds millions.
+#[derive(Debug)]
+struct ControlMap {
+    bodies: Vec<Box<[ControlEntry]>>,
+}
+#[derive(Clone, Copy, Debug)]
+struct ControlEntry {
+    end: u32,
+    other: u32,
+}
+impl ControlEntry {
+    const NONE: u32 = u32::MAX;
+    const EMPTY: Self = Self { end: Self::NONE, other: Self::NONE };
+}
+impl ControlMap {
+    /// The end and the else/catch position of the block starting at `pc` of
+    /// `body`; `None` when no block starts there.
+    #[inline]
+    fn get(&self, body: usize, pc: usize) -> Option<(usize, Option<usize>)> {
+        let entry = self.bodies.get(body)?.get(pc)?;
+        (entry.end != ControlEntry::NONE)
+            .then(|| (entry.end as usize, (entry.other != ControlEntry::NONE).then_some(entry.other as usize)))
+    }
+    fn bytes(&self) -> usize {
+        self.bodies.iter().map(|body| std::mem::size_of_val::<[ControlEntry]>(body)).sum()
+    }
+    /// Test support: overwrite one entry, to corrupt metadata on purpose.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn set(&mut self, body: usize, pc: usize, value: Option<(usize, Option<usize>)>) {
+        self.bodies[body][pc] = match value {
+            Some((end, other)) => ControlEntry {
+                end: end as u32,
+                other: other.map_or(ControlEntry::NONE, |other| other as u32),
+            },
+            None => ControlEntry::EMPTY,
+        };
+    }
+}
 #[derive(Debug)]
 struct ModuleData {
     engine: u64,
@@ -1332,9 +1373,13 @@ impl Store {
 }
 
 fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
-    let mut all = vec![];
+    let mut bodies = vec![];
     for body in &module.decoded().code {
-        let mut map = vec![None; body.instructions.len()];
+        // Positions must fit below the u32 sentinel.
+        if body.instructions.len() >= ControlEntry::NONE as usize {
+            return Err(err(ErrorKind::ResourceLimit, "function body too large for control map"));
+        }
+        let mut map = vec![ControlEntry::EMPTY; body.instructions.len()];
         let mut open: Vec<(usize, Option<usize>)> = vec![];
         for (pc, i) in body.instructions.iter().enumerate() {
             match i.opcode {
@@ -1346,7 +1391,10 @@ fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
                 }
                 0xb => {
                     if let Some((start, other)) = open.pop() {
-                        map[start] = Some((pc, other))
+                        map[start] = ControlEntry {
+                            end: pc as u32,
+                            other: other.map_or(ControlEntry::NONE, |other| other as u32),
+                        }
                     }
                 }
                 _ => {}
@@ -1355,9 +1403,9 @@ fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
         if !open.is_empty() {
             return Err(err(ErrorKind::Validation, "unclosed control block"));
         }
-        all.push(map)
+        bodies.push(map.into_boxed_slice())
     }
-    Ok(all)
+    Ok(ControlMap { bodies })
 }
 
 impl Store {
@@ -1798,11 +1846,7 @@ impl Module {
     }
     /// Bytes used by precomputed control destinations, excluding shared validated code.
     pub fn lowered_control_bytes(&self) -> usize {
-        self.data
-            .control
-            .iter()
-            .map(|body| body.capacity() * std::mem::size_of::<Option<(usize, Option<usize>)>>())
-            .sum()
+        self.data.control.bytes()
     }
     /// Retained optional function hints, shared once across Module clones.
     pub fn function_plan_bytes(&self) -> usize {
@@ -2274,8 +2318,7 @@ mod lowering_and_bulk_acceptance {
             m.data.inner.decoded().code[0].instructions.as_ptr(),
             clone.data.inner.decoded().code[0].instructions.as_ptr()
         ));
-        let expected =
-            m.data.control[0].capacity() * std::mem::size_of::<Option<(usize, Option<usize>)>>();
+        let expected = m.data.control.bodies[0].len() * std::mem::size_of::<ControlEntry>();
         assert_eq!(m.lowered_control_bytes(), expected);
         assert!(expected > 0);
         assert_eq!(m.source_bytes(), bytes.len());
@@ -2324,8 +2367,8 @@ mod performance_module_ownership {
         let clone = m.clone();
         assert!(Arc::ptr_eq(&m.data, &clone.data));
         assert!(std::ptr::eq(
-            m.data.control.as_ptr(),
-            clone.data.control.as_ptr()
+            m.data.control.bodies.as_ptr(),
+            clone.data.control.bodies.as_ptr()
         ));
         assert!(std::ptr::eq(
             m.data.canonical.as_ptr(),

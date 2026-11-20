@@ -114,7 +114,7 @@ impl Store {
                         return Err(trap("try_table immediate"));
                     };
                     let (a, r) = arity(block, &module);
-                    let (end, _) = module.data.control[frame.function.body][pc]
+                    let (end, _) = module.data.control.get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
                         .len()
@@ -174,7 +174,7 @@ impl Store {
                     } else {
                         true
                     };
-                    let (end, other) = module.data.control[frame.function.body][pc]
+                    let (end, other) = module.data.control.get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
                         .len()

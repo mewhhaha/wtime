@@ -97,7 +97,7 @@ impl PreparedEffect {
                 cancellation_checkpoint: true,
                 materialization_point: effect.materialize,
                 transient_stack_peak: None,
-                control_destinations: module.data.control[body][pc],
+                control_destinations: module.data.control.get(body, pc),
             });
         }
         let completed = Self { source };
@@ -122,7 +122,7 @@ impl PreparedEffect {
                 || event.fuel_charge != 1
                 || !event.cancellation_checkpoint
                 || (expected.materialize && !event.materialization_point)
-                || event.control_destinations != module.data.control[body][pc]
+                || event.control_destinations != module.data.control.get(body, pc)
             {
                 return false;
             }

@@ -73,7 +73,7 @@ impl Module {
     ) -> Option<(usize, Option<usize>)> {
         let p = self.data.plans.as_ref()?.functions.get(body)?;
         let pc = p.labels.get(label)?.source_pc;
-        *self.data.control.get(body)?.get(pc)?
+        self.data.control.get(body, pc)
     }
 }
 #[derive(Debug)]

@@ -93,8 +93,7 @@ impl SourceMap {
             match instruction.opcode {
                 0 => {},
                 2..=4 => {
-                    let (end, other) = module.data.control.get(function.body)
-                        .and_then(|control| control.get(pc)).copied().flatten().ok_or(Declined::Verification)?;
+                    let (end, other) = module.data.control.get(function.body, pc).ok_or(Declined::Verification)?;
                     if end >= terminal || end < pc || other.is_some_and(|other| other <= pc || other >= end) {
                         return Err(Declined::Verification);
                     }

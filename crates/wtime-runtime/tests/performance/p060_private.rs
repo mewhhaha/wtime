@@ -97,7 +97,7 @@ fn p060_invalid_or_oversized_control_declines() {
         .unwrap();
     std::sync::Arc::get_mut(&mut malformed.data)
         .unwrap()
-        .control[0][0] = Some((0, None));
+        .control.set(0, 0, Some((0, None)));
     assert_eq!(PreparedModule::prepare(&malformed).unwrap().count(), 0);
     let mut excessive = Engine::new(Config::default())
         .unwrap()

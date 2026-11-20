@@ -58,7 +58,7 @@ impl ControlPlans {
         for (pc, instruction) in code.instructions.iter().enumerate() {
             let record = if matches!(instruction.opcode, 2..=4) {
                 let (params, results) = arities(&instruction.immediate, module, allowed, &mut remaining_work)?;
-                let (end, other) = module.data.control.get(function.body).and_then(|entries| entries.get(pc)).copied().flatten().ok_or(Declined::Plan)?;
+                let (end, other) = module.data.control.get(function.body, pc).ok_or(Declined::Plan)?;
                 if end < pc || end >= code.instructions.len() || other.is_some_and(|other| other <= pc || other >= end) { return Err(Declined::Plan); }
                 Some(BlockRecord { params, results, end: u32::try_from(end).map_err(|_| Declined::Budget)?,
                     other: match other { Some(other) => u32::try_from(other).map_err(|_| Declined::Budget)?, None => NO_ELSE } })

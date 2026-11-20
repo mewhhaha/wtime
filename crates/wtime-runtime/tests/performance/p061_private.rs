@@ -36,6 +36,6 @@ fn p061_preparation_and_activation_guards_remain_transactional() {
         .unwrap()
         .compile(bytes)
         .unwrap();
-    std::sync::Arc::get_mut(&mut corrupt.data).unwrap().control[0][7] = Some((0, None));
+    std::sync::Arc::get_mut(&mut corrupt.data).unwrap().control.set(0, 7, Some((0, None)));
     assert_eq!(PreparedModule::prepare(&corrupt).unwrap().count(), 0);
 }
