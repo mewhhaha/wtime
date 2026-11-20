@@ -50,6 +50,17 @@ fn arity(i: &Immediate, m: &Module) -> (usize, usize) {
         _ => (0, 0),
     }
 }
+/// Keeps a returned frame's locals and label stack, emptied, for a later
+/// call, unless enough are kept or they are large.
+#[inline]
+fn retire(spare: &mut Vec<(Vec<Value>, Vec<Label>)>, frame: Frame) {
+    if spare.len() < 16 && frame.locals.capacity() <= 1024 && frame.labels.capacity() <= 256 {
+        let Frame { mut locals, mut labels, .. } = frame;
+        locals.clear();
+        labels.clear();
+        spare.push((locals, labels));
+    }
+}
 #[inline(always)]
 pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
     if s.len() < n || height > s.len() - n {
@@ -65,6 +76,11 @@ pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
 }
 impl Store {
     pub(super) fn frame(&self, f: Func, args: Vec<Value>, base: usize) -> Result<Frame> {
+        self.frame_reusing(f, args, Vec::new(), base)
+    }
+    /// `frame`, building the label stack in `labels` (empty), whose capacity
+    /// a returned frame left.
+    pub(super) fn frame_reusing(&self, f: Func, args: Vec<Value>, labels: Vec<Label>, base: usize) -> Result<Frame> {
         let k = self.check(f.0, &self.funcs)?;
         let fun = self.funcs[k].clone();
         for value in &args {
@@ -90,17 +106,10 @@ impl Store {
         self.perf.record(perf::Event::Frame, 1);
         let mut locals = args;
         let module = &self.instances[fun.instance].module;
-        let planned_layout = module.function_layout(fun.body);
-        let local_types = planned_layout
-            .as_ref()
-            .map_or(body.locals.as_slice(), |p| p.locals);
         // Zero values in runs of one type, reserved at once.
-        locals.reserve_exact(local_types.len());
-        let mut rest = local_types;
-        while let Some(&first) = rest.first() {
-            let run = rest.iter().take_while(|t| **t == first).count();
-            locals.resize(locals.len() + run, Value::zero(first));
-            rest = &rest[run..];
+        locals.reserve_exact(body.locals.len());
+        for &(zero, n) in module.data.local_runs[fun.body].iter() {
+            locals.resize(locals.len() + n as usize, zero);
         }
         #[cfg(feature = "compact-executor")]
         let compact = self.engine.policy == ExecutionPolicy::Compact
@@ -112,7 +121,7 @@ impl Store {
             self.perf.record(perf::Event::CompactFallbackFrame, 1);
         }
         #[allow(unused_mut)]
-        let mut labels = vec![];
+        let mut labels = labels;
         #[cfg(feature = "register-executor")]
         let register = if self.engine.policy == ExecutionPolicy::Register { register::activate_entry(self, fun.instance, fun.body, &locals, &mut labels) } else { None };
         #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
@@ -190,6 +199,9 @@ impl Store {
         self.perf
             .record(perf::Event::Arguments, u64::from(!args.is_empty()));
         let mut frames = vec![self.frame(f, args.to_vec(), 0)?];
+        // Locals and label stacks of returned frames, reused by later calls
+        // so that a call does not allocate them again.
+        let mut spare: Vec<(Vec<Value>, Vec<Label>)> = Vec::new();
         let mut stack = vec![];
         let mut fuel = self.engine.config.limits.fuel;
         let mut prompts = Vec::new();
@@ -551,7 +563,9 @@ impl Store {
                         #[cfg(feature = "performance-counters")]
                         self.perf.record(perf::Event::Branch, u64::from(n != 0));
                         keep(&mut stack, base, n)?;
-                        frames.pop();
+                        if let Some(f) = frames.pop() {
+                            retire(&mut spare, f)
+                        }
                         if frames.is_empty() {
                             for value in &stack {
                                 self.validate_value(*value)?;
@@ -580,7 +594,9 @@ impl Store {
                         #[cfg(feature = "performance-counters")]
                         self.perf.record(perf::Event::Branch, u64::from(n != 0));
                         keep(&mut stack, frame.base, n)?;
-                        frames.pop();
+                        if let Some(f) = frames.pop() {
+                            retire(&mut spare, f)
+                        }
                         if frames.is_empty() {
                             for value in &stack {
                                 self.validate_value(*value)?;
@@ -612,7 +628,9 @@ impl Store {
                         u64::from(frame.function.ty.results.len() != 0),
                     );
                     keep(&mut stack, frame.base, frame.function.ty.results.len())?;
-                    frames.pop();
+                    if let Some(f) = frames.pop() {
+                        retire(&mut spare, f)
+                    }
                     if frames.is_empty() {
                         for value in &stack {
                             self.validate_value(*value)?;
@@ -738,7 +756,8 @@ impl Store {
                         0
                     };
                     let start = stack.len() - n;
-                    let mut args = Vec::with_capacity(n + declared);
+                    let (mut args, labels) = spare.pop().unwrap_or_default();
+                    args.reserve_exact(n + declared);
                     args.extend_from_slice(&stack[start..]);
                     stack.truncate(start);
                     if let Some(host) = self.funcs[fun.0.index].host.clone() {
@@ -808,7 +827,7 @@ impl Store {
                     }
                     let tail = matches!(op.opcode, 0x12 | 0x13 | 0x15);
                     let base = if tail { frame.base } else { stack.len() };
-                    let next = self.frame(fun, args, base)?;
+                    let next = self.frame_reusing(fun, args, labels, base)?;
                     if tail {
                         stack.truncate(base);
                         frames.pop();

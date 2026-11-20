@@ -169,6 +169,24 @@ impl Engine {
         let lowered = (0..validated.decoded().code.len()).map(|_| std::sync::OnceLock::new()).collect();
         #[cfg(not(feature = "execution-reference"))]
         let heat = (0..validated.decoded().code.len()).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+        // Each body's declared locals as runs of one type, with the type's
+        // zero, so that a call zeroes them without inspecting their types.
+        let local_runs = validated
+            .decoded()
+            .code
+            .iter()
+            .map(|body| {
+                let mut runs: Vec<(Value, u32)> = Vec::new();
+                for &t in &body.locals {
+                    let value = Value::zero(t);
+                    match runs.last_mut() {
+                        Some((zero, n)) if *zero == value && *n < u32::MAX => *n += 1,
+                        _ => runs.push((value, 1)),
+                    }
+                }
+                runs.into_boxed_slice()
+            })
+            .collect();
         let plans = execution::plan::FunctionPlans::prepare(&validated);
         let module = Module {
             data: Arc::new(ModuleData {
@@ -181,6 +199,7 @@ impl Engine {
                 #[cfg(feature = "register-executor")]
                 register_cache: None,
                 control,
+                local_runs,
                 #[cfg(not(feature = "execution-reference"))]
                 lowered,
                 #[cfg(not(feature = "execution-reference"))]
@@ -274,6 +293,8 @@ struct ModuleData {
     #[cfg(feature = "register-executor")]
     register_cache: Option<Arc<execution::register::Cache>>,
     control: ControlMap,
+    /// Each body's declared locals as (zero value, count) runs of one type.
+    local_runs: Box<[LocalRuns]>,
     /// Lowered bodies for straight-line runs, built on first use and shared
     /// by every store using the module.
     #[cfg(not(feature = "execution-reference"))]
@@ -288,6 +309,8 @@ struct ModuleData {
     canonical: Vec<CanonicalTypeId>,
     inner: ValidatedModule,
 }
+/// A body's declared locals as (zero value, count) runs of one type.
+type LocalRuns = Box<[(Value, u32)]>;
 /// An immutable Engine-bound executable payload. Clones retain the same storage.
 #[derive(Clone, Debug)]
 pub struct Module {
