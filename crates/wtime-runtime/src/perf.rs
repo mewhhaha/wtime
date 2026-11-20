@@ -161,6 +161,9 @@ impl Counters {
         self.0.set(s);
     }
 }
+/// Heap bytes a clone of the immediate would copy. Since instructions became
+/// 32 bytes (99e785a), `try_table` and `resume` count their boxed payload
+/// struct as well, so their values are not comparable with earlier records.
 pub(super) fn immediate_copy_bytes(i: &Immediate) -> u64 {
     let bytes = match i {
         Immediate::BrTable(v, _) => v.len().saturating_mul(std::mem::size_of::<u32>()),

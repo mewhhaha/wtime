@@ -143,7 +143,9 @@ pub(crate) fn body_expression(r: &mut Reader) -> Result<(Vec<Instruction>, Vec<u
     let _ = offsets.try_reserve_exact(estimate);
     let mut depth = 1usize;
     while depth > 0 {
-        let offset = u32::try_from(r.offset()).map_err(|_| r.error("module too large for instruction offsets"))?;
+        // An implementation limit, not a malformed module.
+        let offset = u32::try_from(r.offset())
+            .map_err(|_| Error::new(ErrorKind::ResourceLimit, "module too large for u32 instruction offsets"))?;
         instructions.push(read_instruction(r, &mut depth)?);
         offsets.push(offset);
     }
