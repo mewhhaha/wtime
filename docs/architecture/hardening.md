@@ -34,10 +34,15 @@ compatible installed nightly and is not silently counted as run.
 
 The allocator test is distinct from a configured budget rejection. Build
 `wtime-allocation-check` and run `python3 tools/checks/allocation_failure.py`.
-A process address-space limit of 128 MiB forces a permitted 512 MiB request to
-fail in `try_reserve_exact`; the worker checks the resource error and then
-creates and accesses a one-page memory under a one-object store budget.
-This proves the failed construction left no partially registered memory. The
+Unshared linear memory is stored as 64 KiB pages allocated on first write, so
+the worker exercises both allocation points under a process address-space
+limit of 128 MiB. Creating a permitted 1 TiB memory64 memory fails in the
+fallible reservation of its 256 MiB page table; the worker checks the resource
+error, then creates and accesses a one-page memory and a 512 MiB memory under a
+two-object store budget, proving the failed construction left no partially
+registered memory. It then writes one byte to each page of the 512 MiB memory:
+once the address space is exhausted the write returns the same resource error
+instead of aborting, and the bytes already written remain readable. The
 report includes the actual worker exit/output and its executable fingerprint.
 
 Rooting includes GC, external, function and exception references through

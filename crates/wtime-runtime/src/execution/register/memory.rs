@@ -61,7 +61,7 @@ pub(super) fn access(
         .ok_or_else(|| trap("address overflow"))?;
     let range = range(offset, width, memory.bytes.len())?;
     if store {
-        memory.bytes.write(range.start, &value.to_le_bytes()[..width]);
+        memory.bytes.write(range.start, &value.to_le_bytes()[..width]).map_err(crate::allocation_failed)?;
         Ok(None)
     } else {
         let mut buffer = [0; 8];

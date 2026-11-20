@@ -126,7 +126,13 @@ pub(crate) fn expression(r: &mut Reader) -> Result<Vec<Instruction>> {
 /// about three bytes, so reserving for that avoids most regrowth copies.
 pub(crate) fn body_expression(r: &mut Reader) -> Result<Vec<Instruction>> {
     let estimate = r.remaining() / 3;
-    expression_with_capacity(r, estimate)
+    let mut instructions = expression_with_capacity(r, estimate)?;
+    // A body of few, long instructions (one large br_table) would otherwise
+    // keep the estimate reserved for the module's lifetime.
+    if instructions.capacity() > instructions.len().saturating_mul(2).max(16) {
+        instructions.shrink_to_fit();
+    }
+    Ok(instructions)
 }
 fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instruction>> {
     let mut out = Vec::new();

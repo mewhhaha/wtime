@@ -397,10 +397,13 @@ impl Mem {
             m.write(off, b)
         } else {
             let r = range(off, b.len(), self.bytes.len())?;
-            self.bytes.write(r.start, b);
-            Ok(())
+            self.bytes.write(r.start, b).map_err(allocation_failed)
         }
     }
+}
+/// Host storage for a linear memory could not be allocated.
+fn allocation_failed(_: linear::AllocationFailed) -> Error {
+    err(ErrorKind::ResourceLimit, "memory allocation failed")
 }
 struct Tab {
     instance: Option<usize>,

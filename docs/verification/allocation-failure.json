@@ -1,16 +1,16 @@
 {
   "passed": true,
   "source_stable": true,
-  "source_sha256": "e5a3a4eeba54a547ec8102acb6d03bb823de92643b7b34fc435817fcf0a3c75f",
+  "source_sha256": "f4e3a51753753fa838614dc9bc983cd41edee2f75fdfa92890e4996c457932a4",
   "architecture": "x86_64",
   "command": [
-    "/workspace/wtime/target/debug/wtime-allocation-check"
+    "/home/user/wtime/target/debug/wtime-allocation-check"
   ],
-  "worker_sha256": "71bd9df730607d11e4c90d869e823c27e8628acb3c07a2e0780db438a70ae6de",
+  "worker_sha256": "b8cd59d32688034492eaa81cb077a45d5e82988f95bf05f78ebab83b93f64685",
   "address_space_bytes": 134217728,
   "requested_allocation_bytes": 536870912,
   "executed": 1,
   "exit_code": 0,
-  "stdout": "{\"allocator_failed\":true,\"recovery_passed\":true,\"executed\":1}\n",
+  "stdout": "{\"allocator_failed\":true,\"page_allocation_failed\":true,\"pages_written\":1991,\"recovery_passed\":true,\"executed\":1}\n",
   "stderr": ""
 }

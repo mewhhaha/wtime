@@ -194,6 +194,10 @@ impl Store {
         let mut module_stale = true;
         #[cfg(not(feature = "execution-reference"))]
         let mut precharged = false;
+        // A straight-line run that hands an instruction back has already
+        // counted it in the diagnostic counters.
+        #[cfg(all(not(feature = "execution-reference"), any(feature = "performance-counters", feature = "opcode-coverage")))]
+        let mut counted = false;
         loop {
             #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
             register_capacity_scope.observe(&frames);
@@ -358,12 +362,22 @@ impl Store {
                 let plain = true;
                 #[cfg(feature = "register-executor")]
                 let plain = plain && frame.register.is_none();
-                if plain {
+                // An instruction a run handed back is not a straight-line one.
+                if plain && charge {
                     match self.run_straight(inst_id, frame, module, ops, &mut stack, &mut fuel)? {
-                        straight::Straight::Declined => {}
+                        straight::Straight::Declined => {
+                            #[cfg(any(feature = "performance-counters", feature = "opcode-coverage"))]
+                            {
+                                counted = true;
+                            }
+                        }
                         straight::Straight::Ran => continue,
                         straight::Straight::Charged => {
                             precharged = true;
+                            #[cfg(any(feature = "performance-counters", feature = "opcode-coverage"))]
+                            {
+                                counted = true;
+                            }
                             continue;
                         }
                     }
@@ -376,8 +390,12 @@ impl Store {
             let op = ops
                 .get(frame.pc)
                 .ok_or_else(|| trap("instruction pointer out of bounds"))?;
+            #[cfg(all(not(feature = "execution-reference"), any(feature = "performance-counters", feature = "opcode-coverage")))]
+            let count = !std::mem::take(&mut counted);
+            #[cfg(all(feature = "execution-reference", any(feature = "performance-counters", feature = "opcode-coverage")))]
+            let count = true;
             #[cfg(feature = "performance-counters")]
-            {
+            if count {
                 self.perf.record(perf::Event::Dispatch, 1);
 
                 self.perf.record(perf::Event::InstructionClone, 1);
@@ -387,7 +405,9 @@ impl Store {
                 );
             }
             #[cfg(feature = "opcode-coverage")]
-            crate::coverage::record(op.opcode);
+            if count {
+                crate::coverage::record(op.opcode);
+            }
             let pc = frame.pc;
             frame.pc += 1;
             (op, pc)
@@ -399,8 +419,12 @@ impl Store {
                 .get(frame.pc)
                 .ok_or_else(|| trap("instruction pointer out of bounds"))?
                 ;
+            #[cfg(all(not(feature = "execution-reference"), any(feature = "performance-counters", feature = "opcode-coverage")))]
+            let count = !std::mem::take(&mut counted);
+            #[cfg(all(feature = "execution-reference", any(feature = "performance-counters", feature = "opcode-coverage")))]
+            let count = true;
             #[cfg(feature = "performance-counters")]
-            {
+            if count {
                 self.perf.record(perf::Event::Dispatch, 1);
 
                 self.perf.record(perf::Event::InstructionClone, 1);
@@ -410,7 +434,9 @@ impl Store {
                 );
             }
             #[cfg(feature = "opcode-coverage")]
-            crate::coverage::record(op.opcode);
+            if count {
+                crate::coverage::record(op.opcode);
+            }
             let pc = frame.pc;
             frame.pc += 1;
             (op, pc)
@@ -1202,11 +1228,17 @@ impl Store {
                                 // by the chunk order and copy_within.
                                 #[cfg(feature = "performance-counters")]
                                 self.perf.record(perf::Event::BulkSliceChunk, 1);
-                                self.mems[dest].bytes.copy_within(from, dst as usize + chunk, amount, &mut scratch);
+                                self.mems[dest]
+                                    .bytes
+                                    .copy_within(from, dst as usize + chunk, amount, &mut scratch)
+                                    .map_err(allocation_failed)?;
                             } else if self.mems[source].shared.is_none() && self.mems[dest].shared.is_none() {
                                 // Two unshared memories: one reused buffer.
                                 #[cfg(feature = "performance-counters")]
                                 self.perf.record(perf::Event::BulkSliceChunk, 1);
+                                scratch
+                                    .try_reserve(amount.saturating_sub(scratch.len()))
+                                    .map_err(|_| err(ErrorKind::ResourceLimit, "memory allocation failed"))?;
                                 scratch.resize(amount, 0);
                                 self.mems[source].read_into(from as u64, &mut scratch)?;
                                 self.mems[dest].write(dst + chunk as u64, &scratch)?;
@@ -1235,7 +1267,7 @@ impl Store {
                             if unshared {
                                 #[cfg(feature = "performance-counters")]
                                 self.perf.record(perf::Event::BulkSliceChunk, 1);
-                                self.mems[dest].bytes.fill(at, amount, src as u8);
+                                self.mems[dest].bytes.fill(at, amount, src as u8).map_err(allocation_failed)?;
                             } else {
                                 self.mems[dest].write(at as u64, &buffer[..amount])?;
                             }
@@ -1457,7 +1489,11 @@ impl Store {
                 usize::try_from(self.engine.config.limits.max_memory_bytes).unwrap_or(usize::MAX),
             );
             let backing = shared_memory::SharedMemory::new(mem.bytes.len(), max)?;
-            backing.write(0, &mem.bytes.to_vec())?;
+            // Only written pages hold anything; the rest of the new shared
+            // backing is already zero.
+            for (at, page) in mem.bytes.written_pages() {
+                backing.write(at as u64, page)?;
+            }
             mem.bytes.clear();
             mem.shared = Some(backing);
         }

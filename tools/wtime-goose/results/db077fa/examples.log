@@ -47,3 +47,45 @@
          sorting r0              wtime-decoded: wall    49797.3 ms  prep       4.8 ms  run    49787.4 ms
          sorting r0       wtime-before-decoded: wall   269578.5 ms  prep       8.7 ms  run   269564.2 ms
          sorting r1       wtime-before-decoded: wall   279172.2 ms  prep       8.4 ms  run   279158.4 ms
+         sorting r1              wtime-decoded: wall    51570.4 ms  prep       4.8 ms  run    51557.9 ms
+         sorting r1                   wasmtime: wall      337.1 ms  prep     124.7 ms  run      208.5 ms
+         sorting r2                   wasmtime: wall      311.9 ms  prep     132.0 ms  run      173.1 ms
+         sorting r2              wtime-decoded: wall    50645.0 ms  prep       4.9 ms  run    50635.4 ms
+         sorting r2       wtime-before-decoded: wall   271228.2 ms  prep      10.8 ms  run   271211.5 ms
+            life r0                   wasmtime: wall       56.4 ms  prep      20.9 ms  run       25.1 ms
+            life r0              wtime-decoded: wall     2974.3 ms  prep       0.7 ms  run     2963.4 ms
+            life r0       wtime-before-decoded: wall    16099.3 ms  prep       1.5 ms  run    16093.6 ms
+            life r1       wtime-before-decoded: wall    16685.2 ms  prep       1.8 ms  run    16678.8 ms
+            life r1              wtime-decoded: wall     3117.4 ms  prep       0.7 ms  run     3112.9 ms
+            life r1                   wasmtime: wall       44.5 ms  prep      17.2 ms  run       23.2 ms
+            life r2                   wasmtime: wall       43.4 ms  prep      17.1 ms  run       22.3 ms
+            life r2              wtime-decoded: wall     3279.1 ms  prep       0.7 ms  run     3275.0 ms
+            life r2       wtime-before-decoded: wall    16614.7 ms  prep       1.6 ms  run    16608.5 ms
+            maze r0                   wasmtime: wall       44.3 ms  prep      40.1 ms  run        0.1 ms
+            maze r0              wtime-decoded: wall       11.0 ms  prep       1.7 ms  run        3.6 ms
+            maze r0       wtime-before-decoded: wall       49.5 ms  prep       7.3 ms  run       35.4 ms
+            maze r1       wtime-before-decoded: wall       42.7 ms  prep       3.0 ms  run       32.4 ms
+            maze r1              wtime-decoded: wall       27.5 ms  prep      11.5 ms  run        5.3 ms
+            maze r1                   wasmtime: wall       70.9 ms  prep      59.6 ms  run        0.1 ms
+            maze r2                   wasmtime: wall       63.1 ms  prep      57.8 ms  run        0.1 ms
+            maze r2              wtime-decoded: wall       14.1 ms  prep       2.3 ms  run        4.6 ms
+            maze r2       wtime-before-decoded: wall       47.4 ms  prep       4.0 ms  run       31.8 ms
+          sudoku r0                   wasmtime: wall       60.5 ms  prep      31.3 ms  run       17.7 ms
+          sudoku r0              wtime-decoded: wall     1614.1 ms  prep       0.9 ms  run     1604.3 ms
+          sudoku r0       wtime-before-decoded: wall     8238.9 ms  prep       1.5 ms  run     8233.4 ms
+          sudoku r1       wtime-before-decoded: wall     7765.4 ms  prep       1.4 ms  run     7759.8 ms
+          sudoku r1              wtime-decoded: wall     1397.2 ms  prep       0.8 ms  run     1393.1 ms
+          sudoku r1                   wasmtime: wall       28.7 ms  prep      16.3 ms  run        8.8 ms
+          sudoku r2                   wasmtime: wall       35.7 ms  prep      22.6 ms  run        8.7 ms
+          sudoku r2              wtime-decoded: wall     1457.4 ms  prep       0.6 ms  run     1450.7 ms
+          sudoku r2       wtime-before-decoded: wall     7780.5 ms  prep       1.4 ms  run     7774.8 ms
+              vm r0                   wasmtime: wall       31.1 ms  prep      27.4 ms  run        0.1 ms
+              vm r0              wtime-decoded: wall        5.9 ms  prep       1.1 ms  run        1.5 ms
+              vm r0       wtime-before-decoded: wall       17.9 ms  prep       2.1 ms  run       12.1 ms
+              vm r1       wtime-before-decoded: wall       17.5 ms  prep       2.2 ms  run       11.6 ms
+              vm r1              wtime-decoded: wall       12.9 ms  prep       1.0 ms  run        1.8 ms
+              vm r1                   wasmtime: wall       46.3 ms  prep      40.0 ms  run        0.1 ms
+              vm r2                   wasmtime: wall       33.1 ms  prep      26.7 ms  run        0.1 ms
+              vm r2              wtime-decoded: wall       12.5 ms  prep       0.9 ms  run        1.5 ms
+              vm r2       wtime-before-decoded: wall       24.6 ms  prep       2.2 ms  run       11.6 ms
+EXIT 0

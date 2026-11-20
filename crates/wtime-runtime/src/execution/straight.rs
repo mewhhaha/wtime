@@ -13,9 +13,10 @@ use super::*;
 /// How a straight-line run ended.
 pub(super) enum Straight {
     /// The charged instruction is not a straight-line one; nothing ran.
+    /// It has been counted by the diagnostic counters.
     Declined,
     /// Instructions ran; the next one is not a straight-line one and has
-    /// already been charged.
+    /// already been charged and counted by the diagnostic counters.
     Charged,
     /// Instructions ran up to the end of the body; nothing is charged.
     Ran,
@@ -78,6 +79,20 @@ impl Store {
                 }
             }
             let opcode = op.opcode;
+            // Counted before it runs, as the general loop counts it, so that
+            // an instruction that traps is counted too. One that is declined
+            // below is not counted again by the general loop.
+            #[cfg(feature = "performance-counters")]
+            {
+                self.perf.record(perf::Event::Dispatch, 1);
+                self.perf.record(perf::Event::InstructionClone, 1);
+                self.perf.record(
+                    perf::Event::InstructionBytes,
+                    perf::immediate_copy_bytes(&op.immediate),
+                );
+            }
+            #[cfg(feature = "opcode-coverage")]
+            crate::coverage::record(opcode);
             let pc = frame.pc;
             frame.pc += 1;
             // Leaves the instruction at the program counter for the general
@@ -280,17 +295,6 @@ impl Store {
                 _ => decline!(),
             }
             first = false;
-            #[cfg(feature = "performance-counters")]
-            {
-                self.perf.record(perf::Event::Dispatch, 1);
-                self.perf.record(perf::Event::InstructionClone, 1);
-                self.perf.record(
-                    perf::Event::InstructionBytes,
-                    perf::immediate_copy_bytes(&op.immediate),
-                );
-            }
-            #[cfg(feature = "opcode-coverage")]
-            crate::coverage::record(opcode);
         }
     }
 }

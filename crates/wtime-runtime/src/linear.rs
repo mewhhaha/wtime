@@ -1,12 +1,17 @@
 //! Backing storage for an unshared linear memory.
 //!
-//! Memory is a table of fixed-size pages. A page is allocated the first time a
-//! nonzero byte is written to it; until then it reads as zeros. Growing the
-//! memory only extends the table, and filling with zero skips pages that were
-//! never written. So a memory's cost follows the bytes the guest touches, not
-//! its size: a 4 GiB initial memory or a 64-bit memory grown to many GiB needs
-//! no large allocation and commits nothing it does not use. This is safe Rust
-//! with no reliance on how the operating system backs large allocations.
+//! Memory is a table of pages of up to 64 KiB. A page is allocated the first
+//! time a nonzero byte is written to it; until then it reads as zeros. Growing
+//! the memory only extends the table, and filling with zero skips pages that
+//! were never written. So a memory's cost follows the bytes the guest touches,
+//! not its size: a 4 GiB initial memory or a 64-bit memory grown to many GiB
+//! needs no large allocation and commits nothing it does not use. This is safe
+//! Rust with no reliance on how the operating system backs large allocations.
+//!
+//! The last page holds only the bytes up to the memory's length, so the
+//! storage allocated never exceeds the memory's accounted size, even for tiny
+//! memories with custom page sizes. Every allocation is fallible: running out
+//! of host memory is reported as `AllocationFailed`, never an abort.
 //!
 //! Callers check bounds against `len` before every access, as for the former
 //! contiguous backing; out-of-range offsets here panic rather than trap.
@@ -16,6 +21,10 @@ const PAGE_BITS: u32 = 16;
 const PAGE: usize = 1 << PAGE_BITS;
 const MASK: usize = PAGE - 1;
 
+/// The host could not allocate storage for the memory.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AllocationFailed;
+
 #[derive(Default)]
 pub(crate) struct LinearBytes {
     pages: Vec<Option<Box<[u8]>>>,
@@ -24,6 +33,13 @@ pub(crate) struct LinearBytes {
 
 fn page_count(len: usize) -> usize {
     len.div_ceil(PAGE)
+}
+
+fn zeroed_page(size: usize) -> Result<Box<[u8]>, AllocationFailed> {
+    let mut page = Vec::new();
+    page.try_reserve_exact(size).map_err(|_| AllocationFailed)?;
+    page.resize(size, 0);
+    Ok(page.into_boxed_slice())
 }
 
 impl LinearBytes {
@@ -39,8 +55,13 @@ impl LinearBytes {
         self.len
     }
 
+    /// The bytes page `index` holds at the current length.
+    fn page_size(&self, index: usize) -> usize {
+        (self.len - index * PAGE).min(PAGE)
+    }
+
     /// Grows the memory to `new_len` zero-extended bytes. Returns false without
-    /// changing the memory when the page table cannot be allocated.
+    /// changing the memory when storage cannot be allocated.
     pub(crate) fn grow_to(&mut self, new_len: usize) -> bool {
         if new_len <= self.len {
             return true;
@@ -48,6 +69,20 @@ impl LinearBytes {
         let pages = page_count(new_len);
         if self.pages.try_reserve(pages.saturating_sub(self.pages.len())).is_err() {
             return false;
+        }
+        // A written last page that was shorter than a full page extends to the
+        // new length (or to a full page) before anything else changes.
+        if let Some(last) = self.pages.len().checked_sub(1)
+            && let Some(page) = &self.pages[last]
+        {
+            let size = (new_len - last * PAGE).min(PAGE);
+            if page.len() < size {
+                let Ok(mut extended) = zeroed_page(size) else {
+                    return false;
+                };
+                extended[..page.len()].copy_from_slice(page);
+                self.pages[last] = Some(extended);
+            }
         }
         self.pages.resize(pages, None);
         self.len = new_len;
@@ -86,62 +121,77 @@ impl LinearBytes {
         }
     }
 
-    fn page_mut(&mut self, index: usize) -> &mut [u8] {
-        self.pages[index].get_or_insert_with(|| vec![0u8; PAGE].into_boxed_slice())
+    fn page_mut(&mut self, index: usize) -> Result<&mut [u8], AllocationFailed> {
+        if self.pages[index].is_none() {
+            self.pages[index] = Some(zeroed_page(self.page_size(index))?);
+        }
+        Ok(self.pages[index].as_deref_mut().expect("allocated above"))
     }
 
-    /// Copies `data` to `at`.
+    /// Copies `data` to `at`. On allocation failure, bytes before the page
+    /// that could not be allocated have been written.
     #[inline]
-    pub(crate) fn write(&mut self, at: usize, data: &[u8]) {
+    pub(crate) fn write(&mut self, at: usize, data: &[u8]) -> Result<(), AllocationFailed> {
         if data.is_empty() {
-            return;
+            return Ok(());
         }
         let offset = at & MASK;
         if offset + data.len() <= PAGE {
-            self.page_mut(at >> PAGE_BITS)[offset..offset + data.len()].copy_from_slice(data);
+            self.page_mut(at >> PAGE_BITS)?[offset..offset + data.len()].copy_from_slice(data);
+            Ok(())
         } else {
             self.write_spanning(at, data)
         }
     }
 
-    fn write_spanning(&mut self, mut at: usize, mut data: &[u8]) {
+    fn write_spanning(&mut self, mut at: usize, mut data: &[u8]) -> Result<(), AllocationFailed> {
         while !data.is_empty() {
             let offset = at & MASK;
             let amount = data.len().min(PAGE - offset);
-            self.page_mut(at >> PAGE_BITS)[offset..offset + amount].copy_from_slice(&data[..amount]);
+            self.page_mut(at >> PAGE_BITS)?[offset..offset + amount].copy_from_slice(&data[..amount]);
             data = &data[amount..];
             at += amount;
         }
+        Ok(())
     }
 
     /// Sets `count` bytes at `at` to `byte`. Zeroing a page that was never
     /// written leaves it unallocated.
-    pub(crate) fn fill(&mut self, mut at: usize, mut count: usize, byte: u8) {
+    pub(crate) fn fill(&mut self, mut at: usize, mut count: usize, byte: u8) -> Result<(), AllocationFailed> {
         while count > 0 {
             let offset = at & MASK;
             let amount = count.min(PAGE - offset);
             let index = at >> PAGE_BITS;
             if byte != 0 || self.pages[index].is_some() {
-                self.page_mut(index)[offset..offset + amount].fill(byte);
+                self.page_mut(index)?[offset..offset + amount].fill(byte);
             }
             count -= amount;
             at += amount;
         }
+        Ok(())
     }
 
     /// Copies `count` bytes from `source` to `destination`, as `memmove`.
     /// `scratch` is reused between calls to avoid allocating.
-    pub(crate) fn copy_within(&mut self, source: usize, destination: usize, count: usize, scratch: &mut Vec<u8>) {
+    pub(crate) fn copy_within(
+        &mut self,
+        source: usize,
+        destination: usize,
+        count: usize,
+        scratch: &mut Vec<u8>,
+    ) -> Result<(), AllocationFailed> {
+        scratch.try_reserve(count.saturating_sub(scratch.len())).map_err(|_| AllocationFailed)?;
         scratch.resize(count, 0);
         self.read(source, scratch);
-        self.write(destination, scratch);
+        self.write(destination, scratch)
     }
 
-    /// The whole memory as one contiguous vector.
-    pub(crate) fn to_vec(&self) -> Vec<u8> {
-        let mut bytes = vec![0u8; self.len];
-        self.read(0, &mut bytes);
-        bytes
+    /// The written pages, as their byte offsets and contents.
+    pub(crate) fn written_pages(&self) -> impl Iterator<Item = (usize, &[u8])> {
+        self.pages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, page)| page.as_deref().map(|bytes| (index * PAGE, bytes)))
     }
 
     /// Releases the storage; the memory becomes empty.
@@ -158,9 +208,11 @@ impl LinearBytes {
     pub(crate) fn resize(&mut self, new_len: usize, value: u8) {
         assert_eq!(value, 0, "linear memory only grows with zeros");
         if new_len < self.len {
-            self.fill(new_len, self.len - new_len, 0);
-            self.len = new_len;
-            self.pages.truncate(page_count(new_len));
+            let mut kept = Self::zeroed(new_len).expect("test memory allocation");
+            let mut bytes = vec![0; new_len];
+            self.read(0, &mut bytes);
+            kept.write(0, &bytes).expect("test memory allocation");
+            *self = kept;
         } else {
             assert!(self.grow_to(new_len), "test memory allocation");
         }
@@ -171,9 +223,14 @@ impl LinearBytes {
     fn allocated_pages(&self) -> usize {
         self.pages.iter().filter(|page| page.is_some()).count()
     }
+
+    /// Bytes of page storage; for tests of accounting.
+    #[cfg(test)]
+    fn allocated_bytes(&self) -> usize {
+        self.pages.iter().flatten().map(|page| page.len()).sum()
+    }
 }
 
-/// Index-style access for tests written against the contiguous backing.
 #[cfg(test)]
 impl std::ops::Index<usize> for LinearBytes {
     type Output = u8;
@@ -190,7 +247,7 @@ impl std::ops::Index<usize> for LinearBytes {
 impl std::ops::IndexMut<usize> for LinearBytes {
     fn index_mut(&mut self, at: usize) -> &mut u8 {
         assert!(at < self.len, "linear memory index out of range");
-        &mut self.page_mut(at >> PAGE_BITS)[at & MASK]
+        &mut self.page_mut(at >> PAGE_BITS).expect("test memory allocation")[at & MASK]
     }
 }
 
@@ -215,13 +272,13 @@ mod tests {
     #[test]
     fn writes_and_reads_within_and_across_pages() {
         let mut memory = LinearBytes::zeroed(3 * PAGE).unwrap();
-        memory.write(5, &[1, 2, 3]);
+        memory.write(5, &[1, 2, 3]).unwrap();
         assert_eq!(bytes(&memory, 4, 5), [0, 1, 2, 3, 0]);
-        memory.write(PAGE - 2, &[9, 8, 7, 6]);
+        memory.write(PAGE - 2, &[9, 8, 7, 6]).unwrap();
         assert_eq!(bytes(&memory, PAGE - 3, 6), [0, 9, 8, 7, 6, 0]);
         assert_eq!(memory.allocated_pages(), 2);
         let pattern: Vec<u8> = (0..2 * PAGE + 10).map(|i| (i % 251) as u8 + 1).collect();
-        memory.write(PAGE / 2, &pattern);
+        memory.write(PAGE / 2, &pattern).unwrap();
         assert_eq!(bytes(&memory, PAGE / 2, pattern.len()), pattern);
         assert_eq!(memory.allocated_pages(), 3);
     }
@@ -229,7 +286,7 @@ mod tests {
     #[test]
     fn growth_keeps_contents_and_zero_extends() {
         let mut memory = LinearBytes::zeroed(10).unwrap();
-        memory.write(0, &[1; 10]);
+        memory.write(0, &[1; 10]).unwrap();
         assert!(memory.grow_to(PAGE + 10));
         assert_eq!(bytes(&memory, 0, 12), [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0]);
         assert_eq!(bytes(&memory, PAGE, 10), [0; 10]);
@@ -240,12 +297,12 @@ mod tests {
     #[test]
     fn zero_fill_skips_unwritten_pages_and_clears_written_ones() {
         let mut memory = LinearBytes::zeroed(4 * PAGE).unwrap();
-        memory.fill(0, 4 * PAGE, 0);
+        memory.fill(0, 4 * PAGE, 0).unwrap();
         assert_eq!(memory.allocated_pages(), 0);
-        memory.write(PAGE + 1, &[5; 4]);
-        memory.fill(PAGE, 2 * PAGE, 0);
+        memory.write(PAGE + 1, &[5; 4]).unwrap();
+        memory.fill(PAGE, 2 * PAGE, 0).unwrap();
         assert_eq!(bytes(&memory, PAGE, 8), [0; 8]);
-        memory.fill(3, PAGE, 7);
+        memory.fill(3, PAGE, 7).unwrap();
         assert_eq!(bytes(&memory, 0, 5), [0, 0, 0, 7, 7]);
         assert_eq!(bytes(&memory, PAGE + 1, 3), [7, 7, 0]);
     }
@@ -255,11 +312,11 @@ mod tests {
         let mut memory = LinearBytes::zeroed(2 * PAGE).unwrap();
         let mut scratch = Vec::new();
         let pattern: Vec<u8> = (0..300).map(|i| i as u8).collect();
-        memory.write(PAGE - 100, &pattern);
-        memory.copy_within(PAGE - 100, PAGE - 99, 300, &mut scratch);
+        memory.write(PAGE - 100, &pattern).unwrap();
+        memory.copy_within(PAGE - 100, PAGE - 99, 300, &mut scratch).unwrap();
         assert_eq!(bytes(&memory, PAGE - 99, 300), pattern);
-        memory.write(PAGE - 100, &pattern);
-        memory.copy_within(PAGE - 99, PAGE - 100, 299, &mut scratch);
+        memory.write(PAGE - 100, &pattern).unwrap();
+        memory.copy_within(PAGE - 99, PAGE - 100, 299, &mut scratch).unwrap();
         assert_eq!(bytes(&memory, PAGE - 100, 299), pattern[1..]);
     }
 
@@ -267,15 +324,36 @@ mod tests {
     fn empty_accesses_at_the_end_touch_no_page() {
         let mut empty = LinearBytes::zeroed(0).unwrap();
         empty.read(0, &mut []);
-        empty.write(0, &[]);
-        empty.fill(0, 0, 9);
-        empty.copy_within(0, 0, 0, &mut Vec::new());
+        empty.write(0, &[]).unwrap();
+        empty.fill(0, 0, 9).unwrap();
+        empty.copy_within(0, 0, 0, &mut Vec::new()).unwrap();
         let mut memory = LinearBytes::zeroed(PAGE).unwrap();
         memory.read(PAGE, &mut []);
-        memory.write(PAGE, &[]);
-        memory.fill(PAGE, 0, 9);
-        memory.copy_within(PAGE, 0, 0, &mut Vec::new());
+        memory.write(PAGE, &[]).unwrap();
+        memory.fill(PAGE, 0, 9).unwrap();
+        memory.copy_within(PAGE, 0, 0, &mut Vec::new()).unwrap();
         assert_eq!(memory.allocated_pages(), 0);
+    }
+
+    #[test]
+    fn storage_never_exceeds_the_memory_length() {
+        // A one-byte memory, as with a custom page size of one byte.
+        let mut memory = LinearBytes::zeroed(1).unwrap();
+        memory.write(0, &[7]).unwrap();
+        assert_eq!(memory.allocated_bytes(), 1);
+        // Growing extends the written partial page and keeps its contents.
+        assert!(memory.grow_to(10));
+        assert_eq!(memory.allocated_bytes(), 10);
+        assert_eq!(bytes(&memory, 0, 10), [7, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        memory.write(9, &[8]).unwrap();
+        assert!(memory.grow_to(PAGE + 3));
+        assert_eq!(memory.allocated_bytes(), PAGE);
+        memory.write(PAGE + 2, &[9]).unwrap();
+        assert_eq!(memory.allocated_bytes(), PAGE + 3);
+        assert_eq!(bytes(&memory, 8, 3), [0, 8, 0]);
+        assert_eq!(bytes(&memory, PAGE, 3), [0, 0, 9]);
+        let pages: Vec<(usize, usize)> = memory.written_pages().map(|(at, page)| (at, page.len())).collect();
+        assert_eq!(pages, [(0, PAGE), (PAGE, 3)]);
     }
 
     #[test]
@@ -283,6 +361,6 @@ mod tests {
         let mut memory = LinearBytes::zeroed(4).unwrap();
         assert!(!memory.grow_to(usize::MAX));
         assert_eq!(memory.len(), 4);
-        assert_eq!(memory.to_vec(), [0; 4]);
+        assert_eq!(bytes(&memory, 0, 4), [0; 4]);
     }
 }
