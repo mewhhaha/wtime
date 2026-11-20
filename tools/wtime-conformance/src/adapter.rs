@@ -126,6 +126,13 @@ impl Adapter {
                 max_call_depth: 512,
                 max_memory_pages: u64::MAX,
                 max_memory_bytes: 64 * 1024 * 1024,
+                // WTIME_COMPILE_THREADS=n decodes and validates function
+                // bodies on n threads even for small modules (n >= 2), to
+                // check that results do not depend on it.
+                compile_threads: std::env::var("WTIME_COMPILE_THREADS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
                 ..ResourceLimits::default()
             },
         };

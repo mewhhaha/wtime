@@ -29,6 +29,23 @@ impl TypeEnvironment {
     pub(super) fn exhausted(&self) -> bool {
         self.exhausted.get()
     }
+    /// Work spent so far.
+    pub(super) fn work(&self) -> usize {
+        self.work.get()
+    }
+    /// Forgets the work spent, to measure one body's work on its own.
+    pub(super) fn reset_work(&self) {
+        self.work.set(0);
+        self.exhausted.set(false);
+    }
+    /// Spends `n` units at once, as `n` spends would.
+    pub(super) fn charge(&self, n: usize) {
+        let total = self.work.get().saturating_add(n);
+        self.work.set(total);
+        if total > self.limit {
+            self.exhausted.set(true);
+        }
+    }
     fn spend(&self) -> bool {
         let n = self.work.get().saturating_add(1);
         self.work.set(n);

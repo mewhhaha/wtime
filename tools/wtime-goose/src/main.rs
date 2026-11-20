@@ -110,6 +110,11 @@ fn config() -> Config {
     limits.max_store_memory_bytes = 64 << 30;
     limits.max_instructions = 1 << 30;
     limits.max_module_bytes = 256 << 20;
+    // Threads for decoding and validating function bodies; the default (0)
+    // lets wtime decide. WTIME_GOOSE_COMPILE_THREADS=1 keeps them on one.
+    if let Some(threads) = std::env::var("WTIME_GOOSE_COMPILE_THREADS").ok().and_then(|v| v.parse().ok()) {
+        limits.compile_threads = threads;
+    }
     config
 }
 

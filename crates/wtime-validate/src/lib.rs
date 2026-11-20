@@ -526,8 +526,50 @@ pub fn validate(
             m.functions.len() == m.code.len(),
             "function/code count mismatch",
         )?;
-        for (t, b) in m.functions.iter().zip(&m.code) {
-            function_bounds.push(c.body(c.ty(t.0 as usize)?, b)?)
+        // Bodies are validated independently, in parallel when the code
+        // section is large, each with its own type environment whose work
+        // is counted from zero. The work is then charged in body order, so
+        // the type work budget runs out, and an error is reported, exactly
+        // where validating the bodies in order would.
+        let threads = limits.body_threads(m.code.iter().map(|b| b.span.end - b.span.start).sum());
+        let pairs: Vec<(u32, &FunctionBody)> = m.functions.iter().map(|t| t.0).zip(&m.code).collect();
+        if threads == 1 {
+            for &(t, b) in &pairs {
+                function_bounds.push(c.body(c.ty(t as usize)?, b)?)
+            }
+            return Ok(());
+        }
+        let validated = {
+            let parts = (&c.tags, &c.funcs, &c.globals, &c.tables, &c.memories, c.imported_globals);
+            wtime_types::parallel::map_ordered(
+                &pairs,
+                threads,
+                || Context {
+                    tags: parts.0.clone(),
+                    types: Rc::new(types::TypeEnvironment::new(&m.type_groups, limits.max_type_work)),
+                    m: &m,
+                    funcs: parts.1.clone(),
+                    globals: parts.2.clone(),
+                    tables: parts.3.clone(),
+                    memories: parts.4.clone(),
+                    imported_globals: parts.5,
+                    features,
+                    limits,
+                },
+                |worker, &(t, b)| {
+                    worker.types.reset_work();
+                    let result = worker.ty(t as usize).and_then(|ty| worker.body(ty, b));
+                    (result, worker.types.work())
+                },
+            )
+        };
+        for (result, work) in validated {
+            c.types.charge(work);
+            if c.types.exhausted() {
+                // Reported as the work budget below.
+                return result.map(|_| ());
+            }
+            function_bounds.push(result?)
         }
         Ok(())
     })();

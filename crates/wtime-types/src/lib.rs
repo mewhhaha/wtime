@@ -4,6 +4,7 @@
 mod error;
 mod features;
 mod indices;
+pub mod parallel;
 mod types;
 pub use error::*;
 pub use features::*;

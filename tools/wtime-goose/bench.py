@@ -37,7 +37,13 @@ def sha256(path: Path) -> str:
 def run_once(argv: list[str], stdin: bytes, cwd: Path, cpu: str, timeout: float) -> dict:
     with tempfile.TemporaryDirectory() as scratch:
         timing = Path(scratch) / "timing.json"
-        command = ["timeout", str(int(timeout)), "taskset", "-c", cpu, argv[0], "--timing-json", str(timing), *argv[1:]]
+        # The timing file goes after the executable, or where an engine's
+        # command line puts @TIMING@.
+        if "@TIMING@" in argv:
+            engine_argv = [str(timing) if a == "@TIMING@" else a for a in argv]
+        else:
+            engine_argv = [argv[0], "--timing-json", str(timing), *argv[1:]]
+        command = ["timeout", str(int(timeout)), "taskset", "-c", cpu, *engine_argv]
         with open(Path(scratch) / "out", "wb") as out, open(Path(scratch) / "err", "wb") as err:
             started = time.perf_counter_ns()
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=cwd)
@@ -64,11 +70,17 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=7200)
     parser.add_argument("--only", help="comma-separated case names")
     parser.add_argument("--wasmtime-cache", type=Path, help="also run Wasmtime from a warmed compiled-module cache in this directory")
+    parser.add_argument("--deno", type=Path, help="also run V8 through this Deno binary (engine v8), with --v8-host")
+    parser.add_argument("--v8-host", type=Path, help="goose-to-wasm's scripts/run_wasm.mjs, the V8 host Deno runs")
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
     args.wtime, args.wasmtime = args.wtime.resolve(), args.wasmtime.resolve()
     if args.wtime_before:
         args.wtime_before = args.wtime_before.resolve()
+    if bool(args.deno) != bool(args.v8_host):
+        parser.error("--deno and --v8-host go together")
+    if args.deno:
+        args.deno, args.v8_host = args.deno.resolve(), args.v8_host.resolve()
 
     cases = json.loads(args.cases.read_text())
     if args.only:
@@ -84,7 +96,12 @@ def main() -> int:
         "binaries": {"wtime": {"path": str(args.wtime), "sha256": sha256(args.wtime)},
                      "wasmtime": {"path": str(args.wasmtime), "sha256": sha256(args.wasmtime)},
                      **({"wtime_before": {"path": str(args.wtime_before), "sha256": sha256(args.wtime_before)}}
-                        if args.wtime_before else {})},
+                        if args.wtime_before else {}),
+                     **({"deno": {"path": str(args.deno), "sha256": sha256(args.deno),
+                                  "version": subprocess.run([str(args.deno), "--version"], capture_output=True,
+                                                            text=True).stdout.strip()},
+                         "v8_host": {"path": str(args.v8_host), "sha256": sha256(args.v8_host)}}
+                        if args.deno else {})},
         "rounds": args.rounds,
         "cases": [],
     }
@@ -99,6 +116,12 @@ def main() -> int:
             cache = args.wasmtime_cache.resolve() / f"{case['name']}.cwasm"
             engines["wasmtime-cached"] = [str(args.wasmtime), str(module), "--cache", str(cache), *program]
             run_once(engines["wasmtime-cached"], stdin, cwd, args.cpu, args.timeout)  # warm the cache
+        if args.deno:
+            # Deno's V8 with its default tiers (Liftoff, then TurboFan), all
+            # permissions for the host's file access, the module's memory64
+            # and a cold code cache, as for Wasmtime --no-cache.
+            engines["v8"] = [str(args.deno), "run", "-A", "--no-config", str(args.v8_host),
+                             str(module), "--timing-json", "@TIMING@", *program]
         for tier in tiers:
             engines[f"wtime-{tier}"] = [str(args.wtime), "--tier", tier, str(module), *program]
             if args.wtime_before:
@@ -128,13 +151,18 @@ def main() -> int:
             summary[name] = {key: statistics.median(sample[key] for sample in samples)
                              for key in ("wall_ns", "compile_instantiate_ns", "start_function_ns", "max_rss_kib")
                              if all(key in s for s in samples)}
-        for name in names[1:]:
-            ratios = {}
-            for key in ("wall_ns", "start_function_ns", "compile_instantiate_ns"):
-                pairs = [a[key] / b[key] for a, b in zip(rows[name], rows["wasmtime"]) if a.get(key) and b.get(key)]
-                if pairs:
-                    ratios[key] = statistics.median(pairs)
-            summary[name]["paired_ratio_vs_wasmtime"] = ratios
+        for reference_name in ("wasmtime", "v8"):
+            if reference_name not in rows:
+                continue
+            for name in names:
+                if name == reference_name:
+                    continue
+                ratios = {}
+                for key in ("wall_ns", "start_function_ns", "compile_instantiate_ns"):
+                    pairs = [a[key] / b[key] for a, b in zip(rows[name], rows[reference_name]) if a.get(key) and b.get(key)]
+                    if pairs:
+                        ratios[key] = statistics.median(pairs)
+                summary[name][f"paired_ratio_vs_{reference_name}"] = ratios
         report["cases"].append({
             "name": case["name"], "description": case.get("description", ""),
             "module": {"path": str(module), "sha256": sha256(module), "bytes": module.stat().st_size},

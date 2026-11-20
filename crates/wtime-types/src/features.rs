@@ -142,6 +142,12 @@ pub struct ResourceLimits {
     pub max_rec_group_size: usize,
     pub max_instructions: usize,
     pub fuel: Option<u64>,
+    /// Host threads that decoding and validation may use for function
+    /// bodies: 1 keeps them on the calling thread; 0, the default, uses the
+    /// host's available parallelism (at most 8) for code sections of at
+    /// least 512 KiB. The result, including which error is reported, does
+    /// not depend on it.
+    pub compile_threads: usize,
 }
 impl Default for ResourceLimits {
     fn default() -> Self {
@@ -170,6 +176,7 @@ impl Default for ResourceLimits {
             max_rec_group_size: 10_000,
             max_instructions: 10_000_000,
             fuel: None,
+            compile_threads: 0,
         }
     }
 }
@@ -211,6 +218,20 @@ impl FeatureSet {
         Ok(())
     }
 }
+impl ResourceLimits {
+    /// The threads to use for function bodies of a code section of
+    /// `section_bytes` (see `compile_threads`); 1 means the calling thread.
+    pub fn body_threads(&self, section_bytes: usize) -> usize {
+        match self.compile_threads {
+            0 if section_bytes >= 512 * 1024 => {
+                std::thread::available_parallelism().map_or(1, |n| n.get()).min(8)
+            }
+            0 => 1,
+            n => n,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

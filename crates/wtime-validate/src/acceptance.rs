@@ -447,3 +447,89 @@ fn t107_declared_array_const_covariance_and_mutable_invariance() {
     invalid_module(&module(0x6e, 0x6d, 1));
     invalid_module(&module(0x6d, 0x6e, 1));
 }
+
+/// Validates `m` with function bodies on one thread and on four.
+fn on_threads(m: &[u8], features: &FeatureSet, limits: &ResourceLimits) -> [String; 2] {
+    [1, 4].map(|threads| {
+        let limits = ResourceLimits { compile_threads: threads, ..limits.clone() };
+        format!("{:?}", validate(m, features, &limits).map(|v| v.function_bounds().to_vec()))
+    })
+}
+
+#[test]
+fn parallel_bodies_report_the_first_error_in_body_order() {
+    // Five bodies of type [] -> []: two invalid (i32.add and drop on an
+    // empty stack), the first of them in body 1.
+    let mut m = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut m, 1, &[1, 0x60, 0, 0]);
+    section(&mut m, 3, &[5, 0, 0, 0, 0, 0]);
+    let mut code = vec![5];
+    for body in [&[0x0b][..], &[0x6a, 0x0b], &[0x0b], &[0x1a, 0x0b], &[0x0b]] {
+        code.push(body.len() as u8 + 1);
+        code.push(0);
+        code.extend(body);
+    }
+    section(&mut m, 10, &code);
+    let [one, four] = on_threads(&m, &FeatureSet::default(), &ResourceLimits::default());
+    assert!(one.starts_with("Err"), "{one}");
+    assert_eq!(one, four);
+    // Malformed bodies: the first is reported, before a malformed size.
+    let mut m = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut m, 1, &[1, 0x60, 0, 0]);
+    section(&mut m, 3, &[4, 0, 0, 0, 0]);
+    let mut code = vec![4];
+    for body in [&[0x0b][..], &[0xff, 0x0b], &[0xfe, 0x0b]] {
+        code.push(body.len() as u8 + 1);
+        code.push(0);
+        code.extend(body);
+    }
+    code.push(0x7f);
+    section(&mut m, 10, &code);
+    let [one, four] = on_threads(&m, &FeatureSet::default(), &ResourceLimits::default());
+    assert!(one.starts_with("Err"), "{one}");
+    assert_eq!(one, four);
+}
+
+#[test]
+fn parallel_bodies_spend_the_type_work_budget_in_body_order() {
+    // A chain of declared subtypes and bodies that each check a subtyping
+    // along it: one body's work fits the budget, two do not.
+    const N: usize = 300;
+    let mut m = b"\0asm\x01\0\0\0".to_vec();
+    let mut types = Vec::new();
+    leb(N + 1, &mut types);
+    for i in 0..N {
+        types.push(0x50);
+        types.push(u8::from(i != 0));
+        if i != 0 {
+            leb(i - 1, &mut types);
+        }
+        types.extend([0x5f, 0]);
+    }
+    types.extend([0x60, 1, 0x63]);
+    leb(N - 1, &mut types);
+    types.extend([1, 0x63, 0]);
+    section(&mut m, 1, &types);
+    let mut funcs = vec![4];
+    for _ in 0..4 {
+        leb(N, &mut funcs);
+    }
+    section(&mut m, 3, &funcs);
+    let mut code = vec![4];
+    for _ in 0..4 {
+        code.extend([4, 0, 0x20, 0, 0x0b]);
+    }
+    section(&mut m, 10, &code);
+    let features = FeatureSet::all_phase3_core();
+    let [one, four] = on_threads(&m, &features, &ResourceLimits::default());
+    assert!(one.starts_with("Ok"), "{one}");
+    assert_eq!(one, four);
+    let mut exhausted = 0;
+    for budget in (50..4 * N + 100).step_by(7) {
+        let limits = ResourceLimits { max_type_work: budget, ..ResourceLimits::default() };
+        let [one, four] = on_threads(&m, &features, &limits);
+        assert_eq!(one, four, "budget {budget}");
+        exhausted += usize::from(one.contains("budget"));
+    }
+    assert!(exhausted > 0);
+}

@@ -1603,39 +1603,49 @@ impl Store {
 }
 
 fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
-    let mut bodies = vec![];
-    for body in &module.decoded().code {
-        // Positions must fit below the u32 sentinel.
-        if body.instructions.len() >= ControlEntry::NONE as usize {
-            return Err(err(ErrorKind::ResourceLimit, "function body too large for control map"));
-        }
-        let mut map = vec![ControlEntry::EMPTY; body.instructions.len()];
-        let mut open: Vec<(usize, Option<usize>)> = vec![];
-        for (pc, i) in body.instructions.iter().enumerate() {
-            match i.opcode {
-                2..=4 | 6 | 0x1f => open.push((pc, None)),
-                5 | 7 | 0x19 => {
-                    if let Some(top) = open.last_mut() {
-                        top.1 = Some(pc)
-                    }
-                }
-                0xb => {
-                    if let Some((start, other)) = open.pop() {
-                        map[start] = ControlEntry {
-                            end: pc as u32,
-                            other: other.map_or(ControlEntry::NONE, |other| other as u32),
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !open.is_empty() {
-            return Err(err(ErrorKind::Validation, "unclosed control block"));
-        }
-        bodies.push(map.into_boxed_slice())
+    let code = &module.decoded().code;
+    // Per body, in parallel as decoding and validation are; the first error
+    // in body order is reported.
+    let threads = module.limits().body_threads(code.iter().map(|b| b.span.end - b.span.start).sum());
+    let maps = wtime_types::parallel::map_ordered(code, threads, || (), |_, body| body_control(body));
+    let mut bodies = Vec::with_capacity(maps.len());
+    for map in maps {
+        bodies.push(map?)
     }
     Ok(ControlMap { bodies })
+}
+
+/// The control entries of one body.
+fn body_control(body: &wtime_validate::FunctionBody) -> Result<Box<[ControlEntry]>> {
+    // Positions must fit below the u32 sentinel.
+    if body.instructions.len() >= ControlEntry::NONE as usize {
+        return Err(err(ErrorKind::ResourceLimit, "function body too large for control map"));
+    }
+    let mut map = vec![ControlEntry::EMPTY; body.instructions.len()];
+    let mut open: Vec<(usize, Option<usize>)> = vec![];
+    for (pc, i) in body.instructions.iter().enumerate() {
+        match i.opcode {
+            2..=4 | 6 | 0x1f => open.push((pc, None)),
+            5 | 7 | 0x19 => {
+                if let Some(top) = open.last_mut() {
+                    top.1 = Some(pc)
+                }
+            }
+            0xb => {
+                if let Some((start, other)) = open.pop() {
+                    map[start] = ControlEntry {
+                        end: pc as u32,
+                        other: other.map_or(ControlEntry::NONE, |other| other as u32),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !open.is_empty() {
+        return Err(err(ErrorKind::Validation, "unclosed control block"));
+    }
+    Ok(map.into_boxed_slice())
 }
 
 impl Store {

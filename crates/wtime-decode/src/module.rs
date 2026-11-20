@@ -530,37 +530,27 @@ pub fn decode(
             }
             10 => {
                 let n = count(&mut s)?;
+                // Each body's bytes first, then the bodies, in parallel when
+                // the section is large; errors are reported in body order, a
+                // malformed size only after the bodies before it.
+                let mut bodies = Vec::new();
+                let mut sizes = Ok(());
                 for _ in 0..n {
-                    let size = s.u32()? as usize;
-                    let mut b = s.child(size)?;
-                    let start = b.offset();
-                    let groups = count(&mut b)?;
-                    let mut local_groups = Vec::new();
-                    let mut total = 0u32;
-                    for _ in 0..groups {
-                        let n = b.u32()?;
-                        let ty = val(&mut b)?;
-                        total = total
-                            .checked_add(n)
-                            .ok_or_else(|| b.error("local count overflow"))?;
-                        local_groups.push((n, ty));
+                    match s.u32().and_then(|size| s.child(size as usize)) {
+                        Ok(b) => bodies.push(b),
+                        Err(e) => {
+                            sizes = Err(e);
+                            break;
+                        }
                     }
-                    let (instructions, offsets) = body_expression(&mut b)?;
-                    b.finish()?;
-                    if total as usize > policy.max_locals {
-                        return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
-                    }
-                    let mut locals = Vec::new();
-                    for (n, ty) in local_groups {
-                        locals.resize(locals.len() + n as usize, ty);
-                    }
-                    m.code.push(FunctionBody {
-                        locals,
-                        instructions,
-                        offsets,
-                        span: Span::new(start, b.offset()),
-                    })
                 }
+                let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
+                let decoded = wtime_types::parallel::map_ordered(&bodies, threads, || (), |_, b| function_body(b.clone(), policy));
+                m.code.reserve_exact(decoded.len());
+                for body in decoded {
+                    m.code.push(body?);
+                }
+                sizes?;
             }
             11 => {
                 let n = count(&mut s)?;
@@ -631,6 +621,37 @@ pub fn decode(
     }
     Ok(m)
 }
+/// One function body of the code section, from its bytes.
+fn function_body(mut b: Reader, policy: &ResourceLimits) -> Result<FunctionBody> {
+    let start = b.offset();
+    let groups = count(&mut b)?;
+    let mut local_groups = Vec::new();
+    let mut total = 0u32;
+    for _ in 0..groups {
+        let n = b.u32()?;
+        let ty = val(&mut b)?;
+        total = total
+            .checked_add(n)
+            .ok_or_else(|| b.error("local count overflow"))?;
+        local_groups.push((n, ty));
+    }
+    let (instructions, offsets) = body_expression(&mut b)?;
+    b.finish()?;
+    if total as usize > policy.max_locals {
+        return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
+    }
+    let mut locals = Vec::new();
+    for (n, ty) in local_groups {
+        locals.resize(locals.len() + n as usize, ty);
+    }
+    Ok(FunctionBody {
+        locals,
+        instructions,
+        offsets,
+        span: Span::new(start, b.offset()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
