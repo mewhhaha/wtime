@@ -35,6 +35,28 @@ impl Store {
         stack: &mut Vec<Value>,
         fuel: &mut Option<u64>,
     ) -> Result<Straight> {
+        let mut pc = frame.pc;
+        let mut local_fuel = *fuel;
+        let cancel = self.cancellation.clone();
+        let result = self.run_straight_inner(inst_id, frame, module, ops, stack, &mut local_fuel, &mut pc, &cancel);
+        frame.pc = pc;
+        *fuel = local_fuel;
+        self.current_fuel = local_fuel;
+        result
+    }
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn run_straight_inner(
+        &mut self,
+        inst_id: usize,
+        frame: &mut Frame,
+        module: &Module,
+        ops: &[Instruction],
+        stack: &mut Vec<Value>,
+        fuel: &mut Option<u64>,
+        pc_ref: &mut usize,
+        cancel: &CancellationToken,
+    ) -> Result<Straight> {
         // `next_source`, less what a run cannot change: fuel resumption and
         // prompt retirement only follow continuation instructions, so the
         // charge of the run's first instruction settled them for the run.
@@ -58,26 +80,10 @@ impl Store {
                 *slot = $e;
             }};
         }
+        let Some(mut op) = ops.get(*pc_ref) else {
+            return Ok(Straight::Declined);
+        };
         loop {
-            let Some(op) = ops.get(frame.pc) else {
-                // Validated code ends with `end`; let the general loop report it.
-                return Ok(if first { Straight::Declined } else { Straight::Ran });
-            };
-            if !first {
-                if self.cancellation.is_cancelled() {
-                    return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
-                }
-                if let Some(n) = fuel {
-                    if *n == 0 {
-                        return Err(err(ErrorKind::ResourceLimit, "fuel exhausted"));
-                    }
-                    *n -= 1;
-                    self.current_fuel = *fuel;
-                }
-                if stack.len() > max_height {
-                    return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
-                }
-            }
             let opcode = op.opcode;
             // Counted before it runs, as the general loop counts it, so that
             // an instruction that traps is counted too. One that is declined
@@ -93,13 +99,13 @@ impl Store {
             }
             #[cfg(feature = "opcode-coverage")]
             crate::coverage::record(opcode);
-            let pc = frame.pc;
-            frame.pc += 1;
+            let pc = *pc_ref;
+            *pc_ref = pc + 1;
             // Leaves the instruction at the program counter for the general
             // loop: charged, unless it is the instruction the loop charged.
             macro_rules! decline {
                 () => {{
-                    frame.pc = pc;
+                    *pc_ref = pc;
                     return Ok(if first { Straight::Declined } else { Straight::Charged });
                 }};
             }
@@ -123,10 +129,10 @@ impl Store {
                         loop_: opcode == 3,
                     });
                     if !cond {
-                        frame.pc = other.map_or(end, |x| x + 1)
+                        *pc_ref = other.map_or(end, |x| x + 1)
                     }
                 }
-                0x05 => frame.pc = frame.labels.last().ok_or_else(|| trap("else without label"))?.end,
+                0x05 => *pc_ref = frame.labels.last().ok_or_else(|| trap("else without label"))?.end,
                 0x0b => {
                     let Some(l) = frame.labels.pop() else { decline!() };
                     #[cfg(feature = "performance-counters")]
@@ -165,7 +171,7 @@ impl Store {
                         let pos = frame.labels.len().checked_sub(depth + 1).ok_or_else(|| trap("branch depth"))?;
                         let l = &frame.labels[pos];
                         keep(stack, l.height, if l.loop_ { l.params } else { l.results })?;
-                        frame.pc = if l.loop_ { l.start } else { l.end + 1 };
+                        *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
                         let retain = pos + usize::from(l.loop_);
                         frame.labels.truncate(retain)
                     }
@@ -295,6 +301,25 @@ impl Store {
                 _ => decline!(),
             }
             first = false;
+            // Charge the next instruction before it runs, with the checks of
+            // `next_source` in its order.
+            op = match ops.get(*pc_ref) {
+                Some(op) => op,
+                // Validated code ends with `end`; let the general loop report it.
+                None => return Ok(Straight::Ran),
+            };
+            if cancel.is_cancelled() {
+                return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
+            }
+            if let Some(n) = fuel {
+                if *n == 0 {
+                    return Err(err(ErrorKind::ResourceLimit, "fuel exhausted"));
+                }
+                *n -= 1;
+            }
+            if stack.len() > max_height {
+                return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
+            }
         }
     }
 }

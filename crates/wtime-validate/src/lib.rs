@@ -75,9 +75,11 @@ fn budget(b: bool, s: &str) -> Result<()> {
         Err(Error::new(ErrorKind::ResourceLimit, s))
     }
 }
+#[inline]
 fn check(b: bool, s: &str) -> Result<()> {
     if b { Ok(()) } else { Err(invalid(s)) }
 }
+#[inline]
 fn index(i: &Instruction) -> Result<usize> {
     if let Immediate::Index(x) = i.immediate {
         Ok(x as usize)
@@ -86,6 +88,55 @@ fn index(i: &Instruction) -> Result<usize> {
     }
 }
 
+/// The most frequent instructions in reachable code whose operands have
+/// exactly the expected types. Returns false, changing nothing, for anything
+/// else, which then takes the general path with all its checks and errors.
+#[inline]
+fn fast_instruction(s: &mut Stack, locals: &[ValType], i: &Instruction) -> bool {
+    let Some(c) = s.controls.last() else { return false };
+    if c.unreachable || !s.unknown.is_empty() {
+        return false;
+    }
+    let floor = c.height;
+    let n = s.values.len();
+    // Two operands of type `t` above the control frame's floor.
+    let two = |s: &Stack, t: ValType| n >= floor + 2 && s.values[n - 1] == t && s.values[n - 2] == t;
+    match (i.opcode, &i.immediate) {
+        (0x20..=0x22, Immediate::Index(x)) => {
+            let x = *x as usize;
+            let (Some(&t), Some(true)) = (locals.get(x), s.initialized.get(x)) else { return false };
+            match i.opcode {
+                0x20 => s.values.push(t),
+                0x21 if n > floor && s.values[n - 1] == t => s.values.truncate(n - 1),
+                0x22 if n > floor && s.values[n - 1] == t => {}
+                _ => return false,
+            }
+            true
+        }
+        (0x41, Immediate::I32(_)) => {
+            s.values.push(ValType::I32);
+            true
+        }
+        (0x42, Immediate::I64(_)) => {
+            s.values.push(ValType::I64);
+            true
+        }
+        (0x46..=0x4f | 0x6a..=0x78, _) if two(s, ValType::I32) => {
+            s.values.truncate(n - 1);
+            true
+        }
+        (0x7c..=0x8a, _) if two(s, ValType::I64) => {
+            s.values.truncate(n - 1);
+            true
+        }
+        (0x51..=0x5a, _) if two(s, ValType::I64) => {
+            s.values.truncate(n - 2);
+            s.values.push(ValType::I32);
+            true
+        }
+        _ => false,
+    }
+}
 struct Context<'a> {
     tags: Vec<FuncType>,
     types: Rc<types::TypeEnvironment>,
@@ -588,8 +639,10 @@ impl Context<'_> {
                     "undeclared function reference",
                 )?;
             }
-            self.instruction(&mut s, &locals, i)
-                .map_err(|e| e.at(i.span.start))?;
+            if !fast_instruction(&mut s, &locals, i) {
+                self.instruction(&mut s, &locals, i)
+                    .map_err(|e| e.at(i.span.start))?;
+            }
             bounds.stack_peak = bounds.stack_peak.max(s.values.len());
             bounds.maximum_nesting = bounds.maximum_nesting.max(s.controls.len());
             budget(

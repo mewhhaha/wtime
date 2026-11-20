@@ -89,6 +89,34 @@ impl LinearBytes {
         true
     }
 
+    /// The `N` bytes at `at` when the access is in bounds and within one
+    /// page; `None` leaves the access to the general path.
+    #[inline(always)]
+    pub(crate) fn read_array<const N: usize>(&self, at: usize) -> Option<[u8; N]> {
+        let end = at.checked_add(N)?;
+        if end > self.len {
+            return None;
+        }
+        let offset = at & MASK;
+        match self.pages.get(at >> PAGE_BITS)? {
+            Some(page) => page.get(offset..offset + N)?.try_into().ok(),
+            None => (offset + N <= PAGE).then_some([0; N]),
+        }
+    }
+    /// Writes `data` at `at` when the access is in bounds, within one page
+    /// and the page is allocated; false leaves it to the general path.
+    #[inline(always)]
+    pub(crate) fn write_array<const N: usize>(&mut self, at: usize, data: [u8; N]) -> bool {
+        let Some(end) = at.checked_add(N) else { return false };
+        if end > self.len {
+            return false;
+        }
+        let offset = at & MASK;
+        let Some(Some(page)) = self.pages.get_mut(at >> PAGE_BITS) else { return false };
+        let Some(slot) = page.get_mut(offset..offset + N) else { return false };
+        slot.copy_from_slice(&data);
+        true
+    }
     /// Copies `out.len()` bytes at `at` into `out`.
     #[inline]
     pub(crate) fn read(&self, at: usize, out: &mut [u8]) {

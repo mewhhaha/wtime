@@ -95,7 +95,19 @@ impl<'a> Reader<'a> {
             Err(self.error("trailing bytes"))
         }
     }
+    #[inline]
     pub fn unsigned(&mut self, bits: u32) -> Result<u64> {
+        // One-byte encodings, the common case.
+        if (7..=64).contains(&bits)
+            && let Some(&b) = self.bytes.get(self.pos)
+            && b < 0x80
+        {
+            self.pos += 1;
+            return Ok(b as u64);
+        }
+        self.unsigned_slow(bits)
+    }
+    fn unsigned_slow(&mut self, bits: u32) -> Result<u64> {
         if bits == 0 || bits > 64 {
             return Err(self.error("unsupported integer width"));
         }
@@ -115,7 +127,18 @@ impl<'a> Reader<'a> {
         }
         Err(self.error("unterminated LEB"))
     }
+    #[inline]
     pub fn signed(&mut self, bits: u32) -> Result<i64> {
+        if (7..=64).contains(&bits)
+            && let Some(&b) = self.bytes.get(self.pos)
+            && b < 0x80
+        {
+            self.pos += 1;
+            return Ok((((b << 1) as i8) >> 1) as i64);
+        }
+        self.signed_slow(bits)
+    }
+    fn signed_slow(&mut self, bits: u32) -> Result<i64> {
         if bits == 0 || bits > 64 {
             return Err(self.error("unsupported integer width"));
         }

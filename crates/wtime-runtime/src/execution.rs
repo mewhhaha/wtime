@@ -1095,6 +1095,59 @@ impl Store {
             return Err(trap("memory argument"));
         };
         let code = op.opcode;
+        // Fixed-width accesses to an unshared memory that stay within one
+        // allocated page; everything else, with every error, falls through.
+        {
+            let mem = &mut self.mems[index];
+            if mem.shared.is_none() {
+                macro_rules! load {
+                    ($n:literal, |$b:ident| $e:expr) => {{
+                        if let Some(slot) = s.last_mut() {
+                            let a = match *slot { Value::I32(x) => Some(x as u32 as u64), Value::I64(x) => Some(x as u64), _ => None };
+                            if let Some(at) = a.and_then(|a| a.checked_add(offset)).and_then(|a| usize::try_from(a).ok())
+                                && let Some($b) = mem.bytes.read_array::<$n>(at)
+                            {
+                                // The load event the general path records.
+                                #[cfg(feature = "performance-counters")]
+                                self.perf.record(perf::Event::ReadVec, 1);
+                                *slot = $e;
+                                return Ok(());
+                            }
+                        }
+                    }};
+                }
+                macro_rules! store {
+                    ($n:literal, $v:ident, |$x:ident| $e:expr) => {{
+                        if let [.., addr, Value::$v($x)] = s.as_slice() {
+                            let a = match *addr { Value::I32(x) => Some(x as u32 as u64), Value::I64(x) => Some(x as u64), _ => None };
+                            if let Some(at) = a.and_then(|a| a.checked_add(offset)).and_then(|a| usize::try_from(a).ok())
+                                && mem.bytes.write_array::<$n>(at, $e)
+                            {
+                                s.truncate(s.len() - 2);
+                                return Ok(());
+                            }
+                        }
+                    }};
+                }
+                match code {
+                    0x28 => load!(4, |b| Value::I32(i32::from_le_bytes(b))),
+                    0x29 => load!(8, |b| Value::I64(i64::from_le_bytes(b))),
+                    0x2d => load!(1, |b| Value::I32(b[0] as i32)),
+                    0x2c => load!(1, |b| Value::I32(b[0] as i8 as i32)),
+                    0x2f => load!(2, |b| Value::I32(u16::from_le_bytes(b) as i32)),
+                    0x35 => load!(4, |b| Value::I64(u32::from_le_bytes(b) as i64)),
+                    0x34 => load!(4, |b| Value::I64(i32::from_le_bytes(b) as i64)),
+                    0x31 => load!(1, |b| Value::I64(b[0] as i64)),
+                    0x36 => store!(4, I32, |x| x.to_le_bytes()),
+                    0x37 => store!(8, I64, |x| x.to_le_bytes()),
+                    0x3a => store!(1, I32, |x| [*x as u8]),
+                    0x3b => store!(2, I32, |x| (*x as u16).to_le_bytes()),
+                    0x3c => store!(1, I64, |x| [*x as u8]),
+                    0x3e => store!(4, I64, |x| (*x as u32).to_le_bytes()),
+                    _ => {}
+                }
+            }
+        }
         let store = code >= 0x36;
         let value = if store { Some(pop(s)?) } else { None };
         let off = address(pop(s)?)?
