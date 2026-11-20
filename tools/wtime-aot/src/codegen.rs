@@ -1089,10 +1089,14 @@ impl<'a> Function<'a> {
                 let (dst, _) = e.pop()?;
                 // A short copy of constant length moves its bytes inline,
                 // through a value, instead of calling memmove.
-                let constant = n.trim_matches(['(', ')']).strip_suffix("i32").and_then(|k| k.parse::<usize>().ok());
+                let literal = n.trim_matches(['(', ')']);
+                let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
                         e.line(&format!("t!(self.mem.copy_n::<{k}>({dst} as u32, {src} as u32));"))
+                    }
+                    Some(k @ 1..=COPY_INLINE) => {
+                        e.line(&format!("t!(self.mem.copy_n::<{k}>({dst} as u64, {src} as u64));"))
                     }
                     _ => {
                         let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));

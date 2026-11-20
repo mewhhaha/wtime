@@ -111,22 +111,30 @@ pub enum Val {
     F64(f64),
 }
 
-/// The linear memory of a module (64-bit memories use it): chunks of
-/// `CHUNK` bytes, each one zeroed allocation that the OS zeroes lazily, and
-/// the memory's current length. `memory.grow` adds the chunks it reaches and
-/// never moves or touches what is there, so a memory can grow to many GiB
-/// while the program writes little of it; no single allocation exceeds a
-/// chunk. An access checks the length, then finds its chunk; one that
-/// straddles two chunks takes a slower path.
+/// The linear memory of a module (64-bit memories use it). A base, one
+/// lazily zeroed allocation as large as the OS grants up to the memory's
+/// maximum (at most `RESERVE`), holds the low addresses; beyond it, chunks
+/// of `CHUNK` bytes, each lazily zeroed and allocated when `memory.grow`
+/// reaches it. Growing never moves or touches existing bytes, so a memory
+/// can grow to many GiB while the program writes little of it, and no
+/// allocation exceeds what the OS grants. An access that ends within the
+/// base and the length (`fast`) checks one bound, as in `Memory32`; others
+/// take a cold path through the chunks.
 pub struct Memory {
-    /// Zero beyond `len`; the last may be shorter than CHUNK.
+    /// Zero beyond `len`.
+    base: Vec<u8>,
+    /// Bytes `base.len()..`, `CHUNK` to a chunk; zero beyond `len`.
     chunks: Vec<Vec<u8>>,
     len: usize,
+    /// `min(len, base.len())`: accesses ending at or below it are direct.
+    fast: usize,
     /// The most pages it may grow to.
     max_pages: u64,
 }
 
 pub const PAGE: u64 = 65536;
+/// The base is at most this large.
+const RESERVE: u64 = 64 << 30;
 const CHUNK_BITS: u32 = 32;
 const CHUNK: usize = 1 << CHUNK_BITS;
 
@@ -139,7 +147,22 @@ impl Memory {
         if min > max_pages {
             return trap(Trap::MemoryTooLarge);
         }
-        let mut memory = Memory { chunks: Vec::new(), len: 0, max_pages };
+        // The largest base the OS grants, up to the maximum and RESERVE.
+        let mut size = usize::try_from(max_pages.saturating_mul(PAGE).min(RESERVE)).unwrap_or(usize::MAX);
+        let base = loop {
+            match zeroed(size) {
+                Ok(base) => break base,
+                // A sixteenth less each time: the largest grant is usually
+                // a little below the RAM size.
+                Err(_) if size > PAGE as usize => size = (size - size / 16 - 1) & !(PAGE as usize - 1),
+                Err(error) => return Err(error),
+            }
+        };
+        Memory::with_base(min, max_pages, base)
+    }
+
+    fn with_base(min: u64, max_pages: u64, base: Vec<u8>) -> R<Memory> {
+        let mut memory = Memory { base, chunks: Vec::new(), len: 0, fast: 0, max_pages };
         if memory.grow(min) < 0 {
             return trap(Trap::AllocationFailed);
         }
@@ -155,49 +178,84 @@ impl Memory {
         }
     }
 
+    /// Where byte `at` (in bounds) lives: the base or a chunk, and how many
+    /// bytes from there on that part holds.
+    fn part(&self, at: usize) -> (&[u8], usize) {
+        if at < self.base.len() {
+            (&self.base, at)
+        } else {
+            let at = at - self.base.len();
+            (&self.chunks[at >> CHUNK_BITS], at & (CHUNK - 1))
+        }
+    }
+
+    fn part_mut(&mut self, at: usize) -> (&mut [u8], usize) {
+        if at < self.base.len() {
+            (&mut self.base, at)
+        } else {
+            let at = at - self.base.len();
+            (&mut self.chunks[at >> CHUNK_BITS], at & (CHUNK - 1))
+        }
+    }
+
     #[inline(always)]
     fn get<const N: usize>(&self, address: u64, offset: u64) -> R<[u8; N]> {
-        let at = self.at(address, offset, N)?;
-        let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
         let mut out = [0; N];
-        match self.chunks[c].get(o..o + N) {
-            Some(bytes) => out.copy_from_slice(bytes),
-            None => self.read_into(at, &mut out),
+        // Both below `fast` (far below 2^63): their sum cannot overflow.
+        if address < self.fast as u64 && offset < self.fast as u64 && (address + offset) as usize + N <= self.fast {
+            let at = (address + offset) as usize;
+            out.copy_from_slice(&self.base[at..at + N]);
+            return Ok(out);
         }
+        self.get_slow(address, offset, &mut out)?;
         Ok(out)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn get_slow(&self, address: u64, offset: u64, out: &mut [u8]) -> R<()> {
+        let at = self.at(address, offset, out.len())?;
+        self.read_into(at, out);
+        Ok(())
     }
 
     #[inline(always)]
     fn put<const N: usize>(&mut self, address: u64, offset: u64, value: [u8; N]) -> R<()> {
-        let at = self.at(address, offset, N)?;
-        let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
-        match self.chunks[c].get_mut(o..o + N) {
-            Some(bytes) => bytes.copy_from_slice(&value),
-            None => self.write_from(at, &value),
+        // Both below `fast` (far below 2^63): their sum cannot overflow.
+        if address < self.fast as u64 && offset < self.fast as u64 && (address + offset) as usize + N <= self.fast {
+            let at = (address + offset) as usize;
+            self.base[at..at + N].copy_from_slice(&value);
+            return Ok(());
         }
+        self.put_slow(address, offset, &value)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_slow(&mut self, address: u64, offset: u64, value: &[u8]) -> R<()> {
+        let at = self.at(address, offset, value.len())?;
+        self.write_from(at, value);
         Ok(())
     }
 
-    /// Copies the bytes at `at` (in bounds) into `out`, across chunks.
-    #[cold]
+    /// Copies the bytes at `at` (in bounds) into `out`, across parts.
     fn read_into(&self, mut at: usize, mut out: &mut [u8]) {
         while !out.is_empty() {
-            let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
-            let n = out.len().min(self.chunks[c].len() - o);
+            let (part, o) = self.part(at);
+            let n = out.len().min(part.len() - o);
             let (now, rest) = out.split_at_mut(n);
-            now.copy_from_slice(&self.chunks[c][o..o + n]);
+            now.copy_from_slice(&part[o..o + n]);
             out = rest;
             at += n;
         }
     }
 
-    /// Writes `data` at `at` (in bounds), across chunks.
-    #[cold]
+    /// Writes `data` at `at` (in bounds), across parts.
     fn write_from(&mut self, mut at: usize, mut data: &[u8]) {
         while !data.is_empty() {
-            let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
-            let n = data.len().min(self.chunks[c].len() - o);
-            self.chunks[c][o..o + n].copy_from_slice(&data[..n]);
+            let (part, o) = self.part_mut(at);
+            let n = data.len().min(part.len() - o);
+            part[o..o + n].copy_from_slice(&data[..n]);
             data = &data[n..];
             at += n;
         }
@@ -258,15 +316,16 @@ impl Memory {
         let old = self.size();
         let Some(new) = old.checked_add(delta).filter(|&n| n <= self.max_pages) else { return -1 };
         let Some(len) = new.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else { return -1 };
-        // Every chunk is allocated whole (lazily zeroed), except a last one
-        // that the maximum ends inside.
+        // Past the base, every chunk is allocated whole (lazily zeroed),
+        // except a last one that the maximum ends inside.
         let max = usize::try_from(self.max_pages.saturating_mul(PAGE)).unwrap_or(usize::MAX);
-        while self.chunks.len() * CHUNK < len {
-            let start = self.chunks.len() * CHUNK;
+        while self.base.len() + self.chunks.len() * CHUNK < len {
+            let start = self.base.len() + self.chunks.len() * CHUNK;
             let Ok(chunk) = zeroed(CHUNK.min(max - start)) else { return -1 };
             self.chunks.push(chunk);
         }
         self.len = len;
+        self.fast = len.min(self.base.len());
         old as i64
     }
 
@@ -291,24 +350,41 @@ impl Memory {
         let mut at = self.at(destination, 0, n)?;
         let end = at + n;
         while at < end {
-            let (c, o) = (at >> CHUNK_BITS, at & (CHUNK - 1));
-            let k = (end - at).min(self.chunks[c].len() - o);
-            self.chunks[c][o..o + k].fill(value);
+            let (part, o) = self.part_mut(at);
+            let k = (end - at).min(part.len() - o);
+            part[o..o + k].fill(value);
             at += k;
         }
         Ok(())
+    }
+
+    /// `memory.copy` of a constant `N` bytes (at least 1), as
+    /// `Memory32::copy_n`; ranges beyond the base take `copy`.
+    #[inline(always)]
+    pub fn copy_n<const N: usize>(&mut self, destination: u64, source: u64) -> R<()> {
+        let fast = self.fast as u64;
+        if destination < fast && source < fast && destination as usize + N <= self.fast && source as usize + N <= self.fast {
+            let (to, from) = (destination as usize, source as usize);
+            if N <= 64 {
+                let mut value = [0; N];
+                value.copy_from_slice(&self.base[from..from + N]);
+                self.base[to..to + N].copy_from_slice(&value);
+            } else {
+                self.base.copy_within(from..from + N, to);
+            }
+            return Ok(());
+        }
+        self.copy(destination, source, N as u64)
     }
 
     pub fn copy(&mut self, destination: u64, source: u64, n: u64) -> R<()> {
         let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
         let to = self.at(destination, 0, n)?;
         let from = self.at(source, 0, n)?;
-        let (c, o) = (from >> CHUNK_BITS, from & (CHUNK - 1));
-        let (d, p) = (to >> CHUNK_BITS, to & (CHUNK - 1));
-        if c == d && o + n <= self.chunks[c].len() && p + n <= self.chunks[c].len() {
-            self.chunks[c].copy_within(o..o + n, p);
+        if to + n <= self.fast && from + n <= self.fast {
+            self.base.copy_within(from..from + n, to);
         } else {
-            // Across chunks: through a copy, which also keeps overlapping
+            // Across parts: through a copy, which also keeps overlapping
             // ranges right.
             let mut bytes = vec![0; n];
             self.read_into(from, &mut bytes);
@@ -720,9 +796,17 @@ mod tests {
     }
 
     #[test]
-    fn memory64_accesses_straddle_chunks() {
+    fn memory64_accesses_straddle_the_base_and_chunks() {
+        // A base of 2 pages, then chunks: the edges at 2 pages and at
+        // 2 pages + 4 GiB.
+        for edge in [2 * PAGE, 2 * PAGE + (1 << 32)] {
+            straddles(Memory::with_base(edge / PAGE + 1, 1 << 48, vec![0; 2 * PAGE as usize]).unwrap(), edge);
+        }
         let edge = 1u64 << 32;
-        let mut m = Memory::new(edge / PAGE + 1, None, true).unwrap();
+        straddles(Memory::new(edge / PAGE + 1, None, true).unwrap(), edge);
+    }
+
+    fn straddles(mut m: Memory, edge: u64) {
         m.s64(edge - 4, 0, 0x0102_0304_0506_0708).unwrap();
         assert_eq!(m.l64(edge - 4, 0), Ok(0x0102_0304_0506_0708));
         assert_eq!(m.l32(edge, 0), Ok(0x0102_0304));
@@ -736,6 +820,14 @@ mod tests {
         assert_eq!(m.read(edge - 1, 3).unwrap(), vec![1, 2, 3]);
         m.copy(edge - 10, edge - 1, 3).unwrap();
         assert_eq!(m.read(edge - 10, 3).unwrap(), vec![1, 2, 3]);
+        m.copy_n::<3>(edge - 20, edge - 1).unwrap();
+        assert_eq!(m.read(edge - 20, 3).unwrap(), vec![1, 2, 3]);
+        m.copy_n::<2>(edge - 1, edge - 20).unwrap();
+        assert_eq!(m.read(edge - 1, 3).unwrap(), vec![1, 2, 3]);
+        m.copy_n::<2>(edge - 19, edge - 20).unwrap();
+        assert_eq!(m.read(edge - 20, 3).unwrap(), vec![1, 1, 2]);
+        assert_eq!(m.copy_n::<2>(edge + PAGE - 1, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m.copy_n::<2>(0, u64::MAX), Err(Trap::OutOfBounds));
         assert_eq!(m.l8(edge + PAGE - 1, 0), Ok(0));
         assert_eq!(m.l8(edge + PAGE, 0), Err(Trap::OutOfBounds));
     }
