@@ -104,7 +104,37 @@ in a sixth to a fifteenth of V8's (and uncached Wasmtime's) process time, and th
 a small input beats V8 and uncached Wasmtime (Wasmtime with a warm compiled-module cache stays
 faster). Where guest code runs long, V8's and Wasmtime's machine code is 10–80×
 faster than wtime's interpreter; wtime's safe-Rust, JIT-free design rules out closing that
-gap by generating code.
+gap by generating code at run time.
+
+### Ahead of time (wtime-aot)
+
+[`tools/wtime-aot`](../wtime-aot/README.md) closes it before run time instead: it
+translates a module to a safe Rust crate (bounds-checked memory, Wasm's numeric
+semantics, no `unsafe`) that rustc compiles once. Preparation is then 0.3 ms. Every
+output below matches Wasmtime's, and the AOT-compiled Goose compiler emits Wasm
+byte-identical to the native compiler's. Same machine, one CPU per engine
+(`5be3c27`; [tables](results/aot-5be3c27/tables.md)); the VM is noisy, V8 most of all.
+
+| Example | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime | aot / V8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| squares, tour, functions, errors, maze, vm | 0.0–0.1 ms | 0.4–3.5 ms | 0.0–0.1 ms | 0.11–0.74× | ≤ 0.05× |
+| sieve | 0.9 ms | 7.1 ms | 0.9 ms | 1.04× | 0.13× |
+| sudoku | 14.2 ms | 23.0 ms | 12.2 ms | **0.84×** | 0.53× |
+| life | 22.9 ms | 26.4 ms | 14.1 ms | **0.60×** | 0.53× |
+| sorting | 183 ms | 657 ms | 134 ms | **0.68×** | 0.20× |
+
+| Case | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| compile-squares | 1.1 ms | 152 ms | 1.7 ms | 1.41× | 18.5 ms | 344 ms | **6.8 ms** |
+| compile-vm | 6.2 ms | 506 ms | 7.3 ms | 1.19× | 24.2 ms | 686 ms | **12.4 ms** |
+| compile-sudoku | 4.9 ms | 395 ms | 5.6 ms | 1.14× | 23.5 ms | 567 ms | **10.9 ms** |
+| compile-functions | 34.1 ms | 742 ms | 40.5 ms | 1.18× | 52.4 ms | 927 ms | **47.1 ms** |
+
+Compiled ahead of time, the examples run as fast as Wasmtime's code or faster, and
+every case beats V8. The Goose compiler's own run stays 1.1–1.4× Wasmtime's: its
+large functions spill and every memory access carries an explicit bounds check, which
+Wasmtime replaces with guard pages. Whole processes are faster than both everywhere.
+Building the compiler's crate takes about 12 minutes and 11.5 GB with rustc 1.97.0.
 
 ## Fixes
 
