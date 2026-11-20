@@ -10,49 +10,53 @@ to run identical modules on both engines and compare them.
 It is an isolated crate (own `[workspace]`), like `tools/wtime-bench`. `float.rs` and
 `pytext.rs` are copied from goose-to-wasm.
 
-## Results (2026-11-19)
+## Results (2026-11-20)
 
-The first comparison found several pathologies in wtime. They are fixed in the runtime now
-(see [Fixes](#fixes)). Every run on both builds produced output byte-identical to Wasmtime and
-to the expected files. When the Goose compiler itself runs inside wtime, the Wasm it emits
-matches the native compiler's output byte for byte.
+The first comparison found several pathologies in wtime; later rounds made the Decoded tier
+itself faster. Every run produced output byte-identical to Wasmtime and to the expected files.
+When the Goose compiler itself runs inside wtime, the Wasm it emits matches the native
+compiler's output byte for byte.
 
-Guest execution time (`_start`). Ratios are medians of per-round wtime/Wasmtime pairs;
-averages are geometric means. "Before" is wtime `2e77f35`; "after" is this change. Both are
-default builds of the Decoded tier.
+Guest execution time (`_start`), default builds of the Decoded tier. "Original" is wtime
+`2e77f35`, "round 1" is `7451d25` (pathology fixes), "now" is `8f86fdb` (straight-line runs and
+the later rounds below). Ratios are medians of per-round wtime/Wasmtime pairs; averages are
+geometric means.
 
-| Workload | Wasmtime 50.0.1 | wtime before | wtime after | Speedup | After / Wasmtime |
+| Workload | Wasmtime 50.0.1 | Original | Round 1 | Now | Now / Wasmtime |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Ten example programs (average) | | | | **5.1×** (2.2–14×) | 43× (was 226×) |
-| `sorting` example | 152 ms | 281 s | 97 s | 2.9× | 639× (was 1,871×) |
-| `sudoku` example | 9.2 ms | 8.2 s | 2.6 s | 3.1× | 284× (was 889×) |
-| `tour` example | 0.1 ms | 10.1 ms | 1.1 ms | 9.2× | 11× (was 101×) |
-| Compiler (memory32) compiling 4 examples (average) | | | | **2.6×** | 114× (was 318×) |
-| Compiler compiling `functions.goose` | 24.4 ms | 12.3 s | 4.9 s | 2.5× | 200× (was 476×) |
-| Compiler type-checks its own sources (`--check`) | ≈2.5 s | 1,041 s | 379 s | 2.7× | ≈150× (was ≈410×) |
-| Compiler, default **memory64** build, compiling `functions.goose` | 36.8 ms | could not run | 5.4 s | — | 142× |
-| Same memory64 compiler, `--check` on its own sources | | could not run | 442 s | — | |
+| Ten example programs (average speedup vs original) | | | 5.1× | **9.2×** (3.4–20×) | 27× (was 226×) |
+| `sorting` example | 175 ms | 277 s | 97 s | 38.6 s | 221× (was 1,871×) |
+| `sudoku` example | 10 ms | 7.9 s | 2.6 s | 1.25 s | 126× (was 889×) |
+| `sieve` example | 0.6 ms | 598 ms | 173 ms | 83 ms | 139× (was 1,026×) |
+| Compiler (memory32) compiling 4 examples (average vs Wasmtime) | | 318× | 114× | **70×** | |
+| Compiler compiling `functions.goose` | 21 ms | 12.3 s | 4.9 s | 2.25 s | 103× (was 476×) |
+| Compiler type-checks its own sources (`--check`) | ≈2.5 s | 1,041 s | 379 s | 218–242 s | ≈90× (was ≈410×) |
+| Default **memory64** compiler compiling `functions.goose` | 33 ms | could not run | 5.4 s | 2.96 s | 89× |
+| Same memory64 compiler, `--check` on its own sources | | could not run | 442 s | 266–295 s | |
 
 Preparation and memory for the 7.3 MB compiler module:
 
-| | Wasmtime (uncached / cached) | wtime before | wtime after |
+| | Wasmtime (uncached / cached) | Original | Now |
 | --- | ---: | ---: | ---: |
-| Preparation + instantiation | 6.1–6.8 s / 7 ms | 3.0–3.3 s | 0.37–0.44 s |
-| Whole process compiling `vm.goose` | 6.1 s / 26 ms | 5.8 s | 1.6 s |
-| Peak RSS (memory32 / memory64 compiler) | 137 / 242 MiB uncached | 4,645 MiB / — | 330 / 395 MiB |
+| Preparation + instantiation | 5.4–6.8 s / 7 ms | 3.0–3.3 s | 0.29–0.36 s |
+| Whole process compiling `vm.goose` | 6.1 s / 26 ms | 5.8 s | 0.77 s |
+| Peak RSS (memory32 / memory64 compiler) | 137 / 242 MiB uncached | 4,645 MiB / — | 275 / 331 MiB (`a9ec1cd`) |
 
-Full tables: [after](results/after/tables.md) and [before](results/before/tables.md). Raw
-samples, binary hashes and RSS are in `results/*/*.json`.
+Host instructions (callgrind, the most stable metric on this VM): `sieve` 5.57 G originally,
+2.80 G after round 1, 1.36 G now; the compiler compiling `vm.goose` 12.6 G after round 1, 6.3 G
+now. Full tables: [now](results/8f86fdb/tables.md), [round 1](results/after/tables.md) and
+[original](results/before/tables.md). Raw samples, binary hashes and RSS are in
+`results/*/*.json`. Benchmarks ran on a shared 4-vCPU VM partly concurrently with builds and
+other benchmarks; self-check ranges span separate runs.
 
-**What remains.** wtime is still an interpreter. Wasmtime compiles to native code, and wtime
-excludes JIT compilation by design. Guest code therefore stays roughly 10–600× slower. The
-remaining cost is spread across the Decoded dispatch loop: about 140 host instructions per Wasm
-instruction, down from about 280. That is design-level overhead (Result-returning
-stack operations, 32-byte `Value`s, label bookkeeping), not a pathology, and lowering it means
-a better execution tier. The existing experimental Compact and Register tiers do not help
-here. Compact admits nothing in these modules, because its module-wide preparation budget is
-100,000 work units. Register falls back to Decoded for almost every frame: on `sieve` it
-recorded 9,711 fallback frames against 504 register dispatches.
+**What remains.** wtime is still an interpreter; Wasmtime compiles to native code, and wtime
+excludes JIT compilation by design, so guest code stays roughly 10–200× slower on real
+programs. Decoded now spends about 70 host instructions per Wasm instruction (about 280
+originally), much of it in the 64-byte decoded `Instruction`, 32-byte `Value`s and per-instruction
+accounting that the fuel, cancellation and stack-limit contracts require. The experimental
+Compact and Register tiers do not help here: Compact admits nothing in these modules (its
+module-wide preparation budget is 100,000 work units) and Register falls back to Decoded for
+almost every frame.
 
 ## Fixes
 
@@ -108,6 +112,32 @@ These changes were made directly. They did not go through the `tools/verify.py` 
 flow that the repository uses for its performance plan. The `ReadVec` performance counter still
 marks the decoded load path, because existing tests use it to recognize that path, even though
 loads no longer allocate.
+
+### Later rounds (2026-11-20)
+
+Each batch went through the gate below and independent reviews by Opus 5 and Fable 5.2
+(1–2 rounds each); their findings are fixed in the commits listed.
+
+- **Straight-line runs** (`execution/straight.rs`, `32f8093`): after the loop head has charged an
+  instruction, consecutive locals, globals, constants, numeric operators, loads/stores,
+  drop/select and in-frame `block/loop/if/else/end/br/br_if/br_table` run in a tight loop. Each
+  instruction is still charged exactly once before it executes, with `next_source`'s
+  cancellation, fuel and operand-stack checks; an instruction that would leave the frame is
+  handed back already charged. Disabled in `execution-reference` builds.
+- **Calls, globals, validation** (`db077fa`): locals are allocated at full capacity at the call
+  site and zeroed in runs; numeric `global.set` and memory 0 resolve directly; the validator no
+  longer SipHashes its unknown-operand set on every pop.
+- **Fast paths proposed by Fable** (`8f86fdb`): fixed-width loads/stores within one page;
+  run state (pc, fuel, cancellation) kept in locals; a validator fast path for the commonest
+  instructions; inline one-byte LEB128 decoding.
+- **Memory backing hardening** (`0a6c7eb`, `0ee73cb`, `a9ec1cd`, review findings): page
+  allocation is fallible and reported as `ResourceLimit` instead of aborting; the last page is
+  sized to the memory's length (budget bypass with tiny custom-page-size memories); writes are
+  all-or-nothing and zero writes keep unwritten pages unallocated; shared conversion copies only
+  written pages within the length; the allocation-failure hardening check covers page writes.
+- **Control map** (`d063d22`): 8 bytes per instruction instead of 24 (−53 MiB RSS for the
+  compiler module).
+- **Host** (`70d4aaa`): `wtime-goose` skips teardown before exit.
 
 ## Reproduce
 

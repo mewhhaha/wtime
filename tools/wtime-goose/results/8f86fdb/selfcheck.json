@@ -1,0 +1,28 @@
+{
+ "compiler32": {
+  "exit": 0,
+  "max_rss_kib": 558316,
+  "wall_ns": 242507737392,
+  "stdout": "",
+  "stderr": "",
+  "engine": "wtime",
+  "tier": "decoded",
+  "compile_instantiate_ns": 306073469,
+  "compile_ns": 304321457,
+  "start_function_ns": 242167165505,
+  "engine_total_ns": 242473238974
+ },
+ "compiler64": {
+  "exit": 0,
+  "max_rss_kib": 626044,
+  "wall_ns": 266320993265,
+  "stdout": "",
+  "stderr": "",
+  "engine": "wtime",
+  "tier": "decoded",
+  "compile_instantiate_ns": 361779592,
+  "compile_ns": 360304186,
+  "start_function_ns": 265918433792,
+  "engine_total_ns": 266280213384
+ }
+}
