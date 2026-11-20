@@ -4,7 +4,7 @@
 //! their existing helpers. The reference dispatcher keeps its archived copy.
 use super::*;
 use crate::continuation::Prompt;
-#[inline]
+#[inline(always)]
 pub(super) fn next_source(
     store: &mut Store,
     fuel: &mut Option<u64>,

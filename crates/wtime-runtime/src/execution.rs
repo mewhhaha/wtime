@@ -1,4 +1,6 @@
 mod accounting;
+#[cfg(not(feature = "execution-reference"))]
+mod straight;
 #[cfg(feature = "register-executor")]
 #[allow(dead_code)]
 pub(super) mod register;
@@ -50,9 +52,12 @@ pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
     if s.len() < n || height > s.len() - n {
         return Err(trap("stack underflow"));
     }
-    let tail = s.split_off(s.len() - n);
-    s.truncate(height);
-    s.extend(tail);
+    // Remove the values between the label height and the kept results, in
+    // place: no temporary vector per branch.
+    let start = s.len() - n;
+    if height < start {
+        s.drain(height..start);
+    }
     Ok(())
 }
 impl Store {
@@ -180,6 +185,8 @@ impl Store {
         let mut prompts = Vec::new();
         let mut module_cache: Option<(usize, Module)> = None;
         let mut module_stale = true;
+        #[cfg(not(feature = "execution-reference"))]
+        let mut precharged = false;
         loop {
             #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
             register_capacity_scope.observe(&frames);
@@ -187,7 +194,14 @@ impl Store {
             let operand_height = if frames.last().is_some_and(|frame| frame.register.is_some()) { register::logical_height(frames.last().unwrap(), self)? } else { stack.len() };
             #[cfg(not(feature = "register-executor"))]
             let operand_height = stack.len();
-            accounting::next_source(self, &mut fuel, frames.len(), operand_height, &mut prompts)?;
+            // A straight-line run may already have charged this instruction.
+            #[cfg(not(feature = "execution-reference"))]
+            let charge = !std::mem::take(&mut precharged);
+            #[cfg(feature = "execution-reference")]
+            let charge = true;
+            if charge {
+                accounting::next_source(self, &mut fuel, frames.len(), operand_height, &mut prompts)?;
+            }
             #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
             if self.materialization_request.is_some() && frames.last().is_some_and(|frame| frame.register.is_some()) {
                 register::materialize(frames.last_mut().unwrap(), &mut stack, self)?;
@@ -326,6 +340,28 @@ impl Store {
             }
             let module: &Module = &module_cache.as_ref().expect("module cache was just filled").1;
             let ops = &module.data.inner.decoded().code[frame.function.body].instructions;
+            // Straight-line instructions of a plain Decoded frame run without
+            // returning here. The reference build keeps every instruction on
+            // this path for its per-boundary diagnostics.
+            #[cfg(not(feature = "execution-reference"))]
+            {
+                #[cfg(feature = "compact-executor")]
+                let plain = prepared_instruction.is_none() && !frame.compact;
+                #[cfg(not(feature = "compact-executor"))]
+                let plain = true;
+                #[cfg(feature = "register-executor")]
+                let plain = plain && frame.register.is_none();
+                if plain {
+                    match self.run_straight(inst_id, frame, module, ops, &mut stack, &mut fuel)? {
+                        straight::Straight::Declined => {}
+                        straight::Straight::Ran => continue,
+                        straight::Straight::Charged => {
+                            precharged = true;
+                            continue;
+                        }
+                    }
+                }
+            }
             #[cfg(feature = "compact-executor")]
             let (op, pc): (&Instruction, usize) = match &prepared_instruction {
                 Some((op, pc)) => (op, *pc),

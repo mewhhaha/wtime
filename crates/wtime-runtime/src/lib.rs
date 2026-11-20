@@ -986,6 +986,43 @@ mod tests {
             RunOutcome::Returned(vec![Value::I32(i32::MIN)])
         );
     }
+    fn run_with(bytes: &[u8], args: &[Value], limits: ResourceLimits) -> Result<RunOutcome> {
+        let e = Engine::new(Config { limits, ..Config::default() })?;
+        let m = e.compile(bytes)?;
+        let mut s = Store::new(&e);
+        let i = Linker::new(&e).instantiate(&mut s, &m)?;
+        let External::Func(f) = i.export(&s, "f")? else {
+            panic!()
+        };
+        s.invoke(f, args)
+    }
+    /// Counting loop: block, loop, then per iteration local.get, i32.eqz,
+    /// br_if 1, local.get, i32.const 1, i32.sub, local.set, br 0; the exit
+    /// takes local.get, i32.eqz, br_if 1, then local.get and the function end.
+    /// Every executed instruction costs one unit of fuel, whichever path of
+    /// the interpreter runs it.
+    #[test]
+    fn straight_line_runs_charge_fuel_per_instruction() {
+        let code = [
+            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0,
+            0x0b, 0x0b, 0x20, 0, 0x0b,
+        ];
+        let bytes = module(&code, &[0x7f], &[0x7f]);
+        for n in [0u64, 1, 5] {
+            let needed = 8 * n + 7;
+            for fuel in needed.saturating_sub(3)..=needed + 2 {
+                let limits = ResourceLimits { fuel: Some(fuel), ..ResourceLimits::default() };
+                let outcome = run_with(&bytes, &[Value::I32(n as i32)], limits);
+                if fuel >= needed {
+                    assert_eq!(outcome.unwrap(), RunOutcome::Returned(vec![Value::I32(0)]), "n={n} fuel={fuel}");
+                } else {
+                    let error = outcome.unwrap_err();
+                    assert_eq!(error.kind, ErrorKind::ResourceLimit, "n={n} fuel={fuel}");
+                    assert!(error.message.contains("fuel"), "n={n} fuel={fuel}: {error}");
+                }
+            }
+        }
+    }
     #[test]
     fn t045_branch_preserves_results() {
         assert_eq!(
