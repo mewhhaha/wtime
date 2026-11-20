@@ -32,10 +32,13 @@ pub struct State {
     policy: Policy,
     /// Bytes written to standard output, standard error and files so far.
     written: u64,
+    /// The host is inside `goose.reserve`: the module may not call the host
+    /// back into another reservation (or another file read).
+    reserving: bool,
 }
 
 /// The default of `Policy::output_limit`.
-pub const OUTPUT_LIMIT: u64 = 1 << 30;
+pub const OUTPUT_LIMIT: u64 = 256 << 20;
 
 /// What the module may reach outside itself beyond its input, output,
 /// arguments and the clock. Nothing by default: the operator grants
@@ -80,9 +83,20 @@ impl Policy {
         if self.directories.is_empty() {
             return None;
         }
-        // A trailing `/` (or `/.`) names a directory, which must exist.
         let directory = path.ends_with(b"/") || path.ends_with(b"/.");
         let path = Path::new(OsStr::from_bytes(path));
+        // First by its text alone, so that nothing outside the granted
+        // directories is even looked at: no `..`, and the path made absolute
+        // against the working directory lies under a granted directory.
+        if path.components().any(|component| component == Component::ParentDir) {
+            return None;
+        }
+        let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().ok()?.join(path) };
+        let lexical: PathBuf = absolute.components().filter(|component| *component != Component::CurDir).collect();
+        if !self.directories.iter().any(|granted| lexical.starts_with(granted)) {
+            return None;
+        }
+        // A trailing `/` (or `/.`) names a directory, which must exist.
         if directory && !path.is_dir() {
             return None;
         }
@@ -126,6 +140,7 @@ impl State {
             clock_origin: Instant::now(),
             policy: Policy::default(),
             written: 0,
+            reserving: false,
         }
     }
 
@@ -485,6 +500,9 @@ fn os_read_file(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     if path.contains(&0) {
         return Err(fail(guest, "embedded null byte"));
     }
+    if guest.state().reserving {
+        return Err(fail(guest, "goose.reserve called back into the host"));
+    }
     let Some(file) = guest.state().policy.file(&normalized_path(&path)) else { return Ok(Out::Integer(0)) };
     // At most the output limit: a larger file is reported unreadable.
     let limit = guest.state().policy.output_limit;
@@ -583,7 +601,16 @@ fn os_getenv(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
 /// Appends to the growable byte array whose control is at `control` through
 /// the module's exported `goose.reserve(control, count) -> address`.
 fn append_bytes(guest: &mut dyn Guest, control: i64, bytes: &[u8]) -> R<()> {
-    let destination = match guest.reserve(control, bytes.len() as i64) {
+    // goose.reserve runs module code, which could call the host back into
+    // here (or into a file read) while this host buffer is held: refused,
+    // so that host buffers do not pile up and the host cannot recurse.
+    if guest.state().reserving {
+        return Err(fail(guest, "goose.reserve called back into the host"));
+    }
+    guest.state().reserving = true;
+    let reserved = guest.reserve(control, bytes.len() as i64);
+    guest.state().reserving = false;
+    let destination = match reserved {
         None => return Err(fail(guest, "module does not export goose.reserve")),
         Some(destination) => destination?,
     };
@@ -732,10 +759,13 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
                     }
                 }
             },
-            "--time-limit" => match value("--time-limit").to_string_lossy().parse::<f64>() {
-                Ok(seconds) if seconds > 0.0 && seconds.is_finite() => time_limit = Some(std::time::Duration::from_secs_f64(seconds)),
-                _ => usage("--time-limit takes a positive number of seconds"),
-            },
+            "--time-limit" => {
+                let seconds = value("--time-limit").to_string_lossy().parse::<f64>().ok().filter(|s| *s > 0.0);
+                match seconds.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok()) {
+                    Some(limit) => time_limit = Some(limit),
+                    None => usage("--time-limit takes a positive number of seconds"),
+                }
+            }
             "--output-limit" => match value("--output-limit").to_string_lossy().parse::<u64>() {
                 Ok(bytes) => policy.output_limit = bytes,
                 Err(_) => usage("--output-limit takes a number of bytes"),
@@ -873,11 +903,20 @@ mod tests {
         let jail = jail.canonicalize().unwrap();
         assert_eq!(policy.file(&at(&jail.join("in.txt"))), Some(jail.join("in.txt")));
         assert_eq!(policy.file(&at(&jail.join("new.txt"))), Some(jail.join("new.txt")), "a new file inside");
-        assert_eq!(policy.file(&at(&jail.join("sub/../in.txt"))), Some(jail.join("in.txt")));
+        assert_eq!(policy.file(&at(&jail.join("sub/../in.txt"))), None, "no `..`, even inside");
+        assert_eq!(policy.file(&at(&jail.join("sub/./../sub"))), None);
+        assert_eq!(policy.file(&at(&jail.join("./sub/."))), Some(jail.join("sub")));
         for escape in ["../outside/secret.txt", "sub/../../outside/secret.txt", "to_secret", "dangling", "to_outside/secret.txt", "to_outside/new.txt", ".."] {
             assert_eq!(policy.file(&at(&jail.join(escape))), None, "{escape}");
         }
         assert_eq!(policy.file(b"/etc/passwd"), None);
+        // Nothing outside is looked at on the way: a walk out and back in
+        // is refused whether or not the outside exists.
+        let back_in = format!("{}/../jail/in.txt", outside.display());
+        assert_eq!(policy.file(back_in.as_bytes()), None);
+        let through_proc = format!("/proc/1/../..{}", jail.join("in.txt").display());
+        assert_eq!(policy.file(through_proc.as_bytes()), None);
+        assert_eq!(policy.file(&at(&jail.join("in.txt/"))), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

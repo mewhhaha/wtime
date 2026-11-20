@@ -37,9 +37,9 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
             "--rt" => rt = PathBuf::from(value()?),
             "--jobs" => jobs = Some(value()?.parse::<u32>().map_err(|_| format!("{USAGE}\n--jobs takes a number"))?),
             "--time-limit" => {
-                let seconds = value()?.parse::<f64>().ok().filter(|s| *s > 0.0 && s.is_finite());
-                let seconds = seconds.ok_or_else(|| format!("{USAGE}\n--time-limit takes a positive number of seconds"))?;
-                time_limit = std::time::Duration::from_secs_f64(seconds);
+                let seconds = value()?.parse::<f64>().ok().filter(|s| *s > 0.0);
+                let limit = seconds.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok());
+                time_limit = limit.ok_or_else(|| format!("{USAGE}\n--time-limit takes a positive number of seconds"))?;
             }
             _ if module.is_none() && !argument.starts_with('-') => module = Some(PathBuf::from(argument)),
             other => return Err(format!("{USAGE}\nunrecognized argument {other}")),
@@ -71,6 +71,19 @@ pub fn build(
     };
     fs::create_dir_all(cache).map_err(|e| format!("{}: {e}", cache.display()))?;
     let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
+    // Cargo reads configuration (which can name a rustc wrapper to run) from
+    // every ancestor of the directory it builds in; none may have any.
+    for directory in cache.ancestors() {
+        for name in ["config", "config.toml"] {
+            let config = directory.join(".cargo").join(name);
+            if config.exists() {
+                return Err(format!(
+                    "{} would configure the build; keep the cache where no ancestor has a .cargo configuration",
+                    config.display()
+                ));
+            }
+        }
+    }
     let rt = rt.canonicalize().map_err(|e| format!("{}: {e}", rt.display()))?;
 
     // The key: everything the program depends on.
@@ -145,7 +158,8 @@ fn generate_and_compile(
             cargo.env(variable, value);
         }
     }
-    cargo.env("RUSTUP_TOOLCHAIN", toolchain).env("CARGO_TARGET_DIR", &target);
+    // rustc recurses on nested code: a stack of its own size for that.
+    cargo.env("RUSTUP_TOOLCHAIN", toolchain).env("CARGO_TARGET_DIR", &target).env("RUST_MIN_STACK", "268435456");
     cargo.args(["build", "--release", "--offline", "--quiet"]);
     if let Some(jobs) = jobs {
         cargo.args(["--jobs", &jobs.to_string()]);

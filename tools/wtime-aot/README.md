@@ -149,10 +149,16 @@ What makes an uploaded module safe to run:
   arguments and the clock. Files and environment variables it gets only
   as the operator grants them:
   - `--allow-files DIR` (repeatable): the module may read, write and test
-    files under DIR. Paths are resolved through links before the check, a
-    link that cannot be resolved is refused, and writes do not follow a
-    link in the last component. Anything else looks to the module like a
-    file that does not exist (or cannot be written).
+    files under DIR. A path is checked by its text first (no `..`; made
+    absolute against the working directory, it must lie under a granted
+    directory), so nothing outside is even looked at; then it is resolved
+    through links and checked again. A link that cannot be resolved is
+    refused, and writes do not follow a link in the last component.
+    Anything else looks to the module like a file that does not exist (or
+    cannot be written).
+  - The module's `goose.reserve` may not call back into the host (into
+    another reservation or file read): host buffers cannot pile up, and the
+    host cannot recurse.
   - `--allow-env NAME` (repeatable, `*` for all): the variables it may
     read; others look unset.
 - **The operator bounds its resources:**
@@ -160,7 +166,7 @@ What makes an uploaded module safe to run:
     limit`, its buffered output dropped).
   - `--memory-limit-pages N` lowers the memory limit below the default 2^20
     pages (64 GiB).
-  - `--output-limit BYTES` (default 1 GiB) bounds what the module writes to
+  - `--output-limit BYTES` (default 256 MiB) bounds what the module writes to
     standard output, standard error and files together, and the size of a
     file it may read; output is buffered until the program ends, so this
     also bounds the host's memory.
@@ -173,20 +179,24 @@ What makes an uploaded module safe to run:
   run it as a process of its own and use the OS (a cgroup) for anything
   finer, such as CPU or a hard bound on resident memory.
 - **The build is bounded too.** The generator refuses modules over 256 MiB
-  or 100 million instructions and generated source over 1 GiB, and its
-  work is linear in the module (nesting, operand stacks and constant
-  expressions cannot make it grow faster); `wtime-aot build --time-limit
-  SECONDS` (default 3600) ends a build, rustc included. Each build has its
-  own target directory, removed afterwards, success or not.
+  or 100 million instructions, more than 1,000,000 locals in all, blocks
+  nested deeper than 512 (rustc's own stack gives out near 1,000) and
+  generated source over 1 GiB, and its work is linear in the module
+  (nesting, operand stacks and constant expressions cannot make it grow
+  faster). rustc's time is not linear: a valid 28 KB module of 2,000 locals
+  chained through 50 loops takes over a minute. `wtime-aot build
+  --time-limit SECONDS` (default 3600) ends a build, rustc included; run
+  builds under a cgroup to bound their memory. Each build has its own
+  target directory, removed afterwards, success or not. A build refuses to
+  run where an ancestor of the cache has a `.cargo` configuration, which
+  could name a program for Cargo to run.
 
 Not guarded against:
 
 - Another local process swapping links inside a granted directory between
   the check and the access.
-- Cargo configuration: Cargo reads `.cargo/config.toml` from every ancestor
-  of the cache directory and from `CARGO_HOME`, and a `rustc-wrapper` there
-  runs during builds. Keep the cache under directories only the operator
-  can write (not `/tmp`).
+- Cargo configuration in `CARGO_HOME` (the operator's own) applies to
+  builds; keep the cache under directories only the operator can write.
 - rustc or LLVM miscompiling the generated code: pin `--toolchain` to a
   version you have checked (see Toolchain); the default, `stable`, moves.
 

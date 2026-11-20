@@ -19,6 +19,12 @@ const FILE_BYTES: usize = 1 << 20;
 /// The defined functions are split into crates of about this many bytes.
 const PART_BYTES: usize = 12 << 20;
 
+/// Locals the module's functions declare at most, together (the Goose
+/// compilers declare about 56,000), and blocks nested at most (they nest
+/// 39 deep; rustc's own stack overflows near 1,000).
+const MAX_LOCALS: usize = 1_000_000;
+const MAX_NESTING: usize = 512;
+
 /// Pending expressions on the operand stack at most (see `push_pure`).
 const MAX_PENDING: usize = 64;
 
@@ -457,6 +463,10 @@ impl Module {
     fn functions(&self, m: &DecodedModule) -> Res<Vec<(usize, String)>> {
         let base = self.imports.len();
         let mut functions = Vec::new();
+        let locals: usize = m.code.iter().map(|body| body.locals.len()).sum();
+        if locals > MAX_LOCALS {
+            return Err(format!("the module declares {locals} locals, more than {MAX_LOCALS}"));
+        }
         let mut total = 0;
         for (k, body) in m.code.iter().enumerate() {
             let index = base + k;
@@ -871,6 +881,9 @@ impl<'a> Function<'a> {
         });
         for (pc, i) in code.iter().enumerate() {
             self.instruction(&mut e, i).map_err(|err| format!("instruction {pc} ({:#x}): {err}", i.opcode))?;
+            if e.frames.len() > MAX_NESTING {
+                return Err(format!("instruction {pc}: blocks nested deeper than {MAX_NESTING}"));
+            }
             if e.frames.is_empty() {
                 break;
             }
