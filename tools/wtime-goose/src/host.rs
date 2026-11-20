@@ -88,7 +88,9 @@ impl Cx<'_, '_> {
     }
 
     fn memory(&self) -> Result<Memory, Error> {
-        self.state().memory.ok_or_else(|| self.fail("host memory is unavailable during module initialization"))
+        // The state lock is released before `fail` takes it again.
+        let memory = self.state().memory;
+        memory.ok_or_else(|| self.fail("host memory is unavailable during module initialization"))
     }
 
     fn read(&mut self, pointer: i128, length: i128) -> Result<Vec<u8>, Error> {

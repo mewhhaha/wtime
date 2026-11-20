@@ -18,6 +18,8 @@ use std::fmt;
 pub enum Trap {
     Unreachable,
     OutOfBounds,
+    /// An active element segment does not fit its table.
+    TableOutOfBounds,
     DivideByZero,
     IntegerOverflow,
     InvalidConversion,
@@ -38,19 +40,21 @@ pub enum Trap {
 impl Trap {
     pub fn message(self) -> &'static str {
         match self {
-            Trap::Unreachable => "unreachable",
-            Trap::OutOfBounds => "out of bounds memory access",
-            Trap::DivideByZero => "integer divide by zero",
-            Trap::IntegerOverflow => "integer overflow",
-            Trap::InvalidConversion => "invalid conversion to integer",
-            Trap::CallStackExhausted => "call stack exhausted",
-            Trap::MemoryTooLarge => "memory too large",
-            Trap::AllocationFailed => "memory allocation failed",
-            Trap::NoStart => "module does not export _start",
-            Trap::ResultMismatch => "host import result does not fit its declared type",
-            Trap::Host => "host failure",
+            // The texts wtime-goose reports for the same failures.
+            Trap::Unreachable => "Trap: unreachable",
+            Trap::OutOfBounds => "Trap: out of bounds",
+            Trap::TableOutOfBounds => "Trap: table out of bounds",
+            Trap::DivideByZero => "Trap: integer divide by zero",
+            Trap::IntegerOverflow => "Trap: integer overflow",
+            Trap::InvalidConversion => "Trap: invalid integer conversion",
+            Trap::CallStackExhausted => "ResourceLimit: call depth exhausted",
+            Trap::MemoryTooLarge => "ResourceLimit: memory too large",
+            Trap::AllocationFailed => "ResourceLimit: memory allocation failed",
+            Trap::NoStart => "Host: module does not export _start",
+            Trap::ResultMismatch => "Host: host import result does not fit its declared type",
+            Trap::Host => "Host: host failure",
             Trap::Exit => "program exit",
-            Trap::StopIteration => "generator raised StopIteration",
+            Trap::StopIteration => "Host: generator raised StopIteration",
         }
     }
 }

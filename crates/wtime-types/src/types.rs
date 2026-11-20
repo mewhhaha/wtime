@@ -50,6 +50,14 @@ pub struct MemoryType {
     pub shared: bool,
     pub page_size_log2: u8,
 }
+impl MemoryType {
+    /// The most pages the memory's index type can address: 2^32 bytes for a
+    /// 32-bit memory, 2^64 for a 64-bit one, whatever the declared maximum.
+    pub fn addressable_pages(&self) -> u64 {
+        let bits: u32 = if self.index_type == IndexType::I64 { 64 } else { 32 };
+        1u64.checked_shl(bits - u32::from(self.page_size_log2)).unwrap_or(u64::MAX)
+    }
+}
 impl Default for MemoryType {
     fn default() -> Self {
         Self {

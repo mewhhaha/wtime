@@ -61,8 +61,10 @@ impl State {
 
 /// A compiled module as the host and the driver see it.
 pub trait Guest {
-    /// Instantiates the module: memory, globals, data, start function.
-    fn instantiate(state: State) -> R<Self>
+    /// Instantiates the module: memory, globals, data, start function. The
+    /// instance takes `state`; if instantiation fails, `state` holds what the
+    /// module wrote and the host's failure.
+    fn instantiate(state: &mut State) -> R<Self>
     where
         Self: Sized;
     /// The exported memory, if any.
@@ -614,16 +616,16 @@ fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>) -> Outcome {
     let started = Instant::now();
     let mut instantiated = started;
     let mut guest = None;
+    let mut state = State::new(input, program);
     let result = (|| -> R<()> {
-        let g = guest.insert(G::instantiate(State::new(input, program))?);
+        let g = guest.insert(G::instantiate(&mut state)?);
         instantiated = Instant::now();
         g.start()
     })();
     let ended = Instant::now();
-    let mut state = match guest.as_mut() {
-        Some(g) => std::mem::replace(g.state(), State::new(Vec::new(), Vec::new())),
-        None => State::new(Vec::new(), Vec::new()),
-    };
+    if let Some(g) = guest.as_mut() {
+        state = std::mem::replace(g.state(), State::new(Vec::new(), Vec::new()));
+    }
     let (exit_code, error) = match (result, state.exit, state.failure.take()) {
         (_, Some(code), _) => (code, String::new()),
         (Ok(()), None, _) => (0, String::new()),

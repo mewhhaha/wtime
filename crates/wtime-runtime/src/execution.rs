@@ -915,6 +915,7 @@ impl Store {
                         let new = old.checked_add(delta);
                         if let Some(n) = new.filter(|n| {
                             *n <= mem.ty.limits.max.unwrap_or(u64::MAX)
+                                && *n <= mem.ty.addressable_pages()
                                 && *n <= self.engine.config.limits.max_memory_pages
                         }) {
                             if let Some(bytes) = n

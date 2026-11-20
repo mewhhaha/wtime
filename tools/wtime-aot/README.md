@@ -55,13 +55,30 @@ benchmarks such programs as engine `wtime-aot`.
 
 - One memory, 32- or 64-bit, with 64 KiB pages and not shared.
 - Function imports served by the Goose host (`wtime_aot_rt::goose`).
-- Numeric globals with constant initializers, and active data segments.
-- The MVP instruction set without tables: no `call_indirect` or `br_table`.
+- Numeric globals and active data segments, with constant initializers
+  that may use the extended constant operators (integer add, sub, mul).
+- Tables only as far as instantiation goes: an active element segment is
+  bounds checked against its table and traps if it does not fit, as the
+  interpreter does. No instruction may use a table: no `call_indirect`,
+  `br_table` or table instructions.
 - Sign extension, saturating truncation, `memory.copy` and `memory.fill`.
 - The SIMD instructions that treat `v128` as 16 bytes: load, store, const,
   and i64x2 splat, extract_lane and replace_lane.
 
-The generator refuses anything else with an error naming the construct.
+The generator refuses anything else with an error naming the construct,
+in dead code as well as live code.
+
+## Host parity with wtime-goose
+
+The program reports what `wtime-goose` reports for the same module: the
+output written before a failure (also when the start function fails), the
+exit code, and the failure text (`Trap: integer divide by zero`,
+`ResourceLimit: call depth exhausted`, `unsupported direct host import:
+env.x`, ...). Like `wtime-goose`, the host reads and writes only the memory
+exported as `memory`, and only once instantiation, start function included,
+has completed. Two differences remain: an access past the end of memory
+reports `Trap: out of bounds` where the interpreter may report
+`Trap: address overflow`, and the call depth limit is lower (see Calls).
 
 ## Not covered
 

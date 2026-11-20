@@ -1224,6 +1224,28 @@ mod tests {
         assert!(m.data.lowered[0].get().is_some());
         assert_eq!(s.invoke(f, &[Value::I32(3)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
     }
+    /// A 32-bit memory without a declared maximum cannot grow past 2^32
+    /// bytes, even when the page limit would allow it.
+    #[test]
+    fn memory32_growth_stops_at_the_address_space() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0, // header
+            1, 5, 1, 0x60, 0, 1, 0x7f, // type () -> i32
+            3, 2, 1, 0, // function
+            5, 3, 1, 0, 1, // memory 1 page, no maximum
+            7, 5, 1, 1, b'f', 0, 0, // export "f"
+            10, 10, 1, 8, 0, 0x41, 0x80, 0x80, 0x04, 0x40, 0, 0x0b, // memory.grow 65536
+        ];
+        let mut config = Config::default();
+        config.limits.max_memory_pages = 1 << 20;
+        config.limits.max_memory_bytes = u64::MAX;
+        let e = Engine::new(config).unwrap();
+        let m = e.compile(&bytes).unwrap();
+        let mut s = Store::new(&e);
+        let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+        let External::Func(f) = i.export(&s, "f").unwrap() else { panic!() };
+        assert_eq!(s.invoke(f, &[]).unwrap(), RunOutcome::Returned(vec![Value::I32(-1)]));
+    }
     /// A cold body longer than the static Slow ops runs its later
     /// instructions in the general loop, which still warms and lowers it.
     #[cfg(not(feature = "execution-reference"))]
