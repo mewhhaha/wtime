@@ -1,0 +1,1360 @@
+{
+ "schema": "wtime-goose-comparison-v1",
+ "started": "2026-11-20T12:08:36Z",
+ "host": {
+  "machine": "x86_64",
+  "kernel": "6.18.44-fc-v726",
+  "cpus": 4,
+  "cpu": "1-3",
+  "model": "Intel(R) Xeon(R) Processor @ 2.10GHz"
+ },
+ "binaries": {
+  "wtime": {
+   "path": "/tmp/claude-0/-home-user/932f8eb8-43ae-5869-9c0a-b448b1898daa/scratchpad/wtime-goose-dc33870",
+   "sha256": "11abec54448525a224e02c21fff71a152fe47960ba6db3c7b03d721bcf50f3a8"
+  },
+  "wasmtime": {
+   "path": "/home/user/goose-to-wasm/host/rust/target/release/goose-wasmtime",
+   "sha256": "1ad36cbc71eb45867fd5ff2c307e4f3864f38d990dae59176cf18d12fe56d16e"
+  },
+  "deno": {
+   "path": "/tmp/claude-0/-home-user/932f8eb8-43ae-5869-9c0a-b448b1898daa/scratchpad/deno/node_modules/@deno/linux-x64-glibc/deno",
+   "sha256": "bceb5b6a6239b0b010418406d8c77a508f67cf4337d94288f1c19fe71304aab0",
+   "version": "deno 2.9.6 (stable, release, x86_64-unknown-linux-gnu)\nv8 15.0.245.2-rusty\ntypescript 6.0.3"
+  },
+  "v8_host": {
+   "path": "/home/user/goose-to-wasm/scripts/run_wasm.mjs",
+   "sha256": "7e4fdf993a26567c9923e7431acdcc5b8c972b5bc48df832fd402e0de35103d1"
+  }
+ },
+ "rounds": 3,
+ "cases": [
+  {
+   "name": "compile-squares",
+   "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/squares.goose to Wasm",
+   "module": {
+    "path": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+    "sha256": "2e87827f7aa678e88f3575c7aba6c620889528e044801c015f0ddc3699f144a2",
+    "bytes": 7263069
+   },
+   "arguments": [
+    "examples/squares.goose",
+    "--stdlib",
+    "stdlib",
+    "--target",
+    "wasm-direct",
+    "-O2",
+    "-o",
+    "/dev/null"
+   ],
+   "stdin": null,
+   "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "outputs_match": true,
+   "failures": [],
+   "summary": {
+    "wasmtime": {
+     "wall_ns": 2224782025,
+     "compile_instantiate_ns": 2198288129,
+     "start_function_ns": 1316600,
+     "max_rss_kib": 202624,
+     "paired_ratio_vs_v8": {
+      "wall_ns": 9.858824589715391,
+      "start_function_ns": 0.012040536387148441,
+      "compile_instantiate_ns": 122.14322360463149
+     }
+    },
+    "wasmtime-cached": {
+     "wall_ns": 17228821,
+     "compile_instantiate_ns": 6550209,
+     "start_function_ns": 1293684,
+     "max_rss_kib": 110772,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.007692485289654388,
+      "start_function_ns": 1.1138678564602036,
+      "compile_instantiate_ns": 0.0028549640007064394
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.07827759425178696,
+      "start_function_ns": 0.011908291338873757,
+      "compile_instantiate_ns": 0.3487145063214599
+     }
+    },
+    "v8": {
+     "wall_ns": 225396037,
+     "compile_instantiate_ns": 18783873,
+     "start_function_ns": 109347288,
+     "max_rss_kib": 112368,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.10143196999804502,
+      "start_function_ns": 83.05277836852498,
+      "compile_instantiate_ns": 0.008187109939368602
+     }
+    },
+    "wtime-decoded": {
+     "wall_ns": 148537203,
+     "compile_instantiate_ns": 100977494,
+     "start_function_ns": 26836322,
+     "max_rss_kib": 190536,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.06676483418639631,
+      "start_function_ns": 22.530121384426494,
+      "compile_instantiate_ns": 0.04588252402844099
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.6482424844053492,
+      "start_function_ns": 0.24542284029943204,
+      "compile_instantiate_ns": 5.6042393919507445
+     }
+    }
+   },
+   "samples": {
+    "wasmtime": [
+     {
+      "wall_ns": 2224782025,
+      "exit": 0,
+      "max_rss_kib": 207784,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2198288129,
+      "start_function_ns": 1161434,
+      "engine_total_ns": 2199449563
+     },
+     {
+      "wall_ns": 2318643207,
+      "exit": 0,
+      "max_rss_kib": 197760,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2294322800,
+      "start_function_ns": 1378488,
+      "engine_total_ns": 2295701288
+     },
+     {
+      "wall_ns": 2222139992,
+      "exit": 0,
+      "max_rss_kib": 202624,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2194292022,
+      "start_function_ns": 1316600,
+      "engine_total_ns": 2195608622
+     }
+    ],
+    "wasmtime-cached": [
+     {
+      "wall_ns": 17114103,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6054634,
+      "start_function_ns": 1293684,
+      "engine_total_ns": 7348318
+     },
+     {
+      "wall_ns": 17228821,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6550209,
+      "start_function_ns": 1230544,
+      "engine_total_ns": 7780753
+     },
+     {
+      "wall_ns": 24810099,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 9273608,
+      "start_function_ns": 2114961,
+      "engine_total_ns": 11388569
+     }
+    ],
+    "v8": [
+     {
+      "wall_ns": 293648982,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 18899439,
+      "start_function_ns": 152607052,
+      "engine_total_ns": 171506491
+     },
+     {
+      "wall_ns": 220099010,
+      "exit": 0,
+      "max_rss_kib": 112516,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 18783873,
+      "start_function_ns": 103335060,
+      "engine_total_ns": 122118933
+     },
+     {
+      "wall_ns": 225396037,
+      "exit": 0,
+      "max_rss_kib": 112368,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 17494392,
+      "start_function_ns": 109347288,
+      "engine_total_ns": 126841680
+     }
+    ],
+    "wtime-decoded": [
+     {
+      "wall_ns": 148537203,
+      "exit": 0,
+      "max_rss_kib": 190536,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 96955553,
+      "compile_ns": 95352351,
+      "start_function_ns": 26167249,
+      "engine_total_ns": 123122802
+     },
+     {
+      "wall_ns": 164271264,
+      "exit": 0,
+      "max_rss_kib": 190496,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 105269321,
+      "compile_ns": 103421600,
+      "start_function_ns": 34006195,
+      "engine_total_ns": 139275516
+     },
+     {
+      "wall_ns": 146111287,
+      "exit": 0,
+      "max_rss_kib": 190540,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 100977494,
+      "compile_ns": 99386245,
+      "start_function_ns": 26836322,
+      "engine_total_ns": 127813816
+     }
+    ]
+   }
+  },
+  {
+   "name": "compile-vm",
+   "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/vm.goose to Wasm",
+   "module": {
+    "path": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+    "sha256": "2e87827f7aa678e88f3575c7aba6c620889528e044801c015f0ddc3699f144a2",
+    "bytes": 7263069
+   },
+   "arguments": [
+    "examples/vm.goose",
+    "--stdlib",
+    "stdlib",
+    "--target",
+    "wasm-direct",
+    "-O2",
+    "-o",
+    "/dev/null"
+   ],
+   "stdin": null,
+   "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "outputs_match": true,
+   "failures": [],
+   "summary": {
+    "wasmtime": {
+     "wall_ns": 2058175843,
+     "compile_instantiate_ns": 2032869361,
+     "start_function_ns": 5321134,
+     "max_rss_kib": 197080,
+     "paired_ratio_vs_v8": {
+      "wall_ns": 6.967077905901444,
+      "start_function_ns": 0.03064046131227227,
+      "compile_instantiate_ns": 125.44900336919792
+     }
+    },
+    "wasmtime-cached": {
+     "wall_ns": 21230207,
+     "compile_instantiate_ns": 5814176,
+     "start_function_ns": 5732207,
+     "max_rss_kib": 110772,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.010011083211826432,
+      "start_function_ns": 1.0772528938380428,
+      "compile_instantiate_ns": 0.002953897094245246
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.07094507692215975,
+      "start_function_ns": 0.03166421319783376,
+      "compile_instantiate_ns": 0.40020937837481485
+     }
+    },
+    "v8": {
+     "wall_ns": 299248488,
+     "compile_instantiate_ns": 16084312,
+     "start_function_ns": 173641511,
+     "max_rss_kib": 174136,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.1435321972146964,
+      "start_function_ns": 32.63658434540197,
+      "compile_instantiate_ns": 0.007971366636185924
+     }
+    },
+    "wtime-decoded": {
+     "wall_ns": 551958746,
+     "compile_instantiate_ns": 103792726,
+     "start_function_ns": 424823223,
+     "max_rss_kib": 203204,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.2769824392829877,
+      "start_function_ns": 79.83697140496744,
+      "compile_instantiate_ns": 0.05105725335392076
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 1.7742349361511227,
+      "start_function_ns": 2.374629526231202,
+      "compile_instantiate_ns": 6.799907388018835
+     }
+    }
+   },
+   "samples": {
+    "wasmtime": [
+     {
+      "wall_ns": 2058175843,
+      "exit": 0,
+      "max_rss_kib": 197080,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2032869361,
+      "start_function_ns": 5449291,
+      "engine_total_ns": 2038318652
+     },
+     {
+      "wall_ns": 2123401833,
+      "exit": 0,
+      "max_rss_kib": 193812,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2100986028,
+      "start_function_ns": 5320456,
+      "engine_total_ns": 2106306484
+     },
+     {
+      "wall_ns": 1992757185,
+      "exit": 0,
+      "max_rss_kib": 198152,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 1968306889,
+      "start_function_ns": 5321134,
+      "engine_total_ns": 1973628023
+     }
+    ],
+    "wasmtime-cached": [
+     {
+      "wall_ns": 22322954,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6902564,
+      "start_function_ns": 5385996,
+      "engine_total_ns": 12288560
+     },
+     {
+      "wall_ns": 21230207,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 5812619,
+      "start_function_ns": 5934716,
+      "engine_total_ns": 11747335
+     },
+     {
+      "wall_ns": 19949658,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 5814176,
+      "start_function_ns": 5732207,
+      "engine_total_ns": 11546383
+     }
+    ],
+    "v8": [
+     {
+      "wall_ns": 295414501,
+      "exit": 0,
+      "max_rss_kib": 164760,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 16204747,
+      "start_function_ns": 170097263,
+      "engine_total_ns": 186302010
+     },
+     {
+      "wall_ns": 299248488,
+      "exit": 0,
+      "max_rss_kib": 174136,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 14523945,
+      "start_function_ns": 173641511,
+      "engine_total_ns": 188165456
+     },
+     {
+      "wall_ns": 340293221,
+      "exit": 0,
+      "max_rss_kib": 175936,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 16084312,
+      "start_function_ns": 225263035,
+      "engine_total_ns": 241347347
+     }
+    ],
+    "wtime-decoded": [
+     {
+      "wall_ns": 675051054,
+      "exit": 0,
+      "max_rss_kib": 203160,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 103792726,
+      "compile_ns": 101651925,
+      "start_function_ns": 546600859,
+      "engine_total_ns": 650393585
+     },
+     {
+      "wall_ns": 530937122,
+      "exit": 0,
+      "max_rss_kib": 203252,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 98783877,
+      "compile_ns": 97127477,
+      "start_function_ns": 412334259,
+      "engine_total_ns": 511118136
+     },
+     {
+      "wall_ns": 551958746,
+      "exit": 0,
+      "max_rss_kib": 203204,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 109371832,
+      "compile_ns": 107625785,
+      "start_function_ns": 424823223,
+      "engine_total_ns": 534195055
+     }
+    ]
+   }
+  },
+  {
+   "name": "compile-sudoku",
+   "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/sudoku.goose to Wasm",
+   "module": {
+    "path": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+    "sha256": "2e87827f7aa678e88f3575c7aba6c620889528e044801c015f0ddc3699f144a2",
+    "bytes": 7263069
+   },
+   "arguments": [
+    "examples/sudoku.goose",
+    "--stdlib",
+    "stdlib",
+    "--target",
+    "wasm-direct",
+    "-O2",
+    "-o",
+    "/dev/null"
+   ],
+   "stdin": null,
+   "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "outputs_match": true,
+   "failures": [],
+   "summary": {
+    "wasmtime": {
+     "wall_ns": 2265557332,
+     "compile_instantiate_ns": 2243087030,
+     "start_function_ns": 4744175,
+     "max_rss_kib": 198688,
+     "paired_ratio_vs_v8": {
+      "wall_ns": 6.723895671116464,
+      "start_function_ns": 0.027190830058881107,
+      "compile_instantiate_ns": 143.02991995863962
+     }
+    },
+    "wasmtime-cached": {
+     "wall_ns": 21179076,
+     "compile_instantiate_ns": 5850638,
+     "start_function_ns": 4417220,
+     "max_rss_kib": 110772,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.009149346068615184,
+      "start_function_ns": 0.9310828542370381,
+      "compile_instantiate_ns": 0.0025534656237545614
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.06390451877410012,
+      "start_function_ns": 0.02531691566029727,
+      "compile_instantiate_ns": 0.3665825456688547
+     }
+    },
+    "v8": {
+     "wall_ns": 310430620,
+     "compile_instantiate_ns": 15959947,
+     "start_function_ns": 174477020,
+     "max_rss_kib": 167620,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.14872330698045405,
+      "start_function_ns": 36.77710455453266,
+      "compile_instantiate_ns": 0.006991544148868802
+     }
+    },
+    "wtime-decoded": {
+     "wall_ns": 552371973,
+     "compile_instantiate_ns": 106908050,
+     "start_function_ns": 426903981,
+     "max_rss_kib": 201212,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.2438128425169335,
+      "start_function_ns": 72.82591843701502,
+      "compile_instantiate_ns": 0.04766112441031769
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 1.8811907132835528,
+      "start_function_ns": 2.446763367462374,
+      "compile_instantiate_ns": 6.483150724214674
+     }
+    }
+   },
+   "samples": {
+    "wasmtime": [
+     {
+      "wall_ns": 2087303102,
+      "exit": 0,
+      "max_rss_kib": 190460,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2054264541,
+      "start_function_ns": 6479704,
+      "engine_total_ns": 2060744245
+     },
+     {
+      "wall_ns": 2265557332,
+      "exit": 0,
+      "max_rss_kib": 199552,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2243087030,
+      "start_function_ns": 4744175,
+      "engine_total_ns": 2247831205
+     },
+     {
+      "wall_ns": 2314818550,
+      "exit": 0,
+      "max_rss_kib": 198688,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2291253873,
+      "start_function_ns": 4648393,
+      "engine_total_ns": 2295902266
+     }
+    ],
+    "wasmtime-cached": [
+     {
+      "wall_ns": 21230522,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 7066821,
+      "start_function_ns": 4364604,
+      "engine_total_ns": 11431425
+     },
+     {
+      "wall_ns": 18764214,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 5591186,
+      "start_function_ns": 4417220,
+      "engine_total_ns": 10008406
+     },
+     {
+      "wall_ns": 21179076,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 5850638,
+      "start_function_ns": 6033464,
+      "engine_total_ns": 11884102
+     }
+    ],
+    "v8": [
+     {
+      "wall_ns": 310430620,
+      "exit": 0,
+      "max_rss_kib": 167620,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 17425289,
+      "start_function_ns": 174220156,
+      "engine_total_ns": 191645445
+     },
+     {
+      "wall_ns": 293628907,
+      "exit": 0,
+      "max_rss_kib": 167964,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 15682642,
+      "start_function_ns": 174477020,
+      "engine_total_ns": 190159662
+     },
+     {
+      "wall_ns": 353715766,
+      "exit": 0,
+      "max_rss_kib": 166888,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 15959947,
+      "start_function_ns": 219050052,
+      "engine_total_ns": 235009999
+     }
+    ],
+    "wtime-decoded": [
+     {
+      "wall_ns": 606911434,
+      "exit": 0,
+      "max_rss_kib": 201212,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 112970775,
+      "compile_ns": 110764587,
+      "start_function_ns": 471890395,
+      "engine_total_ns": 584861170
+     },
+     {
+      "wall_ns": 552371973,
+      "exit": 0,
+      "max_rss_kib": 201368,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 106908050,
+      "compile_ns": 104845382,
+      "start_function_ns": 426903981,
+      "engine_total_ns": 533812031
+     },
+     {
+      "wall_ns": 454427996,
+      "exit": 0,
+      "max_rss_kib": 201080,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 100286939,
+      "compile_ns": 98344733,
+      "start_function_ns": 334924784,
+      "engine_total_ns": 435211723
+     }
+    ]
+   }
+  },
+  {
+   "name": "compile-functions",
+   "description": "The Goose compiler as fixed memory32 Wasm, compiling examples/functions.goose to Wasm",
+   "module": {
+    "path": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
+    "sha256": "2e87827f7aa678e88f3575c7aba6c620889528e044801c015f0ddc3699f144a2",
+    "bytes": 7263069
+   },
+   "arguments": [
+    "examples/functions.goose",
+    "--stdlib",
+    "stdlib",
+    "--target",
+    "wasm-direct",
+    "-O2",
+    "-o",
+    "/dev/null"
+   ],
+   "stdin": null,
+   "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "outputs_match": true,
+   "failures": [],
+   "summary": {
+    "wasmtime": {
+     "wall_ns": 2165197126,
+     "compile_instantiate_ns": 2119921360,
+     "start_function_ns": 23683588,
+     "max_rss_kib": 196928,
+     "paired_ratio_vs_v8": {
+      "wall_ns": 5.766389464198467,
+      "start_function_ns": 0.09852393304729705,
+      "compile_instantiate_ns": 129.2641359996961
+     }
+    },
+    "wasmtime-cached": {
+     "wall_ns": 41357787,
+     "compile_instantiate_ns": 6359004,
+     "start_function_ns": 25271693,
+     "max_rss_kib": 110772,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.019047256385610736,
+      "start_function_ns": 1.094361268840525,
+      "compile_instantiate_ns": 0.00298854063963845
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.10983389854387274,
+      "start_function_ns": 0.10782077638079894,
+      "compile_instantiate_ns": 0.3894384887223976
+     }
+    },
+    "v8": {
+     "wall_ns": 369544015,
+     "compile_instantiate_ns": 16328648,
+     "start_function_ns": 234386116,
+     "max_rss_kib": 178352,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.17341874082710798,
+      "start_function_ns": 10.14981811089437,
+      "compile_instantiate_ns": 0.007736097814496289
+     }
+    },
+    "wtime-decoded": {
+     "wall_ns": 2044102065,
+     "compile_instantiate_ns": 100372365,
+     "start_function_ns": 1924987951,
+     "max_rss_kib": 210420,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.9820409447263163,
+      "start_function_ns": 81.27940542623863,
+      "compile_instantiate_ns": 0.047347211502222895
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 5.531417049197779,
+      "start_function_ns": 7.792808099907583,
+      "compile_instantiate_ns": 6.1202963868297156
+     }
+    }
+   },
+   "samples": {
+    "wasmtime": [
+     {
+      "wall_ns": 2081483543,
+      "exit": 0,
+      "max_rss_kib": 193616,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2029853288,
+      "start_function_ns": 23683588,
+      "engine_total_ns": 2053536876
+     },
+     {
+      "wall_ns": 2165197126,
+      "exit": 0,
+      "max_rss_kib": 196928,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2119921360,
+      "start_function_ns": 24756005,
+      "engine_total_ns": 2144677365
+     },
+     {
+      "wall_ns": 2171325159,
+      "exit": 0,
+      "max_rss_kib": 198664,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 2127795726,
+      "start_function_ns": 23092642,
+      "engine_total_ns": 2150888368
+     }
+    ],
+    "wasmtime-cached": [
+     {
+      "wall_ns": 82556881,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 9845316,
+      "start_function_ns": 58363092,
+      "engine_total_ns": 68208408
+     },
+     {
+      "wall_ns": 38851409,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6254765,
+      "start_function_ns": 23225765,
+      "engine_total_ns": 29480530
+     },
+     {
+      "wall_ns": 41357787,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6359004,
+      "start_function_ns": 25271693,
+      "engine_total_ns": 31630697
+     }
+    ],
+    "v8": [
+     {
+      "wall_ns": 369544015,
+      "exit": 0,
+      "max_rss_kib": 178928,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 16211649,
+      "start_function_ns": 247021090,
+      "engine_total_ns": 263232739
+     },
+     {
+      "wall_ns": 359853893,
+      "exit": 0,
+      "max_rss_kib": 178352,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 16399919,
+      "start_function_ns": 234319401,
+      "engine_total_ns": 250719320
+     },
+     {
+      "wall_ns": 376548475,
+      "exit": 0,
+      "max_rss_kib": 175008,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 16328648,
+      "start_function_ns": 234386116,
+      "engine_total_ns": 250714764
+     }
+    ],
+    "wtime-decoded": [
+     {
+      "wall_ns": 2044102065,
+      "exit": 0,
+      "max_rss_kib": 210388,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 101024990,
+      "compile_ns": 99302202,
+      "start_function_ns": 1924987951,
+      "engine_total_ns": 2026012941
+     },
+     {
+      "wall_ns": 1893391953,
+      "exit": 0,
+      "max_rss_kib": 210420,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 100372365,
+      "compile_ns": 98662068,
+      "start_function_ns": 1774706567,
+      "engine_total_ns": 1875078932
+     },
+     {
+      "wall_ns": 2193827672,
+      "exit": 0,
+      "max_rss_kib": 210528,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 89357842,
+      "compile_ns": 87818044,
+      "start_function_ns": 2088300491,
+      "engine_total_ns": 2177658333
+     }
+    ]
+   }
+  },
+  {
+   "name": "compile64-vm",
+   "description": "The Goose compiler as default memory64 Wasm, compiling examples/vm.goose to Wasm",
+   "module": {
+    "path": "/home/user/goose-to-wasm/build/cmp/compiler64.wasm",
+    "sha256": "bbecbe9c15d3388fde96604a3d1935c378f1ffd733d7e90baa872e5b07d70ae5",
+    "bytes": 8937039
+   },
+   "arguments": [
+    "examples/vm.goose",
+    "--stdlib",
+    "stdlib",
+    "--target",
+    "wasm-direct",
+    "-O2",
+    "-o",
+    "/dev/null"
+   ],
+   "stdin": null,
+   "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "outputs_match": true,
+   "failures": [],
+   "summary": {
+    "wasmtime": {
+     "wall_ns": 3543179372,
+     "compile_instantiate_ns": 3507802145,
+     "start_function_ns": 8832926,
+     "max_rss_kib": 346684,
+     "paired_ratio_vs_v8": {
+      "wall_ns": 5.27915950642718,
+      "start_function_ns": 0.014492471298255266,
+      "compile_instantiate_ns": 169.36814648509142
+     }
+    },
+    "wasmtime-cached": {
+     "wall_ns": 30174571,
+     "compile_instantiate_ns": 7981864,
+     "start_function_ns": 11013272,
+     "max_rss_kib": 110772,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.0074024865394053,
+      "start_function_ns": 1.2561043819430189,
+      "compile_instantiate_ns": 0.00196506716795388
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.038887367559647806,
+      "start_function_ns": 0.018046905835437506,
+      "compile_instantiate_ns": 0.3948907156190477
+     }
+    },
+    "v8": {
+     "wall_ns": 762366242,
+     "compile_instantiate_ns": 20599284,
+     "start_function_ns": 609483767,
+     "max_rss_kib": 198008,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.1894240927523666,
+      "start_function_ns": 69.00134417519178,
+      "compile_instantiate_ns": 0.005904297949484998
+     }
+    },
+    "wtime-decoded": {
+     "wall_ns": 720911678,
+     "compile_instantiate_ns": 130437714,
+     "start_function_ns": 581810427,
+     "max_rss_kib": 243192,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.2034646294503207,
+      "start_function_ns": 66.35762985013345,
+      "compile_instantiate_ns": 0.033365812485035756
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 1.074122232784344,
+      "start_function_ns": 1.031759128870582,
+      "compile_instantiate_ns": 6.166142152489326
+     }
+    }
+   },
+   "samples": {
+    "wasmtime": [
+     {
+      "wall_ns": 3530311665,
+      "exit": 0,
+      "max_rss_kib": 352100,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 3488862550,
+      "start_function_ns": 8767800,
+      "engine_total_ns": 3497630350
+     },
+     {
+      "wall_ns": 3543179372,
+      "exit": 0,
+      "max_rss_kib": 346684,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 3507802145,
+      "start_function_ns": 8892199,
+      "engine_total_ns": 3516694344
+     },
+     {
+      "wall_ns": 4105368762,
+      "exit": 0,
+      "max_rss_kib": 343440,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 4061878459,
+      "start_function_ns": 8832926,
+      "engine_total_ns": 4070711385
+     }
+    ],
+    "wasmtime-cached": [
+     {
+      "wall_ns": 30174571,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 8134466,
+      "start_function_ns": 11013272,
+      "engine_total_ns": 19147738
+     },
+     {
+      "wall_ns": 23250627,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6578419,
+      "start_function_ns": 8016729,
+      "engine_total_ns": 14595148
+     },
+     {
+      "wall_ns": 30389937,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 7981864,
+      "start_function_ns": 11112903,
+      "engine_total_ns": 19094767
+     }
+    ],
+    "v8": [
+     {
+      "wall_ns": 775947895,
+      "exit": 0,
+      "max_rss_kib": 198008,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 20599284,
+      "start_function_ns": 610258185,
+      "engine_total_ns": 630857469
+     },
+     {
+      "wall_ns": 671163538,
+      "exit": 0,
+      "max_rss_kib": 194356,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 21153861,
+      "start_function_ns": 554945511,
+      "engine_total_ns": 576099372
+     },
+     {
+      "wall_ns": 762366242,
+      "exit": 0,
+      "max_rss_kib": 202176,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 19495866,
+      "start_function_ns": 609483767,
+      "engine_total_ns": 628979633
+     }
+    ],
+    "wtime-decoded": [
+     {
+      "wall_ns": 713067499,
+      "exit": 0,
+      "max_rss_kib": 243272,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 111066055,
+      "compile_ns": 109873248,
+      "start_function_ns": 581810427,
+      "engine_total_ns": 692876482
+     },
+     {
+      "wall_ns": 720911678,
+      "exit": 0,
+      "max_rss_kib": 243192,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 130437714,
+      "compile_ns": 129164981,
+      "start_function_ns": 572570097,
+      "engine_total_ns": 703007811
+     },
+     {
+      "wall_ns": 852222047,
+      "exit": 0,
+      "max_rss_kib": 243020,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 135527875,
+      "compile_ns": 133842693,
+      "start_function_ns": 689377338,
+      "engine_total_ns": 824905213
+     }
+    ]
+   }
+  },
+  {
+   "name": "compile64-functions",
+   "description": "The Goose compiler as default memory64 Wasm, compiling examples/functions.goose to Wasm",
+   "module": {
+    "path": "/home/user/goose-to-wasm/build/cmp/compiler64.wasm",
+    "sha256": "bbecbe9c15d3388fde96604a3d1935c378f1ffd733d7e90baa872e5b07d70ae5",
+    "bytes": 8937039
+   },
+   "arguments": [
+    "examples/functions.goose",
+    "--stdlib",
+    "stdlib",
+    "--target",
+    "wasm-direct",
+    "-O2",
+    "-o",
+    "/dev/null"
+   ],
+   "stdin": null,
+   "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "outputs_match": true,
+   "failures": [],
+   "summary": {
+    "wasmtime": {
+     "wall_ns": 3972574900,
+     "compile_instantiate_ns": 3912927623,
+     "start_function_ns": 35484588,
+     "max_rss_kib": 349044,
+     "paired_ratio_vs_v8": {
+      "wall_ns": 4.128401930399566,
+      "start_function_ns": 0.047428898797651095,
+      "compile_instantiate_ns": 166.06941783380017
+     }
+    },
+    "wasmtime-cached": {
+     "wall_ns": 54731918,
+     "compile_instantiate_ns": 7330353,
+     "start_function_ns": 36419837,
+     "max_rss_kib": 110772,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.013684534623949161,
+      "start_function_ns": 1.0048882365699314,
+      "compile_instantiate_ns": 0.0019260419692405707
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 0.06098723229064265,
+      "start_function_ns": 0.04861023479026708,
+      "compile_instantiate_ns": 0.2990467639700842
+     }
+    },
+    "v8": {
+     "wall_ns": 907111289,
+     "compile_instantiate_ns": 23562000,
+     "start_function_ns": 751318239,
+     "max_rss_kib": 208820,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.24222447737863922,
+      "start_function_ns": 21.08419181871296,
+      "compile_instantiate_ns": 0.006021578283611407
+     }
+    },
+    "wtime-decoded": {
+     "wall_ns": 3236506418,
+     "compile_instantiate_ns": 121281636,
+     "start_function_ns": 3081738140,
+     "max_rss_kib": 251464,
+     "paired_ratio_vs_wasmtime": {
+      "wall_ns": 0.8323866792291317,
+      "start_function_ns": 86.84722899981254,
+      "compile_instantiate_ns": 0.03099511355311363
+     },
+     "paired_ratio_vs_v8": {
+      "wall_ns": 3.436426773368431,
+      "start_function_ns": 3.886197403144915,
+      "compile_instantiate_ns": 5.159457681129874
+     }
+    }
+   },
+   "samples": {
+    "wasmtime": [
+     {
+      "wall_ns": 3579891593,
+      "exit": 0,
+      "max_rss_kib": 335604,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 3518187942,
+      "start_function_ns": 35484588,
+      "engine_total_ns": 3553672530
+     },
+     {
+      "wall_ns": 3972574900,
+      "exit": 0,
+      "max_rss_kib": 353048,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 3912927623,
+      "start_function_ns": 34732157,
+      "engine_total_ns": 3947659780
+     },
+     {
+      "wall_ns": 4077679624,
+      "exit": 0,
+      "max_rss_kib": 349044,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 4010986325,
+      "start_function_ns": 42425895,
+      "engine_total_ns": 4053412220
+     }
+    ],
+    "wasmtime-cached": [
+     {
+      "wall_ns": 54731918,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 7330353,
+      "start_function_ns": 36419837,
+      "engine_total_ns": 43750190
+     },
+     {
+      "wall_ns": 52997657,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 6671333,
+      "start_function_ns": 34901936,
+      "engine_total_ns": 41573269
+     },
+     {
+      "wall_ns": 55801148,
+      "exit": 0,
+      "max_rss_kib": 110772,
+      "engine": "Wasmtime",
+      "wasmtime": "50.0.1",
+      "optimization": "cranelift speed",
+      "compile_instantiate_ns": 7725328,
+      "start_function_ns": 36521756,
+      "engine_total_ns": 44247084
+     }
+    ],
+    "v8": [
+     {
+      "wall_ns": 897432396,
+      "exit": 0,
+      "max_rss_kib": 208620,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 24512397,
+      "start_function_ns": 748163860,
+      "engine_total_ns": 772676257
+     },
+     {
+      "wall_ns": 962254879,
+      "exit": 0,
+      "max_rss_kib": 208820,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 23562000,
+      "start_function_ns": 811680564,
+      "engine_total_ns": 835242564
+     },
+     {
+      "wall_ns": 907111289,
+      "exit": 0,
+      "max_rss_kib": 211304,
+      "engine": "V8",
+      "node": "v26.3.0",
+      "v8": "15.0.245.2-rusty",
+      "compile_instantiate_ns": 22857770,
+      "start_function_ns": 751318239,
+      "engine_total_ns": 774176009
+     }
+    ],
+    "wtime-decoded": [
+     {
+      "wall_ns": 3236506418,
+      "exit": 0,
+      "max_rss_kib": 251328,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 129888107,
+      "compile_ns": 128603307,
+      "start_function_ns": 3081738140,
+      "engine_total_ns": 3211626247
+     },
+     {
+      "wall_ns": 3306718429,
+      "exit": 0,
+      "max_rss_kib": 251464,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 121281636,
+      "compile_ns": 119950058,
+      "start_function_ns": 3154350900,
+      "engine_total_ns": 3275632536
+     },
+     {
+      "wall_ns": 2737022480,
+      "exit": 0,
+      "max_rss_kib": 251664,
+      "engine": "wtime",
+      "tier": "decoded",
+      "compile_instantiate_ns": 117933697,
+      "compile_ns": 116767004,
+      "start_function_ns": 2596616607,
+      "engine_total_ns": 2714550304
+     }
+    ]
+   }
+  }
+ ],
+ "finished": "2026-11-20T12:09:56Z"
+}

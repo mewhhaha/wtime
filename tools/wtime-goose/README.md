@@ -69,6 +69,43 @@ experimental Compact and Register tiers do not help here: Compact admits nothing
 modules (its module-wide preparation budget is 100,000 work units) and Register falls back to
 Decoded for almost every frame.
 
+### Against V8 (Deno)
+
+V8 15.0 runs through Deno 2.9.6 with goose-to-wasm's own JavaScript host
+(`scripts/run_wasm.mjs`, the same imports and timing JSON); `bench.py --deno D --v8-host H`
+adds it as engine `v8`. V8 compiles lazily: Liftoff first, TurboFan for hot code, on
+background threads. "Process" is the whole process, including Deno's own start-up
+(about 50 ms). Ratios are wtime/V8, below 1 when wtime is faster.
+
+One CPU per engine (`b2c2b04`, before parallel preparation; [tables](results/v8-b2c2b04/tables.md)):
+
+| Example | V8 run | wtime run | wtime / V8 run | V8 process | wtime process | wtime / V8 process |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| squares, tour, functions, errors, maze, vm | 0.5–4.5 ms | 0.0–2.8 ms | 0.06–1.4× | 47–74 ms | 4.5–10 ms | **0.06–0.15×** |
+| sieve | 7.6 ms | 65 ms | 10× | 56 ms | 69 ms | 1.24× |
+| sudoku | 18 ms | 1.16 s | 65× | 68 ms | 1.16 s | 18× |
+| life | 26 ms | 2.02 s | 80× | 72 ms | 2.03 s | 29× |
+| sorting | 360 ms | 24.7 s | 69× | 435 ms | 24.7 s | 58× |
+
+The Goose compiler as Wasm, three CPUs for every engine (`dc33870`, bodies prepared in
+parallel; [tables](results/v8-dc33870/tables.md)):
+
+| Case | V8 prep | wtime prep | V8 run | wtime run | V8 process | wtime process | wtime / V8 process |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| compile-squares | 19 ms | 101 ms | 109 ms | 27 ms | 225 ms | 149 ms | **0.65×** |
+| compile64-vm | 21 ms | 130 ms | 610 ms | 582 ms | 762 ms | 721 ms | ≈1× (paired 1.07×) |
+| compile-vm | 16 ms | 104 ms | 174 ms | 425 ms | 299 ms | 552 ms | 1.8× |
+| compile-sudoku | 16 ms | 107 ms | 175 ms | 427 ms | 310 ms | 552 ms | 1.9× |
+| compile64-functions | 24 ms | 121 ms | 751 ms | 3.08 s | 907 ms | 3.24 s | 3.4× |
+| compile-functions | 16 ms | 100 ms | 234 ms | 1.93 s | 370 ms | 2.04 s | 5.5× |
+
+wtime is ahead wherever start-up and preparation dominate: every short example finishes
+in a sixth to a fifteenth of V8's (and uncached Wasmtime's) process time, and the compiler on
+a small input beats V8 and uncached Wasmtime (Wasmtime with a warm compiled-module cache stays
+faster). Where guest code runs long, V8's and Wasmtime's machine code is 10–80×
+faster than wtime's interpreter; wtime's safe-Rust, JIT-free design rules out closing that
+gap by generating code.
+
 ## Fixes
 
 All of these are in `crates/wtime-runtime`, are safe Rust, and add no dependencies.

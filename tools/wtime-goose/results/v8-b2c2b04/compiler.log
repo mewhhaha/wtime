@@ -1,0 +1,72 @@
+ compile-squares r0                   wasmtime: wall     6374.4 ms  prep    6355.4 ms  run        1.0 ms
+ compile-squares r0            wasmtime-cached: wall       15.3 ms  prep       5.8 ms  run        1.1 ms
+ compile-squares r0                         v8: wall      250.9 ms  prep      40.1 ms  run      111.5 ms
+ compile-squares r0              wtime-decoded: wall      237.8 ms  prep     193.6 ms  run       26.5 ms
+ compile-squares r1              wtime-decoded: wall      234.7 ms  prep     190.6 ms  run       26.8 ms
+ compile-squares r1                         v8: wall      250.4 ms  prep      38.9 ms  run      112.2 ms
+ compile-squares r1            wasmtime-cached: wall       16.7 ms  prep       6.1 ms  run        1.0 ms
+ compile-squares r1                   wasmtime: wall     5851.5 ms  prep    5836.2 ms  run        1.0 ms
+ compile-squares r2                   wasmtime: wall     5560.9 ms  prep    5545.7 ms  run        0.9 ms
+ compile-squares r2            wasmtime-cached: wall       14.9 ms  prep       5.6 ms  run        1.0 ms
+ compile-squares r2                         v8: wall      256.0 ms  prep      39.9 ms  run      110.1 ms
+ compile-squares r2              wtime-decoded: wall      248.5 ms  prep     204.3 ms  run       26.4 ms
+      compile-vm r0                   wasmtime: wall     5853.1 ms  prep    5835.1 ms  run        5.3 ms
+      compile-vm r0            wasmtime-cached: wall       20.4 ms  prep       5.5 ms  run        5.3 ms
+      compile-vm r0                         v8: wall      502.0 ms  prep      45.7 ms  run      344.2 ms
+      compile-vm r0              wtime-decoded: wall      622.3 ms  prep     190.2 ms  run      413.4 ms
+      compile-vm r1              wtime-decoded: wall      663.9 ms  prep     209.8 ms  run      434.6 ms
+      compile-vm r1                         v8: wall      523.5 ms  prep      66.2 ms  run      337.6 ms
+      compile-vm r1            wasmtime-cached: wall       20.3 ms  prep       5.6 ms  run        5.4 ms
+      compile-vm r1                   wasmtime: wall     5687.5 ms  prep    5666.7 ms  run        6.0 ms
+      compile-vm r2                   wasmtime: wall     5863.5 ms  prep    5843.2 ms  run        5.8 ms
+      compile-vm r2            wasmtime-cached: wall       19.1 ms  prep       5.5 ms  run        5.4 ms
+      compile-vm r2                         v8: wall      504.5 ms  prep      40.8 ms  run      333.4 ms
+      compile-vm r2              wtime-decoded: wall      612.4 ms  prep     189.4 ms  run      403.1 ms
+  compile-sudoku r0                   wasmtime: wall     5783.5 ms  prep    5762.5 ms  run        4.8 ms
+  compile-sudoku r0            wasmtime-cached: wall       19.2 ms  prep       5.9 ms  run        4.5 ms
+  compile-sudoku r0                         v8: wall      482.2 ms  prep      47.1 ms  run      329.0 ms
+  compile-sudoku r0              wtime-decoded: wall      541.1 ms  prep     202.1 ms  run      318.2 ms
+  compile-sudoku r1              wtime-decoded: wall      531.6 ms  prep     205.9 ms  run      306.6 ms
+  compile-sudoku r1                         v8: wall      651.0 ms  prep      56.5 ms  run      482.4 ms
+  compile-sudoku r1            wasmtime-cached: wall       24.2 ms  prep       6.6 ms  run        6.6 ms
+  compile-sudoku r1                   wasmtime: wall     6272.0 ms  prep    6247.1 ms  run        4.8 ms
+  compile-sudoku r2                   wasmtime: wall     6403.9 ms  prep    6382.8 ms  run        4.9 ms
+  compile-sudoku r2            wasmtime-cached: wall       19.9 ms  prep       6.1 ms  run        4.6 ms
+  compile-sudoku r2                         v8: wall      553.3 ms  prep      59.8 ms  run      383.3 ms
+  compile-sudoku r2              wtime-decoded: wall      518.0 ms  prep     201.9 ms  run      299.7 ms
+compile-functions r0                   wasmtime: wall     5697.2 ms  prep    5652.0 ms  run       26.7 ms
+compile-functions r0            wasmtime-cached: wall       36.9 ms  prep       5.6 ms  run       22.8 ms
+compile-functions r0                         v8: wall      706.4 ms  prep      44.3 ms  run      549.0 ms
+compile-functions r0              wtime-decoded: wall     2095.2 ms  prep     189.1 ms  run     1887.7 ms
+compile-functions r1              wtime-decoded: wall     2402.1 ms  prep     230.6 ms  run     2154.0 ms
+compile-functions r1                         v8: wall      686.8 ms  prep      70.4 ms  run      501.0 ms
+compile-functions r1            wasmtime-cached: wall       39.3 ms  prep       6.4 ms  run       23.6 ms
+compile-functions r1                   wasmtime: wall     6050.2 ms  prep    6012.9 ms  run       22.4 ms
+compile-functions r2                   wasmtime: wall     6792.2 ms  prep    6744.2 ms  run       29.5 ms
+compile-functions r2            wasmtime-cached: wall       45.0 ms  prep       6.3 ms  run       28.9 ms
+compile-functions r2                         v8: wall      937.3 ms  prep      72.2 ms  run      705.3 ms
+compile-functions r2              wtime-decoded: wall     2223.2 ms  prep     215.5 ms  run     1989.0 ms
+    compile64-vm r0                   wasmtime: wall    11066.7 ms  prep   11037.1 ms  run       10.7 ms
+    compile64-vm r0            wasmtime-cached: wall       25.5 ms  prep       7.1 ms  run        8.2 ms
+    compile64-vm r0                         v8: wall     1469.4 ms  prep      69.1 ms  run     1277.9 ms
+    compile64-vm r0              wtime-decoded: wall      991.9 ms  prep     333.2 ms  run      639.0 ms
+    compile64-vm r1              wtime-decoded: wall      866.7 ms  prep     233.2 ms  run      615.7 ms
+    compile64-vm r1                         v8: wall     1404.0 ms  prep      53.5 ms  run     1224.5 ms
+    compile64-vm r1            wasmtime-cached: wall       27.3 ms  prep       6.8 ms  run        9.9 ms
+    compile64-vm r1                   wasmtime: wall    10101.9 ms  prep   10071.5 ms  run        8.4 ms
+    compile64-vm r2                   wasmtime: wall    10071.7 ms  prep   10043.1 ms  run        8.8 ms
+    compile64-vm r2            wasmtime-cached: wall       25.3 ms  prep       7.3 ms  run        8.3 ms
+    compile64-vm r2                         v8: wall     1323.9 ms  prep      52.4 ms  run     1163.2 ms
+    compile64-vm r2              wtime-decoded: wall      950.3 ms  prep     251.3 ms  run      680.0 ms
+compile64-functions r0                   wasmtime: wall    10752.2 ms  prep   10694.2 ms  run       35.3 ms
+compile64-functions r0            wasmtime-cached: wall       55.0 ms  prep       7.7 ms  run       36.9 ms
+compile64-functions r0                         v8: wall     1788.3 ms  prep      54.6 ms  run     1608.0 ms
+compile64-functions r0              wtime-decoded: wall     3884.3 ms  prep     302.5 ms  run     3552.0 ms
+compile64-functions r1              wtime-decoded: wall     3378.9 ms  prep     295.9 ms  run     3062.2 ms
+compile64-functions r1                         v8: wall     1725.6 ms  prep      55.5 ms  run     1544.9 ms
+compile64-functions r1            wasmtime-cached: wall       83.3 ms  prep      11.2 ms  run       59.5 ms
+compile64-functions r1                   wasmtime: wall    10525.7 ms  prep   10446.8 ms  run       51.3 ms
+compile64-functions r2                   wasmtime: wall    10600.0 ms  prep   10541.0 ms  run       36.0 ms
+compile64-functions r2            wasmtime-cached: wall       55.5 ms  prep       8.2 ms  run       37.8 ms
+compile64-functions r2                         v8: wall     1809.8 ms  prep      53.8 ms  run     1635.8 ms
+compile64-functions r2              wtime-decoded: wall     3224.9 ms  prep     288.0 ms  run     2917.9 ms
