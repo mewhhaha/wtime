@@ -92,7 +92,13 @@ fn index(i: &Instruction) -> Result<usize> {
 /// exactly the expected types. Returns false, changing nothing, for anything
 /// else, which then takes the general path with all its checks and errors.
 #[inline]
-fn fast_instruction(s: &mut Stack, locals: &[ValType], i: &Instruction) -> bool {
+fn fast_instruction(
+    s: &mut Stack,
+    locals: &[ValType],
+    globals: &[GlobalType],
+    memories: &[MemoryType],
+    i: &Instruction,
+) -> bool {
     let Some(c) = s.controls.last() else { return false };
     if c.unreachable || !s.unknown.is_empty() {
         return false;
@@ -132,6 +138,66 @@ fn fast_instruction(s: &mut Stack, locals: &[ValType], i: &Instruction) -> bool 
         (0x51..=0x5a, _) if two(s, ValType::I64) => {
             s.values.truncate(n - 2);
             s.values.push(ValType::I32);
+            true
+        }
+        (0x23, Immediate::Index(x)) => {
+            let Some(t) = globals.get(*x as usize) else { return false };
+            s.values.push(t.value);
+            true
+        }
+        (0x24, Immediate::Index(x)) => {
+            let Some(t) = globals.get(*x as usize) else { return false };
+            if !(t.mutable && n > floor && s.values[n - 1] == t.value) {
+                return false;
+            }
+            s.values.truncate(n - 1);
+            true
+        }
+        (0x28..=0x3e, &Immediate::MemArg { align, memory, offset }) => {
+            let Some(m) = memories.get(memory as usize) else { return false };
+            let (t, size) = match i.opcode {
+                0x28 | 0x36 => (ValType::I32, 2),
+                0x29 | 0x37 => (ValType::I64, 3),
+                0x2a | 0x38 => (ValType::F32, 2),
+                0x2b | 0x39 => (ValType::F64, 3),
+                0x2c | 0x2d | 0x3a => (ValType::I32, 0),
+                0x2e | 0x2f | 0x3b => (ValType::I32, 1),
+                0x30 | 0x31 | 0x3c => (ValType::I64, 0),
+                0x32 | 0x33 | 0x3d => (ValType::I64, 1),
+                _ => (ValType::I64, 2),
+            };
+            let address = m.index_type.val_type();
+            if align > size || (m.index_type != IndexType::I64 && offset > u32::MAX as u64) {
+                return false;
+            }
+            if i.opcode >= 0x36 {
+                if !(n >= floor + 2 && s.values[n - 1] == t && s.values[n - 2] == address) {
+                    return false;
+                }
+                s.values.truncate(n - 2);
+            } else {
+                if !(n > floor && s.values[n - 1] == address) {
+                    return false;
+                }
+                s.values[n - 1] = t;
+            }
+            true
+        }
+        (0x1a, _) if n > floor => {
+            s.values.truncate(n - 1);
+            true
+        }
+        // Unary operators: (operand, result).
+        (0x45 | 0x50 | 0xa7 | 0xac | 0xad, _) => {
+            let (a, r) = match i.opcode {
+                0x45 => (ValType::I32, ValType::I32),
+                0x50 | 0xa7 => (ValType::I64, ValType::I32),
+                _ => (ValType::I32, ValType::I64),
+            };
+            if !(n > floor && s.values[n - 1] == a) {
+                return false;
+            }
+            s.values[n - 1] = r;
             true
         }
         _ => false,
@@ -642,7 +708,7 @@ impl Context<'_> {
                     "undeclared function reference",
                 )?;
             }
-            if !fast_instruction(&mut s, &locals, i) {
+            if !fast_instruction(&mut s, &locals, &self.globals, &self.memories, i) {
                 self.instruction(&mut s, &locals, i)
                     .map_err(|e| e.at(at))?;
             }

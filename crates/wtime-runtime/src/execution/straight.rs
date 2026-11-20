@@ -69,6 +69,15 @@ impl Store {
         let mut memory0: Option<usize> = None;
         let mut first = true;
         // Errors in the order numeric::exec reports them.
+        macro_rules! unary {
+            ($v:ident, |$a:ident| $e:expr) => {{
+                let slot = stack.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
+                let Value::$v($a) = *slot else {
+                    return Err(trap("numeric type mismatch"));
+                };
+                *slot = $e;
+            }};
+        }
         macro_rules! binary {
             ($v:ident, |$a:ident, $b:ident| $e:expr) => {{
                 let $b = match stack.pop() {
@@ -174,11 +183,12 @@ impl Store {
                     }
                 }};
             }
-            // Charges the second instruction of a fused pair, as the bottom of
-            // the loop charges the next instruction, and counts it.
-            macro_rules! charge_second {
-                () => {{
-                    *pc_ref = pc + 1;
+            // Charges instruction `pc + k` of a fused group, as the bottom of
+            // the loop charges the next instruction, and counts it; `extra`
+            // operands of the group are held outside the operand stack.
+            macro_rules! charge_at {
+                ($k:literal, $extra:literal) => {{
+                    *pc_ref = pc + $k;
                     if cancel.load(std::sync::atomic::Ordering::Acquire) {
                         return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
                     }
@@ -188,7 +198,7 @@ impl Store {
                         }
                         *n -= 1;
                     }
-                    if stack.len() > max_height {
+                    if stack.len() + $extra > max_height {
                         return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
                     }
                     #[cfg(feature = "performance-counters")]
@@ -197,12 +207,51 @@ impl Store {
                         self.perf.record(perf::Event::InstructionClone, 1);
                         self.perf.record(
                             perf::Event::InstructionBytes,
-                            perf::immediate_copy_bytes(&ops[pc + 1].immediate),
+                            perf::immediate_copy_bytes(&ops[pc + $k].immediate),
                         );
                     }
                     #[cfg(feature = "opcode-coverage")]
-                    crate::coverage::record(ops[pc + 1].opcode);
-                    *pc_ref = pc + 2;
+                    crate::coverage::record(ops[pc + $k].opcode);
+                    *pc_ref = pc + $k + 1;
+                }};
+            }
+            macro_rules! charge_second {
+                () => {
+                    charge_at!(1, 0)
+                };
+            }
+            macro_rules! local {
+                ($x:expr) => {
+                    *frame.locals.get($x as usize).ok_or_else(|| trap("local index"))?
+                };
+            }
+            macro_rules! set_local {
+                ($x:expr, $v:expr) => {{
+                    let value = $v;
+                    *frame.locals.get_mut($x as usize).ok_or_else(|| trap("local index"))? = value
+                }};
+            }
+            // A load or store on memory 0 with its operands on the stack.
+            macro_rules! memory0 {
+                ($opcode:expr, $offset:expr) => {{
+                    let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
+                    self.memory_access_raw(index, $opcode, $offset, stack)?
+                }};
+            }
+            // The value of a load on memory 0 from address operand `addr`,
+            // held outside the operand stack.
+            macro_rules! load0 {
+                ($opcode:expr, $offset:expr, $addr:expr) => {{
+                    let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
+                    let addr = $addr;
+                    match self.load_fast(index, $opcode, addr, $offset) {
+                        Some(v) => v,
+                        None => {
+                            stack.push(addr);
+                            self.memory_slow(index, $opcode, $offset, stack)?;
+                            pop(stack)?
+                        }
+                    }
                 }};
             }
             match lop {
@@ -245,6 +294,45 @@ impl Store {
                     local_get!(local);
                     charge_second!();
                     global_set!(global)
+                }
+                lowered::Op::LocalConstBin { local, value, opcode } => {
+                    let a = local!(local);
+                    charge_at!(1, 1);
+                    charge_at!(2, 2);
+                    stack.push(const_binop(opcode, a, value)?)
+                }
+                lowered::Op::LocalConstBinSet { local, value, to, opcode } => {
+                    let a = local!(local);
+                    charge_at!(1, 1);
+                    charge_at!(2, 2);
+                    let result = const_binop(opcode, a, value)?;
+                    charge_at!(3, 1);
+                    set_local!(to, result)
+                }
+                lowered::Op::LocalLoad { local, offset, opcode } => {
+                    let a = local!(local);
+                    charge_at!(1, 1);
+                    let v = load0!(opcode, u64::from(offset), a);
+                    stack.push(v)
+                }
+                lowered::Op::LocalLoadSet { local, offset, to, opcode } => {
+                    let a = local!(local);
+                    charge_at!(1, 1);
+                    let v = load0!(opcode, u64::from(offset), a);
+                    charge_at!(2, 1);
+                    set_local!(to, v)
+                }
+                lowered::Op::LocalLocalStore { addr, value, offset, opcode } => {
+                    let a = local!(addr);
+                    charge_at!(1, 1);
+                    let v = local!(value);
+                    charge_at!(2, 2);
+                    let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
+                    if !self.store_fast(index, opcode, a, v, u64::from(offset)) {
+                        stack.push(a);
+                        stack.push(v);
+                        self.memory_slow(index, opcode, u64::from(offset), stack)?
+                    }
                 }
                 lowered::Op::Leave => decline!(),
                 lowered::Op::Nop => {}
@@ -299,10 +387,7 @@ impl Store {
                 }
                 lowered::Op::GlobalGet(x) => global_get!(x),
                 lowered::Op::GlobalSet(x) => global_set!(x),
-                lowered::Op::Memory0 { opcode, offset } => {
-                    let index = *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
-                    self.memory_access_raw(index, opcode, offset, stack)?
-                }
+                lowered::Op::Memory0 { opcode, offset } => memory0!(opcode, offset),
                 lowered::Op::I32Const(x) => stack.push(Value::I32(x)),
                 lowered::Op::I64Const(x) => stack.push(Value::I64(x)),
                 lowered::Op::F32Const(x) => stack.push(Value::F32(x)),
@@ -338,6 +423,15 @@ impl Store {
                     0x52 => binary!(I64, |a, b| Value::I32((a != b) as i32)),
                     0x53 => binary!(I64, |a, b| Value::I32((a < b) as i32)),
                     0x54 => binary!(I64, |a, b| Value::I32(((a as u64) < (b as u64)) as i32)),
+                    0x55 => binary!(I64, |a, b| Value::I32((a > b) as i32)),
+                    0x56 => binary!(I64, |a, b| Value::I32(((a as u64) > (b as u64)) as i32)),
+                    0x57 => binary!(I64, |a, b| Value::I32((a <= b) as i32)),
+                    0x58 => binary!(I64, |a, b| Value::I32(((a as u64) <= (b as u64)) as i32)),
+                    0x59 => binary!(I64, |a, b| Value::I32((a >= b) as i32)),
+                    0x5a => binary!(I64, |a, b| Value::I32(((a as u64) >= (b as u64)) as i32)),
+                    0xa7 => unary!(I64, |a| Value::I32(a as i32)),
+                    0xac => unary!(I32, |a| Value::I64(a as i64)),
+                    0xad => unary!(I32, |a| Value::I64(a as u32 as i64)),
                     0x7c => binary!(I64, |a, b| Value::I64(a.wrapping_add(b))),
                     0x7d => binary!(I64, |a, b| Value::I64(a.wrapping_sub(b))),
                     0x7e => binary!(I64, |a, b| Value::I64(a.wrapping_mul(b))),
@@ -566,5 +660,64 @@ impl Store {
                 return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
             }
         }
+    }
+}
+
+/// `a op b` for an inline integer binop whose second operand is the
+/// constant `b` (sign-extended for i64 operators), with the error the
+/// operator reports when `a` is not of its type.
+#[inline(always)]
+fn const_binop(opcode: u16, a: Value, b: i32) -> Result<Value> {
+    if lowered::i32_binop(opcode) {
+        let Value::I32(a) = a else {
+            return Err(trap("numeric type mismatch"));
+        };
+        Ok(match opcode {
+            0x46 => Value::I32((a == b) as i32),
+            0x47 => Value::I32((a != b) as i32),
+            0x48 => Value::I32((a < b) as i32),
+            0x49 => Value::I32(((a as u32) < (b as u32)) as i32),
+            0x4a => Value::I32((a > b) as i32),
+            0x4b => Value::I32(((a as u32) > (b as u32)) as i32),
+            0x4c => Value::I32((a <= b) as i32),
+            0x4d => Value::I32(((a as u32) <= (b as u32)) as i32),
+            0x4e => Value::I32((a >= b) as i32),
+            0x4f => Value::I32(((a as u32) >= (b as u32)) as i32),
+            0x6a => Value::I32(a.wrapping_add(b)),
+            0x6b => Value::I32(a.wrapping_sub(b)),
+            0x6c => Value::I32(a.wrapping_mul(b)),
+            0x71 => Value::I32(a & b),
+            0x72 => Value::I32(a | b),
+            0x73 => Value::I32(a ^ b),
+            0x74 => Value::I32(a.wrapping_shl(b as u32)),
+            0x75 => Value::I32(a.wrapping_shr(b as u32)),
+            0x76 => Value::I32((a as u32).wrapping_shr(b as u32) as i32),
+            _ => return Err(trap("fused operator")),
+        })
+    } else {
+        let Value::I64(a) = a else {
+            return Err(trap("numeric type mismatch"));
+        };
+        let b = i64::from(b);
+        Ok(match opcode {
+            0x51 => Value::I32((a == b) as i32),
+            0x52 => Value::I32((a != b) as i32),
+            0x53 => Value::I32((a < b) as i32),
+            0x54 => Value::I32(((a as u64) < (b as u64)) as i32),
+            0x55 => Value::I32((a > b) as i32),
+            0x56 => Value::I32(((a as u64) > (b as u64)) as i32),
+            0x57 => Value::I32((a <= b) as i32),
+            0x58 => Value::I32(((a as u64) <= (b as u64)) as i32),
+            0x59 => Value::I32((a >= b) as i32),
+            0x5a => Value::I32(((a as u64) >= (b as u64)) as i32),
+            0x7c => Value::I64(a.wrapping_add(b)),
+            0x7d => Value::I64(a.wrapping_sub(b)),
+            0x7e => Value::I64(a.wrapping_mul(b)),
+            0x83 => Value::I64(a & b),
+            0x84 => Value::I64(a | b),
+            0x86 => Value::I64(a.wrapping_shl(b as u32)),
+            0x88 => Value::I64((a as u64).wrapping_shr(b as u32) as i64),
+            _ => return Err(trap("fused operator")),
+        })
     }
 }

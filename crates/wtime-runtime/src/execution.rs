@@ -1100,7 +1100,7 @@ impl Store {
         self.memory_access_raw(index, op.opcode, offset, s)
     }
     /// `memory_access` with the opcode and static offset already decoded.
-    #[inline]
+    #[inline(always)]
     pub(super) fn memory_access_raw(
         &mut self,
         index: usize,
@@ -1110,57 +1110,85 @@ impl Store {
     ) -> Result<()> {
         // Fixed-width accesses to an unshared memory that stay within one
         // allocated page; everything else, with every error, falls through.
-        {
-            let mem = &mut self.mems[index];
-            if mem.shared.is_none() {
-                macro_rules! load {
-                    ($n:literal, |$b:ident| $e:expr) => {{
-                        if let Some(slot) = s.last_mut() {
-                            let a = match *slot { Value::I32(x) => Some(x as u32 as u64), Value::I64(x) => Some(x as u64), _ => None };
-                            if let Some(at) = a.and_then(|a| a.checked_add(offset)).and_then(|a| usize::try_from(a).ok())
-                                && let Some($b) = mem.bytes.read_array::<$n>(at)
-                            {
-                                // The load event the general path records.
-                                #[cfg(feature = "performance-counters")]
-                                self.perf.record(perf::Event::ReadVec, 1);
-                                *slot = $e;
-                                return Ok(());
-                            }
-                        }
-                    }};
-                }
-                macro_rules! store {
-                    ($n:literal, $v:ident, |$x:ident| $e:expr) => {{
-                        if let [.., addr, Value::$v($x)] = s.as_slice() {
-                            let a = match *addr { Value::I32(x) => Some(x as u32 as u64), Value::I64(x) => Some(x as u64), _ => None };
-                            if let Some(at) = a.and_then(|a| a.checked_add(offset)).and_then(|a| usize::try_from(a).ok())
-                                && mem.bytes.write_array::<$n>(at, $e)
-                            {
-                                s.truncate(s.len() - 2);
-                                return Ok(());
-                            }
-                        }
-                    }};
-                }
-                match code {
-                    0x28 => load!(4, |b| Value::I32(i32::from_le_bytes(b))),
-                    0x29 => load!(8, |b| Value::I64(i64::from_le_bytes(b))),
-                    0x2d => load!(1, |b| Value::I32(b[0] as i32)),
-                    0x2c => load!(1, |b| Value::I32(b[0] as i8 as i32)),
-                    0x2f => load!(2, |b| Value::I32(u16::from_le_bytes(b) as i32)),
-                    0x35 => load!(4, |b| Value::I64(u32::from_le_bytes(b) as i64)),
-                    0x34 => load!(4, |b| Value::I64(i32::from_le_bytes(b) as i64)),
-                    0x31 => load!(1, |b| Value::I64(b[0] as i64)),
-                    0x36 => store!(4, I32, |x| x.to_le_bytes()),
-                    0x37 => store!(8, I64, |x| x.to_le_bytes()),
-                    0x3a => store!(1, I32, |x| [*x as u8]),
-                    0x3b => store!(2, I32, |x| (*x as u16).to_le_bytes()),
-                    0x3c => store!(1, I64, |x| [*x as u8]),
-                    0x3e => store!(4, I64, |x| (*x as u32).to_le_bytes()),
-                    _ => {}
-                }
+        if code < 0x36 {
+            if let Some(slot) = s.last_mut()
+                && let Some(v) = self.load_fast(index, code, *slot, offset)
+            {
+                *slot = v;
+                return Ok(());
             }
+        } else if let [.., addr, value] = s.as_slice()
+            && self.store_fast(index, code, *addr, *value, offset)
+        {
+            s.truncate(s.len() - 2);
+            return Ok(());
         }
+        self.memory_slow(index, code, offset, s)
+    }
+    /// The value of load `code` at `addr + offset` on the memory at store
+    /// index `index`, when the memory is unshared, the access is a common
+    /// fixed-width one, in bounds and within one allocated or unwritten page,
+    /// and `addr` is an address; otherwise None and nothing is recorded.
+    #[inline(always)]
+    pub(super) fn load_fast(&mut self, index: usize, code: u16, addr: Value, offset: u64) -> Option<Value> {
+        let mem = &self.mems[index];
+        if mem.shared.is_some() {
+            return None;
+        }
+        let a = match addr {
+            Value::I32(x) => x as u32 as u64,
+            Value::I64(x) => x as u64,
+            _ => return None,
+        };
+        let at = usize::try_from(a.checked_add(offset)?).ok()?;
+        let bytes = &mem.bytes;
+        let v = match code {
+            0x28 => Value::I32(i32::from_le_bytes(bytes.read_array::<4>(at)?)),
+            0x29 => Value::I64(i64::from_le_bytes(bytes.read_array::<8>(at)?)),
+            0x2d => Value::I32(bytes.read_array::<1>(at)?[0] as i32),
+            0x2c => Value::I32(bytes.read_array::<1>(at)?[0] as i8 as i32),
+            0x2f => Value::I32(u16::from_le_bytes(bytes.read_array::<2>(at)?) as i32),
+            0x35 => Value::I64(u32::from_le_bytes(bytes.read_array::<4>(at)?) as i64),
+            0x34 => Value::I64(i32::from_le_bytes(bytes.read_array::<4>(at)?) as i64),
+            0x31 => Value::I64(bytes.read_array::<1>(at)?[0] as i64),
+            _ => return None,
+        };
+        // The load event the general path records.
+        #[cfg(feature = "performance-counters")]
+        self.perf.record(perf::Event::ReadVec, 1);
+        Some(v)
+    }
+    /// Performs store `code` of `value` at `addr + offset` on the memory at
+    /// store index `index` under the conditions of `load_fast`, also
+    /// requiring `value` to be of the stored type and the page allocated;
+    /// false leaves memory unchanged.
+    #[inline(always)]
+    pub(super) fn store_fast(&mut self, index: usize, code: u16, addr: Value, value: Value, offset: u64) -> bool {
+        let mem = &mut self.mems[index];
+        if mem.shared.is_some() {
+            return false;
+        }
+        let a = match addr {
+            Value::I32(x) => x as u32 as u64,
+            Value::I64(x) => x as u64,
+            _ => return false,
+        };
+        let Some(at) = a.checked_add(offset).and_then(|a| usize::try_from(a).ok()) else { return false };
+        let bytes = &mut mem.bytes;
+        match (code, value) {
+            (0x36, Value::I32(x)) => bytes.write_array::<4>(at, x.to_le_bytes()),
+            (0x37, Value::I64(x)) => bytes.write_array::<8>(at, x.to_le_bytes()),
+            (0x3a, Value::I32(x)) => bytes.write_array::<1>(at, [x as u8]),
+            (0x3b, Value::I32(x)) => bytes.write_array::<2>(at, (x as u16).to_le_bytes()),
+            (0x3c, Value::I64(x)) => bytes.write_array::<1>(at, [x as u8]),
+            (0x3e, Value::I64(x)) => bytes.write_array::<4>(at, (x as u32).to_le_bytes()),
+            _ => false,
+        }
+    }
+    /// `memory_access_raw` for everything its fast paths leave, with every
+    /// error.
+    #[inline(never)]
+    pub(super) fn memory_slow(&mut self, index: usize, code: u16, offset: u64, s: &mut Vec<Value>) -> Result<()> {
         let store = code >= 0x36;
         let value = if store { Some(pop(s)?) } else { None };
         let off = address(pop(s)?)?

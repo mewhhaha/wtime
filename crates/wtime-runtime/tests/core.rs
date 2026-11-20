@@ -201,3 +201,55 @@ fn fused_pairs_charge_each_instruction_once() {
         assert!(error.message.contains("fuel"), "fuel {fuel}: {error}");
     }
 }
+
+/// Fused expressions behave exactly as the instructions they cover run one
+/// at a time: the same fuel, the same memory effects before fuel runs out,
+/// the same operand-stack limit and the same traps. The unfused reference
+/// is the same code with a nop after every instruction, which no group of
+/// the lowered Decoded tier contains.
+#[test]
+fn fused_expressions_match_unfused_instructions() {
+    let fused = include_bytes!("fixtures/fused-expressions.wasm").as_slice();
+    let plain = include_bytes!("fixtures/fused-expressions-nops.wasm").as_slice();
+    let run = |bytes: &[u8], name: &str, args: &[Value], fuel: Option<u64>, height: Option<usize>| {
+        let mut config = Config::default();
+        config.limits.fuel = fuel;
+        if let Some(height) = height {
+            config.limits.max_stack_height = height;
+        }
+        let e = Engine::new(config).unwrap();
+        let m = match e.compile(bytes) {
+            Ok(m) => m,
+            Err(error) => return (Err(error.message), vec![]),
+        };
+        let mut s = Store::new(&e);
+        let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+        let result = call(&mut s, i, name, args).map_err(|error| format!("{:?}: {}", error.kind, error.message));
+        let External::Memory(memory) = i.export(&s, "mem").unwrap() else { panic!() };
+        (result, s.read_memory(memory, 0, 128).unwrap())
+    };
+    let args = [Value::I32(5), Value::I64(100)];
+    // 44 instructions and the function's end.
+    let complete = run(fused, "f", &args, Some(45), None);
+    assert_eq!(complete.0, Ok(vec![Value::I64(787)]));
+    assert_eq!(complete, run(plain, "f", &args, Some(89), None));
+    for fuel in 0..45 {
+        let partial = run(fused, "f", &args, Some(fuel), None);
+        assert!(partial.0.as_ref().unwrap_err().contains("fuel"), "fuel {fuel}: {:?}", partial.0);
+        assert_eq!(partial, run(plain, "f", &args, Some(2 * fuel), None), "fuel {fuel}");
+        if fuel > 0 {
+            assert_eq!(partial, run(plain, "f", &args, Some(2 * fuel - 1), None), "fuel {fuel}");
+        }
+    }
+    for height in 0..16 {
+        let limited = run(fused, "deep", &args, None, Some(height));
+        assert_eq!(limited, run(plain, "deep", &args, None, Some(height)), "height {height}");
+    }
+    assert!(run(fused, "deep", &args, None, Some(6)).0.unwrap_err().contains("stack"));
+    assert_eq!(run(fused, "deep", &args, None, Some(16)).0, Ok(vec![Value::I64(787)]));
+    for (name, address) in [("load", 65532), ("load", 65536), ("store", 65534), ("store", -1)] {
+        let fused = run(fused, name, &[Value::I32(address)], None, None);
+        assert_eq!(fused, run(plain, name, &[Value::I32(address)], None, None), "{name} {address}");
+        assert!(fused.0.is_err() || name == "load" && address == 65532, "{name} {address}");
+    }
+}
