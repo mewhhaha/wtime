@@ -45,3 +45,5 @@
            sieve r2       wtime-before-decoded: wall      620.0 ms  prep       1.2 ms  run      614.2 ms
          sorting r0                   wasmtime: wall      290.9 ms  prep     104.4 ms  run      181.6 ms
          sorting r0              wtime-decoded: wall    49797.3 ms  prep       4.8 ms  run    49787.4 ms
+         sorting r0       wtime-before-decoded: wall   269578.5 ms  prep       8.7 ms  run   269564.2 ms
+         sorting r1       wtime-before-decoded: wall   279172.2 ms  prep       8.4 ms  run   279158.4 ms
