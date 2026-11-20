@@ -8,7 +8,7 @@ generator, the runtime crate nor the generated code uses `unsafe`.
 ```sh
 cargo build --release                                       # the generator
 target/release/wtime-aot module.wasm -o out/ [--name NAME] [--module-path PATH]
-cd out && cargo build --release                             # the program
+cd out && cargo +1.97.0 build --release                     # the program (see Toolchain)
 out/target/release/aot-module [--timing-json path] [-- program arguments]
 ```
 
@@ -85,3 +85,14 @@ reports `Trap: out of bounds` where the interpreter may report
 - **Fuel and cancellation:** a compiled program runs unmetered and runs to
   completion. Use the interpreter where fuel or cancellation matters.
 - **The interpreter's resource limits, other than call depth.**
+
+## Toolchain
+
+Build generated crates with a toolchain whose LLVM keeps float division
+exact. rustc 1.99.0, the version this repository pins, folds
+`0.0 / (b as f64)` to `0.0` when it can see that `b` is 0 or 1
+(`fdiv 0.0, uitofp i1` becomes 0.0 at opt-level 1 and above). If `b` is 0,
+the result should be NaN. Generated code reaches that pattern whenever a
+comparison result is converted to a float and divides, and differential
+fuzzing found such a program. rustc 1.97.0 compiles it correctly. The
+generator itself, and the runtime crate's tests, are unaffected.
