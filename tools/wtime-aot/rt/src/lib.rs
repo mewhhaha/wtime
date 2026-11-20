@@ -232,6 +232,14 @@ impl LinearMemory for Memory {
 /// and an access of up to 16 bytes.
 const SPAN32: usize = (1 << 33) + 16;
 
+/// The `N` bytes at `at` of a 32-bit memory.
+#[inline(always)]
+fn get<const N: usize>(bytes: &[u8; SPAN32], at: usize) -> [u8; N] {
+    let mut out = [0; N];
+    out.copy_from_slice(&bytes[at..at + N]);
+    out
+}
+
 /// A 32-bit linear memory: a lazily zeroed allocation spanning every
 /// address a 32-bit access can form, and the memory's current length. The
 /// span is a constant, so LLVM proves the allocation's own bound and an
@@ -329,13 +337,20 @@ impl Memory32 {
     }
 
     /// `memory.copy` of a constant `N` bytes (at least 1): both ranges are
-    /// checked before anything is written, and the bytes pass through a
-    /// value, so overlapping ranges copy as memmove does.
+    /// checked before anything is written. Up to 64 bytes pass through a
+    /// value, which LLVM keeps in registers; longer copies are one memmove
+    /// (through a value they would be two memcpy calls). Either way
+    /// overlapping ranges copy as memmove does.
     #[inline(always)]
     pub fn copy_n<const N: usize>(&mut self, destination: u32, source: u32) -> R<()> {
         let to = self.at::<N>(destination, 0)?;
-        let value = self.load32::<N>(source, 0)?;
-        self.bytes[to..to + N].copy_from_slice(&value);
+        let from = self.at::<N>(source, 0)?;
+        if N <= 64 {
+            let value: [u8; N] = get(&self.bytes, from);
+            self.bytes[to..to + N].copy_from_slice(&value);
+        } else {
+            self.bytes.copy_within(from..from + N, to);
+        }
         Ok(())
     }
 
@@ -563,6 +578,14 @@ mod tests {
         assert_eq!(m.copy_n::<4>(0, 65533), Err(Trap::OutOfBounds));
         assert_eq!(m.copy_n::<4>(u32::MAX, 0), Err(Trap::OutOfBounds));
         assert_eq!(m.l64(0, 0), Ok(u64::from_le_bytes([1, 2, 3, 4, 5, 6, 5, 6])));
+        // Long copies take the memmove path.
+        for k in 0..100u8 {
+            m.s8(1000 + k as u32, 0, k).unwrap();
+        }
+        m.copy_n::<90>(1010, 1000).unwrap();
+        assert_eq!(m.l8(1010 + 89, 0), Ok(89));
+        assert_eq!(m.l8(1010, 0), Ok(0));
+        assert_eq!(m.copy_n::<90>(65500, 0), Err(Trap::OutOfBounds));
         assert!(m.copy_n::<4>(65532, 0).is_ok());
         assert_eq!(m.l32(65532, 0), Ok(u32::from_le_bytes([1, 2, 3, 4])));
     }
