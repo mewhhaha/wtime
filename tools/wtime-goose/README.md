@@ -253,7 +253,8 @@ their findings are fixed in the commits listed.
 ## Reproduce
 
 ```sh
-# goose-to-wasm (b4f46ec): build the Goose compiler, its Wasmtime host and the modules.
+# goose-to-wasm (45eb0c7; results before 2026-11-21 used b4f46ec and the
+# 2026-11-19/lifetime-callers profile): build the Goose compiler, its Wasmtime host and the modules.
 cd goose-to-wasm
 python3 scripts/bootstrap.py                       # build/bin/goose
 (cd host/rust && cargo build --locked --release)   # goose-wasmtime, Wasmtime 50.0.1
@@ -261,10 +262,11 @@ mkdir -p build/cmp
 for e in squares tour functions errors sieve sorting life maze sudoku vm; do
   python3 scripts/goose_wasm.py build examples/$e.goose -O2 -o build/cmp/$e.wasm
 done
-# The compiler itself as Wasm: the project's "fixed memory32" bundled-host build ...
+# The compiler itself as Wasm: the project's "fixed memory32" bundled-host build with
+# its release layout profile (the default 16-page memory exhausts a region compiling itself) ...
 build/bin/goose selfhost/main.goose --stdlib stdlib --target wasm-direct -O2 --wasm-bundled-host \
   --wasm-initial-pages 65535 --wasm-max-pages 65535 \
-  --wasm-region-profile bench/results/2026-11-19/lifetime-callers/training.profile \
+  --wasm-region-profile bench/results/2026-11-21/shared-emitters/training.profile \
   -o build/cmp/compiler32.wasm
 # ... and its default memory64 build.
 build/bin/goose selfhost/main.goose --stdlib stdlib --target wasm-direct -O2 \

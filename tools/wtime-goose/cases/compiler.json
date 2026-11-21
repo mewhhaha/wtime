@@ -94,5 +94,37 @@
    "/dev/null"
   ],
   "description": "The Goose compiler as default memory64 Wasm, compiling examples/functions.goose to Wasm"
+ },
+ {
+  "name": "compile64-8g-vm",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler64-8g.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/vm.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as memory64 Wasm with an 8 GiB maximum (--wasm-max-pages 131072), compiling examples/vm.goose to Wasm"
+ },
+ {
+  "name": "compile64-8g-functions",
+  "module": "/home/user/goose-to-wasm/build/cmp/compiler64-8g.wasm",
+  "cwd": "/home/user/goose-to-wasm",
+  "arguments": [
+   "examples/functions.goose",
+   "--stdlib",
+   "stdlib",
+   "--target",
+   "wasm-direct",
+   "-O2",
+   "-o",
+   "/dev/null"
+  ],
+  "description": "The Goose compiler as memory64 Wasm with an 8 GiB maximum (--wasm-max-pages 131072), compiling examples/functions.goose to Wasm"
  }
 ]
