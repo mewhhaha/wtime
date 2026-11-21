@@ -546,21 +546,22 @@ impl Memory {
     pub fn copy_n<const N: usize>(&mut self, destination: u64, source: u64) -> R<()> {
         let limit = self.fast.min(self.base.len());
         if destination < limit as u64 && source < limit as u64 && destination as usize + N <= limit && source as usize + N <= limit {
-            let base = &mut self.base[..limit];
-            let (to, from) = (destination as usize, source as usize);
-            if N <= 64 {
-                if let Some(value) = base[from..].first_chunk::<N>().copied() {
-                    if let Some(bytes) = base[to..].first_chunk_mut::<N>() {
-                        *bytes = value;
-                        return Ok(());
-                    }
-                }
-            } else {
-                base.copy_within(from..from + N, to);
-                return Ok(());
-            }
+            move_bytes::<N>(&mut self.base[..limit], destination as usize, source as usize);
+            return Ok(());
         }
         self.copy(destination, source, N as u64)
+    }
+
+    /// `memory.fill` of a constant `N` bytes (at least 1).
+    #[inline(always)]
+    pub fn fill_n<const N: usize>(&mut self, destination: u64, value: u8) -> R<()> {
+        let limit = self.fast.min(self.base.len());
+        if destination < limit as u64 && destination as usize + N <= limit {
+            let at = destination as usize;
+            self.base[..limit][at..at + N].fill(value);
+            return Ok(());
+        }
+        self.fill(destination, value, N as u64)
     }
 
     pub fn copy(&mut self, destination: u64, source: u64, n: u64) -> R<()> {
@@ -625,14 +626,129 @@ impl LinearMemory for Memory {
 
 /// Bytes a 32-bit memory spans: every address plus offset, both 32-bit,
 /// and an access of up to 16 bytes.
-const SPAN32: usize = (1 << 33) + 16;
+pub const SPAN32: usize = (1 << 33) + 16;
 
-/// The `N` bytes at `at` of a 32-bit memory.
+/// Accesses to a 32-bit memory through its bytes (`Memory32::bytes_mut`)
+/// and its length, both of which generated functions keep in locals:
+/// LLVM cannot tell that the module's stores leave the instance's fields
+/// alone, so through the instance each access would reload both.
+pub mod m32 {
+    use super::{R, SPAN32, Trap, move_bytes, trap};
+
+    #[inline(always)]
+    fn at<const N: usize>(len: usize, address: u32, offset: u32) -> R<usize> {
+        let at = address as usize + offset as usize;
+        if at + N > len {
+            return trap(Trap::OutOfBounds);
+        }
+        Ok(at)
+    }
+    #[inline(always)]
+    fn get<const N: usize>(bytes: &[u8; SPAN32], len: usize, address: u32, offset: u32) -> R<[u8; N]> {
+        let at = at::<N>(len, address, offset)?;
+        let mut out = [0; N];
+        out.copy_from_slice(&bytes[at..at + N]);
+        Ok(out)
+    }
+    #[inline(always)]
+    fn put<const N: usize>(bytes: &mut [u8; SPAN32], len: usize, address: u32, offset: u32, value: [u8; N]) -> R<()> {
+        let at = at::<N>(len, address, offset)?;
+        bytes[at..at + N].copy_from_slice(&value);
+        Ok(())
+    }
+    #[inline(always)]
+    pub fn l8(bytes: &[u8; SPAN32], len: usize, address: u32, offset: u32) -> R<u8> {
+        let at = at::<1>(len, address, offset)?;
+        Ok(bytes[at])
+    }
+    #[inline(always)]
+    pub fn l16(bytes: &[u8; SPAN32], len: usize, address: u32, offset: u32) -> R<u16> {
+        get(bytes, len, address, offset).map(u16::from_le_bytes)
+    }
+    #[inline(always)]
+    pub fn l32(bytes: &[u8; SPAN32], len: usize, address: u32, offset: u32) -> R<u32> {
+        get(bytes, len, address, offset).map(u32::from_le_bytes)
+    }
+    #[inline(always)]
+    pub fn l64(bytes: &[u8; SPAN32], len: usize, address: u32, offset: u32) -> R<u64> {
+        get(bytes, len, address, offset).map(u64::from_le_bytes)
+    }
+    #[inline(always)]
+    pub fn l128(bytes: &[u8; SPAN32], len: usize, address: u32, offset: u32) -> R<u128> {
+        get(bytes, len, address, offset).map(u128::from_le_bytes)
+    }
+    #[inline(always)]
+    pub fn s8(bytes: &mut [u8; SPAN32], len: usize, address: u32, offset: u32, value: u8) -> R<()> {
+        let at = at::<1>(len, address, offset)?;
+        bytes[at] = value;
+        Ok(())
+    }
+    #[inline(always)]
+    pub fn s16(bytes: &mut [u8; SPAN32], len: usize, address: u32, offset: u32, value: u16) -> R<()> {
+        put(bytes, len, address, offset, value.to_le_bytes())
+    }
+    #[inline(always)]
+    pub fn s32(bytes: &mut [u8; SPAN32], len: usize, address: u32, offset: u32, value: u32) -> R<()> {
+        put(bytes, len, address, offset, value.to_le_bytes())
+    }
+    #[inline(always)]
+    pub fn s64(bytes: &mut [u8; SPAN32], len: usize, address: u32, offset: u32, value: u64) -> R<()> {
+        put(bytes, len, address, offset, value.to_le_bytes())
+    }
+    #[inline(always)]
+    pub fn s128(bytes: &mut [u8; SPAN32], len: usize, address: u32, offset: u32, value: u128) -> R<()> {
+        put(bytes, len, address, offset, value.to_le_bytes())
+    }
+    /// `memory.copy` of a constant `N` bytes (at least 1), as
+    /// `Memory32::copy_n`.
+    #[inline(always)]
+    pub fn copy_n<const N: usize>(bytes: &mut [u8; SPAN32], len: usize, destination: u32, source: u32) -> R<()> {
+        let to = at::<N>(len, destination, 0)?;
+        let from = at::<N>(len, source, 0)?;
+        move_bytes::<N>(&mut bytes[..], to, from);
+        Ok(())
+    }
+    /// `memory.fill` of a constant `N` bytes (at least 1).
+    #[inline(always)]
+    pub fn fill_n<const N: usize>(bytes: &mut [u8; SPAN32], len: usize, destination: u32, value: u8) -> R<()> {
+        let at = at::<N>(len, destination, 0)?;
+        bytes[at..at + N].fill(value);
+        Ok(())
+    }
+}
+
+
+/// Moves `N` bytes (`from..from + N` to `to`, both in bounds) as memmove
+/// does, without a call where it can: through a value up to 64 bytes, as
+/// 32-byte blocks through registers when the ranges are disjoint (the
+/// usual case: struct copies), else by `copy_within`.
 #[inline(always)]
-fn get<const N: usize>(bytes: &[u8; SPAN32], at: usize) -> [u8; N] {
-    let mut out = [0; N];
-    out.copy_from_slice(&bytes[at..at + N]);
-    out
+fn move_bytes<const N: usize>(bytes: &mut [u8], to: usize, from: usize) {
+    if N <= 64 {
+        if let Some(value) = bytes[from..].first_chunk::<N>().copied() {
+            if let Some(target) = bytes[to..].first_chunk_mut::<N>() {
+                *target = value;
+            }
+        }
+    } else if to + N <= from || from + N <= to {
+        // The last block ends at N, overlapping the one before it within
+        // the destination, which is harmless: the ranges are disjoint.
+        let mut k = 0;
+        loop {
+            let at = if k + 32 > N { N - 32 } else { k };
+            if let Some(block) = bytes[from + at..].first_chunk::<32>().copied() {
+                if let Some(target) = bytes[to + at..].first_chunk_mut::<32>() {
+                    *target = block;
+                }
+            }
+            if at + 32 >= N {
+                break;
+            }
+            k += 32;
+        }
+    } else {
+        bytes.copy_within(from..from + N, to);
+    }
 }
 
 /// A 32-bit linear memory: a lazily zeroed allocation spanning every
@@ -664,6 +780,23 @@ impl Memory32 {
             Err(_) => return trap(Trap::AllocationFailed),
         };
         Ok(Memory32 { bytes, len, max_pages })
+    }
+
+    /// The current length in bytes.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The memory has no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The bytes, for `m32`'s accesses.
+    #[inline(always)]
+    pub fn bytes_mut(&mut self) -> &mut [u8; SPAN32] {
+        &mut self.bytes
     }
 
     /// The first byte of an access of `N` bytes at `address + offset`.
@@ -743,12 +876,15 @@ impl Memory32 {
     pub fn copy_n<const N: usize>(&mut self, destination: u32, source: u32) -> R<()> {
         let to = self.at::<N>(destination, 0)?;
         let from = self.at::<N>(source, 0)?;
-        if N <= 64 {
-            let value: [u8; N] = get(&self.bytes, from);
-            self.bytes[to..to + N].copy_from_slice(&value);
-        } else {
-            self.bytes.copy_within(from..from + N, to);
-        }
+        move_bytes::<N>(&mut self.bytes[..], to, from);
+        Ok(())
+    }
+
+    /// `memory.fill` of a constant `N` bytes (at least 1).
+    #[inline(always)]
+    pub fn fill_n<const N: usize>(&mut self, destination: u32, value: u8) -> R<()> {
+        let at = self.at::<N>(destination, 0)?;
+        self.bytes[at..at + N].fill(value);
         Ok(())
     }
 
@@ -980,6 +1116,27 @@ mod tests {
         for k in 0..100u8 {
             m.s8(1000 + k as u32, 0, k).unwrap();
         }
+        // Disjoint long copies take the block path; a tail shorter than a
+        // block included.
+        for n in [65usize, 96, 100, 160, 255] {
+            let mut want = vec![0u8; n];
+            for (k, byte) in want.iter_mut().enumerate() {
+                *byte = (k * 7 + n) as u8;
+            }
+            m.write(3000, &want).unwrap();
+            match n {
+                65 => m.copy_n::<65>(5000, 3000).unwrap(),
+                96 => m.copy_n::<96>(5000, 3000).unwrap(),
+                100 => m.copy_n::<100>(5000, 3000).unwrap(),
+                160 => m.copy_n::<160>(5000, 3000).unwrap(),
+                _ => m.copy_n::<255>(5000, 3000).unwrap(),
+            }
+            assert_eq!(m.read(5000, n as u64).unwrap(), want, "{n}");
+            assert_eq!(m.l8(5000 + n as u32, 0), Ok(0), "{n}: nothing past the end");
+        }
+        m.fill_n::<7>(6000, 9).unwrap();
+        assert_eq!(m.read(5999, 9).unwrap(), vec![0, 9, 9, 9, 9, 9, 9, 9, 0]);
+        assert_eq!(m.fill_n::<8>(65530, 1), Err(Trap::OutOfBounds));
         m.copy_n::<90>(1010, 1000).unwrap();
         assert_eq!(m.l8(1010 + 89, 0), Ok(89));
         assert_eq!(m.l8(1010, 0), Ok(0));
