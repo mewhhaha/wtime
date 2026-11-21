@@ -35,12 +35,12 @@ const MAX_SOURCE_BYTES: usize = 1 << 30;
 
 /// Functions without calls and with at most this many locals skip the
 /// stack check (see `Function::emit`).
-const LEAF_LOCALS: usize = 4096;
+const LEAF_LOCALS: usize = 256;
 
 /// Globals held in locals add at most about this many lines per
 /// instruction of a function (see `Function::emit`).
 const GLOBAL_LINES_PER_INSTRUCTION: usize = 8;
-const LEAF_INSTRUCTIONS: usize = 100_000;
+const LEAF_INSTRUCTIONS: usize = 2_000;
 
 /// `memory.copy`s of a constant length up to this many bytes are inlined.
 const COPY_INLINE: usize = 256;
@@ -1023,10 +1023,12 @@ impl<'a> Function<'a> {
         // Calls check the native stack left, as Wasmtime's do: a frame's own
         // address below the floor traps with call depth exhausted. (No
         // count of calls: the stack bounds recursion by its actual use.) A
-        // leaf with few locals skips it: its caller passed the check, and
-        // its frame fits in the margin kept below the floor (at least 4 MiB,
-        // `goose::main`): LEAF_LOCALS slots and the spills of at most
-        // LEAF_INSTRUCTIONS instructions need far less.
+        // small leaf skips it: it runs on top of a caller that passed the
+        // check, and its frame (at most LEAF_LOCALS locals and the
+        // temporaries of LEAF_INSTRUCTIONS instructions, some tens of KiB)
+        // is small beside the margin kept below the floor (at least 4 MiB,
+        // `goose::main`), which must hold the caller's frame below its
+        // check as well; before, such a leaf would have trapped there.
         let leaf = self.locals.len() <= LEAF_LOCALS && code.len() <= LEAF_INSTRUCTIONS && !code.iter().any(|i| matches!(i.opcode, 0x10..=0x15));
         if !leaf {
             writeln!(
