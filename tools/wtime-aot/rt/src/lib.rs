@@ -219,6 +219,28 @@ impl Memory {
         Memory::with_base(min, max_pages, base)
     }
 
+    /// A memory whose base holds its whole maximum, so that no access ever
+    /// needs a chunk: generated code then uses `m64`'s flat accesses, which
+    /// trap where the others take the slow path. Fails (AllocationFailed)
+    /// where the maximum cannot be allocated.
+    pub fn new_flat(min: u64, max: Option<u64>, memory64: bool) -> R<Memory> {
+        if min.checked_mul(PAGE).is_none() {
+            return trap(Trap::MemoryAllocationOverflow);
+        }
+        if min > page_limit() {
+            return trap(Trap::MemoryLimit);
+        }
+        let limit = if memory64 { 1 << 48 } else { 1 << 16 };
+        let max_pages = max.unwrap_or(limit).min(limit).min(page_limit());
+        if min > max_pages {
+            return trap(Trap::MemoryTooLarge);
+        }
+        let Some(size) = max_pages.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else {
+            return trap(Trap::AllocationFailed);
+        };
+        Memory::with_base(min, max_pages, zeroed(size)?)
+    }
+
     fn with_base(min: u64, max_pages: u64, base: Vec<u8>) -> R<Memory> {
         let base_len = base.len();
         let mut memory = Memory { base, outer: Outer { chunks: Vec::new(), len: 0, fast: 0, base_len, max_pages } };
@@ -666,7 +688,7 @@ fn copy_parts(base: &mut [u8], outer: &mut Outer, destination: u64, source: u64,
 /// an access ending within the direct bytes checks one bound, their length;
 /// others take a cold path through the chunks.
 pub mod m64 {
-    use super::{Outer, R, copy_parts, fill_parts, move_bytes, read_parts, write_parts};
+    use super::{Outer, R, Trap, copy_parts, fill_parts, move_bytes, read_parts, trap, write_parts};
 
     /// The end of an access that may be direct: one bound to check. The
     /// address is clamped to 2^62 (a conditional move, not a branch), so the
@@ -736,6 +758,37 @@ pub mod m64 {
             }
         };
     }
+    // Flat accesses, for a memory made by `Memory::new_flat`: its direct
+    // bytes are all its bytes, so a miss traps, as in `m32`, and no slow
+    // call joins the fast path (that call and its register traffic were
+    // most of what 64-bit accesses cost).
+    macro_rules! flat {
+        ($load:ident, $store:ident, $t:ty, $n:expr) => {
+            #[inline(always)]
+            pub fn $load(base: &[u8], address: u64, offset: u64) -> R<$t> {
+                match direct::<$n>(base, address, offset) {
+                    Some(bytes) => Ok(<$t>::from_le_bytes(*bytes)),
+                    None => trap(Trap::OutOfBounds),
+                }
+            }
+            #[inline(always)]
+            pub fn $store(base: &mut [u8], address: u64, offset: u64, value: $t) -> R<()> {
+                match direct_mut::<$n>(base, address, offset) {
+                    Some(bytes) => {
+                        *bytes = value.to_le_bytes();
+                        Ok(())
+                    }
+                    None => trap(Trap::OutOfBounds),
+                }
+            }
+        };
+    }
+    flat!(fl8, fs8, u8, 1);
+    flat!(fl16, fs16, u16, 2);
+    flat!(fl32, fs32, u32, 4);
+    flat!(fl64, fs64, u64, 8);
+    flat!(fl128, fs128, u128, 16);
+
     access!(l8, s8, u8, 1);
     access!(l16, s16, u16, 2);
     access!(l32, s32, u32, 4);
@@ -1313,6 +1366,24 @@ mod tests {
         assert_eq!(m.grow(1), 1);
         assert_eq!(m.grow(1), -1);
         assert!(m.store::<8>(131064, 0, [1; 8]).is_ok());
+    }
+
+    #[test]
+    fn flat_memory64_traps_on_every_miss() {
+        let mut m = Memory::new_flat(1, Some(3), true).unwrap();
+        assert_eq!(m.grow(2), 1);
+        assert_eq!(m.grow(1), -1);
+        let end = 3 * PAGE;
+        let (base, _) = m.parts();
+        assert_eq!(base.len() as u64, end);
+        assert_eq!(m64::fs64(base, end - 8, 0, 42), Ok(()));
+        assert_eq!(m64::fl64(base, end - 8, 0), Ok(42));
+        assert_eq!(m64::fl64(base, end - 7, 0), Err(Trap::OutOfBounds));
+        assert_eq!(m64::fl8(base, u64::MAX, 1), Err(Trap::OutOfBounds));
+        assert_eq!(m64::fs128(base, 0, end - 15, 1), Err(Trap::OutOfBounds));
+        assert_eq!(m64::fl32(base, 1 << 62, 0), Err(Trap::OutOfBounds));
+        // 64 GiB at once: granted or refused cleanly, depending on the machine.
+        assert!(matches!(Memory::new_flat(1, None, true).map(|_| ()), Ok(()) | Err(Trap::AllocationFailed)));
     }
 
     #[test]

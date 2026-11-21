@@ -36,7 +36,23 @@ const MAX_SOURCE_BYTES: usize = 1 << 30;
 /// `memory.copy`s of a constant length up to this many bytes are inlined.
 const COPY_INLINE: usize = 256;
 
-pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &str) -> Res<()> {
+/// The declared maximum of the module's 64-bit memory in pages (the index
+/// type's limit where it declares none), if it has one: what a flat memory
+/// would allocate.
+pub fn memory64_max(bytes: &[u8]) -> Res<Option<u64>> {
+    let limits = ResourceLimits { max_module_bytes: 256 << 20, max_instructions: 100_000_000, ..ResourceLimits::default() };
+    let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits).map_err(|e| format!("invalid module: {e}"))?;
+    Ok(validated
+        .decoded()
+        .memories
+        .first()
+        .filter(|mt| mt.index_type == wtime_types::IndexType::I64)
+        .map(|mt| mt.limits.max.unwrap_or(1 << 48)))
+}
+
+/// `flat64`: a 64-bit memory is allocated whole at its maximum
+/// (`Memory::new_flat`) and accessed by `m64`'s flat accesses.
+pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &str, flat64: bool) -> Res<()> {
     // Room for programs several times the size of the 64-bit Goose compiler
     // (9 MB, about 5 million instructions), and no more.
     let limits = ResourceLimits {
@@ -49,7 +65,8 @@ pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &s
     };
     let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits).map_err(|e| format!("invalid module: {e}"))?;
     let m = validated.decoded();
-    let module = Module::new(m)?;
+    let mut module = Module::new(m)?;
+    module.flat64 = flat64 && module.memory64;
     let write = |path: &Path, text: &str| {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -178,6 +195,8 @@ struct Module {
     entry: Option<u32>,
     reserve: Option<u32>,
     memory_exported: bool,
+    /// The 64-bit memory is flat (see `generate`).
+    flat64: bool,
 }
 
 impl Module {
@@ -228,6 +247,7 @@ impl Module {
             reserve: export("goose.reserve"),
             // The host uses the memory exported as `memory`, as wtime-goose does.
             memory_exported: m.exports.iter().any(|e| e.kind == ExternalKind::Memory && e.name == "memory"),
+            flat64: false,
         })
     }
 
@@ -341,7 +361,8 @@ impl Module {
         s.push_str("fn instantiate(state: &mut goose::State) -> R<Instance> {\n");
         match m.memories.first() {
             Some(mt) if self.memory64 => {
-                writeln!(s, "    let mem = Memory::new({}, {:?}, true)?;", mt.limits.min, mt.limits.max).unwrap()
+                let new = if self.flat64 { "new_flat" } else { "new" };
+                writeln!(s, "    let mem = Memory::{new}({}, {:?}, true)?;", mt.limits.min, mt.limits.max).unwrap()
             }
             Some(mt) => writeln!(s, "    let mem = Memory32::new({}, {:?})?;", mt.limits.min, mt.limits.max).unwrap(),
             None => s.push_str("    let mem = Memory32::new(0, Some(0))?;\n"),
@@ -1306,9 +1327,15 @@ impl<'a> Function<'a> {
             format!("t!(m32::l128(mb, ml, {a} as u32, {offset}))")
         } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
-            format!("t!(m64::l128(mb, mo, {address}, {offset}))")
+            if self.module.flat64 {
+                format!("t!(m64::fl128(mb, {address}, {offset}))")
+            } else {
+                format!("t!(m64::l128(mb, mo, {address}, {offset}))")
+            }
         } else if self.module.memory64 {
-            format!("t!(m64::l{}(mb, mo, {}, {offset}))", n * 8, self.address(&a))
+            let flat = if self.module.flat64 { "f" } else { "" };
+            let outer = if self.module.flat64 { "" } else { "mo, " };
+            format!("t!(m64::{flat}l{}(mb, {outer}{}, {offset}))", n * 8, self.address(&a))
         } else {
             format!("t!(m32::l{}(mb, ml, {a} as u32, {offset}))", n * 8)
         };
@@ -1335,9 +1362,15 @@ impl<'a> Function<'a> {
             format!("t!(m32::s128(mb, ml, {a} as u32, {offset}, {value}));")
         } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
-            format!("t!(m64::s128(mb, mo, {address}, {offset}, {value}));")
+            if self.module.flat64 {
+                format!("t!(m64::fs128(mb, {address}, {offset}, {value}));")
+            } else {
+                format!("t!(m64::s128(mb, mo, {address}, {offset}, {value}));")
+            }
         } else if self.module.memory64 {
-            format!("t!(m64::s{}(mb, mo, {}, {offset}, {value}));", n * 8, self.address(&a))
+            let flat = if self.module.flat64 { "f" } else { "" };
+            let outer = if self.module.flat64 { "" } else { "mo, " };
+            format!("t!(m64::{flat}s{}(mb, {outer}{}, {offset}, {value}));", n * 8, self.address(&a))
         } else {
             format!("t!(m32::s{}(mb, ml, {a} as u32, {offset}, {value}));", n * 8)
         };

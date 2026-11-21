@@ -87,6 +87,15 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
     while the program writes little of it. An access ending within the
     base checks one bound, as for a 32-bit memory; others take a cold path
     through the chunks.
+  - A *flat* 64-bit memory (`--flat-memory64`; `wtime-aot build` chooses
+    it when the machine grants the declared maximum in one allocation,
+    and keys the cache by the choice) is allocated whole at its maximum,
+    and its accesses trap on a miss instead of calling the slow path: that
+    call, joining the fast path at every access, was most of what 64-bit
+    accesses cost (64-bit `examples/sorting.goose`: 4.63G -> 2.82G
+    instructions, against 2.62G for 32-bit). Where the maximum cannot be
+    allocated when the program starts, it fails with `ResourceLimit:
+    memory allocation failed`.
 
 ## Supported
 

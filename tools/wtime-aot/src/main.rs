@@ -30,7 +30,7 @@ mod sha256;
 use std::path::PathBuf;
 use std::process::exit;
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -44,12 +44,14 @@ fn main() {
     }
     let mut args = all.into_iter();
     let (mut module, mut out, mut name, mut rt, mut module_path) = (None, None, None, None, None);
+    let mut flat64 = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => out = args.next().map(PathBuf::from),
             "--name" => name = args.next(),
             "--rt" => rt = args.next().map(PathBuf::from),
             "--module-path" => module_path = args.next(),
+            "--flat-memory64" => flat64 = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 exit(0)
@@ -87,7 +89,7 @@ fn main() {
             exit(1)
         }
     };
-    if let Err(error) = codegen::generate(&bytes, &out, &name, &rt, &module_path) {
+    if let Err(error) = codegen::generate(&bytes, &out, &name, &rt, &module_path, flat64) {
         eprintln!("wtime-aot: {error}");
         exit(1)
     }

@@ -120,6 +120,16 @@ pub fn build(
     // machine's CPU is not reused for another's.
     field("target cpu", target_cpu.as_bytes());
     field("target features", target_features(toolchain, target_cpu)?.as_bytes());
+    // A 64-bit memory is flat (allocated whole at its maximum, accessed
+    // without a slow path) when this machine grants its maximum.
+    let flat64 = match crate::codegen::memory64_max(&wasm)? {
+        Some(pages) => usize::try_from(pages.min(1 << 20).saturating_mul(65536)).is_ok_and(|bytes| {
+            let mut probe: Vec<u8> = Vec::new();
+            probe.try_reserve_exact(bytes).is_ok()
+        }),
+        None => false,
+    };
+    field("flat memory64", &[flat64 as u8]);
     let key = key.hex();
 
     let entry = cache.join(&key);
@@ -134,7 +144,7 @@ pub fn build(
     let name = format!("aot-{key}");
     let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
-    let result = generate_and_compile(&wasm, &work, &name, &rt, &module_path, toolchain, target_cpu, jobs, time_limit)
+    let result = generate_and_compile(&wasm, &work, &name, &rt, &module_path, flat64, toolchain, target_cpu, jobs, time_limit)
         .and_then(|built| {
             fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
             let staged = entry.join(format!("program.{}", std::process::id()));
@@ -144,7 +154,7 @@ pub fn build(
     let _ = fs::remove_dir_all(&work);
     result?;
     let record = format!(
-        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {target_cpu}\n",
+        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {target_cpu}\nflat memory64 {flat64}\n",
         crate::sha256::hex(&wasm),
         generator.display(),
         rt.display(),
@@ -162,12 +172,13 @@ fn generate_and_compile(
     name: &str,
     rt: &Path,
     module_path: &str,
+    flat64: bool,
     toolchain: &str,
     target_cpu: &str,
     jobs: Option<u32>,
     time_limit: std::time::Duration,
 ) -> Result<PathBuf, String> {
-    crate::codegen::generate(wasm, work, name, rt, module_path)?;
+    crate::codegen::generate(wasm, work, name, rt, module_path, flat64)?;
     let target = work.join("target");
     let mut cargo = Command::new("cargo");
     cargo.env_clear().current_dir(work).stdin(Stdio::null());
