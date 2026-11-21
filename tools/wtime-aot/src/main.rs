@@ -6,7 +6,7 @@
 //! loops become labeled Rust blocks and loops, branches become `break` and
 //! `continue` after assigning the target's values, and every trap is an
 //! `Err` returned through the call chain. Memory accesses are bounds checked
-//! (`wtime_aot_rt::Memory`), calls count their depth so that deep recursion
+//! (`wtime_aot_rt::m32`, `m64`), calls check the native stack left so that deep recursion
 //! traps instead of overflowing the native stack, and the numeric operators
 //! keep Wasm's semantics (division traps, min/max, trapping and saturating
 //! truncation, NaN-aware comparisons). The generated code, the runtime and

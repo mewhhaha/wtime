@@ -668,27 +668,30 @@ fn copy_parts(base: &mut [u8], outer: &mut Outer, destination: u64, source: u64,
 pub mod m64 {
     use super::{Outer, R, copy_parts, fill_parts, move_bytes, read_parts, write_parts};
 
+    /// The end of an access that may be direct: one bound to check. The
+    /// address is clamped to 2^62 (a conditional move, not a branch), so the
+    /// sum cannot overflow; a clamped address ends past any base (the base
+    /// is far below 2^62) and goes to the slow path, which traps. `offset`
+    /// is a constant where generated code calls this, so its test folds.
+    #[inline(always)]
+    fn end<const N: usize>(address: u64, offset: u64) -> Option<u64> {
+        (offset < (1 << 62)).then(|| address.min(1 << 62) + offset + N as u64)
+    }
+
     #[inline(always)]
     fn direct<const N: usize>(base: &[u8], address: u64, offset: u64) -> Option<&[u8; N]> {
-        // `offset` is a constant where generated code calls this, so the
-        // first test folds away; `address` is below a slice's length, so the
-        // sum cannot overflow.
-        if offset < (1 << 62) && address < base.len() as u64 {
-            let end = address + (offset + N as u64);
-            if end <= base.len() as u64 {
-                return base[end as usize - N..].first_chunk::<N>();
-            }
+        let end = end::<N>(address, offset)?;
+        if end <= base.len() as u64 {
+            return base[end as usize - N..].first_chunk::<N>();
         }
         None
     }
 
     #[inline(always)]
     fn direct_mut<const N: usize>(base: &mut [u8], address: u64, offset: u64) -> Option<&mut [u8; N]> {
-        if offset < (1 << 62) && address < base.len() as u64 {
-            let end = address + (offset + N as u64);
-            if end <= base.len() as u64 {
-                return base[end as usize - N..].first_chunk_mut::<N>();
-            }
+        let end = end::<N>(address, offset)?;
+        if end <= base.len() as u64 {
+            return base[end as usize - N..].first_chunk_mut::<N>();
         }
         None
     }

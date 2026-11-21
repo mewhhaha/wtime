@@ -55,8 +55,11 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
   - Code after an unconditional branch is skipped up to its `else` or `end`.
 - **Traps** are `Err(Trap)`, a one-byte code, returned through every call.
   So are host failures, whose text the host keeps.
-- **Calls** count their depth. Recursion deeper than 1,000,000 calls traps
-  instead of overflowing the program's 8 GiB native stack.
+- **Calls** check the native stack left, as Wasmtime's do: a function
+  whose frame comes within an eighth of the stack's end (4 MiB at least)
+  traps with `ResourceLimit: call depth exhausted` instead of overflowing
+  it. How deep recursion goes depends on the frames (the default stack is
+  8 GiB).
 - **Numeric operators** keep Wasm semantics:
   - Division and remainder trap on zero, and signed division traps on
     overflow.
@@ -70,6 +73,12 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
     every address a 32-bit access can form (8 GiB of address space, touched
     only where the program writes). An access checks a single bound, the
     current length; `memory.grow` moves the length.
+  - Generated functions keep the memory's bytes and length (for a 64-bit
+    memory, its direct bytes and the rest, `Memory::parts`) in locals,
+    taken anew after calls, `memory.size`, `memory.grow` and bulk
+    operations: through the instance, LLVM would reload them at every
+    access, unable to tell that the module's stores leave the instance's
+    own fields alone. Accesses go through `m32` and `m64`.
   - A 64-bit memory (`Memory`) is a base, one lazily zeroed allocation as
     large as the OS grants up to the memory's maximum (64 GiB at most),
     then 4 GiB chunks, each lazily zeroed and allocated when `memory.grow`
@@ -111,14 +120,15 @@ compiled program the same reach. Like `wtime-goose`, the host reads and writes o
 exported as `memory`, and only once instantiation, start function included,
 has completed. Two differences remain: an access past the end of memory
 reports `Trap: out of bounds` where the interpreter may report
-`Trap: address overflow`, and the call depth limit is lower (see Calls).
+`Trap: address overflow`, and recursion stops where the native stack does
+rather than at the interpreter's 4,000,000 calls (see Calls).
 
 ## Not covered
 
 - **Fuel and cancellation:** a compiled program runs unmetered; only the
   process's time limit (`--time-limit`) or the OS ends it early. Use the
   interpreter where fuel or in-process cancellation matters.
-- **The interpreter's other resource limits:** only call depth and memory
+- **The interpreter's other resource limits:** only the stack and memory
   pages (2^20, as under wtime-goose) are enforced.
 
 ## Uploaded modules
@@ -171,9 +181,9 @@ What makes an uploaded module safe to run:
     file it may read; output is buffered until the program ends, so this
     also bounds the host's memory.
   - `--stack-limit-mib N` (default 8192, at least 16) bounds the native
-    stack. Calls trap with `ResourceLimit: call depth exhausted` past
-    1,000,000 nested calls or when a frame comes within an eighth of the
-    stack's end (4 MiB at least), so large frames cannot overflow it.
+    stack. Calls trap with `ResourceLimit: call depth exhausted` when a
+    frame comes within an eighth of the stack's end (4 MiB at least), so
+    neither deep recursion nor large frames can overflow it.
 
   A compiled program cannot be metered by fuel or cancelled from inside:
   run it as a process of its own and use the OS (a cgroup) for anything
