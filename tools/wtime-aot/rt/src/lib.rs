@@ -132,11 +132,19 @@ pub enum Val {
 pub struct Memory {
     /// Zero beyond `len`.
     base: Vec<u8>,
-    /// Bytes `base.len()..`, `CHUNK` to a chunk; zero beyond `len`.
+    outer: Outer,
+}
+
+/// A 64-bit memory's state beside its base: the chunks, the length, and
+/// what accesses need to find their part. Generated functions hold it and
+/// the base's direct bytes in locals (`Memory::parts`, `m64`).
+pub struct Outer {
+    /// Bytes `base_len..`, `CHUNK` to a chunk; zero beyond `len`.
     chunks: Vec<Vec<u8>>,
     len: usize,
-    /// `min(len, base.len())`: accesses ending at or below it are direct.
+    /// `min(len, base_len)`: accesses ending at or below it are direct.
     fast: usize,
+    base_len: usize,
     /// The most pages it may grow to.
     max_pages: u64,
 }
@@ -212,7 +220,8 @@ impl Memory {
     }
 
     fn with_base(min: u64, max_pages: u64, base: Vec<u8>) -> R<Memory> {
-        let mut memory = Memory { base, chunks: Vec::new(), len: 0, fast: 0, max_pages };
+        let base_len = base.len();
+        let mut memory = Memory { base, outer: Outer { chunks: Vec::new(), len: 0, fast: 0, base_len, max_pages } };
         if memory.grow(min) < 0 {
             return trap(Trap::AllocationFailed);
         }
@@ -223,30 +232,12 @@ impl Memory {
     #[inline(always)]
     fn at(&self, address: u64, offset: u64, n: usize) -> R<usize> {
         match address.checked_add(offset).and_then(|a| usize::try_from(a).ok()) {
-            Some(at) if at <= self.len && n <= self.len - at => Ok(at),
+            Some(at) if at <= self.outer.len && n <= self.outer.len - at => Ok(at),
             _ => trap(Trap::OutOfBounds),
         }
     }
 
-    /// Where byte `at` (in bounds) lives: the base or a chunk, and how many
-    /// bytes from there on that part holds.
-    fn part(&self, at: usize) -> (&[u8], usize) {
-        if at < self.base.len() {
-            (&self.base, at)
-        } else {
-            let at = at - self.base.len();
-            (&self.chunks[at >> CHUNK_BITS], at & (CHUNK - 1))
-        }
-    }
 
-    fn part_mut(&mut self, at: usize) -> (&mut [u8], usize) {
-        if at < self.base.len() {
-            (&mut self.base, at)
-        } else {
-            let at = at - self.base.len();
-            (&mut self.chunks[at >> CHUNK_BITS], at & (CHUNK - 1))
-        }
-    }
 
     /// The `N` bytes of an access that ends within the base and the
     /// length, or None.
@@ -254,7 +245,7 @@ impl Memory {
     fn direct<const N: usize>(&self, address: u64, offset: u64) -> Option<&[u8; N]> {
         // At most the base's length, which lets the slices below go
         // unchecked.
-        let limit = self.fast.min(self.base.len()).min(isize::MAX as usize);
+        let limit = self.outer.fast.min(self.base.len()).min(isize::MAX as usize);
         // `offset` is a constant where generated code calls this, so the
         // first test folds away. `address` is below `limit`, a slice's
         // length, so the sum cannot overflow.
@@ -269,7 +260,7 @@ impl Memory {
 
     #[inline(always)]
     fn direct_mut<const N: usize>(&mut self, address: u64, offset: u64) -> Option<&mut [u8; N]> {
-        let limit = self.fast.min(self.base.len()).min(isize::MAX as usize);
+        let limit = self.outer.fast.min(self.base.len()).min(isize::MAX as usize);
         if offset < (1 << 62) && address < limit as u64 {
             let end = address + (offset + N as u64);
             if end <= limit as u64 {
@@ -317,26 +308,13 @@ impl Memory {
     }
 
     /// Copies the bytes at `at` (in bounds) into `out`, across parts.
-    fn read_into(&self, mut at: usize, mut out: &mut [u8]) {
-        while !out.is_empty() {
-            let (part, o) = self.part(at);
-            let n = out.len().min(part.len() - o);
-            let (now, rest) = out.split_at_mut(n);
-            now.copy_from_slice(&part[o..o + n]);
-            out = rest;
-            at += n;
-        }
+    fn read_into(&self, at: usize, out: &mut [u8]) {
+        read_parts(&self.base, &self.outer, at, out)
     }
 
     /// Writes `data` at `at` (in bounds), across parts.
-    fn write_from(&mut self, mut at: usize, mut data: &[u8]) {
-        while !data.is_empty() {
-            let (part, o) = self.part_mut(at);
-            let n = data.len().min(part.len() - o);
-            part[o..o + n].copy_from_slice(&data[..n]);
-            data = &data[n..];
-            at += n;
-        }
+    fn write_from(&mut self, at: usize, data: &[u8]) {
+        write_parts(&mut self.base, &mut self.outer, at, data)
     }
 
     #[inline(always)]
@@ -486,24 +464,24 @@ impl Memory {
 
     /// The size in pages.
     pub fn size(&self) -> u64 {
-        self.len as u64 / PAGE
+        self.outer.len as u64 / PAGE
     }
 
     /// Grows by `delta` pages; the old size, or -1 when it cannot.
     pub fn grow(&mut self, delta: u64) -> i64 {
         let old = self.size();
-        let Some(new) = old.checked_add(delta).filter(|&n| n <= self.max_pages) else { return -1 };
+        let Some(new) = old.checked_add(delta).filter(|&n| n <= self.outer.max_pages) else { return -1 };
         let Some(len) = new.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else { return -1 };
         // Past the base, every chunk is allocated whole (lazily zeroed),
         // except a last one that the maximum ends inside.
-        let max = usize::try_from(self.max_pages.saturating_mul(PAGE)).unwrap_or(usize::MAX);
-        while self.base.len() + self.chunks.len() * CHUNK < len {
-            let start = self.base.len() + self.chunks.len() * CHUNK;
+        let max = usize::try_from(self.outer.max_pages.saturating_mul(PAGE)).unwrap_or(usize::MAX);
+        while self.base.len() + self.outer.chunks.len() * CHUNK < len {
+            let start = self.base.len() + self.outer.chunks.len() * CHUNK;
             let Ok(chunk) = zeroed(CHUNK.min(max - start)) else { return -1 };
-            self.chunks.push(chunk);
+            self.outer.chunks.push(chunk);
         }
-        self.len = len;
-        self.fast = len.min(self.base.len());
+        self.outer.len = len;
+        self.outer.fast = len.min(self.base.len());
         old as i64
     }
 
@@ -524,27 +502,14 @@ impl Memory {
     }
 
     pub fn fill(&mut self, destination: u64, value: u8, n: u64) -> R<()> {
-        let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
-        let mut at = self.at(destination, 0, n)?;
-        let end = at + n;
-        while at < end {
-            let (part, o) = self.part_mut(at);
-            let k = (end - at).min(part.len() - o).min(BLOCK);
-            let bytes = &mut part[o..o + k];
-            // Zeros over a block of zeros: left untouched.
-            if !(value == 0 && k == BLOCK && all_zero(bytes)) {
-                bytes.fill(value);
-            }
-            at += k;
-        }
-        Ok(())
+        fill_parts(&mut self.base, &mut self.outer, destination, value, n)
     }
 
     /// `memory.copy` of a constant `N` bytes (at least 1), as
     /// `Memory32::copy_n`; ranges beyond the base take `copy`.
     #[inline(always)]
     pub fn copy_n<const N: usize>(&mut self, destination: u64, source: u64) -> R<()> {
-        let limit = self.fast.min(self.base.len());
+        let limit = self.outer.fast.min(self.base.len());
         if destination < limit as u64 && source < limit as u64 && destination as usize + N <= limit && source as usize + N <= limit {
             move_bytes::<N>(&mut self.base[..limit], destination as usize, source as usize);
             return Ok(());
@@ -555,7 +520,7 @@ impl Memory {
     /// `memory.fill` of a constant `N` bytes (at least 1).
     #[inline(always)]
     pub fn fill_n<const N: usize>(&mut self, destination: u64, value: u8) -> R<()> {
-        let limit = self.fast.min(self.base.len());
+        let limit = self.outer.fast.min(self.base.len());
         if destination < limit as u64 && destination as usize + N <= limit {
             let at = destination as usize;
             self.base[..limit][at..at + N].fill(value);
@@ -565,34 +530,7 @@ impl Memory {
     }
 
     pub fn copy(&mut self, destination: u64, source: u64, n: u64) -> R<()> {
-        let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
-        let to = self.at(destination, 0, n)?;
-        let from = self.at(source, 0, n)?;
-        if n < BLOCK && to + n <= self.fast && from + n <= self.fast {
-            self.base.copy_within(from..from + n, to);
-            return Ok(());
-        }
-        // Block by block through a bounded buffer, in memmove's direction so
-        // that overlapping ranges copy right; a block of zeros over zeros is
-        // skipped.
-        let mut block = vec![0; BLOCK.min(n)];
-        let mut there = vec![0; BLOCK.min(n)];
-        let mut done = 0;
-        while done < n {
-            let k = BLOCK.min(n - done);
-            let at = if to <= from { done } else { n - done - k };
-            self.read_into(from + at, &mut block[..k]);
-            if all_zero(&block[..k]) {
-                self.read_into(to + at, &mut there[..k]);
-                if all_zero(&there[..k]) {
-                    done += k;
-                    continue;
-                }
-            }
-            self.write_from(to + at, &block[..k]);
-            done += k;
-        }
-        Ok(())
+        copy_parts(&mut self.base, &mut self.outer, destination, source, n)
     }
 
     /// Copies `n` bytes of `data` from `from` to `destination` (memory.init
@@ -604,6 +542,224 @@ impl Memory {
         let to = self.at(destination, 0, n)?;
         self.write_from(to, &data[from..from + n]);
         Ok(())
+    }
+}
+
+impl Memory {
+    /// The memory split for generated code: the bytes accesses reach
+    /// directly (the base up to `min(len, base length)`) and the rest.
+    #[inline(always)]
+    pub fn parts(&mut self) -> (&mut [u8], &mut Outer) {
+        let fast = self.outer.fast;
+        (&mut self.base[..fast], &mut self.outer)
+    }
+}
+
+impl Outer {
+    /// The effective address of an access of `n` bytes, or the trap.
+    #[inline(always)]
+    fn at(&self, address: u64, offset: u64, n: usize) -> R<usize> {
+        match address.checked_add(offset).and_then(|a| usize::try_from(a).ok()) {
+            Some(at) if at <= self.len && n <= self.len - at => Ok(at),
+            _ => trap(Trap::OutOfBounds),
+        }
+    }
+}
+
+// The parts of a 64-bit memory: `base` is its base, or (from generated
+// code) the base's direct bytes, which hold every in-bounds byte below the
+// base's length.
+
+/// Where byte `at` (in bounds) lives: the base or a chunk, and the offset
+/// there.
+fn part<'a>(base: &'a [u8], outer: &'a Outer, at: usize) -> (&'a [u8], usize) {
+    if at < outer.base_len {
+        (base, at)
+    } else {
+        let at = at - outer.base_len;
+        (&outer.chunks[at >> CHUNK_BITS], at & (CHUNK - 1))
+    }
+}
+
+fn part_mut<'a>(base: &'a mut [u8], outer: &'a mut Outer, at: usize) -> (&'a mut [u8], usize) {
+    if at < outer.base_len {
+        (base, at)
+    } else {
+        let at = at - outer.base_len;
+        (&mut outer.chunks[at >> CHUNK_BITS], at & (CHUNK - 1))
+    }
+}
+
+/// Copies the bytes at `at` (in bounds) into `out`, across parts.
+fn read_parts(base: &[u8], outer: &Outer, mut at: usize, mut out: &mut [u8]) {
+    while !out.is_empty() {
+        let (part, o) = part(base, outer, at);
+        let n = out.len().min(part.len() - o);
+        let (now, rest) = out.split_at_mut(n);
+        now.copy_from_slice(&part[o..o + n]);
+        out = rest;
+        at += n;
+    }
+}
+
+/// Writes `data` at `at` (in bounds), across parts.
+fn write_parts(base: &mut [u8], outer: &mut Outer, mut at: usize, mut data: &[u8]) {
+    while !data.is_empty() {
+        let (part, o) = part_mut(base, outer, at);
+        let n = data.len().min(part.len() - o);
+        part[o..o + n].copy_from_slice(&data[..n]);
+        data = &data[n..];
+        at += n;
+    }
+}
+
+fn fill_parts(base: &mut [u8], outer: &mut Outer, destination: u64, value: u8, n: u64) -> R<()> {
+    let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
+    let mut at = outer.at(destination, 0, n)?;
+    let end = at + n;
+    while at < end {
+        let (part, o) = part_mut(base, outer, at);
+        let k = (end - at).min(part.len() - o).min(BLOCK);
+        let bytes = &mut part[o..o + k];
+        // Zeros over a block of zeros: left untouched.
+        if !(value == 0 && k == BLOCK && all_zero(bytes)) {
+            bytes.fill(value);
+        }
+        at += k;
+    }
+    Ok(())
+}
+
+fn copy_parts(base: &mut [u8], outer: &mut Outer, destination: u64, source: u64, n: u64) -> R<()> {
+    let n = usize::try_from(n).or_else(|_| trap(Trap::OutOfBounds))?;
+    let to = outer.at(destination, 0, n)?;
+    let from = outer.at(source, 0, n)?;
+    if n < BLOCK && to + n <= outer.fast && from + n <= outer.fast {
+        base.copy_within(from..from + n, to);
+        return Ok(());
+    }
+    // Block by block through a bounded buffer, in memmove's direction so
+    // that overlapping ranges copy right; a block of zeros over zeros is
+    // skipped.
+    let mut block = vec![0; BLOCK.min(n)];
+    let mut there = vec![0; BLOCK.min(n)];
+    let mut done = 0;
+    while done < n {
+        let k = BLOCK.min(n - done);
+        let at = if to <= from { done } else { n - done - k };
+        read_parts(base, outer, from + at, &mut block[..k]);
+        if all_zero(&block[..k]) {
+            read_parts(base, outer, to + at, &mut there[..k]);
+            if all_zero(&there[..k]) {
+                done += k;
+                continue;
+            }
+        }
+        write_parts(base, outer, to + at, &block[..k]);
+        done += k;
+    }
+    Ok(())
+}
+
+/// Accesses to a 64-bit memory through its parts (`Memory::parts`), which
+/// generated functions keep in locals, as `m32` does for 32-bit memories:
+/// an access ending within the direct bytes checks one bound, their length;
+/// others take a cold path through the chunks.
+pub mod m64 {
+    use super::{Outer, R, copy_parts, fill_parts, move_bytes, read_parts, write_parts};
+
+    #[inline(always)]
+    fn direct<const N: usize>(base: &[u8], address: u64, offset: u64) -> Option<&[u8; N]> {
+        // `offset` is a constant where generated code calls this, so the
+        // first test folds away; `address` is below a slice's length, so the
+        // sum cannot overflow.
+        if offset < (1 << 62) && address < base.len() as u64 {
+            let end = address + (offset + N as u64);
+            if end <= base.len() as u64 {
+                return base[end as usize - N..].first_chunk::<N>();
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    fn direct_mut<const N: usize>(base: &mut [u8], address: u64, offset: u64) -> Option<&mut [u8; N]> {
+        if offset < (1 << 62) && address < base.len() as u64 {
+            let end = address + (offset + N as u64);
+            if end <= base.len() as u64 {
+                return base[end as usize - N..].first_chunk_mut::<N>();
+            }
+        }
+        None
+    }
+
+    /// The `n` (at most 16) bytes of an access outside the direct bytes,
+    /// as a little-endian integer.
+    #[cold]
+    #[inline(never)]
+    fn get_slow(base: &[u8], outer: &Outer, address: u64, offset: u64, n: usize) -> R<u128> {
+        let mut out = [0; 16];
+        let at = outer.at(address, offset, n)?;
+        read_parts(base, outer, at, &mut out[..n]);
+        Ok(u128::from_le_bytes(out))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn put_slow(base: &mut [u8], outer: &mut Outer, address: u64, offset: u64, value: u128, n: usize) -> R<()> {
+        let at = outer.at(address, offset, n)?;
+        write_parts(base, outer, at, &value.to_le_bytes()[..n]);
+        Ok(())
+    }
+
+    macro_rules! access {
+        ($load:ident, $store:ident, $t:ty, $n:expr) => {
+            #[inline(always)]
+            pub fn $load(base: &[u8], outer: &Outer, address: u64, offset: u64) -> R<$t> {
+                match direct::<$n>(base, address, offset) {
+                    Some(bytes) => Ok(<$t>::from_le_bytes(*bytes)),
+                    None => get_slow(base, outer, address, offset, $n).map(|value| value as $t),
+                }
+            }
+            #[inline(always)]
+            pub fn $store(base: &mut [u8], outer: &mut Outer, address: u64, offset: u64, value: $t) -> R<()> {
+                match direct_mut::<$n>(base, address, offset) {
+                    Some(bytes) => {
+                        *bytes = value.to_le_bytes();
+                        Ok(())
+                    }
+                    None => put_slow(base, outer, address, offset, value as u128, $n),
+                }
+            }
+        };
+    }
+    access!(l8, s8, u8, 1);
+    access!(l16, s16, u16, 2);
+    access!(l32, s32, u32, 4);
+    access!(l64, s64, u64, 8);
+    access!(l128, s128, u128, 16);
+
+    /// `memory.copy` of a constant `N` bytes (at least 1).
+    #[inline(always)]
+    pub fn copy_n<const N: usize>(base: &mut [u8], outer: &mut Outer, destination: u64, source: u64) -> R<()> {
+        let fast = base.len() as u64;
+        if destination < fast && source < fast && destination + N as u64 <= fast && source + N as u64 <= fast {
+            move_bytes::<N>(base, destination as usize, source as usize);
+            return Ok(());
+        }
+        copy_parts(base, outer, destination, source, N as u64)
+    }
+
+    /// `memory.fill` of a constant `N` bytes (at least 1).
+    #[inline(always)]
+    pub fn fill_n<const N: usize>(base: &mut [u8], outer: &mut Outer, destination: u64, value: u8) -> R<()> {
+        let fast = base.len() as u64;
+        if destination < fast && destination + N as u64 <= fast {
+            let at = destination as usize;
+            base[at..at + N].fill(value);
+            return Ok(());
+        }
+        fill_parts(base, outer, destination, value, N as u64)
     }
 }
 
@@ -1154,6 +1310,47 @@ mod tests {
         assert_eq!(m.grow(1), 1);
         assert_eq!(m.grow(1), -1);
         assert!(m.store::<8>(131064, 0, [1; 8]).is_ok());
+    }
+
+    #[test]
+    fn m64_accesses_agree_with_the_memory() {
+        let page = PAGE as usize;
+        let edge = 2 * PAGE;
+        let mut m = Memory::with_base(4, 1 << 20, vec![0; 2 * page]).unwrap();
+        let mut seed = 12345u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        for _ in 0..20000 {
+            let address = match next() % 4 {
+                0 => edge - 20 + next() % 40,
+                1 => 4 * PAGE - 20 + next() % 40,
+                2 => next() % (4 * PAGE),
+                _ => u64::MAX - next() % 40,
+            };
+            let offset = next() % 24;
+            let value = next() as u128 * 0x1_0000_0001 + 7;
+            let expected = m.store::<8>(address, offset, (value as u64).to_le_bytes());
+            let (base, outer) = m.parts();
+            let got = m64::s64(base, outer, address, offset, value as u64);
+            assert_eq!(got, expected);
+            let expected = m.load::<16>(address, offset).map(u128::from_le_bytes);
+            let (base, outer) = m.parts();
+            assert_eq!(m64::l128(base, outer, address, offset), expected, "{address} {offset}");
+            let expected = m.load::<4>(address, offset).map(u32::from_le_bytes);
+            let (base, outer) = m.parts();
+            assert_eq!(m64::l32(base, outer, address, offset), expected);
+            let (base, outer) = m.parts();
+            if m64::s16(base, outer, address, offset, value as u16).is_ok() {
+                assert_eq!(m.load::<2>(address, offset).map(u16::from_le_bytes), Ok(value as u16));
+            }
+        }
+        let (base, outer) = m.parts();
+        m64::copy_n::<100>(base, outer, edge - 50, 10).unwrap();
+        let (base, outer) = m.parts();
+        m64::fill_n::<9>(base, outer, edge - 4, 3).unwrap();
+        assert_eq!(m.read(edge - 4, 9).unwrap(), vec![3; 9]);
     }
 
     #[test]

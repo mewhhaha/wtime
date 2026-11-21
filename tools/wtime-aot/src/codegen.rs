@@ -664,7 +664,9 @@ impl Emitter {
     /// (calls, memory.size and memory.grow, bulk operations): the locals
     /// holding a 32-bit memory's length and bytes are taken anew.
     fn refresh(&mut self, memory64: bool) {
-        if !memory64 {
+        if memory64 {
+            self.line("(mb, mo) = self.mem.parts();");
+        } else {
             self.line("ml = self.mem.len(); mb = self.mem.bytes_mut();");
         }
     }
@@ -875,7 +877,9 @@ impl<'a> Function<'a> {
         // module's stores leave the instance's own fields alone, so a field
         // would be reloaded at every access. Refreshed after each call and
         // memory.grow, which are what change it.
-        if !self.module.memory64 {
+        if self.module.memory64 {
+            writeln!(out, "    let (mut mb, mut mo) = this.mem.parts();").unwrap();
+        } else {
             writeln!(out, "    let mut ml: usize = this.mem.len();\n    let mut mb = this.mem.bytes_mut();").unwrap();
         }
         for (i, t) in self.locals.iter().enumerate().skip(self.n_params) {
@@ -1189,7 +1193,7 @@ impl<'a> Function<'a> {
                         e.line(&format!("t!(m32::copy_n::<{k}>(mb, ml, {dst} as u32, {src} as u32));"))
                     }
                     Some(k @ 1..=COPY_INLINE) => {
-                        e.line(&format!("t!(self.mem.copy_n::<{k}>({dst} as u64, {src} as u64));"))
+                        e.line(&format!("t!(m64::copy_n::<{k}>(mb, mo, {dst} as u64, {src} as u64));"))
                     }
                     _ => {
                         let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));
@@ -1210,7 +1214,7 @@ impl<'a> Function<'a> {
                         e.line(&format!("t!(m32::fill_n::<{k}>(mb, ml, {dst} as u32, {value} as u8));"))
                     }
                     Some(k @ 1..=COPY_INLINE) => {
-                        e.line(&format!("t!(self.mem.fill_n::<{k}>({dst} as u64, {value} as u8));"))
+                        e.line(&format!("t!(m64::fill_n::<{k}>(mb, mo, {dst} as u64, {value} as u8));"))
                     }
                     _ => {
                         let (dst, n) = (self.address(&dst), self.address(&n));
@@ -1299,9 +1303,9 @@ impl<'a> Function<'a> {
             format!("t!(m32::l128(mb, ml, {a} as u32, {offset}))")
         } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
-            format!("u128::from_le_bytes(t!(self.mem.load::<16>({address}, {offset})))")
+            format!("t!(m64::l128(mb, mo, {address}, {offset}))")
         } else if self.module.memory64 {
-            format!("t!(self.mem.l{}({}, {offset}))", n * 8, self.address(&a))
+            format!("t!(m64::l{}(mb, mo, {}, {offset}))", n * 8, self.address(&a))
         } else {
             format!("t!(m32::l{}(mb, ml, {a} as u32, {offset}))", n * 8)
         };
@@ -1328,9 +1332,9 @@ impl<'a> Function<'a> {
             format!("t!(m32::s128(mb, ml, {a} as u32, {offset}, {value}));")
         } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
-            format!("t!(self.mem.store::<16>({address}, {offset}, ({value}).to_le_bytes()));")
+            format!("t!(m64::s128(mb, mo, {address}, {offset}, {value}));")
         } else if self.module.memory64 {
-            format!("t!(self.mem.s{}({}, {offset}, {value}));", n * 8, self.address(&a))
+            format!("t!(m64::s{}(mb, mo, {}, {offset}, {value}));", n * 8, self.address(&a))
         } else {
             format!("t!(m32::s{}(mb, ml, {a} as u32, {offset}, {value}));", n * 8)
         };
