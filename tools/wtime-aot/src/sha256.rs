@@ -12,6 +12,7 @@ const K: [u32; 64] = [
 ];
 
 /// An incremental SHA-256.
+#[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],
     block: Vec<u8>,

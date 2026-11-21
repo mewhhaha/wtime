@@ -16,6 +16,15 @@
 //! native) goes through CARGO_ENCODED_RUSTFLAGS, above any configuration.
 //! `--time-limit` bounds the build. The generated crates have no build scripts
 //! and no dependencies other than the runtime crate.
+//!
+//! `--train ARGUMENTS` makes the build profile-guided: an instrumented
+//! program runs once with ARGUMENTS (the program's own flags, then `--` and
+//! the guest's arguments, chosen by the operator, never the uploader), in
+//! the same sandbox as any run, and rustc then optimizes with the profile
+//! it wrote (`-C profile-use`, merged by the toolchain's `llvm-profdata`).
+//! The profile steers layout and inlining only, never semantics; the
+//! instrumented and the final program are cached, the final one under a
+//! key that includes the profile.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,7 +32,7 @@ use std::process::{Command, Stdio};
 
 use crate::sha256::Sha256;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--train PROGRAM-ARGUMENTS...]";
 
 pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
     let mut arguments = arguments.into_iter();
@@ -33,6 +42,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
     // The program runs where it is built: by default for this machine's CPU,
     // as a JIT would compile.
     let mut target_cpu = String::from("native");
+    let mut train = None;
     while let Some(argument) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{USAGE}\n{argument} needs a value"));
         match argument.as_str() {
@@ -52,28 +62,99 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
                 let limit = seconds.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok());
                 time_limit = limit.ok_or_else(|| format!("{USAGE}\n--time-limit takes a positive number of seconds"))?;
             }
+            // Everything after --train is the training run's command line.
+            "--train" => {
+                train = Some(arguments.by_ref().collect::<Vec<_>>());
+            }
             _ if module.is_none() && !argument.starts_with('-') => module = Some(PathBuf::from(argument)),
             other => return Err(format!("{USAGE}\nunrecognized argument {other}")),
         }
     }
     let (Some(module), Some(cache)) = (module, cache) else { return Err(USAGE.into()) };
-    let program = build(&module, &cache, &toolchain, &target_cpu, module_path.as_deref(), &rt, jobs, time_limit)?;
+    let options = Options { toolchain: &toolchain, target_cpu: &target_cpu, jobs, time_limit };
+    let program = match train {
+        None => build(&module, &cache, module_path.as_deref(), &rt, &options)?,
+        Some(train) => build_trained(&module, &cache, module_path.as_deref(), &rt, &options, &train)?,
+    };
     println!("{}", program.display());
     Ok(())
 }
 
+/// How programs are compiled.
+pub struct Options<'a> {
+    pub toolchain: &'a str,
+    pub target_cpu: &'a str,
+    pub jobs: Option<u32>,
+    pub time_limit: std::time::Duration,
+}
+
+/// What a build starts from: the Wasm, its validated settings and the key
+/// of everything the program depends on.
+struct Prepared {
+    wasm: Vec<u8>,
+    module_path: String,
+    cache: PathBuf,
+    rt: PathBuf,
+    flat64: bool,
+    key: Sha256,
+    record: String,
+}
+
 /// Builds (or finds in `cache`) the program for `module`; its path.
-#[allow(clippy::too_many_arguments)]
-pub fn build(
+pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, options: &Options) -> Result<PathBuf, String> {
+    let prepared = prepare(module, cache, module_path, rt, options)?;
+    cached(&prepared, prepared.key.clone(), &[], options, "")
+}
+
+/// Builds (or finds in `cache`) the program for `module`, optimized with the
+/// profile of a run of it with `train`; its path.
+pub fn build_trained(
     module: &Path,
     cache: &Path,
-    toolchain: &str,
-    target_cpu: &str,
     module_path: Option<&str>,
     rt: &Path,
-    jobs: Option<u32>,
-    time_limit: std::time::Duration,
+    options: &Options,
+    train: &[String],
 ) -> Result<PathBuf, String> {
+    let prepared = prepare(module, cache, module_path, rt, options)?;
+    let mut key = prepared.key.clone();
+    field(&mut key, "profile-generate", &[]);
+    let instrumented = cached(&prepared, key, &["-Cprofile-generate".into()], options, "instrumented for profiling\n")?;
+
+    // The training run, in a directory of its own for the raw profiles.
+    let profiles = prepared.cache.join("work").join(format!("profile-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&profiles);
+    fs::create_dir_all(&profiles).map_err(|e| format!("{}: {e}", profiles.display()))?;
+    let result = train_and_merge(&instrumented, train, &profiles, options);
+    let profile = result.and_then(|merged| fs::read(&merged).map_err(|e| format!("{}: {e}", merged.display())));
+    let profile = match profile {
+        Ok(profile) => profile,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&profiles);
+            return Err(error);
+        }
+    };
+    let mut key = prepared.key.clone();
+    field(&mut key, "profile-use", &profile);
+    let digest = crate::sha256::hex(&profile);
+    let stored = prepared.cache.join("work").join(format!("profile-{digest}-{}.profdata", std::process::id()));
+    fs::write(&stored, &profile).map_err(|e| format!("{}: {e}", stored.display()))?;
+    let _ = fs::remove_dir_all(&profiles);
+    let flag = format!("-Cprofile-use={}", stored.display());
+    let note = format!("profile-guided: profile sha256 {digest}, training arguments {train:?}\n");
+    let result = cached(&prepared, key, &[flag], options, &note);
+    let _ = fs::remove_file(&stored);
+    result
+}
+
+fn field(key: &mut Sha256, name: &str, bytes: &[u8]) {
+    key.update(name.as_bytes());
+    key.update(&(bytes.len() as u64).to_le_bytes());
+    key.update(bytes);
+}
+
+/// Reads and checks what a build starts from.
+fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, options: &Options) -> Result<Prepared, String> {
     let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
     let wasm = read(module)?;
     // The program reports the module's own name, not where the operator
@@ -101,25 +182,20 @@ pub fn build(
 
     // The key: everything the program depends on.
     let mut key = Sha256::new();
-    let mut field = |name: &str, bytes: &[u8]| {
-        key.update(name.as_bytes());
-        key.update(&(bytes.len() as u64).to_le_bytes());
-        key.update(bytes);
-    };
-    field("wtime-aot build 1", &[]);
-    field("wasm", &wasm);
-    field("module path", module_path.as_bytes());
+    field(&mut key, "wtime-aot build 1", &[]);
+    field(&mut key, "wasm", &wasm);
+    field(&mut key, "module path", module_path.as_bytes());
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
-    field("generator", &read(&generator)?);
+    field(&mut key, "generator", &read(&generator)?);
     for (name, bytes) in runtime_sources(&rt)? {
-        field(&name, &bytes);
+        field(&mut key, &name, &bytes);
     }
-    let version = rustc_version(toolchain)?;
-    field("toolchain", version.as_bytes());
+    let version = rustc_version(options.toolchain)?;
+    field(&mut key, "toolchain", version.as_bytes());
     // The CPU and the features it resolves to here: a program built for one
     // machine's CPU is not reused for another's.
-    field("target cpu", target_cpu.as_bytes());
-    field("target features", target_features(toolchain, target_cpu)?.as_bytes());
+    field(&mut key, "target cpu", options.target_cpu.as_bytes());
+    field(&mut key, "target features", target_features(options.toolchain, options.target_cpu)?.as_bytes());
     // A 64-bit memory is flat (allocated whole at its maximum, accessed
     // without a slow path) when this machine grants its maximum.
     let flat64 = match crate::codegen::memory64_max(&wasm)? {
@@ -129,9 +205,22 @@ pub fn build(
         }),
         None => false,
     };
-    field("flat memory64", &[flat64 as u8]);
-    let key = key.hex();
+    field(&mut key, "flat memory64", &[flat64 as u8]);
+    let record = format!(
+        "wasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {}\nflat memory64 {flat64}\n",
+        crate::sha256::hex(&wasm),
+        generator.display(),
+        rt.display(),
+        version.trim().replace('\n', "; "),
+        options.target_cpu,
+    );
+    Ok(Prepared { wasm, module_path, cache, rt, flat64, key, record })
+}
 
+/// The program cached under `key`, built with `rustflags` if not there yet.
+fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Options, note: &str) -> Result<PathBuf, String> {
+    let key = key.hex();
+    let cache = &prepared.cache;
     let entry = cache.join(&key);
     let program = entry.join("program");
     if program.is_file() {
@@ -144,41 +233,100 @@ pub fn build(
     let name = format!("aot-{key}");
     let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
-    let result = generate_and_compile(&wasm, &work, &name, &rt, &module_path, flat64, toolchain, target_cpu, jobs, time_limit)
-        .and_then(|built| {
-            fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
-            let staged = entry.join(format!("program.{}", std::process::id()));
-            fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
-            fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
-        });
+    let result = generate_and_compile(prepared, &work, &name, rustflags, options).and_then(|built| {
+        fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+        let staged = entry.join(format!("program.{}", std::process::id()));
+        fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
+        fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
+    });
     let _ = fs::remove_dir_all(&work);
     result?;
-    let record = format!(
-        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {target_cpu}\nflat memory64 {flat64}\n",
-        crate::sha256::hex(&wasm),
-        generator.display(),
-        rt.display(),
-        version.trim().replace('\n', "; ")
-    );
-    let _ = fs::write(entry.join("key.txt"), record);
+    let _ = fs::write(entry.join("key.txt"), format!("key {key}\n{}{note}", prepared.record));
     Ok(program)
 }
 
-/// Generates the crates into `work` and compiles them there; the program.
-#[allow(clippy::too_many_arguments)]
-fn generate_and_compile(
-    wasm: &[u8],
-    work: &Path,
-    name: &str,
-    rt: &Path,
-    module_path: &str,
-    flat64: bool,
-    toolchain: &str,
-    target_cpu: &str,
-    jobs: Option<u32>,
-    time_limit: std::time::Duration,
-) -> Result<PathBuf, String> {
-    crate::codegen::generate(wasm, work, name, rt, module_path, flat64)?;
+/// Runs the instrumented program with `train` and merges the profile it
+/// writes into `profiles`; the merged profile's path.
+fn train_and_merge(instrumented: &Path, train: &[String], profiles: &Path, options: &Options) -> Result<PathBuf, String> {
+    // The program's own sandbox applies: it reaches files and variables
+    // only as `train` grants. Its output is not needed.
+    let mut run = Command::new(instrumented);
+    run.env_clear()
+        .env("LLVM_PROFILE_FILE", profiles.join("%m-%p.profraw"))
+        .args(train)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    std::os::unix::process::CommandExt::process_group(&mut run, 0);
+    wait(run, "the training run", options.time_limit)?;
+    let raw: Vec<PathBuf> = fs::read_dir(profiles)
+        .map_err(|e| format!("{}: {e}", profiles.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|e| e == "profraw"))
+        .collect();
+    if raw.is_empty() {
+        return Err("the training run wrote no profile".into());
+    }
+    let sysroot = Command::new("rustc")
+        .env("RUSTUP_TOOLCHAIN", options.toolchain)
+        .args(["--print", "sysroot"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("rustc: {e}"))?;
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
+    let host = rustc_version(options.toolchain)?
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
+        .ok_or("rustc -vV names no host")?;
+    let profdata = sysroot.join("lib").join("rustlib").join(host).join("bin").join("llvm-profdata");
+    if !profdata.is_file() {
+        return Err(format!(
+            "{} is missing: install it with `rustup component add llvm-tools --toolchain {}`",
+            profdata.display(),
+            options.toolchain
+        ));
+    }
+    let merged = profiles.join("merged.profdata");
+    let mut merge = Command::new(&profdata);
+    merge.arg("merge").arg("-o").arg(&merged).args(&raw).stdin(Stdio::null()).stdout(Stdio::null());
+    std::os::unix::process::CommandExt::process_group(&mut merge, 0);
+    wait(merge, "llvm-profdata", options.time_limit)?;
+    Ok(merged)
+}
+
+/// Runs `command` in a process group of its own, which the time limit ends
+/// whole; an error unless it succeeds, except that a training run may end
+/// with any exit code (a guest's own failure still profiles the code it
+/// ran).
+fn wait(mut command: Command, what: &str, time_limit: std::time::Duration) -> Result<(), String> {
+    let mut child = command.spawn().map_err(|e| format!("{what}: {e}"))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("{what}: {e}"))? {
+            break status;
+        }
+        if started.elapsed() > time_limit {
+            let group = format!("-{}", child.id());
+            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+            let _ = child.wait();
+            return Err(format!("{what} exceeded its time limit of {time_limit:?}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    if status.code().is_none() {
+        return Err(format!("{what} ended by a signal ({status})"));
+    }
+    if what != "the training run" && !status.success() {
+        return Err(format!("{what} failed ({status})"));
+    }
+    Ok(())
+}
+
+/// Generates the crates into `work` and compiles them there with
+/// `rustflags` added; the program.
+fn generate_and_compile(prepared: &Prepared, work: &Path, name: &str, rustflags: &[String], options: &Options) -> Result<PathBuf, String> {
+    let Options { toolchain, target_cpu, jobs, time_limit } = *options;
+    crate::codegen::generate(&prepared.wasm, work, name, &prepared.rt, &prepared.module_path, prepared.flat64)?;
     let target = work.join("target");
     let mut cargo = Command::new("cargo");
     cargo.env_clear().current_dir(work).stdin(Stdio::null());
@@ -191,7 +339,9 @@ fn generate_and_compile(
     cargo.env("RUSTUP_TOOLCHAIN", toolchain).env("CARGO_TARGET_DIR", &target).env("RUST_MIN_STACK", "268435456");
     // The target CPU through CARGO_ENCODED_RUSTFLAGS, which takes
     // precedence over every rustflags setting in Cargo's configuration.
-    cargo.env("CARGO_ENCODED_RUSTFLAGS", format!("-C\u{1f}target-cpu={target_cpu}"));
+    let mut flags = vec![format!("-Ctarget-cpu={target_cpu}")];
+    flags.extend(rustflags.iter().cloned());
+    cargo.env("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"));
     cargo.args(["build", "--release", "--offline", "--quiet"]);
     if let Some(jobs) = jobs {
         cargo.args(["--jobs", &jobs.to_string()]);

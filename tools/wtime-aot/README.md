@@ -155,6 +155,24 @@ input builds a new one. Programs are built for the machine's own CPU
 (`--target-cpu`, default `native`, as a JIT compiles for its host): a
 cache shared between machines keeps a program per CPU.
 
+`--train PROGRAM-ARGUMENTS...` (last on the command line) makes the build
+profile-guided: an instrumented program is built and run once with those
+arguments (its own flags, such as `--allow-files`, then `--` and the
+guest's arguments, chosen by the operator), in the same sandbox and under
+the same `--time-limit` as any run, from the current directory; rustc then
+builds the program again with the profile that run wrote (`-C
+profile-use`, merged by the toolchain's `llvm-profdata`: `rustup component
+add llvm-tools`). The profile steers code layout and inlining, never what
+the program does. Both programs are cached, the profile-guided one under a
+key that also covers the profile, so the same training gives the same
+program. A training run that exits with an error still profiles the code
+it ran; one ended by a signal or the time limit fails the build.
+
+```sh
+program=$(target/release/wtime-aot build compiler.wasm --cache /srv/aot \
+  --train --allow-files /srv/sample -- /srv/sample/input.goose -o /dev/null)
+```
+
 What makes an uploaded module safe to run:
 
 - **Only trusted code is compiled.** The generated source is a function of

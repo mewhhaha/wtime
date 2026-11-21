@@ -75,6 +75,9 @@ def main() -> int:
     parser.add_argument("--aot-dir", type=Path,
                         help="also run programs compiled ahead of time by tools/wtime-aot (engine wtime-aot): "
                              "aot-<module stem> in this directory for each case")
+    parser.add_argument("--aot-pgo-dir", type=Path,
+                        help="also run profile-guided programs (wtime-aot build --train; engine wtime-aot-pgo), "
+                             "aot-<module stem> in this directory for each case that has one")
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
     args.wtime, args.wasmtime = args.wtime.resolve(), args.wasmtime.resolve()
@@ -123,6 +126,11 @@ def main() -> int:
             stem = "".join(c if c.isascii() and c.isalnum() else "-" for c in module.stem)
             # The same access to files and variables as wtime-goose grants.
             engines["wtime-aot"] = [str(args.aot_dir.resolve() / f"aot-{stem}"), "--allow-files", "/", "--allow-env", "*", *program]
+        if args.aot_pgo_dir:
+            stem = "".join(c if c.isascii() and c.isalnum() else "-" for c in module.stem)
+            pgo = args.aot_pgo_dir.resolve() / f"aot-{stem}"
+            if pgo.is_file():
+                engines["wtime-aot-pgo"] = [str(pgo), "--allow-files", "/", "--allow-env", "*", *program]
         if args.deno:
             # Deno's V8 with its default tiers (Liftoff, then TurboFan), all
             # permissions for the host's file access, the module's memory64
