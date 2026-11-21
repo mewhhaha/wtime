@@ -111,40 +111,40 @@ gap by generating code at run time.
 [`tools/wtime-aot`](../wtime-aot/README.md) closes the gap before run time instead: it
 translates a module to safe Rust crates (bounds-checked memory, Wasm's numeric
 semantics, no `unsafe`) that rustc compiles once; `wtime-aot build` does so for
-uploaded modules through a content-keyed cache, and the programs run sandboxed
-(files and variables only as granted; time, memory, output and stack limits). Every
-output below matches Wasmtime's, and the AOT-compiled Goose compilers emit Wasm
-byte-identical to the native (32-bit) and interpreter-run (64-bit) compilers'. Same
-machine, one CPU per engine, programs built by `wtime-aot build` (`2b0e007`;
-[tables](results/aot-2b0e007/tables.md)); the VM is noisy, V8 most of all. Process is
-the whole process, run the guest's `_start`.
+uploaded modules through a content-keyed cache, for the machine's own CPU, and the
+programs run sandboxed (files and variables only as granted; time, memory, output
+and stack limits). Every output below matches Wasmtime's, and the AOT-compiled Goose
+compilers emit Wasm byte-identical to the native (32-bit) and interpreter-run
+(64-bit) compilers'. Same machine, one CPU per engine, programs built by `wtime-aot
+build` (`78740bc`; [tables](results/aot-78740bc/tables.md)); the VM is noisy, V8 most
+of all. Process is the whole process, run the guest's `_start`.
 
-| Example | Wasmtime run | V8 run | wtime-aot run | cached-Wasmtime process | V8 process | wtime-aot process |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| squares, tour, functions, errors, maze, vm | 0.0–0.1 ms | 0.3–3.0 ms | 0.0 ms | 4.0–5.6 ms | 43–48 ms | **3.8–4.6 ms** |
-| sieve | 0.6 ms | 7.2 ms | 0.7 ms | 5.0 ms | 51 ms | **4.7 ms** |
-| sudoku | 9.3 ms | 15.7 ms | **9.2 ms** | 15.9 ms | 61 ms | **13.6 ms** |
-| life | 21.8 ms | 26.1 ms | **14.3 ms** | 27.5 ms | 73 ms | **18.7 ms** |
-| sorting | 175 ms | 602 ms | **155 ms** | 182 ms | 651 ms | **160 ms** |
+| Example | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| squares, tour, functions, errors, maze, vm | 0.0–0.1 ms | 0.3–3.0 ms | 0.0–0.1 ms | 0.10–0.91× | 4.8–5.3 ms | 46–52 ms | **4.1–4.4 ms** |
+| sieve | 0.7 ms | 7.3 ms | 0.6 ms | **0.93×** | 5.9 ms | 57 ms | **5.1 ms** |
+| sudoku | 9.1 ms | 16.6 ms | 6.7 ms | **0.74×** | 14.3 ms | 66 ms | **11.8 ms** |
+| life | 23.9 ms | 25.3 ms | 5.4 ms | **0.24×** | 30.2 ms | 74 ms | **9.9 ms** |
+| sorting | 142 ms | 321 ms | 113 ms | **0.82×** | 146 ms | 382 ms | **117 ms** |
 
 | Case | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| compile-squares | 1.0 ms | 114 ms | 1.3 ms | 1.3× | 16.7 ms | 259 ms | **5.8 ms** |
-| compile-vm | 5.6 ms | 354 ms | 6.4 ms | 1.14× | 21.3 ms | 507 ms | **10.8 ms** |
-| compile-sudoku | 4.4 ms | 359 ms | 5.3 ms | 1.2× | 20.6 ms | 543 ms | **10.5 ms** |
-| compile-functions | 23.8 ms | 491 ms | 26.4 ms | 1.11× | 38.5 ms | 648 ms | **31.8 ms** |
-| compile64-vm | 8.2 ms | 1,130 ms | 14.1 ms | 1.72× | 26.7 ms | 1,298 ms | **19.0 ms** |
-| compile64-functions | 38.0 ms | 1,461 ms | 54.2 ms | 1.43× | 58.0 ms | 1,664 ms | 60.1 ms |
+| compile-squares | 1.1 ms | 100 ms | 1.4 ms | 1.23× | 17.0 ms | 245 ms | **6.2 ms** |
+| compile-vm | 6.1 ms | 348 ms | 5.7 ms | **0.91×** | 21.4 ms | 508 ms | **10.4 ms** |
+| compile-sudoku | 4.7 ms | 352 ms | 4.5 ms | **0.94×** | 21.6 ms | 523 ms | **9.6 ms** |
+| compile-functions | 24.7 ms | 529 ms | 22.3 ms | **0.88×** | 41.7 ms | 691 ms | **27.3 ms** |
+| compile64-vm | 8.9 ms | 1,188 ms | 11.9 ms | 1.34× | 29.5 ms | 1,356 ms | **18.1 ms** |
+| compile64-functions | 36.8 ms | 1,475 ms | 42.7 ms | 1.16× | 56.1 ms | 1,646 ms | **48.4 ms** |
 
-Compiled ahead of time, the examples run as fast as Wasmtime's code or faster, every
-case beats V8 by far, and the whole process beats both everywhere but
-compile64-functions, where it is level with cached Wasmtime. The Goose compilers' own
-runs stay behind Wasmtime's: 1.1–1.3× for the 32-bit compiler, whose large functions
-spill and whose every memory access carries an explicit bounds check (Wasmtime uses
-guard pages); 1.4–1.7× for the 64-bit one, which also grows its memory to about
-17 GB, more than one allocation can span here, so accesses above the contiguous base
-take a slower path. `wtime-aot build` builds the 32-bit compiler in about 2.5 minutes
-and the 64-bit one in about 9, with rustc 1.97.0 on four cores.
+Compiled ahead of time, every program's whole process is faster than both cached
+Wasmtime and V8, every example runs as fast as Wasmtime's code or faster, and so does
+the 32-bit Goose compiler on all but the shortest input. The 64-bit compiler's own run
+stays 1.2–1.3× Wasmtime's: its memory grows to about 17 GB, more than one allocation
+can span here, and each 64-bit access needs its address clamped and checked where a
+32-bit one adds an offset. What closed most of the gap: generated functions keep the
+memory's bytes and length in locals (LLVM cannot tell that the module's stores leave
+the instance alone, and reloaded both at every access), constant-length copies and
+fills inline, calls check only the stack, and builds target the host CPU.
 
 ## Fixes
 
