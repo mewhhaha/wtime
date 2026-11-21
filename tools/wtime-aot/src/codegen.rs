@@ -36,6 +36,10 @@ const MAX_SOURCE_BYTES: usize = 1 << 30;
 /// Functions without calls and with at most this many locals skip the
 /// stack check (see `Function::emit`).
 const LEAF_LOCALS: usize = 4096;
+
+/// Globals held in locals add at most about this many lines per
+/// instruction of a function (see `Function::emit`).
+const GLOBAL_LINES_PER_INSTRUCTION: usize = 8;
 const LEAF_INSTRUCTIONS: usize = 100_000;
 
 /// `memory.copy`s of a constant length up to this many bytes are inlined.
@@ -514,7 +518,7 @@ impl Module {
             let index = base + k;
             let mut s = String::new();
             let f = Function::new(self, index, &body.locals)?;
-            f.emit(&body.instructions, &mut s).map_err(|e| format!("function {index}: {e}"))?;
+            f.emit(&body.instructions, &mut s, MAX_SOURCE_BYTES - total).map_err(|e| format!("function {index}: {e}"))?;
             total += s.len();
             if total > MAX_SOURCE_BYTES {
                 return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
@@ -670,6 +674,13 @@ struct Emitter {
     /// reloads after calls (see `Function::emit`).
     globals_set: Vec<u32>,
     globals_reloaded: Vec<u32>,
+    /// The globals held in locals; others are read and written in place.
+    globals_cached: std::collections::BTreeSet<u32>,
+    /// The bytes this function's body may take, and whether it went past:
+    /// checked as lines are written, so that no module makes the generator
+    /// build an oversized string before the total is checked.
+    budget: usize,
+    over: bool,
 }
 
 /// What a pending pure expression reads, and so what must not change before
@@ -739,6 +750,10 @@ impl Emitter {
     }
 
     fn line(&mut self, text: &str) {
+        if self.over || self.s.len() + text.len() + 65 > self.budget {
+            self.over = true;
+            return;
+        }
         // Indentation stops deepening at 16 levels: deeply nested blocks
         // would otherwise make the source grow with the square of the nesting.
         let depth = self.frames.len().min(16);
@@ -923,7 +938,7 @@ impl<'a> Function<'a> {
         if self.module.memory64 { format!("({v} as u64)") } else { format!("({v} as u32 as u64)") }
     }
 
-    fn emit(&self, code: &[Instruction], out: &mut String) -> Res<()> {
+    fn emit(&self, code: &[Instruction], out: &mut String, budget: usize) -> Res<()> {
         let ty = &self.module.types[self.index];
         let params: Vec<String> = ty
             .params
@@ -937,19 +952,50 @@ impl<'a> Function<'a> {
         // globals are stored back before calls and returns, and mutable ones
         // loaded again after calls; a trap needs neither, as nothing runs in
         // the instance after one.
-        let mut used = std::collections::BTreeSet::new();
-        let mut set = std::collections::BTreeSet::new();
+        //
+        // Each call site and exit stores and reloads the cached globals, so
+        // caching costs lines in proportion to (cached globals) x (sites):
+        // the most used globals are cached while that stays within a few
+        // lines per instruction, and the rest are read and written in the
+        // instance directly, so that the source stays linear in the code.
+        let mut uses: std::collections::BTreeMap<u32, (usize, bool)> = std::collections::BTreeMap::new();
+        let mut sites = 1;
         for i in code {
-            if let (0x23 | 0x24, Immediate::Index(x)) = (i.opcode, &i.immediate) {
-                if (*x as usize) < self.module.globals.len() {
-                    used.insert(*x);
-                    if i.opcode == 0x24 {
-                        set.insert(*x);
-                    }
+            match (i.opcode, &i.immediate) {
+                (0x23 | 0x24, Immediate::Index(x)) if (*x as usize) < self.module.globals.len() => {
+                    let entry = uses.entry(*x).or_default();
+                    entry.0 += 1;
+                    entry.1 |= i.opcode == 0x24;
                 }
+                (0x0c | 0x0d | 0x0e | 0x0f | 0x10..=0x15, _) => sites += 1,
+                _ => {}
             }
         }
-        let globals_reloaded = used.iter().copied().filter(|&x| self.module.globals_mutable[x as usize]).collect();
+        let mut ranked: Vec<(u32, usize, bool)> = uses.into_iter().map(|(x, (n, set))| (x, n, set)).collect();
+        ranked.sort_by_key(|&(x, n, _)| (std::cmp::Reverse(n), x));
+        let allowance = GLOBAL_LINES_PER_INSTRUCTION * code.len() + 64;
+        let mut cost = 0;
+        let mut cached = std::collections::BTreeSet::new();
+        let mut set = Vec::new();
+        let mut globals_reloaded = Vec::new();
+        for (x, _, is_set) in ranked {
+            let mutable = self.module.globals_mutable[x as usize];
+            let lines = (usize::from(is_set) + usize::from(mutable)) * sites;
+            if cost + lines > allowance {
+                continue;
+            }
+            cost += lines;
+            cached.insert(x);
+            if is_set {
+                set.push(x);
+            }
+            if mutable {
+                globals_reloaded.push(x);
+            }
+        }
+        set.sort_unstable();
+        globals_reloaded.sort_unstable();
+        let used = cached.clone();
         let mut e = Emitter {
             s: String::new(),
             next: 0,
@@ -958,8 +1004,11 @@ impl<'a> Function<'a> {
             frames: vec![],
             dead: 0,
             pending: vec![],
-            globals_set: set.into_iter().collect(),
+            globals_set: set,
             globals_reloaded,
+            globals_cached: cached,
+            budget,
+            over: false,
         };
         let mut all = vec!["this: &mut Instance".to_string()];
         all.extend(params);
@@ -1018,6 +1067,9 @@ impl<'a> Function<'a> {
         });
         for (pc, i) in code.iter().enumerate() {
             self.instruction(&mut e, i).map_err(|err| format!("instruction {pc} ({:#x}): {err}", i.opcode))?;
+            if e.over {
+                return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+            }
             if e.frames.len() > MAX_NESTING {
                 return Err(format!("instruction {pc}: blocks nested deeper than {MAX_NESTING}"));
             }
@@ -1264,13 +1316,18 @@ impl<'a> Function<'a> {
             0x23 => {
                 let x = index()? as usize;
                 let (t, _) = self.module.globals.get(x).ok_or("global index")?;
-                e.push_pure(*t, &format!("gv{x}"), Dep::global())?;
+                let place = if e.globals_cached.contains(&(x as u32)) { format!("gv{x}") } else { format!("self.g{x}") };
+                e.push_pure(*t, &place, Dep::global())?;
             }
             0x24 => {
                 let x = index()?;
                 let (v, _) = e.pop()?;
                 e.materialize(|d| d.globals, None)?;
-                e.line(&format!("gv{x} = {v};"));
+                if e.globals_cached.contains(&x) {
+                    e.line(&format!("gv{x} = {v};"));
+                } else {
+                    e.line(&format!("self.g{x} = {v};"));
+                }
             }
             0x28..=0x35 | 0xfd00 => self.load(e, i)?,
             0x36..=0x3e | 0xfd0b => self.store(e, i)?,
