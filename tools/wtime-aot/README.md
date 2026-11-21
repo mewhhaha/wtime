@@ -140,8 +140,11 @@ them against this runtime crate with the operator's toolchain
 the program. The program is cached under the SHA-256 of everything that
 determines it: the Wasm, the module name the program reports (the file's
 own name unless `--module-path`), the generator's binary, the runtime
-crate's sources and the toolchain's `rustc -vV`; a cached program is
-reused, a change to any input builds a new one.
+crate's sources, the toolchain's `rustc -vV` and the target CPU with
+the features it resolves to; a cached program is reused, a change to any
+input builds a new one. Programs are built for the machine's own CPU
+(`--target-cpu`, default `native`, as a JIT compiles for its host): a
+cache shared between machines keeps a program per CPU.
 
 What makes an uploaded module safe to run:
 

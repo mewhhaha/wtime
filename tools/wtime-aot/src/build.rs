@@ -21,13 +21,16 @@ use std::process::{Command, Stdio};
 
 use crate::sha256::Sha256;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME]";
 
 pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
     let mut arguments = arguments.into_iter();
     let (mut module, mut cache, mut toolchain, mut module_path, mut rt, mut jobs) =
         (None, None, String::from("stable"), None, default_rt, None);
     let mut time_limit = std::time::Duration::from_secs(3600);
+    // The program runs where it is built: by default for this machine's CPU,
+    // as a JIT would compile.
+    let mut target_cpu = String::from("native");
     while let Some(argument) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{USAGE}\n{argument} needs a value"));
         match argument.as_str() {
@@ -36,6 +39,12 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
             "--module-path" => module_path = Some(value()?),
             "--rt" => rt = PathBuf::from(value()?),
             "--jobs" => jobs = Some(value()?.parse::<u32>().map_err(|_| format!("{USAGE}\n--jobs takes a number"))?),
+            "--target-cpu" => {
+                target_cpu = value()?;
+                if !target_cpu.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                    return Err(format!("{USAGE}\n--target-cpu takes a CPU name"));
+                }
+            }
             "--time-limit" => {
                 let seconds = value()?.parse::<f64>().ok().filter(|s| *s > 0.0);
                 let limit = seconds.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok());
@@ -46,16 +55,18 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
         }
     }
     let (Some(module), Some(cache)) = (module, cache) else { return Err(USAGE.into()) };
-    let program = build(&module, &cache, &toolchain, module_path.as_deref(), &rt, jobs, time_limit)?;
+    let program = build(&module, &cache, &toolchain, &target_cpu, module_path.as_deref(), &rt, jobs, time_limit)?;
     println!("{}", program.display());
     Ok(())
 }
 
 /// Builds (or finds in `cache`) the program for `module`; its path.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     module: &Path,
     cache: &Path,
     toolchain: &str,
+    target_cpu: &str,
     module_path: Option<&str>,
     rt: &Path,
     jobs: Option<u32>,
@@ -103,6 +114,10 @@ pub fn build(
     }
     let version = rustc_version(toolchain)?;
     field("toolchain", version.as_bytes());
+    // The CPU and the features it resolves to here: a program built for one
+    // machine's CPU is not reused for another's.
+    field("target cpu", target_cpu.as_bytes());
+    field("target features", target_features(toolchain, target_cpu)?.as_bytes());
     let key = key.hex();
 
     let entry = cache.join(&key);
@@ -117,7 +132,7 @@ pub fn build(
     let name = format!("aot-{key}");
     let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
-    let result = generate_and_compile(&wasm, &work, &name, &rt, &module_path, toolchain, jobs, time_limit)
+    let result = generate_and_compile(&wasm, &work, &name, &rt, &module_path, toolchain, target_cpu, jobs, time_limit)
         .and_then(|built| {
             fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
             let staged = entry.join(format!("program.{}", std::process::id()));
@@ -127,7 +142,7 @@ pub fn build(
     let _ = fs::remove_dir_all(&work);
     result?;
     let record = format!(
-        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\n",
+        "key {key}\nwasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {target_cpu}\n",
         crate::sha256::hex(&wasm),
         generator.display(),
         rt.display(),
@@ -146,6 +161,7 @@ fn generate_and_compile(
     rt: &Path,
     module_path: &str,
     toolchain: &str,
+    target_cpu: &str,
     jobs: Option<u32>,
     time_limit: std::time::Duration,
 ) -> Result<PathBuf, String> {
@@ -160,7 +176,8 @@ fn generate_and_compile(
     }
     // rustc recurses on nested code: a stack of its own size for that.
     cargo.env("RUSTUP_TOOLCHAIN", toolchain).env("CARGO_TARGET_DIR", &target).env("RUST_MIN_STACK", "268435456");
-    cargo.args(["build", "--release", "--offline", "--quiet"]);
+    cargo.args(["build", "--release", "--offline", "--quiet", "--config"]);
+    cargo.arg(format!("build.rustflags=[\"-C\", \"target-cpu={target_cpu}\"]"));
     if let Some(jobs) = jobs {
         cargo.args(["--jobs", &jobs.to_string()]);
     }
@@ -204,6 +221,21 @@ fn runtime_sources(rt: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+/// The target features `target_cpu` resolves to on this machine
+/// (`rustc --print cfg`).
+fn target_features(toolchain: &str, target_cpu: &str) -> Result<String, String> {
+    let output = Command::new("rustc")
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .args(["--print", "cfg", "-C", &format!("target-cpu={target_cpu}")])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("rustc: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("target cpu {target_cpu}: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// `rustc -vV` of the toolchain.
