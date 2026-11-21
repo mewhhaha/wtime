@@ -36,7 +36,7 @@ STYLE = """
 .s1 { fill:var(--s1); } .s2 { fill:var(--s2); }
 """
 
-WIDTH, LEFT, RIGHT, BAR, GAP, ROW_GAP = 760, 150, 70, 10, 2, 12
+WIDTH, RIGHT, BAR, GAP, ROW_GAP = 780, 70, 10, 2, 12
 
 
 def paired(case, other, metric):
@@ -74,10 +74,12 @@ def chart(groups, metric, series, title, subtitle):
     lo = min([0.5] + [v / 1.4 for v in values])
     hi = max([2.0] + [v * 1.6 for v in values])
     lo, hi = math.log10(lo), math.log10(hi)
-    plot = WIDTH - LEFT - RIGHT
+    longest = max(len(c["name"]) for _, cases in groups for c in cases)
+    left = 36 + int(6.6 * longest)
+    plot = WIDTH - left - RIGHT
 
     def x(v):
-        return LEFT + (math.log10(v) - lo) / (hi - lo) * plot
+        return left + (math.log10(v) - lo) / (hi - lo) * plot
 
     row = len(series) * BAR + (len(series) - 1) * GAP + ROW_GAP
     top = 92
@@ -106,7 +108,7 @@ def chart(groups, metric, series, title, subtitle):
         out.append(f'<text class="grp" x="16" y="{y + 10}">{esc(name.upper())}</text>')
         y += 22
         for case in cases:
-            out.append(f'<text class="lb" x="{LEFT - 10}" y="{y + row / 2 - 2:.1f}" text-anchor="end">'
+            out.append(f'<text class="lb" x="{left - 10}" y="{y + row / 2 - 2:.1f}" text-anchor="end">'
                        f'{esc(case["name"])}</text>')
             for k, (engine, text) in enumerate(series):
                 v = paired(case, engine, metric)
