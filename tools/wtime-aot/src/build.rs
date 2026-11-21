@@ -12,7 +12,9 @@
 //!
 //! Cargo runs offline, with an environment reduced to what locating the
 //! toolchain needs, so no RUSTFLAGS, wrappers or registry access from the
-//! caller's environment apply. The generated crates have no build scripts
+//! caller's environment apply; the target CPU (`--target-cpu`, default
+//! native) goes through CARGO_ENCODED_RUSTFLAGS, above any configuration.
+//! `--time-limit` bounds the build. The generated crates have no build scripts
 //! and no dependencies other than the runtime crate.
 
 use std::fs;
@@ -176,8 +178,10 @@ fn generate_and_compile(
     }
     // rustc recurses on nested code: a stack of its own size for that.
     cargo.env("RUSTUP_TOOLCHAIN", toolchain).env("CARGO_TARGET_DIR", &target).env("RUST_MIN_STACK", "268435456");
-    cargo.args(["build", "--release", "--offline", "--quiet", "--config"]);
-    cargo.arg(format!("build.rustflags=[\"-C\", \"target-cpu={target_cpu}\"]"));
+    // The target CPU through CARGO_ENCODED_RUSTFLAGS, which takes
+    // precedence over every rustflags setting in Cargo's configuration.
+    cargo.env("CARGO_ENCODED_RUSTFLAGS", format!("-C\u{1f}target-cpu={target_cpu}"));
+    cargo.args(["build", "--release", "--offline", "--quiet"]);
     if let Some(jobs) = jobs {
         cargo.args(["--jobs", &jobs.to_string()]);
     }
@@ -235,7 +239,20 @@ fn target_features(toolchain: &str, target_cpu: &str) -> Result<String, String> 
     if !output.status.success() {
         return Err(format!("target cpu {target_cpu}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let mut features = String::from_utf8_lossy(&output.stdout).into_owned();
+    // `--print cfg` lists stable features only: the CPU LLVM resolves
+    // `native` to covers the rest.
+    let cpus = Command::new("rustc")
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .args(["--print", "target-cpus", "-C", &format!("target-cpu={target_cpu}")])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("rustc: {e}"))?;
+    let listing = String::from_utf8_lossy(&cpus.stdout);
+    if let Some(current) = listing.lines().find(|line| line.contains("currently")) {
+        features.push_str(current.trim());
+    }
+    Ok(features)
 }
 
 /// `rustc -vV` of the toolchain.
