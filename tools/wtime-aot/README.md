@@ -59,7 +59,7 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
   whose frame comes within an eighth of the stack's end (4 MiB at least)
   traps with `ResourceLimit: call depth exhausted` instead of overflowing
   it. How deep recursion goes depends on the frames (the default stack is
-  8 GiB).
+  1 GiB, `--stack-limit-mib`).
 - **Numeric operators** keep Wasm semantics:
   - Division and remainder trap on zero, and signed division traps on
     overflow.
@@ -183,8 +183,9 @@ What makes an uploaded module safe to run:
     standard output, standard error and files together, and the size of a
     file it may read; output is buffered until the program ends, so this
     also bounds the host's memory.
-  - `--stack-limit-mib N` (default 8192, at least 16) bounds the native
-    stack. Calls trap with `ResourceLimit: call depth exhausted` when a
+  - `--stack-limit-mib N` (default 1024, from 16 to 65536) sets the native
+    stack, and with it what a runaway recursion costs before it traps
+    (about 900 MiB by default). Calls trap with `ResourceLimit: call depth exhausted` when a
     frame comes within an eighth of the stack's end (4 MiB at least), so
     neither deep recursion nor large frames can overflow it.
 
@@ -209,7 +210,11 @@ Not guarded against:
 - Another local process swapping links inside a granted directory between
   the check and the access.
 - Cargo configuration in `CARGO_HOME` (the operator's own) applies to
-  builds; keep the cache under directories only the operator can write.
+  builds, `target.<triple>.rustflags` there overriding `--target-cpu`; keep
+  the cache under directories only the operator can write.
+- rustc's memory grows faster than linearly with large, call-dense
+  functions (a 200 KB module of one 10,000-call function takes 8 GB): run
+  builds under a cgroup.
 - rustc or LLVM miscompiling the generated code: pin `--toolchain` to a
   version you have checked (see Toolchain); the default, `stable`, moves.
 

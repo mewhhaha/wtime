@@ -8,8 +8,11 @@ use wtime_validate::{DecodedModule, ExternalKind, Immediate, ImportKind, Instruc
 
 type Res<T> = Result<T, String>;
 
-/// The native stack the program runs on.
-const STACK_BYTES: u64 = 8 << 30;
+/// The native stack the program runs on by default (`--stack-limit-mib`
+/// sets it): enough for the Goose compilers many times over, and what a
+/// runaway recursion costs before it traps (the interpreter's 4,000,000
+/// frames take about 700 MiB).
+const STACK_BYTES: u64 = 1 << 30;
 /// A functions file is closed once it holds this many bytes. rustc's
 /// lints copy the rest of a file to make some suggestions, so their cost
 /// grows with the file.

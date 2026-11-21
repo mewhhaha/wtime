@@ -771,8 +771,8 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
                 Err(_) => usage("--output-limit takes a number of bytes"),
             },
             "--stack-limit-mib" => match value("--stack-limit-mib").to_string_lossy().parse::<usize>() {
-                Ok(mib) if mib >= 16 => stack_bytes = stack_bytes.min(mib << 20),
-                _ => usage("--stack-limit-mib takes a number of MiB, at least 16"),
+                Ok(mib @ 16..=65536) => stack_bytes = mib << 20,
+                _ => usage("--stack-limit-mib takes a number of MiB from 16 to 65536"),
             },
             "--memory-limit-pages" => match value("--memory-limit-pages").to_string_lossy().parse::<u64>() {
                 Ok(pages) => crate::set_memory_limit_pages(pages),
