@@ -108,6 +108,14 @@ gap by generating code at run time.
 
 ### Ahead of time (wtime-aot)
 
+![wtime-aot's speed-up over Wasmtime and V8 running each program](charts/run.svg)
+
+![wtime-aot's speed-up over cached Wasmtime and V8 for the whole process](charts/process.svg)
+
+Each bar is the median, over paired rounds, of the other engine's time divided by
+wtime-aot's: right of parity wtime-aot is faster. `python3 chart.py <reports> -o charts`
+redraws both from the latest results.
+
 [`tools/wtime-aot`](../wtime-aot/README.md) closes the gap before run time instead: it
 translates a module to safe Rust crates (bounds-checked memory, Wasm's numeric
 semantics, no `unsafe`) that rustc compiles once; `wtime-aot build` does so for

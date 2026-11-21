@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="c" viewBox="0 0 760 714" width="760" height="714" role="img" aria-labelledby="title desc">
+<title id="title">wtime-aot speed-up: running the program</title>
+<desc id="desc">competitor time ÷ wtime-aot time, median of paired rounds, log scale; right of parity is faster</desc>
+<style>
+.c { --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7;
+     --s1:#2a78d6; --s2:#eb6834; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+@media (prefers-color-scheme: dark) {
+  .c { --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+       --s1:#3987e5; --s2:#d95926; }
+}
+.bg { fill:var(--surface); }
+.t { fill:var(--ink); font-size:15px; font-weight:600; }
+.st { fill:var(--ink2); font-size:12px; }
+.lb { fill:var(--ink); font-size:12px; }
+.grp { fill:var(--ink2); font-size:11px; font-weight:600; letter-spacing:.04em; }
+.v { fill:var(--ink2); font-size:11px; font-variant-numeric:tabular-nums; }
+.tick { fill:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+.grid { stroke:var(--grid); stroke-width:1; }
+.par { stroke:var(--axis); stroke-width:1.5; }
+.s1 { fill:var(--s1); } .s2 { fill:var(--s2); }
+</style>
+<rect class="bg" width="760" height="714" rx="8"/>
+<text class="t" x="16" y="28">wtime-aot speed-up: running the program</text>
+<text class="st" x="16" y="47">competitor time ÷ wtime-aot time, median of paired rounds, log scale; right of parity is faster</text>
+<rect class="s1" x="16" y="62" width="12" height="12" rx="3"/>
+<text class="lb" x="34" y="72">vs Wasmtime</text>
+<rect class="s2" x="123" y="62" width="12" height="12" rx="3"/>
+<text class="lb" x="141" y="72">vs V8 (Deno)</text>
+<line class="grid" x1="150.0" x2="150.0" y1="86" y2="680"/>
+<text class="tick" x="150.0" y="696" text-anchor="middle">0.5×</text>
+<line class="par" x1="211.6" x2="211.6" y1="86" y2="680"/>
+<text class="tick" x="211.6" y="696" text-anchor="middle">parity</text>
+<line class="grid" x1="273.2" x2="273.2" y1="86" y2="680"/>
+<text class="tick" x="273.2" y="696" text-anchor="middle">2×</text>
+<line class="grid" x1="354.6" x2="354.6" y1="86" y2="680"/>
+<text class="tick" x="354.6" y="696" text-anchor="middle">5×</text>
+<line class="grid" x1="416.2" x2="416.2" y1="86" y2="680"/>
+<text class="tick" x="416.2" y="696" text-anchor="middle">10×</text>
+<line class="grid" x1="477.7" x2="477.7" y1="86" y2="680"/>
+<text class="tick" x="477.7" y="696" text-anchor="middle">20×</text>
+<line class="grid" x1="559.1" x2="559.1" y1="86" y2="680"/>
+<text class="tick" x="559.1" y="696" text-anchor="middle">50×</text>
+<line class="grid" x1="620.7" x2="620.7" y1="86" y2="680"/>
+<text class="tick" x="620.7" y="696" text-anchor="middle">100×</text>
+<line class="grid" x1="682.3" x2="682.3" y1="86" y2="680"/>
+<text class="tick" x="682.3" y="696" text-anchor="middle">200×</text>
+<text class="grp" x="16" y="102">EXAMPLES</text>
+<text class="lb" x="140" y="129.0" text-anchor="end">squares</text>
+<g><title>squares vs Wasmtime: 9.70×</title>
+<path class="s1" d="M211.6,114H409.4Q413.4,114 413.4,118V120Q413.4,124 409.4,124H211.6Z"/>
+<text class="v" x="417.4" y="123" text-anchor="start">9.70×</text></g>
+<g><title>squares vs V8 (Deno): 136×</title>
+<path class="s2" d="M211.6,126H644.2Q648.2,126 648.2,130V132Q648.2,136 644.2,136H211.6Z"/>
+<text class="v" x="652.2" y="135" text-anchor="start">136×</text></g>
+<text class="lb" x="140" y="163.0" text-anchor="end">tour</text>
+<g><title>tour vs Wasmtime: 1.10×</title>
+<path class="s1" d="M211.6,148H216.1Q220.1,148 220.1,152V154Q220.1,158 216.1,158H211.6Z"/>
+<text class="v" x="224.1" y="157" text-anchor="start">1.10×</text></g>
+<g><title>tour vs V8 (Deno): 48×</title>
+<path class="s2" d="M211.6,160H552.4Q556.4,160 556.4,164V166Q556.4,170 552.4,170H211.6Z"/>
+<text class="v" x="560.4" y="169" text-anchor="start">48×</text></g>
+<text class="lb" x="140" y="197.0" text-anchor="end">functions</text>
+<g><title>functions vs Wasmtime: 1.64×</title>
+<path class="s1" d="M211.6,182H251.6Q255.6,182 255.6,186V188Q255.6,192 251.6,192H211.6Z"/>
+<text class="v" x="259.6" y="191" text-anchor="start">1.64×</text></g>
+<g><title>functions vs V8 (Deno): 68×</title>
+<path class="s2" d="M211.6,194H582.6Q586.6,194 586.6,198V200Q586.6,204 582.6,204H211.6Z"/>
+<text class="v" x="590.6" y="203" text-anchor="start">68×</text></g>
+<text class="lb" x="140" y="231.0" text-anchor="end">errors</text>
+<g><title>errors vs Wasmtime: 1.90×</title>
+<path class="s1" d="M211.6,216H264.6Q268.6,216 268.6,220V222Q268.6,226 264.6,226H211.6Z"/>
+<text class="v" x="272.6" y="225" text-anchor="start">1.90×</text></g>
+<g><title>errors vs V8 (Deno): 58×</title>
+<path class="s2" d="M211.6,228H568.3Q572.3,228 572.3,232V234Q572.3,238 568.3,238H211.6Z"/>
+<text class="v" x="576.3" y="237" text-anchor="start">58×</text></g>
+<text class="lb" x="140" y="265.0" text-anchor="end">sieve</text>
+<g><title>sieve vs Wasmtime: 1.08×</title>
+<path class="s1" d="M211.6,250H215.0Q218.3,250 218.3,253.37587147966966V256.6241285203304Q218.3,260 215.0,260H211.6Z"/>
+<text class="v" x="222.3" y="259" text-anchor="start">1.08×</text></g>
+<g><title>sieve vs V8 (Deno): 11×</title>
+<path class="s2" d="M211.6,262H423.7Q427.7,262 427.7,266V268Q427.7,272 423.7,272H211.6Z"/>
+<text class="v" x="431.7" y="271" text-anchor="start">11×</text></g>
+<text class="lb" x="140" y="299.0" text-anchor="end">sorting</text>
+<g><title>sorting vs Wasmtime: 1.22×</title>
+<path class="s1" d="M211.6,284H225.3Q229.3,284 229.3,288V290Q229.3,294 225.3,294H211.6Z"/>
+<text class="v" x="233.3" y="293" text-anchor="start">1.22×</text></g>
+<g><title>sorting vs V8 (Deno): 2.75×</title>
+<path class="s2" d="M211.6,296H297.3Q301.3,296 301.3,300V302Q301.3,306 297.3,306H211.6Z"/>
+<text class="v" x="305.3" y="305" text-anchor="start">2.75×</text></g>
+<text class="lb" x="140" y="333.0" text-anchor="end">life</text>
+<g><title>life vs Wasmtime: 4.08×</title>
+<path class="s1" d="M211.6,318H332.6Q336.6,318 336.6,322V324Q336.6,328 332.6,328H211.6Z"/>
+<text class="v" x="340.6" y="327" text-anchor="start">4.08×</text></g>
+<g><title>life vs V8 (Deno): 4.12×</title>
+<path class="s2" d="M211.6,330H333.4Q337.4,330 337.4,334V336Q337.4,340 333.4,340H211.6Z"/>
+<text class="v" x="341.4" y="339" text-anchor="start">4.12×</text></g>
+<text class="lb" x="140" y="367.0" text-anchor="end">maze</text>
+<g><title>maze vs Wasmtime: 1.71×</title>
+<path class="s1" d="M211.6,352H255.3Q259.3,352 259.3,356V358Q259.3,362 255.3,362H211.6Z"/>
+<text class="v" x="263.3" y="361" text-anchor="start">1.71×</text></g>
+<g><title>maze vs V8 (Deno): 43×</title>
+<path class="s2" d="M211.6,364H541.0Q545.0,364 545.0,368V370Q545.0,374 541.0,374H211.6Z"/>
+<text class="v" x="549.0" y="373" text-anchor="start">43×</text></g>
+<text class="lb" x="140" y="401.0" text-anchor="end">sudoku</text>
+<g><title>sudoku vs Wasmtime: 1.36×</title>
+<path class="s1" d="M211.6,386H234.8Q238.8,386 238.8,390V392Q238.8,396 234.8,396H211.6Z"/>
+<text class="v" x="242.8" y="395" text-anchor="start">1.36×</text></g>
+<g><title>sudoku vs V8 (Deno): 2.48×</title>
+<path class="s2" d="M211.6,398H288.2Q292.2,398 292.2,402V404Q292.2,408 288.2,408H211.6Z"/>
+<text class="v" x="296.2" y="407" text-anchor="start">2.48×</text></g>
+<text class="lb" x="140" y="435.0" text-anchor="end">vm</text>
+<g><title>vm vs Wasmtime: 1.63×</title>
+<path class="s1" d="M211.6,420H251.1Q255.1,420 255.1,424V426Q255.1,430 251.1,430H211.6Z"/>
+<text class="v" x="259.1" y="429" text-anchor="start">1.63×</text></g>
+<g><title>vm vs V8 (Deno): 50×</title>
+<path class="s2" d="M211.6,432H555.7Q559.7,432 559.7,436V438Q559.7,442 555.7,442H211.6Z"/>
+<text class="v" x="563.7" y="441" text-anchor="start">50×</text></g>
+<text class="grp" x="16" y="464">COMPILER</text>
+<text class="lb" x="140" y="491.0" text-anchor="end">compile-squares</text>
+<g><title>compile-squares vs Wasmtime: 0.81×</title>
+<path class="s1" d="M211.6,476H197.1Q193.1,476 193.1,480V482Q193.1,486 197.1,486H211.6Z"/>
+<text class="v" x="189.1" y="485" text-anchor="end">0.81×</text></g>
+<g><title>compile-squares vs V8 (Deno): 74×</title>
+<path class="s2" d="M211.6,488H590.0Q594.0,488 594.0,492V494Q594.0,498 590.0,498H211.6Z"/>
+<text class="v" x="598.0" y="497" text-anchor="start">74×</text></g>
+<text class="lb" x="140" y="525.0" text-anchor="end">compile-vm</text>
+<g><title>compile-vm vs Wasmtime: 1.09×</title>
+<path class="s1" d="M211.6,510H215.6Q219.6,510 219.6,513.9916632207573V516.0083367792427Q219.6,520 215.6,520H211.6Z"/>
+<text class="v" x="223.6" y="519" text-anchor="start">1.09×</text></g>
+<g><title>compile-vm vs V8 (Deno): 62×</title>
+<path class="s2" d="M211.6,522H573.8Q577.8,522 577.8,526V528Q577.8,532 573.8,532H211.6Z"/>
+<text class="v" x="581.8" y="531" text-anchor="start">62×</text></g>
+<text class="lb" x="140" y="559.0" text-anchor="end">compile-sudoku</text>
+<g><title>compile-sudoku vs Wasmtime: 1.07×</title>
+<path class="s1" d="M211.6,544H214.5Q217.4,544 217.4,546.903261890214V551.096738109786Q217.4,554 214.5,554H211.6Z"/>
+<text class="v" x="221.4" y="553" text-anchor="start">1.07×</text></g>
+<g><title>compile-sudoku vs V8 (Deno): 79×</title>
+<path class="s2" d="M211.6,556H595.8Q599.8,556 599.8,560V562Q599.8,566 595.8,566H211.6Z"/>
+<text class="v" x="603.8" y="565" text-anchor="start">79×</text></g>
+<text class="lb" x="140" y="593.0" text-anchor="end">compile-functions</text>
+<g><title>compile-functions vs Wasmtime: 1.14×</title>
+<path class="s1" d="M211.6,578H219.0Q223.0,578 223.0,582V584Q223.0,588 219.0,588H211.6Z"/>
+<text class="v" x="227.0" y="587" text-anchor="start">1.14×</text></g>
+<g><title>compile-functions vs V8 (Deno): 23×</title>
+<path class="s2" d="M211.6,590H485.7Q489.7,590 489.7,594V596Q489.7,600 485.7,600H211.6Z"/>
+<text class="v" x="493.7" y="599" text-anchor="start">23×</text></g>
+<text class="lb" x="140" y="627.0" text-anchor="end">compile64-vm</text>
+<g><title>compile64-vm vs Wasmtime: 0.75×</title>
+<path class="s1" d="M211.6,612H189.6Q185.6,612 185.6,616V618Q185.6,622 189.6,622H211.6Z"/>
+<text class="v" x="181.6" y="621" text-anchor="end">0.75×</text></g>
+<g><title>compile64-vm vs V8 (Deno): 94×</title>
+<path class="s2" d="M211.6,624H611.2Q615.2,624 615.2,628V630Q615.2,634 611.2,634H211.6Z"/>
+<text class="v" x="619.2" y="633" text-anchor="start">94×</text></g>
+<text class="lb" x="140" y="661.0" text-anchor="end">compile64-functions</text>
+<g><title>compile64-functions vs Wasmtime: 0.86×</title>
+<path class="s1" d="M211.6,646H202.7Q198.7,646 198.7,650V652Q198.7,656 202.7,656H211.6Z"/>
+<text class="v" x="194.7" y="655" text-anchor="end">0.86×</text></g>
+<g><title>compile64-functions vs V8 (Deno): 35×</title>
+<path class="s2" d="M211.6,658H524.2Q528.2,658 528.2,662V664Q528.2,668 524.2,668H211.6Z"/>
+<text class="v" x="532.2" y="667" text-anchor="start">35×</text></g>
+</svg>

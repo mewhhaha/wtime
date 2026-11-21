@@ -16,6 +16,12 @@ The selected portable performance portfolio is complete. See the
 release verification remains outstanding; conditional research branches are
 explicitly deferred.
 
+Modules can also be compiled ahead of time to safe Rust with
+[`tools/wtime-aot`](tools/wtime-aot/README.md). Against Wasmtime and V8 on Goose
+programs and the Goose compiler ([details](tools/wtime-goose/README.md#ahead-of-time-wtime-aot)):
+
+![wtime-aot's speed-up over Wasmtime and V8 running each program](tools/wtime-goose/charts/run.svg)
+
 After a fresh clone, restore the plans if the sibling directory is absent:
 
 ```sh
