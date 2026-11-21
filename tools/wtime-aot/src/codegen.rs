@@ -33,6 +33,11 @@ const MAX_PENDING: usize = 64;
 /// Goose compiler, a 9 MB module, makes about 130 MB).
 const MAX_SOURCE_BYTES: usize = 1 << 30;
 
+/// Functions without calls and with at most this many locals skip the
+/// stack check (see `Function::emit`).
+const LEAF_LOCALS: usize = 4096;
+const LEAF_INSTRUCTIONS: usize = 100_000;
+
 /// `memory.copy`s of a constant length up to this many bytes are inlined.
 const COPY_INLINE: usize = 256;
 
@@ -191,12 +196,19 @@ struct Module {
     has_memory: bool,
     /// (type, mutable, initial expression) of each global.
     globals: Vec<(ValType, String)>,
+    /// Whether each global is mutable.
+    globals_mutable: Vec<bool>,
     start: Option<u32>,
     entry: Option<u32>,
     reserve: Option<u32>,
     memory_exported: bool,
     /// The 64-bit memory is flat (see `generate`).
     flat64: bool,
+    /// The bytes of a 32-bit memory whose minimum and maximum are equal: no
+    /// memory.grow can change its length, so accesses check against this
+    /// constant (one compare with an immediate, and a dominating check
+    /// stays valid across calls) instead of a length kept in a local.
+    fixed32: Option<u64>,
 }
 
 impl Module {
@@ -227,10 +239,17 @@ impl Module {
         if m.memories.first().is_some_and(|mt| mt.page_size_log2 != 16 || mt.shared) {
             return Err("custom page sizes and shared memories are not supported".into());
         }
+        let fixed32 = m
+            .memories
+            .first()
+            .filter(|mt| !memory64 && mt.limits.max == Some(mt.limits.min))
+            .map(|mt| mt.limits.min << 16);
         let mut globals = Vec::new();
+        let mut globals_mutable = Vec::new();
         for (k, g) in m.globals.iter().enumerate() {
             let init = constant(&g.init, k, "").map_err(|e| format!("global {k}: {e}"))?;
             globals.push((g.ty.value, init));
+            globals_mutable.push(g.ty.mutable);
             rust_type(g.ty.value)?;
         }
         let export = |name: &str| {
@@ -242,12 +261,14 @@ impl Module {
             memory64,
             has_memory: !m.memories.is_empty(),
             globals,
+            globals_mutable,
             start: m.start.map(|f| f.0),
             entry: export("_start"),
             reserve: export("goose.reserve"),
             // The host uses the memory exported as `memory`, as wtime-goose does.
             memory_exported: m.exports.iter().any(|e| e.kind == ExternalKind::Memory && e.name == "memory"),
             flat64: false,
+            fixed32,
         })
     }
 
@@ -644,6 +665,11 @@ struct Emitter {
     /// increasing order; some may since have been evaluated or popped.
     /// `materialize` visits these instead of the whole stack.
     pending: Vec<usize>,
+    /// The globals the function sets, which it stores back to the instance
+    /// before calls and returns, and the mutable globals it uses, which it
+    /// reloads after calls (see `Function::emit`).
+    globals_set: Vec<u32>,
+    globals_reloaded: Vec<u32>,
 }
 
 /// What a pending pure expression reads, and so what must not change before
@@ -679,6 +705,21 @@ impl Dep {
 const MAX_EXPRESSION: usize = 300;
 
 impl Emitter {
+    /// Stores the globals the function has set back to the instance, for
+    /// callees and callers to see.
+    fn store_globals(&mut self) {
+        for x in self.globals_set.clone() {
+            self.line(&format!("self.g{x} = gv{x};"));
+        }
+    }
+
+    /// Takes the mutable globals anew after a call, which may have set them.
+    fn load_globals(&mut self) {
+        for x in self.globals_reloaded.clone() {
+            self.line(&format!("gv{x} = self.g{x};"));
+        }
+    }
+
     fn fresh(&mut self, prefix: &str) -> String {
         self.next += 1;
         format!("{prefix}{}", self.next)
@@ -687,9 +728,11 @@ impl Emitter {
     /// After code that may change or use the memory through the instance
     /// (calls, memory.size and memory.grow, bulk operations): the locals
     /// holding a 32-bit memory's length and bytes are taken anew.
-    fn refresh(&mut self, memory64: bool) {
-        if memory64 {
+    fn refresh(&mut self, module: &Module) {
+        if module.memory64 {
             self.line("(mb, mo) = self.mem.parts();");
+        } else if module.fixed32.is_some() {
+            self.line("mb = self.mem.bytes_mut();");
         } else {
             self.line("ml = self.mem.len(); mb = self.mem.bytes_mut();");
         }
@@ -813,6 +856,7 @@ impl Emitter {
         match kind {
             Kind::Function => {
                 let values = self.top(self.frames[at].results.len())?;
+                self.store_globals();
                 self.line(&format!("return {};", ok_values(&values)));
             }
             Kind::Loop => {
@@ -866,6 +910,15 @@ impl<'a> Function<'a> {
         Err("multi-value block types are not supported".into())
     }
 
+    /// The length a 32-bit access checks against: the constant of a fixed
+    /// memory, otherwise the local kept by the prologue and `refresh`.
+    fn ml(&self) -> String {
+        match self.module.fixed32 {
+            Some(bytes) => format!("{bytes}usize"),
+            None => "ml".into(),
+        }
+    }
+
     fn address(&self, v: &str) -> String {
         if self.module.memory64 { format!("({v} as u64)") } else { format!("({v} as u32 as u64)") }
     }
@@ -878,7 +931,36 @@ impl<'a> Function<'a> {
             .enumerate()
             .map(|(i, t)| Ok(format!("mut l{i}: {}", rust_type(*t)?)))
             .collect::<Res<_>>()?;
-        let mut e = Emitter { s: String::new(), next: 0, stack: vec![], deps: vec![], frames: vec![], dead: 0, pending: vec![] };
+        // The globals the function uses live in locals of their own, so
+        // that LLVM keeps them in registers across memory stores (it cannot
+        // tell that the memory's bytes and the instance do not overlap). Set
+        // globals are stored back before calls and returns, and mutable ones
+        // loaded again after calls; a trap needs neither, as nothing runs in
+        // the instance after one.
+        let mut used = std::collections::BTreeSet::new();
+        let mut set = std::collections::BTreeSet::new();
+        for i in code {
+            if let (0x23 | 0x24, Immediate::Index(x)) = (i.opcode, &i.immediate) {
+                if (*x as usize) < self.module.globals.len() {
+                    used.insert(*x);
+                    if i.opcode == 0x24 {
+                        set.insert(*x);
+                    }
+                }
+            }
+        }
+        let globals_reloaded = used.iter().copied().filter(|&x| self.module.globals_mutable[x as usize]).collect();
+        let mut e = Emitter {
+            s: String::new(),
+            next: 0,
+            stack: vec![],
+            deps: vec![],
+            frames: vec![],
+            dead: 0,
+            pending: vec![],
+            globals_set: set.into_iter().collect(),
+            globals_reloaded,
+        };
         let mut all = vec!["this: &mut Instance".to_string()];
         all.extend(params);
         writeln!(
@@ -891,23 +973,36 @@ impl<'a> Function<'a> {
         .unwrap();
         // Calls check the native stack left, as Wasmtime's do: a frame's own
         // address below the floor traps with call depth exhausted. (No
-        // count of calls: the stack bounds recursion by its actual use.)
-        writeln!(
-            out,
-            "    let frame = 0u8;\n    if (&frame as *const u8 as usize) < this.stack_floor {{ return trap(Trap::CallStackExhausted); }}"
-        )
-        .unwrap();
+        // count of calls: the stack bounds recursion by its actual use.) A
+        // leaf with few locals skips it: its caller passed the check, and
+        // its frame fits in the margin kept below the floor (at least 4 MiB,
+        // `goose::main`): LEAF_LOCALS slots and the spills of at most
+        // LEAF_INSTRUCTIONS instructions need far less.
+        let leaf = self.locals.len() <= LEAF_LOCALS && code.len() <= LEAF_INSTRUCTIONS && !code.iter().any(|i| matches!(i.opcode, 0x10..=0x15));
+        if !leaf {
+            writeln!(
+                out,
+                "    let frame = 0u8;\n    if (&frame as *const u8 as usize) < this.stack_floor {{ return trap(Trap::CallStackExhausted); }}"
+            )
+            .unwrap();
+        }
         // The memory's length, in a local: LLVM cannot tell that the
         // module's stores leave the instance's own fields alone, so a field
         // would be reloaded at every access. Refreshed after each call and
         // memory.grow, which are what change it.
         if self.module.memory64 {
             writeln!(out, "    let (mut mb, mut mo) = this.mem.parts();").unwrap();
+        } else if self.module.fixed32.is_some() {
+            writeln!(out, "    let mut mb = this.mem.bytes_mut();").unwrap();
         } else {
             writeln!(out, "    let mut ml: usize = this.mem.len();\n    let mut mb = this.mem.bytes_mut();").unwrap();
         }
         for (i, t) in self.locals.iter().enumerate().skip(self.n_params) {
             writeln!(out, "    let mut l{i}: {} = {};", rust_type(*t)?, zero(*t)?).unwrap();
+        }
+        for &x in &used {
+            let t = self.module.globals[x as usize].0;
+            writeln!(out, "    let mut gv{x}: {} = this.g{x};", rust_type(t)?).unwrap();
         }
 
         e.frames.push(Frame {
@@ -1062,6 +1157,7 @@ impl<'a> Function<'a> {
                     match kind {
                         Kind::Function => {
                             let values = e.top(frame.results.len())?;
+                            e.store_globals();
                             e.line(&format!("return {};", ok_values(&values)));
                         }
                         Kind::Block | Kind::If | Kind::Loop => {
@@ -1118,6 +1214,7 @@ impl<'a> Function<'a> {
                 e.deps.truncate(at);
                 // The callee may set globals.
                 e.materialize(|d| d.globals, None)?;
+                e.store_globals();
                 let call = format!("t!(self.f{f}({}))", args.join(", "));
                 match ty.results.as_slice() {
                     [] => e.line(&format!("{call};")),
@@ -1130,8 +1227,9 @@ impl<'a> Function<'a> {
                         }
                     }
                 }
-                // The callee may have grown the memory.
-                e.refresh(self.module.memory64);
+                // The callee may have grown the memory and set globals.
+                e.refresh(&self.module);
+                e.load_globals();
 
             }
             0x1a => {
@@ -1166,27 +1264,31 @@ impl<'a> Function<'a> {
             0x23 => {
                 let x = index()? as usize;
                 let (t, _) = self.module.globals.get(x).ok_or("global index")?;
-                e.push_pure(*t, &format!("self.g{x}"), Dep::global())?;
+                e.push_pure(*t, &format!("gv{x}"), Dep::global())?;
             }
             0x24 => {
                 let x = index()?;
                 let (v, _) = e.pop()?;
                 e.materialize(|d| d.globals, None)?;
-                e.line(&format!("self.g{x} = {v};"));
+                e.line(&format!("gv{x} = {v};"));
             }
             0x28..=0x35 | 0xfd00 => self.load(e, i)?,
             0x36..=0x3e | 0xfd0b => self.store(e, i)?,
             0x3f => {
                 let t = if self.module.memory64 { ValType::I64 } else { ValType::I32 };
-                e.push(t, &format!("self.mem.size() as {}", rust_type(t)?))?;
-                e.refresh(self.module.memory64);
+                if let Some(bytes) = self.module.fixed32 {
+                    e.push_plain(t, format!("({}i32)", bytes >> 16));
+                } else {
+                    e.push(t, &format!("self.mem.size() as {}", rust_type(t)?))?;
+                    e.refresh(&self.module);
+                }
             }
             0x40 => {
                 let (n, _) = e.pop()?;
                 let t = if self.module.memory64 { ValType::I64 } else { ValType::I32 };
                 let delta = self.address(&n);
                 e.push(t, &format!("self.mem.grow({delta}) as {}", rust_type(t)?))?;
-                e.refresh(self.module.memory64);
+                e.refresh(&self.module);
             }
             0x41 => {
                 let Immediate::I32(v) = i.immediate else { return Err("i32.const".into()) };
@@ -1214,7 +1316,8 @@ impl<'a> Function<'a> {
                 let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
-                        e.line(&format!("t!(m32::copy_n::<{k}>(mb, ml, {dst} as u32, {src} as u32));"))
+                        let ml = self.ml();
+                        e.line(&format!("t!(m32::copy_n::<{k}>(mb, {ml}, {dst} as u32, {src} as u32));"))
                     }
                     Some(k @ 1..=COPY_INLINE) => {
                         e.line(&format!("t!(m64::copy_n::<{k}>(mb, mo, {dst} as u64, {src} as u64));"))
@@ -1222,7 +1325,7 @@ impl<'a> Function<'a> {
                     _ => {
                         let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));
                         e.line(&format!("t!(self.mem.copy({dst}, {src}, {n}));"));
-                        e.refresh(self.module.memory64);
+                        e.refresh(&self.module);
                     }
                 }
             }
@@ -1235,7 +1338,8 @@ impl<'a> Function<'a> {
                 let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
-                        e.line(&format!("t!(m32::fill_n::<{k}>(mb, ml, {dst} as u32, {value} as u8));"))
+                        let ml = self.ml();
+                        e.line(&format!("t!(m32::fill_n::<{k}>(mb, {ml}, {dst} as u32, {value} as u8));"))
                     }
                     Some(k @ 1..=COPY_INLINE) => {
                         e.line(&format!("t!(m64::fill_n::<{k}>(mb, mo, {dst} as u64, {value} as u8));"))
@@ -1243,7 +1347,7 @@ impl<'a> Function<'a> {
                     _ => {
                         let (dst, n) = (self.address(&dst), self.address(&n));
                         e.line(&format!("t!(self.mem.fill({dst}, {value} as u8, {n}));"));
-                        e.refresh(self.module.memory64);
+                        e.refresh(&self.module);
                     }
                 }
             }
@@ -1313,6 +1417,7 @@ impl<'a> Function<'a> {
     }
 
     fn load(&self, e: &mut Emitter, i: &Instruction) -> Res<()> {
+        let ml = self.ml();
         let offset = self.memarg(i)?;
         let (a, _) = e.pop()?;
         // (bytes, result type, conversion of the loaded unsigned integer)
@@ -1335,7 +1440,7 @@ impl<'a> Function<'a> {
             op => return Err(format!("load {op:#x}")),
         };
         let loaded = if !self.module.memory64 && n == 16 {
-            format!("t!(m32::l128(mb, ml, {a} as u32, {offset}))")
+            format!("t!(m32::l128(mb, {ml}, {a} as u32, {offset}))")
         } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
             if self.module.flat64 {
@@ -1348,12 +1453,13 @@ impl<'a> Function<'a> {
             let outer = if self.module.flat64 { "" } else { "mo, " };
             format!("t!(m64::{flat}l{}(mb, {outer}{}, {offset}))", n * 8, self.address(&a))
         } else {
-            format!("t!(m32::l{}(mb, ml, {a} as u32, {offset}))", n * 8)
+            format!("t!(m32::l{}(mb, {ml}, {a} as u32, {offset}))", n * 8)
         };
         e.push(t, &conversion.replace("{}", &loaded))
     }
 
     fn store(&self, e: &mut Emitter, i: &Instruction) -> Res<()> {
+        let ml = self.ml();
         let offset = self.memarg(i)?;
         let (v, _) = e.pop()?;
         let (a, _) = e.pop()?;
@@ -1370,7 +1476,7 @@ impl<'a> Function<'a> {
             op => return Err(format!("store {op:#x}")),
         };
         let store = if !self.module.memory64 && n == 16 {
-            format!("t!(m32::s128(mb, ml, {a} as u32, {offset}, {value}));")
+            format!("t!(m32::s128(mb, {ml}, {a} as u32, {offset}, {value}));")
         } else if self.module.memory64 && n == 16 {
             let address = self.address(&a);
             if self.module.flat64 {
@@ -1383,7 +1489,7 @@ impl<'a> Function<'a> {
             let outer = if self.module.flat64 { "" } else { "mo, " };
             format!("t!(m64::{flat}s{}(mb, {outer}{}, {offset}, {value}));", n * 8, self.address(&a))
         } else {
-            format!("t!(m32::s{}(mb, ml, {a} as u32, {offset}, {value}));", n * 8)
+            format!("t!(m32::s{}(mb, {ml}, {a} as u32, {offset}, {value}));", n * 8)
         };
         e.line(&store);
         Ok(())
