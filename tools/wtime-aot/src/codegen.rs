@@ -1252,6 +1252,17 @@ impl<'a> Function<'a> {
                 let bytes: [u8; 16] = b.as_ref().try_into().map_err(|_| "v128.const")?;
                 e.push_plain(ValType::V128, format!("{}u128", u128::from_le_bytes(bytes)));
             }
+            // i8x16, i16x8 and i32x4.splat: the low lane bits times a
+            // multiplier with a 1 at the start of every lane.
+            0xfd0f..=0xfd11 => {
+                let (a, _) = e.pop()?;
+                let (lane, ones) = match op {
+                    0xfd0f => ("u8", 0x0101_0101_0101_0101_0101_0101_0101_0101u128),
+                    0xfd10 => ("u16", 0x0001_0001_0001_0001_0001_0001_0001_0001u128),
+                    _ => ("u32", 0x0000_0001_0000_0001_0000_0001_0000_0001u128),
+                };
+                e.push(ValType::V128, &format!("(({a} as {lane} as u128).wrapping_mul({ones}u128))"))?;
+            }
             0xfd12 => {
                 let (a, _) = e.pop()?;
                 e.push(ValType::V128, &format!("(({a} as u64 as u128) | (({a} as u64 as u128) << 64))"))?;
