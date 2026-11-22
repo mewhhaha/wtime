@@ -18,6 +18,7 @@ Wasmtime run, and the expected file when one is given).
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -34,7 +35,20 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run_once(argv: list[str], stdin: bytes, cwd: Path, cpu: str, timeout: float) -> dict:
+def make_no_thp_preexec():
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+
+    def disable_thp() -> None:
+        # PR_SET_THP_DISABLE (41): inherited across fork/exec equally by every engine.
+        if libc.prctl(41, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_THP_DISABLE) failed")
+
+    return disable_thp
+
+
+def run_once(argv: list[str], stdin: bytes, cwd: Path, cpu: str, timeout: float, preexec_fn=None) -> dict:
     with tempfile.TemporaryDirectory() as scratch:
         timing = Path(scratch) / "timing.json"
         # The timing file goes after the executable, or where an engine's
@@ -46,7 +60,8 @@ def run_once(argv: list[str], stdin: bytes, cwd: Path, cpu: str, timeout: float)
         command = ["timeout", str(int(timeout)), "taskset", "-c", cpu, *engine_argv]
         with open(Path(scratch) / "out", "wb") as out, open(Path(scratch) / "err", "wb") as err:
             started = time.perf_counter_ns()
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=cwd)
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                                       cwd=cwd, preexec_fn=preexec_fn)
             process.stdin.write(stdin)
             process.stdin.close()
             _, status, usage = os.wait4(process.pid, 0)
@@ -78,8 +93,13 @@ def main() -> int:
     parser.add_argument("--aot-pgo-dir", type=Path,
                         help="also run profile-guided programs (wtime-aot build --train; engine wtime-aot-pgo), "
                              "aot-<module stem> in this directory for each case that has one")
+    parser.add_argument("--no-thp", action="store_true",
+                        help="disable Transparent Huge Pages (PR_SET_THP_DISABLE) equally for all engine child processes on Linux")
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.no_thp and not sys.platform.startswith("linux"):
+        parser.error("--no-thp is only supported on Linux")
+    preexec_fn = make_no_thp_preexec() if args.no_thp else None
     args.wtime, args.wasmtime = args.wtime.resolve(), args.wasmtime.resolve()
     if args.wtime_before:
         args.wtime_before = args.wtime_before.resolve()
@@ -98,7 +118,8 @@ def main() -> int:
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": {"machine": platform.machine(), "kernel": platform.release(), "cpus": os.cpu_count(), "cpu": args.cpu,
                  "model": next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
-                                if line.startswith("model name")), "")},
+                                if line.startswith("model name")), ""),
+                 **({"thp_disabled": True} if args.no_thp else {})},
         "binaries": {"wtime": {"path": str(args.wtime), "sha256": sha256(args.wtime)},
                      "wasmtime": {"path": str(args.wasmtime), "sha256": sha256(args.wasmtime)},
                      **({"wtime_before": {"path": str(args.wtime_before), "sha256": sha256(args.wtime_before)}}
@@ -121,7 +142,7 @@ def main() -> int:
             args.wasmtime_cache.mkdir(parents=True, exist_ok=True)
             cache = args.wasmtime_cache.resolve() / f"{case['name']}.cwasm"
             engines["wasmtime-cached"] = [str(args.wasmtime), str(module), "--cache", str(cache), *program]
-            run_once(engines["wasmtime-cached"], stdin, cwd, args.cpu, args.timeout)  # warm the cache
+            run_once(engines["wasmtime-cached"], stdin, cwd, args.cpu, args.timeout, preexec_fn)  # warm the cache
         if args.aot_dir:
             stem = "".join(c if c.isascii() and c.isalnum() else "-" for c in module.stem)
             # The same access to files and variables as wtime-goose grants.
@@ -149,7 +170,7 @@ def main() -> int:
         for round_index in range(args.rounds):
             order = names if round_index % 2 == 0 else names[::-1]
             for name in order:
-                result = run_once(engines[name], stdin, cwd, args.cpu, args.timeout)
+                result = run_once(engines[name], stdin, cwd, args.cpu, args.timeout, preexec_fn)
                 outcome = (result["exit"], result["stdout"])
                 if reference is None and name == "wasmtime":
                     reference = outcome

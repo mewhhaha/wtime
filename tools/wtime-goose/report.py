@@ -19,7 +19,8 @@ def main(paths):
     for path in paths:
         report = json.load(open(path))
         print(f"### {path}\n")
-        print(f"{report['rounds']} rounds, CPU {report['host']['cpu']} ({report['host']['model']}). "
+        thp = ", THP disabled" if report["host"].get("thp_disabled") else ""
+        print(f"{report['rounds']} rounds, CPU {report['host']['cpu']} ({report['host']['model']}{thp}). "
               "Medians of fresh processes; ratios are medians of per-round wtime/Wasmtime pairs.\n")
         engines = [name for name in report["cases"][0]["summary"]]
         tiers = [name for name in engines if name != "wasmtime"]
