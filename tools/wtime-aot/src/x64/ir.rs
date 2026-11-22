@@ -1237,6 +1237,10 @@ pub fn lower_wasm_to_ir_with_budget(
                 let height = stack.len() - params.len();
                 let merge_bb = b.new_block(false);
                 let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
+                let n_new = results.len().saturating_add(carried.len());
+                if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
+                    return Err(format!("x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"));
+                }
                 for &rt in &results {
                     b.add_block_param(merge_bb, rt);
                 }
@@ -1263,7 +1267,11 @@ pub fn lower_wasm_to_ir_with_budget(
                 let height = stack.len() - params.len();
                 let header_bb = b.new_block(true);
                 let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
-                let mut entry_args = Vec::with_capacity(params.len() + carried.len());
+                let n_new = params.len().saturating_add(carried.len());
+                if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
+                    return Err(format!("x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"));
+                }
+                let mut entry_args = Vec::with_capacity(n_new);
                 let mut header_param_vals = Vec::with_capacity(params.len());
                 for (k, &pt) in params.iter().enumerate() {
                     entry_args.push(stack[height + k]);
@@ -1307,6 +1315,10 @@ pub fn lower_wasm_to_ir_with_budget(
                 let else_bb = b.new_block(false);
                 let merge_bb = b.new_block(false);
                 let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
+                let n_new = results.len().saturating_add(carried.len());
+                if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
+                    return Err(format!("x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"));
+                }
                 for &rt in &results {
                     b.add_block_param(merge_bb, rt);
                 }
@@ -1543,6 +1555,9 @@ pub fn lower_wasm_to_ir_with_budget(
                 let at = stack.len() - n;
                 let args = b.ir.push_pool(&stack[at..])?;
                 stack.truncate(at);
+                if b.ir.val_tys.len().saturating_add(fty.results.len()) > MAX_IR_VALS_PER_FN {
+                    return Err(format!("x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"));
+                }
                 let mut rets_vec = Vec::with_capacity(fty.results.len());
                 for &rt in &fty.results {
                     let v = b.ir.push_val(Ty::from_val(rt));
@@ -1565,6 +1580,9 @@ pub fn lower_wasm_to_ir_with_budget(
                 let at = stack.len() - n;
                 let args = b.ir.push_pool(&stack[at..])?;
                 stack.truncate(at);
+                if b.ir.val_tys.len().saturating_add(fty.results.len()) > MAX_IR_VALS_PER_FN {
+                    return Err(format!("x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"));
+                }
                 let mut rets_vec = Vec::with_capacity(fty.results.len());
                 for &rt in &fty.results {
                     let v = b.ir.push_val(Ty::from_val(rt));

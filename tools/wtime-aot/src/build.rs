@@ -137,14 +137,31 @@ pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, 
     cached(&prepared, prepared.key.clone(), &[], options, "")
 }
 
-/// Enforces an owner-controlled (`0o700`), symlink-free private directory on Unix.
-/// Fails closed if `path` is a symlink, any ancestor is group/world-writable without the sticky bit,
-/// `chmod(0o700)` fails (e.g. `EPERM` when owned by another UID), or non-owner permission bits remain.
+/// Enforces an owner-controlled (`0o700`), symlink-free private directory hierarchy on Unix.
+/// Fails closed if `path` is a symlink (or traverses a non-root symlink), `chmod(0o700)` fails,
+/// non-owner permission bits remain, `path` is not owned by the current effective UID (covering
+/// `euid == 0` / `CAP_FOWNER`), or any ancestor is owned by an untrusted UID (preventing
+/// attacker-owned `0o1777` sticky directory replacement) or writable without the sticky bit.
 fn ensure_private_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let proc_euid = fs::metadata("/proc/self").ok().map(|m| m.uid());
+        let mut prefix = PathBuf::new();
+        for comp in path.components() {
+            prefix.push(comp);
+            if let Ok(m) = fs::symlink_metadata(&prefix)
+                && m.file_type().is_symlink()
+                && m.uid() != 0
+            {
+                return Err(format!(
+                    "{}: cache hierarchy traverses non-root symlink {}",
+                    path.display(),
+                    prefix.display()
+                ));
+            }
+        }
         let sym_meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_dir() {
             return Err(format!("{}: cache path must be a real directory (not a symlink)", path.display()));
@@ -159,12 +176,38 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
         if post.permissions().mode() & 0o077 != 0 {
             return Err(format!("{}: cache directory must be owner-only (0700)", path.display()));
         }
+        let expected_uid = match proc_euid {
+            Some(euid) => {
+                if post.uid() != euid {
+                    return Err(format!(
+                        "{}: cache directory owner uid {} does not match effective uid {euid}",
+                        path.display(),
+                        post.uid()
+                    ));
+                }
+                euid
+            }
+            None => post.uid(),
+        };
         let canon = path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))?;
         for anc in canon.ancestors().skip(1) {
-            let m = fs::metadata(anc)
-                .map_err(|e| format!("{}: {e}", anc.display()))?
-                .permissions()
-                .mode();
+            let am = fs::symlink_metadata(anc).map_err(|e| format!("{}: {e}", anc.display()))?;
+            if am.file_type().is_symlink() || !am.file_type().is_dir() {
+                return Err(format!(
+                    "{}: cache ancestor {} is not a real directory",
+                    path.display(),
+                    anc.display()
+                ));
+            }
+            let uid = am.uid();
+            if uid != 0 && uid != expected_uid {
+                return Err(format!(
+                    "{}: cache ancestor {} is owned by untrusted uid {uid} (expected 0 or {expected_uid})",
+                    path.display(),
+                    anc.display()
+                ));
+            }
+            let m = am.permissions().mode();
             // Reject non-sticky group/world-writable ancestors that would allow directory replacement.
             if (m & 0o022) != 0 && (m & 0o1000) == 0 {
                 return Err(format!(

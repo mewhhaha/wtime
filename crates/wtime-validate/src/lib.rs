@@ -215,12 +215,54 @@ struct Context<'a> {
     features: &'a FeatureSet,
     limits: &'a ResourceLimits,
 }
-#[derive(Clone)]
+#[derive(Clone, Copy)]
+enum BlockSig {
+    Empty,
+    Single(ValType),
+    Func(usize),
+    FuncResultsOnly(usize),
+}
+
+#[derive(Clone, Copy)]
+enum ValSlice<'a> {
+    Slice(&'a [ValType]),
+    One(ValType),
+}
+
+impl ValSlice<'_> {
+    #[inline]
+    fn as_slice(&self) -> &[ValType] {
+        match self {
+            ValSlice::Slice(s) => s,
+            ValSlice::One(v) => std::slice::from_ref(v),
+        }
+    }
+}
+
+impl BlockSig {
+    #[inline]
+    fn params<'a>(self, types: &'a [FuncType]) -> ValSlice<'a> {
+        match self {
+            BlockSig::Empty | BlockSig::Single(_) | BlockSig::FuncResultsOnly(_) => ValSlice::Slice(&[]),
+            BlockSig::Func(idx) => ValSlice::Slice(&types[idx].params),
+        }
+    }
+
+    #[inline]
+    fn results<'a>(self, types: &'a [FuncType]) -> ValSlice<'a> {
+        match self {
+            BlockSig::Empty => ValSlice::Slice(&[]),
+            BlockSig::Single(v) => ValSlice::One(v),
+            BlockSig::Func(idx) | BlockSig::FuncResultsOnly(idx) => ValSlice::Slice(&types[idx].results),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Control {
     kind: u16,
     height: usize,
-    params: Vec<ValType>,
-    results: Vec<ValType>,
+    sig: BlockSig,
     unreachable: bool,
     has_else: bool,
     initialized: usize,
@@ -291,6 +333,28 @@ impl Stack {
         }
         Ok(())
     }
+    /// Validates that `ts` can be popped from the current frame without mutating or cloning
+    /// `self.values` or `self.unknown`.
+    fn check_pop_all(&self, ts: &[ValType]) -> Result<()> {
+        let c = self
+            .controls
+            .last()
+            .ok_or_else(|| invalid("instruction after final end"))?;
+        let mut len = self.values.len();
+        for &t in ts.iter().rev() {
+            if len == c.height && c.unreachable {
+                return Ok(());
+            }
+            check(len > c.height, "operand stack underflow")?;
+            len -= 1;
+            let unknown = !self.unknown.is_empty() && self.unknown.contains(&len);
+            check(
+                unknown || value_subtype(self.values[len], t, &self.types),
+                "operand type mismatch",
+            )?;
+        }
+        Ok(())
+    }
     fn op(&mut self, inputs: &[ValType], outputs: &[ValType]) -> Result<()> {
         self.pop_all(inputs)?;
         self.values.extend_from_slice(outputs);
@@ -304,7 +368,7 @@ impl Stack {
         }
         c.unreachable = true;
     }
-    fn label(&self, n: usize) -> Result<Vec<ValType>> {
+    fn label<'a>(&self, n: usize, types: &'a [FuncType]) -> Result<ValSlice<'a>> {
         let c = self
             .controls
             .get(
@@ -315,9 +379,9 @@ impl Stack {
             )
             .ok_or_else(|| invalid("invalid branch depth"))?;
         Ok(if c.kind == 3 {
-            c.params.clone()
+            c.sig.params(types)
         } else {
-            c.results.clone()
+            c.sig.results(types)
         })
     }
 }
@@ -544,7 +608,9 @@ pub fn validate(
         let pairs: Vec<(u32, &FunctionBody)> = m.functions.iter().map(|t| t.0).zip(&m.code).collect();
         if threads == 1 {
             for &(t, b) in &pairs {
-                function_bounds.push(c.body(c.ty(t as usize)?, b)?)
+                let ti = t as usize;
+                c.ty(ti)?;
+                function_bounds.push(c.body(ti, b)?)
             }
             return Ok(());
         }
@@ -567,7 +633,8 @@ pub fn validate(
                 },
                 |worker, &(t, b)| {
                     worker.types.reset_work();
-                    let result = worker.ty(t as usize).and_then(|ty| worker.body(ty, b));
+                    let ti = t as usize;
+                    let result = worker.ty(ti).and_then(|_| worker.body(ti, b));
                     (result, worker.types.work())
                 },
             )
@@ -647,8 +714,7 @@ impl Context<'_> {
             controls: vec![Control {
                 kind: 0,
                 height: 0,
-                params: vec![],
-                results: vec![expected],
+                sig: BlockSig::Single(expected),
                 unreachable: false,
                 has_else: false,
                 initialized: 0,
@@ -687,10 +753,13 @@ impl Context<'_> {
         }
         check(s.controls.is_empty(), "unterminated constant expression")
     }
-    fn body(&self, t: &FuncType, b: &FunctionBody) -> Result<FunctionBounds> {
-        let mut locals = t.params.clone();
-        locals.extend(&b.locals);
-        budget(locals.len() <= self.limits.max_locals, "too many locals")?;
+    fn body(&self, ti: usize, b: &FunctionBody) -> Result<FunctionBounds> {
+        let t = self.ty(ti)?;
+        let n_locals = t.params.len().saturating_add(b.locals.len());
+        budget(n_locals <= self.limits.max_locals, "too many locals")?;
+        let mut locals = Vec::with_capacity(n_locals);
+        locals.extend_from_slice(&t.params);
+        locals.extend_from_slice(&b.locals);
         for v in &locals {
             self.valtype(*v)?
         }
@@ -703,8 +772,7 @@ impl Context<'_> {
             controls: vec![Control {
                 kind: 0,
                 height: 0,
-                params: vec![],
-                results: t.results.clone(),
+                sig: BlockSig::FuncResultsOnly(ti),
                 unreachable: false,
                 has_else: false,
                 initialized: 0,
@@ -803,16 +871,28 @@ impl Context<'_> {
                 if i.opcode == 4 {
                     s.pop(I32)?
                 }
-                let (params, results) = match i.immediate {
-                    Immediate::BlockType(t) => (vec![], vec![t]),
-                    Immediate::Block(-64) => (vec![], vec![]),
-                    Immediate::Block(-1) => (vec![], vec![I32]),
-                    Immediate::Block(-2) => (vec![], vec![I64]),
-                    Immediate::Block(-3) => (vec![], vec![F32]),
-                    Immediate::Block(-4) => (vec![], vec![F64]),
-                    Immediate::Block(-5) => (vec![], vec![V128]),
-                    Immediate::Block(-16) => (vec![], vec![ValType::FUNCREF]),
-                    Immediate::Block(-17) => (vec![], vec![ValType::EXTERNREF]),
+                let sig = match i.immediate {
+                    Immediate::BlockType(t) => {
+                        self.valtype(t)?;
+                        BlockSig::Single(t)
+                    }
+                    Immediate::Block(-64) => BlockSig::Empty,
+                    Immediate::Block(-1) => BlockSig::Single(I32),
+                    Immediate::Block(-2) => BlockSig::Single(I64),
+                    Immediate::Block(-3) => BlockSig::Single(F32),
+                    Immediate::Block(-4) => BlockSig::Single(F64),
+                    Immediate::Block(-5) => {
+                        self.valtype(V128)?;
+                        BlockSig::Single(V128)
+                    }
+                    Immediate::Block(-16) => {
+                        self.valtype(ValType::FUNCREF)?;
+                        BlockSig::Single(ValType::FUNCREF)
+                    }
+                    Immediate::Block(-17) => {
+                        self.valtype(ValType::EXTERNREF)?;
+                        BlockSig::Single(ValType::EXTERNREF)
+                    }
                     Immediate::Block(n @ (-24..=-18 | -15..=-11)) => {
                         let h = match n {
                             -18 => HeapType::Any,
@@ -828,89 +908,94 @@ impl Context<'_> {
                             -12 => HeapType::NoExn,
                             _ => HeapType::NoCont,
                         };
-                        (vec![], vec![Ref(RefType::new(true, h))])
+                        let vt = Ref(RefType::new(true, h));
+                        self.valtype(vt)?;
+                        BlockSig::Single(vt)
                     }
                     Immediate::Block(n) if n >= 0 => {
                         self.enabled(self.features.multi_value)?;
-                        let t = self.ty(n as usize)?;
-                        (t.params.clone(), t.results.clone())
+                        let idx = n as usize;
+                        self.ty(idx)?;
+                        // Every valtype in `m.types` was already validated before body validation.
+                        BlockSig::Func(idx)
                     }
                     _ => return Err(invalid("invalid block type")),
                 };
-                for v in params.iter().chain(&results) {
-                    self.valtype(*v)?;
-                }
-                s.pop_all(&params)?;
+                let params = sig.params(&self.m.types);
+                s.pop_all(params.as_slice())?;
                 let h = s.values.len();
-                s.values.extend(&params);
+                s.values.extend_from_slice(params.as_slice());
                 s.controls.push(Control {
                     kind: i.opcode,
                     height: h,
-                    params,
-                    results,
+                    sig,
                     unreachable: false,
                     has_else: false,
                     initialized: s.initialization_changes.len(),
                 })
             }
             5 => {
-                let c = s.controls.last().unwrap().clone();
+                let c = *s.controls.last().unwrap();
                 check(
                     c.kind == 4 && !c.has_else,
                     "else outside if or duplicate else",
                 )?;
-                s.pop_all(&c.results)?;
+                let results = c.sig.results(&self.m.types);
+                let params = c.sig.params(&self.m.types);
+                s.pop_all(results.as_slice())?;
                 check(s.values.len() == c.height, "extra stack operands at else")?;
-                s.values.extend(&c.params);
+                s.values.extend_from_slice(params.as_slice());
                 s.restore_locals(c.initialized);
                 let c = s.controls.last_mut().unwrap();
                 c.unreachable = false;
                 c.has_else = true;
             }
             0x0b => {
-                let c = s.controls.last().unwrap().clone();
+                let c = *s.controls.last().unwrap();
+                let params = c.sig.params(&self.m.types);
+                let results = c.sig.results(&self.m.types);
                 if c.kind == 4 && !c.has_else {
-                    check(c.params == c.results, "if without else type mismatch")?
+                    check(params.as_slice() == results.as_slice(), "if without else type mismatch")?
                 }
-                s.pop_all(&c.results)?;
+                s.pop_all(results.as_slice())?;
                 check(s.values.len() == c.height, "extra operands at end")?;
                 s.restore_locals(c.initialized);
                 s.controls.pop();
-                s.values.extend(c.results)
+                s.values.extend_from_slice(results.as_slice())
             }
             0x0c | 0x0d => {
-                let ts = s.label(index(i)?)?;
+                let ts = s.label(index(i)?, &self.m.types)?;
                 if i.opcode == 0x0d {
                     s.pop(I32)?;
-                    s.pop_all(&ts)?;
-                    s.values.extend(ts)
+                    s.pop_all(ts.as_slice())?;
+                    s.values.extend_from_slice(ts.as_slice())
                 } else {
-                    s.pop_all(&ts)?;
+                    s.pop_all(ts.as_slice())?;
                     s.dead()
                 }
             }
             0x0e => {
                 if let Immediate::BrTable(ref ns, d) = i.immediate {
                     s.pop(I32)?;
-                    let ts = s.label(d as usize)?;
-                    for n in ns {
-                        let target = s.label(*n as usize)?;
-                        check(target.len() == ts.len(), "branch table arity mismatch")?;
-                        let values = s.values.clone();
-                        let unknown = s.unknown.clone();
-                        s.pop_all(&target)?;
-                        s.values = values;
-                        s.unknown = unknown;
+                    let ts = s.label(d as usize, &self.m.types)?;
+                    let mut checked_targets: HashSet<u32> = HashSet::new();
+                    for &n in ns {
+                        if !checked_targets.insert(n) {
+                            continue;
+                        }
+                        let target = s.label(n as usize, &self.m.types)?;
+                        check(target.as_slice().len() == ts.as_slice().len(), "branch table arity mismatch")?;
+                        s.check_pop_all(target.as_slice())?;
                     }
-                    s.pop_all(&ts)?;
+                    s.pop_all(ts.as_slice())?;
                     s.dead()
                 } else {
                     return Err(invalid("invalid br_table"));
                 }
             }
             0x0f => {
-                let ts = s.controls[0].results.clone();
-                s.pop_all(&ts)?;
+                let ts = s.controls[0].sig.results(&self.m.types);
+                s.pop_all(ts.as_slice())?;
                 s.dead()
             }
             0x10 | 0x12 => {
@@ -921,11 +1006,12 @@ impl Context<'_> {
                 let t = self.ty(ti)?;
                 s.op(&t.params, &t.results)?;
                 if i.opcode == 0x12 {
+                    let fn_res = s.controls[0].sig.results(&self.m.types);
                     check(
-                        t.results.len() == s.controls[0].results.len()
+                        t.results.len() == fn_res.as_slice().len()
                             && t.results
                                 .iter()
-                                .zip(&s.controls[0].results)
+                                .zip(fn_res.as_slice())
                                 .all(|(a, b)| value_subtype(*a, *b, &self.types)),
                         "tail call result mismatch",
                     )?;
@@ -949,11 +1035,12 @@ impl Context<'_> {
                 s.pop(table.index_type.val_type())?;
                 s.op(&t.params, &t.results)?;
                 if i.opcode == 0x13 {
+                    let fn_res = s.controls[0].sig.results(&self.m.types);
                     check(
-                        t.results.len() == s.controls[0].results.len()
+                        t.results.len() == fn_res.as_slice().len()
                             && t.results
                                 .iter()
-                                .zip(&s.controls[0].results)
+                                .zip(fn_res.as_slice())
                                 .all(|(a, b)| value_subtype(*a, *b, &self.types)),
                         "tail call result mismatch",
                     )?;
@@ -970,11 +1057,12 @@ impl Context<'_> {
                 s.op(&t.params, &t.results)?;
                 if i.opcode == 0x15 {
                     self.enabled(self.features.tail_call)?;
+                    let fn_res = s.controls[0].sig.results(&self.m.types);
                     check(
-                        t.results.len() == s.controls[0].results.len()
+                        t.results.len() == fn_res.as_slice().len()
                             && t.results
                                 .iter()
-                                .zip(&s.controls[0].results)
+                                .zip(fn_res.as_slice())
                                 .all(|(a, b)| value_subtype(*a, *b, &self.types)),
                         "tail call result mismatch",
                     )?;
@@ -1163,9 +1251,9 @@ impl Context<'_> {
                     _ => return Err(invalid("expected reference")),
                 };
                 if i.opcode == 0xd5 {
-                    let ts = s.label(index(i)?)?;
-                    s.pop_all(&ts)?;
-                    s.values.extend(ts)
+                    let ts = s.label(index(i)?, &self.m.types)?;
+                    s.pop_all(ts.as_slice())?;
+                    s.values.extend_from_slice(ts.as_slice())
                 }
                 if v.is_none() {
                     s.unknown.insert(s.values.len());
@@ -1173,14 +1261,18 @@ impl Context<'_> {
                 s.values.push(Ref(RefType::new(false, r.heap)))
             }
             0xd6 => {
-                let mut ts = s.label(index(i)?)?;
-                let r = match ts.pop() {
-                    Some(Ref(r)) => r,
+                let ts = s.label(index(i)?, &self.m.types)?;
+                let (last, prefix) = ts
+                    .as_slice()
+                    .split_last()
+                    .ok_or_else(|| invalid("branch target must end in reference"))?;
+                let r = match *last {
+                    Ref(r) => r,
                     _ => return Err(invalid("branch target must end in reference")),
                 };
                 s.pop(Ref(RefType::new(true, r.heap)))?;
-                s.pop_all(&ts)?;
-                s.values.extend(ts)
+                s.pop_all(prefix)?;
+                s.values.extend_from_slice(prefix)
             }
             0xd1 => {
                 if let Some(v) = s.any()? {

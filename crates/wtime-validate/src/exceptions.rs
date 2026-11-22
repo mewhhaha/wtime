@@ -31,16 +31,28 @@ impl Context<'_> {
                     return Err(invalid("invalid try_table immediate"));
                 };
                 let (block, catches) = (&table.block, &table.catches);
-                let (params, results) = match block {
-                    Immediate::Block(-64) => (vec![], vec![]),
-                    Immediate::Block(-1) => (vec![], vec![ValType::I32]),
-                    Immediate::Block(-2) => (vec![], vec![ValType::I64]),
-                    Immediate::Block(-3) => (vec![], vec![ValType::F32]),
-                    Immediate::Block(-4) => (vec![], vec![ValType::F64]),
-                    Immediate::Block(-5) => (vec![], vec![ValType::V128]),
-                    Immediate::Block(-16) => (vec![], vec![ValType::FUNCREF]),
-                    Immediate::Block(-17) => (vec![], vec![ValType::EXTERNREF]),
-                    Immediate::BlockType(t) => (vec![], vec![*t]),
+                let sig = match block {
+                    Immediate::Block(-64) => BlockSig::Empty,
+                    Immediate::Block(-1) => BlockSig::Single(ValType::I32),
+                    Immediate::Block(-2) => BlockSig::Single(ValType::I64),
+                    Immediate::Block(-3) => BlockSig::Single(ValType::F32),
+                    Immediate::Block(-4) => BlockSig::Single(ValType::F64),
+                    Immediate::Block(-5) => {
+                        self.valtype(ValType::V128)?;
+                        BlockSig::Single(ValType::V128)
+                    }
+                    Immediate::Block(-16) => {
+                        self.valtype(ValType::FUNCREF)?;
+                        BlockSig::Single(ValType::FUNCREF)
+                    }
+                    Immediate::Block(-17) => {
+                        self.valtype(ValType::EXTERNREF)?;
+                        BlockSig::Single(ValType::EXTERNREF)
+                    }
+                    Immediate::BlockType(t) => {
+                        self.valtype(*t)?;
+                        BlockSig::Single(*t)
+                    }
                     Immediate::Block(n @ (-24..=-18 | -15..=-11)) => {
                         let h = match *n {
                             -18 => HeapType::Any,
@@ -56,18 +68,18 @@ impl Context<'_> {
                             -12 => HeapType::NoExn,
                             _ => HeapType::NoCont,
                         };
-                        (vec![], vec![ValType::Ref(RefType::new(true, h))])
+                        let vt = ValType::Ref(RefType::new(true, h));
+                        self.valtype(vt)?;
+                        BlockSig::Single(vt)
                     }
                     Immediate::Block(n) if *n >= 0 => {
                         self.enabled(self.features.multi_value)?;
-                        let t = self.ty(*n as usize)?;
-                        (t.params.clone(), t.results.clone())
+                        let idx = *n as usize;
+                        self.ty(idx)?;
+                        BlockSig::Func(idx)
                     }
                     _ => return Err(invalid("invalid try_table block type")),
                 };
-                for t in params.iter().chain(&results) {
-                    self.valtype(*t)?;
-                }
                 for c in catches {
                     let mut delivered = if let Some(tag) = c.tag {
                         {
@@ -84,24 +96,24 @@ impl Context<'_> {
                     if c.kind == 1 || c.kind == 3 {
                         delivered.push(ValType::Ref(RefType::new(false, HeapType::Exn)))
                     }
-                    let target = s.label(c.label as usize)?;
+                    let target = s.label(c.label as usize, &self.m.types)?;
                     check(
-                        delivered.len() == target.len()
+                        delivered.len() == target.as_slice().len()
                             && delivered
                                 .iter()
-                                .zip(&target)
+                                .zip(target.as_slice())
                                 .all(|(a, b)| value_subtype(*a, *b, &self.types)),
                         "catch target type mismatch",
                     )?;
                 }
-                s.pop_all(&params)?;
+                let params = sig.params(&self.m.types);
+                s.pop_all(params.as_slice())?;
                 let height = s.values.len();
-                s.values.extend(&params);
+                s.values.extend_from_slice(params.as_slice());
                 s.controls.push(Control {
                     kind: 0x1f,
                     height,
-                    params,
-                    results,
+                    sig,
                     unreachable: false,
                     has_else: false,
                     initialized: s.initialization_changes.len(),

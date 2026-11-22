@@ -274,9 +274,10 @@ impl Context<'_> {
                     "cast target is not a subtype",
                 )?;
                 s.pop(a)?;
-                let mut ts = s.label(label as usize)?;
-                let expected = ts
-                    .pop()
+                let ts = s.label(label as usize, &self.m.types)?;
+                let (&expected, prefix) = ts
+                    .as_slice()
+                    .split_last()
                     .ok_or_else(|| invalid("cast branch label has no reference"))?;
                 let difference = match a {
                     Ref(mut r) => {
@@ -292,8 +293,8 @@ impl Context<'_> {
                     value_subtype(branch, expected, &self.types),
                     "cast branch result mismatch",
                 )?;
-                s.pop_all(&ts)?;
-                s.values.extend(ts);
+                s.pop_all(prefix)?;
+                s.values.extend_from_slice(prefix);
                 s.values
                     .push(if i.opcode == 0xfb18 { difference } else { b })
             }
@@ -446,9 +447,10 @@ impl Context<'_> {
                     "cast source must have same heap hierarchy",
                 )?;
                 s.pop(a)?;
-                let mut ts = s.label(label as usize)?;
-                let last = ts
-                    .pop()
+                let ts = s.label(label as usize, &self.m.types)?;
+                let (&last, prefix) = ts
+                    .as_slice()
+                    .split_last()
                     .ok_or_else(|| invalid("cast label missing result"))?;
                 let difference = match a {
                     Ref(mut r) => {
@@ -467,8 +469,8 @@ impl Context<'_> {
                     ),
                     "cast branch type mismatch",
                 )?;
-                s.pop_all(&ts)?;
-                s.values.extend(ts);
+                s.pop_all(prefix)?;
+                s.values.extend_from_slice(prefix);
                 s.values
                     .push(if i.opcode == 0xfb25 { difference } else { b })
             }

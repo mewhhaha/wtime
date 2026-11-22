@@ -1845,9 +1845,14 @@ pub fn lower_ir_to_x64_with_budget(
         }
         l.asm.bind(l.bb_labels[bid as usize]);
         let bb = &ir.blocks[bid as usize];
-        for inst in &bb.insts {
+        for (ii, inst) in bb.insts.iter().enumerate() {
             l.emit_inst(inst.res, inst.op)?;
-            if l.asm.code.len() > MAX_FN_CODE_BYTES {
+            if (ii & 255) == 255 {
+                if let Some(b) = budget {
+                    b.check_deadline()?;
+                }
+                check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
+            } else if l.asm.code.len() > MAX_FN_CODE_BYTES {
                 return Err(format!(
                     "x64: function {} code ({} B) exceeds cap {MAX_FN_CODE_BYTES} B",
                     ir.func_index,

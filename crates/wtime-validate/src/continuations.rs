@@ -74,17 +74,21 @@ impl Context<'_> {
                         .get(*tag as usize)
                         .ok_or_else(|| invalid("handler tag index out of bounds"))?;
                     if let Some(label) = label {
-                        let mut target = s.label(*label as usize)?;
-                        let cont = match target.pop() {
-                            Some(Ref(RefType {
+                        let target_view = s.label(*label as usize, &self.m.types)?;
+                        let (last, target) = target_view
+                            .as_slice()
+                            .split_last()
+                            .ok_or_else(|| invalid("suspend handler needs continuation result"))?;
+                        let cont = match *last {
+                            Ref(RefType {
                                 heap: HeapType::Defined(t) | HeapType::ExactDefined(t),
                                 ..
-                            })) => t,
+                            }) => t,
                             _ => return Err(invalid("suspend handler needs continuation result")),
                         };
                         let (_, ct) = self.cont(cont.0 as usize)?;
                         check(
-                            sequence_subtype(&tag.params, &target, &self.types),
+                            sequence_subtype(&tag.params, target, &self.types),
                             "handler payload types mismatch",
                         )?;
                         check(

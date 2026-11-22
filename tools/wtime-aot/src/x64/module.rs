@@ -691,12 +691,18 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                 }
                 0x23 => {
                     if let Immediate::Index(g) = insn.immediate {
-                        global_reads[g as usize] += 1;
+                        let slot = global_reads
+                            .get_mut(g as usize)
+                            .ok_or_else(|| format!("x64: global.get index {g} out of range"))?;
+                        *slot += 1;
                     }
                 }
                 0x24 => {
                     if let Immediate::Index(g) = insn.immediate {
-                        global_writes[g as usize] += 1;
+                        let slot = global_writes
+                            .get_mut(g as usize)
+                            .ok_or_else(|| format!("x64: global.set index {g} out of range"))?;
+                        *slot += 1;
                     }
                 }
                 0x25 | 0x26 => {
