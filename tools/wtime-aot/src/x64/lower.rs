@@ -323,7 +323,13 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn emit_call_abi(&mut self, args: ValRange, rets: ValRange, ci_idx: Option<(u32, Val)>, direct_func: Option<u32>) {
+    fn emit_call_abi(
+        &mut self,
+        args: ValRange,
+        rets: ValRange,
+        ci_idx: Option<(u32, Val)>,
+        direct_func: Option<u32>,
+    ) -> Result<(), String> {
         // For indirect call, stash `idx` in `[r15 + OFF_SCRATCH_TMP]` so `emit_parallel_moves` can freely use R10 & R11.
         if let Some((_, idx_val)) = ci_idx {
             let ir = self.gp_read(idx_val, SCRATCH_GP2);
@@ -333,7 +339,7 @@ impl<'a> Lower<'a> {
         let arg_vals = self.ir.pool_slice(args);
         if !arg_vals.is_empty() {
             let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
-            let arg_layout = layout_args(&arg_tys);
+            let arg_layout = layout_args(&arg_tys)?;
             let mut moves = Vec::with_capacity(arg_vals.len());
             for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
                 let dst = match slot {
@@ -349,7 +355,7 @@ impl<'a> Lower<'a> {
         // If the callee has overflow return values, publish our caller-owned stack return buffer pointer.
         let ret_vals = self.ir.pool_slice(rets);
         let ret_tys: Vec<Ty> = ret_vals.iter().map(|&v| self.ty(v)).collect();
-        let ret_layout = layout_rets(&ret_tys);
+        let ret_layout = layout_rets(&ret_tys)?;
         if ret_layout.stack_bytes > 0 {
             self.asm.lea(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, self.alloc.ret_buf_off));
             self.asm.mov_mr(true, Mem::base_disp(Gp::R15, OFF_RET_SPILL_PTR), SCRATCH_GP1);
@@ -400,6 +406,7 @@ impl<'a> Lower<'a> {
             }
             emit_parallel_moves(&mut self.asm, &moves);
         }
+        Ok(())
     }
 
     fn emit_int_bin(&mut self, is64: bool, op: IntBinOp, dst_val: Val, a: Val, b: Val) {
@@ -629,24 +636,16 @@ impl<'a> Lower<'a> {
     fn emit_float_minmax(&mut self, is64: bool, is_max: bool, dst_val: Val, a: Val, b: Val) {
         let ar = self.fp_read(a, SCRATCH_FP1);
         let br = self.fp_read(b, SCRATCH_FP2);
-        let mut d = self.fp_write_reg(dst_val);
+        let d = self.fp_write_reg(dst_val);
         let rhs = if d == br && d != ar {
             self.asm.movaps_rr(SCRATCH_FP2, br);
             self.asm.movaps_rr(d, ar);
             SCRATCH_FP2
         } else {
-            if d == SCRATCH_FP1 && d == ar {
-                // okay
-            } else {
+            if d != ar {
                 self.asm.movaps_rr(d, ar);
             }
-            if br == d && a != b {
-                d = SCRATCH_FP1;
-                self.asm.movaps_rr(d, ar);
-                br
-            } else {
-                br
-            }
+            br
         };
         let lbl_nan = self.asm.new_label();
         let lbl_eq = self.asm.new_label();
@@ -679,7 +678,7 @@ impl<'a> Lower<'a> {
         self.fp_commit(dst_val, d);
     }
 
-    fn emit_inst(&mut self, res: Option<Val>, op: Op) {
+    fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
         match op {
             Op::ConstI32(c) => {
                 let r = res.unwrap();
@@ -1446,8 +1445,8 @@ impl<'a> Lower<'a> {
                 self.asm.pinsrq(d, xr, lane);
                 self.fp_commit(r, d);
             }
-            Op::Call { func, args, rets } => self.emit_call_abi(args, rets, None, Some(func)),
-            Op::CallIndirect { ci_id, idx, args, rets } => self.emit_call_abi(args, rets, Some((ci_id, idx)), None),
+            Op::Call { func, args, rets } => self.emit_call_abi(args, rets, None, Some(func))?,
+            Op::CallIndirect { ci_id, idx, args, rets } => self.emit_call_abi(args, rets, Some((ci_id, idx)), None)?,
             Op::Trap(code) => {
                 let lbl = match code {
                     TRAP_UNREACHABLE => self.trap_unreach_lbl(),
@@ -1457,15 +1456,16 @@ impl<'a> Lower<'a> {
                         self.asm.mov_ri32(SCRATCH_GP1, u32::from(code));
                         let ep = self.epilogue_trap_lbl();
                         self.asm.jmp(ep);
-                        return;
+                        return Ok(());
                     }
                 };
                 self.asm.jmp(lbl);
             }
         }
+        Ok(())
     }
 
-    fn emit_term(&mut self, term: Term, next_bb: Option<u32>) {
+    fn emit_term(&mut self, term: Term, next_bb: Option<u32>) -> Result<(), String> {
         match term {
             Term::Jump { target, args } => {
                 self.emit_edge_moves(target.0, args);
@@ -1568,7 +1568,7 @@ impl<'a> Lower<'a> {
                     if next_bb != Some(default.0.0) {
                         self.asm.jmp(self.bb_labels[default.0.0 as usize]);
                     }
-                    return;
+                    return Ok(());
                 }
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 if ir != SCRATCH_GP2 {
@@ -1591,7 +1591,7 @@ impl<'a> Lower<'a> {
                 let ret_vals = self.ir.pool_slice(vals);
                 if !ret_vals.is_empty() {
                     let ret_tys: Vec<Ty> = ret_vals.iter().map(|&v| self.ty(v)).collect();
-                    let ret_layout = layout_rets(&ret_tys);
+                    let ret_layout = layout_rets(&ret_tys)?;
                     // First store any overflow return values into the caller-owned return buffer
                     // BEFORE `emit_parallel_moves` modifies return registers!
                     if ret_layout.stack_bytes > 0 {
@@ -1632,6 +1632,7 @@ impl<'a> Lower<'a> {
                 self.asm.jmp(lbl);
             }
         }
+        Ok(())
     }
 }
 
@@ -1666,7 +1667,9 @@ pub fn lower_ir_to_x64(
         edge_tramps: Vec::new(),
     };
 
-    // ---- Prospective Stack Check BEFORE Any Push or Frame Allocation ----
+    // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----
+    // Computes `r11 = ctx->stack_floor + total_push_and_frame` (cannot wrap: user-space addr < 2^47,
+    // total <= MAX_FRAME_BYTES + 16), then `cmp rsp, r11; jb early_stack_trap`.
     let early_stack_trap = if ir.needs_stack_check {
         let lbl = l.asm.new_label();
         let push_bytes = i32::try_from(alloc.used_callee_gp.len() * 8).map_err(|_| "callee save overflow")?;
@@ -1674,13 +1677,11 @@ pub fn lower_ir_to_x64(
             .frame_size
             .checked_add(push_bytes)
             .ok_or("x64: stack check frame size overflow")?;
+        l.asm.mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
         if total_push_and_frame > 0 {
-            let neg = total_push_and_frame.checked_neg().ok_or("x64: stack check negation overflow")?;
-            l.asm.lea(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, neg));
-            l.asm.cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
-        } else {
-            l.asm.cmp_rm(true, Gp::Rsp, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
+            l.asm.add_ri(true, SCRATCH_GP1, total_push_and_frame);
         }
+        l.asm.cmp_rr(true, Gp::Rsp, SCRATCH_GP1);
         l.asm.jcc(Cond::B, lbl);
         Some(lbl)
     } else {
@@ -1701,15 +1702,21 @@ pub fn lower_ir_to_x64(
 
     // Move incoming Wasm parameters using the unified typed ABI layout shared with `regalloc`.
     if !ir.params.is_empty() {
-        let incoming_stack_base = alloc.frame_size + (alloc.used_callee_gp.len() as i32 + 1) * 8;
+        let incoming_stack_base = alloc
+            .frame_size
+            .checked_add((alloc.used_callee_gp.len() as i32 + 1) * 8)
+            .ok_or("x64: incoming stack base overflow")?;
         let param_tys: Vec<Ty> = ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]).collect();
-        let arg_layout = layout_args(&param_tys);
+        let arg_layout = layout_args(&param_tys)?;
         let mut moves = Vec::with_capacity(ir.params.len());
         for ((&pv, &ty), slot) in ir.params.iter().zip(&param_tys).zip(arg_layout.slots) {
             let src = match slot {
                 AbiSlot::Gp(r) => MoveLoc::Gp(r),
                 AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
-                AbiSlot::Stack(off) => MoveLoc::Stack(incoming_stack_base + off),
+                AbiSlot::Stack(off) => {
+                    let s = incoming_stack_base.checked_add(off).ok_or("x64: incoming stack arg overflow")?;
+                    MoveLoc::Stack(s)
+                }
             };
             moves.push((MoveLoc::from(alloc.locs[pv.0 as usize]), src, ty));
         }
@@ -1721,10 +1728,10 @@ pub fn lower_ir_to_x64(
         l.asm.bind(l.bb_labels[bid as usize]);
         let bb = &ir.blocks[bid as usize];
         for inst in &bb.insts {
-            l.emit_inst(inst.res, inst.op);
+            l.emit_inst(inst.res, inst.op)?;
         }
         let next_bb = alloc.block_order.get(oi + 1).copied();
-        l.emit_term(bb.term, next_bb);
+        l.emit_term(bb.term, next_bb)?;
     }
 
     // ---- Edge-copy trampolines ----

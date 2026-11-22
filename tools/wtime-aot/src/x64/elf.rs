@@ -10,8 +10,11 @@ use std::collections::BTreeSet;
 const PAGE: usize = 4096;
 
 #[inline]
-fn align_up(n: usize, a: usize) -> usize {
-    (n + (a - 1)) & !(a - 1)
+fn checked_align_up(n: usize, a: usize) -> Result<usize, String> {
+    let mask = a - 1;
+    n.checked_add(mask)
+        .map(|v| v & !mask)
+        .ok_or_else(|| "ELF layout size overflow".to_string())
 }
 
 fn elf_hash(name: &[u8]) -> u32 {
@@ -83,23 +86,27 @@ impl ElfLayout {
 
         // 64-byte Ehdr + 5 * 56-byte Phdrs = 344 bytes.
         let mut cur = 64 + 5 * 56;
-        cur = align_up(cur, 8);
+        cur = checked_align_up(cur, 8)?;
         let dynsym_off = cur;
-        let dynsym_len = nsyms * 24;
-        cur += dynsym_len;
+        let dynsym_len = nsyms.checked_mul(24).ok_or(".dynsym size overflow")?;
+        cur = cur.checked_add(dynsym_len).ok_or("ELF header overflow")?;
 
-        cur = align_up(cur, 4);
+        cur = checked_align_up(cur, 4)?;
         let hash_off = cur;
-        let hash_len = (2 + nbucket + nsyms) * 4;
-        cur += hash_len;
+        let hash_len = nbucket
+            .checked_add(nsyms)
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_mul(4))
+            .ok_or(".hash size overflow")?;
+        cur = cur.checked_add(hash_len).ok_or("ELF header overflow")?;
 
         let dynstr_off = cur;
-        cur += dynstr.len();
+        cur = cur.checked_add(dynstr.len()).ok_or("ELF header overflow")?;
 
-        cur = align_up(cur, 16);
+        cur = checked_align_up(cur, 16)?;
         let rodata_vaddr = cur;
         let seg0_end = rodata_vaddr.checked_add(rodata_len).ok_or("rodata size overflow")?;
-        let text_vaddr = align_up(seg0_end, PAGE);
+        let text_vaddr = checked_align_up(seg0_end, PAGE)?;
 
         Ok(Self {
             rodata_vaddr,
@@ -151,9 +158,12 @@ impl ElfLayout {
             }
         }
 
-        let seg0_end = self.rodata_vaddr + rodata.len();
+        let seg0_end = self.rodata_vaddr.checked_add(rodata.len()).ok_or("rodata size overflow")?;
         let seg1_end = self.text_vaddr.checked_add(text.len()).ok_or("text size overflow")?;
-        let dyn_vaddr = align_up(seg1_end, PAGE);
+        if seg1_end > i32::MAX as usize {
+            return Err(format!("ELF image ({seg1_end} B) exceeds rel32 addressable 2 GiB range"));
+        }
+        let dyn_vaddr = checked_align_up(seg1_end, PAGE)?;
         self.dyn_vaddr = dyn_vaddr;
 
         // 6 dynamic entries * 16 bytes = 96 bytes.
@@ -178,9 +188,12 @@ impl ElfLayout {
             shstrtab.extend_from_slice(name.as_bytes());
             shstrtab.push(0);
         }
-        let shstrtab_off = dyn_vaddr + dyn_size;
-        let shoff = align_up(shstrtab_off + shstrtab.len(), 8);
-        let total_size = shoff + 8 * 64;
+        let shstrtab_off = dyn_vaddr.checked_add(dyn_size).ok_or("ELF section table overflow")?;
+        let shoff = checked_align_up(
+            shstrtab_off.checked_add(shstrtab.len()).ok_or("ELF section table overflow")?,
+            8,
+        )?;
+        let total_size = shoff.checked_add(8 * 64).ok_or("ELF total image overflow")?;
         let mut img = vec![0u8; total_size];
 
         // ---- ELF64 Header (64 bytes) ----

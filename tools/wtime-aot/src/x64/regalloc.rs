@@ -122,7 +122,14 @@ pub struct AbiLayout {
     pub stack_bytes: i32,
 }
 
-pub fn layout_args(tys: &[Ty]) -> AbiLayout {
+fn checked_align_i32(v: i32, align: i32) -> Result<i32, String> {
+    let mask = align - 1;
+    v.checked_add(mask)
+        .map(|x| x & !mask)
+        .ok_or_else(|| "x64: ABI/frame i32 offset overflow".to_string())
+}
+
+pub fn layout_args(tys: &[Ty]) -> Result<AbiLayout, String> {
     let mut slots = Vec::with_capacity(tys.len());
     let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
     for &ty in tys {
@@ -132,24 +139,24 @@ pub fn layout_args(tys: &[Ty]) -> AbiLayout {
                 nf += 1;
             } else {
                 let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
-                off = (off + (align - 1)) & !(align - 1);
+                off = checked_align_i32(off, align)?;
                 slots.push(AbiSlot::Stack(off));
-                off += sz;
+                off = off.checked_add(sz).ok_or("x64: arg stack size overflow")?;
             }
         } else if ng < CALL_GP_ARGS.len() {
             slots.push(AbiSlot::Gp(CALL_GP_ARGS[ng]));
             ng += 1;
         } else {
-            off = (off + 7) & !7;
+            off = checked_align_i32(off, 8)?;
             slots.push(AbiSlot::Stack(off));
-            off += 8;
+            off = off.checked_add(8).ok_or("x64: arg stack size overflow")?;
         }
     }
-    let stack_bytes = (off + 15) & !15;
-    AbiLayout { slots, stack_bytes }
+    let stack_bytes = checked_align_i32(off, 16)?;
+    Ok(AbiLayout { slots, stack_bytes })
 }
 
-pub fn layout_rets(tys: &[Ty]) -> AbiLayout {
+pub fn layout_rets(tys: &[Ty]) -> Result<AbiLayout, String> {
     let mut slots = Vec::with_capacity(tys.len());
     let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
     for &ty in tys {
@@ -159,21 +166,21 @@ pub fn layout_rets(tys: &[Ty]) -> AbiLayout {
                 nf += 1;
             } else {
                 let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
-                off = (off + (align - 1)) & !(align - 1);
+                off = checked_align_i32(off, align)?;
                 slots.push(AbiSlot::Stack(off));
-                off += sz;
+                off = off.checked_add(sz).ok_or("x64: ret stack size overflow")?;
             }
         } else if ng < CALL_GP_RETS.len() {
             slots.push(AbiSlot::Gp(CALL_GP_RETS[ng]));
             ng += 1;
         } else {
-            off = (off + 7) & !7;
+            off = checked_align_i32(off, 8)?;
             slots.push(AbiSlot::Stack(off));
-            off += 8;
+            off = off.checked_add(8).ok_or("x64: ret stack size overflow")?;
         }
     }
-    let stack_bytes = (off + 15) & !15;
-    AbiLayout { slots, stack_bytes }
+    let stack_bytes = checked_align_i32(off, 16)?;
+    Ok(AbiLayout { slots, stack_bytes })
 }
 
 pub struct AllocResult {
@@ -297,7 +304,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                     for &av in ir.pool_slice(args) {
                         scratch_tys.push(ir.val_tys[av.0 as usize]);
                     }
-                    let arg_layout = layout_args(&scratch_tys);
+                    let arg_layout = layout_args(&scratch_tys)?;
                     if arg_layout.stack_bytes > max_outgoing_arg_bytes {
                         max_outgoing_arg_bytes = arg_layout.stack_bytes;
                     }
@@ -311,7 +318,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                             last_use[vi] = pos_def + 1;
                         }
                     }
-                    let ret_layout = layout_rets(&scratch_tys);
+                    let ret_layout = layout_rets(&scratch_tys)?;
                     if ret_layout.stack_bytes > max_ret_buf_bytes {
                         max_ret_buf_bytes = ret_layout.stack_bytes;
                     }
@@ -481,14 +488,20 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
             let bs = block_start[oi];
             let be = block_end[oi];
             for w in 0..words {
-                let mut bits = live_in[oi * words + w] | live_out[oi * words + w];
-                while bits != 0 {
-                    let tz = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
+                let mut in_bits = live_in[oi * words + w];
+                while in_bits != 0 {
+                    let tz = in_bits.trailing_zeros() as usize;
+                    in_bits &= in_bits - 1;
                     let vi = cb_vals[(w << 6) + tz] as usize;
                     if bs < def_pos[vi] {
                         def_pos[vi] = bs;
                     }
+                }
+                let mut out_bits = live_out[oi * words + w];
+                while out_bits != 0 {
+                    let tz = out_bits.trailing_zeros() as usize;
+                    out_bits &= out_bits - 1;
+                    let vi = cb_vals[(w << 6) + tz] as usize;
                     if be > last_use[vi] {
                         last_use[vi] = be;
                     }
@@ -536,16 +549,20 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
     let mut free_spills8: Vec<(u32, i32)> = Vec::new();
     let mut active_gp: Vec<(u32, u32, usize, u32)> = Vec::with_capacity(GP_ALLOC.len());
 
-    let alloc_spill8 = |start: u32, end: u32, free: &mut Vec<(u32, i32)>, next: &mut i32| -> i32 {
+    let alloc_spill8 = |start: u32, end: u32, free: &mut Vec<(u32, i32)>, next: &mut i32| -> Result<i32, String> {
         if let Some(pos) = free.iter().position(|&(e, _)| e <= start) {
             let (_, off) = free.swap_remove(pos);
             free.push((end, off));
-            off
+            Ok(off)
         } else {
             let off = *next;
-            *next += 8;
+            let after = off.checked_add(8).ok_or("x64: spill stack size overflow")?;
+            if after > MAX_FRAME_BYTES {
+                return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
+            }
+            *next = after;
             free.push((end, off));
-            off
+            Ok(off)
         }
     };
 
@@ -573,7 +590,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
             if let Some(ai) = best_evict {
                 let (ev_start, ev_end, ri, ev_val) = active_gp.swap_remove(ai);
                 let g = GP_ALLOC[ri];
-                let sp = alloc_spill8(ev_start, ev_end, &mut free_spills8, &mut next_spill_off);
+                let sp = alloc_spill8(ev_start, ev_end, &mut free_spills8, &mut next_spill_off)?;
                 locs[ev_val as usize] = Loc::Spill(sp);
                 locs[iv.val as usize] = Loc::Gp(g);
                 if matches!(g, Gp::Rbx | Gp::Rbp) {
@@ -581,7 +598,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                 }
                 active_gp.push((iv.start, iv.end, ri, iv.val));
             } else {
-                let sp = alloc_spill8(iv.start, iv.end, &mut free_spills8, &mut next_spill_off);
+                let sp = alloc_spill8(iv.start, iv.end, &mut free_spills8, &mut next_spill_off)?;
                 locs[iv.val as usize] = Loc::Spill(sp);
             }
         }
@@ -597,18 +614,21 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                           free8: &mut Vec<(u32, i32)>,
                           free16: &mut Vec<(u32, i32)>,
                           next: &mut i32|
-     -> i32 {
+     -> Result<i32, String> {
         if ty == Ty::V128 {
             if let Some(pos) = free16.iter().position(|&(e, _)| e <= start) {
                 let (_, off) = free16.swap_remove(pos);
                 free16.push((end, off));
-                off
+                Ok(off)
             } else {
-                *next = (*next + 15) & !15;
-                let off = *next;
-                *next += 16;
+                let off = checked_align_i32(*next, 16)?;
+                let after = off.checked_add(16).ok_or("x64: spill stack size overflow")?;
+                if after > MAX_FRAME_BYTES {
+                    return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
+                }
+                *next = after;
                 free16.push((end, off));
-                off
+                Ok(off)
             }
         } else {
             alloc_spill8(start, end, free8, next)
@@ -637,12 +657,12 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                 let (ev_start, ev_end, ri, ev_val) = active_fp.swap_remove(ai);
                 let x = XMM_ALLOC[ri];
                 let ev_ty = ir.val_tys[ev_val as usize];
-                let sp = alloc_spill_fp(ev_ty, ev_start, ev_end, &mut free_spills8, &mut free_spills16, &mut next_spill_off);
+                let sp = alloc_spill_fp(ev_ty, ev_start, ev_end, &mut free_spills8, &mut free_spills16, &mut next_spill_off)?;
                 locs[ev_val as usize] = Loc::Spill(sp);
                 locs[iv.val as usize] = Loc::Xmm(x);
                 active_fp.push((iv.start, iv.end, ri, iv.val));
             } else {
-                let sp = alloc_spill_fp(iv.ty, iv.start, iv.end, &mut free_spills8, &mut free_spills16, &mut next_spill_off);
+                let sp = alloc_spill_fp(iv.ty, iv.start, iv.end, &mut free_spills8, &mut free_spills16, &mut next_spill_off)?;
                 locs[iv.val as usize] = Loc::Spill(sp);
             }
         }
@@ -675,7 +695,9 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
         }
     }
     let mut raw_frame = spill_base.checked_add(next_spill_off).ok_or("x64: stack frame size overflow")?;
-    let self_ret_layout = layout_rets(&ir.result_tys);
+    let self_ret_layout = layout_rets(&ir.result_tys)?;
+    let self_param_tys: Vec<Ty> = ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]).collect();
+    let self_param_layout = layout_args(&self_param_tys)?;
     let saved_ret_ptr_off = if self_ret_layout.stack_bytes > 0 {
         raw_frame = raw_frame.checked_add(7).ok_or("x64: stack frame size overflow")? & !7;
         let off = raw_frame;
@@ -703,6 +725,13 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
             "x64: function {} stack frame ({frame_size} B) exceeds cap {MAX_FRAME_BYTES} B",
             ir.func_index
         ));
+    }
+    let incoming_stack_base = frame_size
+        .checked_add(pushes_bytes)
+        .and_then(|v| v.checked_add(self_param_layout.stack_bytes))
+        .ok_or("x64: incoming stack parameter offset overflow")?;
+    if incoming_stack_base > MAX_FRAME_BYTES.saturating_mul(2) {
+        return Err(format!("x64: function {} incoming stack offset ({incoming_stack_base} B) exceeds cap", ir.func_index));
     }
 
     Ok(AllocResult {

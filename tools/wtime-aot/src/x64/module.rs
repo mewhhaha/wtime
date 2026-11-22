@@ -14,12 +14,18 @@ pub type Res<T> = Result<T, String>;
 /// Admission caps preventing OOM or integer overflow on adversarial modules.
 pub const MAX_MEM_PAGES: u64 = 65_536;
 pub const MAX_FUNCREF_TABLE_SLOTS: u32 = 1_048_576;
+pub const MAX_TOTAL_FUNCREF_SLOTS: usize = 2_097_152;
 pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
+pub const MAX_TOTAL_EXTERN_SLOTS: usize = 65_536;
+pub const MAX_GLOBALS: usize = 65_536;
+pub const MAX_CTX_BYTES: usize = 16 << 20; // 16 MiB (far below i32::MAX)
 pub const MAX_AGGREGATE_CI_TABLE_BYTES: usize = 64 << 20; // 64 MiB
 pub const MAX_LOCALS_PER_FN: usize = 65_536;
 pub const MAX_TOTAL_LOCALS: usize = 1_000_000;
-pub const MAX_FRAME_BYTES: i32 = 16 << 20; // 16 MiB
+pub const MAX_FRAME_BYTES: i32 = 4 << 20; // 4 MiB (well below 8 MiB dedicated guest stack)
 pub const MAX_LIVENESS_BYTES: usize = 64 << 20; // 64 MiB
+pub const MAX_FRAME_SCAN_WRITES: usize = 4_000_000;
+pub const MAX_IF_SNAPSHOT_ENTRIES: usize = 4_000_000;
 
 /// Constant value folded from an immutable/never-written non-exported global initializer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,8 +232,13 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
             return Err("x64: GC recursive type groups are not supported".into());
         }
         for st in &group.types {
-            if !matches!(st.composite, CompositeType::Func(_)) || st.supertype.is_some() {
-                return Err("x64: GC/subtyping composite types are not supported".into());
+            if !matches!(st.composite, CompositeType::Func(_))
+                || !st.final_
+                || st.supertype.is_some()
+                || st.descriptor.is_some()
+                || st.describes.is_some()
+            {
+                return Err("x64: GC/subtyping/non-final/descriptor types are not supported".into());
             }
         }
     }
@@ -259,8 +270,8 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
     let mut types = Vec::new();
     for imp in &decoded.imports {
         let ti = match imp.kind {
-            ImportKind::Func(t) | ImportKind::ExactFunc(t) => t.0 as usize,
-            _ => return Err(format!("x64: only function imports are supported (got {:?}::{:?})", imp.module, imp.name)),
+            ImportKind::Func(t) => t.0 as usize,
+            _ => return Err(format!("x64: only plain function imports are supported (got {:?}::{:?})", imp.module, imp.name)),
         };
         let fty = decoded.types.get(ti).ok_or("import type index out of range")?.clone();
         for &vt in fty.params.iter().chain(&fty.results) {
@@ -279,16 +290,25 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         types.push(fty);
     }
 
-    // Tables: static funcref tables + mutable externref tables (32-bit only, capped).
+    // Tables: static funcref tables + mutable externref tables (32-bit only, aggregate-capped).
     let mut funcref_tables: BTreeMap<u32, Vec<Option<u32>>> = BTreeMap::new();
     let mut mut_extern_tables: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut total_funcref_slots: usize = 0;
+    let mut total_extern_slots: usize = 0;
     for (ti, tt) in decoded.tables.iter().enumerate() {
         let ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
         if tt.index_type != IndexType::I32 {
             return Err(format!("x64: table64 (table {ti}) is not supported"));
         }
-        if decoded.table_inits.get(ti).and_then(|o| o.as_ref()).is_some() {
-            return Err(format!("x64: non-null table initializer on table {ti} is not supported"));
+        if let Some(init_expr) = decoded.table_inits.get(ti).and_then(|o| o.as_ref()) {
+            let is_matching_null = matches!(
+                init_expr.as_slice(),
+                [Instruction { opcode: 0xd0, immediate: Immediate::Heap(ht) }, Instruction { opcode: 0x0b, .. }]
+                    if *ht == tt.element.heap
+            );
+            if !is_matching_null {
+                return Err(format!("x64: non-null table initializer on table {ti} is not supported"));
+            }
         }
         match tt.element.heap {
             HeapType::Func if tt.element.nullable => {
@@ -296,6 +316,12 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                     .ok()
                     .filter(|&n| n <= MAX_FUNCREF_TABLE_SLOTS)
                     .ok_or_else(|| format!("x64: funcref table {ti} min ({}) exceeds cap {MAX_FUNCREF_TABLE_SLOTS}", tt.limits.min))?;
+                total_funcref_slots = total_funcref_slots.saturating_add(len as usize);
+                if total_funcref_slots > MAX_TOTAL_FUNCREF_SLOTS {
+                    return Err(format!(
+                        "x64: aggregate funcref table slots ({total_funcref_slots}) exceed cap {MAX_TOTAL_FUNCREF_SLOTS}"
+                    ));
+                }
                 funcref_tables.insert(ti_u32, vec![None; len as usize]);
             }
             HeapType::Extern if tt.element.nullable => {
@@ -306,10 +332,26 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                         tt.limits.min, tt.limits.max
                     ));
                 }
+                total_extern_slots = total_extern_slots.saturating_add(tt.limits.min as usize);
+                if total_extern_slots > MAX_TOTAL_EXTERN_SLOTS {
+                    return Err(format!(
+                        "x64: aggregate externref table slots ({total_extern_slots}) exceed cap {MAX_TOTAL_EXTERN_SLOTS}"
+                    ));
+                }
                 mut_extern_tables.insert(ti_u32, tt.limits.min as u32);
             }
             other => return Err(format!("x64: unsupported table element type {other:?} on table {ti}")),
         }
+    }
+
+    if decoded.globals.len() > MAX_GLOBALS {
+        return Err(format!("x64: module global count ({}) exceeds cap {MAX_GLOBALS}", decoded.globals.len()));
+    }
+    let worst_ctx_bytes = 128usize
+        .saturating_add(decoded.globals.len().saturating_mul(16))
+        .saturating_add(total_extern_slots.saturating_mul(8));
+    if worst_ctx_bytes > MAX_CTX_BYTES {
+        return Err(format!("x64: Ctx storage ({worst_ctx_bytes} B) exceeds cap {MAX_CTX_BYTES} B"));
     }
 
     // Globals: evaluate all initializers; track which globals are written or exported-mutable.

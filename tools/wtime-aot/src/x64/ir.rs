@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use wtime_types::ValType;
 use wtime_validate::{DecodedModule, Immediate, Instruction};
 
-use super::module::{X64ConstVal, X64Module};
+use super::module::{MAX_FRAME_SCAN_WRITES, MAX_IF_SNAPSHOT_ENTRIES, X64ConstVal, X64Module};
 use super::TRAP_OOB;
 
 pub type Res<T> = Result<T, String>;
@@ -635,12 +635,13 @@ struct FrameScan {
     frame_locals: HashMap<usize, Vec<u32>>,
 }
 
-fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> FrameScan {
+fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> Res<FrameScan> {
     // Pass 1: find matching `end` PC for every `block`/`loop`/`if`.
     let mut end_pc = vec![0usize; code.len()];
     let mut open_pcs: Vec<(usize, bool)> = Vec::new(); // (open_pc, is_loop)
     let mut frame_writes: HashMap<usize, Vec<u32>> = HashMap::new();
     let mut last_read = vec![0usize; n_locals];
+    let mut total_marks = 0usize;
 
     // First find end_pc of each structured block so loop reads can extend `last_read` to loop end.
     {
@@ -682,6 +683,12 @@ fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> FrameScan {
             }
             0x21 | 0x22 => {
                 if let Immediate::Index(x) = insn.immediate {
+                    total_marks = total_marks.saturating_add(open_pcs.len());
+                    if total_marks > MAX_FRAME_SCAN_WRITES {
+                        return Err(format!(
+                            "x64: nested frame local-write scan ({total_marks}) exceeds cap {MAX_FRAME_SCAN_WRITES}"
+                        ));
+                    }
                     for &(fpc, _) in &open_pcs {
                         frame_writes.entry(fpc).or_default().push(x);
                     }
@@ -705,7 +712,7 @@ fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> FrameScan {
             frame_locals.insert(fpc, locals);
         }
     }
-    FrameScan { frame_locals }
+    Ok(FrameScan { frame_locals })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1049,7 +1056,7 @@ fn block_type_tys(module: &X64Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)
         Immediate::Block(-3) => (vec![], vec![Ty::F32]),
         Immediate::Block(-4) => (vec![], vec![Ty::F64]),
         Immediate::Block(-5) => (vec![], vec![Ty::V128]),
-        Immediate::Block(-16 | -17) => (vec![], vec![Ty::I64]),
+        Immediate::Block(-17) => (vec![], vec![Ty::I64]),
         Immediate::BlockType(t) => (vec![], vec![Ty::from_val(*t)]),
         Immediate::Block(i) if *i >= 0 => {
             let t = module.module_types.get(*i as usize).ok_or("block type index")?;
@@ -1074,7 +1081,8 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
         local_tys.push(Ty::from_val(vt));
     }
 
-    let scan = scan_frame_locals(&body.instructions, local_tys.len());
+    let scan = scan_frame_locals(&body.instructions, local_tys.len())?;
+    let mut total_if_snapshot_entries: usize = 0;
     // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
     // allocated native frame bytes and call depth.
     let mut b = Builder::new(func_index, result_tys.clone(), true);
@@ -1256,6 +1264,12 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                 b.add_pred(else_bb);
                 b.cur_bb = then_bb;
                 let if_entry_params = stack[height..].to_vec();
+                total_if_snapshot_entries = total_if_snapshot_entries.saturating_add(locals.len());
+                if total_if_snapshot_entries > MAX_IF_SNAPSHOT_ENTRIES {
+                    return Err(format!(
+                        "x64: function {func_index} if-nesting local snapshot budget ({total_if_snapshot_entries}) exceeds cap {MAX_IF_SNAPSHOT_ENTRIES}"
+                    ));
+                }
                 let if_entry_locals = locals.clone();
                 frames.push(BuildFrame {
                     kind: FrameKind::If,
@@ -1287,7 +1301,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                 b.cur_bb = f.else_bb.unwrap();
                 stack.truncate(f.height);
                 stack.extend_from_slice(&f.if_entry_params);
-                locals = f.if_entry_locals.clone();
+                locals = std::mem::take(&mut f.if_entry_locals);
             }
             0x0b => {
                 // end
