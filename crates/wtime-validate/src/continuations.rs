@@ -55,10 +55,11 @@ impl Context<'_> {
                 )))
             }
             0xe2 => {
-                let t = self
+                let &ti = self
                     .tags
                     .get(index(i)?)
                     .ok_or_else(|| invalid("suspend tag index out of bounds"))?;
+                let t = self.ty(ti)?;
                 s.op(&t.params, &t.results)?
             }
             0xe3..=0xe5 => {
@@ -69,10 +70,11 @@ impl Context<'_> {
                 };
                 let (_, ft) = self.cont(ty)?;
                 for (tag, label) in handlers {
-                    let tag = self
+                    let &ti = self
                         .tags
                         .get(*tag as usize)
                         .ok_or_else(|| invalid("handler tag index out of bounds"))?;
+                    let tag = self.ty(ti)?;
                     if let Some(label) = label {
                         let target_view = s.label(*label as usize, &self.m.types)?;
                         let (last, target) = target_view
@@ -108,10 +110,11 @@ impl Context<'_> {
                 match i.opcode {
                     0xe3 => s.pop_all(&ft.params)?,
                     0xe4 => {
-                        let t = self
+                        let &ti = self
                             .tags
                             .get(tag.ok_or_else(|| invalid("resume_throw tag missing"))? as usize)
                             .ok_or_else(|| invalid("resume_throw tag out of bounds"))?;
+                        let t = self.ty(ti)?;
                         check(t.results.is_empty(), "resume_throw requires exception tag")?;
                         s.pop_all(&t.params)?
                     }
@@ -125,10 +128,11 @@ impl Context<'_> {
                 } else {
                     return Err(invalid("invalid switch immediate"));
                 };
-                let tag = self
+                let &ti = self
                     .tags
                     .get(tag)
                     .ok_or_else(|| invalid("switch tag out of bounds"))?;
+                let tag = self.ty(ti)?;
                 check(tag.params.is_empty(), "switch tag must have no parameters")?;
                 let (_, ft) = self.cont(ty)?;
                 let last = ft

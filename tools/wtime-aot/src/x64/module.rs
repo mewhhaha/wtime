@@ -5,13 +5,37 @@
 //! enforces an explicit Stage 1 admission contract before emitting any IR or code.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use wtime_types::{CompositeType, FuncType, HeapType, IndexType, ValType};
+use wtime_types::{CompositeType, FeatureSet, FuncType, HeapType, IndexType, ResourceLimits, ValType};
 use wtime_validate::{DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode};
 
 pub type Res<T> = Result<T, String>;
+
+/// Exact Stage 1 Wasm feature profile enforced right at the front door of `wtime_validate::validate`,
+/// disabling unsupported proposals (exceptions, GC, memory64, multi-memory, threads, tail-call,
+/// function-references, custom page sizes/descriptors, stack switching) before decoding/validation.
+pub const fn x64_validate_features() -> FeatureSet {
+    FeatureSet {
+        mutable_globals: true,
+        saturating_float_to_int: true,
+        sign_extension: true,
+        multi_value: true,
+        reference_types: true,
+        bulk_memory: true,
+        simd: true,
+        extended_const: true,
+        ..FeatureSet::mvp()
+    }
+}
+
+/// Exact Stage 1 resource limits passed to `wtime_validate::validate` (strict `ResourceLimits::default()`,
+/// NOT `codegen::validate_module`'s relaxed 16M-function override).
+pub fn x64_validate_limits() -> ResourceLimits {
+    ResourceLimits::default()
+}
 
 /// Admission & compilation caps preventing OOM, peak-memory spikes, or integer overflow on adversarial modules.
 pub const MAX_MEM_PAGES: u64 = 65_536;
@@ -41,10 +65,12 @@ pub const MAX_TOTAL_CODE_BYTES: usize = 512 << 20; // 512 MiB aggregate across w
 pub const MAX_TOTAL_RODATA_BYTES: usize = 128 << 20; // 128 MiB aggregate across workers
 
 /// Shared cross-worker compilation budget enforcing cooperative `--time-limit` checks,
-/// peak concurrent liveness memory, and aggregate emitted code/rodata limits BEFORE growth.
+/// peak concurrent liveness scheduling (deterministic serial/parallel acceptance), and
+/// aggregate emitted code/rodata limits BEFORE growth.
 pub struct CompileBudget {
     deadline: Option<Instant>,
-    in_flight_liveness: AtomicUsize,
+    liveness_mu: Mutex<usize>,
+    liveness_cv: Condvar,
     total_code_bytes: AtomicUsize,
     total_rodata_bytes: AtomicUsize,
 }
@@ -57,7 +83,9 @@ pub struct LivenessBudgetGuard<'a> {
 
 impl Drop for LivenessBudgetGuard<'_> {
     fn drop(&mut self) {
-        self.budget.in_flight_liveness.fetch_sub(self.bytes, Ordering::AcqRel);
+        let mut cur = self.budget.liveness_mu.lock().unwrap_or_else(|e| e.into_inner());
+        *cur = cur.saturating_sub(self.bytes);
+        self.budget.liveness_cv.notify_all();
     }
 }
 
@@ -65,7 +93,8 @@ impl CompileBudget {
     pub fn new(deadline: Option<Instant>) -> Self {
         Self {
             deadline,
-            in_flight_liveness: AtomicUsize::new(0),
+            liveness_mu: Mutex::new(0),
+            liveness_cv: Condvar::new(),
             total_code_bytes: AtomicUsize::new(0),
             total_rodata_bytes: AtomicUsize::new(0),
         }
@@ -79,23 +108,36 @@ impl CompileBudget {
         Ok(())
     }
 
-    /// Atomically reserves `bytes` against `MAX_CONCURRENT_LIVENESS_BYTES` BEFORE allocating
-    /// liveness bitset matrices across parallel workers.
+    /// Schedules parallel workers against `MAX_CONCURRENT_LIVENESS_BYTES` BEFORE allocating
+    /// liveness bitset matrices, waiting cleanly rather than spuriously rejecting a valid module
+    /// due to worker overlap (deterministic rejection stays solely on per-function `MAX_LIVENESS_BYTES`).
     pub fn reserve_liveness(&self, bytes: usize) -> Res<LivenessBudgetGuard<'_>> {
-        let mut cur = self.in_flight_liveness.load(Ordering::Acquire);
+        if bytes > MAX_LIVENESS_BYTES || bytes > MAX_CONCURRENT_LIVENESS_BYTES {
+            return Err(format!(
+                "x64: liveness matrix ({bytes} B) exceeds cap {MAX_LIVENESS_BYTES} B"
+            ));
+        }
+        let mut cur = self.liveness_mu.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            let next = cur
-                .checked_add(bytes)
-                .ok_or("x64: concurrent liveness memory overflow")?;
-            if next > MAX_CONCURRENT_LIVENESS_BYTES {
-                return Err(format!(
-                    "x64: concurrent liveness memory ({next} B) exceeds peak cap {MAX_CONCURRENT_LIVENESS_BYTES} B"
-                ));
+            self.check_deadline()?;
+            if cur.checked_add(bytes).is_some_and(|next| next <= MAX_CONCURRENT_LIVENESS_BYTES) {
+                *cur += bytes;
+                return Ok(LivenessBudgetGuard { budget: self, bytes });
             }
-            match self.in_flight_liveness.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => return Ok(LivenessBudgetGuard { budget: self, bytes }),
-                Err(actual) => cur = actual,
-            }
+            cur = match self.deadline {
+                Some(dl) => {
+                    let rem = dl.saturating_duration_since(Instant::now());
+                    if rem.is_zero() {
+                        return Err("x64: compilation time limit exceeded".into());
+                    }
+                    let (guard, _) = self
+                        .liveness_cv
+                        .wait_timeout(cur, rem)
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard
+                }
+                None => self.liveness_cv.wait(cur).unwrap_or_else(|e| e.into_inner()),
+            };
         }
     }
 
@@ -426,6 +468,13 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     }
 
     // Charge per-function/total locals AND aggregate signature arity (params + results) BEFORE allocating.
+    if decoded.functions.len() != decoded.code.len() {
+        return Err(format!(
+            "x64: function/code count mismatch ({} vs {})",
+            decoded.functions.len(),
+            decoded.code.len()
+        ));
+    }
     let mut precheck_total_locals = 0usize;
     let mut total_sig_arity = 0usize;
     for (bi, body) in decoded.code.iter().enumerate() {
@@ -676,7 +725,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         for &vt in &body.locals {
             check_val_type(vt)?;
         }
-        for insn in &body.instructions {
+        for (ii, insn) in body.instructions.iter().enumerate() {
+            if let Some(b) = budget
+                && (ii & 4095) == 4095
+            {
+                b.check_deadline()?;
+            }
             check_supported_opcode(insn.opcode, &insn.immediate, &type_arity, &type_admitted, &mut total_sig_arity)?;
             match insn.opcode {
                 0x0e => {

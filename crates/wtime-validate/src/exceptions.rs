@@ -2,22 +2,25 @@ use super::*;
 impl Context<'_> {
     pub(super) fn add_tag(&mut self, t: TagType) -> Result<()> {
         self.enabled(self.features.exception_handling)?;
-        let ty = self.ty(t.function.as_usize())?.clone();
+        budget(self.tags.len() < self.limits.max_tags, "tag declaration limit exceeded")?;
+        let ti = t.function.as_usize();
+        let ty = self.ty(ti)?;
         check(
             ty.results.is_empty() || self.features.stack_switching,
             "tag type must have no results",
         )?;
-        self.tags.push(ty);
+        self.tags.push(ti);
         Ok(())
     }
     pub(super) fn exception_instruction(&self, s: &mut Stack, i: &Instruction) -> Result<()> {
         self.enabled(self.features.exception_handling)?;
         match i.opcode {
             0x08 => {
-                let t = self
+                let &ti = self
                     .tags
                     .get(index(i)?)
                     .ok_or_else(|| invalid("tag index out of bounds"))?;
+                let t = self.ty(ti)?;
                 check(t.results.is_empty(), "throw tag must have no results")?;
                 s.pop_all(&t.params)?;
                 s.dead()
@@ -81,30 +84,29 @@ impl Context<'_> {
                     _ => return Err(invalid("invalid try_table block type")),
                 };
                 for c in catches {
-                    let mut delivered = if let Some(tag) = c.tag {
-                        {
-                            let tag = self
-                                .tags
-                                .get(tag as usize)
-                                .ok_or_else(|| invalid("catch tag index out of bounds"))?;
-                            check(tag.results.is_empty(), "catch tag must have no results")?;
-                            tag.params.clone()
-                        }
+                    let params: &[ValType] = if let Some(tag) = c.tag {
+                        let &ti = self
+                            .tags
+                            .get(tag as usize)
+                            .ok_or_else(|| invalid("catch tag index out of bounds"))?;
+                        let tag = self.ty(ti)?;
+                        check(tag.results.is_empty(), "catch tag must have no results")?;
+                        &tag.params
                     } else {
-                        vec![]
+                        &[]
                     };
-                    if c.kind == 1 || c.kind == 3 {
-                        delivered.push(ValType::Ref(RefType::new(false, HeapType::Exn)))
-                    }
+                    let exn = (c.kind == 1 || c.kind == 3)
+                        .then_some(ValType::Ref(RefType::new(false, HeapType::Exn)));
                     let target = s.label(c.label as usize, &self.m.types)?;
-                    check(
-                        delivered.len() == target.as_slice().len()
-                            && delivered
-                                .iter()
-                                .zip(target.as_slice())
-                                .all(|(a, b)| value_subtype(*a, *b, &self.types)),
-                        "catch target type mismatch",
-                    )?;
+                    let tslice = target.as_slice();
+                    let expected_len = params.len() + usize::from(exn.is_some());
+                    let matches = expected_len == tslice.len()
+                        && params
+                            .iter()
+                            .chain(exn.iter())
+                            .zip(tslice)
+                            .all(|(a, b)| value_subtype(*a, *b, &self.types));
+                    check(matches, "catch target type mismatch")?;
                 }
                 let params = sig.params(&self.m.types);
                 s.pop_all(params.as_slice())?;

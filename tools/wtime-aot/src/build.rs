@@ -27,10 +27,13 @@
 //! key that includes the profile.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sha256::Sha256;
+
+static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
@@ -137,88 +140,238 @@ pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, 
     cached(&prepared, prepared.key.clone(), &[], options, "")
 }
 
-/// Enforces an owner-controlled (`0o700`), symlink-free private directory hierarchy on Unix.
-/// Fails closed if `path` is a symlink (or traverses a non-root symlink), `chmod(0o700)` fails,
-/// non-owner permission bits remain, `path` is not owned by the current effective UID (covering
-/// `euid == 0` / `CAP_FOWNER`), or any ancestor is owned by an untrusted UID (preventing
-/// attacker-owned `0o1777` sticky directory replacement) or writable without the sticky bit.
-fn ensure_private_dir(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    #[cfg(unix)]
+/// Returns the current effective UID on Unix, failing closed if unavailable.
+/// On Linux this parses `Uid:` field 2 (`euid`) from `/proc/self/status` so it stays exact
+/// even under `PR_SET_DUMPABLE=0` (where `/proc/self` metadata reports `st_uid == 0`).
+#[cfg(unix)]
+fn current_euid() -> Result<u32, String> {
+    #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let proc_euid = fs::metadata("/proc/self").ok().map(|m| m.uid());
-        let mut prefix = PathBuf::new();
-        for comp in path.components() {
-            prefix.push(comp);
-            if let Ok(m) = fs::symlink_metadata(&prefix)
-                && m.file_type().is_symlink()
-                && m.uid() != 0
-            {
-                return Err(format!(
-                    "{}: cache hierarchy traverses non-root symlink {}",
-                    path.display(),
-                    prefix.display()
-                ));
+        let status = fs::read_to_string("/proc/self/status")
+            .map_err(|e| format!("reading /proc/self/status for effective uid: {e}"))?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("Uid:") {
+                let euid_str = rest
+                    .split_whitespace()
+                    .nth(1)
+                    .ok_or_else(|| "malformed Uid line in /proc/self/status".to_string())?;
+                return euid_str
+                    .parse::<u32>()
+                    .map_err(|e| format!("parsing effective uid from /proc/self/status: {e}"));
             }
         }
-        let sym_meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_dir() {
-            return Err(format!("{}: cache path must be a real directory (not a symlink)", path.display()));
+        Err("missing Uid line in /proc/self/status".to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = Command::new("/usr/bin/id")
+            .arg("-u")
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("running /usr/bin/id -u for effective uid: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("/usr/bin/id -u failed ({})", out.status));
         }
-        // Propagate `set_permissions` error: on Unix `chmod` fails with `EPERM` if not owned by euid.
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("{}: cannot enforce owner-only 0700 cache permissions: {e}", path.display()))?;
-        let post = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if post.file_type().is_symlink() || !post.file_type().is_dir() {
-            return Err(format!("{}: cache directory changed type during validation", path.display()));
-        }
-        if post.permissions().mode() & 0o077 != 0 {
-            return Err(format!("{}: cache directory must be owner-only (0700)", path.display()));
-        }
-        let expected_uid = match proc_euid {
-            Some(euid) => {
-                if post.uid() != euid {
-                    return Err(format!(
-                        "{}: cache directory owner uid {} does not match effective uid {euid}",
-                        path.display(),
-                        post.uid()
-                    ));
-                }
-                euid
-            }
-            None => post.uid(),
-        };
-        let canon = path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))?;
-        for anc in canon.ancestors().skip(1) {
-            let am = fs::symlink_metadata(anc).map_err(|e| format!("{}: {e}", anc.display()))?;
-            if am.file_type().is_symlink() || !am.file_type().is_dir() {
-                return Err(format!(
-                    "{}: cache ancestor {} is not a real directory",
-                    path.display(),
-                    anc.display()
-                ));
-            }
-            let uid = am.uid();
-            if uid != 0 && uid != expected_uid {
-                return Err(format!(
-                    "{}: cache ancestor {} is owned by untrusted uid {uid} (expected 0 or {expected_uid})",
-                    path.display(),
-                    anc.display()
-                ));
-            }
-            let m = am.permissions().mode();
-            // Reject non-sticky group/world-writable ancestors that would allow directory replacement.
-            if (m & 0o022) != 0 && (m & 0o1000) == 0 {
-                return Err(format!(
-                    "{}: cache ancestor {} is writable without sticky bit",
-                    path.display(),
-                    anc.display()
-                ));
-            }
-        }
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u32>()
+            .map_err(|e| format!("parsing effective uid from /usr/bin/id -u: {e}"))
+    }
+}
+
+#[cfg(unix)]
+fn validate_trusted_ancestor(anc: &Path, target: &Path, euid: u32) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let am = fs::symlink_metadata(anc).map_err(|e| format!("{}: {e}", anc.display()))?;
+    if am.file_type().is_symlink() || !am.file_type().is_dir() {
+        return Err(format!(
+            "{}: cache ancestor {} is not a real directory",
+            target.display(),
+            anc.display()
+        ));
+    }
+    let uid = am.uid();
+    if uid != 0 && uid != euid {
+        return Err(format!(
+            "{}: cache ancestor {} is owned by untrusted uid {uid} (expected 0 or {euid})",
+            target.display(),
+            anc.display()
+        ));
+    }
+    let m = am.permissions().mode();
+    // Reject non-sticky group/world-writable ancestors that would allow directory replacement.
+    if (m & 0o022) != 0 && (m & 0o1000) == 0 {
+        return Err(format!(
+            "{}: cache ancestor {} is writable without sticky bit",
+            target.display(),
+            anc.display()
+        ));
     }
     Ok(())
+}
+
+/// Enforces an owner-controlled (`0o700`), symlink-free private directory hierarchy on Unix
+/// BEFORE performing any directory creation or `chmod`, returning the verified canonical path.
+/// Fails closed if effective UID cannot be determined, `path` contains `..` or targets `/`,
+/// traverses a non-root symlink, has untrusted/non-sticky-writable ancestors, targets a foreign-
+/// owned or pre-existing group/world-writable directory, or fails `0o700` creation/tightening.
+fn ensure_private_dir(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        let euid = current_euid()?;
+        let abs_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("resolving current_dir for {}: {e}", path.display()))?
+                .join(path)
+        };
+        let mut existing = PathBuf::new();
+        let mut missing: Vec<std::ffi::OsString> = Vec::new();
+        let mut in_missing = false;
+        for comp in abs_path.components() {
+            match comp {
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    return Err(format!("{}: cache path must not contain '..' components", path.display()));
+                }
+                Component::RootDir => {
+                    if in_missing {
+                        return Err(format!("{}: malformed cache path", path.display()));
+                    }
+                    existing.push(comp.as_os_str());
+                }
+                Component::Prefix(_) => {
+                    return Err(format!("{}: unsupported path prefix", path.display()));
+                }
+                Component::Normal(part) => {
+                    if in_missing {
+                        missing.push(part.to_os_string());
+                        continue;
+                    }
+                    let candidate = existing.join(part);
+                    match fs::symlink_metadata(&candidate) {
+                        Ok(m) => {
+                            if m.file_type().is_symlink() {
+                                if m.uid() != 0 {
+                                    return Err(format!(
+                                        "{}: cache hierarchy traverses non-root symlink {}",
+                                        path.display(),
+                                        candidate.display()
+                                    ));
+                                }
+                            } else if !m.file_type().is_dir() {
+                                return Err(format!(
+                                    "{}: cache path component {} is not a directory",
+                                    path.display(),
+                                    candidate.display()
+                                ));
+                            }
+                            existing = candidate;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            in_missing = true;
+                            missing.push(part.to_os_string());
+                        }
+                        Err(e) => return Err(format!("{}: {e}", candidate.display())),
+                    }
+                }
+            }
+        }
+        if existing.as_os_str().is_empty() {
+            return Err(format!("{}: empty cache path", path.display()));
+        }
+        let canon_existing = existing.canonicalize().map_err(|e| format!("{}: {e}", existing.display()))?;
+        if missing.is_empty() {
+            if canon_existing.parent().is_none() {
+                return Err(format!("{}: refusing to use filesystem root as cache directory", path.display()));
+            }
+            let sym = fs::symlink_metadata(&abs_path).map_err(|e| format!("{}: {e}", abs_path.display()))?;
+            if sym.file_type().is_symlink() || !sym.file_type().is_dir() {
+                return Err(format!("{}: cache path must be a real directory (not a symlink)", path.display()));
+            }
+            if sym.uid() != euid {
+                return Err(format!(
+                    "{}: cache directory owner uid {} does not match effective uid {euid}",
+                    path.display(),
+                    sym.uid()
+                ));
+            }
+            if sym.permissions().mode() & 0o022 != 0 {
+                return Err(format!(
+                    "{}: refusing pre-existing group/world-writable cache directory (mode {:o})",
+                    path.display(),
+                    sym.permissions().mode() & 0o7777
+                ));
+            }
+            for anc in canon_existing.ancestors().skip(1) {
+                validate_trusted_ancestor(anc, path, euid)?;
+            }
+            if sym.permissions().mode() & 0o077 != 0 {
+                fs::set_permissions(&canon_existing, fs::Permissions::from_mode(0o700))
+                    .map_err(|e| format!("{}: cannot enforce owner-only 0700 cache permissions: {e}", path.display()))?;
+            }
+            let post = fs::symlink_metadata(&canon_existing).map_err(|e| format!("{}: {e}", canon_existing.display()))?;
+            if post.file_type().is_symlink()
+                || !post.file_type().is_dir()
+                || post.uid() != euid
+                || post.permissions().mode() & 0o077 != 0
+                || post.dev() != sym.dev()
+                || post.ino() != sym.ino()
+            {
+                return Err(format!("{}: cache directory failed post-validation identity/mode checks", path.display()));
+            }
+            return Ok(canon_existing);
+        }
+
+        // Creating missing tail: validate the entire existing ancestor chain (including `canon_existing`) BEFORE creating anything.
+        for anc in canon_existing.ancestors() {
+            validate_trusted_ancestor(anc, path, euid)?;
+        }
+        let mut cur = canon_existing;
+        for part in missing {
+            cur.push(&part);
+            let mut db = fs::DirBuilder::new();
+            db.mode(0o700);
+            match db.create(&cur) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let pre = fs::symlink_metadata(&cur).map_err(|e| format!("{}: {e}", cur.display()))?;
+                    if pre.file_type().is_symlink()
+                        || !pre.file_type().is_dir()
+                        || pre.uid() != euid
+                        || pre.permissions().mode() & 0o022 != 0
+                    {
+                        return Err(format!("{}: concurrently created cache dir failed ownership/mode checks", cur.display()));
+                    }
+                    if pre.permissions().mode() & 0o077 != 0 {
+                        fs::set_permissions(&cur, fs::Permissions::from_mode(0o700))
+                            .map_err(|e| format!("{}: cannot enforce 0700 permissions: {e}", cur.display()))?;
+                    }
+                }
+                Err(e) => return Err(format!("{}: {e}", cur.display())),
+            }
+            let post = fs::symlink_metadata(&cur).map_err(|e| format!("{}: {e}", cur.display()))?;
+            if post.file_type().is_symlink()
+                || !post.file_type().is_dir()
+                || post.uid() != euid
+                || post.permissions().mode() & 0o077 != 0
+            {
+                return Err(format!("{}: created cache directory failed 0700 ownership checks", cur.display()));
+            }
+        }
+        let canon_leaf = cur.canonicalize().map_err(|e| format!("{}: {e}", cur.display()))?;
+        if canon_leaf != cur {
+            return Err(format!("{}: cache directory changed path during creation", cur.display()));
+        }
+        Ok(canon_leaf)
+    }
 }
 
 /// Marks a newly staged native artifact immutable (`0o555`) before atomic publication on Unix.
@@ -234,7 +387,8 @@ fn mark_artifact_immutable(path: &Path) -> Result<(), String> {
 
 /// Atomically writes `digest_file` containing `sha` (propagating all errors).
 fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_file: &Path) -> Result<(), String> {
-    let staged_sha = entry.join(format!("{artifact_name}.sha256.{}", std::process::id()));
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staged_sha = entry.join(format!("{artifact_name}.sha256.{}.{seq}", std::process::id()));
     if let Err(e) = fs::write(&staged_sha, format!("{sha}\n")) {
         let _ = fs::remove_file(&staged_sha);
         return Err(format!("{}: {e}", staged_sha.display()));
@@ -246,10 +400,11 @@ fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_f
     Ok(())
 }
 
-/// Acquires an exclusive publication lock on `entry/.publish.lock`.
-fn lock_cache_entry(entry: &Path) -> Result<fs::File, String> {
-    ensure_private_dir(entry)?;
-    let lock_path = entry.join(".publish.lock");
+/// Acquires an exclusive publication lock on `entry/.publish.lock`, returning the lock file
+/// and the verified canonical entry directory.
+fn lock_cache_entry(entry: &Path) -> Result<(fs::File, PathBuf), String> {
+    let canon_entry = ensure_private_dir(entry)?;
+    let lock_path = canon_entry.join(".publish.lock");
     let lock_file = fs::File::options()
         .read(true)
         .write(true)
@@ -258,22 +413,39 @@ fn lock_cache_entry(entry: &Path) -> Result<fs::File, String> {
         .open(&lock_path)
         .map_err(|e| format!("{}: {e}", lock_path.display()))?;
     lock_file.lock().map_err(|e| format!("locking {}: {e}", lock_path.display()))?;
-    Ok(lock_file)
+    Ok((lock_file, canon_entry))
 }
 
-/// Verifies `artifact` exists and matches its `.sha256` sidecar.
+/// Verifies `artifact` is a non-symlink immutable regular file matching its `.sha256` sidecar.
 fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
-    artifact.is_file()
-        && fs::read_to_string(digest_file).ok().is_some_and(|expected| {
-            fs::read(artifact).ok().is_some_and(|bytes| crate::sha256::hex(&bytes) == expected.trim())
-        })
+    let Ok(art_meta) = fs::symlink_metadata(artifact) else {
+        return false;
+    };
+    if art_meta.file_type().is_symlink() || !art_meta.file_type().is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if art_meta.permissions().mode() & 0o222 != 0 {
+            return false;
+        }
+    }
+    let Ok(sha_meta) = fs::symlink_metadata(digest_file) else {
+        return false;
+    };
+    if sha_meta.file_type().is_symlink() || !sha_meta.file_type().is_file() {
+        return false;
+    }
+    fs::read_to_string(digest_file).ok().is_some_and(|expected| {
+        fs::read(artifact).ok().is_some_and(|bytes| crate::sha256::hex(&bytes) == expected.trim())
+    })
 }
 
 /// Fast C99 + parallel `clang` + `ld.lld` build path for Blot ABI 8 cdylibs.
 fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, String> {
     let wasm = fs::read(module).map_err(|e| format!("{}: {e}", module.display()))?;
-    ensure_private_dir(cache)?;
-    let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
+    let cache = ensure_private_dir(cache)?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
     let (cc, cc_ver, _) = crate::cgen::detect_cc()?;
@@ -289,8 +461,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
     field(&mut key, "c opt", options.c_opt.tag().as_bytes());
     let key_hex = key.hex();
 
-    let entry = cache.join(&key_hex);
-    let _lock = lock_cache_entry(&entry)?;
+    let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex))?;
     let program = entry.join("library.so");
     let digest_file = entry.join("library.so.sha256");
     if verified_cached_artifact(&program, &digest_file) {
@@ -298,8 +469,17 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
     }
     let _ = fs::remove_file(&program);
     let _ = fs::remove_file(&digest_file);
-    let staged = entry.join(format!("library.so.{}", std::process::id()));
-    let res = crate::cgen::build_c_blot_cdylib(&wasm, &cache, options.target_cpu, options.jobs, options.c_opt, &staged);
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
+    let res = crate::cgen::build_c_blot_cdylib(
+        &wasm,
+        &cache,
+        options.target_cpu,
+        options.jobs,
+        options.c_opt,
+        Some(options.time_limit),
+        &staged,
+    );
     match res {
         Ok(()) => {
             let so_bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
@@ -347,7 +527,8 @@ pub fn build_trained(
     let instrumented = cached(&prepared, key, &["-Cprofile-generate".into()], options, "instrumented for profiling\n")?;
 
     // The training run, in a directory of its own for the raw profiles.
-    let profiles = prepared.cache.join("work").join(format!("profile-{}", std::process::id()));
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let profiles = prepared.cache.join("work").join(format!("profile-{}-{seq}", std::process::id()));
     let _ = fs::remove_dir_all(&profiles);
     fs::create_dir_all(&profiles).map_err(|e| format!("{}: {e}", profiles.display()))?;
     let result = train_and_merge(&instrumented, train, &profiles, options);
@@ -362,7 +543,7 @@ pub fn build_trained(
     let mut key = prepared.key.clone();
     field(&mut key, "profile-use", &profile);
     let digest = crate::sha256::hex(&profile);
-    let stored = prepared.cache.join("work").join(format!("profile-{digest}-{}.profdata", std::process::id()));
+    let stored = prepared.cache.join("work").join(format!("profile-{digest}-{}-{seq}.profdata", std::process::id()));
     fs::write(&stored, &profile).map_err(|e| format!("{}: {e}", stored.display()))?;
     let _ = fs::remove_dir_all(&profiles);
     let flag = format!("-Cprofile-use={}", stored.display());
@@ -388,8 +569,7 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
         Some(path) => path.to_string(),
         None => module.file_name().map_or("module.wasm".into(), |name| name.to_string_lossy().into_owned()),
     };
-    ensure_private_dir(cache)?;
-    let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
+    let cache = ensure_private_dir(cache)?;
     // Cargo reads configuration (which can name a rustc wrapper to run) from
     // every ancestor of the directory it builds in; none may have any.
     for directory in cache.ancestors() {
@@ -451,8 +631,7 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
 fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Options, note: &str) -> Result<PathBuf, String> {
     let key = key.hex();
     let cache = &prepared.cache;
-    let entry = cache.join(&key);
-    let _lock = lock_cache_entry(&entry)?;
+    let (_lock, entry) = lock_cache_entry(&cache.join(&key))?;
     let artifact_name = match options.target {
         crate::codegen::Target::GooseBin => "program",
         crate::codegen::Target::BlotCdylib => "library.so",
@@ -469,10 +648,11 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
     // directory included, then move the program into place: builds of the
     // same or of different modules share nothing while they run.
     let name = format!("aot-{key}");
-    let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let work = cache.join("work").join(format!("{key}-{}-{seq}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     let result = generate_and_compile(prepared, &work, &name, rustflags, options).and_then(|built| {
-        let staged = entry.join(format!("{artifact_name}.{}", std::process::id()));
+        let staged = entry.join(format!("{artifact_name}.{}.{seq}", std::process::id()));
         fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
         let bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
         let sha = crate::sha256::hex(&bytes);

@@ -204,10 +204,13 @@ fn fast_instruction(
     }
 }
 struct Context<'a> {
-    tags: Vec<FuncType>,
+    tags: Vec<usize>,
     types: Rc<types::TypeEnvironment>,
     m: &'a DecodedModule,
     funcs: Vec<usize>,
+    imported_funcs: usize,
+    exact_func_imports: std::sync::Arc<Vec<bool>>,
+    declared_funcs: std::sync::Arc<HashSet<u32>>,
     globals: Vec<GlobalType>,
     tables: Vec<TableType>,
     memories: Vec<MemoryType>,
@@ -401,6 +404,9 @@ pub fn validate(
         )),
         m: &m,
         funcs: vec![],
+        imported_funcs: 0,
+        exact_func_imports: std::sync::Arc::new(vec![]),
+        declared_funcs: std::sync::Arc::new(HashSet::new()),
         globals: vec![],
         tables: vec![],
         memories: vec![],
@@ -425,18 +431,21 @@ pub fn validate(
                 c.valtype(*v)?
             }
         }
+        let mut exact_imports = Vec::new();
         for im in &m.imports {
             match &im.kind {
                 ImportKind::Func(t) => {
                     let ti = t.0 as usize;
                     c.ty(ti)?;
                     c.funcs.push(ti);
+                    exact_imports.push(false);
                 }
                 ImportKind::ExactFunc(t) => {
                     c.enabled(features.custom_descriptors)?;
                     let ti = t.0 as usize;
                     c.ty(ti)?;
                     c.funcs.push(ti);
+                    exact_imports.push(true);
                 }
                 ImportKind::Global(t) => {
                     c.enabled(!t.mutable || features.mutable_globals)?;
@@ -448,6 +457,8 @@ pub fn validate(
                 ImportKind::Tag(t) => c.add_tag(*t)?,
             }
         }
+        c.imported_funcs = exact_imports.len();
+        c.exact_func_imports = std::sync::Arc::new(exact_imports);
         for t in &m.tags {
             c.add_tag(*t)?;
         }
@@ -464,7 +475,8 @@ pub fn validate(
             c.funcs.len() <= limits.max_functions
                 && c.globals.len() + m.globals.len() <= limits.max_globals
                 && c.tables.len() <= limits.max_tables
-                && c.memories.len() <= limits.max_memories,
+                && c.memories.len() <= limits.max_memories
+                && c.tags.len() <= limits.max_tags,
             "imported declaration limits exceeded",
         )?;
         for t in &c.memories {
@@ -599,6 +611,27 @@ pub fn validate(
             m.functions.len() == m.code.len(),
             "function/code count mismatch",
         )?;
+        // Precompute declared function references ONCE so `ref.func` in bodies is O(1).
+        let mut declared = HashSet::new();
+        for e in &m.exports {
+            if e.kind == ExternalKind::Func {
+                declared.insert(e.index);
+            }
+        }
+        for j in m
+            .elements
+            .iter()
+            .flat_map(|e| e.init.iter().flatten())
+            .chain(m.globals.iter().flat_map(|g| g.init.iter()))
+            .chain(m.table_inits.iter().filter_map(|v| v.as_ref()).flatten())
+        {
+            if j.opcode == 0xd2
+                && let Immediate::Index(x) = j.immediate
+            {
+                declared.insert(x);
+            }
+        }
+        c.declared_funcs = std::sync::Arc::new(declared);
         // Bodies are validated independently, in parallel when the code
         // section is large, each with its own type environment whose work
         // is counted from zero. The work is then charged in body order, so
@@ -615,7 +648,17 @@ pub fn validate(
             return Ok(());
         }
         let validated = {
-            let parts = (&c.tags, &c.funcs, &c.globals, &c.tables, &c.memories, c.imported_globals);
+            let parts = (
+                &c.tags,
+                &c.funcs,
+                c.imported_funcs,
+                &c.exact_func_imports,
+                &c.declared_funcs,
+                &c.globals,
+                &c.tables,
+                &c.memories,
+                c.imported_globals,
+            );
             wtime_types::parallel::map_ordered(
                 &pairs,
                 threads,
@@ -624,10 +667,13 @@ pub fn validate(
                     types: Rc::new(types::TypeEnvironment::new(&m.type_groups, limits.max_type_work)),
                     m: &m,
                     funcs: parts.1.clone(),
-                    globals: parts.2.clone(),
-                    tables: parts.3.clone(),
-                    memories: parts.4.clone(),
-                    imported_globals: parts.5,
+                    imported_funcs: parts.2,
+                    exact_func_imports: parts.3.clone(),
+                    declared_funcs: parts.4.clone(),
+                    globals: parts.5.clone(),
+                    tables: parts.6.clone(),
+                    memories: parts.7.clone(),
+                    imported_globals: parts.8,
                     features,
                     limits,
                 },
@@ -803,27 +849,7 @@ impl Context<'_> {
             if i.opcode == 0xd2 {
                 let n = index(i)? as u32;
                 check(
-                    self.m
-                        .exports
-                        .iter()
-                        .any(|e| e.kind == ExternalKind::Func && e.index == n)
-                        || self
-                            .m
-                            .elements
-                            .iter()
-                            .flat_map(|e| e.init.iter().flatten())
-                            .chain(self.m.globals.iter().flat_map(|g| g.init.iter()))
-                            .chain(
-                                self.m
-                                    .table_inits
-                                    .iter()
-                                    .filter_map(|v| v.as_ref())
-                                    .flatten(),
-                            )
-                            .any(|j| {
-                                j.opcode == 0xd2
-                                    && matches!(j.immediate,Immediate::Index(x) if x==n)
-                            }),
+                    self.declared_funcs.contains(&n),
                     "undeclared function reference",
                 )?;
             }
@@ -1281,34 +1307,15 @@ impl Context<'_> {
                 s.values.push(I32)
             }
             0xd2 => {
-                check(index(i)? < self.funcs.len(), "ref.func index out of bounds")?;
                 let n = index(i)?;
+                let &ti = self
+                    .funcs
+                    .get(n)
+                    .ok_or_else(|| invalid("ref.func index out of bounds"))?;
                 if self.features.function_references {
-                    let ty = self
-                        .m
-                        .imports
-                        .iter()
-                        .filter_map(|im| {
-                            if let ImportKind::Func(t) | ImportKind::ExactFunc(t) = im.kind {
-                                Some(t)
-                            } else {
-                                None
-                            }
-                        })
-                        .chain(self.m.functions.iter().copied())
-                        .nth(n)
-                        .ok_or_else(|| invalid("function index out of bounds"))?;
-                    let imported = self
-                        .m
-                        .imports
-                        .iter()
-                        .filter(|i| {
-                            matches!(i.kind, ImportKind::Func(_) | ImportKind::ExactFunc(_))
-                        })
-                        .collect::<Vec<_>>();
+                    let ty = TypeIdx(ti as u32);
                     let exact = self.features.custom_descriptors
-                        && (n >= imported.len()
-                            || matches!(imported[n].kind, ImportKind::ExactFunc(_)));
+                        && (n >= self.imported_funcs || self.exact_func_imports[n]);
                     s.values.push(Ref(RefType::new(
                         false,
                         if exact {

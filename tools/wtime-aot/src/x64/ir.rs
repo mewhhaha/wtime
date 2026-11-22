@@ -646,7 +646,7 @@ struct FrameScan {
     frame_locals: HashMap<usize, Vec<u32>>,
 }
 
-fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> Res<FrameScan> {
+fn scan_frame_locals(code: &[Instruction], n_locals: usize, budget: Option<&CompileBudget>) -> Res<FrameScan> {
     // Pass 1: find matching `end` PC for every `block`/`loop`/`if`.
     let mut end_pc = vec![0usize; code.len()];
     let mut open_pcs: Vec<(usize, bool)> = Vec::new(); // (open_pc, is_loop)
@@ -659,6 +659,11 @@ fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> Res<FrameScan> {
     {
         let mut stk: Vec<usize> = Vec::new();
         for (pc, insn) in code.iter().enumerate() {
+            if let Some(bg) = budget
+                && (pc & 4095) == 4095
+            {
+                bg.check_deadline()?;
+            }
             match insn.opcode {
                 0x02..=0x04 => stk.push(pc),
                 0x0b => {
@@ -672,6 +677,11 @@ fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> Res<FrameScan> {
     }
 
     for (pc, insn) in code.iter().enumerate() {
+        if let Some(bg) = budget
+            && (pc & 4095) == 4095
+        {
+            bg.check_deadline()?;
+        }
         match insn.opcode {
             0x02 | 0x04 => open_pcs.push((pc, false)),
             0x03 => {
@@ -1124,7 +1134,7 @@ pub fn lower_wasm_to_ir_with_budget(
         local_tys.push(Ty::from_val(vt));
     }
 
-    let scan = scan_frame_locals(&body.instructions, local_tys.len())?;
+    let scan = scan_frame_locals(&body.instructions, local_tys.len(), budget)?;
     let mut total_if_snapshot_entries: usize = 0;
     // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
     // allocated native frame bytes and call depth.
@@ -2091,7 +2101,7 @@ pub fn lower_wasm_to_ir_with_budget(
 
     let mut ir = b.ir;
     if opt {
-        optimize_ir(&mut ir);
+        optimize_ir_with_budget(&mut ir, budget)?;
     }
     Ok(ir)
 }
@@ -2101,9 +2111,19 @@ pub fn lower_wasm_to_ir_with_budget(
 /// 2. Within-block redundant bounds-check elimination + pure load-run check hoisting.
 /// 3. Dead-instruction elimination (reverse use-count pass).
 pub fn optimize_ir(ir: &mut IrFunc) {
+    let _ = optimize_ir_with_budget(ir, None);
+}
+
+/// Runs `optimize_ir` while cooperatively polling `budget`'s deadline across blocks.
+pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) -> Res<()> {
     // Pass 1: Fuse `BranchIf` with defining `Cmp`/`Eqz`/`ConstI32` in the same block.
     let mut dropped_preds: Vec<BlockId> = Vec::new();
-    for bb in &mut ir.blocks {
+    for (bi, bb) in ir.blocks.iter_mut().enumerate() {
+        if let Some(bg) = budget
+            && (bi & 255) == 0
+        {
+            bg.check_deadline()?;
+        }
         if let Term::BranchIf { mut cond, mut then_bb, mut then_args, mut else_bb, mut else_args } = bb.term {
             // Walk back up to 2 steps in the same block (`eqz` -> `cmp` or `const`).
             let mut fused: Option<Term> = None;
@@ -2160,7 +2180,12 @@ pub fn optimize_ir(ir: &mut IrFunc) {
 
     // Pass 2: Within-block redundant bounds-check elimination + pure load-run check hoisting.
     let mut checked_max: HashMap<Val, u64> = HashMap::new();
-    for bb in &mut ir.blocks {
+    for (bi, bb) in ir.blocks.iter_mut().enumerate() {
+        if let Some(bg) = budget
+            && (bi & 255) == 0
+        {
+            bg.check_deadline()?;
+        }
         checked_max.clear();
         let mut out: Vec<Inst> = Vec::with_capacity(bb.insts.len());
         let insts = &bb.insts;
@@ -2241,7 +2266,12 @@ pub fn optimize_ir(ir: &mut IrFunc) {
             uses[v.0 as usize] = uses[v.0 as usize].saturating_add(1);
         });
     }
-    for bb in ir.blocks.iter_mut().rev() {
+    for (bi, bb) in ir.blocks.iter_mut().rev().enumerate() {
+        if let Some(bg) = budget
+            && (bi & 255) == 0
+        {
+            bg.check_deadline()?;
+        }
         let mut keep = vec![true; bb.insts.len()];
         let mut any_dropped = false;
         for (idx, inst) in bb.insts.iter().enumerate().rev() {
@@ -2265,4 +2295,5 @@ pub fn optimize_ir(ir: &mut IrFunc) {
             });
         }
     }
+    Ok(())
 }

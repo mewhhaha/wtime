@@ -14,7 +14,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+static NEXT_WORK_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use wtime_types::ValType;
 use wtime_validate::{DecodedModule, ExternalKind, Immediate, Instruction, SegmentMode};
@@ -4622,6 +4625,59 @@ pub fn cc_target_fingerprint(cc: &str, target_cpu: &str) -> Res<String> {
     Ok(h.hex())
 }
 
+/// Runs `cmd` in its own process group (on Unix), capturing stderr to a temp file under `work`
+/// so pipes cannot deadlock, and terminating the entire process group if `deadline` expires.
+fn run_cmd_with_deadline(mut cmd: Command, work: &Path, label: &str, deadline: Option<Instant>) -> Res<()> {
+    if let Some(dl) = deadline
+        && Instant::now() >= dl
+    {
+        return Err(format!("{label}: exceeded build time limit"));
+    }
+    let err_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
+    let err_path = work.join(format!(".stderr-{}-{err_seq}.log", std::process::id()));
+    let err_file = fs::File::create(&err_path).map_err(|e| format!("{}: {e}", err_path.display()))?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(err_file));
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.spawn().map_err(|e| {
+        let _ = fs::remove_file(&err_path);
+        format!("{label}: {e}")
+    })?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl
+                {
+                    #[cfg(unix)]
+                    {
+                        let group = format!("-{}", child.id());
+                        let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(&err_path);
+                    return Err(format!("{label}: exceeded build time limit"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&err_path);
+                return Err(format!("{label}: {e}"));
+            }
+        }
+    };
+    let stderr = fs::read_to_string(&err_path).unwrap_or_default();
+    let _ = fs::remove_file(&err_path);
+    if !status.success() {
+        return Err(format!("{label} failed ({status}): {}", stderr.trim()));
+    }
+    Ok(())
+}
+
 /// Compiles `wasm` to a Blot ABI 8 `library.so` via parallel `clang` + `ld.lld`
 /// with per-shard content-addressed `.o` caching under `cache/c-obj`.
 pub fn build_c_blot_cdylib(
@@ -4630,17 +4686,20 @@ pub fn build_c_blot_cdylib(
     target_cpu: &str,
     jobs: Option<u32>,
     opt: COpt,
+    time_limit: Option<Duration>,
     out_so: &Path,
 ) -> Res<()> {
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
     let t_total = Instant::now();
+    let deadline = time_limit.map(|d| t_total + d);
     let (cc, cc_ver, has_lld) = detect_cc()?;
     let cc_target = cc_target_fingerprint(&cc, target_cpu)?;
     let generated = generate_c_sources(wasm, opt, timings)?;
 
     let obj_cache = cache.join("c-obj");
     fs::create_dir_all(&obj_cache).map_err(|e| format!("{}: {e}", obj_cache.display()))?;
-    let work = cache.join("work").join(format!("c-{}", std::process::id()));
+    let work_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
+    let work = cache.join("work").join(format!("c-{}-{work_seq}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
 
@@ -4706,10 +4765,20 @@ pub fn build_c_blot_cdylib(
                         if err_slot.lock().unwrap().is_some() {
                             break;
                         }
+                        if let Some(dl) = deadline
+                            && Instant::now() >= dl
+                        {
+                            let mut e = err_slot.lock().unwrap();
+                            if e.is_none() {
+                                *e = Some("C shard compilation exceeded build time limit".into());
+                            }
+                            break;
+                        }
                         let next = { q.lock().unwrap().next() };
                         let Some((_, src_path, cached_obj, opt_flag, _)) = next else { break };
                         let t_one = Instant::now();
-                        let tmp_obj = cached_obj.with_extension(format!("o.{}", std::process::id()));
+                        let obj_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
+                        let tmp_obj = cached_obj.with_extension(format!("o.{}.{obj_seq}", std::process::id()));
                         let mut cmd = Command::new(cc_ref);
                         cmd.args([
                             opt_flag,
@@ -4726,17 +4795,15 @@ pub fn build_c_blot_cdylib(
                         if opt == COpt::Auto && opt_flag == "-O2" && is_clang {
                             cmd.args(["-fno-vectorize", "-fno-slp-vectorize"]);
                         }
-                        let out = cmd
-                            .arg("-I")
+                        cmd.arg("-I")
                             .arg(work_ref)
                             .arg("-c")
                             .arg(&src_path)
                             .arg("-o")
-                            .arg(&tmp_obj)
-                            .stdin(Stdio::null())
-                            .output();
-                        match out {
-                            Ok(o) if o.status.success() => {
+                            .arg(&tmp_obj);
+                        let label = format!("{cc_ref} on {}", src_path.display());
+                        match run_cmd_with_deadline(cmd, work_ref, &label, deadline) {
+                            Ok(()) => {
                                 let _ = fs::rename(&tmp_obj, &cached_obj);
                                 let dt = t_one.elapsed().as_secs_f64();
                                 let mut sl = slow_slot.lock().unwrap();
@@ -4744,22 +4811,11 @@ pub fn build_c_blot_cdylib(
                                     *sl = (dt, src_path.file_name().unwrap().to_string_lossy().into_owned());
                                 }
                             }
-                            Ok(o) => {
+                            Err(msg) => {
                                 let _ = fs::remove_file(&tmp_obj);
                                 let mut e = err_slot.lock().unwrap();
                                 if e.is_none() {
-                                    *e = Some(format!(
-                                        "{cc_ref} failed on {}: {}",
-                                        src_path.display(),
-                                        String::from_utf8_lossy(&o.stderr)
-                                    ));
-                                }
-                            }
-                            Err(io_err) => {
-                                let _ = fs::remove_file(&tmp_obj);
-                                let mut e = err_slot.lock().unwrap();
-                                if e.is_none() {
-                                    *e = Some(format!("{cc_ref}: {io_err}"));
+                                    *e = Some(msg);
                                 }
                             }
                         }
@@ -4778,11 +4834,8 @@ pub fn build_c_blot_cdylib(
         if has_lld {
             link.arg("-fuse-ld=lld");
         }
-        link.arg("-o").arg(out_so).args(&obj_paths).stdin(Stdio::null());
-        let out = link.output().map_err(|e| format!("{cc} link: {e}"))?;
-        if !out.status.success() {
-            return Err(format!("link failed: {}", String::from_utf8_lossy(&out.stderr)));
-        }
+        link.arg("-o").arg(out_so).args(&obj_paths);
+        run_cmd_with_deadline(link, &work, &format!("{cc} link"), deadline)?;
         if timings {
             let (sl_t, sl_name) = slowest.into_inner().unwrap();
             eprintln!(
@@ -5042,7 +5095,8 @@ mod tests {
         assert!(src_dir.join("f10_st.h").is_file(), "expected f10 to be outlined");
 
         // Compile to shared library and execute via a tiny C test driver.
-        build_c_blot_cdylib(&wasm, &cache, "native", Some(2), COpt::Auto, &so_path).unwrap();
+        build_c_blot_cdylib(&wasm, &cache, "native", Some(2), COpt::Auto, Some(Duration::from_secs(120)), &so_path)
+            .unwrap();
         assert!(so_path.is_file());
 
         let driver_c = root.join("driver.c");

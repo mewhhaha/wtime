@@ -545,12 +545,43 @@ pub fn decode(
                     }
                 }
                 let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
-                let decoded = wtime_types::parallel::map_ordered(&bodies, threads, || (), |_, b| function_body(b.clone(), policy));
-                m.code.reserve_exact(decoded.len());
+                // Decode body syntax and local group headers WITHOUT expanding `FunctionBody::locals`,
+                // so malformed bytecode always precedes policy errors while aggregate local limits
+                // (`max_total_locals`) are enforced strictly before any local vector allocation.
+                let decoded = wtime_types::parallel::map_ordered(
+                    &bodies,
+                    threads,
+                    || (),
+                    |_, b| parse_function_body(b.clone(), policy),
+                );
+                let mut parsed_bodies = Vec::with_capacity(decoded.len());
+                let mut total_decoded_locals: usize = 0;
+                let mut total_limit_exceeded = false;
                 for body in decoded {
-                    m.code.push(body?);
+                    let parsed = body?;
+                    total_decoded_locals = total_decoded_locals.saturating_add(parsed.total_locals as usize);
+                    if total_decoded_locals > policy.max_total_locals {
+                        total_limit_exceeded = true;
+                    }
+                    parsed_bodies.push(parsed);
                 }
                 sizes?;
+                if total_limit_exceeded {
+                    return Err(Error::new(ErrorKind::ResourceLimit, "module total local limit"));
+                }
+                m.code.reserve_exact(parsed_bodies.len());
+                for parsed in parsed_bodies {
+                    let mut locals = Vec::with_capacity(parsed.total_locals as usize);
+                    for (cnt, ty) in parsed.local_groups {
+                        locals.resize(locals.len() + cnt as usize, ty);
+                    }
+                    m.code.push(FunctionBody {
+                        locals,
+                        instructions: parsed.instructions,
+                        offsets: parsed.offsets,
+                        span: parsed.span,
+                    });
+                }
             }
             11 => {
                 let n = count(&mut s)?;
@@ -597,6 +628,7 @@ pub fn decode(
         || m.tables.len() > policy.max_tables
         || m.memories.len() > policy.max_memories
         || m.globals.len() > policy.max_globals
+        || m.tags.len() > policy.max_tags
         || m.code.iter().map(|b| b.instructions.len()).sum::<usize>() > policy.max_instructions
     {
         return Err(Error::new(
@@ -621,8 +653,16 @@ pub fn decode(
     }
     Ok(m)
 }
-/// One function body of the code section, from its bytes.
-fn function_body(mut b: Reader, policy: &ResourceLimits) -> Result<FunctionBody> {
+struct ParsedBody {
+    local_groups: Vec<(u32, ValType)>,
+    total_locals: u32,
+    instructions: Vec<Instruction>,
+    offsets: Vec<u32>,
+    span: Span,
+}
+
+/// One function body of the code section, parsed without expanding `locals`.
+fn parse_function_body(mut b: Reader, policy: &ResourceLimits) -> Result<ParsedBody> {
     let start = b.offset();
     let groups = count(&mut b)?;
     let mut local_groups = Vec::new();
@@ -640,12 +680,9 @@ fn function_body(mut b: Reader, policy: &ResourceLimits) -> Result<FunctionBody>
     if total as usize > policy.max_locals {
         return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
     }
-    let mut locals = Vec::new();
-    for (n, ty) in local_groups {
-        locals.resize(locals.len() + n as usize, ty);
-    }
-    Ok(FunctionBody {
-        locals,
+    Ok(ParsedBody {
+        local_groups,
+        total_locals: total,
         instructions,
         offsets,
         span: Span::new(start, b.offset()),
@@ -877,6 +914,35 @@ mod tests {
         };
         assert_eq!(
             decode(&b, &FeatureSet::default(), &p).unwrap_err().kind,
+            ErrorKind::Decode
+        );
+        // Aggregate local cap (`max_total_locals`) rejects multi-body expansion without OOM,
+        // while malformed bytecode in a later body still precedes policy errors.
+        let ok_bodies = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[2, 0, 0]),
+            (10, &[2, 4, 1, 5, 0x7f, 0x0b, 4, 1, 5, 0x7f, 0x0b]),
+        ]);
+        let tight_total = ResourceLimits {
+            max_locals: 10,
+            max_total_locals: 8,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            decode(&ok_bodies, &FeatureSet::default(), &tight_total)
+                .unwrap_err()
+                .kind,
+            ErrorKind::ResourceLimit
+        );
+        let malformed_second = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[2, 0, 0]),
+            (10, &[2, 4, 1, 5, 0x7f, 0x0b, 4, 1, 5, 0x7f, 0x41]),
+        ]);
+        assert_eq!(
+            decode(&malformed_second, &FeatureSet::default(), &tight_total)
+                .unwrap_err()
+                .kind,
             ErrorKind::Decode
         );
     }
