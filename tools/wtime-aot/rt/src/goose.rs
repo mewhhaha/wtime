@@ -619,13 +619,34 @@ fn append_bytes(guest: &mut dyn Guest, control: i64, bytes: &[u8]) -> R<()> {
 
 // std's byte-set searches: a set's members are its first 256 bytes.
 
+fn check_range(guest: &mut dyn Guest, pointer: i128, length: i128) -> R<(u64, u64)> {
+    if pointer < 0 || length < 0 {
+        return Err(fail(guest, "negative host address"));
+    }
+    let (Ok(pointer), Ok(length)) = (u64::try_from(pointer), u64::try_from(length)) else {
+        return Err(fail(guest, "host write is outside exported memory"));
+    };
+    Ok((pointer, length))
+}
+
 fn find_any(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     let mut arguments = Arguments::new(values, 2);
     let (pointer, length) = arguments.slice(guest)?;
     let members = address(arguments.integer(guest)?);
-    let text = read(guest, pointer, length)?;
-    let members = read(guest, members, 256)?;
-    let found = text.iter().position(|&byte| members[usize::from(byte)] != 0);
+    let (pointer, length) = check_range(guest, pointer, length)?;
+    let (members_ptr, members_len) = check_range(guest, members, 256)?;
+    let found = {
+        let Some(memory) = guest.memory() else {
+            return Err(fail(guest, "host memory is unavailable during module initialization"));
+        };
+        let Ok(text) = memory.slice(pointer, length) else {
+            return Err(fail(guest, "host write is outside exported memory"));
+        };
+        let Ok(members) = memory.slice(members_ptr, members_len) else {
+            return Err(fail(guest, "host write is outside exported memory"));
+        };
+        text.iter().position(|&byte| members[usize::from(byte)] != 0)
+    };
     Ok(Out::Integer(found.map_or(-1, |index| index as i64)))
 }
 
@@ -635,14 +656,32 @@ fn find_pair(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     let first = address(arguments.integer(guest)?);
     let distance = arguments.integer(guest)?;
     let second = address(arguments.integer(guest)?);
-    let text = read(guest, pointer, length)?;
-    let first = read(guest, first, 256)?;
-    let second = read(guest, second, 256)?;
+    let (pointer, length) = check_range(guest, pointer, length)?;
+    let (first_ptr, first_len) = check_range(guest, first, 256)?;
+    let (second_ptr, second_len) = check_range(guest, second, 256)?;
     let Ok(distance) = usize::try_from(distance) else {
+        // Check memory availability/bounds first to match error priority.
+        let _ = read(guest, pointer.into(), length.into())?;
+        let _ = read(guest, first_ptr.into(), first_len.into())?;
+        let _ = read(guest, second_ptr.into(), second_len.into())?;
         return Err(fail(guest, "negative gs_find_pair distance is not supported by this host"));
     };
-    let found = (0..text.len().saturating_sub(distance))
-        .find(|&index| first[usize::from(text[index])] != 0 && second[usize::from(text[index + distance])] != 0);
+    let found = {
+        let Some(memory) = guest.memory() else {
+            return Err(fail(guest, "host memory is unavailable during module initialization"));
+        };
+        let Ok(text) = memory.slice(pointer, length) else {
+            return Err(fail(guest, "host write is outside exported memory"));
+        };
+        let Ok(first) = memory.slice(first_ptr, first_len) else {
+            return Err(fail(guest, "host write is outside exported memory"));
+        };
+        let Ok(second) = memory.slice(second_ptr, second_len) else {
+            return Err(fail(guest, "host write is outside exported memory"));
+        };
+        (0..text.len().saturating_sub(distance))
+            .find(|&index| first[usize::from(text[index])] != 0 && second[usize::from(text[index + distance])] != 0)
+    };
     Ok(Out::Integer(found.map_or(-1, |index| index as i64)))
 }
 
@@ -928,5 +967,71 @@ mod tests {
         assert!(policy.variable(b"HOME") && !policy.variable(b"PATH"));
         policy.variables = None;
         assert!(policy.variable(b"PATH"));
+    }
+
+    #[test]
+    fn find_any_and_find_pair_zero_copy_semantics() {
+        use super::{Guest, State, find_any, find_pair};
+        use crate::{LinearMemory, Memory, R, Trap, Val};
+
+        struct DummyGuest {
+            mem: Memory,
+            state: State,
+        }
+        impl Guest for DummyGuest {
+            fn memory(&mut self) -> Option<&mut dyn LinearMemory> {
+                Some(&mut self.mem)
+            }
+            fn state(&mut self) -> &mut State {
+                &mut self.state
+            }
+            fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> {
+                None
+            }
+            fn start(&mut self) -> R<()> {
+                Ok(())
+            }
+        }
+
+        let mut g = DummyGuest { mem: Memory::new(1, Some(1), false).unwrap(), state: State::new(vec![], vec![]) };
+        g.mem.write(0, b"hello, world!").unwrap();
+        // Set 1 at 1024: contains b'w' and b'!'
+        g.mem.write(1024 + b'w' as u64, &[1]).unwrap();
+        g.mem.write(1024 + b'!' as u64, &[1]).unwrap();
+        // Set 2 at 1536: contains b'o'
+        g.mem.write(1536 + b'o' as u64, &[1]).unwrap();
+
+        let res = find_any(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024)]).unwrap().i64().unwrap();
+        assert_eq!(res, 7); // 'w' at index 7
+        let miss = find_any(&mut g, &[Val::I32(0), Val::I32(5), Val::I32(1024)]).unwrap().i64().unwrap();
+        assert_eq!(miss, -1);
+
+        // find_pair: 'w' followed at distance 1 by 'o' -> index 7
+        let pair = find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024), Val::I32(1), Val::I32(1536)])
+            .unwrap()
+            .i64()
+            .unwrap();
+        assert_eq!(pair, 7);
+        let pair_miss = find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024), Val::I32(2), Val::I32(1536)])
+            .unwrap()
+            .i64()
+            .unwrap();
+        assert_eq!(pair_miss, -1);
+
+        // Out-of-bounds table checks take priority over negative distance.
+        g.state.failure = None;
+        assert_eq!(
+            find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(65500), Val::I32(-1), Val::I32(1536)]).err(),
+            Some(Trap::Host)
+        );
+        assert_eq!(g.state.failure.as_deref(), Some("host write is outside exported memory"));
+
+        // Negative distance with valid ranges reports negative distance error.
+        g.state.failure = None;
+        assert_eq!(
+            find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024), Val::I32(-1), Val::I32(1536)]).err(),
+            Some(Trap::Host)
+        );
+        assert_eq!(g.state.failure.as_deref(), Some("negative gs_find_pair distance is not supported by this host"));
     }
 }

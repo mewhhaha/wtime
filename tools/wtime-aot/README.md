@@ -29,21 +29,38 @@ benchmarks such programs as engine `wtime-aot`.
 
 ## Output
 
-The generated directory is a Cargo workspace: `core` holds the instance,
-the host imports and the trait `Fns<M>`, which declares every function;
-the crates `p0`, `p1`, ... hold the functions, about 12 MiB of source each,
-generic over `M` and calling each other through `Fns<M>`; the program crate
-implements `Fns` for its marker, which monomorphizes every function there
-with direct calls. rustc's front end is sequential within a crate, so the
-parts build in parallel and each in a fraction of the memory: the 64-bit
-Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
-(about 9 minutes on four cores) as nine.
+The generated directory is a Cargo workspace: `core` holds `Ctx` (hot
+fields `stack_floor`, memory metadata and mutable globals laid out first
+under `#[repr(C)]`), `Instance` (owning `Ctx` and the disjoint linear
+memory buffer), the host imports (`HostView` zero-allocation bridge), and
+the trait `Fns<M>`; the crates `p0`, `p1`, ... hold the functions
+balanced by Longest-Processing-Time-first bin-packing (~6 MiB of source
+each, up to 12 parts), generic over `M` and calling each other through
+`Fns<M>`; the program crate implements `Fns` for its marker, which
+monomorphizes every function there with direct calls and thin LTO (`codegen-units = 1`
+for modules up to 4 MiB, `16` for larger modules). Parallel balanced part
+crates and thin LTO build the 32-bit and 64-bit Goose compilers in under
+one minute each on 8 cores.
 
 ## Translation
 
-- **Functions** become methods of `Instance`. The operand stack becomes typed
-  `let` bindings, and a `local.get` copies the local, so later `local.set`s
-  cannot change values already on the stack.
+- **Functions** take `(ctx: &mut Ctx, mb, [preserved_globals...], params...)`,
+  keeping linear memory (`mb`) disjoint (`noalias`) from `Ctx`. The operand
+  stack becomes typed `let` bindings, and a `local.get` copies the local, so
+  later `local.set`s cannot change values already on the stack.
+- **Global analyses:**
+  - Effectively constant globals (unwritten globals, or globals whose every
+    reachable `global.set` writes back their own value) are evaluated at
+    generation time and inlined as literals.
+  - A greatest-fixed-point structured-control-flow analysis proves which
+    globals each function preserves across normal exits (including
+    loop-header invariants). Module-wide preserved globals (up to 4) are
+    passed by value in registers to functions that transitively use them;
+    per-function preservation omits redundant caller reloads and dead
+    return stores.
+  - Non-returning host imports (`goose.abort`, `goose.exit`, `proc_exit`)
+    compile as `#[cold] #[inline(never)] -> Trap`, avoiding dead global
+    stores/reloads on abort paths.
 - **Control flow:**
   - Blocks become labeled Rust blocks. A block's results are variables
     declared before it.
@@ -58,8 +75,10 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
 - **Calls** check the native stack left, as Wasmtime's do: a function
   whose frame comes within an eighth of the stack's end (4 MiB at least)
   traps with `ResourceLimit: call depth exhausted` instead of overflowing
-  it. How deep recursion goes depends on the frames (the default stack is
-  1 GiB, `--stack-limit-mib`).
+  it. Small acyclic call subtrees (bounded locals, instructions and call
+  depth, never in a recursive SCC or `goose.reserve` cycle) elide the
+  redundant prologue check. How deep recursion goes depends on the frames
+  (the default stack is 1 GiB, `--stack-limit-mib`).
 - **Numeric operators** keep Wasm semantics:
   - Division and remainder trap on zero, and signed division traps on
     overflow.
@@ -69,32 +88,29 @@ Goose compiler needed more than 13.5 GB as one crate and builds in 6 GB
   - Shifts and rotations take their count modulo the width.
   - `nearest` rounds ties to even.
 - **Memory:**
-  - A 32-bit memory (`Memory32`) is one lazily zeroed allocation spanning
-    every address a 32-bit access can form (8 GiB of address space, touched
-    only where the program writes). An access checks a single bound, the
-    current length; `memory.grow` moves the length.
-  - Generated functions keep the memory's bytes and length (for a 64-bit
-    memory, its direct bytes and the rest, `Memory::parts`) in locals,
-    taken anew after calls, `memory.size`, `memory.grow` and bulk
-    operations: through the instance, LLVM would reload them at every
-    access, unable to tell that the module's stores leave the instance's
-    own fields alone. Accesses go through `m32` and `m64`.
-  - A 64-bit memory (`Memory`) is a base, one lazily zeroed allocation as
-    large as the OS grants up to the memory's maximum (64 GiB at most),
-    then 4 GiB chunks, each lazily zeroed and allocated when `memory.grow`
-    reaches it. Growing never moves or touches existing bytes, so a memory
-    can grow to many GiB (the 64-bit Goose compiler grows to about 17 GB)
-    while the program writes little of it. An access ending within the
-    base checks one bound, as for a 32-bit memory; others take a cold path
-    through the chunks.
+  - A 32-bit memory (`Mem32Meta` + `alloc32::<CAP32>()`) is one lazily
+    zeroed fixed-capacity array `&mut [u8; CAP32]` (`max_pages * 65536`),
+    passed disjointly from `Ctx`. Accesses go through zero-panic `m32`
+    helpers (`first_chunk` for zero-offset `>= 4`-byte accesses so loops
+    auto-vectorize, `last_chunk` for offset/narrow accesses, direct `.get`
+    for bytes); fixed-size memories fold `ml` to `CAP32` as a constant.
+  - Generated functions cache the active direct memory length `ml` in a
+    local with a dominating range guard (`MIN_BYTES <= ml <= cap`), and
+    refresh `ml` only after `memory.grow` or calls that transitively may
+    grow memory.
+  - A chunked 64-bit memory (`Outer` + `Vec<u8>`) allocates a lazily zeroed
+    base up to the OS grant (64 GiB at most), then 4 GiB chunks on demand
+    without moving existing bytes. Fast-path misses use register-returned
+    `#[cold]` slow paths (`Option<u64>` / `bool`, zero `sret`). Non-growing
+    loops and blocks specialize under `if mf { <flat m64> } else { <chunked m64> }`
+    while `len == fast` (all bytes reside in the base).
   - A *flat* 64-bit memory (`--flat-memory64`; `wtime-aot build` chooses
     it when the machine grants the declared maximum in one allocation,
-    and keys the cache by the choice) is allocated whole at its maximum,
-    and its accesses trap on a miss instead of calling the slow path: that
-    call, joining the fast path at every access, was most of what 64-bit
-    accesses cost (64-bit `examples/sorting.goose`: 4.63G -> 2.82G
-    instructions, against 2.62G for 32-bit). Where the maximum cannot be
-    allocated when the program starts, it fails with `ResourceLimit:
+    and keys the cache by the choice) allocates a fixed-capacity array
+    `Box<[u8; CAP64]>` (`alloc64::<CAP64>()`) passed in a single register
+    and accessed via `m64f` (single hoisted `cmpq (ml - offset - N), addr;
+    ja trap` even across `memory.grow` PHI nodes). Where the maximum cannot
+    be allocated when the program starts, it fails with `ResourceLimit:
     memory allocation failed`.
 
 ## Supported

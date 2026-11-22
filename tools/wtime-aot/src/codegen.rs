@@ -17,8 +17,6 @@ const STACK_BYTES: u64 = 1 << 30;
 /// lints copy the rest of a file to make some suggestions, so their cost
 /// grows with the file.
 const FILE_BYTES: usize = 1 << 20;
-/// The defined functions are split into crates of about this many bytes.
-const PART_BYTES: usize = 12 << 20;
 
 /// Locals the module's functions declare at most, together (the Goose
 /// compilers declare about 56,000), and blocks nested at most (they nest
@@ -33,14 +31,41 @@ const MAX_PENDING: usize = 64;
 /// Goose compiler, a 9 MB module, makes about 130 MB).
 const MAX_SOURCE_BYTES: usize = 1 << 30;
 
-/// Functions without calls and with at most this many locals skip the
-/// stack check (see `Function::emit`).
+/// Functions without calls (or small acyclic subtrees) with at most this many
+/// locals, instructions and call depth skip the stack check.
 const LEAF_LOCALS: usize = 256;
+const LEAF_INSTRUCTIONS: usize = 2_000;
+const LEAF_CHAIN_DEPTH: usize = 8;
 
 /// Globals held in locals add at most about this many lines per
 /// instruction of a function (see `Function::emit`).
 const GLOBAL_LINES_PER_INSTRUCTION: usize = 8;
-const LEAF_INSTRUCTIONS: usize = 2_000;
+
+/// At most this many module-wide preserved globals are passed in registers.
+const MAX_REG_GLOBALS: usize = 4;
+
+/// Non-recursive inlining thresholds.
+const INLINE_ALWAYS_LEAF_INSTRUCTIONS: usize = 90;
+const INLINE_ALWAYS_SMALL_LEAF_INSTRUCTIONS: usize = 160;
+const INLINE_ALWAYS_SMALL_LEAF_MAX_CALLERS: usize = 8;
+const INLINE_INSTRUCTIONS: usize = 80;
+const INLINE_LEAF_INSTRUCTIONS: usize = 350;
+const INLINE_LEAF_MAX_CALLERS: usize = 3;
+const INLINE_SINGLE_CALLER_INSTRUCTIONS: usize = 400;
+
+/// Chunked 64-bit flat-region specialization bounds (for non-growing regions
+/// guarded by `if mf`).
+const FLAT_REGION_MAX_INSTRUCTIONS: usize = 2_000;
+const FLAT_LOOP_MIN_MEM_OPS: usize = 2;
+const FLAT_BLOCK_MIN_MEM_OPS: usize = 12;
+
+/// Modules whose generated function source fits under this threshold build
+/// with a single codegen unit for whole-program optimization.
+const SINGLE_CGU_BYTES: usize = 4 << 20;
+
+/// Target source bytes per part crate for large modules (balanced via LPT).
+const TARGET_PART_BYTES: usize = 6 << 20;
+const MAX_PARTS: usize = 12;
 
 /// `memory.copy`s of a constant length up to this many bytes are inlined.
 const COPY_INLINE: usize = 256;
@@ -74,8 +99,7 @@ pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &s
     };
     let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits).map_err(|e| format!("invalid module: {e}"))?;
     let m = validated.decoded();
-    let mut module = Module::new(m)?;
-    module.flat64 = flat64 && module.memory64;
+    let module = Module::new(m, flat64)?;
     let write = |path: &Path, text: &str| {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -86,18 +110,33 @@ pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &s
     let core = format!("{name}-core");
     let rt = rt.display().to_string();
 
-    // The defined functions, grouped into parts of about PART_BYTES.
-    let mut parts: Vec<Vec<(usize, String)>> = vec![vec![]];
-    let mut part_bytes = 0;
+    // Generate all defined functions, then balance them across part crates
+    // with Longest-Processing-Time-first bin-packing so no single part crate
+    // accumulates all of the largest functions and stalls parallel builds.
+    let all_fns = module.functions(m)?;
+    let total_fn_bytes: usize = all_fns.iter().map(|(_, t)| t.len()).sum();
+    let n_parts = if total_fn_bytes <= SINGLE_CGU_BYTES {
+        1
+    } else {
+        (total_fn_bytes / TARGET_PART_BYTES + 1).clamp(2, MAX_PARTS)
+    };
+    let mut parts: Vec<Vec<(usize, String)>> = (0..n_parts).map(|_| Vec::new()).collect();
+    let mut part_load = vec![0usize; n_parts];
+    let mut order: Vec<usize> = (0..all_fns.len()).collect();
+    if n_parts > 1 {
+        order.sort_by_key(|&k| (std::cmp::Reverse(all_fns[k].1.len()), all_fns[k].0));
+    }
+    let mut all_slots: Vec<Option<(usize, String)>> = all_fns.into_iter().map(Some).collect();
     let mut part_of = vec![0; module.types.len()];
-    for (index, text) in module.functions(m)? {
-        if part_bytes >= PART_BYTES {
-            parts.push(vec![]);
-            part_bytes = 0;
-        }
-        part_bytes += text.len();
-        part_of[index] = parts.len() - 1;
-        parts.last_mut().unwrap().push((index, text));
+    for k in order {
+        let (index, text) = all_slots[k].take().unwrap();
+        let best = (0..n_parts).min_by_key(|&p| part_load[p]).unwrap();
+        part_load[best] += text.len();
+        part_of[index] = best;
+        parts[best].push((index, text));
+    }
+    for part in &mut parts {
+        part.sort_by_key(|(idx, _)| *idx);
     }
     let part_names: Vec<String> = (0..parts.len()).map(|j| format!("{name}-p{j}")).collect();
 
@@ -112,6 +151,7 @@ pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &s
         write!(members, ", \"p{j}\"").unwrap();
         writeln!(dependencies, "{part} = {{ path = \"p{j}\" }}").unwrap();
     }
+    let cgu = if total_fn_bytes <= SINGLE_CGU_BYTES { 1 } else { 16 };
     write(
         &out.join("Cargo.toml"),
         &(package(name, &dependencies)
@@ -120,7 +160,7 @@ pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &s
                  # crates of their own so that rustc's front end, which is sequential\n\
                  # within a crate, runs on each part in parallel and in less memory.\n\
                  [workspace]\nmembers = [{members}]\n\n\
-                 [profile.release]\nopt-level = 3\ncodegen-units = 16\npanic = \"abort\"\ndebug = 0\n"
+                 [profile.release]\nopt-level = 3\ncodegen-units = {cgu}\nlto = \"thin\"\npanic = \"abort\"\ndebug = 0\n"
             )),
     )?;
     write(&out.join("core/Cargo.toml"), &package(&core, &format!("wtime-aot-rt = {{ path = {rt:?} }}\n")))?;
@@ -192,31 +232,976 @@ fn ok_values(values: &[String]) -> String {
     }
 }
 
+/// Compact dynamic bitset for per-function global read/write sets.
+#[derive(Clone, Default)]
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    fn new(bits: usize) -> BitSet {
+        BitSet { words: vec![0; bits.div_ceil(64)] }
+    }
+    fn insert(&mut self, bit: u32) {
+        let idx = (bit as usize) / 64;
+        if idx >= self.words.len() {
+            self.words.resize(idx + 1, 0);
+        }
+        self.words[idx] |= 1u64 << (bit % 64);
+    }
+    fn contains(&self, bit: u32) -> bool {
+        self.words.get((bit as usize) / 64).is_some_and(|w| (w & (1u64 << (bit % 64))) != 0)
+    }
+    fn remove(&mut self, bit: u32) {
+        if let Some(w) = self.words.get_mut((bit as usize) / 64) {
+            *w &= !(1u64 << (bit % 64));
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+    fn union_with(&mut self, other: &BitSet) -> bool {
+        if self.words.len() < other.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        let mut changed = false;
+        for (a, &b) in self.words.iter_mut().zip(&other.words) {
+            let next = *a | b;
+            if next != *a {
+                *a = next;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// Compile-time constant value of an effectively immutable global.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstVal {
+    I32(i32),
+    I64(i64),
+    F32(u32),
+    F64(u64),
+}
+
+impl ConstVal {
+    fn rust_literal(self) -> String {
+        match self {
+            ConstVal::I32(v) => format!("({v}i32)"),
+            ConstVal::I64(v) => format!("({v}i64)"),
+            ConstVal::F32(bits) => format!("f32::from_bits({bits:#x})"),
+            ConstVal::F64(bits) => format!("f64::from_bits({bits:#x})"),
+        }
+    }
+}
+
+/// Evaluates a Wasm constant expression if all referenced globals are known constants.
+fn eval_constant(expression: &[Instruction], consts: &[Option<ConstVal>]) -> Option<ConstVal> {
+    let mut stack: Vec<ConstVal> = Vec::new();
+    for i in expression {
+        let value = match (i.opcode, &i.immediate) {
+            (0x0b, _) => break,
+            (0x41, Immediate::I32(v)) => ConstVal::I32(*v),
+            (0x42, Immediate::I64(v)) => ConstVal::I64(*v),
+            (0x43, Immediate::F32(v)) => ConstVal::F32(*v),
+            (0x44, Immediate::F64(v)) => ConstVal::F64(*v),
+            (0x23, Immediate::Index(g)) => (*consts.get(*g as usize)?)?,
+            (op @ (0x6a..=0x6c), _) => {
+                let (Some(ConstVal::I32(b)), Some(ConstVal::I32(a))) = (stack.pop(), stack.pop()) else {
+                    return None;
+                };
+                ConstVal::I32(match op {
+                    0x6a => a.wrapping_add(b),
+                    0x6b => a.wrapping_sub(b),
+                    _ => a.wrapping_mul(b),
+                })
+            }
+            (op @ (0x7c..=0x7e), _) => {
+                let (Some(ConstVal::I64(b)), Some(ConstVal::I64(a))) = (stack.pop(), stack.pop()) else {
+                    return None;
+                };
+                ConstVal::I64(match op {
+                    0x7c => a.wrapping_add(b),
+                    0x7d => a.wrapping_sub(b),
+                    _ => a.wrapping_mul(b),
+                })
+            }
+            _ => return None,
+        };
+        stack.push(value);
+    }
+    if stack.len() == 1 { stack.pop() } else { None }
+}
+
+/// Visits live instructions of a function body, skipping dead code after
+/// unconditional branches identically to `Function::instruction`.
+fn visit_live(code: &[Instruction], noreturn: &[bool], mut f: impl FnMut(&Instruction)) {
+    let mut unreachable_stack = vec![false];
+    let mut dead = 0usize;
+    for i in code {
+        let op = i.opcode;
+        if *unreachable_stack.last().unwrap_or(&false) {
+            match op {
+                0x02..=0x04 => {
+                    dead += 1;
+                    continue;
+                }
+                0x05 if dead > 0 => continue,
+                0x0b if dead > 0 => {
+                    dead -= 1;
+                    continue;
+                }
+                0x05 | 0x0b => {}
+                _ => continue,
+            }
+        }
+        f(i);
+        match op {
+            0x02..=0x04 => unreachable_stack.push(false),
+            0x05 => {
+                if let Some(u) = unreachable_stack.last_mut() {
+                    *u = false;
+                }
+                dead = 0;
+            }
+            0x0b => {
+                unreachable_stack.pop();
+                if unreachable_stack.is_empty() {
+                    break;
+                }
+            }
+            0x00 | 0x0c | 0x0f => {
+                if let Some(u) = unreachable_stack.last_mut() {
+                    *u = true;
+                }
+            }
+            0x10 => {
+                if let Immediate::Index(idx) = i.immediate
+                    && noreturn.get(idx as usize).copied().unwrap_or(false)
+                    && let Some(u) = unreachable_stack.last_mut()
+                {
+                    *u = true;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Sound structured-control-flow proof that every reachable `global.set g` in
+/// `code` writes a value equal to `g`'s own value (assuming `g` starts equal to
+/// its constant initializer and no callee ever modifies it). If every defined
+/// function passes, `g` is provably constant across the entire module.
+fn function_writes_only_same_global(
+    code: &[Instruction],
+    n_locals: usize,
+    types: &[FuncType],
+    noreturn: &[bool],
+    g: u32,
+) -> bool {
+    let mut writes_g = false;
+    visit_live(code, noreturn, |i| {
+        if i.opcode == 0x24 && matches!(i.immediate, Immediate::Index(x) if x == g) {
+            writes_g = true;
+        }
+    });
+    if !writes_g {
+        return true;
+    }
+
+    let mut loop_mod_locals: Vec<Vec<u32>> = vec![Vec::new(); code.len()];
+    {
+        let mut open_loops: Vec<(usize, usize)> = Vec::new();
+        let mut depth = 0usize;
+        for (pc, i) in code.iter().enumerate() {
+            match i.opcode {
+                0x02 | 0x04 => depth += 1,
+                0x03 => {
+                    depth += 1;
+                    open_loops.push((pc, depth));
+                }
+                0x0b => {
+                    if open_loops.last().is_some_and(|&(_, d)| d == depth) {
+                        open_loops.pop();
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                0x21 | 0x22 => {
+                    if let Immediate::Index(x) = i.immediate {
+                        for &(lpc, _) in &open_loops {
+                            if !loop_mod_locals[lpc].contains(&x) {
+                                loop_mod_locals[lpc].push(x);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    struct CFrame {
+        kind: Kind,
+        height: usize,
+        results: usize,
+        unreachable: bool,
+        end_reached: bool,
+        end_locals: Vec<bool>,
+        if_locals: Vec<bool>,
+        has_else: bool,
+    }
+
+    let merge = |frame: &mut CFrame, locals: &[bool]| {
+        if !frame.end_reached {
+            frame.end_reached = true;
+            frame.end_locals = locals.to_vec();
+        } else {
+            for (a, &b) in frame.end_locals.iter_mut().zip(locals) {
+                *a &= b;
+            }
+        }
+    };
+
+    let mut locals = vec![false; n_locals];
+    let mut stack: Vec<bool> = Vec::new();
+    let mut dead = 0usize;
+    let mut frames = vec![CFrame {
+        kind: Kind::Function,
+        height: 0,
+        results: 0,
+        unreachable: false,
+        end_reached: false,
+        end_locals: Vec::new(),
+        if_locals: Vec::new(),
+        has_else: false,
+    }];
+
+    for (pc, i) in code.iter().enumerate() {
+        let op = i.opcode;
+        if frames.last().is_some_and(|f| f.unreachable) {
+            match op {
+                0x02..=0x04 => {
+                    dead += 1;
+                    continue;
+                }
+                0x05 if dead > 0 => continue,
+                0x0b if dead > 0 => {
+                    dead -= 1;
+                    continue;
+                }
+                0x05 | 0x0b => {}
+                _ => continue,
+            }
+        }
+        let block_results = |imm: &Immediate| -> Option<usize> {
+            match imm {
+                Immediate::Block(-64) => Some(0),
+                Immediate::Block(-5..=-1) => Some(1),
+                _ => None,
+            }
+        };
+        match op {
+            0x00 => frames.last_mut().unwrap().unreachable = true,
+            0x01 => {}
+            0x02 | 0x03 => {
+                let Some(results) = block_results(&i.immediate) else { return false };
+                if op == 0x03 {
+                    for &x in &loop_mod_locals[pc] {
+                        if let Some(slot) = locals.get_mut(x as usize) {
+                            *slot = false;
+                        }
+                    }
+                }
+                frames.push(CFrame {
+                    kind: if op == 0x03 { Kind::Loop } else { Kind::Block },
+                    height: stack.len(),
+                    results,
+                    unreachable: false,
+                    end_reached: false,
+                    end_locals: Vec::new(),
+                    if_locals: Vec::new(),
+                    has_else: false,
+                });
+            }
+            0x04 => {
+                let Some(results) = block_results(&i.immediate) else { return false };
+                if stack.pop().is_none() {
+                    return false;
+                }
+                frames.push(CFrame {
+                    kind: Kind::If,
+                    height: stack.len(),
+                    results,
+                    unreachable: false,
+                    end_reached: false,
+                    end_locals: Vec::new(),
+                    if_locals: locals.clone(),
+                    has_else: false,
+                });
+            }
+            0x05 => {
+                let Some(frame) = frames.last_mut() else { return false };
+                if !frame.unreachable {
+                    merge(frame, &locals);
+                }
+                frame.has_else = true;
+                frame.unreachable = false;
+                locals.clone_from(&frame.if_locals);
+                stack.truncate(frame.height);
+                dead = 0;
+            }
+            0x0b => {
+                let Some(mut frame) = frames.pop() else { return false };
+                if frame.kind == Kind::Function {
+                    return true;
+                }
+                if !frame.unreachable {
+                    merge(&mut frame, &locals);
+                }
+                if frame.kind == Kind::If && !frame.has_else {
+                    let if_locals = std::mem::take(&mut frame.if_locals);
+                    merge(&mut frame, &if_locals);
+                }
+                stack.truncate(frame.height);
+                if frame.end_reached {
+                    locals = frame.end_locals;
+                    stack.resize(stack.len() + frame.results, false);
+                } else if let Some(parent) = frames.last_mut() {
+                    parent.unreachable = true;
+                }
+            }
+            0x0c => {
+                let Immediate::Index(d) = i.immediate else { return false };
+                let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                if matches!(frames[at].kind, Kind::Block | Kind::If) {
+                    merge(&mut frames[at], &locals);
+                }
+                frames.last_mut().unwrap().unreachable = true;
+            }
+            0x0d => {
+                let Immediate::Index(d) = i.immediate else { return false };
+                if stack.pop().is_none() {
+                    return false;
+                }
+                let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                if matches!(frames[at].kind, Kind::Block | Kind::If) {
+                    merge(&mut frames[at], &locals);
+                }
+            }
+            0x0f => frames.last_mut().unwrap().unreachable = true,
+            0x10 => {
+                let Immediate::Index(f) = i.immediate else { return false };
+                let Some(ty) = types.get(f as usize) else { return false };
+                if stack.len() < ty.params.len() {
+                    return false;
+                }
+                stack.truncate(stack.len() - ty.params.len());
+                if noreturn.get(f as usize).copied().unwrap_or(false) {
+                    frames.last_mut().unwrap().unreachable = true;
+                } else {
+                    stack.resize(stack.len() + ty.results.len(), false);
+                }
+            }
+            0x1a => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+            }
+            0x1b | 0x1c => {
+                if stack.len() < 3 {
+                    return false;
+                }
+                let _c = stack.pop().unwrap();
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(a && b);
+            }
+            0x20 => {
+                let Immediate::Index(x) = i.immediate else { return false };
+                let Some(&v) = locals.get(x as usize) else { return false };
+                stack.push(v);
+            }
+            0x21 => {
+                let Immediate::Index(x) = i.immediate else { return false };
+                let Some(v) = stack.pop() else { return false };
+                let Some(slot) = locals.get_mut(x as usize) else { return false };
+                *slot = v;
+            }
+            0x22 => {
+                let Immediate::Index(x) = i.immediate else { return false };
+                let Some(&v) = stack.last() else { return false };
+                let Some(slot) = locals.get_mut(x as usize) else { return false };
+                *slot = v;
+            }
+            0x23 => {
+                let Immediate::Index(x) = i.immediate else { return false };
+                stack.push(x == g);
+            }
+            0x24 => {
+                let Immediate::Index(x) = i.immediate else { return false };
+                let Some(v) = stack.pop() else { return false };
+                if x == g && !v {
+                    return false;
+                }
+            }
+            0x28..=0x35 | 0xfd00 => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+                stack.push(false);
+            }
+            0x36..=0x3e | 0xfd0b => {
+                if stack.len() < 2 {
+                    return false;
+                }
+                stack.truncate(stack.len() - 2);
+            }
+            0x3f => stack.push(false),
+            0x40 => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+                stack.push(false);
+            }
+            0x41..=0x44 | 0xfd0c => stack.push(false),
+            0xfc0a | 0xfc0b => {
+                if stack.len() < 3 {
+                    return false;
+                }
+                stack.truncate(stack.len() - 3);
+            }
+            0xfd0f..=0xfd12 | 0xfd1d => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+                stack.push(false);
+            }
+            0xfd1e => {
+                if stack.len() < 2 {
+                    return false;
+                }
+                stack.truncate(stack.len() - 2);
+                stack.push(false);
+            }
+            _ => match numeric(op) {
+                Some((arity, _, _)) => {
+                    if stack.len() < arity {
+                        return false;
+                    }
+                    stack.truncate(stack.len() - arity);
+                    stack.push(false);
+                }
+                None => return false,
+            },
+        }
+    }
+    true
+}
+
+/// Sound structured-control-flow proof that function `code` preserves global `g`
+/// on every reachable normal exit, given which callees preserve `g`. Uses a
+/// monotonic fixed point for loop-header invariance of `g == entry_g`.
+fn function_preserves_global(
+    code: &[Instruction],
+    n_locals: usize,
+    types: &[FuncType],
+    noreturn: &[bool],
+    callee_preserves: &[bool],
+    g: u32,
+) -> bool {
+    let mut touches_g = false;
+    visit_live(code, noreturn, |i| match (i.opcode, &i.immediate) {
+        (0x24, Immediate::Index(x)) if *x == g => touches_g = true,
+        (0x10, Immediate::Index(f))
+            if !noreturn.get(*f as usize).copied().unwrap_or(false)
+                && !callee_preserves.get(*f as usize).copied().unwrap_or(false) =>
+        {
+            touches_g = true;
+        }
+        _ => {}
+    });
+    if !touches_g {
+        return true;
+    }
+
+    // For each `loop` at pc, precompute which locals are written anywhere
+    // inside the loop body (always invalidated at loop entry).
+    let mut loop_mod_locals: Vec<Vec<u32>> = vec![Vec::new(); code.len()];
+    {
+        let mut open_loops: Vec<(usize, usize)> = Vec::new();
+        let mut depth = 0usize;
+        for (pc, i) in code.iter().enumerate() {
+            match i.opcode {
+                0x02 | 0x04 => depth += 1,
+                0x03 => {
+                    depth += 1;
+                    open_loops.push((pc, depth));
+                }
+                0x0b => {
+                    if open_loops.last().is_some_and(|&(_, d)| d == depth) {
+                        open_loops.pop();
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                0x21 | 0x22 => {
+                    if let Immediate::Index(x) = i.immediate {
+                        for &(lpc, _) in &open_loops {
+                            if !loop_mod_locals[lpc].contains(&x) {
+                                loop_mod_locals[lpc].push(x);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    struct PFrame {
+        kind: Kind,
+        pc: usize,
+        header_g: bool,
+        height: usize,
+        results: usize,
+        unreachable: bool,
+        end_reached: bool,
+        end_g: bool,
+        end_locals: Vec<bool>,
+        if_g: bool,
+        if_locals: Vec<bool>,
+        has_else: bool,
+    }
+
+    let merge = |frame: &mut PFrame, g_entry: bool, locals: &[bool]| {
+        if !frame.end_reached {
+            frame.end_reached = true;
+            frame.end_g = g_entry;
+            frame.end_locals = locals.to_vec();
+        } else {
+            frame.end_g &= g_entry;
+            for (a, &b) in frame.end_locals.iter_mut().zip(locals) {
+                *a &= b;
+            }
+        }
+    };
+
+    // Monotonic set of loop pcs whose backedges did NOT preserve `g == entry_g`.
+    let mut loop_not_invariant = vec![false; code.len()];
+    loop {
+        let mut retry = false;
+        let mut g_entry = true;
+        let mut locals = vec![false; n_locals];
+        let mut stack: Vec<bool> = Vec::new();
+        let mut dead = 0usize;
+        let mut frames = vec![PFrame {
+            kind: Kind::Function,
+            pc: 0,
+            header_g: true,
+            height: 0,
+            results: 0,
+            unreachable: false,
+            end_reached: false,
+            end_g: true,
+            end_locals: Vec::new(),
+            if_g: false,
+            if_locals: Vec::new(),
+            has_else: false,
+        }];
+        let mut func_ok = true;
+
+        for (pc, i) in code.iter().enumerate() {
+            let op = i.opcode;
+            if frames.last().is_some_and(|f| f.unreachable) {
+                match op {
+                    0x02..=0x04 => {
+                        dead += 1;
+                        continue;
+                    }
+                    0x05 if dead > 0 => continue,
+                    0x0b if dead > 0 => {
+                        dead -= 1;
+                        continue;
+                    }
+                    0x05 | 0x0b => {}
+                    _ => continue,
+                }
+            }
+            let block_results = |imm: &Immediate| -> Option<usize> {
+                match imm {
+                    Immediate::Block(-64) => Some(0),
+                    Immediate::Block(-5..=-1) => Some(1),
+                    _ => None,
+                }
+            };
+            match op {
+                0x00 => frames.last_mut().unwrap().unreachable = true,
+                0x01 => {}
+                0x02 | 0x03 => {
+                    let Some(results) = block_results(&i.immediate) else { return false };
+                    if op == 0x03 {
+                        if loop_not_invariant[pc] {
+                            g_entry = false;
+                        }
+                        for &x in &loop_mod_locals[pc] {
+                            if let Some(slot) = locals.get_mut(x as usize) {
+                                *slot = false;
+                            }
+                        }
+                    }
+                    frames.push(PFrame {
+                        kind: if op == 0x03 { Kind::Loop } else { Kind::Block },
+                        pc,
+                        header_g: g_entry,
+                        height: stack.len(),
+                        results,
+                        unreachable: false,
+                        end_reached: false,
+                        end_g: true,
+                        end_locals: Vec::new(),
+                        if_g: false,
+                        if_locals: Vec::new(),
+                        has_else: false,
+                    });
+                }
+                0x04 => {
+                    let Some(results) = block_results(&i.immediate) else { return false };
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                    frames.push(PFrame {
+                        kind: Kind::If,
+                        pc,
+                        header_g: false,
+                        height: stack.len(),
+                        results,
+                        unreachable: false,
+                        end_reached: false,
+                        end_g: true,
+                        end_locals: Vec::new(),
+                        if_g: g_entry,
+                        if_locals: locals.clone(),
+                        has_else: false,
+                    });
+                }
+                0x05 => {
+                    let Some(frame) = frames.last_mut() else { return false };
+                    if !frame.unreachable {
+                        merge(frame, g_entry, &locals);
+                    }
+                    frame.has_else = true;
+                    frame.unreachable = false;
+                    g_entry = frame.if_g;
+                    locals.clone_from(&frame.if_locals);
+                    stack.truncate(frame.height);
+                    dead = 0;
+                }
+                0x0b => {
+                    let Some(mut frame) = frames.pop() else { return false };
+                    if frame.kind == Kind::Function {
+                        func_ok &= frame.unreachable || g_entry;
+                        break;
+                    }
+                    if !frame.unreachable {
+                        merge(&mut frame, g_entry, &locals);
+                    }
+                    if frame.kind == Kind::If && !frame.has_else {
+                        let if_g = frame.if_g;
+                        let if_locals = std::mem::take(&mut frame.if_locals);
+                        merge(&mut frame, if_g, &if_locals);
+                    }
+                    stack.truncate(frame.height);
+                    if frame.end_reached {
+                        g_entry = frame.end_g;
+                        locals = frame.end_locals;
+                        stack.resize(stack.len() + frame.results, false);
+                    } else if let Some(parent) = frames.last_mut() {
+                        parent.unreachable = true;
+                    }
+                }
+                0x0c => {
+                    let Immediate::Index(d) = i.immediate else { return false };
+                    let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                    match frames[at].kind {
+                        Kind::Function => {
+                            if !g_entry {
+                                func_ok = false;
+                            }
+                        }
+                        Kind::Block | Kind::If => merge(&mut frames[at], g_entry, &locals),
+                        Kind::Loop => {
+                            if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc] {
+                                loop_not_invariant[frames[at].pc] = true;
+                                retry = true;
+                            }
+                        }
+                    }
+                    frames.last_mut().unwrap().unreachable = true;
+                }
+                0x0d => {
+                    let Immediate::Index(d) = i.immediate else { return false };
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                    let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                    match frames[at].kind {
+                        Kind::Function => {
+                            if !g_entry {
+                                func_ok = false;
+                            }
+                        }
+                        Kind::Block | Kind::If => merge(&mut frames[at], g_entry, &locals),
+                        Kind::Loop => {
+                            if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc] {
+                                loop_not_invariant[frames[at].pc] = true;
+                                retry = true;
+                            }
+                        }
+                    }
+                }
+                0x0f => {
+                    if !g_entry {
+                        func_ok = false;
+                    }
+                    frames.last_mut().unwrap().unreachable = true;
+                }
+                0x10 => {
+                    let Immediate::Index(f) = i.immediate else { return false };
+                    let Some(ty) = types.get(f as usize) else { return false };
+                    if stack.len() < ty.params.len() {
+                        return false;
+                    }
+                    stack.truncate(stack.len() - ty.params.len());
+                    if noreturn.get(f as usize).copied().unwrap_or(false) {
+                        frames.last_mut().unwrap().unreachable = true;
+                    } else {
+                        if !callee_preserves.get(f as usize).copied().unwrap_or(false) {
+                            g_entry = false;
+                        }
+                        stack.resize(stack.len() + ty.results.len(), false);
+                    }
+                }
+                0x1a => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                }
+                0x1b | 0x1c => {
+                    if stack.len() < 3 {
+                        return false;
+                    }
+                    let _c = stack.pop().unwrap();
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    stack.push(a && b);
+                }
+                0x20 => {
+                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Some(&v) = locals.get(x as usize) else { return false };
+                    stack.push(v);
+                }
+                0x21 => {
+                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Some(v) = stack.pop() else { return false };
+                    let Some(slot) = locals.get_mut(x as usize) else { return false };
+                    *slot = v;
+                }
+                0x22 => {
+                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Some(&v) = stack.last() else { return false };
+                    let Some(slot) = locals.get_mut(x as usize) else { return false };
+                    *slot = v;
+                }
+                0x23 => {
+                    let Immediate::Index(x) = i.immediate else { return false };
+                    stack.push(x == g && g_entry);
+                }
+                0x24 => {
+                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Some(v) = stack.pop() else { return false };
+                    if x == g {
+                        g_entry = v;
+                    }
+                }
+                0x28..=0x35 | 0xfd00 => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                    stack.push(false);
+                }
+                0x36..=0x3e | 0xfd0b => {
+                    if stack.len() < 2 {
+                        return false;
+                    }
+                    stack.truncate(stack.len() - 2);
+                }
+                0x3f => stack.push(false),
+                0x40 => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                    stack.push(false);
+                }
+                0x41..=0x44 | 0xfd0c => stack.push(false),
+                0xfc0a | 0xfc0b => {
+                    if stack.len() < 3 {
+                        return false;
+                    }
+                    stack.truncate(stack.len() - 3);
+                }
+                0xfd0f..=0xfd12 | 0xfd1d => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                    stack.push(false);
+                }
+                0xfd1e => {
+                    if stack.len() < 2 {
+                        return false;
+                    }
+                    stack.truncate(stack.len() - 2);
+                    stack.push(false);
+                }
+                _ => match numeric(op) {
+                    Some((arity, _, _)) => {
+                        if stack.len() < arity {
+                            return false;
+                        }
+                        stack.truncate(stack.len() - arity);
+                        stack.push(false);
+                    }
+                    None => return false,
+                },
+            }
+        }
+        if !retry {
+            return func_ok;
+        }
+    }
+}
+
+/// Tarjan's strongly connected components over `0..n` in reverse topological
+/// order (callees before callers).
+fn tarjan_scc(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = edges.len();
+    let mut index = 0usize;
+    let mut indices = vec![usize::MAX; n];
+    let mut lowlink = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack = Vec::new();
+    let mut sccs = Vec::new();
+
+    // Iterative DFS so deep call graphs never overflow the generator's stack.
+    for start in 0..n {
+        if indices[start] != usize::MAX {
+            continue;
+        }
+        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
+        indices[start] = index;
+        lowlink[start] = index;
+        index += 1;
+        stack.push(start);
+        on_stack[start] = true;
+
+        while let Some((v, next_e)) = call_stack.last_mut() {
+            let v = *v;
+            if *next_e < edges[v].len() {
+                let w = edges[v][*next_e];
+                *next_e += 1;
+                if indices[w] == usize::MAX {
+                    indices[w] = index;
+                    lowlink[w] = index;
+                    index += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call_stack.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(indices[w]);
+                }
+            } else {
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
+                }
+                if lowlink[v] == indices[v] {
+                    let mut scc = Vec::new();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(scc);
+                }
+            }
+        }
+    }
+    sccs
+}
+
 struct Module {
     /// Every function's type, imports first.
     types: Vec<FuncType>,
     imports: Vec<(String, String)>,
     memory64: bool,
     has_memory: bool,
-    /// (type, mutable, initial expression) of each global.
+    /// Minimum initial size in bytes of memory 0 (guaranteed lower bound on `ml`).
+    min_bytes: usize,
+    /// Fixed capacity in bytes for 32-bit memory (`max_pages * 65536`, 0 if no memory).
+    cap32: usize,
+    /// Fixed capacity in bytes for flat 64-bit memory (`max_pages * 65536`).
+    cap64: Option<usize>,
+    /// (type, initial expression) of each global.
     globals: Vec<(ValType, String)>,
-    /// Whether each global is mutable.
+    /// Whether each global is declared mutable and can actually change value.
     globals_mutable: Vec<bool>,
+    /// Effectively constant globals evaluated to compile-time constants.
+    global_consts: Vec<Option<ConstVal>>,
+    /// Module-wide preserved globals passed by value in registers.
+    reg_globals: Vec<u32>,
+    /// Whether each import never returns (`goose.abort`, `goose.exit`, `proc_exit`).
+    noreturn_imports: Vec<bool>,
+    /// Whether each import can invoke `goose.reserve`.
+    reserve_imports: Vec<bool>,
+    /// Transitive non-const global reads per function.
+    fn_reads: Vec<BitSet>,
+    /// Transitive non-const global writes per function (including temporary writes
+    /// later restored before return, so callers know whether `ctx.g{x}` is touched).
+    fn_writes: Vec<BitSet>,
+    /// Transitive net writes per function (excluding globals the function is
+    /// proven to preserve on every normal exit, so callers skip reloading them).
+    fn_net_writes: Vec<BitSet>,
+    /// Per-function bitset of globals proven preserved on every normal exit.
+    fn_preserves: Vec<BitSet>,
+    /// Whether each function (transitively) may execute `memory.grow`.
+    fn_may_grow: Vec<bool>,
+    /// Whether each function skips the native stack check (small acyclic subtree).
+    fn_no_stack_check: Vec<bool>,
+    /// Whether each function is part of a recursive SCC.
+    fn_in_cycle: Vec<bool>,
+    /// Whether each function makes any direct non-noreturn calls.
+    fn_has_calls: Vec<bool>,
+    /// Whether each function contains any live `loop` instruction.
+    fn_has_loops: Vec<bool>,
+    /// Direct non-noreturn call sites targeting each function.
+    fn_callers: Vec<usize>,
+    /// Instruction count of each defined function (0 for imports).
+    fn_insns: Vec<usize>,
     start: Option<u32>,
     entry: Option<u32>,
     reserve: Option<u32>,
     memory_exported: bool,
     /// The 64-bit memory is flat (see `generate`).
     flat64: bool,
-    /// The bytes of a 32-bit memory whose minimum and maximum are equal: no
-    /// memory.grow can change its length, so accesses check against this
-    /// constant (one compare with an immediate, and a dominating check
-    /// stays valid across calls) instead of a length kept in a local.
+    /// The bytes of a 32-bit memory whose minimum and maximum are equal.
     fixed32: Option<u64>,
+    /// The bytes of a flat 64-bit memory whose minimum and maximum are equal.
+    fixed64: Option<u64>,
 }
 
 impl Module {
-    fn new(m: &DecodedModule) -> Res<Module> {
+    fn new(m: &DecodedModule, flat64_req: bool) -> Res<Module> {
         let mut types = Vec::new();
         let mut imports = Vec::new();
         for import in &m.imports {
@@ -243,72 +1228,511 @@ impl Module {
         if m.memories.first().is_some_and(|mt| mt.page_size_log2 != 16 || mt.shared) {
             return Err("custom page sizes and shared memories are not supported".into());
         }
+        let flat64 = flat64_req && memory64;
+        let min_bytes = m
+            .memories
+            .first()
+            .and_then(|mt| mt.limits.min.checked_mul(65536))
+            .and_then(|b| usize::try_from(b).ok())
+            .unwrap_or(0);
+        let cap32 = match m.memories.first() {
+            Some(mt) if !memory64 => (mt.limits.max.unwrap_or(1 << 16).min(1 << 16) << 16) as usize,
+            _ => 0,
+        };
+        let cap64 = if flat64 {
+            m.memories.first().and_then(|mt| {
+                let max_pages = mt.limits.max.unwrap_or(1 << 20).min(1 << 20);
+                max_pages.checked_mul(65536).and_then(|b| usize::try_from(b).ok())
+            })
+        } else {
+            None
+        };
         let fixed32 = m
             .memories
             .first()
             .filter(|mt| !memory64 && mt.limits.max == Some(mt.limits.min))
             .map(|mt| mt.limits.min << 16);
+        let fixed64 = m
+            .memories
+            .first()
+            .filter(|mt| flat64 && mt.limits.max == Some(mt.limits.min))
+            .and_then(|mt| mt.limits.min.checked_mul(65536));
+
+        let n_funcs = types.len();
+        let n_imports = imports.len();
+        let n_globals = m.globals.len();
+        let mut noreturn_imports = vec![false; n_funcs];
+        let mut reserve_imports = vec![false; n_funcs];
+        for (k, (module, name)) in imports.iter().enumerate() {
+            if matches!(
+                (module.as_str(), name.as_str()),
+                ("goose", "abort") | ("goose", "exit") | ("wasi_snapshot_preview1", "proc_exit")
+            ) {
+                noreturn_imports[k] = true;
+            }
+            if matches!(
+                (module.as_str(), name.as_str()),
+                ("env", "gs_os_read_file") | ("env", "gs_os_arg") | ("env", "gs_os_getenv")
+            ) {
+                reserve_imports[k] = true;
+            }
+        }
+
+        // Scan live instructions across all defined functions to find which
+        // globals are written anywhere in the module.
+        let mut global_written = vec![false; n_globals];
+        for body in &m.code {
+            visit_live(&body.instructions, &noreturn_imports, |i| {
+                if i.opcode == 0x24
+                    && let Immediate::Index(x) = i.immediate
+                    && let Some(w) = global_written.get_mut(x as usize)
+                {
+                    *w = true;
+                }
+            });
+        }
+        // Evaluate effectively constant globals: both unwritten globals AND
+        // globals whose every reachable `global.set` writes back their own
+        // constant value (such as unused Goose scope counters like `g11`).
+        let mut global_consts: Vec<Option<ConstVal>> = vec![None; n_globals];
+        for (k, g) in m.globals.iter().enumerate() {
+            let Some(init_val) = eval_constant(&g.init, &global_consts) else {
+                continue;
+            };
+            if !global_written[k] {
+                global_consts[k] = Some(init_val);
+            } else {
+                let only_same = m.code.iter().enumerate().all(|(fi, body)| {
+                    let n_locals = types[n_imports + fi].params.len() + body.locals.len();
+                    function_writes_only_same_global(&body.instructions, n_locals, &types, &noreturn_imports, k as u32)
+                });
+                if only_same {
+                    global_consts[k] = Some(init_val);
+                }
+            }
+        }
         let mut globals = Vec::new();
         let mut globals_mutable = Vec::new();
         for (k, g) in m.globals.iter().enumerate() {
-            let init = constant(&g.init, k, "").map_err(|e| format!("global {k}: {e}"))?;
+            let init = constant(&g.init, k, "", &global_consts).map_err(|e| format!("global {k}: {e}"))?;
             globals.push((g.ty.value, init));
-            globals_mutable.push(g.ty.mutable);
+            globals_mutable.push(g.ty.mutable && global_consts[k].is_none());
             rust_type(g.ty.value)?;
         }
+
         let export = |name: &str| {
             m.exports.iter().find(|e| e.name == name && e.kind == ExternalKind::Func).map(|e| e.index)
         };
+        let start = m.start.map(|f| f.0);
+        let entry = export("_start");
+        let reserve = export("goose.reserve");
+
+        // Build direct call graph and per-function direct effects.
+        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n_funcs];
+        let mut fn_reads: Vec<BitSet> = (0..n_funcs).map(|_| BitSet::new(n_globals)).collect();
+        let mut fn_writes: Vec<BitSet> = (0..n_funcs).map(|_| BitSet::new(n_globals)).collect();
+        let mut fn_may_grow = vec![false; n_funcs];
+        let mut fn_has_calls = vec![false; n_funcs];
+        let mut fn_has_loops = vec![false; n_funcs];
+        let mut fn_callers = vec![0usize; n_funcs];
+        let mut fn_insns = vec![0usize; n_funcs];
+        for (k, body) in m.code.iter().enumerate() {
+            fn_insns[n_imports + k] = body.instructions.len();
+        }
+        let fixed_mem = fixed32.is_some() || fixed64.is_some();
+
+        for k in 0..n_imports {
+            if reserve_imports[k]
+                && let Some(r) = reserve
+            {
+                edges[k].push(r as usize);
+            }
+        }
+        let mut global_use_fns = vec![0usize; n_globals];
+        for (k, body) in m.code.iter().enumerate() {
+            let f = n_imports + k;
+            let mut seen_g = BitSet::new(n_globals);
+            visit_live(&body.instructions, &noreturn_imports, |i| match (i.opcode, &i.immediate) {
+                (0x03, _) => {
+                    fn_has_loops[f] = true;
+                }
+                (0x10, Immediate::Index(callee)) => {
+                    let c = *callee as usize;
+                    if c < n_funcs && !noreturn_imports[c] {
+                        fn_has_calls[f] = true;
+                        fn_callers[c] += 1;
+                        if !edges[f].contains(&c) {
+                            edges[f].push(c);
+                        }
+                    }
+                }
+                (0x23, Immediate::Index(x)) if (*x as usize) < n_globals && global_consts[*x as usize].is_none() => {
+                    fn_reads[f].insert(*x);
+                    seen_g.insert(*x);
+                }
+                (0x24, Immediate::Index(x)) if (*x as usize) < n_globals && global_consts[*x as usize].is_none() => {
+                    fn_writes[f].insert(*x);
+                    seen_g.insert(*x);
+                }
+                (0x40, _) if !fixed_mem => {
+                    fn_may_grow[f] = true;
+                }
+                _ => {}
+            });
+            for (g, count) in global_use_fns.iter_mut().enumerate() {
+                if seen_g.contains(g as u32) {
+                    *count += 1;
+                }
+            }
+        }
+
+        // Fixed-point propagation of transitive reads, writes and memory growth.
+        let sccs = tarjan_scc(&edges);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for scc in &sccs {
+                for &u in scc {
+                    for &v in &edges[u] {
+                        let v_reads = fn_reads[v].clone();
+                        let v_writes = fn_writes[v].clone();
+                        if fn_reads[u].union_with(&v_reads) {
+                            changed = true;
+                        }
+                        if fn_writes[u].union_with(&v_writes) {
+                            changed = true;
+                        }
+                        if fn_may_grow[v] && !fn_may_grow[u] {
+                            fn_may_grow[u] = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Detect recursive SCCs and small acyclic subtrees that skip stack checks.
+        let mut fn_in_cycle = vec![false; n_funcs];
+        let mut fn_no_stack_check = vec![false; n_funcs];
+        let mut chain_locals = vec![0usize; n_funcs];
+        let mut chain_insns = vec![0usize; n_funcs];
+        let mut chain_depth = vec![0usize; n_funcs];
+        for scc in &sccs {
+            let cyclic = scc.len() > 1 || (scc.len() == 1 && edges[scc[0]].contains(&scc[0]));
+            if cyclic {
+                for &u in scc {
+                    fn_in_cycle[u] = true;
+                }
+                continue;
+            }
+            let u = scc[0];
+            if u < n_imports {
+                if !reserve_imports[u] {
+                    fn_no_stack_check[u] = true;
+                } else if let Some(r) = reserve {
+                    let r = r as usize;
+                    fn_no_stack_check[u] = fn_no_stack_check[r];
+                    chain_locals[u] = chain_locals[r];
+                    chain_insns[u] = chain_insns[r];
+                    chain_depth[u] = chain_depth[r];
+                } else {
+                    fn_no_stack_check[u] = true;
+                }
+                continue;
+            }
+            let body = &m.code[u - n_imports];
+            let own_locals = types[u].params.len() + body.locals.len();
+            let own_insns = body.instructions.len();
+            let mut ok = true;
+            let mut max_l = 0usize;
+            let mut max_i = 0usize;
+            let mut max_d = 0usize;
+            for &v in &edges[u] {
+                if !fn_no_stack_check[v] {
+                    ok = false;
+                    break;
+                }
+                max_l = max_l.max(chain_locals[v]);
+                max_i = max_i.max(chain_insns[v]);
+                max_d = max_d.max(chain_depth[v]);
+            }
+            let total_l = own_locals.saturating_add(max_l);
+            let total_i = own_insns.saturating_add(max_i);
+            let total_d = 1usize.saturating_add(max_d);
+            if ok && total_l <= LEAF_LOCALS && total_i <= LEAF_INSTRUCTIONS && total_d <= LEAF_CHAIN_DEPTH {
+                fn_no_stack_check[u] = true;
+                chain_locals[u] = total_l;
+                chain_insns[u] = total_i;
+                chain_depth[u] = total_d;
+            }
+        }
+
+        // Greatest fixed-point preservation analysis for every non-const mutable
+        // global `g`: finds both module-wide preserved globals (promoted to
+        // by-value register arguments, like `g0` and `g3`) AND per-function
+        // preserved globals (like `g1` in non-allocating functions, so callers
+        // skip reloading `ctx.g1` after calling them).
+        let mut fn_preserves: Vec<BitSet> = (0..n_funcs).map(|_| BitSet::new(n_globals)).collect();
+        let mut fn_net_writes = fn_writes.clone();
+        let mut candidates: Vec<(usize, u32)> = (0..n_globals)
+            .filter(|&k| global_consts[k].is_none() && global_use_fns[k] > 0)
+            .map(|k| (global_use_fns[k], k as u32))
+            .collect();
+        candidates.sort_by_key(|&(n, k)| (std::cmp::Reverse(n), k));
+        let mut reg_globals = Vec::new();
+        for (_, g) in candidates {
+            let mut preserves = vec![true; n_funcs];
+            let mut p_changed = true;
+            while p_changed {
+                p_changed = false;
+                for k in 0..n_imports {
+                    if reserve_imports[k]
+                        && let Some(r) = reserve
+                        && !preserves[r as usize]
+                        && preserves[k]
+                    {
+                        preserves[k] = false;
+                        p_changed = true;
+                    }
+                }
+                for (fi, body) in m.code.iter().enumerate() {
+                    let f = n_imports + fi;
+                    if !preserves[f] {
+                        continue;
+                    }
+                    let n_locals = types[f].params.len() + body.locals.len();
+                    if !function_preserves_global(&body.instructions, n_locals, &types, &noreturn_imports, &preserves, g) {
+                        preserves[f] = false;
+                        p_changed = true;
+                    }
+                }
+            }
+            let all_preserve = preserves.iter().all(|&p| p);
+            for f in 0..n_funcs {
+                if preserves[f] {
+                    fn_preserves[f].insert(g);
+                    fn_net_writes[f].remove(g);
+                }
+            }
+            if all_preserve && reg_globals.len() < MAX_REG_GLOBALS {
+                reg_globals.push(g);
+            }
+        }
+        reg_globals.sort_unstable();
+
         Ok(Module {
             types,
             imports,
             memory64,
             has_memory: !m.memories.is_empty(),
+            min_bytes,
+            cap32,
+            cap64,
             globals,
             globals_mutable,
-            start: m.start.map(|f| f.0),
-            entry: export("_start"),
-            reserve: export("goose.reserve"),
+            global_consts,
+            reg_globals,
+            noreturn_imports,
+            reserve_imports,
+            fn_reads,
+            fn_writes,
+            fn_net_writes,
+            fn_preserves,
+            fn_may_grow,
+            fn_no_stack_check,
+            fn_in_cycle,
+            fn_has_calls,
+            fn_has_loops,
+            fn_callers,
+            fn_insns,
+            start,
+            entry,
+            reserve,
             // The host uses the memory exported as `memory`, as wtime-goose does.
             memory_exported: m.exports.iter().any(|e| e.kind == ExternalKind::Memory && e.name == "memory"),
-            flat64: false,
+            flat64,
             fixed32,
+            fixed64,
         })
     }
 
-    /// The signature of function `f` after its name: `(receiver, params) -> R<results>`.
-    fn signature(&self, f: usize, receiver: &str) -> Res<String> {
+    /// The Rust type of the disjoint memory slice passed to every function.
+    fn mb_type(&self) -> &'static str {
+        if !self.memory64 {
+            "&mut [u8; CAP32]"
+        } else if self.cap64.is_some() {
+            "&mut [u8; CAP64]"
+        } else {
+            "&mut [u8]"
+        }
+    }
+
+    /// Whether defined function `f` is a tiny non-recursive leaf that should
+    /// always inline (including through its `Fns<Marker>` trait bridge).
+    /// Excludes functions with net global writes (such as bump allocators).
+    fn fn_inline_always(&self, f: usize) -> bool {
+        let is_root = self.start == Some(f as u32) || self.entry == Some(f as u32) || self.reserve == Some(f as u32);
+        f >= self.imports.len()
+            && !is_root
+            && !self.fn_in_cycle[f]
+            && !self.fn_has_calls[f]
+            && self.fn_net_writes[f].is_empty()
+            && (self.fn_insns[f] <= INLINE_ALWAYS_LEAF_INSTRUCTIONS
+                || (!self.fn_has_loops[f]
+                    && self.fn_insns[f] <= INLINE_ALWAYS_SMALL_LEAF_INSTRUCTIONS
+                    && self.fn_callers[f] <= INLINE_ALWAYS_SMALL_LEAF_MAX_CALLERS))
+    }
+
+    /// Preserved register-passed globals needed by defined function `f`.
+    fn fn_reg_globals(&self, f: usize) -> Vec<u32> {
+        if f < self.imports.len() {
+            return Vec::new();
+        }
+        self.reg_globals
+            .iter()
+            .copied()
+            .filter(|&g| self.fn_reads[f].contains(g) || self.fn_writes[f].contains(g))
+            .collect()
+    }
+
+    /// The signature of defined function `f` after its name:
+    /// `(ctx, mb, [reg_globals...], params...) -> R<results>`.
+    fn fn_signature(&self, f: usize, ctx_param: &str) -> Res<String> {
         let ty = &self.types[f];
-        let mut params = vec![receiver.to_string()];
+        let mut params = vec![ctx_param.to_string(), format!("mb: {}", self.mb_type())];
+        for g in self.fn_reg_globals(f) {
+            params.push(format!("gv{g}: {}", rust_type(self.globals[g as usize].0)?));
+        }
         for (i, t) in ty.params.iter().enumerate() {
             params.push(format!("p{i}: {}", rust_type(*t)?));
         }
         Ok(format!("({}) -> R<{}>", params.join(", "), result_type(&ty.results)?))
     }
 
-    /// The core crate: the instance, the host imports, `Guest`, and `Fns`,
-    /// the trait through which the functions in the part crates call each
-    /// other.
+    /// The signature of host import `k` on `Ctx`.
+    fn import_signature(&self, k: usize) -> Res<String> {
+        let ty = &self.types[k];
+        let mut params = vec!["&mut self".to_string(), format!("mb: {}", self.mb_type())];
+        for (i, t) in ty.params.iter().enumerate() {
+            params.push(format!("p{i}: {}", rust_type(*t)?));
+        }
+        if self.noreturn_imports[k] {
+            Ok(format!("({}) -> Trap", params.join(", ")))
+        } else {
+            Ok(format!("({}) -> R<{}>", params.join(", "), result_type(&ty.results)?))
+        }
+    }
+
+    /// The core crate: `Ctx` (hot fields first, disjoint from linear memory),
+    /// `Instance`, `HostView`, the host imports, and `Fns<M>`.
     fn core(&self, m: &DecodedModule) -> Res<String> {
         let mut s = String::new();
         s.push_str("// Generated by wtime-aot. Do not edit.\n#![forbid(unsafe_code)]\n#![allow(unused, non_snake_case, unreachable_code, unused_parens, clippy::all)]\n\n");
         s.push_str("pub use wtime_aot_rt::*;\n\n");
+        if !self.memory64 {
+            writeln!(s, "pub const CAP32: usize = {};", self.cap32).unwrap();
+        } else if let Some(cap64) = self.cap64 {
+            writeln!(s, "pub const CAP64: usize = {cap64};").unwrap();
+        }
+        writeln!(s, "pub const MIN_BYTES: usize = {};\n", self.min_bytes).unwrap();
+        // `#[repr(C)]` keeps stack_floor, memory length and mutable globals in
+        // the first cache line with 1-byte displacements (instead of Rust
+        // reordering `goose::State` ahead of them).
+        s.push_str("#[repr(C)]\npub struct Ctx {\n");
+        s.push_str("    /// The lowest stack address guest code may use (`goose::stack_floor`).\n    pub stack_floor: usize,\n");
+        if self.memory64 {
+            s.push_str("    pub outer: Outer,\n");
+        } else {
+            s.push_str("    pub mem: Mem32Meta,\n");
+        }
+        for (k, (t, _)) in self.globals.iter().enumerate() {
+            if self.global_consts[k].is_none() {
+                writeln!(s, "    pub g{k}: {},", rust_type(*t)?).unwrap();
+            }
+        }
+        s.push_str("    /// Instantiation is complete: the host may use the memory and goose.reserve.\n    pub ready: bool,\n");
+        writeln!(s, "    /// Runs `_start` (or reports why it cannot).\n    pub start: fn(&mut Ctx, {}) -> R<()>,", self.mb_type()).unwrap();
         writeln!(
             s,
-            "pub struct Instance {{\n    pub mem: {},\n    pub state: goose::State,\n    /// Instantiation is complete: the host may use the memory and goose.reserve.\n    pub ready: bool,",
-            if self.memory64 { "Memory" } else { "Memory32" }
+            "    /// The exported `goose.reserve`, if any.\n    pub reserve: Option<fn(&mut Ctx, {}, i64, i64) -> R<i64>>,",
+            self.mb_type()
         )
         .unwrap();
         writeln!(s, "    pub imports: [goose::Handler; {}],", self.imports.len()).unwrap();
-        s.push_str("    /// The lowest stack address guest code may use (`goose::stack_floor`).\n    pub stack_floor: usize,\n");
-        s.push_str("    /// Runs `_start` (or reports why it cannot).\n    pub start: fn(&mut Instance) -> R<()>,\n");
-        s.push_str("    /// The exported `goose.reserve`, if any.\n    pub reserve: Option<fn(&mut Instance, i64, i64) -> R<i64>>,\n");
-        for (k, (t, _)) in self.globals.iter().enumerate() {
-            writeln!(s, "    pub g{k}: {},", rust_type(*t)?).unwrap();
+        s.push_str("    pub state: goose::State,\n}\n\n");
+
+        // Top-level Instance owning both Ctx and the disjoint memory buffer.
+        writeln!(
+            s,
+            "pub struct Instance {{\n    pub ctx: Ctx,\n    pub mem: {},\n}}\n",
+            if !self.memory64 {
+                "Box<[u8; CAP32]>"
+            } else if self.cap64.is_some() {
+                "Box<[u8; CAP64]>"
+            } else {
+                "Vec<u8>"
+            }
+        )
+        .unwrap();
+        s.push_str("impl goose::Guest for Instance {\n");
+        s.push_str("    fn memory(&mut self) -> Option<&mut dyn LinearMemory> { None }\n");
+        s.push_str("    fn state(&mut self) -> &mut goose::State { &mut self.ctx.state }\n");
+        s.push_str("    fn reserve(&mut self, _: i64, _: i64) -> Option<R<i64>> { None }\n");
+        s.push_str("    fn start(&mut self) -> R<()> { (self.ctx.start)(&mut self.ctx, &mut self.mem) }\n}\n\n");
+
+        // Temporary zero-allocation host view pairing `Ctx` and `mb` for host calls.
+        writeln!(
+            s,
+            "struct HostView<'a> {{\n    mem: {},\n    ctx: &'a mut Ctx,\n}}\n",
+            if !self.memory64 {
+                "Mem32Host<'a, CAP32>"
+            } else if self.cap64.is_some() {
+                "Mem64FixedHost<'a, CAP64>"
+            } else {
+                "Mem64Host<'a>"
+            }
+        )
+        .unwrap();
+        s.push_str("impl goose::Guest for HostView<'_> {\n");
+        s.push_str(if self.memory_exported && self.has_memory {
+            "    fn memory(&mut self) -> Option<&mut dyn LinearMemory> { if self.ctx.ready { Some(&mut self.mem) } else { None } }\n"
+        } else {
+            "    fn memory(&mut self) -> Option<&mut dyn LinearMemory> { None }\n"
+        });
+        s.push_str("    fn state(&mut self) -> &mut goose::State { &mut self.ctx.state }\n");
+        if self.memory64 {
+            s.push_str(
+                "    fn reserve(&mut self, control: i64, count: i64) -> Option<R<i64>> {\n\
+                 \x20       match self.ctx.reserve {\n\
+                 \x20           Some(reserve) if self.ctx.ready => {\n\
+                 \x20               self.ctx.outer = std::mem::replace(&mut self.mem.outer, Outer::empty());\n\
+                 \x20               let res = reserve(self.ctx, self.mem.base, control, count);\n\
+                 \x20               self.mem.outer = std::mem::replace(&mut self.ctx.outer, Outer::empty());\n\
+                 \x20               Some(res)\n\
+                 \x20           }\n\
+                 \x20           _ => None,\n\
+                 \x20       }\n\
+                 \x20   }\n",
+            );
+        } else {
+            s.push_str(
+                "    fn reserve(&mut self, control: i64, count: i64) -> Option<R<i64>> {\n\
+                 \x20       match self.ctx.reserve {\n\
+                 \x20           Some(reserve) if self.ctx.ready => {\n\
+                 \x20               self.ctx.mem = self.mem.meta;\n\
+                 \x20               let res = reserve(self.ctx, self.mem.bytes, control, count);\n\
+                 \x20               self.mem.meta = self.ctx.mem;\n\
+                 \x20               Some(res)\n\
+                 \x20           }\n\
+                 \x20           _ => None,\n\
+                 \x20       }\n\
+                 \x20   }\n",
+            );
         }
-        s.push_str("}\n\n");
-        // Host imports.
-        s.push_str("impl Instance {\n");
+        s.push_str("    fn start(&mut self) -> R<()> { trap(Trap::NoStart) }\n}\n\n");
+
+        // Host imports on Ctx.
+        s.push_str("impl Ctx {\n");
         for (k, (module, name)) in self.imports.iter().enumerate() {
             let ty = &self.types[k];
             let vals: Vec<String> = ty
@@ -333,31 +1757,44 @@ impl Module {
                 [ValType::F64] => "f64",
                 _ => return Err(format!("import {module:?}.{name:?} has unsupported results")),
             };
+            let cold = if self.noreturn_imports[k] { "    #[cold]\n" } else { "" };
+            let (mk_view, restore) = if !self.memory64 {
+                (
+                    "let mut view = HostView { mem: Mem32Host { bytes: mb, meta: self.mem }, ctx: self };",
+                    "view.ctx.mem = view.mem.meta;",
+                )
+            } else if self.cap64.is_some() {
+                (
+                    "let mut view = HostView { mem: Mem64FixedHost { base: mb, outer: std::mem::replace(&mut self.outer, Outer::empty()) }, ctx: self };",
+                    "view.ctx.outer = view.mem.outer;",
+                )
+            } else {
+                (
+                    "let mut view = HostView { mem: Mem64Host { base: mb, outer: std::mem::replace(&mut self.outer, Outer::empty()) }, ctx: self };",
+                    "view.ctx.outer = view.mem.outer;",
+                )
+            };
+            let ret = if self.noreturn_imports[k] {
+                "match res { Err(error) => error, Ok(_) => Trap::Host }".to_string()
+            } else {
+                format!("res?.{fit}()")
+            };
             writeln!(
                 s,
-                "    // {module:?}.{name:?}\n    #[inline(never)]\n    pub fn import{k}{} {{\n        let handler = self.imports[{k}];\n        handler(self, &[{}])?.{fit}()\n    }}",
-                self.signature(k, "&mut self")?,
+                "    // {module:?}.{name:?}\n{cold}    #[inline(never)]\n    pub fn import{k}{} {{\n        let handler = self.imports[{k}];\n        {mk_view}\n        let res = handler(&mut view, &[{}]);\n        {restore}\n        {ret}\n    }}",
+                self.import_signature(k)?,
                 vals.join(", ")
             )
             .unwrap();
         }
         s.push_str("}\n\n");
-        // Fns.
-        s.push_str("/// Every function of the module. The part crates define the functions\n/// generically over `M` and call each other through this trait; the\n/// program crate implements it for its marker, which monomorphizes them all\n/// there, with direct calls.\npub trait Fns<M> {\n");
-        for f in 0..self.types.len() {
-            writeln!(s, "    fn f{f}{};", self.signature(f, "&mut self")?).unwrap();
+
+        // Fns trait for defined functions.
+        s.push_str("/// Every defined function of the module. The part crates define the functions\n/// generically over `M` and call each other through this trait; the\n/// program crate implements it for its marker, which monomorphizes them all\n/// there, with direct calls and disjoint `noalias` memory.\npub trait Fns<M> {\n");
+        for f in self.imports.len()..self.types.len() {
+            writeln!(s, "    fn f{f}{};", self.fn_signature(f, "&mut self")?).unwrap();
         }
-        s.push_str("}\n\n");
-        // Guest.
-        s.push_str("impl goose::Guest for Instance {\n");
-        s.push_str(if self.memory_exported && self.has_memory {
-            "    fn memory(&mut self) -> Option<&mut dyn LinearMemory> { if self.ready { Some(&mut self.mem) } else { None } }\n"
-        } else {
-            "    fn memory(&mut self) -> Option<&mut dyn LinearMemory> { None }\n"
-        });
-        s.push_str("    fn state(&mut self) -> &mut goose::State { &mut self.state }\n");
-        s.push_str("    fn reserve(&mut self, control: i64, count: i64) -> Option<R<i64>> {\n        match self.reserve {\n            Some(reserve) if self.ready => Some(reserve(self, control, count)),\n            _ => None,\n        }\n    }\n");
-        s.push_str("    fn start(&mut self) -> R<()> { (self.start)(self) }\n}\n");
+        s.push_str("}\n");
         let _ = m;
         Ok(s)
     }
@@ -369,28 +1806,37 @@ impl Module {
         s.push_str("// Generated by wtime-aot. Do not edit.\n#![forbid(unsafe_code)]\n#![allow(unused, non_snake_case, unreachable_code, unused_parens, clippy::all)]\n\n");
         writeln!(s, "use {core}::*;\n").unwrap();
         s.push_str("static DATA: &[u8] = include_bytes!(\"data.bin\");\n\n");
-        s.push_str("pub struct Marker;\n\nimpl Fns<Marker> for Instance {\n");
-        for (f, path) in paths.iter().enumerate() {
-            let args: Vec<String> = (0..self.types[f].params.len()).map(|i| format!("p{i}")).collect();
-            let body = if f < self.imports.len() {
-                format!("self.import{f}({})", args.join(", "))
-            } else {
-                let mut all = vec!["self".to_string()];
-                all.extend(args);
-                format!("{path}::<Marker>({})", all.join(", "))
-            };
-            writeln!(s, "    #[inline]\n    fn f{f}{} {{ {body} }}", self.signature(f, "&mut self")?).unwrap();
+        s.push_str("pub struct Marker;\n\nimpl Fns<Marker> for Ctx {\n");
+        for (f, path) in paths.iter().enumerate().skip(self.imports.len()) {
+            let mut all = vec!["self".to_string(), "mb".to_string()];
+            for g in self.fn_reg_globals(f) {
+                all.push(format!("gv{g}"));
+            }
+            for i in 0..self.types[f].params.len() {
+                all.push(format!("p{i}"));
+            }
+            let attr = if self.fn_inline_always(f) { "#[inline(always)]" } else { "#[inline]" };
+            writeln!(s, "    {attr}\n    fn f{f}{} {{ {path}::<Marker>({}) }}", self.fn_signature(f, "&mut self")?, all.join(", ")).unwrap();
         }
         s.push_str("}\n\n");
+
         // Instantiation.
         s.push_str("fn instantiate(state: &mut goose::State) -> R<Instance> {\n");
         match m.memories.first() {
-            Some(mt) if self.memory64 => {
-                let new = if self.flat64 { "new_flat" } else { "new" };
-                writeln!(s, "    let mem = Memory::{new}({}, {:?}, true)?;", mt.limits.min, mt.limits.max).unwrap()
+            Some(mt) if self.memory64 && self.cap64.is_some() => {
+                writeln!(s, "    let outer = Outer::new_flat_meta({}, {:?}, CAP64)?;", mt.limits.min, mt.limits.max).unwrap();
+                s.push_str("    let mem = alloc64::<CAP64>()?;\n");
             }
-            Some(mt) => writeln!(s, "    let mem = Memory32::new({}, {:?})?;", mt.limits.min, mt.limits.max).unwrap(),
-            None => s.push_str("    let mem = Memory32::new(0, Some(0))?;\n"),
+            Some(mt) if self.memory64 => {
+                writeln!(s, "    let (mem, outer) = Memory::new_parts({}, {:?}, true, {})?;", mt.limits.min, mt.limits.max, self.flat64).unwrap();
+            }
+            Some(mt) => {
+                writeln!(s, "    let mem_meta = Mem32Meta::new({}, {:?})?;", mt.limits.min, mt.limits.max).unwrap();
+                s.push_str("    let mem = alloc32::<CAP32>()?;\n");
+            }
+            None => {
+                s.push_str("    let mem_meta = Mem32Meta::new(0, Some(0))?;\n    let mem = alloc32::<CAP32>()?;\n");
+            }
         }
         s.push_str("    let mut imports: Vec<goose::Handler> = Vec::new();\n");
         for (module, name) in &self.imports {
@@ -403,39 +1849,63 @@ impl Module {
         }
         s.push_str("    let imports = imports.try_into().map_err(|_| Trap::Host)?;\n");
         s.push_str("    let owned = std::mem::replace(state, goose::State::new(Vec::new(), Vec::new()));\n");
-        // Globals in order, each initializer naming the earlier ones.
+        // Non-constant globals in order.
         for (k, (t, init)) in self.globals.iter().enumerate() {
-            writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
+            if self.global_consts[k].is_none() {
+                writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
+            }
         }
         writeln!(
             s,
-            "    let mut instance = Instance {{ mem, state: owned, stack_floor: goose::stack_floor(), ready: false, imports, start, reserve: {},",
-            if self.reserve.is_some() { "Some(reserve)" } else { "None" }
+            "    let ctx = Ctx {{\n        stack_floor: goose::stack_floor(),\n        {},",
+            if self.memory64 { "outer" } else { "mem: mem_meta" }
         )
         .unwrap();
         for k in 0..self.globals.len() {
-            writeln!(s, "        g{k},").unwrap();
+            if self.global_consts[k].is_none() {
+                writeln!(s, "        g{k},").unwrap();
+            }
         }
-        // wtime-goose refuses Emscripten standalone modules once they are
-        // instantiated.
+        writeln!(
+            s,
+            "        ready: false,\n        start,\n        reserve: {},\n        imports,\n        state: owned,\n    }};",
+            if self.reserve.is_some() { "Some(reserve)" } else { "None" }
+        )
+        .unwrap();
         let refused = m.exports.iter().any(|e| e.name == "__set_stack_limits");
-        s.push_str("    };\n    match initialize(&mut instance) {\n");
+        s.push_str("    let mut instance = Instance { ctx, mem };\n    match initialize(&mut instance.ctx, &mut instance.mem) {\n");
         if refused {
-            s.push_str("        Ok(()) => {\n            instance.state.failure = Some(\"emscripten standalone modules are not supported by this host\".into());\n            *state = std::mem::replace(&mut instance.state, goose::State::new(Vec::new(), Vec::new()));\n            trap(Trap::Host)\n        }\n");
+            s.push_str("        Ok(()) => {\n            instance.ctx.state.failure = Some(\"emscripten standalone modules are not supported by this host\".into());\n            *state = std::mem::replace(&mut instance.ctx.state, goose::State::new(Vec::new(), Vec::new()));\n            trap(Trap::Host)\n        }\n");
         } else {
-            s.push_str("        Ok(()) => {\n            instance.ready = true;\n            Ok(instance)\n        }\n");
+            s.push_str("        Ok(()) => {\n            instance.ctx.ready = true;\n            Ok(instance)\n        }\n");
         }
-        s.push_str("        Err(error) => {\n            *state = std::mem::replace(&mut instance.state, goose::State::new(Vec::new(), Vec::new()));\n            Err(error)\n        }\n    }\n}\n\n");
-        // The instantiation steps that can run code or trap, in the spec's
-        // order: active element segments, active data segments, then the
-        // start function.
-        s.push_str("fn initialize(this: &mut Instance) -> R<()> {\n");
-        // No instruction reads a table, so an active element segment only
-        // needs its bounds check: it traps if it does not fit the table.
+        s.push_str("        Err(error) => {\n            *state = std::mem::replace(&mut instance.ctx.state, goose::State::new(Vec::new(), Vec::new()));\n            Err(error)\n        }\n    }\n}\n\n");
+
+        // Helper for calling function `f` from top-level `initialize`/`start`/`reserve`.
+        let top_call = |f: usize, extra_args: &[String]| -> String {
+            if f < self.imports.len() {
+                let mut a = vec!["mb".to_string()];
+                a.extend_from_slice(extra_args);
+                if self.noreturn_imports[f] {
+                    format!("Err(ctx.import{f}({}))", a.join(", "))
+                } else {
+                    format!("ctx.import{f}({})", a.join(", "))
+                }
+            } else {
+                let mut a = vec!["mb".to_string()];
+                for g in self.fn_reg_globals(f) {
+                    a.push(format!("ctx.g{g}"));
+                }
+                a.extend_from_slice(extra_args);
+                format!("ctx.f{f}({})", a.join(", "))
+            }
+        };
+
+        writeln!(s, "fn initialize(ctx: &mut Ctx, mb: {}) -> R<()> {{", self.mb_type()).unwrap();
         for element in &m.elements {
             if let SegmentMode::Active { index, offset } = &element.mode {
                 let table = m.tables.get(*index as usize).ok_or("element segment for an imported table")?;
-                let offset = constant(offset, self.globals.len(), "this.")?;
+                let offset = constant(offset, self.globals.len(), "ctx.", &self.global_consts)?;
                 let offset = if table.index_type == wtime_types::IndexType::I64 {
                     format!("({offset}) as u64")
                 } else {
@@ -456,30 +1926,35 @@ impl Module {
             data.extend_from_slice(bytes);
             match &segment.mode {
                 SegmentMode::Active { index: 0, offset } => {
-                    let offset = constant(offset, self.globals.len(), "this.")?;
+                    let offset = constant(offset, self.globals.len(), "ctx.", &self.global_consts)?;
                     let address = if self.memory64 { format!("({offset}) as u64") } else { format!("({offset}) as u32 as u64") };
-                    writeln!(s, "    this.mem.init({address}, &DATA[{at}..{}], 0, {})?;", at + bytes.len(), bytes.len()).unwrap();
+                    if self.memory64 {
+                        writeln!(s, "    init_parts(mb, &mut ctx.outer, {address}, &DATA[{at}..{}], 0, {})?;", at + bytes.len(), bytes.len()).unwrap();
+                    } else {
+                        writeln!(s, "    ctx.mem.init(mb, {address}, &DATA[{at}..{}], 0, {})?;", at + bytes.len(), bytes.len()).unwrap();
+                    }
                 }
                 SegmentMode::Passive => {}
                 _ => return Err("data segments for other memories are not supported".into()),
             }
         }
         if let Some(start) = self.start {
-            writeln!(s, "    this.f{start}()?;").unwrap();
+            writeln!(s, "    {}?;", top_call(start as usize, &[])).unwrap();
         }
         s.push_str("    Ok(())\n}\n\n");
+        let mb_ty = self.mb_type();
         match self.entry {
             Some(f) if self.types[f as usize].params.is_empty() => {
-                writeln!(s, "fn start(this: &mut Instance) -> R<()> {{ this.f{f}().map(|_| ()) }}\n").unwrap()
+                writeln!(s, "fn start(ctx: &mut Ctx, mb: {mb_ty}) -> R<()> {{ {}.map(|_| ()) }}\n", top_call(f as usize, &[])).unwrap()
             }
             Some(f) if (f as usize) < self.imports.len() => {
-                s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::StartImportArguments) }\n\n")
+                writeln!(s, "fn start(_: &mut Ctx, _: {mb_ty}) -> R<()> {{ trap(Trap::StartImportArguments) }}\n").unwrap()
             }
-            Some(_) => s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::StartArguments) }\n\n"),
+            Some(_) => writeln!(s, "fn start(_: &mut Ctx, _: {mb_ty}) -> R<()> {{ trap(Trap::StartArguments) }}\n").unwrap(),
             None if m.exports.iter().any(|e| e.name == "_start") => {
-                s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::StartNotFunction) }\n\n")
+                writeln!(s, "fn start(_: &mut Ctx, _: {mb_ty}) -> R<()> {{ trap(Trap::StartNotFunction) }}\n").unwrap()
             }
-            None => s.push_str("fn start(_: &mut Instance) -> R<()> { trap(Trap::NoStart) }\n\n"),
+            None => writeln!(s, "fn start(_: &mut Ctx, _: {mb_ty}) -> R<()> {{ trap(Trap::NoStart) }}\n").unwrap(),
         }
         if let Some(f) = self.reserve {
             let ty = &self.types[f as usize];
@@ -490,7 +1965,7 @@ impl Module {
             };
             let (call, fit) = match (ty.params.as_slice(), ty.results.as_slice()) {
                 ([a, b], [r]) => (
-                    format!("this.f{f}({}, {})", arg(a, "control")?, arg(b, "count")?),
+                    top_call(f as usize, &[arg(a, "control")?, arg(b, "count")?]),
                     match r {
                         ValType::I32 => ".map(|v| v as i64)",
                         ValType::I64 => "",
@@ -499,7 +1974,7 @@ impl Module {
                 ),
                 _ => return Err("goose.reserve is not (address, address) -> address".into()),
             };
-            writeln!(s, "fn reserve(this: &mut Instance, control: i64, count: i64) -> R<i64> {{ {call}{fit} }}\n").unwrap();
+            writeln!(s, "fn reserve(ctx: &mut Ctx, mb: {mb_ty}, control: i64, count: i64) -> R<i64> {{ {call}{fit} }}\n").unwrap();
         }
         writeln!(s, "fn main() {{\n    goose::main({module_path:?}, {STACK_BYTES}, instantiate);\n}}").unwrap();
         Ok(s)
@@ -589,10 +2064,9 @@ fn bare_operands(line: &str) -> String {
 
 /// A constant expression as Rust: numeric constants, global.get and the
 /// extended constant operators (wrapping integer add, sub and mul).
-/// Earlier globals are referred to by name (`{prefix}g{k}`), of which
-/// `globals` are defined, never by copying their initializers: those can
-/// refer to one another, and copies would grow exponentially.
-fn constant(expression: &[Instruction], globals: usize, prefix: &str) -> Res<String> {
+/// Earlier globals are referred to by name (`{prefix}g{k}`), or by their
+/// evaluated constant literal when effectively immutable.
+fn constant(expression: &[Instruction], globals: usize, prefix: &str, consts: &[Option<ConstVal>]) -> Res<String> {
     let mut stack: Vec<String> = Vec::new();
     for i in expression {
         let value = match (i.opcode, &i.immediate) {
@@ -601,7 +2075,13 @@ fn constant(expression: &[Instruction], globals: usize, prefix: &str) -> Res<Str
             (0x42, Immediate::I64(v)) => format!("({v}i64)"),
             (0x43, Immediate::F32(v)) => format!("f32::from_bits({v:#x})"),
             (0x44, Immediate::F64(v)) => format!("f64::from_bits({v:#x})"),
-            (0x23, Immediate::Index(g)) if (*g as usize) < globals => format!("{prefix}g{g}"),
+            (0x23, Immediate::Index(g)) if (*g as usize) < globals => {
+                if let Some(c) = consts.get(*g as usize).and_then(|c| *c) {
+                    c.rust_literal()
+                } else {
+                    format!("{prefix}g{g}")
+                }
+            }
             (0x23, _) => return Err("global.get of a later global".into()),
             (op @ (0x6a..=0x6c | 0x7c..=0x7e), _) => {
                 let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
@@ -669,13 +2149,23 @@ struct Emitter {
     /// increasing order; some may since have been evaluated or popped.
     /// `materialize` visits these instead of the whole stack.
     pending: Vec<usize>,
-    /// The globals the function sets, which it stores back to the instance
-    /// before calls and returns, and the mutable globals it uses, which it
-    /// reloads after calls (see `Function::emit`).
+    /// The globals the function sets (excluding register-passed preserved
+    /// globals), which it stores back to `ctx` before calls that read/write
+    /// them; `globals_return_store` omits globals proven preserved when no
+    /// callee inside this function reads or writes them.
     globals_set: Vec<u32>,
+    globals_return_store: Vec<u32>,
     globals_reloaded: Vec<u32>,
-    /// The globals held in locals; others are read and written in place.
+    /// The globals held in locals (including register-passed preserved globals).
     globals_cached: std::collections::BTreeSet<u32>,
+    /// Preserved globals passed by value into this function.
+    reg_globals: Vec<u32>,
+    /// Whether this function keeps `ml: usize` (the active direct memory length)
+    /// and (in chunked 64-bit mode) `mf: bool` (`ctx.outer.is_flat()`).
+    uses_ml: bool,
+    /// Inside an `if mf { ... }` non-growing region of a chunked 64-bit function:
+    /// all memory ops emit flat `m64::fl*`/`fs*`/`fcopy_n`/`ffill_n`.
+    in_flat_region: bool,
     /// The bytes this function's body may take, and whether it went past:
     /// checked as lines are written, so that no module makes the generator
     /// build an oversized string before the total is checked.
@@ -716,18 +2206,39 @@ impl Dep {
 const MAX_EXPRESSION: usize = 300;
 
 impl Emitter {
-    /// Stores the globals the function has set back to the instance, for
-    /// callees and callers to see.
-    fn store_globals(&mut self) {
-        for x in self.globals_set.clone() {
-            self.line(&format!("self.g{x} = gv{x};"));
+    /// Stores modified cached globals back to `ctx` before returning, omitting
+    /// globals proven preserved whose `ctx` slot was never touched by any call.
+    fn store_globals_return(&mut self) {
+        for x in self.globals_return_store.clone() {
+            self.line(&format!("ctx.g{x} = gv{x};"));
         }
     }
 
-    /// Takes the mutable globals anew after a call, which may have set them.
-    fn load_globals(&mut self) {
+    /// Stores only the set cached globals that `callee` transitively reads or writes.
+    fn store_globals_for_call(&mut self, module: &Module, callee: usize) {
+        for x in self.globals_set.clone() {
+            if module.fn_reads[callee].contains(x) || module.fn_writes[callee].contains(x) {
+                self.line(&format!("ctx.g{x} = gv{x};"));
+            }
+        }
+        // Host imports that can re-enter `goose.reserve` read preserved globals
+        // from `ctx` inside `reserve(...)`.
+        if module.reserve_imports[callee] {
+            for g in self.reg_globals.clone() {
+                if module.fn_reads[callee].contains(g) || module.fn_writes[callee].contains(g) {
+                    self.line(&format!("ctx.g{g} = gv{g};"));
+                }
+            }
+        }
+    }
+
+    /// Reloads only the cached mutable globals that `callee` may net-modify
+    /// (skipping globals `callee` is proven to preserve).
+    fn load_globals_after_call(&mut self, module: &Module, callee: usize) {
         for x in self.globals_reloaded.clone() {
-            self.line(&format!("gv{x} = self.g{x};"));
+            if module.fn_net_writes[callee].contains(x) {
+                self.line(&format!("gv{x} = ctx.g{x};"));
+            }
         }
     }
 
@@ -736,16 +2247,38 @@ impl Emitter {
         format!("{prefix}{}", self.next)
     }
 
-    /// After code that may change or use the memory through the instance
-    /// (calls, memory.size and memory.grow, bulk operations): the locals
-    /// holding a 32-bit memory's length and bytes are taken anew.
-    fn refresh(&mut self, module: &Module) {
+    /// Refreshes `ml` (and `mf` in chunked 64-bit mode) after a call that may
+    /// grow memory or after `memory.grow`, re-establishing LLVM's dominating
+    /// `MIN_BYTES <= ml <= cap` range proof.
+    fn refresh_ml(&mut self, module: &Module) {
+        if !self.uses_ml {
+            return;
+        }
         if module.memory64 {
-            self.line("(mb, mo) = self.mem.parts();");
-        } else if module.fixed32.is_some() {
-            self.line("mb = self.mem.bytes_mut();");
-        } else {
-            self.line("ml = self.mem.len(); mb = self.mem.bytes_mut();");
+            if module.fixed64.is_none() {
+                self.line("ml = ctx.outer.fast();");
+                if !module.flat64 {
+                    self.line("mf = ctx.outer.is_flat();");
+                    self.line("if ml > mb.len() { return trap(Trap::OutOfBounds); }");
+                } else if module.cap64.is_some() {
+                    if module.min_bytes > 0 {
+                        self.line("if ml < MIN_BYTES || ml > CAP64 { return trap(Trap::OutOfBounds); }");
+                    } else {
+                        self.line("if ml > CAP64 { return trap(Trap::OutOfBounds); }");
+                    }
+                } else if module.min_bytes > 0 {
+                    self.line("if ml < MIN_BYTES || ml > mb.len() { return trap(Trap::OutOfBounds); }");
+                } else {
+                    self.line("if ml > mb.len() { return trap(Trap::OutOfBounds); }");
+                }
+            }
+        } else if module.fixed32.is_none() {
+            self.line("ml = ctx.mem.len;");
+            if module.min_bytes > 0 {
+                self.line("if ml < MIN_BYTES || ml > CAP32 { return trap(Trap::OutOfBounds); }");
+            } else {
+                self.line("if ml > CAP32 { return trap(Trap::OutOfBounds); }");
+            }
         }
     }
 
@@ -871,7 +2404,7 @@ impl Emitter {
         match kind {
             Kind::Function => {
                 let values = self.top(self.frames[at].results.len())?;
-                self.store_globals();
+                self.store_globals_return();
                 self.line(&format!("return {};", ok_values(&values)));
             }
             Kind::Loop => {
@@ -925,12 +2458,19 @@ impl<'a> Function<'a> {
         Err("multi-value block types are not supported".into())
     }
 
-    /// The length a 32-bit access checks against: the constant of a fixed
-    /// memory, otherwise the local kept by the prologue and `refresh`.
+    /// The length a memory access checks against: the constant of a fixed
+    /// memory, otherwise the local `ml` kept by the prologue and `refresh_ml`.
     fn ml(&self) -> String {
-        match self.module.fixed32 {
-            Some(bytes) => format!("{bytes}usize"),
-            None => "ml".into(),
+        if self.module.memory64 {
+            match self.module.fixed64 {
+                Some(bytes) => format!("{bytes}usize"),
+                None => "ml".into(),
+            }
+        } else {
+            match self.module.fixed32 {
+                Some(bytes) => format!("{bytes}usize"),
+                None => "ml".into(),
+            }
         }
     }
 
@@ -940,43 +2480,50 @@ impl<'a> Function<'a> {
 
     fn emit(&self, code: &[Instruction], out: &mut String, budget: usize) -> Res<()> {
         let ty = &self.module.types[self.index];
-        let params: Vec<String> = ty
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, t)| Ok(format!("mut l{i}: {}", rust_type(*t)?)))
-            .collect::<Res<_>>()?;
-        // The globals the function uses live in locals of their own, so
-        // that LLVM keeps them in registers across memory stores (it cannot
-        // tell that the memory's bytes and the instance do not overlap). Set
-        // globals are stored back before calls and returns, and mutable ones
-        // loaded again after calls; a trap needs neither, as nothing runs in
-        // the instance after one.
-        //
-        // Each call site and exit stores and reloads the cached globals, so
-        // caching costs lines in proportion to (cached globals) x (sites):
-        // the most used globals are cached while that stays within a few
-        // lines per instruction, and the rest are read and written in the
-        // instance directly, so that the source stays linear in the code.
+        let fn_reg_globals = self.module.fn_reg_globals(self.index);
+        let reg_set: std::collections::BTreeSet<u32> = fn_reg_globals.iter().copied().collect();
+
+        // Collect non-constant, non-register-passed globals used in live code,
+        // and globals touched by any reachable non-noreturn callee.
         let mut uses: std::collections::BTreeMap<u32, (usize, bool)> = std::collections::BTreeMap::new();
-        let mut sites = 1;
-        for i in code {
-            match (i.opcode, &i.immediate) {
-                (0x23 | 0x24, Immediate::Index(x)) if (*x as usize) < self.module.globals.len() => {
-                    let entry = uses.entry(*x).or_default();
-                    entry.0 += 1;
-                    entry.1 |= i.opcode == 0x24;
-                }
-                (0x0c | 0x0d | 0x0e | 0x0f | 0x10..=0x15, _) => sites += 1,
-                _ => {}
+        let mut callee_touches = BitSet::new(self.module.globals.len());
+        let mut sites = 1usize;
+        let mut uses_ml = false;
+        let is_fixed = if self.module.memory64 { self.module.fixed64.is_some() } else { self.module.fixed32.is_some() };
+        visit_live(code, &self.module.noreturn_imports, |i| match (i.opcode, &i.immediate) {
+            (0x23 | 0x24, Immediate::Index(x))
+                if (*x as usize) < self.module.globals.len()
+                    && self.module.global_consts[*x as usize].is_none()
+                    && !reg_set.contains(x) =>
+            {
+                let entry = uses.entry(*x).or_default();
+                entry.0 += 1;
+                entry.1 |= i.opcode == 0x24;
             }
-        }
+            (0x0c..=0x0f, _) => sites += 1,
+            (0x10, Immediate::Index(c)) if !self.module.noreturn_imports.get(*c as usize).copied().unwrap_or(false) => {
+                sites += 1;
+                if let Some(r) = self.module.fn_reads.get(*c as usize) {
+                    callee_touches.union_with(r);
+                }
+                if let Some(w) = self.module.fn_writes.get(*c as usize) {
+                    callee_touches.union_with(w);
+                }
+            }
+            (0x11..=0x15, _) => sites += 1,
+            (0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b, _) if !is_fixed => {
+                uses_ml = true;
+            }
+            _ => {}
+        });
         let mut ranked: Vec<(u32, usize, bool)> = uses.into_iter().map(|(x, (n, set))| (x, n, set)).collect();
         ranked.sort_by_key(|&(x, n, _)| (std::cmp::Reverse(n), x));
         let allowance = GLOBAL_LINES_PER_INSTRUCTION * code.len() + 64;
         let mut cost = 0;
-        let mut cached = std::collections::BTreeSet::new();
+        let mut cached = reg_set.clone();
+        let mut init_cached = Vec::new();
         let mut set = Vec::new();
+        let mut return_store = Vec::new();
         let mut globals_reloaded = Vec::new();
         for (x, _, is_set) in ranked {
             let mutable = self.module.globals_mutable[x as usize];
@@ -986,16 +2533,24 @@ impl<'a> Function<'a> {
             }
             cost += lines;
             cached.insert(x);
+            init_cached.push(x);
             if is_set {
                 set.push(x);
+                // Skip storing `ctx.g{x} = gv{x}` on return when this function
+                // preserves `x` and never lets any call observe or modify `ctx.g{x}`.
+                if !(self.module.fn_preserves[self.index].contains(x) && !callee_touches.contains(x)) {
+                    return_store.push(x);
+                }
             }
             if mutable {
                 globals_reloaded.push(x);
             }
         }
+        init_cached.sort_unstable();
         set.sort_unstable();
+        return_store.sort_unstable();
         globals_reloaded.sort_unstable();
-        let used = cached.clone();
+
         let mut e = Emitter {
             s: String::new(),
             next: 0,
@@ -1005,55 +2560,130 @@ impl<'a> Function<'a> {
             dead: 0,
             pending: vec![],
             globals_set: set,
+            globals_return_store: return_store,
             globals_reloaded,
             globals_cached: cached,
+            reg_globals: fn_reg_globals.clone(),
+            uses_ml,
+            in_flat_region: false,
             budget,
             over: false,
         };
-        let mut all = vec!["this: &mut Instance".to_string()];
-        all.extend(params);
+        let mut all = vec!["ctx: &mut Ctx".to_string(), format!("mb: {}", self.module.mb_type())];
+        for &g in &fn_reg_globals {
+            all.push(format!("mut gv{g}: {}", rust_type(self.module.globals[g as usize].0)?));
+        }
+        for (i, t) in ty.params.iter().enumerate() {
+            all.push(format!("mut l{i}: {}", rust_type(*t)?));
+        }
+        let is_root = self.module.start == Some(self.index as u32)
+            || self.module.entry == Some(self.index as u32)
+            || self.module.reserve == Some(self.index as u32);
+        let inline_always = self.module.fn_inline_always(self.index);
+        let should_inline = !self.module.fn_in_cycle[self.index]
+            && (code.len() <= INLINE_INSTRUCTIONS
+                || (!self.module.fn_has_calls[self.index]
+                    && code.len() <= INLINE_LEAF_INSTRUCTIONS
+                    && self.module.fn_callers[self.index] <= INLINE_LEAF_MAX_CALLERS)
+                || (!is_root && self.module.fn_callers[self.index] == 1 && code.len() <= INLINE_SINGLE_CALLER_INSTRUCTIONS));
+        if inline_always {
+            writeln!(out, "#[inline(always)]").unwrap();
+        } else if should_inline {
+            writeln!(out, "#[inline]").unwrap();
+        }
         writeln!(
             out,
-            "pub fn f{}<M>({}) -> R<{}>\nwhere\n    Instance: Fns<M>,\n{{",
+            "pub fn f{}<M>({}) -> R<{}>\nwhere\n    Ctx: Fns<M>,\n{{",
             self.index,
             all.join(", "),
             result_type(&ty.results)?
         )
         .unwrap();
-        // Calls check the native stack left, as Wasmtime's do: a frame's own
-        // address below the floor traps with call depth exhausted. (No
-        // count of calls: the stack bounds recursion by its actual use.) A
-        // small leaf skips it: it runs on top of a caller that passed the
-        // check, and its frame (at most LEAF_LOCALS locals and the
-        // temporaries of LEAF_INSTRUCTIONS instructions, some tens of KiB)
-        // is small beside the margin kept below the floor (at least 4 MiB,
-        // `goose::main`), which must hold the caller's frame below its
-        // check as well; before, such a leaf would have trapped there.
-        let leaf = self.locals.len() <= LEAF_LOCALS && code.len() <= LEAF_INSTRUCTIONS && !code.iter().any(|i| matches!(i.opcode, 0x10..=0x15));
-        if !leaf {
+        // Calls check the native stack left unless this function heads a small
+        // acyclic call subtree well inside the 4+ MiB guard margin. Using
+        // `MaybeUninit::uninit()` avoids a dead stack write in every prologue.
+        if !self.module.fn_no_stack_check[self.index] {
             writeln!(
                 out,
-                "    let frame = 0u8;\n    if (&frame as *const u8 as usize) < this.stack_floor {{ return trap(Trap::CallStackExhausted); }}"
+                "    let frame = std::mem::MaybeUninit::<u8>::uninit();\n    if (frame.as_ptr() as usize) < ctx.stack_floor {{ return trap(Trap::CallStackExhausted); }}"
             )
             .unwrap();
         }
-        // The memory's length, in a local: LLVM cannot tell that the
-        // module's stores leave the instance's own fields alone, so a field
-        // would be reloaded at every access. Refreshed after each call and
-        // memory.grow, which are what change it.
-        if self.module.memory64 {
-            writeln!(out, "    let (mut mb, mut mo) = this.mem.parts();").unwrap();
-        } else if self.module.fixed32.is_some() {
-            writeln!(out, "    let mut mb = this.mem.bytes_mut();").unwrap();
-        } else {
-            writeln!(out, "    let mut ml: usize = this.mem.len();\n    let mut mb = this.mem.bytes_mut();").unwrap();
+        if uses_ml {
+            if self.module.memory64 {
+                writeln!(out, "    let mut ml: usize = ctx.outer.fast();").unwrap();
+                if !self.module.flat64 {
+                    writeln!(out, "    let mut mf: bool = ctx.outer.is_flat();").unwrap();
+                    writeln!(out, "    if ml > mb.len() {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                } else if self.module.cap64.is_some() {
+                    if self.module.min_bytes > 0 {
+                        writeln!(out, "    if ml < MIN_BYTES || ml > CAP64 {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                    } else {
+                        writeln!(out, "    if ml > CAP64 {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                    }
+                } else if self.module.min_bytes > 0 {
+                    writeln!(out, "    if ml < MIN_BYTES || ml > mb.len() {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                } else {
+                    writeln!(out, "    if ml > mb.len() {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                }
+            } else {
+                writeln!(out, "    let mut ml: usize = ctx.mem.len;").unwrap();
+                if self.module.min_bytes > 0 {
+                    writeln!(out, "    if ml < MIN_BYTES || ml > CAP32 {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                } else {
+                    writeln!(out, "    if ml > CAP32 {{ return trap(Trap::OutOfBounds); }}").unwrap();
+                }
+            }
         }
         for (i, t) in self.locals.iter().enumerate().skip(self.n_params) {
             writeln!(out, "    let mut l{i}: {} = {};", rust_type(*t)?, zero(*t)?).unwrap();
         }
-        for &x in &used {
+        for &x in &init_cached {
             let t = self.module.globals[x as usize].0;
-            writeln!(out, "    let mut gv{x}: {} = this.g{x};", rust_type(t)?).unwrap();
+            writeln!(out, "    let mut gv{x}: {} = ctx.g{x};", rust_type(t)?).unwrap();
+        }
+
+        // In chunked 64-bit mode, precompute non-growing void blocks/loops to
+        // specialize under `if mf { <flat m64> } else { <chunked m64> }`.
+        let chunked64 = self.module.memory64 && !self.module.flat64 && uses_ml;
+        let mut region_end = vec![0usize; code.len()];
+        let mut region_may_grow = vec![false; code.len()];
+        let mut region_mem_ops = vec![0usize; code.len()];
+        if chunked64 {
+            let mut open: Vec<usize> = Vec::new();
+            for (pc, i) in code.iter().enumerate() {
+                match i.opcode {
+                    0x02..=0x04 => open.push(pc),
+                    0x0b => {
+                        if let Some(start_pc) = open.pop() {
+                            region_end[start_pc] = pc;
+                        }
+                    }
+                    0x40 => {
+                        for &s in &open {
+                            region_may_grow[s] = true;
+                        }
+                    }
+                    0x10 => {
+                        if let Immediate::Index(c) = i.immediate {
+                            let c = c as usize;
+                            if !self.module.noreturn_imports.get(c).copied().unwrap_or(false)
+                                && self.module.fn_may_grow.get(c).copied().unwrap_or(false)
+                            {
+                                for &s in &open {
+                                    region_may_grow[s] = true;
+                                }
+                            }
+                        }
+                    }
+                    0x28..=0x3e | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b => {
+                        for &s in &open {
+                            region_mem_ops[s] += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
         e.frames.push(Frame {
@@ -1067,7 +2697,60 @@ impl<'a> Function<'a> {
             if_params: vec![],
             has_else: false,
         });
-        for (pc, i) in code.iter().enumerate() {
+        let mut pc = 0usize;
+        while pc < code.len() {
+            let i = &code[pc];
+            let can_specialize = chunked64
+                && !e.in_flat_region
+                && !e.frames.last().is_some_and(|f| f.unreachable)
+                && matches!(i.opcode, 0x02 | 0x03)
+                && matches!(i.immediate, Immediate::Block(-64))
+                && region_end[pc] > pc
+                && region_end[pc] - pc < FLAT_REGION_MAX_INSTRUCTIONS
+                && !region_may_grow[pc]
+                && region_mem_ops[pc] >= if i.opcode == 0x03 { FLAT_LOOP_MIN_MEM_OPS } else { FLAT_BLOCK_MIN_MEM_OPS };
+            if can_specialize {
+                let end_pc = region_end[pc];
+                e.materialize(|_| true, None)?;
+                let saved_stack = e.stack.clone();
+                let saved_deps = e.deps.clone();
+                let saved_pending = e.pending.clone();
+                let saved_unreach = e.frames.last().unwrap().unreachable;
+                e.line("if mf {");
+                e.in_flat_region = true;
+                for (sub_pc, sub_i) in code.iter().enumerate().take(end_pc + 1).skip(pc) {
+                    self.instruction(&mut e, sub_i)
+                        .map_err(|err| format!("instruction {sub_pc} ({:#x}): {err}", sub_i.opcode))?;
+                    if e.over {
+                        return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                    }
+                    if e.frames.len() > MAX_NESTING {
+                        return Err(format!("instruction {sub_pc}: blocks nested deeper than {MAX_NESTING}"));
+                    }
+                }
+                let then_unreach = e.frames.last().unwrap().unreachable;
+                e.in_flat_region = false;
+                e.stack = saved_stack;
+                e.deps = saved_deps;
+                e.pending = saved_pending;
+                e.frames.last_mut().unwrap().unreachable = saved_unreach;
+                e.line("} else {");
+                for (sub_pc, sub_i) in code.iter().enumerate().take(end_pc + 1).skip(pc) {
+                    self.instruction(&mut e, sub_i)
+                        .map_err(|err| format!("instruction {sub_pc} ({:#x}): {err}", sub_i.opcode))?;
+                    if e.over {
+                        return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                    }
+                    if e.frames.len() > MAX_NESTING {
+                        return Err(format!("instruction {sub_pc}: blocks nested deeper than {MAX_NESTING}"));
+                    }
+                }
+                let else_unreach = e.frames.last().unwrap().unreachable;
+                e.line("}");
+                e.frames.last_mut().unwrap().unreachable = then_unreach && else_unreach;
+                pc = end_pc + 1;
+                continue;
+            }
             self.instruction(&mut e, i).map_err(|err| format!("instruction {pc} ({:#x}): {err}", i.opcode))?;
             if e.over {
                 return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
@@ -1078,10 +2761,10 @@ impl<'a> Function<'a> {
             if e.frames.is_empty() {
                 break;
             }
+            pc += 1;
         }
-        // The body refers to the instance as `this`.
         for line in e.s.lines() {
-            writeln!(out, "{}", bare_operands(&line.replace("self.", "this."))).unwrap();
+            writeln!(out, "{}", bare_operands(line)).unwrap();
         }
         out.push_str("}\n\n");
         Ok(())
@@ -1211,7 +2894,7 @@ impl<'a> Function<'a> {
                     match kind {
                         Kind::Function => {
                             let values = e.top(frame.results.len())?;
-                            e.store_globals();
+                            e.store_globals_return();
                             e.line(&format!("return {};", ok_values(&values)));
                         }
                         Kind::Block | Kind::If | Kind::Loop => {
@@ -1266,25 +2949,45 @@ impl<'a> Function<'a> {
                 let at = e.stack.len() - n;
                 let args: Vec<String> = e.stack.drain(at..).map(|(v, _)| v).collect();
                 e.deps.truncate(at);
-                // The callee may set globals.
-                e.materialize(|d| d.globals, None)?;
-                e.store_globals();
-                let call = format!("t!(self.f{f}({}))", args.join(", "));
-                match ty.results.as_slice() {
-                    [] => e.line(&format!("{call};")),
-                    [t] => e.push(*t, &call)?,
-                    ts => {
-                        let vars: Vec<String> = ts.iter().map(|_| e.fresh("v")).collect();
-                        e.line(&format!("let ({}) = {call};", vars.join(", ")));
-                        for (v, t) in vars.into_iter().zip(ts) {
-                            e.push_plain(*t, v);
+                if self.module.noreturn_imports[f] {
+                    // Cold, never-returning host import (`goose.abort`, `goose.exit`):
+                    // returns `Trap` directly, so no globals need storing or reloading.
+                    let mut all = vec!["mb".to_string()];
+                    all.extend(args);
+                    e.line(&format!("return Err(ctx.import{f}({}));", all.join(", ")));
+                    e.set_unreachable();
+                } else {
+                    // Materialize pending expressions reading globals only if callee net-writes globals.
+                    if !self.module.fn_net_writes[f].is_empty() {
+                        e.materialize(|d| d.globals, None)?;
+                    }
+                    e.store_globals_for_call(self.module, f);
+                    let mut all = vec!["mb".to_string()];
+                    for g in self.module.fn_reg_globals(f) {
+                        all.push(format!("gv{g}"));
+                    }
+                    all.extend(args);
+                    let call = if f < self.module.imports.len() {
+                        format!("t!(ctx.import{f}({}))", all.join(", "))
+                    } else {
+                        format!("t!(ctx.f{f}({}))", all.join(", "))
+                    };
+                    match ty.results.as_slice() {
+                        [] => e.line(&format!("{call};")),
+                        [t] => e.push(*t, &call)?,
+                        ts => {
+                            let vars: Vec<String> = ts.iter().map(|_| e.fresh("v")).collect();
+                            e.line(&format!("let ({}) = {call};", vars.join(", ")));
+                            for (v, t) in vars.into_iter().zip(ts) {
+                                e.push_plain(*t, v);
+                            }
                         }
                     }
+                    if self.module.fn_may_grow[f] {
+                        e.refresh_ml(self.module);
+                    }
+                    e.load_globals_after_call(self.module, f);
                 }
-                // The callee may have grown the memory and set globals.
-                e.refresh(&self.module);
-                e.load_globals();
-
             }
             0x1a => {
                 e.pop()?;
@@ -1318,36 +3021,61 @@ impl<'a> Function<'a> {
             0x23 => {
                 let x = index()? as usize;
                 let (t, _) = self.module.globals.get(x).ok_or("global index")?;
-                let place = if e.globals_cached.contains(&(x as u32)) { format!("gv{x}") } else { format!("self.g{x}") };
-                e.push_pure(*t, &place, Dep::global())?;
+                if let Some(c) = self.module.global_consts[x] {
+                    e.push_plain(*t, c.rust_literal());
+                } else {
+                    let place = if e.globals_cached.contains(&(x as u32)) { format!("gv{x}") } else { format!("ctx.g{x}") };
+                    e.push_pure(*t, &place, Dep::global())?;
+                }
             }
             0x24 => {
                 let x = index()?;
                 let (v, _) = e.pop()?;
-                e.materialize(|d| d.globals, None)?;
-                if e.globals_cached.contains(&x) {
-                    e.line(&format!("gv{x} = {v};"));
+                if self.module.global_consts.get(x as usize).and_then(|c| *c).is_some() {
+                    // Proven constant-init global: every write stores the same constant.
                 } else {
-                    e.line(&format!("self.g{x} = {v};"));
+                    e.materialize(|d| d.globals, None)?;
+                    if e.globals_cached.contains(&x) {
+                        e.line(&format!("gv{x} = {v};"));
+                    } else {
+                        e.line(&format!("ctx.g{x} = {v};"));
+                    }
                 }
             }
             0x28..=0x35 | 0xfd00 => self.load(e, i)?,
             0x36..=0x3e | 0xfd0b => self.store(e, i)?,
             0x3f => {
-                let t = if self.module.memory64 { ValType::I64 } else { ValType::I32 };
-                if let Some(bytes) = self.module.fixed32 {
-                    e.push_plain(t, format!("({}i32)", bytes >> 16));
+                if !self.module.memory64 {
+                    if let Some(bytes) = self.module.fixed32 {
+                        e.push_plain(ValType::I32, format!("({}i32)", bytes >> 16));
+                    } else {
+                        e.push(ValType::I32, "(ml >> 16) as i32")?;
+                    }
+                } else if let Some(bytes) = self.module.fixed64 {
+                    e.push_plain(ValType::I64, format!("({}i64)", bytes >> 16));
+                } else if self.module.flat64 {
+                    e.push(ValType::I64, "(ml >> 16) as i64")?;
                 } else {
-                    e.push(t, &format!("self.mem.size() as {}", rust_type(t)?))?;
-                    e.refresh(&self.module);
+                    e.push(ValType::I64, "(ctx.outer.len() >> 16) as i64")?;
                 }
             }
             0x40 => {
                 let (n, _) = e.pop()?;
-                let t = if self.module.memory64 { ValType::I64 } else { ValType::I32 };
-                let delta = self.address(&n);
-                e.push(t, &format!("self.mem.grow({delta}) as {}", rust_type(t)?))?;
-                e.refresh(&self.module);
+                if !self.module.memory64 {
+                    if let Some(bytes) = self.module.fixed32 {
+                        e.push(ValType::I32, &format!("if ({n}) == 0 {{ {}i32 }} else {{ -1i32 }}", bytes >> 16))?;
+                    } else {
+                        let delta = self.address(&n);
+                        e.push(ValType::I32, &format!("ctx.mem.grow({delta}) as i32"))?;
+                        e.refresh_ml(self.module);
+                    }
+                } else if let Some(bytes) = self.module.fixed64 {
+                    e.push(ValType::I64, &format!("if ({n}) == 0 {{ {}i64 }} else {{ -1i64 }}", bytes >> 16))?;
+                } else {
+                    let delta = self.address(&n);
+                    e.push(ValType::I64, &format!("ctx.outer.grow({delta})"))?;
+                    e.refresh_ml(self.module);
+                }
             }
             0x41 => {
                 let Immediate::I32(v) = i.immediate else { return Err("i32.const".into()) };
@@ -1369,22 +3097,29 @@ impl<'a> Function<'a> {
                 let (n, _) = e.pop()?;
                 let (src, _) = e.pop()?;
                 let (dst, _) = e.pop()?;
-                // A short copy of constant length moves its bytes inline,
-                // through a value, instead of calling memmove.
                 let literal = n.trim_matches(['(', ')']);
                 let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
+                let ml = self.ml();
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
-                        let ml = self.ml();
-                        e.line(&format!("t!(m32::copy_n::<{k}>(mb, {ml}, {dst} as u32, {src} as u32));"))
+                        e.line(&format!("t!(m32::copy_n::<CAP32, {k}>(mb, {ml}, {dst} as u32, {src} as u32));"))
+                    }
+                    Some(k @ 1..=COPY_INLINE) if self.module.cap64.is_some() => {
+                        e.line(&format!("t!(m64f::copy_n::<CAP64, {k}>(mb, {ml}, {dst} as u64, {src} as u64));"))
+                    }
+                    Some(k @ 1..=COPY_INLINE) if self.module.flat64 || e.in_flat_region => {
+                        e.line(&format!("t!(m64::fcopy_n::<{k}>(mb, {ml}, {dst} as u64, {src} as u64));"))
                     }
                     Some(k @ 1..=COPY_INLINE) => {
-                        e.line(&format!("t!(m64::copy_n::<{k}>(mb, mo, {dst} as u64, {src} as u64));"))
+                        e.line(&format!("t!(m64::copy_n::<{k}>(mb, {ml}, &mut ctx.outer, {dst} as u64, {src} as u64));"))
+                    }
+                    _ if !self.module.memory64 => {
+                        let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));
+                        e.line(&format!("t!(ctx.mem.copy(mb, {dst}, {src}, {n}));"));
                     }
                     _ => {
                         let (dst, src, n) = (self.address(&dst), self.address(&src), self.address(&n));
-                        e.line(&format!("t!(self.mem.copy({dst}, {src}, {n}));"));
-                        e.refresh(&self.module);
+                        e.line(&format!("t!(copy_parts(mb, &mut ctx.outer, {dst}, {src}, {n}));"));
                     }
                 }
             }
@@ -1392,21 +3127,29 @@ impl<'a> Function<'a> {
                 let (n, _) = e.pop()?;
                 let (value, _) = e.pop()?;
                 let (dst, _) = e.pop()?;
-                // A short fill of constant length stores inline.
                 let literal = n.trim_matches(['(', ')']);
                 let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
+                let ml = self.ml();
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
-                        let ml = self.ml();
-                        e.line(&format!("t!(m32::fill_n::<{k}>(mb, {ml}, {dst} as u32, {value} as u8));"))
+                        e.line(&format!("t!(m32::fill_n::<CAP32, {k}>(mb, {ml}, {dst} as u32, {value} as u8));"))
+                    }
+                    Some(k @ 1..=COPY_INLINE) if self.module.cap64.is_some() => {
+                        e.line(&format!("t!(m64f::fill_n::<CAP64, {k}>(mb, {ml}, {dst} as u64, {value} as u8));"))
+                    }
+                    Some(k @ 1..=COPY_INLINE) if self.module.flat64 || e.in_flat_region => {
+                        e.line(&format!("t!(m64::ffill_n::<{k}>(mb, {ml}, {dst} as u64, {value} as u8));"))
                     }
                     Some(k @ 1..=COPY_INLINE) => {
-                        e.line(&format!("t!(m64::fill_n::<{k}>(mb, mo, {dst} as u64, {value} as u8));"))
+                        e.line(&format!("t!(m64::fill_n::<{k}>(mb, {ml}, &mut ctx.outer, {dst} as u64, {value} as u8));"))
+                    }
+                    _ if !self.module.memory64 => {
+                        let (dst, n) = (self.address(&dst), self.address(&n));
+                        e.line(&format!("t!(ctx.mem.fill(mb, {dst}, {value} as u8, {n}));"));
                     }
                     _ => {
                         let (dst, n) = (self.address(&dst), self.address(&n));
-                        e.line(&format!("t!(self.mem.fill({dst}, {value} as u8, {n}));"));
-                        e.refresh(&self.module);
+                        e.line(&format!("t!(fill_parts(mb, &mut ctx.outer, {dst}, {value} as u8, {n}));"));
                     }
                 }
             }
@@ -1498,21 +3241,14 @@ impl<'a> Function<'a> {
             0xfd00 => (16, ValType::V128, "{}"),
             op => return Err(format!("load {op:#x}")),
         };
-        let loaded = if !self.module.memory64 && n == 16 {
-            format!("t!(m32::l128(mb, {ml}, {a} as u32, {offset}))")
-        } else if self.module.memory64 && n == 16 {
-            let address = self.address(&a);
-            if self.module.flat64 {
-                format!("t!(m64::fl128(mb, {address}, {offset}))")
-            } else {
-                format!("t!(m64::l128(mb, mo, {address}, {offset}))")
-            }
-        } else if self.module.memory64 {
-            let flat = if self.module.flat64 { "f" } else { "" };
-            let outer = if self.module.flat64 { "" } else { "mo, " };
-            format!("t!(m64::{flat}l{}(mb, {outer}{}, {offset}))", n * 8, self.address(&a))
-        } else {
+        let loaded = if !self.module.memory64 {
             format!("t!(m32::l{}(mb, {ml}, {a} as u32, {offset}))", n * 8)
+        } else if self.module.cap64.is_some() {
+            format!("t!(m64f::l{}::<CAP64>(mb, {ml}, {}, {offset}))", n * 8, self.address(&a))
+        } else if self.module.flat64 || e.in_flat_region {
+            format!("t!(m64::fl{}(mb, {ml}, {}, {offset}))", n * 8, self.address(&a))
+        } else {
+            format!("t!(m64::l{}(mb, {ml}, &ctx.outer, {}, {offset}))", n * 8, self.address(&a))
         };
         e.push(t, &conversion.replace("{}", &loaded))
     }
@@ -1534,21 +3270,14 @@ impl<'a> Function<'a> {
             0xfd0b => (16, v.to_string()),
             op => return Err(format!("store {op:#x}")),
         };
-        let store = if !self.module.memory64 && n == 16 {
-            format!("t!(m32::s128(mb, {ml}, {a} as u32, {offset}, {value}));")
-        } else if self.module.memory64 && n == 16 {
-            let address = self.address(&a);
-            if self.module.flat64 {
-                format!("t!(m64::fs128(mb, {address}, {offset}, {value}));")
-            } else {
-                format!("t!(m64::s128(mb, mo, {address}, {offset}, {value}));")
-            }
-        } else if self.module.memory64 {
-            let flat = if self.module.flat64 { "f" } else { "" };
-            let outer = if self.module.flat64 { "" } else { "mo, " };
-            format!("t!(m64::{flat}s{}(mb, {outer}{}, {offset}, {value}));", n * 8, self.address(&a))
-        } else {
+        let store = if !self.module.memory64 {
             format!("t!(m32::s{}(mb, {ml}, {a} as u32, {offset}, {value}));", n * 8)
+        } else if self.module.cap64.is_some() {
+            format!("t!(m64f::s{}::<CAP64>(mb, {ml}, {}, {offset}, {value}));", n * 8, self.address(&a))
+        } else if self.module.flat64 || e.in_flat_region {
+            format!("t!(m64::fs{}(mb, {ml}, {}, {offset}, {value}));", n * 8, self.address(&a))
+        } else {
+            format!("t!(m64::s{}(mb, {ml}, &mut ctx.outer, {}, {offset}, {value}));", n * 8, self.address(&a))
         };
         e.line(&store);
         Ok(())
@@ -1696,7 +3425,20 @@ fn numeric(op: u16) -> Option<(usize, ValType, &'static str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::bare_operands;
+    use super::{
+        ConstVal, bare_operands, eval_constant, function_preserves_global, function_writes_only_same_global,
+        generate, tarjan_scc,
+    };
+    use wtime_types::{FuncType, ValType};
+    use wtime_validate::{Immediate, Instruction};
+
+    fn insn(opcode: u16, immediate: Immediate) -> Instruction {
+        Instruction { opcode, immediate }
+    }
+
+    fn void_fn() -> FuncType {
+        FuncType { params: vec![], results: vec![] }
+    }
 
     #[test]
     fn whole_values_lose_their_parentheses() {
@@ -1720,5 +3462,284 @@ mod tests {
         for (line, bare) in cases {
             assert_eq!(bare_operands(line), bare, "{line}");
         }
+    }
+
+    #[test]
+    fn eval_constant_handles_chains_and_extended_ops() {
+        let consts = [Some(ConstVal::I32(10)), None, Some(ConstVal::I64(100))];
+        // global.get 0 + 5 * 2 = 20
+        let expr = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(5)),
+            insn(0x41, Immediate::I32(2)),
+            insn(0x6c, Immediate::None),
+            insn(0x6a, Immediate::None),
+            insn(0x0b, Immediate::None),
+        ];
+        assert_eq!(eval_constant(&expr, &consts), Some(ConstVal::I32(20)));
+        // i64 sub
+        let expr64 = [
+            insn(0x23, Immediate::Index(2)),
+            insn(0x42, Immediate::I64(37)),
+            insn(0x7d, Immediate::None),
+            insn(0x0b, Immediate::None),
+        ];
+        assert_eq!(eval_constant(&expr64, &consts), Some(ConstVal::I64(63)));
+        // Non-constant global reference must return None.
+        let non_const = [insn(0x23, Immediate::Index(1)), insn(0x0b, Immediate::None)];
+        assert_eq!(eval_constant(&non_const, &consts), None);
+    }
+
+    #[test]
+    fn writes_only_same_global_accepts_save_restore_and_rejects_mutation() {
+        let types = [void_fn()];
+        let noreturn = [false];
+        // Save g0 into l0, restore g0 inside a block and loop without mutating l0.
+        let save_restore = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x21, Immediate::Index(0)),
+            insn(0x03, Immediate::Block(-64)),
+            insn(0x20, Immediate::Index(0)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(function_writes_only_same_global(&save_restore, 1, &types, &noreturn, 0));
+
+        // Writing a computed value rejects constant-init elimination.
+        let mutated = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(1)),
+            insn(0x6a, Immediate::None),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(!function_writes_only_same_global(&mutated, 1, &types, &noreturn, 0));
+
+        // Modifying saved local inside a loop must invalidate it at loop header.
+        let loop_clobber = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x21, Immediate::Index(0)),
+            insn(0x03, Immediate::Block(-64)),
+            insn(0x20, Immediate::Index(0)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(9)),
+            insn(0x21, Immediate::Index(0)),
+            insn(0x0c, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(!function_writes_only_same_global(&loop_clobber, 1, &types, &noreturn, 0));
+    }
+
+    #[test]
+    fn preserves_global_handles_loops_branches_and_callees() {
+        // f0 = noreturn abort, f1 = preserving callee, f2 = mutating callee.
+        let types = [void_fn(), void_fn(), void_fn()];
+        let noreturn = [true, false, false];
+        let preserves = [true, true, false];
+
+        // Save g0, bump g0, call preserving f1, optionally abort via f0, restore g0.
+        let ok_loop = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x21, Immediate::Index(0)),
+            insn(0x03, Immediate::Block(-64)),
+            insn(0x23, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(1)),
+            insn(0x6a, Immediate::None),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x10, Immediate::Index(1)),
+            insn(0x41, Immediate::I32(0)),
+            insn(0x04, Immediate::Block(-64)),
+            insn(0x10, Immediate::Index(0)), // noreturn abort while g0 is bumped
+            insn(0x0b, Immediate::None),
+            insn(0x20, Immediate::Index(0)),
+            insn(0x24, Immediate::Index(0)), // restored before backedge
+            insn(0x41, Immediate::I32(1)),
+            insn(0x0d, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(function_preserves_global(&ok_loop, 1, &types, &noreturn, &preserves, 0));
+
+        // Early return before restoring g0 must be rejected.
+        let bad_early_ret = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x21, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(1)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(1)),
+            insn(0x04, Immediate::Block(-64)),
+            insn(0x0f, Immediate::None),
+            insn(0x0b, Immediate::None),
+            insn(0x20, Immediate::Index(0)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(!function_preserves_global(&bad_early_ret, 1, &types, &noreturn, &preserves, 0));
+
+        // Loop backedge taken while g0 is modified breaks header invariant on retry.
+        let bad_loop_backedge = [
+            insn(0x03, Immediate::Block(-64)),
+            insn(0x23, Immediate::Index(0)),
+            insn(0x21, Immediate::Index(0)), // saved inside loop -> invalidated
+            insn(0x41, Immediate::I32(1)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x41, Immediate::I32(1)),
+            insn(0x0d, Immediate::Index(0)), // backedge with g0 mutated!
+            insn(0x20, Immediate::Index(0)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(!function_preserves_global(&bad_loop_backedge, 1, &types, &noreturn, &preserves, 0));
+
+        // Calling non-preserving f2 fails unless g0 is restored from saved local afterwards.
+        let bad_call = [insn(0x10, Immediate::Index(2)), insn(0x0b, Immediate::None)];
+        assert!(!function_preserves_global(&bad_call, 1, &types, &noreturn, &preserves, 0));
+        let ok_call_restored = [
+            insn(0x23, Immediate::Index(0)),
+            insn(0x21, Immediate::Index(0)),
+            insn(0x10, Immediate::Index(2)),
+            insn(0x20, Immediate::Index(0)),
+            insn(0x24, Immediate::Index(0)),
+            insn(0x0b, Immediate::None),
+        ];
+        assert!(function_preserves_global(&ok_call_restored, 1, &types, &noreturn, &preserves, 0));
+    }
+
+    #[test]
+    fn tarjan_scc_orders_callees_before_callers_and_finds_cycles() {
+        // 0 -> 1 -> 2, 1 <-> 3 (cycle), 4 -> 4 (self-loop), 3 -> 2
+        let edges = vec![vec![1], vec![2, 3], vec![], vec![1, 2], vec![4]];
+        let sccs = tarjan_scc(&edges);
+        let pos = |u: usize| sccs.iter().position(|c| c.contains(&u)).unwrap();
+        // Callees appear before callers in reverse topological order.
+        assert!(pos(2) < pos(1));
+        assert!(pos(1) < pos(0));
+        // 1 and 3 form a 2-node SCC.
+        let mut cycle = sccs[pos(1)].clone();
+        cycle.sort_unstable();
+        assert_eq!(cycle, vec![1, 3]);
+        assert_eq!(sccs[pos(4)], vec![4]);
+    }
+
+    /// Minimal valid memory64 Wasm module with:
+    /// - 1 memory64 (min=1, max=4)
+    /// - g0 (i64 mut, preserved via save/restore -> register-passed `gv0`)
+    /// - g1 (i32 mut, written only with itself -> constant-folded out of `Ctx`)
+    /// - f0: non-growing loop with 2 loads (gets `if mf` in chunked64)
+    /// - f1: growing loop with `memory.grow` and 2 loads (must NOT get `if mf`)
+    fn sample_mem64_wasm() -> Vec<u8> {
+        fn section(id: u8, payload: &[u8]) -> Vec<u8> {
+            let mut out = vec![id];
+            leb_u32(&mut out, payload.len() as u32);
+            out.extend_from_slice(payload);
+            out
+        }
+        fn leb_u32(out: &mut Vec<u8>, mut v: u32) {
+            loop {
+                let mut b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 {
+                    b |= 0x80;
+                }
+                out.push(b);
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        // Type section: 1 type () -> ()
+        wasm.extend(section(1, &[1, 0x60, 0, 0]));
+        // Function section: 2 functions of type 0
+        wasm.extend(section(3, &[2, 0, 0]));
+        // Memory section: 1 memory64, flags=5 (memory64 + max), min=1, max=4
+        wasm.extend(section(5, &[1, 0x05, 1, 4]));
+        // Global section: g0 = mut i64 0, g1 = mut i32 7
+        wasm.extend(section(6, &[2, 0x7e, 1, 0x42, 0, 0x0b, 0x7f, 1, 0x41, 7, 0x0b]));
+        // Export section: "_start" -> func 0, "memory" -> mem 0
+        let mut exp = vec![2];
+        exp.push(6);
+        exp.extend_from_slice(b"_start");
+        exp.extend_from_slice(&[0x00, 0]);
+        exp.push(6);
+        exp.extend_from_slice(b"memory");
+        exp.extend_from_slice(&[0x02, 0]);
+        wasm.extend(section(7, &exp));
+
+        // f0 body: 1 local i64; save g0, bump g0, loop with 2 i64.load, restore g0, set g1 = g1, call f1.
+        let f0 = vec![
+            1, 1, 0x7e, // 1 local: l0: i64
+            0x23, 0, 0x21, 0, // l0 = g0
+            0x23, 0, 0x42, 8, 0x7c, 0x24, 0, // g0 = g0 + 8
+            0x03, 0x40, // loop (void)
+            0x42, 0, 0x29, 0x03, 0, 0x1a, // drop (i64.load align=8 off=0 (0))
+            0x42, 8, 0x29, 0x03, 0, 0x1a, // drop (i64.load align=8 off=0 (8))
+            0x0b, // end loop
+            0x20, 0, 0x24, 0, // g0 = l0
+            0x23, 1, 0x24, 1, // g1 = g1 (constant-init)
+            0x10, 1, // call f1
+            0x0b,
+        ];
+        // f1 body: 0 locals; loop with memory.grow and 2 loads (must NOT specialize under `if mf`).
+        let f1 = vec![
+            0, // 0 locals
+            0x03, 0x40, // loop (void)
+            0x42, 0, 0x40, 0, 0x1a, // drop (memory.grow 0)
+            0x42, 0, 0x29, 0x03, 0, 0x1a, // drop (i64.load 0)
+            0x42, 8, 0x29, 0x03, 0, 0x1a, // drop (i64.load 8)
+            0x0b, // end loop
+            0x0b,
+        ];
+        let mut code = vec![2];
+        leb_u32(&mut code, f0.len() as u32);
+        code.extend_from_slice(&f0);
+        leb_u32(&mut code, f1.len() as u32);
+        code.extend_from_slice(&f1);
+        wasm.extend(section(10, &code));
+        wasm
+    }
+
+    #[test]
+    fn generate_emits_cap64_chunked_regions_and_global_analyses() {
+        let wasm = sample_mem64_wasm();
+        let rt = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
+        let root = std::env::temp_dir().join(format!("wtime-aot-codegen-test-{}", std::process::id()));
+        let flat_dir = root.join("flat");
+        let chunk_dir = root.join("chunked");
+        let _ = std::fs::remove_dir_all(&root);
+
+        generate(&wasm, &flat_dir, "test-flat", &rt, "test.wasm", true).unwrap();
+        let core_flat = std::fs::read_to_string(flat_dir.join("core/src/lib.rs")).unwrap();
+        let fns_flat = std::fs::read_to_string(flat_dir.join("p0/src/f0.rs")).unwrap();
+        assert!(core_flat.contains("pub const CAP64: usize = 262144;"));
+        assert!(core_flat.contains("pub g0: i64,"));
+        // g1 is proven constant (only written with itself), so omitted from Ctx.
+        assert!(!core_flat.contains("pub g1:"));
+        // g0 is preserved across all functions -> register-passed `mut gv0: i64`.
+        assert!(fns_flat.contains("mut gv0: i64"));
+        // Flat64 uses fixed-capacity m64f:: accesses.
+        assert!(fns_flat.contains("m64f::l64::<CAP64>"));
+        assert!(!fns_flat.contains("if mf {"));
+
+        generate(&wasm, &chunk_dir, "test-chunked", &rt, "test.wasm", false).unwrap();
+        let core_chunk = std::fs::read_to_string(chunk_dir.join("core/src/lib.rs")).unwrap();
+        let fns_chunk = std::fs::read_to_string(chunk_dir.join("p0/src/f0.rs")).unwrap();
+        assert!(!core_chunk.contains("CAP64"));
+        // f0's non-growing loop specializes under `if mf { ... m64::fl64 ... } else { ... m64::l64 ... }`.
+        let f0_idx = fns_chunk.find("pub fn f0<M>").unwrap();
+        let f1_idx = fns_chunk.find("pub fn f1<M>").unwrap();
+        let f0_src = &fns_chunk[f0_idx..f1_idx];
+        let f1_src = &fns_chunk[f1_idx..];
+        assert!(f0_src.contains("if mf {"));
+        assert!(f0_src.contains("m64::fl64("));
+        assert!(f0_src.contains("m64::l64("));
+        // f1's loop executes `memory.grow`, so it must NOT specialize under `if mf`.
+        assert!(!f1_src.contains("if mf {"));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = ValType::I32;
     }
 }
