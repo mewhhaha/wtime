@@ -123,63 +123,72 @@ uploaded modules through a content-keyed cache, for the machine's own CPU, and t
 programs run sandboxed (files and variables only as granted; time, memory, output
 and stack limits). Every output below matches Wasmtime's, and the AOT-compiled Goose
 compilers emit Wasm byte-identical to the native (32-bit) and interpreter-run
-(64-bit) compilers'. Same machine, one CPU per engine, programs built by `wtime-aot build` (`7042670`, Goose
-compiler from goose-to-wasm `45eb0c7`; [tables](results/aot-7042670/tables.md)); the VM is
-noisy, V8 most of all. Run is the guest's `_start`, process the whole process.
+(64-bit) compilers'. Same machine, one CPU per engine, programs built by `wtime-aot build` (`0c142ba`, Goose
+compiler from goose-to-wasm `45eb0c7`; [tables](results/aot-0c142ba/tables.md)); the VM is
+noisy, V8 most of all, and the examples ran on another CPU at the same time.
+Run is the guest's `_start`, process the whole process.
 
 | Example | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| squares | 0.02 ms | 0.36 ms | 0.00 ms | **0.11×** | 5.6 ms | 63.9 ms | **4.2 ms** |
-| tour | 0.08 ms | 3.7 ms | 0.05 ms | **0.70×** | 4.8 ms | 62.1 ms | **4.7 ms** |
-| functions | 0.07 ms | 3.3 ms | 0.04 ms | **0.64×** | 5.4 ms | 55.4 ms | **4.1 ms** |
-| errors | 0.05 ms | 1.6 ms | 0.03 ms | **0.52×** | 5.0 ms | 52.8 ms | **4.7 ms** |
-| sieve | 0.71 ms | 7.4 ms | 0.64 ms | **0.87×** | 5.5 ms | 61.1 ms | **4.7 ms** |
-| sorting | 224 ms | 276 ms | 132 ms | **0.59×** | 202 ms | 328 ms | **137 ms** |
-| life | 24.9 ms | 28.0 ms | 5.2 ms | **0.21×** | 29.4 ms | 78.7 ms | **9.6 ms** |
-| maze | 0.07 ms | 1.9 ms | 0.04 ms | **0.58×** | 4.6 ms | 50.8 ms | **4.2 ms** |
-| sudoku | 10.3 ms | 17.5 ms | 8.2 ms | **0.82×** | 15.2 ms | 70.1 ms | **12.5 ms** |
-| vm | 0.07 ms | 1.9 ms | 0.04 ms | **0.57×** | 4.7 ms | 53.7 ms | **4.0 ms** |
+| squares | 0.02 ms | 0.28 ms | 0.00 ms | **0.11×** | 4.4 ms | 45.5 ms | **3.7 ms** |
+| tour | 0.08 ms | 3.5 ms | 0.06 ms | **0.64×** | 4.9 ms | 56.2 ms | **3.9 ms** |
+| functions | 0.07 ms | 2.9 ms | 0.04 ms | **0.65×** | 4.6 ms | 48.3 ms | **3.7 ms** |
+| errors | 0.04 ms | 1.3 ms | 0.02 ms | **0.54×** | 4.3 ms | 42.7 ms | **3.5 ms** |
+| sieve | 0.73 ms | 7.4 ms | 0.59 ms | **0.81×** | 4.9 ms | 52.4 ms | **4.3 ms** |
+| sorting | 196 ms | 638 ms | 133 ms | **0.69×** | 215 ms | 686 ms | **137 ms** |
+| life | 22.9 ms | 26.8 ms | 5.2 ms | **0.23×** | 28.0 ms | 75.2 ms | **9.3 ms** |
+| maze | 0.07 ms | 1.9 ms | 0.05 ms | **0.63×** | 4.5 ms | 47.1 ms | **3.7 ms** |
+| sudoku | 9.7 ms | 15.2 ms | 8.0 ms | **0.81×** | 14.2 ms | 62.4 ms | **11.6 ms** |
+| vm | 0.06 ms | 1.9 ms | 0.04 ms | **0.64×** | 4.6 ms | 50.9 ms | **4.0 ms** |
 
 | Case | Wasmtime run | V8 run | wtime-aot run | aot / Wasmtime run | cached-Wasmtime process | V8 process | wtime-aot process |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| compile-squares | 0.92 ms | 73.4 ms | 0.95 ms | 1.05× | 12.6 ms | 198 ms | **5.5 ms** |
-| compile-vm | 5.2 ms | 215 ms | 5.0 ms | **0.96×** | 16.7 ms | 370 ms | **10.0 ms** |
-| compile-sudoku | 4.7 ms | 223 ms | 4.5 ms | **0.96×** | 19.7 ms | 397 ms | **9.5 ms** |
-| compile-functions | 21.5 ms | 388 ms | 20.1 ms | **0.98×** | 33.6 ms | 556 ms | **25.7 ms** |
-| compile64-vm | 8.6 ms | 1,027 ms | 10.8 ms | 1.24× | 21.5 ms | 1,199 ms | **16.4 ms** |
-| compile64-functions | 37.1 ms | 1,271 ms | 41.1 ms | 1.09× | 48.8 ms | 1,417 ms | **46.7 ms** |
-| compile64-8g-vm | 8.5 ms | 351 ms | 8.4 ms | **0.98×** | 21.2 ms | 509 ms | **14.0 ms** |
-| compile64-8g-functions | 34.6 ms | 502 ms | 32.4 ms | **0.94×** | 47.7 ms | 651 ms | **38.5 ms** |
+| compile-squares | 0.90 ms | 71.4 ms | 0.95 ms | **0.99×** | 12.3 ms | 196 ms | **5.0 ms** |
+| compile-vm | 5.1 ms | 207 ms | 4.7 ms | **0.95×** | 16.7 ms | 355 ms | **9.4 ms** |
+| compile-sudoku | 4.0 ms | 199 ms | 4.0 ms | **0.96×** | 15.7 ms | 344 ms | **8.6 ms** |
+| compile-functions | 19.7 ms | 334 ms | 20.8 ms | 1.13× | 33.8 ms | 484 ms | **25.3 ms** |
+| compile64-vm | 8.3 ms | 917 ms | 10.3 ms | 1.28× | 20.1 ms | 1,050 ms | **15.2 ms** |
+| compile64-functions | 32.0 ms | 1,200 ms | 38.2 ms | 1.19× | 45.9 ms | 1,342 ms | **43.4 ms** |
+| compile64-8g-vm | 8.2 ms | 329 ms | 8.0 ms | **0.96×** | 21.7 ms | 483 ms | **12.5 ms** |
+| compile64-8g-functions | 32.8 ms | 486 ms | 31.2 ms | **0.95×** | 50.0 ms | 631 ms | **36.5 ms** |
 
 Compiled ahead of time, every program's whole process is faster than both cached Wasmtime
 and V8, every example runs faster than Wasmtime's code, and the 32-bit Goose compiler runs
-level with it or ahead (compile-squares runs for under a millisecond). The 64-bit compiler
-runs ahead too when its memory fits one allocation: `compile64-8g-*` is the same compiler
-built with an 8 GiB maximum. Built with its default 16 GiB maximum it grows its memory to
-all 16 GiB (touching little of it), which this 15.7 GiB machine will not grant as one
-allocation, and safe Rust cannot reserve address space without committing it as Wasmtime
-does; wtime-aot then keeps the memory in a base and 4 GiB chunks, and the chunk path that
-every access must be able to take costs `compile64-*` 1.1–1.2× Wasmtime's run (on sorting
-built for memory64, 48% more instructions than flat). On a machine with more memory the
-16 GiB build is flat as well.
+level with it or ahead. Its rounds spread widely here (compile-functions: 18.6–22.5 ms
+against Wasmtime's 18.4–20.9 ms); measured alone, 11 paired rounds put the four compiler
+cases at 0.87–0.92× Wasmtime's run ([pgo.md](results/aot-0c142ba/pgo.md)). The 64-bit
+compiler runs ahead too when its memory fits one allocation: `compile64-8g-*` is the same
+compiler built with an 8 GiB maximum. Built with its default 16 GiB maximum it grows its
+memory to all 16 GiB (touching little of it), which this 15.7 GiB machine will not grant as
+one allocation, and safe Rust cannot reserve address space without committing it as
+Wasmtime does; wtime-aot then keeps the memory in a base and 4 GiB chunks, and the chunk
+path that every access must be able to take costs `compile64-*` 1.2–1.3× Wasmtime's run
+(on sorting built for memory64, 48% more instructions than flat). On a machine with more
+memory the 16 GiB build is flat as well.
 
 What closed the gap, measured with callgrind on the compiler:
 
 - **Constant memory length** (`5747518`): a 32-bit memory whose minimum and maximum are
   equal, as the release compiler's 65,535 pages are, checks each access against a constant,
   one compare with an immediate; 12–14% fewer instructions.
-- **Globals in locals** (`5747518`): LLVM cannot tell the memory from the instance, which is
-  passed to every callee, so it reloaded globals after every store; 3% fewer.
+- **Globals in locals** (`5747518`, bounded in `2f9b4a4`): LLVM cannot tell the memory from
+  the instance, which is passed to every callee, so it reloaded globals after every store;
+  3% fewer.
 - **Upstream** (`45eb0c7`): the compiler's Wasm is 43–46% smaller (32-bit 7.26 → 4.12 MB,
   64-bit 8.94 → 4.79 MB) and builds 1.7× (32-bit, 652 → 383 s, measured on its 16-page
   build) and 3.7× (64-bit, 1,899 → 520 s) faster ahead of time.
 - Earlier: memory bytes and length in locals, constant-length copies and fills inline,
   calls check only the native stack, and builds target the host CPU.
 
-Tried and left out: ThinLTO (no faster: the functions are generic, so all of them are
-compiled in the program crate, where cross-unit inlining already applies), traps by
-unwinding instead of `Result` (result tests after calls are under 1% of instructions), and
-three other shapes of the 64-bit access (all slower).
+Tried and left out, each measured: ThinLTO (no faster: the functions are generic, so all of
+them are compiled in the program crate, where cross-unit inlining already applies); one
+codegen unit (rustc needed more than 11 GB); a higher LLVM inline threshold (0.4% fewer
+instructions); traps by unwinding instead of `Result` (result tests after calls are under
+1% of instructions); skipping the stack check in small functions on short acyclic call
+chains (half the compiler's functions, no change in instructions: the hot ones do not
+qualify); profile-guided builds (`wtime-aot build --train`, kept as an option: 0.97–1.02×
+the plain build, [pgo.md](results/aot-0c142ba/pgo.md)); and three other shapes of the 64-bit
+access (all slower).
 
 ## Fixes
 
