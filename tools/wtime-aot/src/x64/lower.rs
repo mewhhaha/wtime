@@ -12,26 +12,12 @@
 
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::ir::{CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, StoreKind, Term, Ty, Val, ValRange};
-use super::regalloc::{AllocResult, Loc};
+use super::regalloc::{AbiSlot, AllocResult, Loc, layout_args, layout_rets};
 use super::{
-    CtxLayout, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_TRUNC_BASE, OFF_RET_SPILL, OFF_STACK_FLOOR,
-    RodataConsts, TRAP_CALL_STACK, TRAP_DIV_ZERO, TRAP_INDIRECT_CALL, TRAP_INT_OVERFLOW, TRAP_OOB, TRAP_TABLE_OOB,
-    TRAP_UNREACHABLE,
+    CtxLayout, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_TRUNC_BASE, OFF_RET_SPILL_PTR,
+    OFF_SCRATCH_TMP, OFF_STACK_FLOOR, RodataConsts, TRAP_CALL_STACK, TRAP_DIV_ZERO, TRAP_INDIRECT_CALL,
+    TRAP_INT_OVERFLOW, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
-
-pub const CALL_GP_ARGS: [Gp; 6] = [Gp::Rdi, Gp::Rsi, Gp::Rdx, Gp::Rcx, Gp::R8, Gp::R9];
-pub const CALL_FP_ARGS: [Xmm; 8] = [
-    Xmm::Xmm0,
-    Xmm::Xmm1,
-    Xmm::Xmm2,
-    Xmm::Xmm3,
-    Xmm::Xmm4,
-    Xmm::Xmm5,
-    Xmm::Xmm6,
-    Xmm::Xmm7,
-];
-pub const CALL_GP_RETS: [Gp; 7] = [Gp::Rax, Gp::Rdx, Gp::Rcx, Gp::Rsi, Gp::Rdi, Gp::R8, Gp::R9];
-pub const CALL_FP_RETS: [Xmm; 8] = CALL_FP_ARGS;
 
 const SCRATCH_GP1: Gp = Gp::R11;
 const SCRATCH_GP2: Gp = Gp::R10;
@@ -45,8 +31,6 @@ pub enum MoveLoc {
     Xmm(Xmm),
     /// `[rsp + disp]`
     Stack(i32),
-    /// `[r15 + disp]` (for multi-value `Ctx.ret_spill`)
-    Ctx(i32),
 }
 
 impl From<Loc> for MoveLoc {
@@ -59,8 +43,9 @@ impl From<Loc> for MoveLoc {
     }
 }
 
-/// Emits a single move `dst <- src` using `SCRATCH_GP1` / `SCRATCH_FP1` if both are memory.
-/// Never touches `SCRATCH_GP2` (`R10`) or `SCRATCH_FP2` (`Xmm14`).
+/// Emits a single move `dst <- src`.
+/// Memory-to-memory copies use `SCRATCH_GP2` (`R10`) / `SCRATCH_FP2` (`Xmm14`) exclusively,
+/// keeping `SCRATCH_GP1` (`R11`) / `SCRATCH_FP1` (`Xmm15`) completely disjoint for cycle breaking!
 fn emit_single_move(asm: &mut Asm, dst: MoveLoc, src: MoveLoc, ty: Ty) {
     if dst == src {
         return;
@@ -69,40 +54,18 @@ fn emit_single_move(asm: &mut Asm, dst: MoveLoc, src: MoveLoc, ty: Ty) {
     match (dst, src) {
         (MoveLoc::Gp(d), MoveLoc::Gp(s)) => asm.mov_rr(is64, d, s),
         (MoveLoc::Gp(d), MoveLoc::Stack(off)) => asm.mov_rm(is64, d, Mem::base_disp(Gp::Rsp, off)),
-        (MoveLoc::Gp(d), MoveLoc::Ctx(off)) => asm.mov_rm(is64, d, Mem::base_disp(Gp::R15, off)),
         (MoveLoc::Stack(off), MoveLoc::Gp(s)) => asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, off), s),
-        (MoveLoc::Ctx(off), MoveLoc::Gp(s)) => asm.mov_mr(is64, Mem::base_disp(Gp::R15, off), s),
         (MoveLoc::Xmm(d), MoveLoc::Xmm(s)) => asm.movaps_rr(d, s),
         (MoveLoc::Xmm(d), MoveLoc::Stack(off)) => emit_fp_load(asm, d, Mem::base_disp(Gp::Rsp, off), ty),
-        (MoveLoc::Xmm(d), MoveLoc::Ctx(off)) => emit_fp_load(asm, d, Mem::base_disp(Gp::R15, off), ty),
         (MoveLoc::Stack(off), MoveLoc::Xmm(s)) => emit_fp_store(asm, Mem::base_disp(Gp::Rsp, off), s, ty),
-        (MoveLoc::Ctx(off), MoveLoc::Xmm(s)) => emit_fp_store(asm, Mem::base_disp(Gp::R15, off), s, ty),
-        // Memory-to-memory through scratch1:
+        // Memory-to-memory through scratch2 (`R10` / `Xmm14`) so cycle-breaking scratch1 (`R11` / `Xmm15`) is never clobbered:
         (MoveLoc::Stack(doff), MoveLoc::Stack(soff)) => {
             if ty.is_fp() {
-                emit_fp_load(asm, SCRATCH_FP1, Mem::base_disp(Gp::Rsp, soff), ty);
-                emit_fp_store(asm, Mem::base_disp(Gp::Rsp, doff), SCRATCH_FP1, ty);
+                emit_fp_load(asm, SCRATCH_FP2, Mem::base_disp(Gp::Rsp, soff), ty);
+                emit_fp_store(asm, Mem::base_disp(Gp::Rsp, doff), SCRATCH_FP2, ty);
             } else {
-                asm.mov_rm(is64, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, soff));
-                asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, doff), SCRATCH_GP1);
-            }
-        }
-        (MoveLoc::Ctx(doff), MoveLoc::Stack(soff)) => {
-            if ty.is_fp() {
-                emit_fp_load(asm, SCRATCH_FP1, Mem::base_disp(Gp::Rsp, soff), ty);
-                emit_fp_store(asm, Mem::base_disp(Gp::R15, doff), SCRATCH_FP1, ty);
-            } else {
-                asm.mov_rm(is64, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, soff));
-                asm.mov_mr(is64, Mem::base_disp(Gp::R15, doff), SCRATCH_GP1);
-            }
-        }
-        (MoveLoc::Stack(doff), MoveLoc::Ctx(soff)) => {
-            if ty.is_fp() {
-                emit_fp_load(asm, SCRATCH_FP1, Mem::base_disp(Gp::R15, soff), ty);
-                emit_fp_store(asm, Mem::base_disp(Gp::Rsp, doff), SCRATCH_FP1, ty);
-            } else {
-                asm.mov_rm(is64, SCRATCH_GP1, Mem::base_disp(Gp::R15, soff));
-                asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, doff), SCRATCH_GP1);
+                asm.mov_rm(is64, SCRATCH_GP2, Mem::base_disp(Gp::Rsp, soff));
+                asm.mov_mr(is64, Mem::base_disp(Gp::Rsp, doff), SCRATCH_GP2);
             }
         }
         _ => unreachable!("mismatched move kinds: {dst:?} <- {src:?} ({ty:?})"),
@@ -127,13 +90,13 @@ fn emit_fp_store(asm: &mut Asm, mem: Mem, src: Xmm, ty: Ty) {
     }
 }
 
-/// Verified parallel-move resolver (handles arbitrary cycles/chains across registers & stack slots).
-/// Uses `SCRATCH_GP1` (`R11`) and `SCRATCH_FP1` (`Xmm15`) exclusively; NEVER touches `R10` or `Xmm14`.
+/// Verified parallel-move resolver (handles arbitrary cycles, stack swaps, and duplicate sources).
+/// Uses `SCRATCH_GP1`/`SCRATCH_FP1` (`R11`/`Xmm15`) for cycle breaking and
+/// `SCRATCH_GP2`/`SCRATCH_FP2` (`R10`/`Xmm14`) for memory-to-memory copies.
 pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) {
     let mut pending: Vec<(MoveLoc, MoveLoc, Ty)> =
         raw_moves.iter().copied().filter(|&(d, s, _)| d != s).collect();
     while !pending.is_empty() {
-        // Find a move whose `dst` is not read as `src` by any other pending move.
         let ready = pending.iter().enumerate().find(|&(i, &(dst, _, _))| {
             pending.iter().enumerate().all(|(j, &(_, src, _))| i == j || src != dst)
         });
@@ -141,9 +104,9 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
             emit_single_move(asm, dst, src, ty);
             pending.swap_remove(idx);
         } else {
-            // Break cycle by moving `pending[0].src` into scratch.
             let (_, src0, ty0) = pending[0];
             let tmp = if ty0.is_fp() { MoveLoc::Xmm(SCRATCH_FP1) } else { MoveLoc::Gp(SCRATCH_GP1) };
+            debug_assert!(src0 != tmp, "parallel move cycle already in scratch");
             emit_single_move(asm, tmp, src0, ty0);
             for m in &mut pending {
                 if m.1 == src0 {
@@ -214,10 +177,11 @@ impl<'a> Lower<'a> {
     }
 
     fn fp_read(&mut self, v: Val, scratch: Xmm) -> Xmm {
+        let ty = self.ty(v);
         match self.loc(v) {
             Loc::Xmm(x) => x,
             Loc::Spill(off) => {
-                emit_fp_load(&mut self.asm, scratch, Mem::base_disp(Gp::Rsp, off), self.ty(v));
+                emit_fp_load(&mut self.asm, scratch, Mem::base_disp(Gp::Rsp, off), ty);
                 scratch
             }
             Loc::Gp(_) => unreachable!("expected fp val"),
@@ -257,9 +221,10 @@ impl<'a> Lower<'a> {
     }
 
     fn fp_commit(&mut self, v: Val, reg: Xmm) {
+        let ty = self.ty(v);
         match self.loc(v) {
             Loc::Xmm(d) => self.asm.movaps_rr(d, reg),
-            Loc::Spill(off) => emit_fp_store(&mut self.asm, Mem::base_disp(Gp::Rsp, off), reg, self.ty(v)),
+            Loc::Spill(off) => emit_fp_store(&mut self.asm, Mem::base_disp(Gp::Rsp, off), reg, ty),
             Loc::Gp(_) => unreachable!(),
         }
     }
@@ -353,42 +318,35 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_call_abi(&mut self, args: ValRange, rets: ValRange, ci_idx: Option<(u32, Val)>, direct_func: Option<u32>) {
-        // For indirect call, stash `idx` into `SCRATCH_GP2` (`R10`) BEFORE arg moves clobber caller regs!
+        // For indirect call, stash `idx` in `[r15 + OFF_SCRATCH_TMP]` so `emit_parallel_moves` can freely use R10 & R11.
         if let Some((_, idx_val)) = ci_idx {
             let ir = self.gp_read(idx_val, SCRATCH_GP2);
-            if ir != SCRATCH_GP2 {
-                self.asm.mov_rr(false, SCRATCH_GP2, ir);
-            }
+            self.asm.mov_mr(false, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
         }
-        // Marshal arguments into internal Wasm call ABI.
+        // Marshal arguments using the unified typed ABI layout shared with `regalloc`.
         let arg_vals = self.ir.pool_slice(args);
         if !arg_vals.is_empty() {
+            let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
+            let arg_layout = layout_args(&arg_tys);
             let mut moves = Vec::with_capacity(arg_vals.len());
-            let (mut ng, mut nf, mut stack_slot) = (0usize, 0usize, 0i32);
-            for &av in arg_vals {
-                let ty = self.ty(av);
-                let dst = if ty.is_fp() {
-                    if nf < CALL_FP_ARGS.len() {
-                        let r = CALL_FP_ARGS[nf];
-                        nf += 1;
-                        MoveLoc::Xmm(r)
-                    } else {
-                        let s = MoveLoc::Stack(stack_slot);
-                        stack_slot += 8;
-                        s
-                    }
-                } else if ng < CALL_GP_ARGS.len() {
-                    let r = CALL_GP_ARGS[ng];
-                    ng += 1;
-                    MoveLoc::Gp(r)
-                } else {
-                    let s = MoveLoc::Stack(stack_slot);
-                    stack_slot += 8;
-                    s
+            for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                let dst = match slot {
+                    AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                    AbiSlot::Stack(off) => MoveLoc::Stack(off),
                 };
                 moves.push((dst, MoveLoc::from(self.loc(av)), ty));
             }
             emit_parallel_moves(&mut self.asm, &moves);
+        }
+
+        // If the callee has overflow return values, publish our caller-owned stack return buffer pointer.
+        let ret_vals = self.ir.pool_slice(rets);
+        let ret_tys: Vec<Ty> = ret_vals.iter().map(|&v| self.ty(v)).collect();
+        let ret_layout = layout_rets(&ret_tys);
+        if ret_layout.stack_bytes > 0 {
+            self.asm.lea(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, self.alloc.ret_buf_off));
+            self.asm.mov_mr(true, Mem::base_disp(Gp::R15, OFF_RET_SPILL_PTR), SCRATCH_GP1);
         }
 
         if let Some(f) = direct_func {
@@ -397,7 +355,9 @@ impl<'a> Lower<'a> {
             let ci = &self.layout.ci_tables[ci_id as usize];
             let toob = self.trap_table_oob_lbl();
             let bad = self.trap_ci_lbl();
-            self.asm.cmp_ri(true, SCRATCH_GP2, ci.table_len as i32);
+            self.asm.mov_rm(false, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+            // Unsigned 32-bit comparisons avoid sign-extending lengths >= 2^31 in 64-bit `cmp_ri`.
+            self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
             self.asm.jcc(Cond::Ae, toob);
             if ci.span == 0 {
                 self.asm.jmp(bad);
@@ -405,7 +365,7 @@ impl<'a> Lower<'a> {
                 if ci.min_slot > 0 {
                     self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
                 }
-                self.asm.cmp_ri(true, SCRATCH_GP2, ci.span as i32);
+                self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
                 self.asm.jcc(Cond::Ae, bad);
                 self.asm.lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
                 self.asm.movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
@@ -421,31 +381,14 @@ impl<'a> Lower<'a> {
         self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
         self.asm.jcc(Cond::Ne, prop);
 
-        // Unpack return values from internal Wasm return ABI.
-        let ret_vals = self.ir.pool_slice(rets);
+        // Unpack return values from registers and caller-owned stack return buffer.
         if !ret_vals.is_empty() {
             let mut moves = Vec::with_capacity(ret_vals.len());
-            let (mut ng, mut nf, mut spill_k) = (0usize, 0usize, 0i32);
-            for &rv in ret_vals {
-                let ty = self.ty(rv);
-                let src = if ty.is_fp() {
-                    if nf < CALL_FP_RETS.len() {
-                        let r = CALL_FP_RETS[nf];
-                        nf += 1;
-                        MoveLoc::Xmm(r)
-                    } else {
-                        let c = MoveLoc::Ctx(OFF_RET_SPILL + spill_k * 8);
-                        spill_k += if ty == Ty::V128 { 2 } else { 1 };
-                        c
-                    }
-                } else if ng < CALL_GP_RETS.len() {
-                    let r = CALL_GP_RETS[ng];
-                    ng += 1;
-                    MoveLoc::Gp(r)
-                } else {
-                    let c = MoveLoc::Ctx(OFF_RET_SPILL + spill_k * 8);
-                    spill_k += 1;
-                    c
+            for ((&rv, &ty), slot) in ret_vals.iter().zip(&ret_tys).zip(ret_layout.slots) {
+                let src = match slot {
+                    AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                    AbiSlot::Stack(off) => MoveLoc::Stack(self.alloc.ret_buf_off + off),
                 };
                 moves.push((MoveLoc::from(self.loc(rv)), src, ty));
             }
@@ -506,27 +449,22 @@ impl<'a> Lower<'a> {
                 }
             }
             IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU | IntBinOp::Rotl | IntBinOp::Rotr => {
-                // `regalloc` guarantees RCX is not live across variable shifts.
-                let br = self.gp_read(b, Gp::Rcx);
-                let ar = self.gp_read(a, SCRATCH_GP2);
+                // `regalloc` guarantees RCX is not live across variable shifts, though `a` or `b`
+                // dying at this instruction may reside in RCX. Stage `b -> R10`, then `a -> d`
+                // (choosing `d != RCX`), then `R10 -> RCX` so neither operand can clobber the other.
+                let br = self.gp_read(b, SCRATCH_GP2);
+                if br != SCRATCH_GP2 {
+                    self.asm.mov_rr(false, SCRATCH_GP2, br);
+                }
                 let mut d = self.gp_write_reg(dst_val);
                 if d == Gp::Rcx {
                     d = SCRATCH_GP1;
                 }
-                if br == d {
-                    self.asm.mov_rr(false, SCRATCH_GP1, br);
-                    if d != ar {
-                        self.asm.mov_rr(is64, d, ar);
-                    }
-                    self.asm.mov_rr(false, Gp::Rcx, SCRATCH_GP1);
-                } else {
-                    if br != Gp::Rcx {
-                        self.asm.mov_rr(false, Gp::Rcx, br);
-                    }
-                    if d != ar {
-                        self.asm.mov_rr(is64, d, ar);
-                    }
+                let ar = self.gp_read(a, d);
+                if d != ar {
+                    self.asm.mov_rr(is64, d, ar);
                 }
+                self.asm.mov_rr(false, Gp::Rcx, SCRATCH_GP2);
                 match op {
                     IntBinOp::Shl => self.asm.shl_cl(is64, d),
                     IntBinOp::ShrS => self.asm.sar_cl(is64, d),
@@ -1114,10 +1052,11 @@ impl<'a> Lower<'a> {
                 self.asm.cvtsi2ss(true, d, ar);
                 self.asm.jmp(lbl_done);
                 self.asm.bind(lbl_hi);
-                self.asm.mov_rr(true, SCRATCH_GP1, ar);
-                self.asm.shr_imm(true, SCRATCH_GP1, 1);
+                // Capture original bit 0 in `SCRATCH_GP2` BEFORE shifting `SCRATCH_GP1` (which may alias `ar` when spilled!).
                 self.asm.mov_rr(true, SCRATCH_GP2, ar);
                 self.asm.and_ri(false, SCRATCH_GP2, 1);
+                self.asm.mov_rr(true, SCRATCH_GP1, ar);
+                self.asm.shr_imm(true, SCRATCH_GP1, 1);
                 self.asm.or_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                 self.asm.cvtsi2ss(true, d, SCRATCH_GP1);
                 self.asm.addss(d, d);
@@ -1156,10 +1095,11 @@ impl<'a> Lower<'a> {
                 self.asm.cvtsi2sd(true, d, ar);
                 self.asm.jmp(lbl_done);
                 self.asm.bind(lbl_hi);
-                self.asm.mov_rr(true, SCRATCH_GP1, ar);
-                self.asm.shr_imm(true, SCRATCH_GP1, 1);
+                // Capture original bit 0 in `SCRATCH_GP2` BEFORE shifting `SCRATCH_GP1` (which may alias `ar` when spilled!).
                 self.asm.mov_rr(true, SCRATCH_GP2, ar);
                 self.asm.and_ri(false, SCRATCH_GP2, 1);
+                self.asm.mov_rr(true, SCRATCH_GP1, ar);
+                self.asm.shr_imm(true, SCRATCH_GP1, 1);
                 self.asm.or_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                 self.asm.cvtsi2sd(true, d, SCRATCH_GP1);
                 self.asm.addsd(d, d);
@@ -1311,7 +1251,7 @@ impl<'a> Lower<'a> {
                 let (toff, tlen) = self.layout.extern_tables[&table];
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 let toob = self.trap_table_oob_lbl();
-                self.asm.cmp_ri(true, ir, tlen as i32);
+                self.asm.cmp_ri(false, ir, tlen as i32);
                 self.asm.jcc(Cond::Ae, toob);
                 let d = self.gp_write_reg(r);
                 self.asm.mov_rm(true, d, Mem::indexed(Gp::R15, ir, 8, toff));
@@ -1321,7 +1261,7 @@ impl<'a> Lower<'a> {
                 let (toff, tlen) = self.layout.extern_tables[&table];
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 let toob = self.trap_table_oob_lbl();
-                self.asm.cmp_ri(true, ir, tlen as i32);
+                self.asm.cmp_ri(false, ir, tlen as i32);
                 self.asm.jcc(Cond::Ae, toob);
                 let vr = self.gp_read(val, SCRATCH_GP1);
                 self.asm.mov_mr(true, Mem::indexed(Gp::R15, ir, 8, toff), vr);
@@ -1367,8 +1307,9 @@ impl<'a> Lower<'a> {
                 let mem = self.mem_addr(ar, offset);
                 match kind {
                     StoreKind::F32 | StoreKind::F64 | StoreKind::V128 => {
+                        let vty = self.ty(val);
                         let vr = self.fp_read(val, SCRATCH_FP1);
-                        emit_fp_store(&mut self.asm, mem, vr, self.ty(val));
+                        emit_fp_store(&mut self.asm, mem, vr, vty);
                     }
                     StoreKind::I8 | StoreKind::I16 | StoreKind::I32 | StoreKind::I64 => {
                         // If `offset > i32::MAX`, `mem` uses `SCRATCH_GP1` as index! Move `mem` base to `SCRATCH_GP2` first if `val` is spilled!
@@ -1614,7 +1555,7 @@ impl<'a> Lower<'a> {
                 for (bb, args) in targets {
                     tbl_lbls.push(self.edge_target_label(bb.0, args));
                 }
-                self.asm.cmp_ri(true, SCRATCH_GP2, tbl_lbls.len() as i32);
+                self.asm.cmp_ri(false, SCRATCH_GP2, tbl_lbls.len() as i32);
                 self.asm.jcc(Cond::Ae, def_lbl);
                 let jt_off = self.asm.add_jump_table(&tbl_lbls);
                 self.asm.lea_rip(SCRATCH_GP1, RelocTarget::LocalRodata(jt_off));
@@ -1625,30 +1566,32 @@ impl<'a> Lower<'a> {
             Term::Return { vals } => {
                 let ret_vals = self.ir.pool_slice(vals);
                 if !ret_vals.is_empty() {
-                    let mut moves = Vec::with_capacity(ret_vals.len());
-                    let (mut ng, mut nf, mut spill_k) = (0usize, 0usize, 0i32);
-                    for &rv in ret_vals {
-                        let ty = self.ty(rv);
-                        let dst = if ty.is_fp() {
-                            if nf < CALL_FP_RETS.len() {
-                                let r = CALL_FP_RETS[nf];
-                                nf += 1;
-                                MoveLoc::Xmm(r)
-                            } else {
-                                let c = MoveLoc::Ctx(OFF_RET_SPILL + spill_k * 8);
-                                spill_k += if ty == Ty::V128 { 2 } else { 1 };
-                                c
+                    let ret_tys: Vec<Ty> = ret_vals.iter().map(|&v| self.ty(v)).collect();
+                    let ret_layout = layout_rets(&ret_tys);
+                    // First store any overflow return values into the caller-owned return buffer
+                    // BEFORE `emit_parallel_moves` modifies return registers!
+                    if ret_layout.stack_bytes > 0 {
+                        let ptr_slot = self.alloc.saved_ret_ptr_off.expect("saved_ret_ptr_off missing");
+                        self.asm.mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, ptr_slot));
+                        for ((&rv, &ty), &slot) in ret_vals.iter().zip(&ret_tys).zip(&ret_layout.slots) {
+                            if let AbiSlot::Stack(buf_off) = slot {
+                                if ty.is_fp() {
+                                    let xr = self.fp_read(rv, SCRATCH_FP2);
+                                    emit_fp_store(&mut self.asm, Mem::base_disp(SCRATCH_GP1, buf_off), xr, ty);
+                                } else {
+                                    let gr = self.gp_read(rv, SCRATCH_GP2);
+                                    self.asm.mov_mr(ty == Ty::I64, Mem::base_disp(SCRATCH_GP1, buf_off), gr);
+                                }
                             }
-                        } else if ng < CALL_GP_RETS.len() {
-                            let r = CALL_GP_RETS[ng];
-                            ng += 1;
-                            MoveLoc::Gp(r)
-                        } else {
-                            let c = MoveLoc::Ctx(OFF_RET_SPILL + spill_k * 8);
-                            spill_k += 1;
-                            c
-                        };
-                        moves.push((dst, MoveLoc::from(self.loc(rv)), ty));
+                        }
+                    }
+                    let mut moves = Vec::with_capacity(ret_vals.len());
+                    for ((&rv, &ty), slot) in ret_vals.iter().zip(&ret_tys).zip(ret_layout.slots) {
+                        match slot {
+                            AbiSlot::Gp(r) => moves.push((MoveLoc::Gp(r), MoveLoc::from(self.loc(rv)), ty)),
+                            AbiSlot::Xmm(x) => moves.push((MoveLoc::Xmm(x), MoveLoc::from(self.loc(rv)), ty)),
+                            AbiSlot::Stack(_) => {}
+                        }
                     }
                     emit_parallel_moves(&mut self.asm, &moves);
                 }
@@ -1698,6 +1641,22 @@ pub fn lower_ir_to_x64(
         edge_tramps: Vec::new(),
     };
 
+    // ---- Prospective Stack Check BEFORE Any Push or Frame Allocation ----
+    let early_stack_trap = if ir.needs_stack_check {
+        let lbl = l.asm.new_label();
+        let total_push_and_frame = alloc.frame_size + (alloc.used_callee_gp.len() as i32) * 8;
+        if total_push_and_frame > 0 {
+            l.asm.lea(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, -total_push_and_frame));
+            l.asm.cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
+        } else {
+            l.asm.cmp_rm(true, Gp::Rsp, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
+        }
+        l.asm.jcc(Cond::B, lbl);
+        Some(lbl)
+    } else {
+        None
+    };
+
     // ---- Prologue ----
     for &g in &alloc.used_callee_gp {
         l.asm.push(g);
@@ -1705,37 +1664,22 @@ pub fn lower_ir_to_x64(
     if alloc.frame_size > 0 {
         l.asm.sub_ri(true, Gp::Rsp, alloc.frame_size);
     }
-    if ir.needs_stack_check {
-        let stk = l.trap_stack_lbl();
-        l.asm.cmp_rm(true, Gp::Rsp, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
-        l.asm.jcc(Cond::B, stk);
+    if let Some(ptr_slot) = alloc.saved_ret_ptr_off {
+        l.asm.mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_RET_SPILL_PTR));
+        l.asm.mov_mr(true, Mem::base_disp(Gp::Rsp, ptr_slot), SCRATCH_GP1);
     }
 
-    // Move incoming Wasm parameters from internal ABI into their allocated locations.
+    // Move incoming Wasm parameters using the unified typed ABI layout shared with `regalloc`.
     if !ir.params.is_empty() {
         let incoming_stack_base = alloc.frame_size + (alloc.used_callee_gp.len() as i32 + 1) * 8;
+        let param_tys: Vec<Ty> = ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]).collect();
+        let arg_layout = layout_args(&param_tys);
         let mut moves = Vec::with_capacity(ir.params.len());
-        let (mut ng, mut nf, mut s_idx) = (0usize, 0usize, 0i32);
-        for &pv in &ir.params {
-            let ty = ir.val_tys[pv.0 as usize];
-            let src = if ty.is_fp() {
-                if nf < CALL_FP_ARGS.len() {
-                    let r = CALL_FP_ARGS[nf];
-                    nf += 1;
-                    MoveLoc::Xmm(r)
-                } else {
-                    let s = MoveLoc::Stack(incoming_stack_base + s_idx * 8);
-                    s_idx += 1;
-                    s
-                }
-            } else if ng < CALL_GP_ARGS.len() {
-                let r = CALL_GP_ARGS[ng];
-                ng += 1;
-                MoveLoc::Gp(r)
-            } else {
-                let s = MoveLoc::Stack(incoming_stack_base + s_idx * 8);
-                s_idx += 1;
-                s
+        for ((&pv, &ty), slot) in ir.params.iter().zip(&param_tys).zip(arg_layout.slots) {
+            let src = match slot {
+                AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                AbiSlot::Stack(off) => MoveLoc::Stack(incoming_stack_base + off),
             };
             moves.push((MoveLoc::from(alloc.locs[pv.0 as usize]), src, ty));
         }
@@ -1809,6 +1753,13 @@ pub fn lower_ir_to_x64(
         }
         l.asm.bind(ep_trap);
         l.emit_epilogue_body();
+    }
+
+    // Early pre-prologue stack trap returns directly without popping callee-saved regs.
+    if let Some(early) = early_stack_trap {
+        l.asm.bind(early);
+        l.asm.mov_ri32(SCRATCH_GP1, u32::from(TRAP_CALL_STACK));
+        l.asm.ret();
     }
 
     l.asm.finish_labels()?;

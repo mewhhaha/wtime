@@ -1104,4 +1104,49 @@ impl Asm {
         self.modrm_reg(dst.lo(), src.lo());
         self.emit_u8(lane & 1);
     }
+
+    // ---- CPUID, MXCSR, and portable BSR/BSF ----
+
+    pub fn cpuid(&mut self) {
+        self.emit_u8(0x0f);
+        self.emit_u8(0xa2);
+    }
+
+    pub fn stmxcsr(&mut self, mem: Mem) {
+        self.rex_mem(false, 0, mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xae);
+        self.modrm_mem(3, mem);
+    }
+
+    pub fn ldmxcsr(&mut self, mem: Mem) {
+        self.rex_mem(false, 0, mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xae);
+        self.modrm_mem(2, mem);
+    }
+
+    pub fn ldmxcsr_rip(&mut self, target: RelocTarget) {
+        self.emit_u8(0x0f);
+        self.emit_u8(0xae);
+        self.emit_u8((2 << 3) | 5);
+        let patch_off = self.pos();
+        self.emit_i32(0);
+        let next_ip_off = self.pos();
+        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+    }
+
+    pub fn bsr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.rex(is64, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xbd);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
+
+    pub fn bsf(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.rex(is64, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xbc);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
 }

@@ -1,29 +1,46 @@
-//! Fast exact cross-block liveness + clobber-aware linear-scan register allocator.
+//! Fast exact cross-block liveness + clobber-aware linear-scan register allocator,
+//! plus the single source of truth for internal Wasm ABI layouts and helper clobbers.
 //!
 //! Register partition (internal Wasm ABI):
 //! - Fixed / pinned:
 //!   - `Rsp`: native stack pointer (16-byte aligned at calls)
 //!   - `R15`: `Ctx*`
-//!   - `R14`: `mem_base` (4 GiB virtual `mmap` base — invariant across `memory.grow`)
+//!   - `R14`: `mem_base` (fixed virtual `mmap` base — invariant across `memory.grow`)
 //!   - `R13`: `mem_len` (current byte length of memory — updated in-place by `memory.grow`)
 //!   - `R12`: pinned hottest scalar mutable global (when present; else unused)
-//! - Scratch (never allocated): `R11`, `R10`, `Xmm15`, `Xmm14`
+//! - Scratch (never allocated):
+//!   - `R11` / `Xmm15`: primary scratch & parallel-move cycle-breaking temporary
+//!   - `R10` / `Xmm14`: secondary scratch & parallel-move mem-to-mem copy temporary
 //! - Allocatable GP (9 regs):
 //!   - Caller-saved (7): `Rax, Rcx, Rdx, Rsi, Rdi, R8, R9`
 //!   - Callee-saved (2): `Rbx, Rbp`
-//! - Allocatable XMM (14 regs, all caller-saved): `Xmm0..Xmm13`
+//! - Allocatable XMM (14 regs, all caller-saved in Stage 1): `Xmm0..Xmm13`
 
 use super::asm::{Gp, Xmm};
-use super::ir::{IntBinOp, IrFunc, Op, Ty, Val};
+use super::ir::{IntBinOp, IrFunc, Op, Ty};
 
 /// Physical location assigned to an SSA `Val`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loc {
     Gp(Gp),
     Xmm(Xmm),
-    /// Stack spill slot at `[rsp + offset]` (8 bytes for scalar, 16 bytes for V128).
+    /// Stack spill slot at `[rsp + offset]` (8-byte aligned for scalars, 16-byte aligned for V128).
     Spill(i32),
 }
+
+pub const CALL_GP_ARGS: [Gp; 6] = [Gp::Rdi, Gp::Rsi, Gp::Rdx, Gp::Rcx, Gp::R8, Gp::R9];
+pub const CALL_FP_ARGS: [Xmm; 8] = [
+    Xmm::Xmm0,
+    Xmm::Xmm1,
+    Xmm::Xmm2,
+    Xmm::Xmm3,
+    Xmm::Xmm4,
+    Xmm::Xmm5,
+    Xmm::Xmm6,
+    Xmm::Xmm7,
+];
+pub const CALL_GP_RETS: [Gp; 7] = [Gp::Rax, Gp::Rdx, Gp::Rcx, Gp::Rsi, Gp::Rdi, Gp::R8, Gp::R9];
+pub const CALL_FP_RETS: [Xmm; 8] = CALL_FP_ARGS;
 
 pub const GP_CALLER_SAVED: [Gp; 7] = [Gp::Rax, Gp::Rcx, Gp::Rdx, Gp::Rsi, Gp::Rdi, Gp::R8, Gp::R9];
 pub const GP_CALLEE_SAVED: [Gp; 2] = [Gp::Rbx, Gp::Rbp];
@@ -58,21 +75,122 @@ pub const XMM_ALLOC: [Xmm; 14] = [
 /// Bitmask over `Gp::id()` (bits 0..15).
 pub const MASK_GP_CALLER: u16 =
     (1 << 0) | (1 << 1) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9);
+pub const MASK_RAX: u16 = 1 << 0;
 pub const MASK_RAX_RDX: u16 = (1 << 0) | (1 << 2);
 pub const MASK_RCX: u16 = 1 << 1;
 /// Bitmask over `Xmm::id()` (bits 0..13).
 pub const MASK_XMM_CALLER: u16 = (1 << 14) - 1;
 
+/// Single source of truth for internal runtime helper clobber masks `(gp_mask, xmm_mask)`.
+///
+/// Every helper guarantees preservation of `Rbx, Rbp, R12..R15` (except `MemGrow` which updates
+/// `R13 = mem_len` in place) and all allocated `Xmm0..Xmm13` (helpers use only scratch `Xmm14`/`Xmm15`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperKind {
+    /// Input in `Xmm15`, returns int in `Rax` + trap code in `R11d`; clobbers only `Rax, R10, R11, Xmm14, Xmm15`.
+    Trunc,
+    /// Input in `Rdi`, returns `old_pages | -1` in `Rax`, updates `R13`; clobbers caller-saved GP only.
+    MemGrow,
+    /// Inputs in `Rdi, Rsi, Rdx`, returns trap in `R11d`; clobbers caller-saved GP only.
+    MemCopy,
+    /// Inputs in `Rdi, Rsi, Rdx`, returns trap in `R11d`; clobbers caller-saved GP only.
+    MemFill,
+}
+
+#[inline]
+pub const fn helper_clobbers(kind: HelperKind) -> (u16, u16) {
+    match kind {
+        HelperKind::Trunc => (MASK_RAX, 0),
+        HelperKind::MemGrow | HelperKind::MemCopy | HelperKind::MemFill => (MASK_GP_CALLER, 0),
+    }
+}
+
+/// Typed slot placement for internal Wasm call arguments or multi-value return buffers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbiSlot {
+    Gp(Gp),
+    Xmm(Xmm),
+    /// Byte offset from the start of the outgoing arg area (`[rsp + off]`) or return buffer (`[buf + off]`).
+    Stack(i32),
+}
+
+/// Unified typed ABI layout shared by caller, callee, and stack-frame sizing.
+pub struct AbiLayout {
+    pub slots: Vec<AbiSlot>,
+    /// 16-byte aligned byte size required for overflow slots (0 if all values fit in registers).
+    pub stack_bytes: i32,
+}
+
+pub fn layout_args(tys: &[Ty]) -> AbiLayout {
+    let mut slots = Vec::with_capacity(tys.len());
+    let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
+    for &ty in tys {
+        if ty.is_fp() {
+            if nf < CALL_FP_ARGS.len() {
+                slots.push(AbiSlot::Xmm(CALL_FP_ARGS[nf]));
+                nf += 1;
+            } else {
+                let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
+                off = (off + (align - 1)) & !(align - 1);
+                slots.push(AbiSlot::Stack(off));
+                off += sz;
+            }
+        } else if ng < CALL_GP_ARGS.len() {
+            slots.push(AbiSlot::Gp(CALL_GP_ARGS[ng]));
+            ng += 1;
+        } else {
+            off = (off + 7) & !7;
+            slots.push(AbiSlot::Stack(off));
+            off += 8;
+        }
+    }
+    let stack_bytes = (off + 15) & !15;
+    AbiLayout { slots, stack_bytes }
+}
+
+pub fn layout_rets(tys: &[Ty]) -> AbiLayout {
+    let mut slots = Vec::with_capacity(tys.len());
+    let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
+    for &ty in tys {
+        if ty.is_fp() {
+            if nf < CALL_FP_RETS.len() {
+                slots.push(AbiSlot::Xmm(CALL_FP_RETS[nf]));
+                nf += 1;
+            } else {
+                let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
+                off = (off + (align - 1)) & !(align - 1);
+                slots.push(AbiSlot::Stack(off));
+                off += sz;
+            }
+        } else if ng < CALL_GP_RETS.len() {
+            slots.push(AbiSlot::Gp(CALL_GP_RETS[ng]));
+            ng += 1;
+        } else {
+            off = (off + 7) & !7;
+            slots.push(AbiSlot::Stack(off));
+            off += 8;
+        }
+    }
+    let stack_bytes = (off + 15) & !15;
+    AbiLayout { slots, stack_bytes }
+}
+
 pub struct AllocResult {
     pub locs: Vec<Loc>,
-    /// Block order emitted linearly (reachable blocks in RPO-like order).
+    /// Block order emitted linearly (reachable blocks in RPO order).
     pub block_order: Vec<u32>,
     /// Callee-saved GP registers actually modified (`Rbx`, `Rbp`).
     pub used_callee_gp: Vec<Gp>,
-    /// Total stack bytes reserved below pushed callee-saved regs (keeps `rsp` 16-byte aligned).
+    /// Total stack bytes subtracted from `rsp` below pushed callee-saved regs (keeps `rsp` 16-byte aligned).
     pub frame_size: i32,
-    /// Offset of the spill area base (above outgoing call stack-args area).
+    /// Offset of the outgoing stack-arg area (always 0 when non-empty).
     pub outgoing_arg_bytes: i32,
+    /// Offset in this frame (`[rsp + ret_buf_off]`) reserved for callee overflow returns (16-byte aligned).
+    pub ret_buf_off: i32,
+    /// Size of `ret_buf` (0 if no call in this function has overflow returns).
+    pub ret_buf_bytes: i32,
+    /// Frame slot (`[rsp + off]`) saving incoming `[r15 + OFF_RET_SPILL_PTR]` when THIS function has overflow returns.
+    pub saved_ret_ptr_off: Option<i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -141,7 +259,9 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
     let mut last_use = vec![0u32; n_vals];
     let mut cross_block = vec![false; n_vals];
     let mut clobbers: Vec<Clobber> = Vec::new();
-    let mut max_outgoing_stack_args = 0usize;
+    let mut max_outgoing_arg_bytes = 0i32;
+    let mut max_ret_buf_bytes = 0i32;
+    let mut scratch_tys: Vec<Ty> = Vec::new();
 
     let mut tick = 0u32;
     for (oi, &bid) in block_order.iter().enumerate() {
@@ -169,52 +289,47 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
                     last_use[vi] = pos_use;
                 }
             });
-            // Record fixed-register clobbers at `pos_use` (strictly inside `(start, end)` means live across!).
             match inst.op {
-                Op::Call { args, rets, .. } => {
+                Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
                     clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_GP_CALLER, xmm_mask: MASK_XMM_CALLER });
-                    let (mut n_gp, mut n_fp) = (0usize, 0usize);
+                    scratch_tys.clear();
                     for &av in ir.pool_slice(args) {
-                        if ir.val_tys[av.0 as usize].is_fp() { n_fp += 1; } else { n_gp += 1; }
+                        scratch_tys.push(ir.val_tys[av.0 as usize]);
                     }
-                    let stack_args = n_gp.saturating_sub(6) + n_fp.saturating_sub(8);
-                    if stack_args > max_outgoing_stack_args {
-                        max_outgoing_stack_args = stack_args;
+                    let arg_layout = layout_args(&scratch_tys);
+                    if arg_layout.stack_bytes > max_outgoing_arg_bytes {
+                        max_outgoing_arg_bytes = arg_layout.stack_bytes;
                     }
+                    scratch_tys.clear();
                     for &rv in ir.pool_slice(rets) {
                         let vi = rv.0 as usize;
+                        scratch_tys.push(ir.val_tys[vi]);
                         def_pos[vi] = pos_def;
                         def_block[vi] = oi as u32;
-                        if last_use[vi] < pos_def {
-                            last_use[vi] = pos_def;
+                        if last_use[vi] < pos_def + 1 {
+                            last_use[vi] = pos_def + 1;
                         }
                     }
-                }
-                Op::CallIndirect { args, rets, .. } => {
-                    clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_GP_CALLER, xmm_mask: MASK_XMM_CALLER });
-                    let (mut n_gp, mut n_fp) = (0usize, 0usize);
-                    for &av in ir.pool_slice(args) {
-                        if ir.val_tys[av.0 as usize].is_fp() { n_fp += 1; } else { n_gp += 1; }
-                    }
-                    let stack_args = n_gp.saturating_sub(6) + n_fp.saturating_sub(8);
-                    if stack_args > max_outgoing_stack_args {
-                        max_outgoing_stack_args = stack_args;
-                    }
-                    for &rv in ir.pool_slice(rets) {
-                        let vi = rv.0 as usize;
-                        def_pos[vi] = pos_def;
-                        def_block[vi] = oi as u32;
-                        if last_use[vi] < pos_def {
-                            last_use[vi] = pos_def;
-                        }
+                    let ret_layout = layout_rets(&scratch_tys);
+                    if ret_layout.stack_bytes > max_ret_buf_bytes {
+                        max_ret_buf_bytes = ret_layout.stack_bytes;
                     }
                 }
-                Op::MemCopy { .. } | Op::MemFill { .. } | Op::MemGrow(_) => {
-                    clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_GP_CALLER, xmm_mask: 0 });
+                Op::MemCopy { .. } => {
+                    let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemCopy);
+                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
+                }
+                Op::MemFill { .. } => {
+                    let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemFill);
+                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
+                }
+                Op::MemGrow(_) => {
+                    let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemGrow);
+                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
                 }
                 Op::Trunc(_, _) => {
-                    // Trunc helpers only clobber RAX and XMM0/XMM15 (we pass in XMM15 and return in RAX!).
-                    clobbers.push(Clobber { pos: pos_use, gp_mask: 1 << 0, xmm_mask: 0 });
+                    let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::Trunc);
+                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
                 }
                 Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => match op {
                     IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU => {
@@ -242,7 +357,6 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
             }
             tick += 2;
         }
-        // Terminator uses occur at `tick`.
         let pos_term = tick;
         bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
             let vi = v.0 as usize;
@@ -322,7 +436,6 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
             });
         }
 
-        // Fixed-point backward liveness iteration.
         let mut changed = true;
         while changed {
             changed = false;
@@ -353,7 +466,6 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
             }
         }
 
-        // Extend `[def_pos, last_use]` across every block where value is live_in or live_out.
         for oi in 0..n_ord {
             let bs = block_start[oi];
             let be = block_end[oi];
@@ -374,7 +486,7 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
         }
     }
 
-    // 4. Build intervals and compute exact clobber masks for each interval via binary search on `clobbers`.
+    // 4. Build intervals and compute exact clobber masks for each interval.
     let mut gp_intervals: Vec<Interval> = Vec::new();
     let mut fp_intervals: Vec<Interval> = Vec::new();
     for vi in 0..n_vals {
@@ -383,9 +495,6 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
             continue;
         }
         let end = last_use[vi].max(start + 1);
-        // Find all clobbers strictly inside `(start, end)` — note: a value whose last use is AT a call
-        // (passed as an arg) has `end == pos_use`, which is NOT strictly `> pos_use`, so it CAN live
-        // in a caller-saved register right up to the call!
         let clob_end = last_use[vi].max(start);
         let lo = clobbers.partition_point(|c| c.pos <= start);
         let mut clob_gp = 0u16;
@@ -409,13 +518,11 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
     fp_intervals.sort_by_key(|iv| (iv.start, iv.end));
 
     let mut locs = vec![Loc::Spill(0); n_vals];
-    let mut next_spill_off: i32 = 0; // relative to spill base; will be shifted by outgoing_arg_bytes later.
+    let mut next_spill_off: i32 = 0;
     let mut used_callee_mask: u16 = 0;
 
     // 5a. Linear scan for GP intervals.
-    // Free-list of reusable 8-byte spill slots `(max_end_pos, offset)`.
     let mut free_spills8: Vec<(u32, i32)> = Vec::new();
-    // Active GP intervals: `(start, end, reg_idx_in_GP_ALLOC, val_idx)`.
     let mut active_gp: Vec<(u32, u32, usize, u32)> = Vec::with_capacity(GP_ALLOC.len());
 
     let alloc_spill8 = |start: u32, end: u32, free: &mut Vec<(u32, i32)>, next: &mut i32| -> i32 {
@@ -438,7 +545,6 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
             used_regs |= 1 << GP_ALLOC[ri].id();
         }
         let forbidden = used_regs | iv.clob_gp;
-        // Prefer caller-saved regs when the interval doesn't cross a call, else callee-saved.
         let chosen = GP_ALLOC.iter().enumerate().find(|&(_, &g)| (forbidden & (1 << g.id())) == 0);
         if let Some((ri, &g)) = chosen {
             locs[iv.val as usize] = Loc::Gp(g);
@@ -447,7 +553,6 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
             }
             active_gp.push((iv.start, iv.end, ri, iv.val));
         } else {
-            // Try spilling the active interval that ends furthest in the future AND is compatible.
             let best_evict = active_gp
                 .iter()
                 .enumerate()
@@ -532,33 +637,57 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
         }
     }
 
-    // 6. Compute aligned stack frame size.
-    // On function entry, `call` pushed an 8-byte return address so `rsp % 16 == 8`.
-    // Pushing `k` callee-saved regs shifts `rsp` by `8*k`. We want `(8 + 8*k + frame_size) % 16 == 0`.
+    // 6. Compute aligned stack frame layout:
+    //   [rsp + 0 .. outgoing_arg_bytes]                     : outgoing stack args (16-byte aligned)
+    //   [rsp + ret_buf_off .. ret_buf_off + ret_buf_bytes]  : callee overflow return buffer (16-byte aligned)
+    //   [rsp + spill_base .. spill_base + next_spill_off]   : SSA spills (16-byte aligned base for V128)
+    //   [rsp + saved_ret_ptr_off]                           : optional saved caller ret_spill_ptr (8 bytes)
     let mut used_callee_gp = Vec::new();
     for &g in &GP_CALLEE_SAVED {
         if (used_callee_mask & (1 << g.id())) != 0 {
             used_callee_gp.push(g);
         }
     }
-    let outgoing_arg_bytes = ((max_outgoing_stack_args * 8) as i32 + 15) & !15;
-    // Shift all spill offsets above outgoing stack arguments.
-    if outgoing_arg_bytes > 0 {
+    let outgoing_arg_bytes = max_outgoing_arg_bytes;
+    let ret_buf_off = outgoing_arg_bytes;
+    let ret_buf_bytes = max_ret_buf_bytes;
+    let spill_base = (ret_buf_off + ret_buf_bytes + 15) & !15;
+    if spill_base > 0 {
         for loc in &mut locs {
             if let Loc::Spill(off) = loc {
-                *off += outgoing_arg_bytes;
+                *off += spill_base;
             }
         }
     }
-    let raw_frame = outgoing_arg_bytes + next_spill_off;
+    let mut raw_frame = spill_base + next_spill_off;
+    let self_ret_layout = layout_rets(&ir.result_tys);
+    let saved_ret_ptr_off = if self_ret_layout.stack_bytes > 0 {
+        raw_frame = (raw_frame + 7) & !7;
+        let off = raw_frame;
+        raw_frame += 8;
+        Some(off)
+    } else {
+        None
+    };
+
+    // On function entry, `call` pushed an 8-byte return address so `rsp % 16 == 8`.
+    // Pushing `k` callee-saved regs shifts `rsp` by `8*k`. We want `(8 + 8*k + frame_size) % 16 == 0`.
     let pushes_bytes = (1 + used_callee_gp.len()) as i32 * 8;
     let frame_size = if raw_frame == 0 && clobbers.is_empty() {
-        // Leaf function with 0 spills and 0 calls needs no stack alignment adjustment!
         0
     } else {
         let total = (pushes_bytes + raw_frame + 15) & !15;
         total - pushes_bytes
     };
 
-    AllocResult { locs, block_order, used_callee_gp, frame_size, outgoing_arg_bytes }
+    AllocResult {
+        locs,
+        block_order,
+        used_callee_gp,
+        frame_size,
+        outgoing_arg_bytes,
+        ret_buf_off,
+        ret_buf_bytes,
+        saved_ret_ptr_off,
+    }
 }

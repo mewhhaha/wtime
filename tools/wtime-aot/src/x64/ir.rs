@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use wtime_types::ValType;
-use wtime_validate::{Immediate, Instruction};
+use wtime_validate::{DecodedModule, Immediate, Instruction};
 
 use crate::codegen::{ConstVal, Module};
 
@@ -253,7 +253,7 @@ impl StoreKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValRange {
     pub start: u32,
-    pub len: u16,
+    pub len: u32,
 }
 
 impl ValRange {
@@ -517,35 +517,35 @@ pub enum Term {
 
 impl Term {
     pub fn for_each_use(&self, pool: &[Val], tables: &[BrTableData], mut f: impl FnMut(Val)) {
-        let mut emit_range = |r: ValRange| {
+        fn emit_range(pool: &[Val], r: ValRange, f: &mut impl FnMut(Val)) {
             for &v in &pool[r.start as usize..r.start as usize + r.len as usize] {
                 f(v);
             }
-        };
+        }
         match *self {
-            Term::Jump { args, .. } => emit_range(args),
+            Term::Jump { args, .. } => emit_range(pool, args, &mut f),
             Term::BranchIf { cond, then_args, else_args, .. } => {
                 f(cond);
-                emit_range(then_args);
-                emit_range(else_args);
+                emit_range(pool, then_args, &mut f);
+                emit_range(pool, else_args, &mut f);
             }
             Term::CmpBranch { kind, a, b, then_args, else_args, .. } => {
                 f(a);
                 if !matches!(kind, CmpBranchKind::I32Imm(_, _) | CmpBranchKind::I64Imm(_, _)) {
                     f(b);
                 }
-                emit_range(then_args);
-                emit_range(else_args);
+                emit_range(pool, then_args, &mut f);
+                emit_range(pool, else_args, &mut f);
             }
             Term::BrTable { idx, table_idx } => {
                 f(idx);
                 let bt = &tables[table_idx as usize];
                 for &(_, args) in &bt.targets {
-                    emit_range(args);
+                    emit_range(pool, args, &mut f);
                 }
-                emit_range(bt.default.1);
+                emit_range(pool, bt.default.1, &mut f);
             }
-            Term::Return { vals } => emit_range(vals),
+            Term::Return { vals } => emit_range(pool, vals, &mut f),
             Term::Unreachable => {}
         }
     }
@@ -614,9 +614,10 @@ impl IrFunc {
     }
 
     pub fn push_pool(&mut self, vals: &[Val]) -> ValRange {
-        let start = self.val_pool.len() as u32;
+        let start = u32::try_from(self.val_pool.len()).expect("val_pool exceeded u32::MAX");
+        let len = u32::try_from(vals.len()).expect("val range exceeded u32::MAX");
         self.val_pool.extend_from_slice(vals);
-        ValRange { start, len: vals.len() as u16 }
+        ValRange { start, len }
     }
 
     #[inline]
@@ -1056,22 +1057,21 @@ fn block_type_tys(module: &Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)> {
 }
 
 /// Lowers defined Wasm function `func_index` (`>= module.imports.len()`) into optimized SSA IR.
-pub fn lower_wasm_to_ir(module: &Module, func_index: usize) -> Res<IrFunc> {
+pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: usize) -> Res<IrFunc> {
     let body_idx = func_index - module.imports.len();
-    let body = &module.bodies[body_idx];
+    let body = &decoded.code[body_idx];
     let ty = &module.types[func_index];
     let result_tys: Vec<Ty> = ty.results.iter().map(|&v| Ty::from_val(v)).collect();
 
     let mut local_tys: Vec<Ty> = ty.params.iter().map(|&v| Ty::from_val(v)).collect();
-    for &(count, vt) in &body.locals {
-        let t = Ty::from_val(vt);
-        for _ in 0..count {
-            local_tys.push(t);
-        }
+    for &vt in &body.locals {
+        local_tys.push(Ty::from_val(vt));
     }
 
     let scan = scan_frame_locals(&body.instructions, local_tys.len());
-    let mut b = Builder::new(func_index, result_tys.clone(), !module.fn_no_stack_check[func_index]);
+    // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
+    // allocated native frame bytes and call depth.
+    let mut b = Builder::new(func_index, result_tys.clone(), true);
 
     // Initialize params and zero locals in entry block (bb0).
     let mut locals: Vec<Val> = Vec::with_capacity(local_tys.len());
@@ -2052,21 +2052,20 @@ pub fn optimize_ir(ir: &mut IrFunc) {
                         i += 1;
                         continue;
                     }
-                    // Look ahead over pure non-trapping/load instructions using the same `addr`
-                    // to hoist a single max bounds check for a load run.
+                    // Look ahead over pure non-trapping instructions and loads from the SAME `addr`
+                    // (stopping at any different-address load or side-effecting op to preserve exact
+                    // Wasm trap order and keep lookahead strictly linear).
                     let mut max_end = end;
                     let mut run_loads = 1usize;
                     let mut j = i + 1;
                     while j < insts.len() {
                         match insts[j].op {
-                            Op::Load { kind: lk, addr: la, offset: lo, .. } => {
-                                if la == a {
-                                    let e = (lo as u64) + lk.bytes();
-                                    if e > max_end {
-                                        max_end = e;
-                                    }
-                                    run_loads += 1;
+                            Op::Load { kind: lk, addr: la, offset: lo, .. } if la == a => {
+                                let e = (lo as u64) + lk.bytes();
+                                if e > max_end {
+                                    max_end = e;
                                 }
+                                run_loads += 1;
                             }
                             ref other if !other.has_side_effect() => {}
                             _ => break,

@@ -24,12 +24,23 @@ fn elf_hash(name: &[u8]) -> u32 {
     h
 }
 
+/// Export symbol placement within `.text`, matched 1:1 to `plan`'s export name order.
+#[derive(Clone, Copy, Debug)]
+pub struct ExportDef {
+    pub text_off: u64,
+    pub size: u64,
+}
+
 /// Metadata layout computed BEFORE finalizing `.text` relocations, because
 /// `text_vaddr` depends on the exact size of `.dynsym` + `.hash` + `.dynstr` + `.rodata`.
+///
+/// Export names are captured once in `plan` and reused verbatim by `emit`, making
+/// `.dynsym`, `.dynstr`, and `.hash` impossible to drift out of sync.
 pub struct ElfLayout {
     pub rodata_vaddr: usize,
     pub text_vaddr: usize,
     pub dyn_vaddr: usize,
+    export_names: Vec<String>,
     dynsym_off: usize,
     hash_off: usize,
     dynstr_off: usize,
@@ -45,10 +56,12 @@ impl ElfLayout {
 
         let mut dynstr = vec![0u8];
         let mut name_offs = Vec::with_capacity(export_names.len());
-        for name in export_names {
+        let mut owned_names = Vec::with_capacity(export_names.len());
+        for &name in export_names {
             name_offs.push(dynstr.len() as u32);
             dynstr.extend_from_slice(name.as_bytes());
             dynstr.push(0);
+            owned_names.push(name.to_owned());
         }
 
         // 64-byte Ehdr + 5 * 56-byte Phdrs = 344 bytes.
@@ -72,7 +85,8 @@ impl ElfLayout {
         Self {
             rodata_vaddr,
             text_vaddr,
-            dyn_vaddr: 0, // filled once text_len is known
+            dyn_vaddr: 0,
+            export_names: owned_names,
             dynsym_off,
             hash_off,
             dynstr_off,
@@ -83,10 +97,25 @@ impl ElfLayout {
     }
 
     /// Emits the complete ELF64 `.so` image.
-    /// `exports` must match `export_names` order from `plan`, giving `(text_offset, size)`.
-    pub fn emit(mut self, rodata: &[u8], text: &[u8], exports: &[(&str, u64, u64)]) -> Vec<u8> {
+    /// `exports` must have the exact same length and order as `export_names` passed to `plan`.
+    pub fn emit(mut self, rodata: &[u8], text: &[u8], exports: &[ExportDef]) -> Result<Vec<u8>, String> {
+        if exports.len() != self.export_names.len() {
+            return Err(format!(
+                "ELF export count mismatch: planned {} vs emitted {}",
+                self.export_names.len(),
+                exports.len()
+            ));
+        }
         let seg0_end = self.rodata_vaddr + rodata.len();
-        debug_assert_eq!(self.text_vaddr, align_up(seg0_end, PAGE));
+        if self.text_vaddr != align_up(seg0_end, PAGE) {
+            return Err("ELF rodata length changed after ElfLayout::plan".into());
+        }
+        for (name, def) in self.export_names.iter().zip(exports) {
+            let end = def.text_off.checked_add(def.size).ok_or_else(|| format!("export {name} overflow"))?;
+            if end > text.len() as u64 {
+                return Err(format!("export {name} extent ({end}) exceeds .text ({})", text.len()));
+            }
+        }
         let seg1_end = self.text_vaddr + text.len();
         let dyn_vaddr = align_up(seg1_end, PAGE);
         self.dyn_vaddr = dyn_vaddr;
@@ -143,21 +172,21 @@ impl ElfLayout {
 
         // ---- .dynsym ----
         let nsyms = 1 + exports.len();
-        for (i, &(_, text_off, sym_size)) in exports.iter().enumerate() {
+        for (i, def) in exports.iter().enumerate() {
             let sym_idx = i + 1;
             let base = self.dynsym_off + sym_idx * 24;
             put_u32(&mut img, base, self.name_offs[i]); // st_name
             img[base + 4] = (1 << 4) | 2; // STB_GLOBAL | STT_FUNC
             img[base + 5] = 0; // STV_DEFAULT
             put_u16(&mut img, base + 6, 1); // non-zero shndx (defined)
-            put_u64(&mut img, base + 8, self.text_vaddr as u64 + text_off);
-            put_u64(&mut img, base + 16, sym_size);
+            put_u64(&mut img, base + 8, self.text_vaddr as u64 + def.text_off);
+            put_u64(&mut img, base + 16, def.size);
         }
 
         // ---- .hash (SysV ELF hash table) ----
         let mut buckets = vec![0u32; self.nbucket];
         let mut chains = vec![0u32; nsyms];
-        for (i, &(name, _, _)) in exports.iter().enumerate() {
+        for (i, name) in self.export_names.iter().enumerate() {
             let sym_idx = (i + 1) as u32;
             let b = (elf_hash(name.as_bytes()) as usize) % self.nbucket;
             chains[sym_idx as usize] = buckets[b];
@@ -196,7 +225,7 @@ impl ElfLayout {
         put_dyn(11, 24); // DT_SYMENT
         put_dyn(0, 0); // DT_NULL
 
-        img
+        Ok(img)
     }
 }
 
