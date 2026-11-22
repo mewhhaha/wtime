@@ -20,14 +20,18 @@ pub const MAX_TOTAL_EXTERN_SLOTS: usize = 65_536;
 pub const MAX_GLOBALS: usize = 65_536;
 pub const MAX_CTX_BYTES: usize = 16 << 20; // 16 MiB (far below i32::MAX)
 pub const MAX_AGGREGATE_CI_TABLE_BYTES: usize = 64 << 20; // 64 MiB
+pub const MAX_AGGREGATE_BR_TABLE_ENTRIES: usize = 4_194_304; // 16 MiB jump tables
 pub const MAX_LOCALS_PER_FN: usize = 65_536;
 pub const MAX_TOTAL_LOCALS: usize = 1_000_000;
 pub const MAX_FRAME_BYTES: i32 = 4 << 20; // 4 MiB (well below 8 MiB dedicated guest stack)
 pub const MAX_LIVENESS_BYTES: usize = 64 << 20; // 64 MiB
+pub const MAX_LIVENESS_WORK_UNITS: usize = 32_000_000;
 pub const MAX_FRAME_SCAN_WRITES: usize = 4_000_000;
 pub const MAX_IF_SNAPSHOT_ENTRIES: usize = 4_000_000;
 pub const MAX_IR_VALS_PER_FN: usize = 1_000_000;
 pub const MAX_VAL_POOL_PER_FN: usize = 2_000_000;
+pub const MAX_FN_CODE_BYTES: usize = 64 << 20; // 64 MiB
+pub const MAX_FN_LOCAL_RODATA_BYTES: usize = 16 << 20; // 16 MiB
 
 /// Constant value folded from an immutable/never-written non-exported global initializer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,9 +271,35 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         (None, None)
     };
 
-    // Imports: function imports only.
+    // Intern module types ONCE into canonical `u32` IDs so signature lookups and table pre-indexing
+    // never re-hash or clone `FuncType` per table slot or per function.
+    let mut sig_to_canon: HashMap<&FuncType, u32> = HashMap::with_capacity(decoded.types.len());
+    let mut type_canon: Vec<u32> = Vec::with_capacity(decoded.types.len());
+    for fty in &decoded.types {
+        let next_id = sig_to_canon.len() as u32;
+        let cid = *sig_to_canon.entry(fty).or_insert(next_id);
+        type_canon.push(cid);
+    }
+
+    // Charge per-function and total-module local counts BEFORE cloning per-function signatures.
+    let mut precheck_total_locals = 0usize;
+    for (bi, body) in decoded.code.iter().enumerate() {
+        let ti = decoded.functions.get(bi).ok_or("function/code count mismatch")?.0 as usize;
+        let fty = decoded.types.get(ti).ok_or("function type index out of range")?;
+        let n_locals = fty.params.len().saturating_add(body.locals.len());
+        if n_locals > MAX_LOCALS_PER_FN {
+            return Err(format!("x64: function body {bi} has {n_locals} locals (cap {MAX_LOCALS_PER_FN})"));
+        }
+        precheck_total_locals = precheck_total_locals.saturating_add(n_locals);
+        if precheck_total_locals > MAX_TOTAL_LOCALS {
+            return Err(format!("x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"));
+        }
+    }
+
+    // Imports: plain function imports only.
     let mut imports = Vec::new();
     let mut types = Vec::new();
+    let mut func_canon_sig: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
     for imp in &decoded.imports {
         let ti = match imp.kind {
             ImportKind::Func(t) => t.0 as usize,
@@ -282,14 +312,17 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         check_blot_import_sig(&imp.module, &imp.name, &fty)?;
         imports.push((imp.module.clone(), imp.name.clone()));
         types.push(fty);
+        func_canon_sig.push(type_canon[ti]);
     }
 
     for &ti in &decoded.functions {
-        let fty = decoded.types.get(ti.0 as usize).ok_or("function type index out of range")?.clone();
+        let ti_u = ti.0 as usize;
+        let fty = decoded.types.get(ti_u).ok_or("function type index out of range")?.clone();
         for &vt in fty.params.iter().chain(&fty.results) {
             check_val_type(vt)?;
         }
         types.push(fty);
+        func_canon_sig.push(type_canon[ti_u]);
     }
 
     // Tables: static funcref tables + mutable externref tables (32-bit only, aggregate-capped).
@@ -454,49 +487,50 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         }
     }
 
-    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, FuncType)`
-    // so every distinct `call_indirect` signature resolves in O(1) instead of rescanning the table.
+    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, canon_sig_id)`
+    // (zero `FuncType` cloning/hashing per slot) so every `call_indirect` resolves in O(1).
     let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut funcref_by_sig: HashMap<(u32, FuncType), Vec<(u32, u32)>> = HashMap::new();
+    let mut funcref_by_sig: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
     for (tbl, slots) in funcref_tables {
         funcref_table_lens.insert(tbl, slots.len() as u32);
         for (slot, entry) in slots.into_iter().enumerate() {
             if let Some(f) = entry
-                && let Some(sig) = types.get(f as usize)
+                && let Some(&csig) = func_canon_sig.get(f as usize)
             {
-                funcref_by_sig.entry((tbl, sig.clone())).or_default().push((slot as u32, f));
+                funcref_by_sig.entry((tbl, csig)).or_default().push((slot as u32, f));
             }
         }
     }
 
     // Single linear scan over ALL function bodies (including unreachable code) to:
-    // 1. Enforce opcode, local-count, and value-type allowlists;
+    // 1. Enforce opcode, local-count, value-type, and br_table aggregate allowlists;
     // 2. Count global reads/writes to detect constant globals & pick `pinned_global`;
-    // 3. Collect canonical `(table, FuncType)` `call_indirect` signatures.
-    let mut total_locals = 0usize;
+    // 3. Collect canonical `(table, canon_sig_id)` `call_indirect` signatures.
+    let mut total_br_table_entries = 0usize;
     let mut global_reads = vec![0usize; globals.len()];
     let mut global_writes = vec![0usize; globals.len()];
-    let mut ci_canon: HashMap<(u32, FuncType), usize> = HashMap::new();
+    let mut ci_canon: HashMap<(u32, u32), usize> = HashMap::new();
     let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     let mut ci_sigs: Vec<X64CiSig> = Vec::new();
     let mut total_ci_bytes = 0usize;
 
-    for (bi, body) in decoded.code.iter().enumerate() {
-        let fidx = imports.len() + bi;
-        let n_locals = types[fidx].params.len() + body.locals.len();
-        if n_locals > MAX_LOCALS_PER_FN {
-            return Err(format!("x64: function {fidx} has {n_locals} locals (cap {MAX_LOCALS_PER_FN})"));
-        }
-        total_locals += n_locals;
-        if total_locals > MAX_TOTAL_LOCALS {
-            return Err(format!("x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"));
-        }
+    for body in &decoded.code {
         for &vt in &body.locals {
             check_val_type(vt)?;
         }
         for insn in &body.instructions {
             check_supported_opcode(insn.opcode, &insn.immediate, decoded)?;
             match insn.opcode {
+                0x0e => {
+                    if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
+                        total_br_table_entries = total_br_table_entries.saturating_add(raw_targets.len());
+                        if total_br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
+                            return Err(format!(
+                                "x64: aggregate br_table entries ({total_br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
+                            ));
+                        }
+                    }
+                }
                 0x23 => {
                     if let Immediate::Index(g) = insn.immediate {
                         global_reads[g as usize] += 1;
@@ -521,14 +555,14 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                     if ci_index.contains_key(&(tbl, ti)) {
                         continue;
                     }
-                    let sig = decoded.types.get(ti as usize).ok_or("call_indirect type index")?.clone();
-                    let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, sig.clone())) {
+                    let &csig = type_canon.get(ti as usize).ok_or("call_indirect type index")?;
+                    let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
                         existing
                     } else {
                         let &table_len = funcref_table_lens
                             .get(&tbl)
                             .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
-                        let targets = funcref_by_sig.remove(&(tbl, sig.clone())).unwrap_or_default();
+                        let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
                         let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) = (targets.first(), targets.last()) {
                             (first, last - first + 1)
                         } else {
@@ -542,15 +576,16 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                             ));
                         }
                         let id = ci_sigs.len();
+                        let sig = decoded.types[ti as usize].clone();
                         ci_sigs.push(X64CiSig {
                             table: tbl,
                             table_len,
-                            sig: sig.clone(),
+                            sig,
                             min_slot,
                             span,
                             targets,
                         });
-                        ci_canon.insert((tbl, sig), id);
+                        ci_canon.insert((tbl, csig), id);
                         id
                     };
                     ci_index.insert((tbl, ti), ci_id);

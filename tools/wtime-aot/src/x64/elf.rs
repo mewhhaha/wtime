@@ -107,6 +107,9 @@ impl ElfLayout {
         let rodata_vaddr = cur;
         let seg0_end = rodata_vaddr.checked_add(rodata_len).ok_or("rodata size overflow")?;
         let text_vaddr = checked_align_up(seg0_end, PAGE)?;
+        if text_vaddr >= i32::MAX as usize {
+            return Err(format!("ELF rodata + headers ({text_vaddr} B) exceed rel32 addressable 2 GiB range"));
+        }
 
         Ok(Self {
             rodata_vaddr,

@@ -543,10 +543,9 @@ impl Term {
             Term::BrTable { idx, table_idx } => {
                 f(idx);
                 let bt = &tables[table_idx as usize];
-                for &(_, args) in &bt.targets {
+                for &(_, args) in &bt.unique_edges {
                     emit_range(pool, args, &mut f);
                 }
-                emit_range(pool, bt.default.1, &mut f);
             }
             Term::Return { vals } => emit_range(pool, vals, &mut f),
             Term::Unreachable => {}
@@ -562,10 +561,9 @@ impl Term {
             }
             Term::BrTable { table_idx, .. } => {
                 let bt = &tables[table_idx as usize];
-                for &(bb, _) in &bt.targets {
+                for &(bb, _) in &bt.unique_edges {
                     f(bb);
                 }
-                f(bt.default.0);
             }
             Term::Return { .. } | Term::Unreachable => {}
         }
@@ -573,8 +571,11 @@ impl Term {
 }
 
 pub struct BrTableData {
+    /// Raw dispatch entries in table-index order (used only for jump-table codegen).
     pub targets: Vec<(BlockId, ValRange)>,
     pub default: (BlockId, ValRange),
+    /// Deduplicated `(target_bb, args)` edges across `targets` + `default` (used by liveness, CFG, and DCE).
+    pub unique_edges: Vec<(BlockId, ValRange)>,
 }
 
 pub struct Block {
@@ -763,10 +764,11 @@ struct Builder {
     ir: IrFunc,
     cur_bb: BlockId,
     consts: Vec<Option<KnownConst>>,
+    const_fold: bool,
 }
 
 impl Builder {
-    fn new(func_index: usize, result_tys: Vec<Ty>, needs_stack_check: bool) -> Self {
+    fn new(func_index: usize, result_tys: Vec<Ty>, needs_stack_check: bool, const_fold: bool) -> Self {
         let mut ir = IrFunc {
             func_index,
             params: Vec::new(),
@@ -779,7 +781,7 @@ impl Builder {
             needs_stack_check,
         };
         ir.blocks[0].preds = 1;
-        Self { ir, cur_bb: BlockId(0), consts: Vec::new() }
+        Self { ir, cur_bb: BlockId(0), consts: Vec::new(), const_fold }
     }
 
     fn new_block(&mut self, is_loop_header: bool) -> BlockId {
@@ -835,6 +837,9 @@ impl Builder {
 
     #[inline]
     fn as_i32(&self, v: Val) -> Option<i32> {
+        if !self.const_fold {
+            return None;
+        }
         match self.consts.get(v.0 as usize).copied().flatten() {
             Some(KnownConst::I32(c)) => Some(c),
             _ => None,
@@ -843,6 +848,9 @@ impl Builder {
 
     #[inline]
     fn as_i64(&self, v: Val) -> Option<i64> {
+        if !self.const_fold {
+            return None;
+        }
         match self.consts.get(v.0 as usize).copied().flatten() {
             Some(KnownConst::I64(c)) => Some(c),
             _ => None,
@@ -881,7 +889,7 @@ impl Builder {
                 return self.const_i32(v);
             }
         }
-        if a == b {
+        if self.const_fold && a == b {
             match op {
                 IntBinOp::Sub | IntBinOp::Xor => return self.const_i32(0),
                 IntBinOp::And | IntBinOp::Or => return a,
@@ -958,7 +966,7 @@ impl Builder {
                 return self.const_i64(v);
             }
         }
-        if a == b {
+        if self.const_fold && a == b {
             match op {
                 IntBinOp::Sub | IntBinOp::Xor => return self.const_i64(0),
                 IntBinOp::And | IntBinOp::Or => return a,
@@ -1084,6 +1092,17 @@ fn block_type_tys(module: &X64Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)
 
 /// Lowers defined Wasm function `func_index` (`>= module.imports.len()`) into optimized SSA IR.
 pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index: usize) -> Res<IrFunc> {
+    lower_wasm_to_ir_impl(decoded, module, func_index, true)
+}
+
+/// Lowers defined Wasm function `func_index` (`>= module.imports.len()`) into raw unoptimized SSA IR
+/// (disabling construction-time constant/algebraic folding and skipping `optimize_ir`), enabling
+/// differential verification of unoptimized vs optimized lowering.
+pub fn lower_wasm_to_ir_unopt(decoded: &DecodedModule, module: &X64Module, func_index: usize) -> Res<IrFunc> {
+    lower_wasm_to_ir_impl(decoded, module, func_index, false)
+}
+
+fn lower_wasm_to_ir_impl(decoded: &DecodedModule, module: &X64Module, func_index: usize, opt: bool) -> Res<IrFunc> {
     let body_idx = func_index - module.imports.len();
     let body = &decoded.code[body_idx];
     let ty = &module.types[func_index];
@@ -1098,7 +1117,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
     let mut total_if_snapshot_entries: usize = 0;
     // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
     // allocated native frame bytes and call depth.
-    let mut b = Builder::new(func_index, result_tys.clone(), true);
+    let mut b = Builder::new(func_index, result_tys.clone(), true, opt);
 
     // Initialize params and zero locals in entry block (bb0).
     let mut locals: Vec<Val> = Vec::with_capacity(local_tys.len());
@@ -1443,6 +1462,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                 let idx = stack.pop().ok_or("br_table idx")?;
                 let mut ret_bb_cache: Option<BlockId> = None;
                 let mut depth_cache: HashMap<u32, (BlockId, ValRange)> = HashMap::new();
+                let mut unique_edges: Vec<(BlockId, ValRange)> = Vec::new();
                 let mut resolve_depth = |b: &mut Builder, d: u32| -> Res<(BlockId, ValRange)> {
                     if let Some(&cached) = depth_cache.get(&d) {
                         return Ok(cached);
@@ -1472,6 +1492,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                         (f.target_bb, args_r)
                     };
                     depth_cache.insert(d, resolved);
+                    unique_edges.push(resolved);
                     Ok(resolved)
                 };
                 let mut targets = Vec::with_capacity(raw_targets.len());
@@ -1480,7 +1501,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                 }
                 let default = resolve_depth(&mut b, raw_default)?;
                 let tid = b.ir.br_tables.len() as u32;
-                b.ir.br_tables.push(BrTableData { targets, default });
+                b.ir.br_tables.push(BrTableData { targets, default, unique_edges });
                 b.terminate(Term::BrTable { idx, table_idx: tid });
                 frames.last_mut().unwrap().unreachable = true;
             }
@@ -2027,7 +2048,9 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
     }
 
     let mut ir = b.ir;
-    optimize_ir(&mut ir);
+    if opt {
+        optimize_ir(&mut ir);
+    }
     Ok(ir)
 }
 
@@ -2155,14 +2178,18 @@ pub fn optimize_ir(ir: &mut IrFunc) {
         bb.insts = out;
     }
 
-    // Pass 3: Dead-code elimination (single reverse use-count pass + worklist).
+    // Pass 3: Dead-code elimination (single reverse use-count pass with saturating usize counts).
     let n_vals = ir.val_tys.len();
-    let mut uses = vec![0u32; n_vals];
+    let mut uses = vec![0usize; n_vals];
     for bb in &ir.blocks {
         for inst in &bb.insts {
-            inst.op.for_each_use(&ir.val_pool, |v| uses[v.0 as usize] += 1);
+            inst.op.for_each_use(&ir.val_pool, |v| {
+                uses[v.0 as usize] = uses[v.0 as usize].saturating_add(1);
+            });
         }
-        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| uses[v.0 as usize] += 1);
+        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+            uses[v.0 as usize] = uses[v.0 as usize].saturating_add(1);
+        });
     }
     for bb in ir.blocks.iter_mut().rev() {
         let mut keep = vec![true; bb.insts.len()];

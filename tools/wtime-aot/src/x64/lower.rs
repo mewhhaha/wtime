@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::ir::{CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, StoreKind, Term, Ty, Val, ValRange};
+use super::module::{MAX_FN_CODE_BYTES, MAX_FN_LOCAL_RODATA_BYTES};
 use super::regalloc::{AbiSlot, AllocResult, Loc, layout_args, layout_rets};
 use super::{
     CtxLayout, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_TRUNC_BASE, OFF_RET_SPILL_PTR,
@@ -1785,9 +1786,23 @@ pub fn lower_ir_to_x64(
         let bb = &ir.blocks[bid as usize];
         for inst in &bb.insts {
             l.emit_inst(inst.res, inst.op)?;
+            if l.asm.code.len() > MAX_FN_CODE_BYTES {
+                return Err(format!(
+                    "x64: function {} code ({} B) exceeds cap {MAX_FN_CODE_BYTES} B",
+                    ir.func_index,
+                    l.asm.code.len()
+                ));
+            }
         }
         let next_bb = alloc.block_order.get(oi + 1).copied();
         l.emit_term(bb.term, next_bb)?;
+        if l.asm.local_rodata.len() > MAX_FN_LOCAL_RODATA_BYTES {
+            return Err(format!(
+                "x64: function {} local_rodata ({} B) exceeds cap {MAX_FN_LOCAL_RODATA_BYTES} B",
+                ir.func_index,
+                l.asm.local_rodata.len()
+            ));
+        }
     }
 
     // ---- Edge-copy trampolines ----

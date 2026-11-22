@@ -269,12 +269,12 @@ impl Asm {
 
     #[inline]
     pub fn pos(&self) -> u32 {
-        self.code.len() as u32
+        u32::try_from(self.code.len()).expect("function machine code exceeded u32::MAX")
     }
 
     #[inline]
     pub fn new_label(&mut self) -> Label {
-        let id = self.labels.len() as u32;
+        let id = u32::try_from(self.labels.len()).expect("label count exceeded u32::MAX");
         self.labels.push(None);
         Label(id)
     }
@@ -282,17 +282,28 @@ impl Asm {
     #[inline]
     pub fn bind(&mut self, label: Label) {
         debug_assert!(self.labels[label.0 as usize].is_none(), "label bound twice");
-        self.labels[label.0 as usize] = Some(self.code.len() as u32);
+        self.labels[label.0 as usize] = Some(self.pos());
     }
 
     /// Resolves all local branch fixups. Must be called before linking.
     pub fn finish_labels(&mut self) -> Result<(), String> {
+        if self.code.len() > i32::MAX as usize {
+            return Err(format!("function machine code ({} B) exceeds rel32 range", self.code.len()));
+        }
         for f in &self.fixups {
-            let target = self.labels[f.label.0 as usize].ok_or_else(|| format!("unbound label {}", f.label.0))?;
-            let rel = (target as i64) - (f.next_ip_off as i64);
+            let target = self
+                .labels
+                .get(f.label.0 as usize)
+                .and_then(|&o| o)
+                .ok_or_else(|| format!("unbound label {}", f.label.0))?;
+            let rel = i128::from(target) - i128::from(f.next_ip_off);
             let rel32 = i32::try_from(rel).map_err(|_| "local branch displacement exceeds rel32".to_string())?;
             let p = f.patch_off as usize;
-            self.code[p..p + 4].copy_from_slice(&rel32.to_le_bytes());
+            let end = p.checked_add(4).ok_or("local branch patch offset overflow")?;
+            if end > self.code.len() {
+                return Err(format!("local branch patch offset {p} exceeds code len {}", self.code.len()));
+            }
+            self.code[p..end].copy_from_slice(&rel32.to_le_bytes());
         }
         self.fixups.clear();
         Ok(())
@@ -301,24 +312,40 @@ impl Asm {
     /// Resolves jump-table entries in `local_rodata` once `fn_vaddr` and `local_rodata_vaddr` are known.
     pub fn patch_jump_tables(&mut self, fn_vaddr: u64, local_rodata_vaddr: u64) -> Result<(), String> {
         for jt in &self.jt_patches {
-            let label_off = self.labels[jt.label.0 as usize].ok_or_else(|| format!("unbound jt label {}", jt.label.0))?;
-            let target_vaddr = fn_vaddr + u64::from(label_off);
-            let base_vaddr = local_rodata_vaddr + u64::from(jt.table_rodata_off);
-            let rel = (target_vaddr as i64) - (base_vaddr as i64);
+            let label_off = self
+                .labels
+                .get(jt.label.0 as usize)
+                .and_then(|&o| o)
+                .ok_or_else(|| format!("unbound jt label {}", jt.label.0))?;
+            let target_vaddr = fn_vaddr
+                .checked_add(u64::from(label_off))
+                .ok_or("jump table target vaddr overflow")?;
+            let base_vaddr = local_rodata_vaddr
+                .checked_add(u64::from(jt.table_rodata_off))
+                .ok_or("jump table base vaddr overflow")?;
+            let rel = i128::from(target_vaddr) - i128::from(base_vaddr);
             let rel32 = i32::try_from(rel).map_err(|_| "jump table displacement exceeds rel32".to_string())?;
             let p = jt.rodata_off as usize;
-            self.local_rodata[p..p + 4].copy_from_slice(&rel32.to_le_bytes());
+            let end = p.checked_add(4).ok_or("jump table patch offset overflow")?;
+            if end > self.local_rodata.len() {
+                return Err(format!(
+                    "jump table patch offset {p} exceeds local_rodata len {}",
+                    self.local_rodata.len()
+                ));
+            }
+            self.local_rodata[p..end].copy_from_slice(&rel32.to_le_bytes());
         }
         Ok(())
     }
 
     /// Appends aligned raw bytes to `local_rodata`, returning the starting offset.
     pub fn add_local_rodata(&mut self, align: usize, bytes: &[u8]) -> u32 {
-        let mask = align.saturating_sub(1);
+        assert!(align.is_power_of_two(), "local_rodata alignment must be a non-zero power of two");
+        let mask = align - 1;
         while (self.local_rodata.len() & mask) != 0 {
             self.local_rodata.push(0);
         }
-        let off = self.local_rodata.len() as u32;
+        let off = u32::try_from(self.local_rodata.len()).expect("local_rodata exceeded u32::MAX");
         self.local_rodata.extend_from_slice(bytes);
         off
     }

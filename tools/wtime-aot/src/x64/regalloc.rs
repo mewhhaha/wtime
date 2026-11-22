@@ -16,9 +16,12 @@
 //!   - Callee-saved (2): `Rbx, Rbp`
 //! - Allocatable XMM (14 regs, all caller-saved in Stage 1): `Xmm0..Xmm13`
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use super::asm::{Gp, Xmm};
 use super::ir::{IntBinOp, IrFunc, Op, Ty};
-use super::module::{MAX_FRAME_BYTES, MAX_LIVENESS_BYTES};
+use super::module::{MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS};
 
 /// Physical location assigned to an SSA `Val`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,16 +226,20 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
-    // 1. Compute reachable block order (iterative DFS postorder -> reversed = RPO).
+    // 1. Compute reachable block order (iterative DFS postorder -> reversed = RPO)
+    // with O(1) per-edge successor deduplication.
     let mut visited = vec![false; n_blocks];
     let mut postorder = Vec::with_capacity(n_blocks);
     let mut dfs: Vec<(u32, usize)> = vec![(0, 0)];
     let mut succs: Vec<Vec<u32>> = vec![Vec::new(); n_blocks];
+    let mut succ_seen = vec![u32::MAX; n_blocks];
     for (bi, bb) in ir.blocks.iter().enumerate() {
+        let stamp = bi as u32;
         bb.term.for_each_succ(&ir.br_tables, |s| {
-            let sid = s.0;
-            if !succs[bi].contains(&sid) {
-                succs[bi].push(sid);
+            let sid = s.0 as usize;
+            if succ_seen[sid] != stamp {
+                succ_seen[sid] = stamp;
+                succs[bi].push(s.0);
             }
         });
     }
@@ -454,6 +461,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
             });
         }
 
+        let mut work_units: usize = 0;
         let mut changed = true;
         while changed {
             changed = false;
@@ -465,6 +473,13 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                         continue;
                     }
                     let soi = soi as usize;
+                    work_units = work_units.saturating_add(words);
+                    if work_units > MAX_LIVENESS_WORK_UNITS {
+                        return Err(format!(
+                            "x64: function {} liveness work ({work_units}) exceeds cap {MAX_LIVENESS_WORK_UNITS}",
+                            ir.func_index
+                        ));
+                    }
                     for w in 0..words {
                         let old = live_out[oi * words + w];
                         let nv = old | live_in[soi * words + w];
@@ -473,6 +488,13 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                             changed = true;
                         }
                     }
+                }
+                work_units = work_units.saturating_add(words);
+                if work_units > MAX_LIVENESS_WORK_UNITS {
+                    return Err(format!(
+                        "x64: function {} liveness work ({work_units}) exceeds cap {MAX_LIVENESS_WORK_UNITS}",
+                        ir.func_index
+                    ));
                 }
                 for w in 0..words {
                     let nv = live_use[oi * words + w] | (live_out[oi * words + w] & !live_def[oi * words + w]);
@@ -510,7 +532,41 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
         }
     }
 
-    // 4. Build intervals and compute exact clobber masks for each interval.
+    // 4. Build O(log C) segment tree over clobbers and build exact intervals.
+    let n_clob = clobbers.len();
+    let mut clob_seg = vec![(0u16, 0u16); n_clob * 2];
+    for (i, c) in clobbers.iter().enumerate() {
+        clob_seg[n_clob + i] = (c.gp_mask, c.xmm_mask);
+    }
+    for i in (1..n_clob).rev() {
+        let a = clob_seg[i << 1];
+        let b = clob_seg[(i << 1) | 1];
+        clob_seg[i] = (a.0 | b.0, a.1 | b.1);
+    }
+    let query_clobbers = |mut l: usize, mut r: usize| -> (u16, u16) {
+        if l >= r || n_clob == 0 {
+            return (0, 0);
+        }
+        l += n_clob;
+        r += n_clob;
+        let (mut gp, mut xmm) = (0u16, 0u16);
+        while l < r {
+            if (l & 1) != 0 {
+                gp |= clob_seg[l].0;
+                xmm |= clob_seg[l].1;
+                l += 1;
+            }
+            if (r & 1) != 0 {
+                r -= 1;
+                gp |= clob_seg[r].0;
+                xmm |= clob_seg[r].1;
+            }
+            l >>= 1;
+            r >>= 1;
+        }
+        (gp, xmm)
+    };
+
     let mut gp_intervals: Vec<Interval> = Vec::new();
     let mut fp_intervals: Vec<Interval> = Vec::new();
     for vi in 0..n_vals {
@@ -521,15 +577,8 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
         let end = last_use[vi].max(start + 1);
         let clob_end = last_use[vi].max(start);
         let lo = clobbers.partition_point(|c| c.pos <= start);
-        let mut clob_gp = 0u16;
-        let mut clob_xmm = 0u16;
-        for c in &clobbers[lo..] {
-            if c.pos >= clob_end {
-                break;
-            }
-            clob_gp |= c.gp_mask;
-            clob_xmm |= c.xmm_mask;
-        }
+        let hi = clobbers.partition_point(|c| c.pos < clob_end);
+        let (clob_gp, clob_xmm) = query_clobbers(lo, hi);
         let iv = Interval { val: vi as u32, start, end, ty: ir.val_tys[vi], clob_gp, clob_xmm };
         if iv.ty.is_fp() {
             fp_intervals.push(iv);
@@ -545,14 +594,20 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
     let mut next_spill_off: i32 = 0;
     let mut used_callee_mask: u16 = 0;
 
-    // 5a. Linear scan for GP intervals.
-    let mut free_spills8: Vec<(u32, i32)> = Vec::new();
+    // 5a. Linear scan for GP intervals with O(log S) min-heap spill-slot expiry.
+    let mut free_spills8: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
     let mut active_gp: Vec<(u32, u32, usize, u32)> = Vec::with_capacity(GP_ALLOC.len());
 
-    let alloc_spill8 = |start: u32, end: u32, free: &mut Vec<(u32, i32)>, next: &mut i32| -> Result<i32, String> {
-        if let Some(pos) = free.iter().position(|&(e, _)| e <= start) {
-            let (_, off) = free.swap_remove(pos);
-            free.push((end, off));
+    let alloc_spill8 = |start: u32,
+                        end: u32,
+                        free: &mut BinaryHeap<Reverse<(u32, i32)>>,
+                        next: &mut i32|
+     -> Result<i32, String> {
+        if let Some(&Reverse((e, _))) = free.peek()
+            && e <= start
+        {
+            let Reverse((_, off)) = free.pop().unwrap();
+            free.push(Reverse((end, off)));
             Ok(off)
         } else {
             let off = *next;
@@ -561,7 +616,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                 return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
             }
             *next = after;
-            free.push((end, off));
+            free.push(Reverse((end, off)));
             Ok(off)
         }
     };
@@ -604,21 +659,23 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
         }
     }
 
-    // 5b. Linear scan for FP/V128 intervals.
-    let mut free_spills16: Vec<(u32, i32)> = Vec::new();
+    // 5b. Linear scan for FP/V128 intervals with O(log S) min-heap spill-slot expiry.
+    let mut free_spills16: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
     let mut active_fp: Vec<(u32, u32, usize, u32)> = Vec::with_capacity(XMM_ALLOC.len());
 
     let alloc_spill_fp = |ty: Ty,
                           start: u32,
                           end: u32,
-                          free8: &mut Vec<(u32, i32)>,
-                          free16: &mut Vec<(u32, i32)>,
+                          free8: &mut BinaryHeap<Reverse<(u32, i32)>>,
+                          free16: &mut BinaryHeap<Reverse<(u32, i32)>>,
                           next: &mut i32|
      -> Result<i32, String> {
         if ty == Ty::V128 {
-            if let Some(pos) = free16.iter().position(|&(e, _)| e <= start) {
-                let (_, off) = free16.swap_remove(pos);
-                free16.push((end, off));
+            if let Some(&Reverse((e, _))) = free16.peek()
+                && e <= start
+            {
+                let Reverse((_, off)) = free16.pop().unwrap();
+                free16.push(Reverse((end, off)));
                 Ok(off)
             } else {
                 let off = checked_align_i32(*next, 16)?;
@@ -627,7 +684,7 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                     return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
                 }
                 *next = after;
-                free16.push((end, off));
+                free16.push(Reverse((end, off)));
                 Ok(off)
             }
         } else {

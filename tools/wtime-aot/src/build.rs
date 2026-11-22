@@ -137,10 +137,53 @@ pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, 
     cached(&prepared, prepared.key.clone(), &[], options, "")
 }
 
+/// Enforces owner-only (`0o700`) permissions on private cache directories on Unix.
+fn ensure_private_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Marks a newly staged native artifact immutable (`0o555`) before atomic publication on Unix.
+fn mark_artifact_immutable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o555));
+    }
+}
+
+/// Acquires an exclusive publication lock on `entry/.publish.lock`.
+fn lock_cache_entry(entry: &Path) -> Result<fs::File, String> {
+    ensure_private_dir(entry)?;
+    let lock_path = entry.join(".publish.lock");
+    let lock_file = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    lock_file.lock().map_err(|e| format!("locking {}: {e}", lock_path.display()))?;
+    Ok(lock_file)
+}
+
+/// Verifies `artifact` exists and matches its `.sha256` sidecar.
+fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
+    artifact.is_file()
+        && fs::read_to_string(digest_file).ok().is_some_and(|expected| {
+            fs::read(artifact).ok().is_some_and(|bytes| crate::sha256::hex(&bytes) == expected.trim())
+        })
+}
+
 /// Fast C99 + parallel `clang` + `ld.lld` build path for Blot ABI 8 cdylibs.
 fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, String> {
     let wasm = fs::read(module).map_err(|e| format!("{}: {e}", module.display()))?;
-    fs::create_dir_all(cache).map_err(|e| format!("{}: {e}", cache.display()))?;
+    ensure_private_dir(cache)?;
     let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
@@ -156,20 +199,32 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
     let key_hex = key.hex();
 
     let entry = cache.join(&key_hex);
+    let _lock = lock_cache_entry(&entry)?;
     let program = entry.join("library.so");
-    if program.is_file() {
+    let digest_file = entry.join("library.so.sha256");
+    if verified_cached_artifact(&program, &digest_file) {
         return Ok(program);
     }
-    fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+    let _ = fs::remove_file(&program);
+    let _ = fs::remove_file(&digest_file);
     let staged = entry.join(format!("library.so.{}", std::process::id()));
     let res = crate::cgen::build_c_blot_cdylib(&wasm, &cache, options.target_cpu, options.jobs, options.c_opt, &staged);
     match res {
         Ok(()) => {
+            let so_bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+            let so_sha = crate::sha256::hex(&so_bytes);
+            mark_artifact_immutable(&staged);
             fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
+            let staged_sha = entry.join(format!("library.so.sha256.{}", std::process::id()));
+            if fs::write(&staged_sha, format!("{so_sha}\n")).is_ok()
+                && fs::rename(&staged_sha, &digest_file).is_err()
+            {
+                let _ = fs::remove_file(&staged_sha);
+            }
             let _ = fs::write(
                 entry.join("key.txt"),
                 format!(
-                    "key {key_hex}\nbackend c\nc opt {}\ncc {cc_ver}\ntarget cpu {}\nwasm sha256 {}\n",
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {cc_ver}\ntarget cpu {}\nwasm sha256 {}\nso sha256 {so_sha}\n",
                     options.c_opt.tag(),
                     options.target_cpu,
                     crate::sha256::hex(&wasm)
@@ -241,7 +296,7 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
         Some(path) => path.to_string(),
         None => module.file_name().map_or("module.wasm".into(), |name| name.to_string_lossy().into_owned()),
     };
-    fs::create_dir_all(cache).map_err(|e| format!("{}: {e}", cache.display()))?;
+    ensure_private_dir(cache)?;
     let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
     // Cargo reads configuration (which can name a rustc wrapper to run) from
     // every ancestor of the directory it builds in; none may have any.
@@ -305,14 +360,18 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
     let key = key.hex();
     let cache = &prepared.cache;
     let entry = cache.join(&key);
+    let _lock = lock_cache_entry(&entry)?;
     let artifact_name = match options.target {
         crate::codegen::Target::GooseBin => "program",
         crate::codegen::Target::BlotCdylib => "library.so",
     };
     let program = entry.join(artifact_name);
-    if program.is_file() {
+    let digest_file = entry.join(format!("{artifact_name}.sha256"));
+    if verified_cached_artifact(&program, &digest_file) {
         return Ok(program);
     }
+    let _ = fs::remove_file(&program);
+    let _ = fs::remove_file(&digest_file);
 
     // Generate and compile in a directory of this build's own, target
     // directory included, then move the program into place: builds of the
@@ -321,14 +380,23 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
     let work = cache.join("work").join(format!("{key}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     let result = generate_and_compile(prepared, &work, &name, rustflags, options).and_then(|built| {
-        fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
         let staged = entry.join(format!("{artifact_name}.{}", std::process::id()));
         fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
-        fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
+        let bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+        let sha = crate::sha256::hex(&bytes);
+        mark_artifact_immutable(&staged);
+        fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
+        let staged_sha = entry.join(format!("{artifact_name}.sha256.{}", std::process::id()));
+        if fs::write(&staged_sha, format!("{sha}\n")).is_ok()
+            && fs::rename(&staged_sha, &digest_file).is_err()
+        {
+            let _ = fs::remove_file(&staged_sha);
+        }
+        Ok(sha)
     });
     let _ = fs::remove_dir_all(&work);
-    result?;
-    let _ = fs::write(entry.join("key.txt"), format!("key {key}\n{}{note}", prepared.record));
+    let sha = result?;
+    let _ = fs::write(entry.join("key.txt"), format!("key {key}\n{}artifact sha256 {sha}\n{note}", prepared.record));
     Ok(program)
 }
 
