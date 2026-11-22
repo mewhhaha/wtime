@@ -149,3 +149,56 @@ Once Stage 1 has 100% SHA-256 parity and ~0.1–0.25 s cold compile, climb runti
    - Multi-global pinning (`R12` + optional callee-saved reg for 2nd hottest preserved global).
 6. **Cross-block bounds-check elimination** (dominator-tree `checked_max` propagation + loop-invariant upper-bound hoisting for counted loops).
 7. **Flip `pen run` default** in `/home/jacobt/src/pen/crates/blot-host/src/wtime_aot.rs` from `c` to `x64` once `--backend x64` beats Wasmtime across all 5 `opt-palm` workloads with 100% parity!
+
+---
+
+## 6. External Review Findings (`gpt-6.2-sol`, `codex exec`)
+
+Reviewed `CONTINUE.md` and `tools/wtime-aot/src/x64/{asm.rs,elf.rs,ir.rs,regalloc.rs,lower.rs}` (including an isolated Rust type-check and numeric counterexample verification).
+
+### Critical Bugs (Must Fix Before Stage 1 End-to-End Wiring)
+1. **8 compile/borrow errors in WIP `x64` files** (`ir.rs:519,1059`, `lower.rs:220,262,1371`):
+   - `Module` has no `bodies` field and `DecodedModule`'s `FunctionBody.locals` is already a flat `Vec<ValType>` — pass `DecodedModule` / `&FunctionBody` into `lower_wasm_to_ir`.
+   - Pass `&mut f` explicitly to `emit_range` in `Term::for_each_use` (`ir.rs:519`).
+   - Read `self.ty(v)` into a local before mutably borrowing `self.asm` in the 3 FP load/store helpers (`lower.rs:220,262,1371`).
+2. **Shift/rotate clobbers left operand when `a` is in `RCX`** (`lower.rs:508`, `regalloc.rs:223,385`):
+   - `regalloc` only protects values live *across* the shift, so an operand `a` dying at the shift can live in `RCX`. Loading `b` into `RCX` then overwrites `a` before `a` reaches `dst` (e.g., `a=3` in `RCX`, `b=5` in `RDX`, `dst=RAX` computes `5 << 5 = 160` instead of `3 << 5 = 96`).
+   - Fix: marshal `(d <- a, rcx <- b)` via parallel assignment (or move `a` out of `RCX` first) and test both register and spilled counts.
+3. **Spilled `u64 -> f32/f64` conversion loses bit 0 before rounding** (`lower.rs:1106,1148`):
+   - When `a` is spilled, `ar` is loaded into `R11`. The high-bit path shifts `R11` right by 1 and then reads `ar` (`R11`) again to extract the sticky bit, corrupting rounding (verified wrong at `f32`: `0x8000_0080_0000_0001` and `f64`: `0x8000_0000_0000_0401`).
+   - Fix: copy `ar` (or extract `ar & 1`) into `R10` *before* shifting `R11`, and test with forced spills.
+4. **Parallel-move stack-to-stack cycle clobber (GP & XMM)** (`lower.rs:80,130,355`):
+   - Both cycle-breaking and memory-to-memory copies use `R11`/`Xmm15`, so a pure memory cycle (`Stack(0) <-> Stack(8)`) overwrites the saved cycle value.
+   - Fix: reserve independent scratch temporaries (`R11`/`Xmm15` for cycle breaking vs `R10`/`Xmm14` for mem-to-mem copies), stash `CallIndirect`'s `idx` in a frame/Ctx slot instead of `R10` across arg moves, and test 3-way cycles, duplicate sources, and mixed-width spills.
+5. **Typed ABI layout overlap for `v128` overflow args and >16 multi-value returns** (`regalloc.rs:174,544`, `lower.rs:367,1625,1714`):
+   - Overflow `v128` stack args advance by 8 bytes instead of 16 bytes (overlapping adjacent args and overflowing the reserved outgoing arg area).
+   - Fixed 16-slot `Ctx.ret_spill` overflows into globals if a function returns >7 GP + 16 overflow values (e.g., 24 `i64`s).
+   - Fix: share one typed byte-offset layout (with explicit size & alignment) between `regalloc.rs` and `lower.rs` for both args and results, and use a caller-owned return buffer (or enforce an explicit checked admission limit before emission).
+6. **Stack guard order & small-thread stack safety** (`lower.rs:1701`, `ir.rs:1074`, `codegen.rs:2231`):
+   - Prologue pushes callee-saved registers *before* checking `stack_floor`, and `rsp - 7 MiB` can undershoot a smaller pthread stack. Also `fn_no_stack_check` estimates Wasm locals/insns rather than actual allocated native frame bytes.
+   - Fix: compute/check prospective `rsp - total_frame` *before* any push, start with checks on every frame using a real stack bound (or conservative headroom accounting for helper/host calls and active reentry), and revisit leaf check elision using real allocated frame bytes + call depth.
+
+### Important Fixes & Verification Checks
+- **IR load-run hoisting & `ValRange.len` overflow** (`ir.rs:616,635,1130,2055`):
+  - Lookahead can cross a different-address load (`load A; load B_oob; load A+off_oob`), changing which instruction traps (and is $O(N^2)$ on long runs of distinct addresses). Stop lookahead at any other potentially trapping load (or preserve exact order on failed combined check).
+  - Widen `ValRange.len` (e.g. `u32`) or reject oversized ranges explicitly so large operand + carried-local lists cannot truncate `u16`.
+- **Single source of truth for helper clobber masks** (`regalloc.rs:212`):
+  - Align `Trunc` helper comment vs mask vs implementation (ensure `Xmm0` is NOT clobbered by `Trunc`, `MemCopy`, `MemFill`, or `MemGrow`, and test live FP values in `Xmm0` across every helper).
+- **CPU feature gate & `MXCSR` hygiene** (`asm.rs:361,531,866,1061`):
+  - Gate SSE4.1, POPCNT, LZCNT, and BMI1/TZCNT before execution (on unsupported CPUs `lzcnt`/`tzcnt` silently execute as `bsr`/`bsf` with wrong results!), or provide `bsr`/`bsf` fallback.
+  - Save/restore `MXCSR` across guest/host boundaries so host rounding mode / FTZ / DAZ / unmasked FP exceptions cannot alter Wasm semantics.
+- **ELF export single-table & checked `rel32`** (`elf.rs:42,85,138,185`):
+  - Derive `.dynsym`, `.dynstr`, and `.hash` from one shared export descriptor slice (avoid independent name slices in `plan` vs `emit`), verify merged `.rodata` alignment and every `rel32` conversion, and add a glibc `dlopen`/`dlsym` smoke test covering all 18 exports, hash collisions, and segment permissions.
+- **Stage 1 admission & Blot ABI 8 boundary** (`codegen.rs:2032`, `lower.rs:396`):
+  - Validate/cap supported memory, table, reference, import, and export shapes up front; fix `cmp_ri(true, SCRATCH_GP2, table_len as i32)` sign-extension (use unsigned 32-bit compare or cap table length).
+  - Match all 18 Blot ABI 8 signatures, status codes (`0/1/2/3`), nullable output pointers, `uint64_t` grow delta, `R12`/`R13` publish+reload across host callbacks and active returns (including traps), and Linux syscall `R10`/`RCX`/`R11` clobber rules (`mprotect` before updating `mem_len`, zero-capacity & `grow(0)` edge cases).
+- **Stage 2 budgeting & qualification**:
+  - Instrument phase timings (`validate`, `analyze`, `ssa`, `regalloc`, `emit`, `link`, `load`); audit which `Module::new` analyses `--backend x64` actually needs so analysis doesn't eat the 100–250 ms Stage 1 budget.
+  - Compute true CFG dominance before GVN/LICM, budget inlining by measured hotness/growth, preserve any callee-saved XMMs across host calls, and qualify against **both** `--backend c` and Wasmtime (runtime + cold/ready + exact replay parity + differential trap tests) before changing `pen run`'s default backend.
+
+### Confirmed Sound by Inspection
+- `asm.rs` REX/ModRM/SIB/RIP-relative/SSE instruction encodings.
+- `elf.rs` 3 page-separated `PT_LOAD` segments, writable `PT_DYNAMIC`, non-executable `PT_GNU_STACK`, and SysV `.hash` chaining.
+- `ir.rs` structured block/implicit-else/unreachable lowering.
+- `regalloc.rs` cross-block back-edge liveness, strict-interior clobber checks, spill-slot reuse, and scalar call alignment.
+- `lower.rs` signed-zero `min`/`max`, unordered float comparisons, `INT_MIN % -1 == 0`, and widened Wasm32 offset arithmetic.
