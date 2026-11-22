@@ -187,8 +187,13 @@ instructions); traps by unwinding instead of `Result` (result tests after calls 
 1% of instructions); skipping the stack check in small functions on short acyclic call
 chains (half the compiler's functions, no change in instructions: the hot ones do not
 qualify); profile-guided builds (`wtime-aot build --train`, kept as an option: 0.97–1.02×
-the plain build, [pgo.md](results/aot-0c142ba/pgo.md)); and three other shapes of the 64-bit
-access (all slower).
+the plain build, [pgo.md](results/aot-0c142ba/pgo.md)); three other shapes of the 64-bit
+access (all slower); and, for the chunked memory, a cold-path hint on the slow accesses (no
+change), an inline byte-wise slow load (17% more instructions on sorting built for memory64)
+and a call-free lookup in the chunk (9% more). Whatever form it takes, a load that can
+continue after missing the base costs that much; only one that traps instead is cheap, which
+needs every byte in one allocation. The whole process of a small program is 0.16 ms above
+the cost of starting `/bin/true` here, so startup has little left to give.
 
 ## Fixes
 
