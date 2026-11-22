@@ -1,8 +1,11 @@
 //! Pure-Rust Linux x86-64 ELF64 shared object (`ET_DYN`) writer.
 //!
 //! Produces a self-contained, zero-relocation, zero-`DT_NEEDED` shared library
-//! (`library.so`) loadable directly by `dlopen` / `libloading` in sub-millisecond
-//! time with a non-executable stack (`PT_GNU_STACK`).
+//! (`library.so`) loadable directly by `dlopen` / `libloading`, with a conforming
+//! section-header table (`.dynsym`, `.hash`, `.dynstr`, `.rodata`, `.text`,
+//! `.dynamic`, `.shstrtab`) and a non-executable stack (`PT_GNU_STACK`).
+
+use std::collections::BTreeSet;
 
 const PAGE: usize = 4096;
 
@@ -24,9 +27,10 @@ fn elf_hash(name: &[u8]) -> u32 {
     h
 }
 
-/// Export symbol placement within `.text`, matched 1:1 to `plan`'s export name order.
+/// Keyed export symbol placement within `.text`, verified by name against `ElfLayout::plan`.
 #[derive(Clone, Copy, Debug)]
-pub struct ExportDef {
+pub struct ExportDef<'a> {
+    pub name: &'a str,
     pub text_off: u64,
     pub size: u64,
 }
@@ -34,15 +38,18 @@ pub struct ExportDef {
 /// Metadata layout computed BEFORE finalizing `.text` relocations, because
 /// `text_vaddr` depends on the exact size of `.dynsym` + `.hash` + `.dynstr` + `.rodata`.
 ///
-/// Export names are captured once in `plan` and reused verbatim by `emit`, making
-/// `.dynsym`, `.dynstr`, and `.hash` impossible to drift out of sync.
+/// Export names and `planned_rodata_len` are captured once in `plan` and validated
+/// strictly by `emit`, preventing positional drift or sub-page size changes.
 pub struct ElfLayout {
     pub rodata_vaddr: usize,
     pub text_vaddr: usize,
     pub dyn_vaddr: usize,
+    planned_rodata_len: usize,
     export_names: Vec<String>,
     dynsym_off: usize,
+    dynsym_len: usize,
     hash_off: usize,
+    hash_len: usize,
     dynstr_off: usize,
     dynstr: Vec<u8>,
     name_offs: Vec<u32>,
@@ -50,7 +57,16 @@ pub struct ElfLayout {
 }
 
 impl ElfLayout {
-    pub fn plan(export_names: &[&str], rodata_len: usize) -> Self {
+    pub fn plan(export_names: &[&str], rodata_len: usize) -> Result<Self, String> {
+        let mut seen = BTreeSet::new();
+        for &name in export_names {
+            if name.is_empty() || name.as_bytes().contains(&0) {
+                return Err(format!("invalid ELF export name {name:?}"));
+            }
+            if !seen.insert(name) {
+                return Err(format!("duplicate ELF export name {name:?}"));
+            }
+        }
         let nsyms = 1 + export_names.len();
         let nbucket = export_names.len().max(1);
 
@@ -58,7 +74,8 @@ impl ElfLayout {
         let mut name_offs = Vec::with_capacity(export_names.len());
         let mut owned_names = Vec::with_capacity(export_names.len());
         for &name in export_names {
-            name_offs.push(dynstr.len() as u32);
+            let off = u32::try_from(dynstr.len()).map_err(|_| ".dynstr exceeds u32")?;
+            name_offs.push(off);
             dynstr.extend_from_slice(name.as_bytes());
             dynstr.push(0);
             owned_names.push(name.to_owned());
@@ -68,37 +85,52 @@ impl ElfLayout {
         let mut cur = 64 + 5 * 56;
         cur = align_up(cur, 8);
         let dynsym_off = cur;
-        cur += nsyms * 24;
+        let dynsym_len = nsyms * 24;
+        cur += dynsym_len;
 
         cur = align_up(cur, 4);
         let hash_off = cur;
-        cur += (2 + nbucket + nsyms) * 4;
+        let hash_len = (2 + nbucket + nsyms) * 4;
+        cur += hash_len;
 
         let dynstr_off = cur;
         cur += dynstr.len();
 
         cur = align_up(cur, 16);
         let rodata_vaddr = cur;
-        let seg0_end = rodata_vaddr + rodata_len;
+        let seg0_end = rodata_vaddr.checked_add(rodata_len).ok_or("rodata size overflow")?;
         let text_vaddr = align_up(seg0_end, PAGE);
 
-        Self {
+        Ok(Self {
             rodata_vaddr,
             text_vaddr,
             dyn_vaddr: 0,
+            planned_rodata_len: rodata_len,
             export_names: owned_names,
             dynsym_off,
+            dynsym_len,
             hash_off,
+            hash_len,
             dynstr_off,
             dynstr,
             name_offs,
             nbucket,
-        }
+        })
     }
 
-    /// Emits the complete ELF64 `.so` image.
-    /// `exports` must have the exact same length and order as `export_names` passed to `plan`.
-    pub fn emit(mut self, rodata: &[u8], text: &[u8], exports: &[ExportDef]) -> Result<Vec<u8>, String> {
+    /// Emits the complete ELF64 `.so` image with conforming section headers.
+    /// Every `ExportDef` must match `plan`'s export names and have a non-empty extent within `.text`.
+    pub fn emit(mut self, rodata: &[u8], text: &[u8], exports: &[ExportDef<'_>]) -> Result<Vec<u8>, String> {
+        if rodata.len() != self.planned_rodata_len {
+            return Err(format!(
+                "ELF rodata length changed after plan: planned {} vs emitted {}",
+                self.planned_rodata_len,
+                rodata.len()
+            ));
+        }
+        if text.is_empty() {
+            return Err("ELF .text section must be non-empty".into());
+        }
         if exports.len() != self.export_names.len() {
             return Err(format!(
                 "ELF export count mismatch: planned {} vs emitted {}",
@@ -106,23 +138,49 @@ impl ElfLayout {
                 exports.len()
             ));
         }
-        let seg0_end = self.rodata_vaddr + rodata.len();
-        if self.text_vaddr != align_up(seg0_end, PAGE) {
-            return Err("ELF rodata length changed after ElfLayout::plan".into());
-        }
-        for (name, def) in self.export_names.iter().zip(exports) {
-            let end = def.text_off.checked_add(def.size).ok_or_else(|| format!("export {name} overflow"))?;
+        for (expected, def) in self.export_names.iter().zip(exports) {
+            if expected != def.name {
+                return Err(format!("ELF export name/order mismatch: expected {expected:?}, got {:?}", def.name));
+            }
+            if def.size == 0 {
+                return Err(format!("ELF export {:?} has empty extent", def.name));
+            }
+            let end = def.text_off.checked_add(def.size).ok_or_else(|| format!("export {:?} overflow", def.name))?;
             if end > text.len() as u64 {
-                return Err(format!("export {name} extent ({end}) exceeds .text ({})", text.len()));
+                return Err(format!("export {:?} extent ({end}) exceeds .text ({})", def.name, text.len()));
             }
         }
-        let seg1_end = self.text_vaddr + text.len();
+
+        let seg0_end = self.rodata_vaddr + rodata.len();
+        let seg1_end = self.text_vaddr.checked_add(text.len()).ok_or("text size overflow")?;
         let dyn_vaddr = align_up(seg1_end, PAGE);
         self.dyn_vaddr = dyn_vaddr;
 
         // 6 dynamic entries * 16 bytes = 96 bytes.
         let dyn_size: usize = 6 * 16;
-        let total_size = dyn_vaddr + dyn_size;
+
+        // Non-allocated `.shstrtab` and 8-entry Section Header Table appended after `.dynamic`.
+        // Section indices:
+        //   0: SHN_UNDEF
+        //   1: .dynsym
+        //   2: .hash
+        //   3: .dynstr
+        //   4: .rodata
+        //   5: .text      <-- st_shndx for all exported functions!
+        //   6: .dynamic
+        //   7: .shstrtab
+        const SHNDX_TEXT: u16 = 5;
+        let sh_names = ["", ".dynsym", ".hash", ".dynstr", ".rodata", ".text", ".dynamic", ".shstrtab"];
+        let mut shstrtab = Vec::new();
+        let mut sh_name_offs = [0u32; 8];
+        for (i, name) in sh_names.iter().enumerate() {
+            sh_name_offs[i] = shstrtab.len() as u32;
+            shstrtab.extend_from_slice(name.as_bytes());
+            shstrtab.push(0);
+        }
+        let shstrtab_off = dyn_vaddr + dyn_size;
+        let shoff = align_up(shstrtab_off + shstrtab.len(), 8);
+        let total_size = shoff + 8 * 64;
         let mut img = vec![0u8; total_size];
 
         // ---- ELF64 Header (64 bytes) ----
@@ -136,14 +194,14 @@ impl ElfLayout {
         put_u32(&mut img, 20, 1); // EV_CURRENT
         put_u64(&mut img, 24, 0); // e_entry
         put_u64(&mut img, 32, 64); // e_phoff
-        put_u64(&mut img, 40, 0); // e_shoff
+        put_u64(&mut img, 40, shoff as u64); // e_shoff
         put_u32(&mut img, 48, 0); // e_flags
         put_u16(&mut img, 52, 64); // e_ehsize
         put_u16(&mut img, 54, 56); // e_phentsize
         put_u16(&mut img, 56, 5); // e_phnum
-        put_u16(&mut img, 58, 0); // e_shentsize
-        put_u16(&mut img, 60, 0); // e_shnum
-        put_u16(&mut img, 62, 0); // e_shstrndx
+        put_u16(&mut img, 58, 64); // e_shentsize
+        put_u16(&mut img, 60, 8); // e_shnum
+        put_u16(&mut img, 62, 7); // e_shstrndx (.shstrtab)
 
         // ---- Program Headers (5 * 56 bytes at offset 64) ----
         let ph = |img: &mut [u8], idx: usize, p_type: u32, p_flags: u32, off: usize, vaddr: usize, sz: usize, align: usize| {
@@ -178,7 +236,7 @@ impl ElfLayout {
             put_u32(&mut img, base, self.name_offs[i]); // st_name
             img[base + 4] = (1 << 4) | 2; // STB_GLOBAL | STT_FUNC
             img[base + 5] = 0; // STV_DEFAULT
-            put_u16(&mut img, base + 6, 1); // non-zero shndx (defined)
+            put_u16(&mut img, base + 6, SHNDX_TEXT); // real .text section index
             put_u64(&mut img, base + 8, self.text_vaddr as u64 + def.text_off);
             put_u64(&mut img, base + 16, def.size);
         }
@@ -224,6 +282,51 @@ impl ElfLayout {
         put_dyn(10, self.dynstr.len() as u64); // DT_STRSZ
         put_dyn(11, 24); // DT_SYMENT
         put_dyn(0, 0); // DT_NULL
+
+        // ---- .shstrtab ----
+        img[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(&shstrtab);
+
+        // ---- Section Header Table (8 * 64 bytes) ----
+        #[allow(clippy::too_many_arguments)]
+        let sh = |img: &mut [u8],
+                  idx: usize,
+                  sh_type: u32,
+                  sh_flags: u64,
+                  sh_addr: usize,
+                  sh_off: usize,
+                  sh_size: usize,
+                  sh_link: u32,
+                  sh_info: u32,
+                  sh_align: u64,
+                  sh_entsize: u64| {
+            let base = shoff + idx * 64;
+            put_u32(img, base, sh_name_offs[idx]);
+            put_u32(img, base + 4, sh_type);
+            put_u64(img, base + 8, sh_flags);
+            put_u64(img, base + 16, sh_addr as u64);
+            put_u64(img, base + 24, sh_off as u64);
+            put_u64(img, base + 32, sh_size as u64);
+            put_u32(img, base + 40, sh_link);
+            put_u32(img, base + 44, sh_info);
+            put_u64(img, base + 48, sh_align);
+            put_u64(img, base + 56, sh_entsize);
+        };
+        const SHT_PROGBITS: u32 = 1;
+        const SHT_STRTAB: u32 = 3;
+        const SHT_HASH: u32 = 5;
+        const SHT_DYNAMIC: u32 = 6;
+        const SHT_DYNSYM: u32 = 11;
+        const SHF_WRITE: u64 = 1;
+        const SHF_ALLOC: u64 = 2;
+        const SHF_EXECINSTR: u64 = 4;
+
+        sh(&mut img, 1, SHT_DYNSYM, SHF_ALLOC, self.dynsym_off, self.dynsym_off, self.dynsym_len, 3, 1, 8, 24);
+        sh(&mut img, 2, SHT_HASH, SHF_ALLOC, self.hash_off, self.hash_off, self.hash_len, 1, 0, 4, 4);
+        sh(&mut img, 3, SHT_STRTAB, SHF_ALLOC, self.dynstr_off, self.dynstr_off, self.dynstr.len(), 0, 0, 1, 0);
+        sh(&mut img, 4, SHT_PROGBITS, SHF_ALLOC, self.rodata_vaddr, self.rodata_vaddr, rodata.len(), 0, 0, 16, 0);
+        sh(&mut img, 5, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, self.text_vaddr, self.text_vaddr, text.len(), 0, 0, 16, 0);
+        sh(&mut img, 6, SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, dyn_vaddr, dyn_vaddr, dyn_size, 3, 0, 8, 16);
+        sh(&mut img, 7, SHT_STRTAB, 0, 0, shstrtab_off, shstrtab.len(), 0, 0, 1, 0);
 
         Ok(img)
     }

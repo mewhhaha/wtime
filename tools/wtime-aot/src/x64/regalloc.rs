@@ -18,6 +18,7 @@
 
 use super::asm::{Gp, Xmm};
 use super::ir::{IntBinOp, IrFunc, Op, Ty};
+use super::module::{MAX_FRAME_BYTES, MAX_LIVENESS_BYTES};
 
 /// Physical location assigned to an SSA `Val`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,7 +212,7 @@ struct Interval {
 }
 
 /// Computes RPO order of reachable blocks, exact cross-block liveness, and linear-scan allocation.
-pub fn allocate(ir: &IrFunc) -> AllocResult {
+pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
@@ -383,6 +384,16 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
     let n_cb = cb_vals.len();
     if n_cb > 0 {
         let words = n_cb.div_ceil(64);
+        let liveness_bytes = n_ord
+            .checked_mul(words)
+            .and_then(|n| n.checked_mul(4 * 8))
+            .ok_or("x64: liveness table size overflow")?;
+        if liveness_bytes > MAX_LIVENESS_BYTES {
+            return Err(format!(
+                "x64: function {} liveness matrix ({liveness_bytes} B) exceeds cap {MAX_LIVENESS_BYTES} B",
+                ir.func_index
+            ));
+        }
         let mut live_use = vec![0u64; n_ord * words];
         let mut live_def = vec![0u64; n_ord * words];
         let mut live_in = vec![0u64; n_ord * words];
@@ -651,20 +662,24 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
     let outgoing_arg_bytes = max_outgoing_arg_bytes;
     let ret_buf_off = outgoing_arg_bytes;
     let ret_buf_bytes = max_ret_buf_bytes;
-    let spill_base = (ret_buf_off + ret_buf_bytes + 15) & !15;
+    let spill_base = ret_buf_off
+        .checked_add(ret_buf_bytes)
+        .and_then(|v| v.checked_add(15))
+        .ok_or("x64: stack frame size overflow")?
+        & !15;
     if spill_base > 0 {
         for loc in &mut locs {
             if let Loc::Spill(off) = loc {
-                *off += spill_base;
+                *off = off.checked_add(spill_base).ok_or("x64: spill offset overflow")?;
             }
         }
     }
-    let mut raw_frame = spill_base + next_spill_off;
+    let mut raw_frame = spill_base.checked_add(next_spill_off).ok_or("x64: stack frame size overflow")?;
     let self_ret_layout = layout_rets(&ir.result_tys);
     let saved_ret_ptr_off = if self_ret_layout.stack_bytes > 0 {
-        raw_frame = (raw_frame + 7) & !7;
+        raw_frame = raw_frame.checked_add(7).ok_or("x64: stack frame size overflow")? & !7;
         let off = raw_frame;
-        raw_frame += 8;
+        raw_frame = raw_frame.checked_add(8).ok_or("x64: stack frame size overflow")?;
         Some(off)
     } else {
         None
@@ -676,11 +691,21 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
     let frame_size = if raw_frame == 0 && clobbers.is_empty() {
         0
     } else {
-        let total = (pushes_bytes + raw_frame + 15) & !15;
+        let total = pushes_bytes
+            .checked_add(raw_frame)
+            .and_then(|v| v.checked_add(15))
+            .ok_or("x64: stack frame size overflow")?
+            & !15;
         total - pushes_bytes
     };
+    if frame_size > MAX_FRAME_BYTES {
+        return Err(format!(
+            "x64: function {} stack frame ({frame_size} B) exceeds cap {MAX_FRAME_BYTES} B",
+            ir.func_index
+        ));
+    }
 
-    AllocResult {
+    Ok(AllocResult {
         locs,
         block_order,
         used_callee_gp,
@@ -689,5 +714,5 @@ pub fn allocate(ir: &IrFunc) -> AllocResult {
         ret_buf_off,
         ret_buf_bytes,
         saved_ret_ptr_off,
-    }
+    })
 }

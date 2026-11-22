@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use wtime_types::ValType;
 use wtime_validate::{DecodedModule, Immediate, Instruction};
 
-use crate::codegen::{ConstVal, Module};
+use super::module::{X64ConstVal, X64Module};
+use super::TRAP_OOB;
 
 pub type Res<T> = Result<T, String>;
 
@@ -613,11 +614,12 @@ impl IrFunc {
         Val(id)
     }
 
-    pub fn push_pool(&mut self, vals: &[Val]) -> ValRange {
-        let start = u32::try_from(self.val_pool.len()).expect("val_pool exceeded u32::MAX");
-        let len = u32::try_from(vals.len()).expect("val range exceeded u32::MAX");
+    pub fn push_pool(&mut self, vals: &[Val]) -> Res<ValRange> {
+        let start = u32::try_from(self.val_pool.len()).map_err(|_| "x64: val_pool exceeded u32::MAX")?;
+        let len = u32::try_from(vals.len()).map_err(|_| "x64: val range exceeded u32::MAX")?;
+        let _ = start.checked_add(len).ok_or("x64: val_pool overflow")?;
         self.val_pool.extend_from_slice(vals);
-        ValRange { start, len }
+        Ok(ValRange { start, len })
     }
 
     #[inline]
@@ -741,8 +743,6 @@ struct Builder {
     ir: IrFunc,
     cur_bb: BlockId,
     consts: Vec<Option<KnownConst>>,
-    zero_i32: Option<Val>,
-    zero_i64: Option<Val>,
 }
 
 impl Builder {
@@ -759,7 +759,7 @@ impl Builder {
             needs_stack_check,
         };
         ir.blocks[0].preds = 1;
-        Self { ir, cur_bb: BlockId(0), consts: Vec::new(), zero_i32: None, zero_i64: None }
+        Self { ir, cur_bb: BlockId(0), consts: Vec::new() }
     }
 
     fn new_block(&mut self, is_loop_header: bool) -> BlockId {
@@ -1041,9 +1041,15 @@ impl Builder {
     }
 }
 
-fn block_type_tys(module: &Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)> {
+fn block_type_tys(module: &X64Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)> {
     Ok(match imm {
         Immediate::Block(-64) => (vec![], vec![]),
+        Immediate::Block(-1) => (vec![], vec![Ty::I32]),
+        Immediate::Block(-2) => (vec![], vec![Ty::I64]),
+        Immediate::Block(-3) => (vec![], vec![Ty::F32]),
+        Immediate::Block(-4) => (vec![], vec![Ty::F64]),
+        Immediate::Block(-5) => (vec![], vec![Ty::V128]),
+        Immediate::Block(-16 | -17) => (vec![], vec![Ty::I64]),
         Immediate::BlockType(t) => (vec![], vec![Ty::from_val(*t)]),
         Immediate::Block(i) if *i >= 0 => {
             let t = module.module_types.get(*i as usize).ok_or("block type index")?;
@@ -1057,7 +1063,7 @@ fn block_type_tys(module: &Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)> {
 }
 
 /// Lowers defined Wasm function `func_index` (`>= module.imports.len()`) into optimized SSA IR.
-pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: usize) -> Res<IrFunc> {
+pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index: usize) -> Res<IrFunc> {
     let body_idx = func_index - module.imports.len();
     let body = &decoded.code[body_idx];
     let ty = &module.types[func_index];
@@ -1116,7 +1122,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
     }];
     let mut dead: usize = 0;
 
-    let build_branch_args = |b: &mut Builder, stack: &[Val], locals: &[Val], frame: &BuildFrame| -> ValRange {
+    let build_branch_args = |b: &mut Builder, stack: &[Val], locals: &[Val], frame: &BuildFrame| -> Res<ValRange> {
         let arity = if frame.kind == FrameKind::Loop { frame.params_len } else { frame.results.len() };
         let mut args = Vec::with_capacity(arity + frame.carried_locals.len());
         let base = stack.len() - arity;
@@ -1200,7 +1206,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                     entry_args.push(locals[lx as usize]);
                     header_local_vals.push(b.add_block_param(header_bb, local_tys[lx as usize]));
                 }
-                let args_r = b.ir.push_pool(&entry_args);
+                let args_r = b.ir.push_pool(&entry_args)?;
                 b.terminate(Term::Jump { target: header_bb, args: args_r });
                 b.add_pred(header_bb);
                 b.cur_bb = header_bb;
@@ -1269,7 +1275,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 // else
                 let f = frames.last().ok_or("else without if")?;
                 if !f.unreachable {
-                    let args_r = build_branch_args(&mut b, &stack, &locals, f);
+                    let args_r = build_branch_args(&mut b, &stack, &locals, f)?;
                     let target = f.target_bb;
                     b.terminate(Term::Jump { target, args: args_r });
                     b.add_pred(target);
@@ -1290,7 +1296,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                     FrameKind::Function => {
                         if !f.unreachable {
                             let base = stack.len() - f.results.len();
-                            let vals = b.ir.push_pool(&stack[base..]);
+                            let vals = b.ir.push_pool(&stack[base..])?;
                             b.terminate(Term::Return { vals });
                         }
                         break;
@@ -1306,7 +1312,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                     }
                     FrameKind::Block | FrameKind::If => {
                         if !f.unreachable {
-                            let args_r = build_branch_args(&mut b, &stack, &locals, &f);
+                            let args_r = build_branch_args(&mut b, &stack, &locals, &f)?;
                             let target = f.target_bb;
                             b.terminate(Term::Jump { target, args: args_r });
                             b.add_pred(target);
@@ -1319,7 +1325,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                             for &lx in &f.carried_locals {
                                 args.push(f.if_entry_locals[lx as usize]);
                             }
-                            let args_r = b.ir.push_pool(&args);
+                            let args_r = b.ir.push_pool(&args)?;
                             b.terminate(Term::Jump { target: f.target_bb, args: args_r });
                             b.add_pred(f.target_bb);
                         }
@@ -1347,10 +1353,10 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 let f = &frames[fi];
                 if f.kind == FrameKind::Function {
                     let base = stack.len() - f.results.len();
-                    let vals = b.ir.push_pool(&stack[base..]);
+                    let vals = b.ir.push_pool(&stack[base..])?;
                     b.terminate(Term::Return { vals });
                 } else {
-                    let args_r = build_branch_args(&mut b, &stack, &locals, f);
+                    let args_r = build_branch_args(&mut b, &stack, &locals, f)?;
                     let target = f.target_bb;
                     b.terminate(Term::Jump { target, args: args_r });
                     b.add_pred(target);
@@ -1377,11 +1383,11 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                     b.add_pred(ret_bb);
                     b.add_pred(fall_bb);
                     b.cur_bb = ret_bb;
-                    let vr = b.ir.push_pool(&ret_vals);
+                    let vr = b.ir.push_pool(&ret_vals)?;
                     b.terminate(Term::Return { vals: vr });
                     b.cur_bb = fall_bb;
                 } else {
-                    let args_r = build_branch_args(&mut b, &stack, &locals, &frames[fi]);
+                    let args_r = build_branch_args(&mut b, &stack, &locals, &frames[fi])?;
                     let target = frames[fi].target_bb;
                     b.terminate(Term::BranchIf {
                         cond,
@@ -1402,7 +1408,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 };
                 let idx = stack.pop().ok_or("br_table idx")?;
                 let mut ret_bb_cache: Option<BlockId> = None;
-                let mut resolve_depth = |b: &mut Builder, d: u32| -> (BlockId, ValRange) {
+                let mut resolve_depth = |b: &mut Builder, d: u32| -> Res<(BlockId, ValRange)> {
                     let fi = frames.len() - 1 - d as usize;
                     let f = &frames[fi];
                     if f.kind == FrameKind::Function {
@@ -1413,7 +1419,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                                 let saved = b.cur_bb;
                                 b.cur_bb = bb;
                                 let base = stack.len() - f.results.len();
-                                let vr = b.ir.push_pool(&stack[base..]);
+                                let vr = b.ir.push_pool(&stack[base..])?;
                                 b.terminate(Term::Return { vals: vr });
                                 b.cur_bb = saved;
                                 ret_bb_cache = Some(bb);
@@ -1421,18 +1427,18 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                             }
                         };
                         b.add_pred(rbb);
-                        (rbb, ValRange::EMPTY)
+                        Ok((rbb, ValRange::EMPTY))
                     } else {
-                        let args_r = build_branch_args(b, &stack, &locals, f);
+                        let args_r = build_branch_args(b, &stack, &locals, f)?;
                         b.add_pred(f.target_bb);
-                        (f.target_bb, args_r)
+                        Ok((f.target_bb, args_r))
                     }
                 };
                 let mut targets = Vec::with_capacity(raw_targets.len());
                 for &d in raw_targets.iter() {
-                    targets.push(resolve_depth(&mut b, d));
+                    targets.push(resolve_depth(&mut b, d)?);
                 }
-                let default = resolve_depth(&mut b, raw_default);
+                let default = resolve_depth(&mut b, raw_default)?;
                 let tid = b.ir.br_tables.len() as u32;
                 b.ir.br_tables.push(BrTableData { targets, default });
                 b.terminate(Term::BrTable { idx, table_idx: tid });
@@ -1442,7 +1448,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 // return
                 let n_res = frames[0].results.len();
                 let base = stack.len() - n_res;
-                let vals = b.ir.push_pool(&stack[base..]);
+                let vals = b.ir.push_pool(&stack[base..])?;
                 b.terminate(Term::Return { vals });
                 frames.last_mut().unwrap().unreachable = true;
             }
@@ -1452,7 +1458,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 let fty = module.types.get(f).ok_or("call func index")?;
                 let n = fty.params.len();
                 let at = stack.len() - n;
-                let args = b.ir.push_pool(&stack[at..]);
+                let args = b.ir.push_pool(&stack[at..])?;
                 stack.truncate(at);
                 let mut rets_vec = Vec::with_capacity(fty.results.len());
                 for &rt in &fty.results {
@@ -1460,7 +1466,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                     b.consts.push(None);
                     rets_vec.push(v);
                 }
-                let rets = b.ir.push_pool(&rets_vec);
+                let rets = b.ir.push_pool(&rets_vec)?;
                 b.emit_void(Op::Call { func: f as u32, args, rets });
                 stack.extend(rets_vec);
             }
@@ -1474,7 +1480,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 let idx = stack.pop().ok_or("ci idx")?;
                 let n = fty.params.len();
                 let at = stack.len() - n;
-                let args = b.ir.push_pool(&stack[at..]);
+                let args = b.ir.push_pool(&stack[at..])?;
                 stack.truncate(at);
                 let mut rets_vec = Vec::with_capacity(fty.results.len());
                 for &rt in &fty.results {
@@ -1482,7 +1488,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                     b.consts.push(None);
                     rets_vec.push(v);
                 }
-                let rets = b.ir.push_pool(&rets_vec);
+                let rets = b.ir.push_pool(&rets_vec)?;
                 b.emit_void(Op::CallIndirect { ci_id: ci_id as u32, idx, args, rets });
                 stack.extend(rets_vec);
             }
@@ -1521,10 +1527,16 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 let (vt, _) = module.globals[x];
                 let v = if let Some(c) = module.global_consts[x] {
                     match c {
-                        ConstVal::I32(k) => b.const_i32(k),
-                        ConstVal::I64(k) => b.const_i64(k),
-                        ConstVal::F32(bits) => b.emit(Ty::F32, Op::ConstF32(bits)),
-                        ConstVal::F64(bits) => b.emit(Ty::F64, Op::ConstF64(bits)),
+                        X64ConstVal::I32(k) => b.const_i32(k),
+                        X64ConstVal::I64(k) => b.const_i64(k),
+                        X64ConstVal::F32(bits) => b.emit(Ty::F32, Op::ConstF32(bits)),
+                        X64ConstVal::F64(bits) => b.emit(Ty::F64, Op::ConstF64(bits)),
+                        X64ConstVal::V128(bytes) => {
+                            let idx = b.ir.v128_consts.len() as u32;
+                            b.ir.v128_consts.push(bytes);
+                            b.emit(Ty::V128, Op::ConstV128(idx))
+                        }
+                        X64ConstVal::RefNull => b.const_i64(0),
                     }
                 } else {
                     b.emit(Ty::from_val(vt), Op::GlobalGet(x as u32))
@@ -1571,7 +1583,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 };
                 let addr = stack.pop().ok_or("load addr")?;
                 if offset > u32::MAX as u64 {
-                    b.emit_void(Op::Trap(2)); // TRAP_OOB
+                    b.emit_void(Op::Trap(TRAP_OOB));
                     b.terminate(Term::Unreachable);
                     frames.last_mut().unwrap().unreachable = true;
                     continue;
@@ -1603,7 +1615,7 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &Module, func_index: us
                 let val = stack.pop().ok_or("store val")?;
                 let addr = stack.pop().ok_or("store addr")?;
                 if offset > u32::MAX as u64 {
-                    b.emit_void(Op::Trap(2)); // TRAP_OOB
+                    b.emit_void(Op::Trap(TRAP_OOB));
                     b.terminate(Term::Unreachable);
                     frames.last_mut().unwrap().unreachable = true;
                     continue;

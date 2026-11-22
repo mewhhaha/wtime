@@ -2,13 +2,15 @@
 //!
 //! Register conventions:
 //! - Pinned: `R15 = Ctx*`, `R14 = mem_base`, `R13 = mem_len`, `R12 = pinned_global` (optional).
-//! - Scratch (never allocated by regalloc): `R11`, `R10`, `Xmm15`, `Xmm14`.
-//! - Internal Wasm call ABI:
-//!   - GP args: `Rdi, Rsi, Rdx, Rcx, R8, R9`, then stack `[rsp + k*8]`
-//!   - FP args: `Xmm0..Xmm7`, then stack `[rsp + k*8]`
-//!   - Trap return: `R11d` (`0` = ok, `1..21` = trap code)
-//!   - GP results: `Rax, Rdx, Rcx, Rsi, Rdi, R8, R9`, overflow in `[r15 + OFF_RET_SPILL + k*8]`
-//!   - FP results: `Xmm0..Xmm7`, overflow in `[r15 + OFF_RET_SPILL + k*8]`
+//! - Scratch (never allocated by regalloc):
+//!   - `R11` / `Xmm15`: primary scratch, trap return code (`R11d`), and parallel-move cycle break.
+//!   - `R10` / `Xmm14`: secondary scratch and parallel-move memory-to-memory copy temporary.
+//! - Unified typed internal Wasm call ABI (`regalloc::layout_args` / `layout_rets`):
+//!   - GP args: `Rdi, Rsi, Rdx, Rcx, R8, R9`, overflow on caller stack (8-byte aligned scalars, 16-byte aligned V128).
+//!   - FP/V128 args: `Xmm0..Xmm7`, overflow on caller stack.
+//!   - Trap return: `R11d` (`0` = ok, `1..22` = trap code).
+//!   - GP results: `Rax, Rdx, Rcx, Rsi, Rdi, R8, R9`; FP/V128 results: `Xmm0..Xmm7`;
+//!     overflow multi-value results stored into caller-owned stack buffer via `[r15 + OFF_RET_SPILL_PTR]`.
 
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::ir::{CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, StoreKind, Term, Ty, Val, ValRange};
@@ -132,11 +134,19 @@ fn cmp_to_cond(op: CmpOp) -> Cond {
     }
 }
 
+/// Resolved CPU ISA feature flags enforced by both lowering and `blot_aot_new`'s CPUID gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetIsa {
+    /// Emit `lzcnt`/`tzcnt` when true; emit branchless portable `bsr`/`bsf` + `cmovz` when false.
+    pub has_abm_bmi1: bool,
+}
+
 struct Lower<'a> {
     ir: &'a IrFunc,
     alloc: &'a AllocResult,
     layout: &'a CtxLayout,
     ro: &'a RodataConsts,
+    isa: TargetIsa,
     asm: Asm,
     bb_labels: Vec<Label>,
     trap_oob: Option<Label>,
@@ -145,7 +155,6 @@ struct Lower<'a> {
     trap_div0: Option<Label>,
     trap_int_ovf: Option<Label>,
     trap_unreach: Option<Label>,
-    trap_stack: Option<Label>,
     trap_prop: Option<Label>,
     epilogue_ok: Option<Label>,
     epilogue_trap: Option<Label>,
@@ -246,9 +255,6 @@ impl<'a> Lower<'a> {
     }
     fn trap_unreach_lbl(&mut self) -> Label {
         *self.trap_unreach.get_or_insert_with(|| self.asm.new_label())
-    }
-    fn trap_stack_lbl(&mut self) -> Label {
-        *self.trap_stack.get_or_insert_with(|| self.asm.new_label())
     }
     fn trap_prop_lbl(&mut self) -> Label {
         *self.trap_prop.get_or_insert_with(|| self.asm.new_label())
@@ -743,14 +749,28 @@ impl<'a> Lower<'a> {
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
-                self.asm.lzcnt(false, d, ar);
+                if self.isa.has_abm_bmi1 {
+                    self.asm.lzcnt(false, d, ar);
+                } else {
+                    // Branchless portable CLZ32: `bsr` sets ZF=1 iff src==0; `63 ^ 31 == 32`.
+                    self.asm.mov_ri32(SCRATCH_GP2, 63);
+                    self.asm.bsr(false, d, ar);
+                    self.asm.cmovcc(Cond::E, false, d, SCRATCH_GP2);
+                    self.asm.xor_ri(false, d, 31);
+                }
                 self.gp_commit(r, d);
             }
             Op::I32Ctz(a) => {
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
-                self.asm.tzcnt(false, d, ar);
+                if self.isa.has_abm_bmi1 {
+                    self.asm.tzcnt(false, d, ar);
+                } else {
+                    self.asm.mov_ri32(SCRATCH_GP2, 32);
+                    self.asm.bsf(false, d, ar);
+                    self.asm.cmovcc(Cond::E, false, d, SCRATCH_GP2);
+                }
                 self.gp_commit(r, d);
             }
             Op::I32Popcnt(a) => {
@@ -764,14 +784,28 @@ impl<'a> Lower<'a> {
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
-                self.asm.lzcnt(true, d, ar);
+                if self.isa.has_abm_bmi1 {
+                    self.asm.lzcnt(true, d, ar);
+                } else {
+                    // Branchless portable CLZ64: `127 ^ 63 == 64`.
+                    self.asm.mov_ri32(SCRATCH_GP2, 127);
+                    self.asm.bsr(true, d, ar);
+                    self.asm.cmovcc(Cond::E, true, d, SCRATCH_GP2);
+                    self.asm.xor_ri(true, d, 63);
+                }
                 self.gp_commit(r, d);
             }
             Op::I64Ctz(a) => {
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
-                self.asm.tzcnt(true, d, ar);
+                if self.isa.has_abm_bmi1 {
+                    self.asm.tzcnt(true, d, ar);
+                } else {
+                    self.asm.mov_ri32(SCRATCH_GP2, 64);
+                    self.asm.bsf(true, d, ar);
+                    self.asm.cmovcc(Cond::E, true, d, SCRATCH_GP2);
+                }
                 self.gp_commit(r, d);
             }
             Op::I64Popcnt(a) => {
@@ -1166,16 +1200,6 @@ impl<'a> Lower<'a> {
                     self.fp_commit(r, d);
                 } else {
                     let is64 = ty == Ty::I64;
-                    // Watch register overlap: `cr` might equal `d`! Test `cr` before modifying `d`?
-                    // `mov` doesn't modify flags! So load `ar`/`br`, test `cr`, then `mov` + `cmov`!
-                    // Keep `cr` safe if `a` or `b` is spilled (reloading `a`/`b` into `SCRATCH_GP1`/`R10` could clobber `cr` if `cr == R10`).
-                    if cr != SCRATCH_GP2 {
-                        // Safe to use SCRATCH_GP1 for `a` and SCRATCH_GP2 for `b`? Only if we test `cr` AFTER loading `a` and `b`!
-                    }
-                    // Easiest completely clobber-free sequence:
-                    // 1. Read `a` into `SCRATCH_GP1` (if not in reg, or if `loc(a) == d`).
-                    // 2. Test `cr` (`cr` is either a real GP reg or was loaded into `SCRATCH_GP2` — wait: if `cond` was spilled, `cr == SCRATCH_GP2`!).
-                    // So read `b` using `d`? No, just load `cr` LAST or branchless with `lbl` if `b` is spilled!
                     let d = self.gp_write_reg(r);
                     match (self.loc(a), self.loc(b), self.loc(cond)) {
                         (Loc::Gp(ag), Loc::Gp(bg), Loc::Gp(cg)) => {
@@ -1617,6 +1641,7 @@ pub fn lower_ir_to_x64(
     alloc: &AllocResult,
     layout: &CtxLayout,
     ro: &RodataConsts,
+    isa: TargetIsa,
 ) -> Result<Asm, String> {
     let mut asm = Asm::with_capacity(ir.blocks.len() * 64 + 128);
     let bb_labels: Vec<Label> = (0..ir.blocks.len()).map(|_| asm.new_label()).collect();
@@ -1626,6 +1651,7 @@ pub fn lower_ir_to_x64(
         alloc,
         layout,
         ro,
+        isa,
         asm,
         bb_labels,
         trap_oob: None,
@@ -1634,7 +1660,6 @@ pub fn lower_ir_to_x64(
         trap_div0: None,
         trap_int_ovf: None,
         trap_unreach: None,
-        trap_stack: None,
         trap_prop: None,
         epilogue_ok: None,
         epilogue_trap: None,
@@ -1644,9 +1669,14 @@ pub fn lower_ir_to_x64(
     // ---- Prospective Stack Check BEFORE Any Push or Frame Allocation ----
     let early_stack_trap = if ir.needs_stack_check {
         let lbl = l.asm.new_label();
-        let total_push_and_frame = alloc.frame_size + (alloc.used_callee_gp.len() as i32) * 8;
+        let push_bytes = i32::try_from(alloc.used_callee_gp.len() * 8).map_err(|_| "callee save overflow")?;
+        let total_push_and_frame = alloc
+            .frame_size
+            .checked_add(push_bytes)
+            .ok_or("x64: stack check frame size overflow")?;
         if total_push_and_frame > 0 {
-            l.asm.lea(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, -total_push_and_frame));
+            let neg = total_push_and_frame.checked_neg().ok_or("x64: stack check negation overflow")?;
+            l.asm.lea(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, neg));
             l.asm.cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
         } else {
             l.asm.cmp_rm(true, Gp::Rsp, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR));
@@ -1718,7 +1748,6 @@ pub fn lower_ir_to_x64(
         || l.trap_div0.is_some()
         || l.trap_int_ovf.is_some()
         || l.trap_unreach.is_some()
-        || l.trap_stack.is_some()
         || l.trap_prop.is_some()
         || l.epilogue_trap.is_some();
 
@@ -1731,14 +1760,13 @@ pub fn lower_ir_to_x64(
                 l.asm.jmp(ep_trap);
             }
         };
-        let (oob, toob, ci, div0, ovf, unr, stk, prop) = (
+        let (oob, toob, ci, div0, ovf, unr, prop) = (
             l.trap_oob,
             l.trap_table_oob,
             l.trap_ci,
             l.trap_div0,
             l.trap_int_ovf,
             l.trap_unreach,
-            l.trap_stack,
             l.trap_prop,
         );
         emit_trap_stub(&mut l, oob, TRAP_OOB);
@@ -1747,7 +1775,6 @@ pub fn lower_ir_to_x64(
         emit_trap_stub(&mut l, div0, TRAP_DIV_ZERO);
         emit_trap_stub(&mut l, ovf, TRAP_INT_OVERFLOW);
         emit_trap_stub(&mut l, unr, TRAP_UNREACHABLE);
-        emit_trap_stub(&mut l, stk, TRAP_CALL_STACK);
         if let Some(prop) = prop {
             l.asm.bind(prop);
         }

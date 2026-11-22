@@ -599,6 +599,9 @@ impl Asm {
         self.modrm_reg(src.lo(), dst.lo());
     }
 
+    /// Loads 32-bit zero-extended immediate into `dst`.
+    /// Note: `imm == 0` emits `xor dst32, dst32`, which modifies `RFLAGS` — do not
+    /// call with `imm == 0` between a `cmp`/`test` and a dependent `jcc`/`cmovcc`/`setcc`.
     pub fn mov_ri32(&mut self, dst: Gp, imm: u32) {
         if imm == 0 {
             self.xor_rr(false, dst, dst);
@@ -609,6 +612,8 @@ impl Asm {
         self.emit_u32(imm);
     }
 
+    /// Loads 64-bit immediate into `dst`.
+    /// Note: `imm == 0` emits `xor dst32, dst32`, which modifies `RFLAGS`.
     pub fn mov_ri64(&mut self, dst: Gp, imm: u64) {
         if imm == 0 {
             self.xor_rr(false, dst, dst);
@@ -1148,5 +1153,11 @@ impl Asm {
         self.emit_u8(0x0f);
         self.emit_u8(0xbc);
         self.modrm_reg(dst.lo(), src.lo());
+    }
+}
+
+impl Default for Asm {
+    fn default() -> Self {
+        Self::new()
     }
 }

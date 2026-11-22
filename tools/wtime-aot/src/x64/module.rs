@@ -1,0 +1,548 @@
+//! Lean, self-contained Wasm admission & metadata analysis for `--backend x64`.
+//!
+//! Decoupled from `codegen::Module` so `--backend x64` skips C/Rust-only analyses
+//! (global-preservation fixpoints, callee read/write sets, outline planning) and
+//! enforces an explicit Stage 1 admission contract before emitting any IR or code.
+
+use std::collections::{BTreeMap, HashMap};
+
+use wtime_types::{CompositeType, FuncType, HeapType, IndexType, ValType};
+use wtime_validate::{DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode};
+
+pub type Res<T> = Result<T, String>;
+
+/// Admission caps preventing OOM or integer overflow on adversarial modules.
+pub const MAX_MEM_PAGES: u64 = 65_536;
+pub const MAX_FUNCREF_TABLE_SLOTS: u32 = 1_048_576;
+pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
+pub const MAX_AGGREGATE_CI_TABLE_BYTES: usize = 64 << 20; // 64 MiB
+pub const MAX_LOCALS_PER_FN: usize = 65_536;
+pub const MAX_TOTAL_LOCALS: usize = 1_000_000;
+pub const MAX_FRAME_BYTES: i32 = 16 << 20; // 16 MiB
+pub const MAX_LIVENESS_BYTES: usize = 64 << 20; // 64 MiB
+
+/// Constant value folded from an immutable/never-written non-exported global initializer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum X64ConstVal {
+    I32(i32),
+    I64(i64),
+    F32(u32),
+    F64(u64),
+    V128([u8; 16]),
+    RefNull,
+}
+
+/// Static `call_indirect` dispatch metadata for one canonical `(table, canonical_sig_id)` pair.
+#[derive(Clone, Debug)]
+pub struct X64CiSig {
+    pub table: u32,
+    pub table_len: u32,
+    pub sig: FuncType,
+    pub min_slot: u32,
+    pub span: u32,
+    /// Sorted `(table_slot, func_index)` entries whose function signature equals `sig`.
+    pub targets: Vec<(u32, u32)>,
+}
+
+/// Lean module metadata consumed by `x64/{ir,lower,mod}.rs`.
+pub struct X64Module {
+    /// Imported functions: `(module_name, import_name)`.
+    pub imports: Vec<(String, String)>,
+    /// Function signature for every function index (`0..imports.len() + code.len()`).
+    pub types: Vec<FuncType>,
+    /// All declared module types (for `Immediate::Block(idx)` lookups).
+    pub module_types: Vec<FuncType>,
+    /// Globals: `(ValType, mutable)` for every global index.
+    pub globals: Vec<(ValType, bool)>,
+    /// Evaluated initializer value for every global (for runtime init of non-folded globals).
+    pub global_inits: Vec<X64ConstVal>,
+    /// `Some(c)` iff global `k` is proven constant AND not an exported mutable global.
+    /// Every global with `global_consts[k].is_none()` gets a checked storage slot in `Ctx`.
+    pub global_consts: Vec<Option<X64ConstVal>>,
+    /// Single hottest mutable non-const scalar (`I32`/`I64`) global to pin in `R12`.
+    pub pinned_global: Option<u32>,
+    /// Exported globals: `(name, global_index, val_type, mutable)`.
+    pub exported_globals: Vec<(String, usize, ValType, bool)>,
+    /// Exported functions: `(name, func_index)`.
+    pub exported_funcs: Vec<(String, usize)>,
+    /// Maps `(table_idx, raw_type_idx)` -> index into `ci_sigs` (canonicalized by `FuncType`).
+    pub ci_index: BTreeMap<(u32, u32), usize>,
+    /// Deduplicated `call_indirect` dispatch descriptors.
+    pub ci_sigs: Vec<X64CiSig>,
+    /// Mutable `externref` tables: `table_idx -> exact_len`.
+    pub mut_extern_tables: BTreeMap<u32, u32>,
+    /// Memory 0 declared limits: `Some((min_pages, declared_max_pages))` or `None` if 0 memories.
+    pub memory: Option<(u64, u64)>,
+    /// `Some(fixed_bytes)` iff memory 0 exists with `min == max`.
+    pub fixed32: Option<u64>,
+    /// Active element segment bounds checks `(table_len, base_off, elem_len)` for `wt_initialize`.
+    pub active_elem_checks: Vec<(u32, u32, u32)>,
+    /// Active data segments `(mem_off, decoded.data index)` for `wt_initialize` (in declaration order).
+    pub active_data_segs: Vec<(u32, usize)>,
+    /// Optional start function index.
+    pub start: Option<u32>,
+}
+
+fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstVal> {
+    let mut stk: Vec<X64ConstVal> = Vec::new();
+    for i in expr {
+        let v = match (i.opcode, &i.immediate) {
+            (0x0b, _) => break,
+            (0x41, Immediate::I32(k)) => X64ConstVal::I32(*k),
+            (0x42, Immediate::I64(k)) => X64ConstVal::I64(*k),
+            (0x43, Immediate::F32(b)) => X64ConstVal::F32(*b),
+            (0x44, Immediate::F64(b)) => X64ConstVal::F64(*b),
+            (0xfd0c, Immediate::Bytes(bytes)) => {
+                let arr: [u8; 16] = bytes.as_ref().try_into().map_err(|_| "invalid v128.const")?;
+                X64ConstVal::V128(arr)
+            }
+            (0xd0, _) => X64ConstVal::RefNull,
+            (0x23, Immediate::Index(g)) => {
+                *prior.get(*g as usize).ok_or("const global.get out of range")?
+            }
+            (0x6a..=0x6c, _) => match (stk.pop(), stk.pop()) {
+                (Some(X64ConstVal::I32(b)), Some(X64ConstVal::I32(a))) => X64ConstVal::I32(match i.opcode {
+                    0x6a => a.wrapping_add(b),
+                    0x6b => a.wrapping_sub(b),
+                    _ => a.wrapping_mul(b),
+                }),
+                _ => return Err("invalid i32 const expr".into()),
+            },
+            (0x7c..=0x7e, _) => match (stk.pop(), stk.pop()) {
+                (Some(X64ConstVal::I64(b)), Some(X64ConstVal::I64(a))) => X64ConstVal::I64(match i.opcode {
+                    0x7c => a.wrapping_add(b),
+                    0x7d => a.wrapping_sub(b),
+                    _ => a.wrapping_mul(b),
+                }),
+                _ => return Err("invalid i64 const expr".into()),
+            },
+            (op, _) => return Err(format!("x64: unsupported const expression opcode {op:#x}")),
+        };
+        stk.push(v);
+    }
+    match stk.as_slice() {
+        [v] => Ok(*v),
+        _ => Err("const expression did not yield one value".into()),
+    }
+}
+
+fn check_val_type(vt: ValType) -> Res<()> {
+    match vt {
+        ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => Ok(()),
+        ValType::Ref(rt) if rt.nullable && matches!(rt.heap, HeapType::Extern) => Ok(()),
+        other => Err(format!("x64: unsupported value type {other:?}")),
+    }
+}
+
+fn check_supported_opcode(op: u16, imm: &Immediate, decoded: &DecodedModule) -> Res<()> {
+    match op {
+        0x00 | 0x01 | 0x05 | 0x0b..=0x10 | 0x1a | 0x1b | 0x20..=0x26 | 0x41..=0x44 | 0x45..=0xc4 | 0xd1 => Ok(()),
+        0x02..=0x04 => match imm {
+            Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17) => Ok(()),
+            Immediate::Block(i) if *i >= 0 => {
+                let fty = decoded.types.get(*i as usize).ok_or("x64: block type index out of range")?;
+                for &vt in fty.params.iter().chain(&fty.results) {
+                    check_val_type(vt)?;
+                }
+                Ok(())
+            }
+            Immediate::BlockType(vt) => check_val_type(*vt),
+            other => Err(format!("x64: unsupported block type {other:?}")),
+        },
+        0x11 => match imm {
+            Immediate::Pair(ti, _) => {
+                let fty = decoded.types.get(*ti as usize).ok_or("x64: call_indirect type index out of range")?;
+                for &vt in fty.params.iter().chain(&fty.results) {
+                    check_val_type(vt)?;
+                }
+                Ok(())
+            }
+            _ => Err("x64: malformed call_indirect immediate".into()),
+        },
+        0x1c => match imm {
+            Immediate::Types(tys) => {
+                for &vt in tys.iter() {
+                    check_val_type(vt)?;
+                }
+                Ok(())
+            }
+            _ => Err("x64: malformed typed select immediate".into()),
+        },
+        0x3f | 0x40 => match imm {
+            Immediate::Index(0) | Immediate::None => Ok(()),
+            _ => Err("x64: memory.size/grow only supports memory 0".into()),
+        },
+        0xd0 => match imm {
+            Immediate::Heap(HeapType::Extern) => Ok(()),
+            other => Err(format!("x64: unsupported ref.null heap type {other:?}")),
+        },
+        0x28..=0x3e | 0xfd00 | 0xfd0b => match imm {
+            Immediate::MemArg { memory: 0, .. } => Ok(()),
+            _ => Err("x64: only memory index 0 is supported".into()),
+        },
+        0xfc00..=0xfc07 => Ok(()),
+        0xfc0a => match imm {
+            Immediate::Pair(0, 0) | Immediate::None => Ok(()),
+            _ => Err("x64: memory.copy only supports memory 0".into()),
+        },
+        0xfc0b => match imm {
+            Immediate::Index(0) | Immediate::None => Ok(()),
+            _ => Err("x64: memory.fill only supports memory 0".into()),
+        },
+        0xfd0c | 0xfd0f..=0xfd12 | 0xfd1d | 0xfd1e => Ok(()),
+        _ => Err(format!("x64: unsupported opcode {op:#x}")),
+    }
+}
+
+fn check_blot_import_sig(mod_name: &str, name: &str, ty: &FuncType) -> Res<()> {
+    let ok_params = matches!(
+        ty.params.as_slice(),
+        [] | [ValType::Ref(_)]
+            | [ValType::I32]
+            | [ValType::F32]
+            | [ValType::Ref(_), ValType::I32]
+            | [ValType::Ref(_), ValType::I64]
+            | [ValType::Ref(_), ValType::F32]
+            | [ValType::Ref(_), ValType::F64]
+            | [ValType::Ref(_), ValType::Ref(_)]
+    );
+    let ok_results = matches!(
+        ty.results.as_slice(),
+        [] | [ValType::I32] | [ValType::I64] | [ValType::F32] | [ValType::F64] | [ValType::Ref(_)]
+    );
+    if !ok_params || !ok_results {
+        return Err(format!("x64: Blot import {mod_name:?}::{name:?} has unsupported signature {ty:?}"));
+    }
+    Ok(())
+}
+
+/// Enforces the Stage 1 admission contract and builds lean `X64Module` metadata.
+pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
+    if !decoded.tags.is_empty() {
+        return Err("x64: exception tags are not supported".into());
+    }
+    for group in &decoded.type_groups {
+        if group.explicit {
+            return Err("x64: GC recursive type groups are not supported".into());
+        }
+        for st in &group.types {
+            if !matches!(st.composite, CompositeType::Func(_)) || st.supertype.is_some() {
+                return Err("x64: GC/subtyping composite types are not supported".into());
+            }
+        }
+    }
+    if decoded.memories.len() > 1 {
+        return Err(format!("x64: multi-memory ({}) is not supported", decoded.memories.len()));
+    }
+    let (memory, fixed32) = if let Some(mt) = decoded.memories.first() {
+        if mt.index_type != IndexType::I32 {
+            return Err("x64: memory64 is not supported in Stage 1".into());
+        }
+        if mt.shared {
+            return Err("x64: shared memory is not supported".into());
+        }
+        if mt.page_size_log2 != 16 {
+            return Err(format!("x64: custom memory page size (2^{}) is not supported", mt.page_size_log2));
+        }
+        let max_p = mt.limits.max.unwrap_or(MAX_MEM_PAGES).min(MAX_MEM_PAGES);
+        if mt.limits.min > max_p {
+            return Err(format!("x64: memory min ({}) exceeds max ({max_p})", mt.limits.min));
+        }
+        let fixed = (mt.limits.min == max_p).then_some(mt.limits.min * 65_536);
+        (Some((mt.limits.min, max_p)), fixed)
+    } else {
+        (None, None)
+    };
+
+    // Imports: function imports only.
+    let mut imports = Vec::new();
+    let mut types = Vec::new();
+    for imp in &decoded.imports {
+        let ti = match imp.kind {
+            ImportKind::Func(t) | ImportKind::ExactFunc(t) => t.0 as usize,
+            _ => return Err(format!("x64: only function imports are supported (got {:?}::{:?})", imp.module, imp.name)),
+        };
+        let fty = decoded.types.get(ti).ok_or("import type index out of range")?.clone();
+        for &vt in fty.params.iter().chain(&fty.results) {
+            check_val_type(vt)?;
+        }
+        check_blot_import_sig(&imp.module, &imp.name, &fty)?;
+        imports.push((imp.module.clone(), imp.name.clone()));
+        types.push(fty);
+    }
+
+    for &ti in &decoded.functions {
+        let fty = decoded.types.get(ti.0 as usize).ok_or("function type index out of range")?.clone();
+        for &vt in fty.params.iter().chain(&fty.results) {
+            check_val_type(vt)?;
+        }
+        types.push(fty);
+    }
+
+    // Tables: static funcref tables + mutable externref tables (32-bit only, capped).
+    let mut funcref_tables: BTreeMap<u32, Vec<Option<u32>>> = BTreeMap::new();
+    let mut mut_extern_tables: BTreeMap<u32, u32> = BTreeMap::new();
+    for (ti, tt) in decoded.tables.iter().enumerate() {
+        let ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
+        if tt.index_type != IndexType::I32 {
+            return Err(format!("x64: table64 (table {ti}) is not supported"));
+        }
+        if decoded.table_inits.get(ti).and_then(|o| o.as_ref()).is_some() {
+            return Err(format!("x64: non-null table initializer on table {ti} is not supported"));
+        }
+        match tt.element.heap {
+            HeapType::Func if tt.element.nullable => {
+                let len = u32::try_from(tt.limits.min)
+                    .ok()
+                    .filter(|&n| n <= MAX_FUNCREF_TABLE_SLOTS)
+                    .ok_or_else(|| format!("x64: funcref table {ti} min ({}) exceeds cap {MAX_FUNCREF_TABLE_SLOTS}", tt.limits.min))?;
+                funcref_tables.insert(ti_u32, vec![None; len as usize]);
+            }
+            HeapType::Extern if tt.element.nullable => {
+                let max = tt.limits.max.unwrap_or(u64::MAX);
+                if tt.limits.min != max || tt.limits.min > u64::from(MAX_EXTERN_TABLE_SLOTS) {
+                    return Err(format!(
+                        "x64: externref table {ti} must be fixed-size <= {MAX_EXTERN_TABLE_SLOTS} (min={}, max={:?})",
+                        tt.limits.min, tt.limits.max
+                    ));
+                }
+                mut_extern_tables.insert(ti_u32, tt.limits.min as u32);
+            }
+            other => return Err(format!("x64: unsupported table element type {other:?} on table {ti}")),
+        }
+    }
+
+    // Globals: evaluate all initializers; track which globals are written or exported-mutable.
+    let mut globals = Vec::with_capacity(decoded.globals.len());
+    let mut global_inits = Vec::with_capacity(decoded.globals.len());
+    for g in &decoded.globals {
+        check_val_type(g.ty.value)?;
+        let init = eval_const_expr(&g.init, &global_inits)?;
+        globals.push((g.ty.value, g.ty.mutable));
+        global_inits.push(init);
+    }
+
+    // Exports: admit functions, globals, and memory 0 (`blot:memory` etc.); reject table/tag exports.
+    let mut exported_funcs = Vec::new();
+    let mut exported_globals = Vec::new();
+    let mut exported_mut_globals = vec![false; globals.len()];
+    for exp in &decoded.exports {
+        match exp.kind {
+            ExternalKind::Func => {
+                exported_funcs.push((exp.name.clone(), exp.index as usize));
+            }
+            ExternalKind::Global => {
+                let gi = exp.index as usize;
+                let (vt, mutable) = *globals.get(gi).ok_or("exported global out of range")?;
+                if mutable {
+                    exported_mut_globals[gi] = true;
+                }
+                exported_globals.push((exp.name.clone(), gi, vt, mutable));
+            }
+            ExternalKind::Memory => {
+                if exp.index != 0 || memory.is_none() {
+                    return Err(format!("x64: unsupported memory export {:?} (index {})", exp.name, exp.index));
+                }
+            }
+            ExternalKind::Table | ExternalKind::Tag => {
+                return Err(format!("x64: unsupported export {:?} ({:?})", exp.name, exp.kind));
+            }
+        }
+    }
+
+    // Active element segments: validate forms and populate static funcref tables (recording bounds
+    // checks so `wt_initialize` reports `TRAP_TABLE_OOB` at instantiation time per Wasm spec).
+    let mut active_elem_checks = Vec::new();
+    for elem in &decoded.elements {
+        match &elem.mode {
+            SegmentMode::Active { index, offset } => {
+                let off_val = eval_const_expr(offset, &global_inits)?;
+                let X64ConstVal::I32(off_i32) = off_val else {
+                    return Err("x64: active element offset must be i32".into());
+                };
+                let Some(slots) = funcref_tables.get_mut(index) else {
+                    return Err(format!("x64: active element segment targets non-funcref table {index}"));
+                };
+                let mut entries = Vec::with_capacity(elem.init.len());
+                for expr in &elem.init {
+                    match expr.as_slice() {
+                        [Instruction { opcode: 0xd2, immediate: Immediate::Index(f) }, Instruction { opcode: 0x0b, .. }] => {
+                            entries.push(Some(*f));
+                        }
+                        [Instruction { opcode: 0xd0, .. }, Instruction { opcode: 0x0b, .. }] => {
+                            entries.push(None);
+                        }
+                        _ => return Err("x64: unsupported active element init expression".into()),
+                    }
+                }
+                let base_u32 = off_i32 as u32;
+                let elem_len = u32::try_from(entries.len()).map_err(|_| "active element segment too large")?;
+                active_elem_checks.push((slots.len() as u32, base_u32, elem_len));
+                let base = base_u32 as usize;
+                if let Some(end) = base.checked_add(entries.len())
+                    && end <= slots.len()
+                {
+                    slots[base..end].copy_from_slice(&entries);
+                }
+            }
+            SegmentMode::Passive | SegmentMode::Declarative => {
+                return Err("x64: passive/declarative element segments are not supported".into());
+            }
+        }
+    }
+
+    // Active data segments only (passive segments rejected).
+    let mut active_data_segs = Vec::new();
+    for (di, seg) in decoded.data.iter().enumerate() {
+        match &seg.mode {
+            SegmentMode::Active { index: 0, offset } => {
+                let X64ConstVal::I32(off_i32) = eval_const_expr(offset, &global_inits)? else {
+                    return Err("x64: active data offset must be i32".into());
+                };
+                active_data_segs.push((off_i32 as u32, di));
+            }
+            SegmentMode::Active { index, .. } => {
+                return Err(format!("x64: active data segment on unsupported memory {index}"));
+            }
+            SegmentMode::Passive | SegmentMode::Declarative => {
+                return Err("x64: passive data segments are not supported".into());
+            }
+        }
+    }
+
+    // Single linear scan over ALL function bodies (including unreachable code) to:
+    // 1. Enforce opcode, local-count, and value-type allowlists;
+    // 2. Count global reads/writes to detect constant globals & pick `pinned_global`;
+    // 3. Collect canonical `(table, FuncType)` `call_indirect` signatures.
+    let mut total_locals = 0usize;
+    let mut global_reads = vec![0usize; globals.len()];
+    let mut global_writes = vec![0usize; globals.len()];
+    let mut ci_canon: HashMap<(u32, FuncType), usize> = HashMap::new();
+    let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+    let mut ci_sigs: Vec<X64CiSig> = Vec::new();
+    let mut total_ci_bytes = 0usize;
+
+    for (bi, body) in decoded.code.iter().enumerate() {
+        let fidx = imports.len() + bi;
+        let n_locals = types[fidx].params.len() + body.locals.len();
+        if n_locals > MAX_LOCALS_PER_FN {
+            return Err(format!("x64: function {fidx} has {n_locals} locals (cap {MAX_LOCALS_PER_FN})"));
+        }
+        total_locals += n_locals;
+        if total_locals > MAX_TOTAL_LOCALS {
+            return Err(format!("x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"));
+        }
+        for &vt in &body.locals {
+            check_val_type(vt)?;
+        }
+        for insn in &body.instructions {
+            check_supported_opcode(insn.opcode, &insn.immediate, decoded)?;
+            match insn.opcode {
+                0x23 => {
+                    if let Immediate::Index(g) = insn.immediate {
+                        global_reads[g as usize] += 1;
+                    }
+                }
+                0x24 => {
+                    if let Immediate::Index(g) = insn.immediate {
+                        global_writes[g as usize] += 1;
+                    }
+                }
+                0x25 | 0x26 => {
+                    if let Immediate::Index(t) = insn.immediate
+                        && !mut_extern_tables.contains_key(&t)
+                    {
+                        return Err(format!("x64: table.get/set on unsupported table {t}"));
+                    }
+                }
+                0x11 => {
+                    let Immediate::Pair(ti, tbl) = insn.immediate else {
+                        return Err("x64: malformed call_indirect immediate".into());
+                    };
+                    if ci_index.contains_key(&(tbl, ti)) {
+                        continue;
+                    }
+                    let sig = decoded.types.get(ti as usize).ok_or("call_indirect type index")?.clone();
+                    let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, sig.clone())) {
+                        existing
+                    } else {
+                        let slots = funcref_tables
+                            .get(&tbl)
+                            .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
+                        let mut targets = Vec::new();
+                        for (slot, entry) in slots.iter().enumerate() {
+                            if let Some(f) = *entry
+                                && types.get(f as usize) == Some(&sig)
+                            {
+                                targets.push((slot as u32, f));
+                            }
+                        }
+                        let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) = (targets.first(), targets.last()) {
+                            (first, last - first + 1)
+                        } else {
+                            (0, 0)
+                        };
+                        let bytes = (span as usize).saturating_mul(4);
+                        total_ci_bytes = total_ci_bytes.saturating_add(bytes);
+                        if total_ci_bytes > MAX_AGGREGATE_CI_TABLE_BYTES {
+                            return Err(format!(
+                                "x64: aggregate call_indirect dispatch tables ({total_ci_bytes} B) exceed cap {MAX_AGGREGATE_CI_TABLE_BYTES} B"
+                            ));
+                        }
+                        let id = ci_sigs.len();
+                        ci_sigs.push(X64CiSig {
+                            table: tbl,
+                            table_len: slots.len() as u32,
+                            sig: sig.clone(),
+                            min_slot,
+                            span,
+                            targets,
+                        });
+                        ci_canon.insert((tbl, sig), id);
+                        id
+                    };
+                    ci_index.insert((tbl, ti), ci_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Fold globals that are immutable OR never written by Wasm AND not exported-mutable.
+    let mut global_consts = Vec::with_capacity(globals.len());
+    for (k, &(_, mutable)) in globals.iter().enumerate() {
+        let can_fold = !mutable || (global_writes[k] == 0 && !exported_mut_globals[k]);
+        global_consts.push(if can_fold { Some(global_inits[k]) } else { None });
+    }
+
+    // Pick single hottest non-const mutable I32/I64 global for `R12` pinning.
+    let pinned_global = (0..globals.len())
+        .filter(|&k| {
+            global_consts[k].is_none()
+                && globals[k].1
+                && matches!(globals[k].0, ValType::I32 | ValType::I64)
+                && (global_reads[k] + global_writes[k]) > 0
+        })
+        .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
+        .map(|k| k as u32);
+
+    Ok(X64Module {
+        imports,
+        types,
+        module_types: decoded.types.clone(),
+        globals,
+        global_inits,
+        global_consts,
+        pinned_global,
+        exported_globals,
+        exported_funcs,
+        ci_index,
+        ci_sigs,
+        mut_extern_tables,
+        memory,
+        fixed32,
+        active_elem_checks,
+        active_data_segs,
+        start: decoded.start.map(|s| s.0),
+    })
+}
