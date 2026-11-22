@@ -26,6 +26,8 @@ pub const MAX_FRAME_BYTES: i32 = 4 << 20; // 4 MiB (well below 8 MiB dedicated g
 pub const MAX_LIVENESS_BYTES: usize = 64 << 20; // 64 MiB
 pub const MAX_FRAME_SCAN_WRITES: usize = 4_000_000;
 pub const MAX_IF_SNAPSHOT_ENTRIES: usize = 4_000_000;
+pub const MAX_IR_VALS_PER_FN: usize = 1_000_000;
+pub const MAX_VAL_POOL_PER_FN: usize = 2_000_000;
 
 /// Constant value folded from an immutable/never-written non-exported global initializer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -452,6 +454,21 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         }
     }
 
+    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, FuncType)`
+    // so every distinct `call_indirect` signature resolves in O(1) instead of rescanning the table.
+    let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut funcref_by_sig: HashMap<(u32, FuncType), Vec<(u32, u32)>> = HashMap::new();
+    for (tbl, slots) in funcref_tables {
+        funcref_table_lens.insert(tbl, slots.len() as u32);
+        for (slot, entry) in slots.into_iter().enumerate() {
+            if let Some(f) = entry
+                && let Some(sig) = types.get(f as usize)
+            {
+                funcref_by_sig.entry((tbl, sig.clone())).or_default().push((slot as u32, f));
+            }
+        }
+    }
+
     // Single linear scan over ALL function bodies (including unreachable code) to:
     // 1. Enforce opcode, local-count, and value-type allowlists;
     // 2. Count global reads/writes to detect constant globals & pick `pinned_global`;
@@ -508,17 +525,10 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                     let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, sig.clone())) {
                         existing
                     } else {
-                        let slots = funcref_tables
+                        let &table_len = funcref_table_lens
                             .get(&tbl)
                             .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
-                        let mut targets = Vec::new();
-                        for (slot, entry) in slots.iter().enumerate() {
-                            if let Some(f) = *entry
-                                && types.get(f as usize) == Some(&sig)
-                            {
-                                targets.push((slot as u32, f));
-                            }
-                        }
+                        let targets = funcref_by_sig.remove(&(tbl, sig.clone())).unwrap_or_default();
                         let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) = (targets.first(), targets.last()) {
                             (first, last - first + 1)
                         } else {
@@ -534,7 +544,7 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                         let id = ci_sigs.len();
                         ci_sigs.push(X64CiSig {
                             table: tbl,
-                            table_len: slots.len() as u32,
+                            table_len,
                             sig: sig.clone(),
                             min_slot,
                             span,

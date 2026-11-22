@@ -12,6 +12,8 @@
 //!   - GP results: `Rax, Rdx, Rcx, Rsi, Rdi, R8, R9`; FP/V128 results: `Xmm0..Xmm7`;
 //!     overflow multi-value results stored into caller-owned stack buffer via `[r15 + OFF_RET_SPILL_PTR]`.
 
+use std::collections::HashMap;
+
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::ir::{CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, StoreKind, Term, Ty, Val, ValRange};
 use super::regalloc::{AbiSlot, AllocResult, Loc, layout_args, layout_rets};
@@ -27,7 +29,7 @@ const SCRATCH_FP1: Xmm = Xmm::Xmm15;
 const SCRATCH_FP2: Xmm = Xmm::Xmm14;
 
 /// Generalized location used by the parallel-move resolver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MoveLoc {
     Gp(Gp),
     Xmm(Xmm),
@@ -92,28 +94,74 @@ fn emit_fp_store(asm: &mut Asm, mem: Mem, src: Xmm, ty: Ty) {
     }
 }
 
-/// Verified parallel-move resolver (handles arbitrary cycles, stack swaps, and duplicate sources).
+/// Verified O(M) parallel-move resolver (handles arbitrary disjoint cycles, stack swaps, and
+/// duplicate sources) using source-use counts.
 /// Uses `SCRATCH_GP1`/`SCRATCH_FP1` (`R11`/`Xmm15`) for cycle breaking and
 /// `SCRATCH_GP2`/`SCRATCH_FP2` (`R10`/`Xmm14`) for memory-to-memory copies.
 pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) {
-    let mut pending: Vec<(MoveLoc, MoveLoc, Ty)> =
+    let mut moves: Vec<(MoveLoc, MoveLoc, Ty)> =
         raw_moves.iter().copied().filter(|&(d, s, _)| d != s).collect();
-    while !pending.is_empty() {
-        let ready = pending.iter().enumerate().find(|&(i, &(dst, _, _))| {
-            pending.iter().enumerate().all(|(j, &(_, src, _))| i == j || src != dst)
-        });
-        if let Some((idx, (dst, src, ty))) = ready.map(|(i, &m)| (i, m)) {
+    let n = moves.len();
+    if n == 0 {
+        return;
+    }
+    let mut active = vec![true; n];
+    let mut remaining = n;
+    let mut src_uses: HashMap<MoveLoc, usize> = HashMap::with_capacity(n);
+    let mut dst_to_idx: HashMap<MoveLoc, usize> = HashMap::with_capacity(n);
+    for (i, &(dst, src, _)) in moves.iter().enumerate() {
+        *src_uses.entry(src).or_insert(0) += 1;
+        let prev = dst_to_idx.insert(dst, i);
+        debug_assert!(prev.is_none(), "parallel moves must have distinct destinations");
+    }
+    let mut ready: Vec<usize> = Vec::with_capacity(n);
+    for (i, &(dst, _, _)) in moves.iter().enumerate() {
+        if src_uses.get(&dst).copied().unwrap_or(0) == 0 {
+            ready.push(i);
+        }
+    }
+    let mut scan_cursor = 0usize;
+    while remaining > 0 {
+        while let Some(i) = ready.pop() {
+            if !active[i] {
+                continue;
+            }
+            active[i] = false;
+            remaining -= 1;
+            let (dst, src, ty) = moves[i];
             emit_single_move(asm, dst, src, ty);
-            pending.swap_remove(idx);
-        } else {
-            let (_, src0, ty0) = pending[0];
-            let tmp = if ty0.is_fp() { MoveLoc::Xmm(SCRATCH_FP1) } else { MoveLoc::Gp(SCRATCH_GP1) };
-            debug_assert!(src0 != tmp, "parallel move cycle already in scratch");
-            emit_single_move(asm, tmp, src0, ty0);
-            for m in &mut pending {
-                if m.1 == src0 {
-                    m.1 = tmp;
+            if let Some(cnt) = src_uses.get_mut(&src) {
+                *cnt -= 1;
+                if *cnt == 0
+                    && let Some(&producer) = dst_to_idx.get(&src)
+                    && active[producer]
+                {
+                    ready.push(producer);
                 }
+            }
+        }
+        if remaining == 0 {
+            break;
+        }
+        // All non-cycle trees have drained, so every remaining active node has `src_uses[dst] == 1`
+        // (pigeonhole over distinct destinations) and forms disjoint cycles.
+        while scan_cursor < n && !active[scan_cursor] {
+            scan_cursor += 1;
+        }
+        let k = scan_cursor;
+        let (_, src0, ty0) = moves[k];
+        let tmp = if ty0.is_fp() { MoveLoc::Xmm(SCRATCH_FP1) } else { MoveLoc::Gp(SCRATCH_GP1) };
+        debug_assert!(src0 != tmp, "parallel move cycle already in scratch");
+        emit_single_move(asm, tmp, src0, ty0);
+        moves[k].1 = tmp;
+        *src_uses.entry(tmp).or_insert(0) += 1;
+        if let Some(cnt) = src_uses.get_mut(&src0) {
+            *cnt -= 1;
+            if *cnt == 0
+                && let Some(&producer) = dst_to_idx.get(&src0)
+                && active[producer]
+            {
+                ready.push(producer);
             }
         }
     }
@@ -160,6 +208,8 @@ struct Lower<'a> {
     epilogue_trap: Option<Label>,
     /// Deferred cold edge-copy trampolines `(trampoline_label, target_bb, args)` emitted after blocks.
     edge_tramps: Vec<(Label, u32, ValRange)>,
+    /// Interns repeated `(target_bb, args.start, args.len)` edge trampolines (e.g. dense `br_table`).
+    edge_tramp_cache: HashMap<(u32, u32, u32), Label>,
 }
 
 impl<'a> Lower<'a> {
@@ -317,8 +367,13 @@ impl<'a> Lower<'a> {
         if args.len == 0 {
             self.bb_labels[target_bb as usize]
         } else {
+            let key = (target_bb, args.start, args.len);
+            if let Some(&lbl) = self.edge_tramp_cache.get(&key) {
+                return lbl;
+            }
             let lbl = self.asm.new_label();
             self.edge_tramps.push((lbl, target_bb, args));
+            self.edge_tramp_cache.insert(key, lbl);
             lbl
         }
     }
@@ -1665,6 +1720,7 @@ pub fn lower_ir_to_x64(
         epilogue_ok: None,
         epilogue_trap: None,
         edge_tramps: Vec::new(),
+        edge_tramp_cache: HashMap::new(),
     };
 
     // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----

@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use wtime_types::ValType;
 use wtime_validate::{DecodedModule, Immediate, Instruction};
 
-use super::module::{MAX_FRAME_SCAN_WRITES, MAX_IF_SNAPSHOT_ENTRIES, X64ConstVal, X64Module};
+use super::module::{
+    MAX_FRAME_SCAN_WRITES, MAX_IF_SNAPSHOT_ENTRIES, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64ConstVal, X64Module,
+};
 use super::TRAP_OOB;
 
 pub type Res<T> = Result<T, String>;
@@ -615,6 +617,13 @@ impl IrFunc {
     }
 
     pub fn push_pool(&mut self, vals: &[Val]) -> Res<ValRange> {
+        let new_len = self.val_pool.len().saturating_add(vals.len());
+        if new_len > MAX_VAL_POOL_PER_FN {
+            return Err(format!(
+                "x64: function {} val_pool ({new_len}) exceeds cap {MAX_VAL_POOL_PER_FN}",
+                self.func_index
+            ));
+        }
         let start = u32::try_from(self.val_pool.len()).map_err(|_| "x64: val_pool exceeded u32::MAX")?;
         let len = u32::try_from(vals.len()).map_err(|_| "x64: val range exceeded u32::MAX")?;
         let _ = start.checked_add(len).ok_or("x64: val_pool overflow")?;
@@ -639,6 +648,7 @@ fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> Res<FrameScan> {
     // Pass 1: find matching `end` PC for every `block`/`loop`/`if`.
     let mut end_pc = vec![0usize; code.len()];
     let mut open_pcs: Vec<(usize, bool)> = Vec::new(); // (open_pc, is_loop)
+    let mut open_loops: Vec<usize> = Vec::new(); // stack of enclosing loop PCs; first() has max end_pc in O(1)
     let mut frame_writes: HashMap<usize, Vec<u32>> = HashMap::new();
     let mut last_read = vec![0usize; n_locals];
     let mut total_marks = 0usize;
@@ -662,21 +672,24 @@ fn scan_frame_locals(code: &[Instruction], n_locals: usize) -> Res<FrameScan> {
     for (pc, insn) in code.iter().enumerate() {
         match insn.opcode {
             0x02 | 0x04 => open_pcs.push((pc, false)),
-            0x03 => open_pcs.push((pc, true)),
+            0x03 => {
+                open_pcs.push((pc, true));
+                open_loops.push(pc);
+            }
             0x0b => {
-                open_pcs.pop();
+                if let Some((_, is_loop)) = open_pcs.pop()
+                    && is_loop
+                {
+                    open_loops.pop();
+                }
             }
             0x20 => {
                 if let Immediate::Index(x) = insn.immediate {
                     let xu = x as usize;
                     if xu < n_locals {
-                        if pc > last_read[xu] {
-                            last_read[xu] = pc;
-                        }
-                        for &(lpc, is_loop) in &open_pcs {
-                            if is_loop && end_pc[lpc] > last_read[xu] {
-                                last_read[xu] = end_pc[lpc];
-                            }
+                        let eff_end = open_loops.first().map_or(pc, |&outer| end_pc[outer].max(pc));
+                        if eff_end > last_read[xu] {
+                            last_read[xu] = eff_end;
                         }
                     }
                 }
@@ -1142,6 +1155,12 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
     };
 
     for (pc, insn) in body.instructions.iter().enumerate() {
+        if b.ir.val_tys.len() > MAX_IR_VALS_PER_FN {
+            return Err(format!(
+                "x64: function {func_index} SSA values ({}) exceeds cap {MAX_IR_VALS_PER_FN}",
+                b.ir.val_tys.len()
+            ));
+        }
         let op = insn.opcode;
         if frames.last().is_some_and(|f| f.unreachable) {
             match op {
@@ -1263,13 +1282,14 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                 b.add_pred(then_bb);
                 b.add_pred(else_bb);
                 b.cur_bb = then_bb;
-                let if_entry_params = stack[height..].to_vec();
-                total_if_snapshot_entries = total_if_snapshot_entries.saturating_add(locals.len());
+                let snap_entries = (stack.len() - height).saturating_add(locals.len());
+                total_if_snapshot_entries = total_if_snapshot_entries.saturating_add(snap_entries);
                 if total_if_snapshot_entries > MAX_IF_SNAPSHOT_ENTRIES {
                     return Err(format!(
-                        "x64: function {func_index} if-nesting local snapshot budget ({total_if_snapshot_entries}) exceeds cap {MAX_IF_SNAPSHOT_ENTRIES}"
+                        "x64: function {func_index} if-nesting snapshot budget ({total_if_snapshot_entries}) exceeds cap {MAX_IF_SNAPSHOT_ENTRIES}"
                     ));
                 }
+                let if_entry_params = stack[height..].to_vec();
                 let if_entry_locals = locals.clone();
                 frames.push(BuildFrame {
                     kind: FrameKind::If,
@@ -1422,10 +1442,14 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                 };
                 let idx = stack.pop().ok_or("br_table idx")?;
                 let mut ret_bb_cache: Option<BlockId> = None;
+                let mut depth_cache: HashMap<u32, (BlockId, ValRange)> = HashMap::new();
                 let mut resolve_depth = |b: &mut Builder, d: u32| -> Res<(BlockId, ValRange)> {
+                    if let Some(&cached) = depth_cache.get(&d) {
+                        return Ok(cached);
+                    }
                     let fi = frames.len() - 1 - d as usize;
                     let f = &frames[fi];
-                    if f.kind == FrameKind::Function {
+                    let resolved = if f.kind == FrameKind::Function {
                         let rbb = match ret_bb_cache {
                             Some(bb) => bb,
                             None => {
@@ -1441,12 +1465,14 @@ pub fn lower_wasm_to_ir(decoded: &DecodedModule, module: &X64Module, func_index:
                             }
                         };
                         b.add_pred(rbb);
-                        Ok((rbb, ValRange::EMPTY))
+                        (rbb, ValRange::EMPTY)
                     } else {
                         let args_r = build_branch_args(b, &stack, &locals, f)?;
                         b.add_pred(f.target_bb);
-                        Ok((f.target_bb, args_r))
-                    }
+                        (f.target_bb, args_r)
+                    };
+                    depth_cache.insert(d, resolved);
+                    Ok(resolved)
                 };
                 let mut targets = Vec::with_capacity(raw_targets.len());
                 for &d in raw_targets.iter() {

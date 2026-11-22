@@ -189,8 +189,8 @@ impl Mem {
 
     #[inline]
     pub const fn indexed(base: Gp, index: Gp, scale: u8, disp: i32) -> Self {
-        debug_assert!(matches!(scale, 1 | 2 | 4 | 8));
-        debug_assert!(!matches!(index, Gp::Rsp));
+        assert!(matches!(scale, 1 | 2 | 4 | 8), "invalid x86-64 SIB scale");
+        assert!(!matches!(index, Gp::Rsp), "x86-64 SIB cannot use RSP as index register");
         Mem::BaseIndexDisp { base, index, scale, disp }
     }
 }
@@ -401,7 +401,7 @@ impl Asm {
                 }
             }
             Mem::BaseIndexDisp { base, index, scale, disp } => {
-                debug_assert!(!matches!(index, Gp::Rsp));
+                assert!(!matches!(index, Gp::Rsp), "x86-64 SIB cannot use RSP as index register");
                 let blo = base.lo();
                 let ilo = index.lo();
                 let sbits = match scale {
