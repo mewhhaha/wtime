@@ -21,7 +21,7 @@ use std::collections::BinaryHeap;
 
 use super::asm::{Gp, Xmm};
 use super::ir::{IntBinOp, IrFunc, Op, Ty};
-use super::module::{MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS};
+use super::module::{CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS};
 
 /// Physical location assigned to an SSA `Val`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +223,15 @@ struct Interval {
 
 /// Computes RPO order of reachable blocks, exact cross-block liveness, and linear-scan allocation.
 pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
+    allocate_with_budget(ir, None)
+}
+
+/// Computes RPO order, exact cross-block liveness (charging concurrent peak liveness memory BEFORE
+/// allocation), and linear-scan allocation while polling `budget`'s cooperative deadline.
+pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<AllocResult, String> {
+    if let Some(b) = budget {
+        b.check_deadline()?;
+    }
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
@@ -408,6 +417,10 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
                 ir.func_index
             ));
         }
+        let _liveness_guard = match budget {
+            Some(b) => Some(b.reserve_liveness(liveness_bytes)?),
+            None => None,
+        };
         let mut live_use = vec![0u64; n_ord * words];
         let mut live_def = vec![0u64; n_ord * words];
         let mut live_in = vec![0u64; n_ord * words];
@@ -464,6 +477,9 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
         let mut work_units: usize = 0;
         let mut changed = true;
         while changed {
+            if let Some(b) = budget {
+                b.check_deadline()?;
+            }
             changed = false;
             for oi in (0..n_ord).rev() {
                 let bid = block_order[oi] as usize;

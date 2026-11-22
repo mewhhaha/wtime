@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use super::asm::{Asm, Cond, Gp, Label, Mem, RelocTarget, Xmm};
 use super::ir::{CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, IntBinOp, IrFunc, LoadKind, Op, StoreKind, Term, Ty, Val, ValRange};
-use super::module::{MAX_FN_CODE_BYTES, MAX_FN_LOCAL_RODATA_BYTES};
+use super::module::{CompileBudget, MAX_BLOCKS_PER_FN, MAX_FN_CODE_BYTES, MAX_FN_LOCAL_RODATA_BYTES};
 use super::regalloc::{AbiSlot, AllocResult, Loc, layout_args, layout_rets};
 use super::{
     CtxLayout, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_TRUNC_BASE, OFF_RET_SPILL_PTR,
@@ -113,7 +113,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
     for (i, &(dst, src, _)) in moves.iter().enumerate() {
         *src_uses.entry(src).or_insert(0) += 1;
         let prev = dst_to_idx.insert(dst, i);
-        debug_assert!(prev.is_none(), "parallel moves must have distinct destinations");
+        assert!(prev.is_none(), "parallel moves must have distinct destinations");
     }
     let mut ready: Vec<usize> = Vec::with_capacity(n);
     for (i, &(dst, _, _)) in moves.iter().enumerate() {
@@ -1700,7 +1700,31 @@ pub fn lower_ir_to_x64(
     ro: &RodataConsts,
     isa: TargetIsa,
 ) -> Result<Asm, String> {
-    let mut asm = Asm::with_capacity(ir.blocks.len() * 64 + 128);
+    lower_ir_to_x64_with_budget(ir, alloc, layout, ro, isa, None)
+}
+
+/// Lowers `ir` + `alloc` into position-independent x86-64 machine code (`Asm`) while enforcing
+/// per-function caps, aggregate cross-worker code/rodata budgets, and cooperative deadlines.
+pub fn lower_ir_to_x64_with_budget(
+    ir: &IrFunc,
+    alloc: &AllocResult,
+    layout: &CtxLayout,
+    ro: &RodataConsts,
+    isa: TargetIsa,
+    budget: Option<&CompileBudget>,
+) -> Result<Asm, String> {
+    if ir.blocks.len() > MAX_BLOCKS_PER_FN {
+        return Err(format!(
+            "x64: function {} block count ({}) exceeds cap {MAX_BLOCKS_PER_FN}",
+            ir.func_index,
+            ir.blocks.len()
+        ));
+    }
+    if let Some(b) = budget {
+        b.check_deadline()?;
+    }
+    let init_cap = ir.blocks.len().saturating_mul(64).saturating_add(128).min(MAX_FN_CODE_BYTES);
+    let mut asm = Asm::with_capacity(init_cap);
     let bb_labels: Vec<Label> = (0..ir.blocks.len()).map(|_| asm.new_label()).collect();
 
     let mut l = Lower {
@@ -1780,8 +1804,45 @@ pub fn lower_ir_to_x64(
         emit_parallel_moves(&mut l.asm, &moves);
     }
 
+    let mut charged_code = 0usize;
+    let mut charged_rodata = 0usize;
+    let check_limits = |asm: &Asm, charged_code: &mut usize, charged_rodata: &mut usize| -> Result<(), String> {
+        if asm.code.len() > MAX_FN_CODE_BYTES {
+            return Err(format!(
+                "x64: function {} code ({} B) exceeds cap {MAX_FN_CODE_BYTES} B",
+                ir.func_index,
+                asm.code.len()
+            ));
+        }
+        if asm.local_rodata.len() > MAX_FN_LOCAL_RODATA_BYTES {
+            return Err(format!(
+                "x64: function {} local_rodata ({} B) exceeds cap {MAX_FN_LOCAL_RODATA_BYTES} B",
+                ir.func_index,
+                asm.local_rodata.len()
+            ));
+        }
+        if let Some(b) = budget {
+            let dc = asm.code.len().saturating_sub(*charged_code);
+            if dc > 0 {
+                b.charge_code(dc)?;
+                *charged_code = asm.code.len();
+            }
+            let dr = asm.local_rodata.len().saturating_sub(*charged_rodata);
+            if dr > 0 {
+                b.charge_rodata(dr)?;
+                *charged_rodata = asm.local_rodata.len();
+            }
+        }
+        Ok(())
+    };
+
     // ---- Basic Blocks ----
     for (oi, &bid) in alloc.block_order.iter().enumerate() {
+        if let Some(b) = budget
+            && (oi & 63) == 0
+        {
+            b.check_deadline()?;
+        }
         l.asm.bind(l.bb_labels[bid as usize]);
         let bb = &ir.blocks[bid as usize];
         for inst in &bb.insts {
@@ -1796,21 +1857,21 @@ pub fn lower_ir_to_x64(
         }
         let next_bb = alloc.block_order.get(oi + 1).copied();
         l.emit_term(bb.term, next_bb)?;
-        if l.asm.local_rodata.len() > MAX_FN_LOCAL_RODATA_BYTES {
-            return Err(format!(
-                "x64: function {} local_rodata ({} B) exceeds cap {MAX_FN_LOCAL_RODATA_BYTES} B",
-                ir.func_index,
-                l.asm.local_rodata.len()
-            ));
-        }
+        check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     }
 
     // ---- Edge-copy trampolines ----
     let tramps = std::mem::take(&mut l.edge_tramps);
-    for (lbl, target_bb, args) in tramps {
+    for (ti, (lbl, target_bb, args)) in tramps.into_iter().enumerate() {
+        if let Some(b) = budget
+            && (ti & 63) == 0
+        {
+            b.check_deadline()?;
+        }
         l.asm.bind(lbl);
         l.emit_edge_moves(target_bb, args);
         l.asm.jmp(l.bb_labels[target_bb as usize]);
+        check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     }
 
     // ---- Shared Normal Epilogue ----
@@ -1867,6 +1928,7 @@ pub fn lower_ir_to_x64(
         l.asm.ret();
     }
 
+    check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     l.asm.finish_labels()?;
     Ok(l.asm)
 }

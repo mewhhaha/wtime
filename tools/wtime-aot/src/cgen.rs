@@ -4594,6 +4594,34 @@ pub fn detect_cc() -> Res<(String, String, bool)> {
     Err("no C compiler found (install clang or gcc)".into())
 }
 
+/// Returns a deterministic fingerprint of the effective C target CPU & ISA feature macros
+/// enabled by `cc -march=<target_cpu>`, so `-march=native` never aliases across distinct CPUs.
+pub fn cc_target_fingerprint(cc: &str, target_cpu: &str) -> Res<String> {
+    let out = Command::new(cc)
+        .args([&format!("-march={target_cpu}"), "-dM", "-E", "-x", "c", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("probing {cc} -march={target_cpu}: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("{cc} -march={target_cpu} probe failed: {stderr}"));
+    }
+    let mut lines: Vec<&str> = std::str::from_utf8(&out.stdout)
+        .unwrap_or("")
+        .lines()
+        .filter(|l| l.starts_with("#define __"))
+        .collect();
+    lines.sort_unstable();
+    let mut h = Sha256::new();
+    h.update(b"cc-target-v1");
+    h.update(target_cpu.as_bytes());
+    for l in lines {
+        h.update(l.as_bytes());
+        h.update(b"\n");
+    }
+    Ok(h.hex())
+}
+
 /// Compiles `wasm` to a Blot ABI 8 `library.so` via parallel `clang` + `ld.lld`
 /// with per-shard content-addressed `.o` caching under `cache/c-obj`.
 pub fn build_c_blot_cdylib(
@@ -4607,6 +4635,7 @@ pub fn build_c_blot_cdylib(
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
     let t_total = Instant::now();
     let (cc, cc_ver, has_lld) = detect_cc()?;
+    let cc_target = cc_target_fingerprint(&cc, target_cpu)?;
     let generated = generate_c_sources(wasm, opt, timings)?;
 
     let obj_cache = cache.join("c-obj");
@@ -4623,9 +4652,10 @@ pub fn build_c_blot_cdylib(
         }
 
         let mut base_hash = Sha256::new();
-        base_hash.update(b"wtime-aot-c-obj-v8");
+        base_hash.update(b"wtime-aot-c-obj-v9");
         base_hash.update(cc_ver.as_bytes());
         base_hash.update(target_cpu.as_bytes());
+        base_hash.update(cc_target.as_bytes());
         base_hash.update(opt.tag().as_bytes());
         base_hash.update(generated.rt_h.as_bytes());
         base_hash.update(generated.types_h.as_bytes());
@@ -4655,10 +4685,11 @@ pub fn build_c_blot_cdylib(
 
         let is_clang = cc_ver.contains("clang");
         let t_comp = Instant::now();
-        let n_workers = jobs
-            .map(|j| j as usize)
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
-            .clamp(1, to_compile.len().max(1));
+        let n_workers = match jobs {
+            Some(0) | None => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(64),
+            Some(j) => (j as usize).min(64),
+        }
+        .clamp(1, to_compile.len().max(1));
         let queue = Mutex::new(to_compile.into_iter());
         let first_err: Mutex<Option<String>> = Mutex::new(None);
         let slowest: Mutex<(f64, String)> = Mutex::new((0.0, String::new()));

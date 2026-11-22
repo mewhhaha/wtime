@@ -207,7 +207,7 @@ struct Context<'a> {
     tags: Vec<FuncType>,
     types: Rc<types::TypeEnvironment>,
     m: &'a DecodedModule,
-    funcs: Vec<FuncType>,
+    funcs: Vec<usize>,
     globals: Vec<GlobalType>,
     tables: Vec<TableType>,
     memories: Vec<MemoryType>,
@@ -363,10 +363,16 @@ pub fn validate(
         }
         for im in &m.imports {
             match &im.kind {
-                ImportKind::Func(t) => c.funcs.push(c.ty(t.0 as usize)?.clone()),
+                ImportKind::Func(t) => {
+                    let ti = t.0 as usize;
+                    c.ty(ti)?;
+                    c.funcs.push(ti);
+                }
                 ImportKind::ExactFunc(t) => {
                     c.enabled(features.custom_descriptors)?;
-                    c.funcs.push(c.ty(t.0 as usize)?.clone())
+                    let ti = t.0 as usize;
+                    c.ty(ti)?;
+                    c.funcs.push(ti);
                 }
                 ImportKind::Global(t) => {
                     c.enabled(!t.mutable || features.mutable_globals)?;
@@ -382,7 +388,9 @@ pub fn validate(
             c.add_tag(*t)?;
         }
         for t in &m.functions {
-            c.funcs.push(c.ty(t.0 as usize)?.clone())
+            let ti = t.0 as usize;
+            c.ty(ti)?;
+            c.funcs.push(ti);
         }
         c.tables.extend(&m.tables);
         c.memories.extend(&m.memories);
@@ -471,10 +479,11 @@ pub fn validate(
             check((e.index as usize) < n, "export index out of bounds")?;
         }
         if let Some(s) = m.start {
-            let t = c
+            let ti = *c
                 .funcs
                 .get(s.0 as usize)
                 .ok_or_else(|| invalid("start index out of bounds"))?;
+            let t = c.ty(ti)?;
             check(
                 t.params.is_empty() && t.results.is_empty(),
                 "start function must have empty signature",
@@ -905,10 +914,11 @@ impl Context<'_> {
                 s.dead()
             }
             0x10 | 0x12 => {
-                let t = self
+                let ti = *self
                     .funcs
                     .get(index(i)?)
                     .ok_or_else(|| invalid("function index out of bounds"))?;
+                let t = self.ty(ti)?;
                 s.op(&t.params, &t.results)?;
                 if i.opcode == 0x12 {
                     check(

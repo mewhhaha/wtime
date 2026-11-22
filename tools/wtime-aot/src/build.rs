@@ -137,24 +137,70 @@ pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, 
     cached(&prepared, prepared.key.clone(), &[], options, "")
 }
 
-/// Enforces owner-only (`0o700`) permissions on private cache directories on Unix.
+/// Enforces an owner-controlled (`0o700`), symlink-free private directory on Unix.
+/// Fails closed if `path` is a symlink, any ancestor is group/world-writable without the sticky bit,
+/// `chmod(0o700)` fails (e.g. `EPERM` when owned by another UID), or non-owner permission bits remain.
 fn ensure_private_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        let sym_meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_dir() {
+            return Err(format!("{}: cache path must be a real directory (not a symlink)", path.display()));
+        }
+        // Propagate `set_permissions` error: on Unix `chmod` fails with `EPERM` if not owned by euid.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("{}: cannot enforce owner-only 0700 cache permissions: {e}", path.display()))?;
+        let post = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if post.file_type().is_symlink() || !post.file_type().is_dir() {
+            return Err(format!("{}: cache directory changed type during validation", path.display()));
+        }
+        if post.permissions().mode() & 0o077 != 0 {
+            return Err(format!("{}: cache directory must be owner-only (0700)", path.display()));
+        }
+        let canon = path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))?;
+        for anc in canon.ancestors().skip(1) {
+            let m = fs::metadata(anc)
+                .map_err(|e| format!("{}: {e}", anc.display()))?
+                .permissions()
+                .mode();
+            // Reject non-sticky group/world-writable ancestors that would allow directory replacement.
+            if (m & 0o022) != 0 && (m & 0o1000) == 0 {
+                return Err(format!(
+                    "{}: cache ancestor {} is writable without sticky bit",
+                    path.display(),
+                    anc.display()
+                ));
+            }
+        }
     }
     Ok(())
 }
 
 /// Marks a newly staged native artifact immutable (`0o555`) before atomic publication on Unix.
-fn mark_artifact_immutable(path: &Path) {
+fn mark_artifact_immutable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o555));
+        fs::set_permissions(path, fs::Permissions::from_mode(0o555))
+            .map_err(|e| format!("{}: cannot mark artifact read-only: {e}", path.display()))?;
     }
+    Ok(())
+}
+
+/// Atomically writes `digest_file` containing `sha` (propagating all errors).
+fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_file: &Path) -> Result<(), String> {
+    let staged_sha = entry.join(format!("{artifact_name}.sha256.{}", std::process::id()));
+    if let Err(e) = fs::write(&staged_sha, format!("{sha}\n")) {
+        let _ = fs::remove_file(&staged_sha);
+        return Err(format!("{}: {e}", staged_sha.display()));
+    }
+    if let Err(e) = fs::rename(&staged_sha, digest_file) {
+        let _ = fs::remove_file(&staged_sha);
+        return Err(format!("{}: {e}", digest_file.display()));
+    }
+    Ok(())
 }
 
 /// Acquires an exclusive publication lock on `entry/.publish.lock`.
@@ -187,14 +233,16 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
     let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
-    let (_, cc_ver, _) = crate::cgen::detect_cc()?;
+    let (cc, cc_ver, _) = crate::cgen::detect_cc()?;
+    let cc_target = crate::cgen::cc_target_fingerprint(&cc, options.target_cpu)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 1", &[]);
+    field(&mut key, "wtime-aot build c 2", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
     field(&mut key, "cc", cc_ver.as_bytes());
     field(&mut key, "target cpu", options.target_cpu.as_bytes());
+    field(&mut key, "cc target fingerprint", cc_target.as_bytes());
     field(&mut key, "c opt", options.c_opt.tag().as_bytes());
     let key_hex = key.hex();
 
@@ -213,18 +261,19 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
         Ok(()) => {
             let so_bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
             let so_sha = crate::sha256::hex(&so_bytes);
-            mark_artifact_immutable(&staged);
-            fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
-            let staged_sha = entry.join(format!("library.so.sha256.{}", std::process::id()));
-            if fs::write(&staged_sha, format!("{so_sha}\n")).is_ok()
-                && fs::rename(&staged_sha, &digest_file).is_err()
+            if let Err(e) = mark_artifact_immutable(&staged)
+                .and_then(|()| fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display())))
+                .and_then(|()| publish_digest_sidecar(&entry, "library.so", &so_sha, &digest_file))
             {
-                let _ = fs::remove_file(&staged_sha);
+                let _ = fs::remove_file(&staged);
+                let _ = fs::remove_file(&program);
+                let _ = fs::remove_file(&digest_file);
+                return Err(e);
             }
             let _ = fs::write(
                 entry.join("key.txt"),
                 format!(
-                    "key {key_hex}\nbackend c\nc opt {}\ncc {cc_ver}\ntarget cpu {}\nwasm sha256 {}\nso sha256 {so_sha}\n",
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {cc_ver}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
                     options.c_opt.tag(),
                     options.target_cpu,
                     crate::sha256::hex(&wasm)
@@ -384,13 +433,14 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
         fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
         let bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
         let sha = crate::sha256::hex(&bytes);
-        mark_artifact_immutable(&staged);
-        fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
-        let staged_sha = entry.join(format!("{artifact_name}.sha256.{}", std::process::id()));
-        if fs::write(&staged_sha, format!("{sha}\n")).is_ok()
-            && fs::rename(&staged_sha, &digest_file).is_err()
+        if let Err(e) = mark_artifact_immutable(&staged)
+            .and_then(|()| fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display())))
+            .and_then(|()| publish_digest_sidecar(&entry, artifact_name, &sha, &digest_file))
         {
-            let _ = fs::remove_file(&staged_sha);
+            let _ = fs::remove_file(&staged);
+            let _ = fs::remove_file(&program);
+            let _ = fs::remove_file(&digest_file);
+            return Err(e);
         }
         Ok(sha)
     });

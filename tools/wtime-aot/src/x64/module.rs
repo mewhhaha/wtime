@@ -5,13 +5,15 @@
 //! enforces an explicit Stage 1 admission contract before emitting any IR or code.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use wtime_types::{CompositeType, FuncType, HeapType, IndexType, ValType};
 use wtime_validate::{DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode};
 
 pub type Res<T> = Result<T, String>;
 
-/// Admission caps preventing OOM or integer overflow on adversarial modules.
+/// Admission & compilation caps preventing OOM, peak-memory spikes, or integer overflow on adversarial modules.
 pub const MAX_MEM_PAGES: u64 = 65_536;
 pub const MAX_FUNCREF_TABLE_SLOTS: u32 = 1_048_576;
 pub const MAX_TOTAL_FUNCREF_SLOTS: usize = 2_097_152;
@@ -23,8 +25,11 @@ pub const MAX_AGGREGATE_CI_TABLE_BYTES: usize = 64 << 20; // 64 MiB
 pub const MAX_AGGREGATE_BR_TABLE_ENTRIES: usize = 4_194_304; // 16 MiB jump tables
 pub const MAX_LOCALS_PER_FN: usize = 65_536;
 pub const MAX_TOTAL_LOCALS: usize = 1_000_000;
+pub const MAX_TOTAL_SIG_ARITY: usize = 1_000_000; // params + results across decls, blocks, and call_indirect sites
+pub const MAX_BLOCKS_PER_FN: usize = 262_144;
 pub const MAX_FRAME_BYTES: i32 = 4 << 20; // 4 MiB (well below 8 MiB dedicated guest stack)
-pub const MAX_LIVENESS_BYTES: usize = 64 << 20; // 64 MiB
+pub const MAX_LIVENESS_BYTES: usize = 16 << 20; // 16 MiB per function
+pub const MAX_CONCURRENT_LIVENESS_BYTES: usize = 256 << 20; // 256 MiB peak across all parallel workers
 pub const MAX_LIVENESS_WORK_UNITS: usize = 32_000_000;
 pub const MAX_FRAME_SCAN_WRITES: usize = 4_000_000;
 pub const MAX_IF_SNAPSHOT_ENTRIES: usize = 4_000_000;
@@ -32,6 +37,108 @@ pub const MAX_IR_VALS_PER_FN: usize = 1_000_000;
 pub const MAX_VAL_POOL_PER_FN: usize = 2_000_000;
 pub const MAX_FN_CODE_BYTES: usize = 64 << 20; // 64 MiB
 pub const MAX_FN_LOCAL_RODATA_BYTES: usize = 16 << 20; // 16 MiB
+pub const MAX_TOTAL_CODE_BYTES: usize = 512 << 20; // 512 MiB aggregate across workers
+pub const MAX_TOTAL_RODATA_BYTES: usize = 128 << 20; // 128 MiB aggregate across workers
+
+/// Shared cross-worker compilation budget enforcing cooperative `--time-limit` checks,
+/// peak concurrent liveness memory, and aggregate emitted code/rodata limits BEFORE growth.
+pub struct CompileBudget {
+    deadline: Option<Instant>,
+    in_flight_liveness: AtomicUsize,
+    total_code_bytes: AtomicUsize,
+    total_rodata_bytes: AtomicUsize,
+}
+
+/// RAII release guard for an in-flight liveness matrix reservation.
+pub struct LivenessBudgetGuard<'a> {
+    budget: &'a CompileBudget,
+    bytes: usize,
+}
+
+impl Drop for LivenessBudgetGuard<'_> {
+    fn drop(&mut self) {
+        self.budget.in_flight_liveness.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+impl CompileBudget {
+    pub fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            deadline,
+            in_flight_liveness: AtomicUsize::new(0),
+            total_code_bytes: AtomicUsize::new(0),
+            total_rodata_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn check_deadline(&self) -> Res<()> {
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err("x64: compilation time limit exceeded".into());
+        }
+        Ok(())
+    }
+
+    /// Atomically reserves `bytes` against `MAX_CONCURRENT_LIVENESS_BYTES` BEFORE allocating
+    /// liveness bitset matrices across parallel workers.
+    pub fn reserve_liveness(&self, bytes: usize) -> Res<LivenessBudgetGuard<'_>> {
+        let mut cur = self.in_flight_liveness.load(Ordering::Acquire);
+        loop {
+            let next = cur
+                .checked_add(bytes)
+                .ok_or("x64: concurrent liveness memory overflow")?;
+            if next > MAX_CONCURRENT_LIVENESS_BYTES {
+                return Err(format!(
+                    "x64: concurrent liveness memory ({next} B) exceeds peak cap {MAX_CONCURRENT_LIVENESS_BYTES} B"
+                ));
+            }
+            match self.in_flight_liveness.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(LivenessBudgetGuard { budget: self, bytes }),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    /// Atomically charges `delta` emitted machine-code bytes against `MAX_TOTAL_CODE_BYTES`.
+    pub fn charge_code(&self, delta: usize) -> Res<()> {
+        if delta == 0 {
+            return Ok(());
+        }
+        let mut cur = self.total_code_bytes.load(Ordering::Acquire);
+        loop {
+            let next = cur.checked_add(delta).ok_or("x64: aggregate code size overflow")?;
+            if next > MAX_TOTAL_CODE_BYTES {
+                return Err(format!(
+                    "x64: aggregate code size ({next} B) exceeds cap {MAX_TOTAL_CODE_BYTES} B"
+                ));
+            }
+            match self.total_code_bytes.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(()),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    /// Atomically charges `delta` emitted local-rodata bytes against `MAX_TOTAL_RODATA_BYTES`.
+    pub fn charge_rodata(&self, delta: usize) -> Res<()> {
+        if delta == 0 {
+            return Ok(());
+        }
+        let mut cur = self.total_rodata_bytes.load(Ordering::Acquire);
+        loop {
+            let next = cur.checked_add(delta).ok_or("x64: aggregate rodata size overflow")?;
+            if next > MAX_TOTAL_RODATA_BYTES {
+                return Err(format!(
+                    "x64: aggregate rodata size ({next} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"
+                ));
+            }
+            match self.total_rodata_bytes.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(()),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
 
 /// Constant value folded from an immutable/never-written non-exported global initializer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,10 +156,11 @@ pub enum X64ConstVal {
 pub struct X64CiSig {
     pub table: u32,
     pub table_len: u32,
-    pub sig: FuncType,
+    /// Representative index into `X64Module::module_types` (zero `FuncType` duplication).
+    pub type_idx: u32,
     pub min_slot: u32,
     pub span: u32,
-    /// Sorted `(table_slot, func_index)` entries whose function signature equals `sig`.
+    /// Sorted `(table_slot, func_index)` entries whose function signature equals `module_types[type_idx]`.
     pub targets: Vec<(u32, u32)>,
 }
 
@@ -60,9 +168,9 @@ pub struct X64CiSig {
 pub struct X64Module {
     /// Imported functions: `(module_name, import_name)`.
     pub imports: Vec<(String, String)>,
-    /// Function signature for every function index (`0..imports.len() + code.len()`).
-    pub types: Vec<FuncType>,
-    /// All declared module types (for `Immediate::Block(idx)` lookups).
+    /// Index into `module_types` for every function (`0..imports.len() + code.len()`) — zero per-function signature cloning.
+    pub func_type_idx: Vec<u32>,
+    /// All declared module types (referenced by `func_type_idx`, `X64CiSig::type_idx`, and `Immediate::Block(idx)`).
     pub module_types: Vec<FuncType>,
     /// Globals: `(ValType, mutable)` for every global index.
     pub globals: Vec<(ValType, bool)>,
@@ -77,7 +185,7 @@ pub struct X64Module {
     pub exported_globals: Vec<(String, usize, ValType, bool)>,
     /// Exported functions: `(name, func_index)`.
     pub exported_funcs: Vec<(String, usize)>,
-    /// Maps `(table_idx, raw_type_idx)` -> index into `ci_sigs` (canonicalized by `FuncType`).
+    /// Maps `(table_idx, raw_type_idx)` -> index into `ci_sigs` (`O(log N)` deterministic `BTreeMap` lookup).
     pub ci_index: BTreeMap<(u32, u32), usize>,
     /// Deduplicated `call_indirect` dispatch descriptors.
     pub ci_sigs: Vec<X64CiSig>,
@@ -93,6 +201,15 @@ pub struct X64Module {
     pub active_data_segs: Vec<(u32, usize)>,
     /// Optional start function index.
     pub start: Option<u32>,
+}
+
+impl X64Module {
+    /// Borrows the canonical `FuncType` for function index `func_index` without cloning.
+    #[inline]
+    pub fn func_type(&self, func_index: usize) -> Option<&FuncType> {
+        let &ti = self.func_type_idx.get(func_index)?;
+        self.module_types.get(ti as usize)
+    }
 }
 
 fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstVal> {
@@ -146,15 +263,25 @@ fn check_val_type(vt: ValType) -> Res<()> {
     }
 }
 
-fn check_supported_opcode(op: u16, imm: &Immediate, decoded: &DecodedModule) -> Res<()> {
+fn check_supported_opcode(
+    op: u16,
+    imm: &Immediate,
+    type_arity: &[usize],
+    type_admitted: &[bool],
+    total_sig_arity: &mut usize,
+) -> Res<()> {
     match op {
         0x00 | 0x01 | 0x05 | 0x0b..=0x10 | 0x1a | 0x1b | 0x20..=0x26 | 0x41..=0x44 | 0x45..=0xc4 | 0xd1 => Ok(()),
         0x02..=0x04 => match imm {
             Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17) => Ok(()),
             Immediate::Block(i) if *i >= 0 => {
-                let fty = decoded.types.get(*i as usize).ok_or("x64: block type index out of range")?;
-                for &vt in fty.params.iter().chain(&fty.results) {
-                    check_val_type(vt)?;
+                let idx = *i as usize;
+                if !*type_admitted.get(idx).ok_or("x64: block type index out of range")? {
+                    return Err(format!("x64: block type index {idx} uses unsupported value type"));
+                }
+                *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
+                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                    return Err(format!("x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
                 }
                 Ok(())
             }
@@ -163,9 +290,13 @@ fn check_supported_opcode(op: u16, imm: &Immediate, decoded: &DecodedModule) -> 
         },
         0x11 => match imm {
             Immediate::Pair(ti, _) => {
-                let fty = decoded.types.get(*ti as usize).ok_or("x64: call_indirect type index out of range")?;
-                for &vt in fty.params.iter().chain(&fty.results) {
-                    check_val_type(vt)?;
+                let idx = *ti as usize;
+                if !*type_admitted.get(idx).ok_or("x64: call_indirect type index out of range")? {
+                    return Err(format!("x64: call_indirect type index {idx} uses unsupported value type"));
+                }
+                *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
+                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                    return Err(format!("x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
                 }
                 Ok(())
             }
@@ -230,6 +361,14 @@ fn check_blot_import_sig(mod_name: &str, name: &str, ty: &FuncType) -> Res<()> {
 
 /// Enforces the Stage 1 admission contract and builds lean `X64Module` metadata.
 pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
+    admit_x64_module_with_budget(decoded, None)
+}
+
+/// Enforces the Stage 1 admission contract while cooperatively polling `budget`'s deadline.
+pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&CompileBudget>) -> Res<X64Module> {
+    if let Some(b) = budget {
+        b.check_deadline()?;
+    }
     if !decoded.tags.is_empty() {
         return Err("x64: exception tags are not supported".into());
     }
@@ -271,18 +410,24 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         (None, None)
     };
 
-    // Intern module types ONCE into canonical `u32` IDs so signature lookups and table pre-indexing
-    // never re-hash or clone `FuncType` per table slot or per function.
+    // Pre-validate and intern module types ONCE into canonical `u32` IDs + cached arity/admissibility
+    // so every function declaration, block type, table slot, and `call_indirect` site runs in O(1)
+    // with zero per-function or per-slot `FuncType` cloning/re-scanning.
     let mut sig_to_canon: HashMap<&FuncType, u32> = HashMap::with_capacity(decoded.types.len());
     let mut type_canon: Vec<u32> = Vec::with_capacity(decoded.types.len());
+    let mut type_arity: Vec<usize> = Vec::with_capacity(decoded.types.len());
+    let mut type_admitted: Vec<bool> = Vec::with_capacity(decoded.types.len());
     for fty in &decoded.types {
         let next_id = sig_to_canon.len() as u32;
         let cid = *sig_to_canon.entry(fty).or_insert(next_id);
         type_canon.push(cid);
+        type_arity.push(fty.params.len().saturating_add(fty.results.len()));
+        type_admitted.push(fty.params.iter().chain(&fty.results).all(|&vt| check_val_type(vt).is_ok()));
     }
 
-    // Charge per-function and total-module local counts BEFORE cloning per-function signatures.
+    // Charge per-function/total locals AND aggregate signature arity (params + results) BEFORE allocating.
     let mut precheck_total_locals = 0usize;
+    let mut total_sig_arity = 0usize;
     for (bi, body) in decoded.code.iter().enumerate() {
         let ti = decoded.functions.get(bi).ok_or("function/code count mismatch")?.0 as usize;
         let fty = decoded.types.get(ti).ok_or("function type index out of range")?;
@@ -294,34 +439,42 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
         if precheck_total_locals > MAX_TOTAL_LOCALS {
             return Err(format!("x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"));
         }
+        total_sig_arity = total_sig_arity.saturating_add(type_arity[ti]);
+        if total_sig_arity > MAX_TOTAL_SIG_ARITY {
+            return Err(format!("x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+        }
     }
 
-    // Imports: plain function imports only.
+    // Imports: plain function imports only (zero per-function `FuncType` cloning).
     let mut imports = Vec::new();
-    let mut types = Vec::new();
+    let mut func_type_idx: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
     let mut func_canon_sig: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
     for imp in &decoded.imports {
-        let ti = match imp.kind {
-            ImportKind::Func(t) => t.0 as usize,
+        let ti_u32 = match imp.kind {
+            ImportKind::Func(t) => t.0,
             _ => return Err(format!("x64: only plain function imports are supported (got {:?}::{:?})", imp.module, imp.name)),
         };
-        let fty = decoded.types.get(ti).ok_or("import type index out of range")?.clone();
-        for &vt in fty.params.iter().chain(&fty.results) {
-            check_val_type(vt)?;
+        let ti = ti_u32 as usize;
+        let fty = decoded.types.get(ti).ok_or("import type index out of range")?;
+        if !type_admitted[ti] {
+            return Err(format!("x64: import {:?}::{:?} uses unsupported value type", imp.module, imp.name));
         }
-        check_blot_import_sig(&imp.module, &imp.name, &fty)?;
+        total_sig_arity = total_sig_arity.saturating_add(type_arity[ti]);
+        if total_sig_arity > MAX_TOTAL_SIG_ARITY {
+            return Err(format!("x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+        }
+        check_blot_import_sig(&imp.module, &imp.name, fty)?;
         imports.push((imp.module.clone(), imp.name.clone()));
-        types.push(fty);
+        func_type_idx.push(ti_u32);
         func_canon_sig.push(type_canon[ti]);
     }
 
     for &ti in &decoded.functions {
         let ti_u = ti.0 as usize;
-        let fty = decoded.types.get(ti_u).ok_or("function type index out of range")?.clone();
-        for &vt in fty.params.iter().chain(&fty.results) {
-            check_val_type(vt)?;
+        if !*type_admitted.get(ti_u).ok_or("function type index out of range")? {
+            return Err(format!("x64: function type index {ti_u} uses unsupported value type"));
         }
-        types.push(fty);
+        func_type_idx.push(ti.0);
         func_canon_sig.push(type_canon[ti_u]);
     }
 
@@ -488,7 +641,7 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
     }
 
     // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, canon_sig_id)`
-    // (zero `FuncType` cloning/hashing per slot) so every `call_indirect` resolves in O(1).
+    // (zero `FuncType` cloning/hashing per slot); `ci_index` uses deterministic `O(log N)` `BTreeMap` lookups.
     let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
     let mut funcref_by_sig: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
     for (tbl, slots) in funcref_tables {
@@ -503,7 +656,7 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
     }
 
     // Single linear scan over ALL function bodies (including unreachable code) to:
-    // 1. Enforce opcode, local-count, value-type, and br_table aggregate allowlists;
+    // 1. Enforce opcode, local-count, value-type, expanded-signature, and br_table aggregate allowlists;
     // 2. Count global reads/writes to detect constant globals & pick `pinned_global`;
     // 3. Collect canonical `(table, canon_sig_id)` `call_indirect` signatures.
     let mut total_br_table_entries = 0usize;
@@ -514,12 +667,17 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
     let mut ci_sigs: Vec<X64CiSig> = Vec::new();
     let mut total_ci_bytes = 0usize;
 
-    for body in &decoded.code {
+    for (bi, body) in decoded.code.iter().enumerate() {
+        if let Some(b) = budget
+            && (bi & 63) == 0
+        {
+            b.check_deadline()?;
+        }
         for &vt in &body.locals {
             check_val_type(vt)?;
         }
         for insn in &body.instructions {
-            check_supported_opcode(insn.opcode, &insn.immediate, decoded)?;
+            check_supported_opcode(insn.opcode, &insn.immediate, &type_arity, &type_admitted, &mut total_sig_arity)?;
             match insn.opcode {
                 0x0e => {
                     if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
@@ -576,11 +734,10 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
                             ));
                         }
                         let id = ci_sigs.len();
-                        let sig = decoded.types[ti as usize].clone();
                         ci_sigs.push(X64CiSig {
                             table: tbl,
                             table_len,
-                            sig,
+                            type_idx: ti,
                             min_slot,
                             span,
                             targets,
@@ -615,7 +772,7 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
 
     Ok(X64Module {
         imports,
-        types,
+        func_type_idx,
         module_types: decoded.types.clone(),
         globals,
         global_inits,

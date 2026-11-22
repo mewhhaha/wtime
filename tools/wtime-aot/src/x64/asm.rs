@@ -355,9 +355,9 @@ impl Asm {
         while (self.local_rodata.len() & 3) != 0 {
             self.local_rodata.push(0);
         }
-        let base = self.local_rodata.len() as u32;
+        let base = u32::try_from(self.local_rodata.len()).expect("local_rodata exceeded u32::MAX");
         for &lbl in targets {
-            let off = self.local_rodata.len() as u32;
+            let off = u32::try_from(self.local_rodata.len()).expect("local_rodata exceeded u32::MAX");
             self.local_rodata.extend_from_slice(&0i32.to_le_bytes());
             self.jt_patches.push(JumpTablePatch { rodata_off: off, table_rodata_off: base, label: lbl });
         }
