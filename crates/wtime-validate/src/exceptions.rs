@@ -111,7 +111,7 @@ impl Context<'_> {
                 let params = sig.params(&self.m.types);
                 s.pop_all(params.as_slice())?;
                 let height = s.values.len();
-                s.values.extend_from_slice(params.as_slice());
+                s.push_slice(params.as_slice())?;
                 s.controls.push(Control {
                     kind: 0x1f,
                     height,

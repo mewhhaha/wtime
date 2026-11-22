@@ -331,8 +331,30 @@ impl Stack {
         }
     }
     fn pop_all(&mut self, ts: &[ValType]) -> Result<()> {
-        for t in ts.iter().rev() {
-            self.pop(*t)?
+        let c = *self
+            .controls
+            .last()
+            .ok_or_else(|| invalid("instruction after final end"))?;
+        for &t in ts.iter().rev() {
+            if self.values.len() == c.height && c.unreachable {
+                return Ok(());
+            }
+            self.pop(t)?;
+        }
+        Ok(())
+    }
+    /// Charges pushed slice elements against `self.types` (`max_type_work`) before extending
+    /// `self.values`, bounding cumulative operand-stack traffic even in dead/polymorphic code.
+    fn push_slice(&mut self, ts: &[ValType]) -> Result<()> {
+        if !ts.is_empty() {
+            self.types.charge(ts.len());
+            if self.types.exhausted() {
+                return Err(Error::new(
+                    ErrorKind::ResourceLimit,
+                    "type validation work budget exhausted",
+                ));
+            }
+            self.values.extend_from_slice(ts);
         }
         Ok(())
     }
@@ -360,8 +382,7 @@ impl Stack {
     }
     fn op(&mut self, inputs: &[ValType], outputs: &[ValType]) -> Result<()> {
         self.pop_all(inputs)?;
-        self.values.extend_from_slice(outputs);
-        Ok(())
+        self.push_slice(outputs)
     }
     fn dead(&mut self) {
         let c = self.controls.last_mut().unwrap();
@@ -522,6 +543,28 @@ pub fn validate(
         for t in &c.globals {
             c.valtype(t.value)?;
         }
+        // Precompute declared function references ONCE before validating constant expressions
+        // and function bodies so `0xd2` (`ref.func`) is O(1) everywhere.
+        let mut declared = HashSet::new();
+        for e in &m.exports {
+            if e.kind == ExternalKind::Func {
+                declared.insert(e.index);
+            }
+        }
+        for j in m
+            .elements
+            .iter()
+            .flat_map(|e| e.init.iter().flatten())
+            .chain(m.globals.iter().flat_map(|g| g.init.iter()))
+            .chain(m.table_inits.iter().filter_map(|v| v.as_ref()).flatten())
+        {
+            if j.opcode == 0xd2
+                && let Immediate::Index(x) = j.immediate
+            {
+                declared.insert(x);
+            }
+        }
+        c.declared_funcs = std::sync::Arc::new(declared);
         for (n, init) in m.table_inits.iter().enumerate() {
             if let Some(init) = init {
                 c.constant(init, ValType::Ref(m.tables[n].element))?
@@ -611,27 +654,19 @@ pub fn validate(
             m.functions.len() == m.code.len(),
             "function/code count mismatch",
         )?;
-        // Precompute declared function references ONCE so `ref.func` in bodies is O(1).
-        let mut declared = HashSet::new();
-        for e in &m.exports {
-            if e.kind == ExternalKind::Func {
-                declared.insert(e.index);
-            }
+        // Pre-check aggregate `(params + declared locals)` across all functions BEFORE allocating
+        // per-body local vectors or launching parallel validation workers.
+        let mut total_fn_locals = 0usize;
+        for (t, b) in m.functions.iter().zip(&m.code) {
+            let ft = c.ty(t.0 as usize)?;
+            let n_locals = ft.params.len().saturating_add(b.locals.len());
+            budget(n_locals <= limits.max_locals, "too many locals")?;
+            total_fn_locals = total_fn_locals.saturating_add(n_locals);
+            budget(
+                total_fn_locals <= limits.max_total_locals,
+                "too many module locals",
+            )?;
         }
-        for j in m
-            .elements
-            .iter()
-            .flat_map(|e| e.init.iter().flatten())
-            .chain(m.globals.iter().flat_map(|g| g.init.iter()))
-            .chain(m.table_inits.iter().filter_map(|v| v.as_ref()).flatten())
-        {
-            if j.opcode == 0xd2
-                && let Immediate::Index(x) = j.immediate
-            {
-                declared.insert(x);
-            }
-        }
-        c.declared_funcs = std::sync::Arc::new(declared);
         // Bodies are validated independently, in parallel when the code
         // section is large, each with its own type environment whose work
         // is counted from zero. The work is then charged in body order, so
@@ -806,7 +841,8 @@ impl Context<'_> {
         let mut locals = Vec::with_capacity(n_locals);
         locals.extend_from_slice(&t.params);
         locals.extend_from_slice(&b.locals);
-        for v in &locals {
+        // `t.params` were already validated when checking `m.types` before body validation.
+        for v in &b.locals {
             self.valtype(*v)?
         }
         let mut s = Stack {
@@ -846,13 +882,6 @@ impl Context<'_> {
             // Absolute module offset for error reports; a body built without
             // offsets reports its own start.
             let at = b.offsets.get(n).map_or(b.span.start, |&offset| offset as usize);
-            if i.opcode == 0xd2 {
-                let n = index(i)? as u32;
-                check(
-                    self.declared_funcs.contains(&n),
-                    "undeclared function reference",
-                )?;
-            }
             if !fast_instruction(&mut s, &locals, &self.globals, &self.memories, i) {
                 self.instruction(&mut s, &locals, i)
                     .map_err(|e| e.at(at))?;
@@ -950,7 +979,7 @@ impl Context<'_> {
                 let params = sig.params(&self.m.types);
                 s.pop_all(params.as_slice())?;
                 let h = s.values.len();
-                s.values.extend_from_slice(params.as_slice());
+                s.push_slice(params.as_slice())?;
                 s.controls.push(Control {
                     kind: i.opcode,
                     height: h,
@@ -970,7 +999,7 @@ impl Context<'_> {
                 let params = c.sig.params(&self.m.types);
                 s.pop_all(results.as_slice())?;
                 check(s.values.len() == c.height, "extra stack operands at else")?;
-                s.values.extend_from_slice(params.as_slice());
+                s.push_slice(params.as_slice())?;
                 s.restore_locals(c.initialized);
                 let c = s.controls.last_mut().unwrap();
                 c.unreachable = false;
@@ -987,14 +1016,14 @@ impl Context<'_> {
                 check(s.values.len() == c.height, "extra operands at end")?;
                 s.restore_locals(c.initialized);
                 s.controls.pop();
-                s.values.extend_from_slice(results.as_slice())
+                s.push_slice(results.as_slice())?
             }
             0x0c | 0x0d => {
                 let ts = s.label(index(i)?, &self.m.types)?;
                 if i.opcode == 0x0d {
                     s.pop(I32)?;
                     s.pop_all(ts.as_slice())?;
-                    s.values.extend_from_slice(ts.as_slice())
+                    s.push_slice(ts.as_slice())?
                 } else {
                     s.pop_all(ts.as_slice())?;
                     s.dead()
@@ -1279,7 +1308,7 @@ impl Context<'_> {
                 if i.opcode == 0xd5 {
                     let ts = s.label(index(i)?, &self.m.types)?;
                     s.pop_all(ts.as_slice())?;
-                    s.values.extend_from_slice(ts.as_slice())
+                    s.push_slice(ts.as_slice())?
                 }
                 if v.is_none() {
                     s.unknown.insert(s.values.len());
@@ -1298,7 +1327,7 @@ impl Context<'_> {
                 };
                 s.pop(Ref(RefType::new(true, r.heap)))?;
                 s.pop_all(prefix)?;
-                s.values.extend_from_slice(prefix)
+                s.push_slice(prefix)?
             }
             0xd1 => {
                 if let Some(v) = s.any()? {
@@ -1312,6 +1341,10 @@ impl Context<'_> {
                     .funcs
                     .get(n)
                     .ok_or_else(|| invalid("ref.func index out of bounds"))?;
+                check(
+                    self.declared_funcs.contains(&(n as u32)),
+                    "undeclared function reference",
+                )?;
                 if self.features.function_references {
                     let ty = TypeIdx(ti as u32);
                     let exact = self.features.custom_descriptors

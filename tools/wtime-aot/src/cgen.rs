@@ -8,12 +8,12 @@
 //! adaptive opt-levels and per-shard content-addressed `.o` caching, and links
 //! with `ld.lld` into a Blot ABI 8 `library.so`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -4600,6 +4600,12 @@ pub fn detect_cc() -> Res<(String, String, bool)> {
 /// Returns a deterministic fingerprint of the effective C target CPU & ISA feature macros
 /// enabled by `cc -march=<target_cpu>`, so `-march=native` never aliases across distinct CPUs.
 pub fn cc_target_fingerprint(cc: &str, target_cpu: &str) -> Res<String> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (cc.to_string(), target_cpu.to_string());
+    if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
+        return Ok(hit);
+    }
     let out = Command::new(cc)
         .args([&format!("-march={target_cpu}"), "-dM", "-E", "-x", "c", "-"])
         .stdin(Stdio::null())
@@ -4622,7 +4628,9 @@ pub fn cc_target_fingerprint(cc: &str, target_cpu: &str) -> Res<String> {
         h.update(l.as_bytes());
         h.update(b"\n");
     }
-    Ok(h.hex())
+    let digest = h.hex();
+    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, digest.clone());
+    Ok(digest)
 }
 
 /// Runs `cmd` in its own process group (on Unix), capturing stderr to a temp file under `work`
@@ -4804,7 +4812,18 @@ pub fn build_c_blot_cdylib(
                         let label = format!("{cc_ref} on {}", src_path.display());
                         match run_cmd_with_deadline(cmd, work_ref, &label, deadline) {
                             Ok(()) => {
-                                let _ = fs::rename(&tmp_obj, &cached_obj);
+                                if let Err(io_err) = fs::rename(&tmp_obj, &cached_obj) {
+                                    let _ = fs::remove_file(&tmp_obj);
+                                    let mut e = err_slot.lock().unwrap();
+                                    if e.is_none() {
+                                        *e = Some(format!(
+                                            "publishing object {} -> {}: {io_err}",
+                                            tmp_obj.display(),
+                                            cached_obj.display()
+                                        ));
+                                    }
+                                    break;
+                                }
                                 let dt = t_one.elapsed().as_secs_f64();
                                 let mut sl = slow_slot.lock().unwrap();
                                 if dt > sl.0 {

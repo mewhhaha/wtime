@@ -294,7 +294,7 @@ impl Context<'_> {
                     "cast branch result mismatch",
                 )?;
                 s.pop_all(prefix)?;
-                s.values.extend_from_slice(prefix);
+                s.push_slice(prefix)?;
                 s.values
                     .push(if i.opcode == 0xfb18 { difference } else { b })
             }
@@ -470,7 +470,7 @@ impl Context<'_> {
                     "cast branch type mismatch",
                 )?;
                 s.pop_all(prefix)?;
-                s.values.extend_from_slice(prefix);
+                s.push_slice(prefix)?;
                 s.values
                     .push(if i.opcode == 0xfb25 { difference } else { b })
             }

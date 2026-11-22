@@ -292,7 +292,7 @@ fn ensure_private_dir(path: &Path) -> Result<PathBuf, String> {
             if canon_existing.parent().is_none() {
                 return Err(format!("{}: refusing to use filesystem root as cache directory", path.display()));
             }
-            let sym = fs::symlink_metadata(&abs_path).map_err(|e| format!("{}: {e}", abs_path.display()))?;
+            let sym = fs::symlink_metadata(&existing).map_err(|e| format!("{}: {e}", existing.display()))?;
             if sym.file_type().is_symlink() || !sym.file_type().is_dir() {
                 return Err(format!("{}: cache path must be a real directory (not a symlink)", path.display()));
             }
@@ -426,8 +426,11 @@ fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if art_meta.permissions().mode() & 0o222 != 0 {
+            return false;
+        }
+        if !current_euid().ok().is_some_and(|euid| art_meta.uid() == euid) {
             return false;
         }
     }
@@ -771,7 +774,7 @@ fn generate_and_compile(prepared: &Prepared, work: &Path, name: &str, rustflags:
     flags.extend(rustflags.iter().cloned());
     cargo.env("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"));
     cargo.args(["build", "--release", "--offline", "--quiet"]);
-    if let Some(jobs) = jobs {
+    if let Some(jobs) = jobs.filter(|&j| j > 0) {
         cargo.args(["--jobs", &jobs.to_string()]);
     }
     // A process group of its own, so that the time limit ends rustc too.

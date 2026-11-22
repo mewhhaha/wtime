@@ -556,18 +556,27 @@ pub fn decode(
                 );
                 let mut parsed_bodies = Vec::with_capacity(decoded.len());
                 let mut total_decoded_locals: usize = 0;
+                let mut total_decoded_insns: usize = 0;
                 let mut total_limit_exceeded = false;
+                let mut insn_limit_exceeded = false;
                 for body in decoded {
                     let parsed = body?;
                     total_decoded_locals = total_decoded_locals.saturating_add(parsed.total_locals as usize);
                     if total_decoded_locals > policy.max_total_locals {
                         total_limit_exceeded = true;
                     }
+                    total_decoded_insns = total_decoded_insns.saturating_add(parsed.instructions.len());
+                    if total_decoded_insns > policy.max_instructions {
+                        insn_limit_exceeded = true;
+                    }
                     parsed_bodies.push(parsed);
                 }
                 sizes?;
                 if total_limit_exceeded {
                     return Err(Error::new(ErrorKind::ResourceLimit, "module total local limit"));
+                }
+                if insn_limit_exceeded {
+                    return Err(Error::new(ErrorKind::ResourceLimit, "module instruction limit"));
                 }
                 m.code.reserve_exact(parsed_bodies.len());
                 for parsed in parsed_bodies {

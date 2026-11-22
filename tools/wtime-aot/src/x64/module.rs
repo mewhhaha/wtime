@@ -308,12 +308,26 @@ fn check_val_type(vt: ValType) -> Res<()> {
 fn check_supported_opcode(
     op: u16,
     imm: &Immediate,
+    func_type_idx: &[u32],
     type_arity: &[usize],
     type_admitted: &[bool],
     total_sig_arity: &mut usize,
 ) -> Res<()> {
     match op {
-        0x00 | 0x01 | 0x05 | 0x0b..=0x10 | 0x1a | 0x1b | 0x20..=0x26 | 0x41..=0x44 | 0x45..=0xc4 | 0xd1 => Ok(()),
+        0x00 | 0x01 | 0x05 | 0x0b..=0x0f | 0x1a | 0x1b | 0x20..=0x26 | 0x41..=0x44 | 0x45..=0xc4 | 0xd1 => Ok(()),
+        0x10 => match imm {
+            Immediate::Index(fi) => {
+                let &ti = func_type_idx
+                    .get(*fi as usize)
+                    .ok_or_else(|| format!("x64: call function index {fi} out of range"))?;
+                *total_sig_arity = total_sig_arity.saturating_add(type_arity[ti as usize]);
+                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                    return Err(format!("x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+                }
+                Ok(())
+            }
+            _ => Err("x64: malformed call immediate".into()),
+        },
         0x02..=0x04 => match imm {
             Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17) => Ok(()),
             Immediate::Block(i) if *i >= 0 => {
@@ -442,7 +456,13 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         if mt.page_size_log2 != 16 {
             return Err(format!("x64: custom memory page size (2^{}) is not supported", mt.page_size_log2));
         }
-        let max_p = mt.limits.max.unwrap_or(MAX_MEM_PAGES).min(MAX_MEM_PAGES);
+        let max_p = match mt.limits.max {
+            Some(m) if m > MAX_MEM_PAGES => {
+                return Err(format!("x64: memory max ({m}) exceeds Wasm32 limit ({MAX_MEM_PAGES})"));
+            }
+            Some(m) => m,
+            None => MAX_MEM_PAGES,
+        };
         if mt.limits.min > max_p {
             return Err(format!("x64: memory min ({}) exceeds max ({max_p})", mt.limits.min));
         }
@@ -731,7 +751,14 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
             {
                 b.check_deadline()?;
             }
-            check_supported_opcode(insn.opcode, &insn.immediate, &type_arity, &type_admitted, &mut total_sig_arity)?;
+            check_supported_opcode(
+                insn.opcode,
+                &insn.immediate,
+                &func_type_idx,
+                &type_arity,
+                &type_admitted,
+                &mut total_sig_arity,
+            )?;
             match insn.opcode {
                 0x0e => {
                     if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
