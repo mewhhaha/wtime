@@ -12,50 +12,86 @@ pub mod pytext;
 
 use std::fmt;
 
-/// A trap, or a host's refusal. One byte, so that results stay in
-/// registers; a host keeps the text of its own failures in its state.
+/// A trap, or a host's refusal. Non-zero `#[repr(u8)]` so `Option<Trap>` is
+/// 1 byte with `None == 0`, allowing `(T, Option<Trap>)` to return in two
+/// native registers (`ScalarPair`) with zero bit-packing or `sret` spills.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
-    Unreachable,
-    OutOfBounds,
+    Unreachable = 1,
+    OutOfBounds = 2,
     /// An active element segment does not fit its table.
-    TableOutOfBounds,
-    DivideByZero,
-    IntegerOverflow,
-    InvalidConversion,
-    CallStackExhausted,
-    MemoryTooLarge,
+    TableOutOfBounds = 3,
+    /// An indirect call hit an uninitialized slot or wrong function type.
+    IndirectCall = 4,
+    DivideByZero = 5,
+    IntegerOverflow = 6,
+    InvalidConversion = 7,
+    CallStackExhausted = 8,
+    MemoryTooLarge = 9,
     /// The minimum size overflows 64 bits.
-    MemoryAllocationOverflow,
+    MemoryAllocationOverflow = 10,
     /// The minimum size exceeds `MEMORY_LIMIT_PAGES`.
-    MemoryLimit,
-    AllocationFailed,
-    NoStart,
+    MemoryLimit = 11,
+    AllocationFailed = 12,
+    NoStart = 13,
     /// `_start` is an imported function that takes parameters.
-    StartImportArguments,
+    StartImportArguments = 14,
     /// The module exports `_start`, but not as a function.
-    StartNotFunction,
+    StartNotFunction = 15,
     /// `_start` takes parameters.
-    StartArguments,
+    StartArguments = 16,
     /// A host import's result does not fit its declared type.
-    ResultMismatch,
+    ResultMismatch = 17,
     /// A host import declared without results got one.
-    ExtraResults,
+    ExtraResults = 18,
     /// The host refused; its text is in the host's state.
-    Host,
+    Host = 19,
     /// The program ended itself; the code is in the host's state.
-    Exit,
+    Exit = 20,
     /// The program read past the end of its input.
-    StopIteration,
+    StopIteration = 21,
 }
 
 impl Trap {
+    pub fn to_code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Option<Trap> {
+        match code {
+            1 => Some(Trap::Unreachable),
+            2 => Some(Trap::OutOfBounds),
+            3 => Some(Trap::TableOutOfBounds),
+            4 => Some(Trap::IndirectCall),
+            5 => Some(Trap::DivideByZero),
+            6 => Some(Trap::IntegerOverflow),
+            7 => Some(Trap::InvalidConversion),
+            8 => Some(Trap::CallStackExhausted),
+            9 => Some(Trap::MemoryTooLarge),
+            10 => Some(Trap::MemoryAllocationOverflow),
+            11 => Some(Trap::MemoryLimit),
+            12 => Some(Trap::AllocationFailed),
+            13 => Some(Trap::NoStart),
+            14 => Some(Trap::StartImportArguments),
+            15 => Some(Trap::StartNotFunction),
+            16 => Some(Trap::StartArguments),
+            17 => Some(Trap::ResultMismatch),
+            18 => Some(Trap::ExtraResults),
+            19 => Some(Trap::Host),
+            20 => Some(Trap::Exit),
+            21 => Some(Trap::StopIteration),
+            _ => None,
+        }
+    }
+
     pub fn message(self) -> &'static str {
         match self {
             // The texts wtime-goose reports for the same failures.
             Trap::Unreachable => "Trap: unreachable",
             Trap::OutOfBounds => "Trap: out of bounds",
             Trap::TableOutOfBounds => "Trap: table out of bounds",
+            Trap::IndirectCall => "Trap: indirect call type mismatch",
             Trap::DivideByZero => "Trap: integer divide by zero",
             Trap::IntegerOverflow => "Trap: integer overflow",
             Trap::InvalidConversion => "Trap: invalid integer conversion",
@@ -85,8 +121,17 @@ impl fmt::Display for Trap {
 
 pub type R<T> = Result<T, Trap>;
 
+/// Cold inlined wrapper for trap returns: gives LLVM cold branch-weight
+/// hints while staying inlined so fast-path bounds-check proofs stay intact.
+#[cold]
+#[inline(always)]
+pub fn cold_trap(trap: Trap) -> Option<Trap> {
+    Some(trap)
+}
+
 /// `expr?` for generated code: the value of an `Ok`, or a return of the
-/// `Err`. Written as a match, it gives rustc one branch to build and check,
+/// trap in the caller's return ABI (`Result`, `Option<Trap>`, or `(T, Option<Trap>)`).
+/// Written as a match, it gives rustc one branch to build and check,
 /// where `?` adds `Try` and `FromResidual` calls for its MIR inliner; on a
 /// crate the size of the Goose compiler that is gigabytes of compile-time
 /// memory.
@@ -96,6 +141,61 @@ macro_rules! t {
         match $e {
             Ok(value) => value,
             Err(error) => return Err(error),
+        }
+    };
+    ($e:expr, void) => {
+        match $e {
+            Ok(value) => value,
+            Err(error) => return $crate::cold_trap(error),
+        }
+    };
+    ($e:expr, $z:expr) => {
+        match $e {
+            Ok(value) => value,
+            Err(error) => return ($z, $crate::cold_trap(error)),
+        }
+    };
+}
+
+/// Unwraps a `(T, Option<Trap>)` call result, returning the trap in the caller's ABI.
+#[macro_export]
+macro_rules! tc {
+    ($e:expr) => {
+        match $e {
+            (value, None) => value,
+            (_, Some(error)) => return Err(error),
+        }
+    };
+    ($e:expr, void) => {
+        match $e {
+            (value, None) => value,
+            (_, Some(error)) => return $crate::cold_trap(error),
+        }
+    };
+    ($e:expr, $z:expr) => {
+        match $e {
+            (value, None) => value,
+            (_, Some(error)) => return ($z, $crate::cold_trap(error)),
+        }
+    };
+}
+
+/// Checks a void `Option<Trap>` call result, returning the trap in the caller's ABI.
+#[macro_export]
+macro_rules! tv {
+    ($e:expr) => {
+        if let Some(error) = $e {
+            return Err(error);
+        }
+    };
+    ($e:expr, void) => {
+        if let Some(error) = $e {
+            return $crate::cold_trap(error);
+        }
+    };
+    ($e:expr, $z:expr) => {
+        if let Some(error) = $e {
+            return ($z, $crate::cold_trap(error));
         }
     };
 }
@@ -1228,10 +1328,15 @@ impl Mem32Meta {
     }
 
     pub fn new(min: u64, max: Option<u64>) -> R<Mem32Meta> {
-        if min > page_limit() {
+        Self::new_with_limit(min, max, page_limit())
+    }
+
+    pub fn new_with_limit(min: u64, max: Option<u64>, limit_pages: u64) -> R<Mem32Meta> {
+        let limit_pages = limit_pages.min(MEMORY_LIMIT_PAGES);
+        if min > limit_pages {
             return trap(Trap::MemoryLimit);
         }
-        let max_pages = max.unwrap_or(1 << 16).min(1 << 16).min(page_limit());
+        let max_pages = max.unwrap_or(1 << 16).min(1 << 16).min(limit_pages);
         let Some(len) = min.checked_mul(PAGE).and_then(|n| usize::try_from(n).ok()) else {
             return trap(Trap::MemoryTooLarge);
         };
@@ -1261,7 +1366,7 @@ impl Mem32Meta {
         }
     }
 
-    #[cold]
+    #[inline]
     pub fn fill(&self, bytes: &mut [u8], destination: u64, value: u8, n: u64) -> R<()> {
         let range = self.range(destination, n)?;
         let Some(dst) = bytes.get_mut(range) else { return trap(Trap::OutOfBounds) };
@@ -1269,7 +1374,7 @@ impl Mem32Meta {
         Ok(())
     }
 
-    #[cold]
+    #[inline]
     pub fn copy(&self, bytes: &mut [u8], destination: u64, source: u64, n: u64) -> R<()> {
         let to = self.range(destination, n)?;
         let from = self.range(source, n)?;
@@ -1313,6 +1418,14 @@ pub fn alloc32<const CAP: usize>() -> R<Box<[u8; CAP]>> {
     }
 }
 
+/// Computes a stack-floor address `budget_bytes` below the current stack frame.
+#[inline(never)]
+pub fn stack_floor_for(budget_bytes: usize) -> usize {
+    let mark = 0u8;
+    let sp = (&mark as *const u8) as usize;
+    sp.saturating_sub(budget_bytes)
+}
+
 /// A borrowed host view of a split 32-bit memory (`bytes` + `Mem32Meta`).
 pub struct Mem32Host<'a, const CAP: usize> {
     pub bytes: &'a mut [u8; CAP],
@@ -1349,9 +1462,17 @@ pub mod m32 {
                 return active.get(a..)?.first_chunk::<N>();
             }
             None
-        } else {
-            let end = (address as usize).checked_add(offset as usize)?.checked_add(N)?;
+        } else if offset == 0 {
+            let end = (address as usize).checked_add(N)?;
             active.get(..end)?.last_chunk::<N>()
+        } else {
+            let sub = active.get(offset as usize..)?;
+            let limit = sub.len().checked_sub(N)?;
+            let a = address as usize;
+            if a <= limit {
+                return sub.get(a..)?.first_chunk::<N>();
+            }
+            None
         }
     }
 
@@ -1365,9 +1486,17 @@ pub mod m32 {
                 return active.get_mut(a..)?.first_chunk_mut::<N>();
             }
             None
-        } else {
-            let end = (address as usize).checked_add(offset as usize)?.checked_add(N)?;
+        } else if offset == 0 {
+            let end = (address as usize).checked_add(N)?;
             active.get_mut(..end)?.last_chunk_mut::<N>()
+        } else {
+            let sub = active.get_mut(offset as usize..)?;
+            let limit = sub.len().checked_sub(N)?;
+            let a = address as usize;
+            if a <= limit {
+                return sub.get_mut(a..)?.first_chunk_mut::<N>();
+            }
+            None
         }
     }
 
@@ -1421,13 +1550,47 @@ pub mod m32 {
     access!(l64, s64, u64, 8);
     access!(l128, s128, u128, 16);
 
+    /// `memory.copy` of a dynamic `n` bytes on a 32-bit memory.
+    #[inline]
+    pub fn copy<const CAP: usize>(bytes: &mut [u8; CAP], len: usize, destination: u32, source: u32, n: u32) -> R<()> {
+        let Some(active) = bytes.get_mut(..len) else { return trap(Trap::OutOfBounds) };
+        let to = destination as usize;
+        let from = source as usize;
+        let count = n as usize;
+        if let Some(to_end) = to.checked_add(count)
+            && let Some(from_end) = from.checked_add(count)
+            && to_end <= active.len()
+            && from_end <= active.len()
+        {
+            active.copy_within(from..from_end, to);
+            return Ok(());
+        }
+        trap(Trap::OutOfBounds)
+    }
+
+    /// `memory.fill` of a dynamic `n` bytes on a 32-bit memory.
+    #[inline]
+    pub fn fill<const CAP: usize>(bytes: &mut [u8; CAP], len: usize, destination: u32, value: u8, n: u32) -> R<()> {
+        let Some(active) = bytes.get_mut(..len) else { return trap(Trap::OutOfBounds) };
+        let to = destination as usize;
+        if let Some(to_end) = to.checked_add(n as usize)
+            && let Some(dst) = active.get_mut(to..to_end)
+        {
+            dst.fill(value);
+            return Ok(());
+        }
+        trap(Trap::OutOfBounds)
+    }
+
     /// `memory.copy` of a constant `N` bytes (at least 1).
     #[inline(always)]
     pub fn copy_n<const CAP: usize, const N: usize>(bytes: &mut [u8; CAP], len: usize, destination: u32, source: u32) -> R<()> {
-        let Some(active) = bytes.get_mut(..len) else { return trap(Trap::OutOfBounds) };
-        let Some(limit) = active.len().checked_sub(N) else { return trap(Trap::OutOfBounds) };
-        if destination as usize <= limit && source as usize <= limit {
-            move_bytes::<N>(active, destination as usize, source as usize);
+        if len <= CAP
+            && let Some(limit) = len.checked_sub(N)
+            && destination as usize <= limit
+            && source as usize <= limit
+        {
+            move_bytes::<N>(bytes, destination as usize, source as usize);
             return Ok(());
         }
         trap(Trap::OutOfBounds)
@@ -1436,11 +1599,10 @@ pub mod m32 {
     /// `memory.fill` of a constant `N` bytes (at least 1).
     #[inline(always)]
     pub fn fill_n<const CAP: usize, const N: usize>(bytes: &mut [u8; CAP], len: usize, destination: u32, value: u8) -> R<()> {
-        let Some(active) = bytes.get_mut(..len) else { return trap(Trap::OutOfBounds) };
-        let Some(limit) = active.len().checked_sub(N) else { return trap(Trap::OutOfBounds) };
-        let at = destination as usize;
-        if at <= limit
-            && let Some(dst) = active.get_mut(at..).and_then(|s| s.first_chunk_mut::<N>())
+        if len <= CAP
+            && let Some(limit) = len.checked_sub(N)
+            && destination as usize <= limit
+            && let Some(dst) = bytes.get_mut(destination as usize..).and_then(|s| s.first_chunk_mut::<N>())
         {
             dst.fill(value);
             return Ok(());
@@ -1449,13 +1611,20 @@ pub mod m32 {
     }
 }
 
+#[cold]
+#[inline(never)]
+fn copy_within_overlap(bytes: &mut [u8], from: usize, len: usize, to: usize) {
+    bytes.copy_within(from..from + len, to);
+}
+
 /// Moves `N` bytes (`from..from + N` to `to`, both in bounds) as memmove
-/// does, without a call where it can: through a value up to 64 bytes, as
-/// 32-byte blocks through registers when the ranges are disjoint (the
-/// usual case: struct copies), else by `copy_within`.
+/// does, without a call where it can: through a value up to 128 bytes (fits
+/// in 4 AVX2 registers with zero overlap check), as 32-byte blocks through
+/// registers when the ranges are disjoint (the usual case: struct copies),
+/// else by a cold `copy_within` fallback.
 #[inline(always)]
 fn move_bytes<const N: usize>(bytes: &mut [u8], to: usize, from: usize) {
-    if N <= 64 {
+    if N <= 128 {
         if let Some(value) = bytes.get(from..).and_then(|s| s.first_chunk::<N>()).copied()
             && let Some(target) = bytes.get_mut(to..).and_then(|s| s.first_chunk_mut::<N>())
         {
@@ -1476,7 +1645,7 @@ fn move_bytes<const N: usize>(bytes: &mut [u8], to: usize, from: usize) {
             k += 32;
         }
     } else {
-        bytes.copy_within(from..from + N, to);
+        copy_within_overlap(bytes, from, N, to);
     }
 }
 

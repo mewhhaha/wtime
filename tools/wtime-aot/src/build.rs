@@ -32,7 +32,14 @@ use std::process::{Command, Stdio};
 
 use crate::sha256::Sha256;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+
+/// Codegen/compiler backend used by `wtime-aot build`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Rust,
+    C,
+}
 
 pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
     let mut arguments = arguments.into_iter();
@@ -42,6 +49,9 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
     // The program runs where it is built: by default for this machine's CPU,
     // as a JIT would compile.
     let mut target_cpu = String::from("native");
+    let mut target = crate::codegen::Target::GooseBin;
+    let mut backend = Backend::Rust;
+    let mut c_opt = crate::cgen::COpt::Auto;
     let mut train = None;
     while let Some(argument) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{USAGE}\n{argument} needs a value"));
@@ -62,6 +72,15 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
                 let limit = seconds.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok());
                 time_limit = limit.ok_or_else(|| format!("{USAGE}\n--time-limit takes a positive number of seconds"))?;
             }
+            "--blot-cdylib" => target = crate::codegen::Target::BlotCdylib,
+            "--backend" => {
+                backend = match value()?.as_str() {
+                    "rust" => Backend::Rust,
+                    "c" => Backend::C,
+                    other => return Err(format!("{USAGE}\ninvalid --backend {other:?}")),
+                };
+            }
+            "--c-opt" => c_opt = crate::cgen::COpt::parse(&value()?)?,
             // Everything after --train is the training run's command line.
             "--train" => {
                 train = Some(arguments.by_ref().collect::<Vec<_>>());
@@ -71,7 +90,13 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
         }
     }
     let (Some(module), Some(cache)) = (module, cache) else { return Err(USAGE.into()) };
-    let options = Options { toolchain: &toolchain, target_cpu: &target_cpu, jobs, time_limit };
+    if backend == Backend::C && target != crate::codegen::Target::BlotCdylib {
+        return Err("--backend c currently requires --blot-cdylib".into());
+    }
+    if backend == Backend::C && train.is_some() {
+        return Err("--train is not supported with --backend c".into());
+    }
+    let options = Options { toolchain: &toolchain, target_cpu: &target_cpu, jobs, time_limit, target, backend, c_opt };
     let program = match train {
         None => build(&module, &cache, module_path.as_deref(), &rt, &options)?,
         Some(train) => build_trained(&module, &cache, module_path.as_deref(), &rt, &options, &train)?,
@@ -86,6 +111,9 @@ pub struct Options<'a> {
     pub target_cpu: &'a str,
     pub jobs: Option<u32>,
     pub time_limit: std::time::Duration,
+    pub target: crate::codegen::Target,
+    pub backend: Backend,
+    pub c_opt: crate::cgen::COpt,
 }
 
 /// What a build starts from: the Wasm, its validated settings and the key
@@ -102,8 +130,58 @@ struct Prepared {
 
 /// Builds (or finds in `cache`) the program for `module`; its path.
 pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, options: &Options) -> Result<PathBuf, String> {
+    if options.backend == Backend::C {
+        return build_c(module, cache, options);
+    }
     let prepared = prepare(module, cache, module_path, rt, options)?;
     cached(&prepared, prepared.key.clone(), &[], options, "")
+}
+
+/// Fast C99 + parallel `clang` + `ld.lld` build path for Blot ABI 8 cdylibs.
+fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, String> {
+    let wasm = fs::read(module).map_err(|e| format!("{}: {e}", module.display()))?;
+    fs::create_dir_all(cache).map_err(|e| format!("{}: {e}", cache.display()))?;
+    let cache = cache.canonicalize().map_err(|e| format!("{}: {e}", cache.display()))?;
+    let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
+    let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
+    let (_, cc_ver, _) = crate::cgen::detect_cc()?;
+
+    let mut key = Sha256::new();
+    field(&mut key, "wtime-aot build c 1", &[]);
+    field(&mut key, "wasm", &wasm);
+    field(&mut key, "generator", &gen_bytes);
+    field(&mut key, "cc", cc_ver.as_bytes());
+    field(&mut key, "target cpu", options.target_cpu.as_bytes());
+    field(&mut key, "c opt", options.c_opt.tag().as_bytes());
+    let key_hex = key.hex();
+
+    let entry = cache.join(&key_hex);
+    let program = entry.join("library.so");
+    if program.is_file() {
+        return Ok(program);
+    }
+    fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+    let staged = entry.join(format!("library.so.{}", std::process::id()));
+    let res = crate::cgen::build_c_blot_cdylib(&wasm, &cache, options.target_cpu, options.jobs, options.c_opt, &staged);
+    match res {
+        Ok(()) => {
+            fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))?;
+            let _ = fs::write(
+                entry.join("key.txt"),
+                format!(
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {cc_ver}\ntarget cpu {}\nwasm sha256 {}\n",
+                    options.c_opt.tag(),
+                    options.target_cpu,
+                    crate::sha256::hex(&wasm)
+                ),
+            );
+            Ok(program)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&staged);
+            Err(e)
+        }
+    }
 }
 
 /// Builds (or finds in `cache`) the program for `module`, optimized with the
@@ -206,8 +284,13 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
         None => false,
     };
     field(&mut key, "flat memory64", &[flat64 as u8]);
+    let target_tag = match options.target {
+        crate::codegen::Target::GooseBin => "goose-bin",
+        crate::codegen::Target::BlotCdylib => "blot-cdylib",
+    };
+    field(&mut key, "target", target_tag.as_bytes());
     let record = format!(
-        "wasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {}\nflat memory64 {flat64}\n",
+        "wasm sha256 {}\nmodule path {module_path:?}\ngenerator {}\nruntime {}\ntoolchain {}\ntarget cpu {}\ntarget {target_tag}\nflat memory64 {flat64}\n",
         crate::sha256::hex(&wasm),
         generator.display(),
         rt.display(),
@@ -222,7 +305,11 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
     let key = key.hex();
     let cache = &prepared.cache;
     let entry = cache.join(&key);
-    let program = entry.join("program");
+    let artifact_name = match options.target {
+        crate::codegen::Target::GooseBin => "program",
+        crate::codegen::Target::BlotCdylib => "library.so",
+    };
+    let program = entry.join(artifact_name);
     if program.is_file() {
         return Ok(program);
     }
@@ -235,7 +322,7 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
     let _ = fs::remove_dir_all(&work);
     let result = generate_and_compile(prepared, &work, &name, rustflags, options).and_then(|built| {
         fs::create_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()))?;
-        let staged = entry.join(format!("program.{}", std::process::id()));
+        let staged = entry.join(format!("{artifact_name}.{}", std::process::id()));
         fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
         fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
     });
@@ -325,8 +412,8 @@ fn wait(mut command: Command, what: &str, time_limit: std::time::Duration) -> Re
 /// Generates the crates into `work` and compiles them there with
 /// `rustflags` added; the program.
 fn generate_and_compile(prepared: &Prepared, work: &Path, name: &str, rustflags: &[String], options: &Options) -> Result<PathBuf, String> {
-    let Options { toolchain, target_cpu, jobs, time_limit } = *options;
-    crate::codegen::generate(&prepared.wasm, work, name, &prepared.rt, &prepared.module_path, prepared.flat64)?;
+    let Options { toolchain, target_cpu, jobs, time_limit, target: target_kind, .. } = *options;
+    crate::codegen::generate_target(&prepared.wasm, work, name, &prepared.rt, &prepared.module_path, prepared.flat64, target_kind)?;
     let target = work.join("target");
     let mut cargo = Command::new("cargo");
     cargo.env_clear().current_dir(work).stdin(Stdio::null());
@@ -365,7 +452,11 @@ fn generate_and_compile(prepared: &Prepared, work: &Path, name: &str, rustflags:
     if !status.success() {
         return Err(format!("cargo build failed ({status})"));
     }
-    Ok(target.join("release").join(name))
+    let out_file = match target_kind {
+        crate::codegen::Target::GooseBin => name.to_string(),
+        crate::codegen::Target::BlotCdylib => format!("lib{}.so", name.replace('-', "_")),
+    };
+    Ok(target.join("release").join(out_file))
 }
 
 /// The runtime crate's manifest and sources, by relative path, in order.

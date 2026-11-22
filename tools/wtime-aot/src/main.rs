@@ -24,13 +24,14 @@
 #![forbid(unsafe_code)]
 
 mod build;
+mod cgen;
 mod codegen;
 mod sha256;
 
 use std::path::PathBuf;
 use std::process::exit;
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +46,9 @@ fn main() {
     let mut args = all.into_iter();
     let (mut module, mut out, mut name, mut rt, mut module_path) = (None, None, None, None, None);
     let mut flat64 = false;
+    let mut target = codegen::Target::GooseBin;
+    let mut backend_c = false;
+    let mut c_opt = cgen::COpt::Auto;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => out = args.next().map(PathBuf::from),
@@ -52,6 +56,26 @@ fn main() {
             "--rt" => rt = args.next().map(PathBuf::from),
             "--module-path" => module_path = args.next(),
             "--flat-memory64" => flat64 = true,
+            "--blot-cdylib" => target = codegen::Target::BlotCdylib,
+            "--backend" => match args.next().as_deref() {
+                Some("rust") => backend_c = false,
+                Some("c") => backend_c = true,
+                other => {
+                    eprintln!("{USAGE}\ninvalid --backend {other:?}");
+                    exit(2);
+                }
+            },
+            "--c-opt" => match args.next().as_deref().map(cgen::COpt::parse) {
+                Some(Ok(v)) => c_opt = v,
+                Some(Err(e)) => {
+                    eprintln!("{USAGE}\n{e}");
+                    exit(2);
+                }
+                None => {
+                    eprintln!("{USAGE}\n--c-opt needs a value");
+                    exit(2);
+                }
+            },
             "-h" | "--help" => {
                 println!("{USAGE}");
                 exit(0)
@@ -67,6 +91,24 @@ fn main() {
         eprintln!("{USAGE}");
         exit(2)
     };
+    let bytes = match std::fs::read(&module) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("{}: {error}", module.display());
+            exit(1)
+        }
+    };
+    if backend_c {
+        if target != codegen::Target::BlotCdylib {
+            eprintln!("wtime-aot: --backend c currently requires --blot-cdylib");
+            exit(2);
+        }
+        if let Err(error) = cgen::generate_c(&bytes, &out, c_opt) {
+            eprintln!("wtime-aot: {error}");
+            exit(1);
+        }
+        return;
+    }
     let name = name.unwrap_or_else(|| {
         let stem = module.file_stem().map_or("module".into(), |s| s.to_string_lossy().into_owned());
         format!("aot-{}", stem.replace(|c: char| !c.is_ascii_alphanumeric(), "-"))
@@ -82,14 +124,7 @@ fn main() {
         }
     };
     let module_path = module_path.unwrap_or_else(|| module.to_string_lossy().into_owned());
-    let bytes = match std::fs::read(&module) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("{}: {error}", module.display());
-            exit(1)
-        }
-    };
-    if let Err(error) = codegen::generate(&bytes, &out, &name, &rt, &module_path, flat64) {
+    if let Err(error) = codegen::generate_target(&bytes, &out, &name, &rt, &module_path, flat64, target) {
         eprintln!("wtime-aot: {error}");
         exit(1)
     }
