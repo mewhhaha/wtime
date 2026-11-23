@@ -1144,6 +1144,16 @@ impl Asm {
         self.emit_u8(0xa2);
     }
 
+    /// `rdsspq dst` (`F3 [REX.W+B] 0F 1E /1`): architectural multi-byte NOP when CET shadow stack
+    /// is inactive; writes the calling thread's non-zero shadow-stack pointer into `dst` when active.
+    pub fn rdsspq(&mut self, dst: Gp) {
+        self.emit_u8(0xf3);
+        self.rex(true, 0, 0, dst.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x1e);
+        self.modrm_reg(1, dst.lo());
+    }
+
     pub fn stmxcsr(&mut self, mem: Mem) {
         self.rex_mem(false, 0, mem, false);
         self.emit_u8(0x0f);

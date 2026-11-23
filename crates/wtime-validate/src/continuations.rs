@@ -120,7 +120,7 @@ impl Context<'_> {
                     }
                     _ => s.pop(Ref(RefType::new(true, HeapType::Exn)))?,
                 }
-                s.values.extend(&ft.results)
+                s.push_slice(&ft.results)?
             }
             0xe6 => {
                 let (ty, tag) = if let Immediate::Pair(a, b) = i.immediate {
@@ -154,7 +154,7 @@ impl Context<'_> {
                 )?;
                 s.pop(Self::contref(ty))?;
                 s.pop_all(&ft.params[..ft.params.len() - 1])?;
-                s.values.extend(&peer.params)
+                s.push_slice(&peer.params)?
             }
             _ => return Err(invalid("unknown continuation operation")),
         }

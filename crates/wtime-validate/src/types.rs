@@ -1,8 +1,16 @@
+use std::sync::Arc;
+
 use super::*;
+
 #[derive(Debug)]
-pub(super) struct TypeEnvironment {
+pub(super) struct TypeDeclData {
     declarations: Vec<SubType>,
     groups: Vec<(usize, usize, usize)>,
+}
+
+#[derive(Debug)]
+pub(super) struct TypeEnvironment {
+    data: Arc<TypeDeclData>,
     work: std::cell::Cell<usize>,
     limit: usize,
     exhausted: std::cell::Cell<bool>,
@@ -19,8 +27,23 @@ impl TypeEnvironment {
             }
         }
         Self {
-            declarations,
-            groups: layouts,
+            data: Arc::new(TypeDeclData {
+                declarations,
+                groups: layouts,
+            }),
+            work: std::cell::Cell::new(0),
+            limit,
+            exhausted: std::cell::Cell::new(false),
+        }
+    }
+    /// Returns a thread-safe `Arc` handle to the immutable type declarations.
+    pub(super) fn shared_data(&self) -> Arc<TypeDeclData> {
+        Arc::clone(&self.data)
+    }
+    /// Constructs a per-worker `TypeEnvironment` sharing immutable declarations with a fresh work counter.
+    pub(super) fn from_shared(data: Arc<TypeDeclData>, limit: usize) -> Self {
+        Self {
+            data,
             work: std::cell::Cell::new(0),
             limit,
             exhausted: std::cell::Cell::new(false),
@@ -32,11 +55,6 @@ impl TypeEnvironment {
     /// Work spent so far.
     pub(super) fn work(&self) -> usize {
         self.work.get()
-    }
-    /// Forgets the work spent, to measure one body's work on its own.
-    pub(super) fn reset_work(&self) {
-        self.work.set(0);
-        self.exhausted.set(false);
     }
     /// Spends `n` units at once, as `n` spends would.
     pub(super) fn charge(&self, n: usize) {
@@ -60,7 +78,7 @@ impl TypeEnvironment {
 impl std::ops::Deref for TypeEnvironment {
     type Target = [SubType];
     fn deref(&self) -> &Self::Target {
-        &self.declarations
+        &self.data.declarations
     }
 }
 
@@ -145,7 +163,7 @@ fn equivalent(a: TypeIdx, b: TypeIdx, ts: &TypeEnvironment) -> bool {
             return false;
         }
         let (Some(&(start_a, len_a, pos_a)), Some(&(start_b, len_b, pos_b))) =
-            (ts.groups.get(a.0 as usize), ts.groups.get(b.0 as usize))
+            (ts.data.groups.get(a.0 as usize), ts.data.groups.get(b.0 as usize))
         else {
             return false;
         };

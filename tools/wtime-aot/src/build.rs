@@ -141,26 +141,31 @@ pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, 
 }
 
 /// Returns the current effective UID on Unix, failing closed if unavailable.
-/// On Linux this parses `Uid:` field 2 (`euid`) from `/proc/self/status` so it stays exact
-/// even under `PR_SET_DUMPABLE=0` (where `/proc/self` metadata reports `st_uid == 0`).
+/// On Linux this reads `/proc/thread-self/status` (falling back to `/proc/self/status` only on
+/// `NotFound`) and parses `Uid:` field 2 (`euid`), staying exact for the calling thread even
+/// under `PR_SET_DUMPABLE=0` (where `/proc/self` metadata reports `st_uid == 0`).
 #[cfg(unix)]
 fn current_euid() -> Result<u32, String> {
     #[cfg(target_os = "linux")]
     {
-        let status = fs::read_to_string("/proc/self/status")
-            .map_err(|e| format!("reading /proc/self/status for effective uid: {e}"))?;
+        let status = match fs::read_to_string("/proc/thread-self/status") {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::read_to_string("/proc/self/status")
+                .map_err(|e2| format!("reading /proc/self/status for effective uid: {e2}"))?,
+            Err(e) => return Err(format!("reading /proc/thread-self/status for effective uid: {e}")),
+        };
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("Uid:") {
                 let euid_str = rest
                     .split_whitespace()
                     .nth(1)
-                    .ok_or_else(|| "malformed Uid line in /proc/self/status".to_string())?;
+                    .ok_or_else(|| "malformed Uid line in proc status".to_string())?;
                 return euid_str
                     .parse::<u32>()
-                    .map_err(|e| format!("parsing effective uid from /proc/self/status: {e}"));
+                    .map_err(|e| format!("parsing effective uid from proc status: {e}"));
             }
         }
-        Err("missing Uid line in /proc/self/status".to_string())
+        Err("missing Uid line in proc status".to_string())
     }
     #[cfg(not(target_os = "linux"))]
     {

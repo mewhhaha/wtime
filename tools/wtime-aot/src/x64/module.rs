@@ -628,7 +628,11 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     for exp in &decoded.exports {
         match exp.kind {
             ExternalKind::Func => {
-                exported_funcs.push((exp.name.clone(), exp.index as usize));
+                let fi = exp.index as usize;
+                if fi >= func_type_idx.len() {
+                    return Err(format!("x64: exported function index {fi} out of range"));
+                }
+                exported_funcs.push((exp.name.clone(), fi));
             }
             ExternalKind::Global => {
                 let gi = exp.index as usize;

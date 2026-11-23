@@ -277,6 +277,7 @@ struct Stack {
     types: Rc<types::TypeEnvironment>,
     values: Vec<ValType>,
     controls: Vec<Control>,
+    max_stack_height: usize,
 }
 impl Stack {
     fn restore_locals(&mut self, n: usize) {
@@ -343,10 +344,15 @@ impl Stack {
         }
         Ok(())
     }
-    /// Charges pushed slice elements against `self.types` (`max_type_work`) before extending
-    /// `self.values`, bounding cumulative operand-stack traffic even in dead/polymorphic code.
+    /// Enforces `max_stack_height` and charges pushed slice elements against `self.types`
+    /// (`max_type_work`) BEFORE extending `self.values`, preventing both transient multi-MB stack
+    /// allocations and uncharged dead/polymorphic operand-stack traffic.
     fn push_slice(&mut self, ts: &[ValType]) -> Result<()> {
         if !ts.is_empty() {
+            budget(
+                self.values.len().saturating_add(ts.len()) <= self.max_stack_height,
+                "validation stack limit exceeded",
+            )?;
             self.types.charge(ts.len());
             if self.types.exhausted() {
                 return Err(Error::new(
@@ -683,6 +689,14 @@ pub fn validate(
             return Ok(());
         }
         let validated = {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let indexed: Vec<(usize, u32, &FunctionBody)> = pairs
+                .iter()
+                .enumerate()
+                .map(|(idx, &(t, b))| (idx, t, b))
+                .collect();
+            let stop_at = AtomicUsize::new(indexed.len());
+            let type_data = c.types.shared_data();
             let parts = (
                 &c.tags,
                 &c.funcs,
@@ -694,12 +708,20 @@ pub fn validate(
                 &c.memories,
                 c.imported_globals,
             );
+            // Share immutable `TypeEnvironment` declarations via `Arc` (`from_shared`) and accumulate
+            // type work monotonically per worker WITHOUT resetting between bodies. Because `map_ordered`
+            // assigns batches in strictly increasing index order, a worker reaching `exhausted()` at
+            // index `m` proves `sum_{0..=m} work >= worker_work > max_type_work`, bounding total parallel
+            // work to `<= threads * max_type_work` while preserving the exact deterministic first error.
             wtime_types::parallel::map_ordered(
-                &pairs,
+                &indexed,
                 threads,
                 || Context {
                     tags: parts.0.clone(),
-                    types: Rc::new(types::TypeEnvironment::new(&m.type_groups, limits.max_type_work)),
+                    types: Rc::new(types::TypeEnvironment::from_shared(
+                        std::sync::Arc::clone(&type_data),
+                        limits.max_type_work,
+                    )),
                     m: &m,
                     funcs: parts.1.clone(),
                     imported_funcs: parts.2,
@@ -712,15 +734,25 @@ pub fn validate(
                     features,
                     limits,
                 },
-                |worker, &(t, b)| {
-                    worker.types.reset_work();
+                |worker, &(idx, t, b)| {
+                    if worker.types.exhausted() || idx >= stop_at.load(Ordering::Relaxed) {
+                        return (None, 0);
+                    }
+                    let before = worker.types.work();
                     let ti = t as usize;
                     let result = worker.ty(ti).and_then(|_| worker.body(ti, b));
-                    (result, worker.types.work())
+                    let delta = worker.types.work().saturating_sub(before);
+                    if worker.types.exhausted() || result.is_err() {
+                        stop_at.fetch_min(idx + 1, Ordering::Relaxed);
+                    }
+                    (Some(result), delta)
                 },
             )
         };
-        for (result, work) in validated {
+        for (opt_result, work) in validated {
+            let Some(result) = opt_result else {
+                break;
+            };
             c.types.charge(work);
             if c.types.exhausted() {
                 // Reported as the work budget below.
@@ -800,6 +832,7 @@ impl Context<'_> {
                 has_else: false,
                 initialized: 0,
             }],
+            max_stack_height: self.limits.max_stack_height,
         };
         for i in is {
             match i.opcode {
@@ -859,6 +892,7 @@ impl Context<'_> {
                 has_else: false,
                 initialized: 0,
             }],
+            max_stack_height: self.limits.max_stack_height,
         };
         s.initialized = locals
             .iter()

@@ -795,10 +795,16 @@ impl Builder {
         Self { ir, cur_bb: BlockId(0), consts: Vec::new(), const_fold }
     }
 
-    fn new_block(&mut self, is_loop_header: bool) -> BlockId {
+    fn new_block(&mut self, is_loop_header: bool) -> Res<BlockId> {
+        if self.ir.blocks.len() >= MAX_BLOCKS_PER_FN {
+            return Err(format!(
+                "x64: function {} basic blocks exceed cap {MAX_BLOCKS_PER_FN}",
+                self.ir.func_index
+            ));
+        }
         let id = BlockId(self.ir.blocks.len() as u32);
         self.ir.blocks.push(Block::new(is_loop_header));
-        id
+        Ok(id)
     }
 
     fn add_block_param(&mut self, bb: BlockId, ty: Ty) -> Val {
@@ -1245,7 +1251,7 @@ pub fn lower_wasm_to_ir_with_budget(
                 // block
                 let (params, results) = block_type_tys(module, &insn.immediate)?;
                 let height = stack.len() - params.len();
-                let merge_bb = b.new_block(false);
+                let merge_bb = b.new_block(false)?;
                 let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
                 let n_new = results.len().saturating_add(carried.len());
                 if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
@@ -1275,7 +1281,7 @@ pub fn lower_wasm_to_ir_with_budget(
                 // loop
                 let (params, results) = block_type_tys(module, &insn.immediate)?;
                 let height = stack.len() - params.len();
-                let header_bb = b.new_block(true);
+                let header_bb = b.new_block(true)?;
                 let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
                 let n_new = params.len().saturating_add(carried.len());
                 if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
@@ -1321,9 +1327,9 @@ pub fn lower_wasm_to_ir_with_budget(
                 let (params, results) = block_type_tys(module, &insn.immediate)?;
                 let cond = stack.pop().ok_or("if cond underflow")?;
                 let height = stack.len() - params.len();
-                let then_bb = b.new_block(false);
-                let else_bb = b.new_block(false);
-                let merge_bb = b.new_block(false);
+                let then_bb = b.new_block(false)?;
+                let else_bb = b.new_block(false)?;
+                let merge_bb = b.new_block(false)?;
                 let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
                 let n_new = results.len().saturating_add(carried.len());
                 if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
@@ -1465,9 +1471,9 @@ pub fn lower_wasm_to_ir_with_budget(
                 let depth = imm_idx()? as usize;
                 let cond = stack.pop().ok_or("br_if cond")?;
                 let fi = frames.len() - 1 - depth;
-                let fall_bb = b.new_block(false);
+                let fall_bb = b.new_block(false)?;
                 if frames[fi].kind == FrameKind::Function {
-                    let ret_bb = b.new_block(false);
+                    let ret_bb = b.new_block(false)?;
                     let n_res = frames[fi].results.len();
                     let ret_vals = stack[stack.len() - n_res..].to_vec();
                     b.terminate(Term::BranchIf {
@@ -1517,7 +1523,7 @@ pub fn lower_wasm_to_ir_with_budget(
                         let rbb = match ret_bb_cache {
                             Some(bb) => bb,
                             None => {
-                                let bb = b.new_block(false);
+                                let bb = b.new_block(false)?;
                                 let saved = b.cur_bb;
                                 b.cur_bb = bb;
                                 let base = stack.len() - f.results.len();
