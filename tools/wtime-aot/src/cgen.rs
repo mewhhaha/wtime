@@ -498,12 +498,20 @@ static inline int64_t wt_mem_grow(Mem32Meta *m, uint64_t delta) {
 }
 
 #if defined(WT_NEED_LIBC)
+#if defined(__linux__)
+static __thread uintptr_t wt_tls_stack_low = 0;
+static __thread uintptr_t wt_tls_stack_high = 0;
+static __thread uintptr_t wt_tls_stack_floor = 0;
+#endif
 static __attribute__((noinline)) uintptr_t wt_stack_floor(void) {
     volatile uint8_t probe = 0;
     uintptr_t sp = (uintptr_t)&probe;
     const uintptr_t budget = 7ULL << 20;
     uintptr_t budget_floor = sp > budget ? (sp - budget) : 0;
 #if defined(__linux__)
+    if (WT_LIKELY(sp >= wt_tls_stack_low && sp < wt_tls_stack_high)) {
+        return wt_tls_stack_floor > budget_floor ? wt_tls_stack_floor : budget_floor;
+    }
     pthread_attr_t attr;
     if (pthread_getattr_np(pthread_self(), &attr) == 0) {
         void *addr = NULL;
@@ -513,14 +521,17 @@ static __attribute__((noinline)) uintptr_t wt_stack_floor(void) {
         if (ok == 0 && addr != NULL && size > 0) {
             uintptr_t low = (uintptr_t)addr;
             uintptr_t high = low + (uintptr_t)size;
-            if (sp >= low && sp <= high) {
+            if (high > low && sp >= low && sp < high) {
                 uintptr_t headroom = size >= (256ULL << 10) ? (128ULL << 10) : (uintptr_t)(size / 2);
                 uintptr_t real_floor = low + headroom;
+                wt_tls_stack_low = low;
+                wt_tls_stack_high = high;
+                wt_tls_stack_floor = real_floor;
                 return real_floor > budget_floor ? real_floor : budget_floor;
             }
         }
     }
-    return sp;
+    return ~(uintptr_t)0;
 #else
     return budget_floor;
 #endif
@@ -4753,50 +4764,80 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" {
         return false;
     }
-    let e_phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
-    let e_phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
-    let e_phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+    let Ok(e_phoff) = usize::try_from(u64::from_le_bytes(elf[32..40].try_into().unwrap())) else {
+        return false;
+    };
+    let e_phentsize = usize::from(u16::from_le_bytes(elf[54..56].try_into().unwrap()));
+    let e_phnum = usize::from(u16::from_le_bytes(elf[56..58].try_into().unwrap()));
     const PT_NOTE: u32 = 4;
     const PT_GNU_PROPERTY: u32 = 0x6474_e553;
     const NT_GNU_PROPERTY_TYPE_0: u32 = 5;
     const GNU_PROPERTY_X86_FEATURE_1_AND: u32 = 0xc000_0002;
     const GNU_PROPERTY_X86_FEATURE_1_SHSTK: u32 = 1 << 1;
+    let align_up = |v: usize, a: usize| v.checked_add(a - 1).map(|x| x & !(a - 1));
     for i in 0..e_phnum {
-        let Some(off) = e_phoff.checked_add(i.saturating_mul(e_phentsize)) else {
+        let Some(off) = i.checked_mul(e_phentsize).and_then(|d| e_phoff.checked_add(d)) else {
             break;
         };
-        if off + 56 > elf.len() {
+        let Some(ph_end) = off.checked_add(56) else {
+            break;
+        };
+        if ph_end > elf.len() {
             break;
         }
         let p_type = u32::from_le_bytes(elf[off..off + 4].try_into().unwrap());
         if p_type != PT_NOTE && p_type != PT_GNU_PROPERTY {
             continue;
         }
-        let p_offset = u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
-        let p_filesz = u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
-        let p_align = u64::from_le_bytes(elf[off + 48..off + 56].try_into().unwrap()) as usize;
+        let Ok(p_offset) = usize::try_from(u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap())) else {
+            continue;
+        };
+        let Ok(p_filesz) = usize::try_from(u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap())) else {
+            continue;
+        };
+        let Ok(p_align) = usize::try_from(u64::from_le_bytes(elf[off + 48..off + 56].try_into().unwrap())) else {
+            continue;
+        };
         let note_align = if p_type == PT_GNU_PROPERTY || p_align >= 8 { 8 } else { 4 };
-        let align_up = |v: usize, a: usize| (v + (a - 1)) & !(a - 1);
         let mut cur = p_offset;
         let end = p_offset.saturating_add(p_filesz).min(elf.len());
-        while cur + 12 <= end {
-            let namesz = u32::from_le_bytes(elf[cur..cur + 4].try_into().unwrap()) as usize;
-            let descsz = u32::from_le_bytes(elf[cur + 4..cur + 8].try_into().unwrap()) as usize;
+        while let Some(name_start) = cur.checked_add(12) {
+            if name_start > end {
+                break;
+            }
+            let Ok(namesz) = usize::try_from(u32::from_le_bytes(elf[cur..cur + 4].try_into().unwrap())) else {
+                break;
+            };
+            let Ok(descsz) = usize::try_from(u32::from_le_bytes(elf[cur + 4..cur + 8].try_into().unwrap())) else {
+                break;
+            };
             let ntype = u32::from_le_bytes(elf[cur + 8..cur + 12].try_into().unwrap());
-            let name_start = cur + 12;
-            let name_end = name_start.saturating_add(namesz);
-            let desc_start = align_up(name_end, note_align);
-            let desc_end = desc_start.saturating_add(descsz);
+            let Some(name_end) = name_start.checked_add(namesz) else {
+                break;
+            };
+            let Some(desc_start) = align_up(name_end, note_align) else {
+                break;
+            };
+            let Some(desc_end) = desc_start.checked_add(descsz) else {
+                break;
+            };
             if desc_end > end {
                 break;
             }
             if ntype == NT_GNU_PROPERTY_TYPE_0 && &elf[name_start..name_end] == b"GNU\0" {
                 let mut p = desc_start;
-                while p + 8 <= desc_end {
+                while let Some(data_start) = p.checked_add(8) {
+                    if data_start > desc_end {
+                        break;
+                    }
                     let pr_type = u32::from_le_bytes(elf[p..p + 4].try_into().unwrap());
-                    let pr_datasz = u32::from_le_bytes(elf[p + 4..p + 8].try_into().unwrap()) as usize;
-                    let data_start = p + 8;
-                    let data_end = data_start.saturating_add(pr_datasz);
+                    let Ok(pr_datasz) = usize::try_from(u32::from_le_bytes(elf[p + 4..p + 8].try_into().unwrap()))
+                    else {
+                        break;
+                    };
+                    let Some(data_end) = data_start.checked_add(pr_datasz) else {
+                        break;
+                    };
                     if data_end > desc_end {
                         break;
                     }
@@ -4806,10 +4847,16 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
                             return true;
                         }
                     }
-                    p = align_up(data_end, 8);
+                    let Some(next_p) = align_up(data_end, 8) else {
+                        break;
+                    };
+                    p = next_p;
                 }
             }
-            cur = align_up(desc_end, note_align);
+            let Some(next_cur) = align_up(desc_end, note_align) else {
+                break;
+            };
+            cur = next_cur;
         }
     }
     false
@@ -4822,15 +4869,37 @@ pub struct CcInfo {
     pub cc: String,
     pub canon_cc: PathBuf,
     pub stamp: FileStamp,
+    pub lld_key: Option<(PathBuf, FileStamp)>,
     pub version: String,
     pub has_lld: bool,
     pub has_cet_return: bool,
     pub has_stack_clash: bool,
 }
 
-/// Re-resolves `info.cc_name` on `PATH` and confirms both the canonical target path and file
-/// stamp are unchanged since probing (catching both in-place binary edits and symlink repointing).
-pub fn verify_cc_unchanged(info: &CcInfo) -> Res<()> {
+/// Re-resolves C compiler precedence (`clang`, `cc`, `gcc`), canonical compiler target + file stamp,
+/// and `ld.lld` canonical path + file stamp to catch in-place upgrades, symlink repointing, linker
+/// upgrades, or a higher-precedence compiler appearing on `PATH` mid-build.
+pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> {
+    for cand in ["clang", "cc", "gcc"] {
+        if cand == info.cc_name {
+            break;
+        }
+        if let Some(higher) = find_in_path(cand)
+            && let Ok(canon_higher) = fs::canonicalize(&higher)
+        {
+            let mut ver_cmd = clean_cc_command(&canon_higher.to_string_lossy());
+            ver_cmd.arg("--version");
+            if crate::build::run_cmd_capture_with_deadline(ver_cmd, &format!("{cand} --version"), deadline)
+                .is_ok_and(|o| o.status.success())
+            {
+                return Err(format!(
+                    "higher-precedence C compiler {cand} ({}) appeared on PATH during build (previously selected {}); refusing to publish stale provenance",
+                    canon_higher.display(),
+                    info.cc_name
+                ));
+            }
+        }
+    }
     let found = find_in_path(info.cc_name)
         .ok_or_else(|| format!("C compiler {} disappeared from PATH during build", info.cc_name))?;
     let post_canon = fs::canonicalize(&found).map_err(|e| format!("canonicalizing {}: {e}", found.display()))?;
@@ -4842,6 +4911,12 @@ pub fn verify_cc_unchanged(info: &CcInfo) -> Res<()> {
             info.canon_cc.display(),
             post_canon.display()
         ));
+    }
+    let post_lld_key = find_in_path("ld.lld")
+        .and_then(|p| fs::canonicalize(&p).ok())
+        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+    if post_lld_key != info.lld_key {
+        return Err("linker ld.lld changed on PATH during build; refusing to publish stale provenance".into());
     }
     Ok(())
 }
@@ -4875,11 +4950,15 @@ struct ShardJob {
 
 /// Probes the host C compiler (respecting `deadline`) and memoizes by resolved canonical binary
 /// path + file stamp so repeated builds avoid duplicate spawns while detecting live upgrades.
-pub fn detect_cc_with_deadline(deadline: Option<Instant>) -> Res<CcInfo> {
+pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Instant>) -> Res<CcInfo> {
     static CACHE: OnceLock<Mutex<HashMap<CcCacheKey, CcInfo>>> = OnceLock::new();
     let lld_key = find_in_path("ld.lld")
         .and_then(|p| fs::canonicalize(&p).ok())
         .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+    let private_probe_dir = match probe_root {
+        Some(root) => Some(crate::build::ensure_private_dir(&root.join("cc-probe"))?),
+        None => None,
+    };
     for cc in ["clang", "cc", "gcc"] {
         let Some(found) = find_in_path(cc) else { continue };
         let Ok(canon_cc) = fs::canonicalize(&found) else { continue };
@@ -4907,12 +4986,14 @@ pub fn detect_cc_with_deadline(deadline: Option<Instant>) -> Res<CcInfo> {
         };
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let has_cet_return = {
-            let (mut c_file, c_path) = crate::build::create_private_temp_file(None, "cet", ".c")?;
+            let (mut c_file, c_path) =
+                crate::build::create_private_temp_file(private_probe_dir.as_deref(), "cet", ".c")?;
             let _rm_c = crate::build::RemoveFileOnDrop(c_path.clone());
             std::io::Write::write_all(&mut c_file, b"int wt_cet_probe(void) { return 0; }\n")
                 .map_err(|e| format!("{}: {e}", c_path.display()))?;
             drop(c_file);
-            let (so_file, so_path) = crate::build::create_private_temp_file(None, "cet", ".so")?;
+            let (so_file, so_path) =
+                crate::build::create_private_temp_file(private_probe_dir.as_deref(), "cet", ".so")?;
             drop(so_file);
             let _rm_so = crate::build::RemoveFileOnDrop(so_path.clone());
             let mut cet_cmd = clean_cc_command(&cc_str);
@@ -4931,13 +5012,17 @@ pub fn detect_cc_with_deadline(deadline: Option<Instant>) -> Res<CcInfo> {
         };
         #[cfg(all(not(target_os = "linux"), target_arch = "x86_64"))]
         let has_cet_return = {
+            let _ = &private_probe_dir;
             let mut cet_cmd = clean_cc_command(&cc_str);
             cet_cmd.args(["-x", "c", "-c", "-fcf-protection=return", "-o", "/dev/null", "-"]);
             crate::build::run_cmd_capture_with_deadline(cet_cmd, &format!("{cc} -fcf-protection=return"), deadline)
                 .map(|o| o.status.success())?
         };
         #[cfg(not(target_arch = "x86_64"))]
-        let has_cet_return = false;
+        let has_cet_return = {
+            let _ = &private_probe_dir;
+            false
+        };
         let has_stack_clash = {
             let mut sc_cmd = clean_cc_command(&cc_str);
             sc_cmd.args(["-x", "c", "-c", "-fstack-clash-protection", "-o", "/dev/null", "-"]);
@@ -4949,6 +5034,7 @@ pub fn detect_cc_with_deadline(deadline: Option<Instant>) -> Res<CcInfo> {
             cc: cc_str,
             canon_cc,
             stamp,
+            lld_key: lld_key.clone(),
             version,
             has_lld,
             has_cet_return,
@@ -4963,7 +5049,7 @@ pub fn detect_cc_with_deadline(deadline: Option<Instant>) -> Res<CcInfo> {
 /// Returns `(compiler_path, version_string, has_lld)`.
 #[allow(dead_code)]
 pub fn detect_cc() -> Res<(String, String, bool)> {
-    let info = detect_cc_with_deadline(None)?;
+    let info = detect_cc_with_deadline(None, None)?;
     Ok((info.cc, info.version, info.has_lld))
 }
 
@@ -5077,9 +5163,10 @@ pub fn build_c_blot_cdylib(
     out_so: &Path,
 ) -> Res<()> {
     let deadline = time_limit.map(|d| Instant::now() + d);
-    let cc_info = detect_cc_with_deadline(deadline)?;
+    let cache = crate::build::ensure_private_dir(cache)?;
+    let cc_info = detect_cc_with_deadline(Some(&cache), deadline)?;
     let cc_target = cc_target_fingerprint_with_deadline(&cc_info, target_cpu, deadline)?;
-    build_c_blot_cdylib_with_info(wasm, cache, target_cpu, jobs, opt, &cc_info, &cc_target, deadline, out_so)
+    build_c_blot_cdylib_with_info(wasm, &cache, target_cpu, jobs, opt, &cc_info, &cc_target, deadline, out_so)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5834,7 +5921,7 @@ int main(int argc, char **argv) {
         );
         // Verify C fallback `.so` carries `GNU_PROPERTY_X86_FEATURE_1_SHSTK` when compiler supports `-fcf-protection=return`,
         // and verify `c-obj` cached shards were published immutable (`0o444`) with `.o.sha256` sidecars.
-        let cc_info = detect_cc_with_deadline(None).unwrap();
+        let cc_info = detect_cc_with_deadline(Some(&cache), None).unwrap();
         let obj_dir = cache.join("c-obj");
         let mut saw_obj = 0usize;
         for entry in fs::read_dir(&obj_dir).unwrap().flatten() {

@@ -636,6 +636,14 @@ pub fn decode(
             8 => m.start = Some(FuncIdx(s.u32()?)),
             9 => {
                 let n = count(&mut s)?;
+                if n > policy.max_elements
+                    || (!decl_limit_exceeded
+                        && !rec_group_limit_exceeded
+                        && !expr_limit_exceeded
+                        && m.elements.try_reserve_exact(n).is_err())
+                {
+                    decl_limit_exceeded = true;
+                }
                 for _ in 0..n {
                     let f = s.u32()?;
                     if f > 7 {
@@ -653,6 +661,10 @@ pub fn decode(
                     if expr_insns > policy.max_instructions {
                         expr_limit_exceeded = true;
                     }
+                    let keep_seg = !decl_limit_exceeded
+                        && !rec_group_limit_exceeded
+                        && !expr_limit_exceeded
+                        && m.elements.len() < policy.max_elements;
                     let mode = match f & 3 {
                         0 => {
                             let (offset, over) = expression_bounded(
@@ -660,7 +672,7 @@ pub fn decode(
                                 &mut expr_insns,
                                 &mut expr_imm_elems,
                                 policy.max_instructions,
-                                !expr_limit_exceeded,
+                                keep_seg,
                             )?;
                             if over {
                                 expr_limit_exceeded = true;
@@ -674,7 +686,7 @@ pub fn decode(
                                 &mut expr_insns,
                                 &mut expr_imm_elems,
                                 policy.max_instructions,
-                                !expr_limit_exceeded,
+                                keep_seg,
                             )?;
                             if over {
                                 expr_limit_exceeded = true;
@@ -705,24 +717,39 @@ pub fn decode(
                     };
                     let n_items = count(&mut s)?;
                     let mut init = Vec::new();
+                    let keep_items = keep_seg
+                        && !expr_limit_exceeded
+                        && total_elem_items.saturating_add(u64::try_from(n_items).unwrap_or(u64::MAX))
+                            <= policy.max_table_elements
+                        && expr_insns.saturating_add(n_items.saturating_mul(2))
+                            <= policy.max_instructions
+                        && expr_imm_elems.saturating_add(n_items.saturating_mul(4))
+                            <= policy.max_instructions;
+                    if keep_items && init.try_reserve_exact(n_items).is_err() {
+                        expr_limit_exceeded = true;
+                    }
                     for _ in 0..n_items {
                         total_elem_items = total_elem_items.saturating_add(1);
-                        if total_elem_items > policy.max_table_elements {
+                        expr_imm_elems = expr_imm_elems.saturating_add(4);
+                        if total_elem_items > policy.max_table_elements
+                            || expr_imm_elems > policy.max_instructions
+                        {
                             expr_limit_exceeded = true;
                             init.clear();
                         }
+                        let retain = keep_seg && !expr_limit_exceeded;
                         if expr {
                             let (item, over) = expression_bounded(
                                 &mut s,
                                 &mut expr_insns,
                                 &mut expr_imm_elems,
                                 policy.max_instructions,
-                                !expr_limit_exceeded,
+                                retain,
                             )?;
                             if over {
                                 expr_limit_exceeded = true;
                                 init.clear();
-                            } else if !expr_limit_exceeded {
+                            } else if retain {
                                 init.push(item);
                             }
                         } else {
@@ -731,7 +758,7 @@ pub fn decode(
                             if expr_insns > policy.max_instructions {
                                 expr_limit_exceeded = true;
                                 init.clear();
-                            } else if !expr_limit_exceeded {
+                            } else if retain {
                                 init.push(vec![
                                     Instruction {
                                         opcode: 0xd2,
@@ -745,7 +772,7 @@ pub fn decode(
                             }
                         }
                     }
-                    if !expr_limit_exceeded {
+                    if keep_seg && !expr_limit_exceeded {
                         m.elements.push(Element { mode, ty, init });
                     }
                 }
@@ -879,12 +906,22 @@ pub fn decode(
             11 => {
                 let n = count(&mut s)?;
                 decoded_data_count = n;
+                if n > policy.max_data_segments {
+                    decl_limit_exceeded = true;
+                }
                 let data_keep_base = !decl_limit_exceeded
                     && !rec_group_limit_exceeded
                     && !local_limit_exceeded
                     && !total_local_limit_exceeded
                     && !code_insn_limit_exceeded
-                    && !imm_limit_exceeded;
+                    && !imm_limit_exceeded
+                    && !expr_limit_exceeded
+                    && expr_insns <= policy.max_instructions
+                    && expr_imm_elems <= policy.max_instructions;
+                if data_keep_base && m.data.try_reserve_exact(n).is_err() {
+                    decl_limit_exceeded = true;
+                }
+                let data_keep_base = data_keep_base && !decl_limit_exceeded;
                 for _ in 0..n {
                     let flags = s.u32()?;
                     s.feature(flags == 0 || s.features().bulk_memory, "bulk data segments")?;
@@ -999,6 +1036,8 @@ pub fn decode(
         || m.memories.len() > policy.max_memories
         || m.globals.len() > policy.max_globals
         || m.tags.len() > policy.max_tags
+        || m.elements.len() > policy.max_elements
+        || m.data.len() > policy.max_data_segments
     {
         return Err(Error::new(
             ErrorKind::ResourceLimit,
@@ -1663,13 +1702,42 @@ mod tests {
                 &dc_mismatch_over,
                 &FeatureSet::default(),
                 &ResourceLimits {
-                    max_instructions: 1,
+                    max_data_segments: 1,
                     ..ResourceLimits::default()
                 },
             )
             .unwrap_err()
             .kind,
             ErrorKind::Decode
+        );
+        // (d) over-limit elements / data segments reject with `ResourceLimit` when well-formed.
+        let many_data = module(&[(11, &[3, 1, 0, 1, 0, 1, 0])]);
+        assert_eq!(
+            decode(
+                &many_data,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_data_segments: 2,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+        let many_elems = module(&[(9, &[3, 1, 0, 0, 1, 0, 0, 1, 0, 0])]);
+        assert_eq!(
+            decode(
+                &many_elems,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_elements: 2,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
         );
     }
 }

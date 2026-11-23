@@ -142,6 +142,8 @@ pub struct ResourceLimits {
     pub max_gc_mark_work: usize,
     pub max_type_work: usize,
     pub max_rec_group_size: usize,
+    pub max_elements: usize,
+    pub max_data_segments: usize,
     pub max_instructions: usize,
     pub fuel: Option<u64>,
     /// Host threads that decoding and validation may use for function
@@ -178,6 +180,8 @@ impl Default for ResourceLimits {
             max_gc_mark_work: 10_000_000,
             max_type_work: 10_000_000,
             max_rec_group_size: 10_000,
+            max_elements: 100_000,
+            max_data_segments: 100_000,
             max_instructions: 10_000_000,
             fuel: None,
             compile_threads: 0,

@@ -45,6 +45,7 @@ pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
 pub const MAX_TOTAL_EXTERN_SLOTS: usize = 65_536;
 pub const MAX_GLOBALS: usize = 65_536;
 pub const MAX_EXPORTS: usize = 65_536;
+pub const MAX_MODULE_TYPES: usize = 100_000;
 pub const MAX_CTX_BYTES: usize = 16 << 20; // 16 MiB (far below i32::MAX)
 pub const MAX_AGGREGATE_CI_TABLE_BYTES: usize = 64 << 20; // 64 MiB
 pub const MAX_AGGREGATE_BR_TABLE_ENTRIES: usize = 4_194_304; // 16 MiB jump tables
@@ -475,21 +476,33 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
 
     // Pre-validate and intern module types ONCE into canonical `u32` IDs + cached arity/admissibility
     // so every function declaration, block type, table slot, and `call_indirect` site runs in O(1)
-    // with zero per-function or per-slot `FuncType` cloning/re-scanning.
+    // with zero per-function or per-slot `FuncType` cloning/re-scanning. Also bound total
+    // declared type arity upfront before cloning `decoded.types` into `X64Module`.
+    if decoded.types.len() > MAX_MODULE_TYPES {
+        return Err(format!("x64: module declares {} types (max {MAX_MODULE_TYPES})", decoded.types.len()));
+    }
     let mut sig_to_canon: HashMap<&FuncType, u32> = HashMap::with_capacity(decoded.types.len());
     let mut type_canon: Vec<u32> = Vec::with_capacity(decoded.types.len());
     let mut type_arity: Vec<usize> = Vec::with_capacity(decoded.types.len());
     let mut type_admitted: Vec<bool> = Vec::with_capacity(decoded.types.len());
+    let mut declared_type_arity: usize = 0;
     for (ti, fty) in decoded.types.iter().enumerate() {
         if let Some(b) = budget
             && (ti & 4095) == 4095
         {
             b.check_deadline()?;
         }
+        let arity = fty.params.len().saturating_add(fty.results.len());
+        declared_type_arity = declared_type_arity.saturating_add(arity);
+        if declared_type_arity > MAX_TOTAL_SIG_ARITY {
+            return Err(format!(
+                "x64: total type-section signature arity exceeds cap ({MAX_TOTAL_SIG_ARITY})"
+            ));
+        }
         let next_id = sig_to_canon.len() as u32;
         let cid = *sig_to_canon.entry(fty).or_insert(next_id);
         type_canon.push(cid);
-        type_arity.push(fty.params.len().saturating_add(fty.results.len()));
+        type_arity.push(arity);
         type_admitted.push(fty.params.iter().chain(&fty.results).all(|&vt| check_val_type(vt).is_ok()));
     }
 
@@ -738,6 +751,9 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         }
         match &seg.mode {
             SegmentMode::Active { index: 0, offset } => {
+                if memory.is_none() {
+                    return Err("x64: active data segment without linear memory".into());
+                }
                 let X64ConstVal::I32(off_i32) = eval_const_expr(offset, &global_inits)? else {
                     return Err("x64: active data offset must be i32".into());
                 };

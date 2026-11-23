@@ -618,17 +618,27 @@ fn mark_artifact_immutable(path: &Path) -> Result<(), String> {
     mark_file_immutable(path, 0o555)
 }
 
-/// Atomically writes `digest_file` containing `sha` (propagating all errors).
+/// Atomically writes `digest_file` containing `sha` with owner-only creation (`0o600`) and
+/// immutable `0o444` permissions before rename so `umask 0002` never creates group-writable
+/// sidecars (propagating all errors).
 pub(crate) fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_file: &Path) -> Result<(), String> {
+    use std::io::Write as _;
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let staged_sha = entry.join(format!("{artifact_name}.sha256.{}.{seq}", std::process::id()));
-    if let Err(e) = fs::write(&staged_sha, format!("{sha}\n")) {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let write_res = opts
+        .open(&staged_sha)
+        .and_then(|mut f| f.write_all(format!("{sha}\n").as_bytes()))
+        .map_err(|e| format!("{}: {e}", staged_sha.display()));
+    if let Err(e) = write_res
+        .and_then(|()| mark_file_immutable(&staged_sha, 0o444))
+        .and_then(|()| fs::rename(&staged_sha, digest_file).map_err(|e| format!("{}: {e}", digest_file.display())))
+    {
         let _ = fs::remove_file(&staged_sha);
-        return Err(format!("{}: {e}", staged_sha.display()));
-    }
-    if let Err(e) = fs::rename(&staged_sha, digest_file) {
-        let _ = fs::remove_file(&staged_sha);
-        return Err(format!("{}: {e}", digest_file.display()));
+        return Err(e);
     }
     Ok(())
 }
@@ -734,7 +744,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     let cache = ensure_private_dir(cache)?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
-    let cc_info = crate::cgen::detect_cc_with_deadline(Some(deadline))?;
+    let cc_info = crate::cgen::detect_cc_with_deadline(Some(&cache), Some(deadline))?;
     let cc_target = crate::cgen::cc_target_fingerprint_with_deadline(&cc_info, options.target_cpu, Some(deadline))?;
     check_deadline(deadline, options.time_limit)?;
 
@@ -777,7 +787,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     match res {
         Ok(()) => {
             check_deadline(deadline, options.time_limit)?;
-            if let Err(e) = crate::cgen::verify_cc_unchanged(&cc_info) {
+            if let Err(e) = crate::cgen::verify_cc_unchanged(&cc_info, Some(deadline)) {
                 let _ = fs::remove_file(&staged);
                 return Err(e);
             }
@@ -1251,4 +1261,40 @@ fn rustc_version(toolchain: &str, deadline: Option<std::time::Instant>) -> Resul
         return Err(format!("toolchain {toolchain}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_digest_sidecar_is_immutable_and_rejects_group_writable() {
+        let root = std::env::temp_dir().join(format!("wtime-aot-sidecar-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = ensure_private_dir(&root).unwrap();
+        let art = dir.join("library.so");
+        let sha_path = dir.join("library.so.sha256");
+        let payload = b"dummy-verified-artifact";
+        fs::write(&art, payload).unwrap();
+        mark_artifact_immutable(&art).unwrap();
+        let sha = crate::sha256::hex(payload);
+        publish_digest_sidecar(&dir, "library.so", &sha, &sha_path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::symlink_metadata(&sha_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o444, "sidecar must be immutable 0o444 regardless of umask");
+        }
+        assert_eq!(verified_cached_artifact_bytes(&art, &sha_path).as_deref(), Some(payload.as_slice()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sha_path, fs::Permissions::from_mode(0o664)).unwrap();
+            assert!(
+                verified_cached_artifact_bytes(&art, &sha_path).is_none(),
+                "group-writable 0o664 sidecar must be rejected"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }
