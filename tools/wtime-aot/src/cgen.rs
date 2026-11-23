@@ -4600,10 +4600,8 @@ fn emit_rt_exports_c(
             let body = body_tmpl.replace("{call}", &call);
             writeln!(
                 s,
-                "  if (name_len == {}u && memcmp(name_ptr, {}, {}u) == 0) {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} {body} }}",
-                exp.name.len(),
-                c_escape_str(&exp.name),
-                exp.name.len()
+                "  if ({}) {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} {body} }}",
+                c_name_match_cond(&exp.name)
             )
             .unwrap();
         }
@@ -4639,10 +4637,8 @@ fn emit_rt_exports_c(
         };
         writeln!(
             s,
-            "  if (name_len == {}u && memcmp(name_ptr, {}, {}u) == 0) {{ if (val_out) *val_out = {expr}; if (kind_out) *kind_out = {kind}u; return 0; }}",
-            name.len(),
-            c_escape_str(name),
-            name.len()
+            "  if ({}) {{ if (val_out) *val_out = {expr}; if (kind_out) *kind_out = {kind}u; return 0; }}",
+            c_name_match_cond(name)
         )
         .unwrap();
     }
@@ -4669,17 +4665,23 @@ fn emit_rt_exports_c(
             ValType::Ref(_) => format!("ctx->g{gi} = val;"),
             _ => continue,
         };
-        writeln!(
-            s,
-            "  if (name_len == {}u && memcmp(name_ptr, {}, {}u) == 0) {{ {assign} return 0; }}",
+        writeln!(s, "  if ({}) {{ {assign} return 0; }}", c_name_match_cond(name)).unwrap();
+    }
+    s.push_str("  return 1;\n}\n");
+    Ok(s)
+}
+
+fn c_name_match_cond(name: &str) -> String {
+    if name.is_empty() {
+        "name_len == 0u".to_string()
+    } else {
+        format!(
+            "name_len == {}u && name_ptr != NULL && memcmp(name_ptr, {}, {}u) == 0",
             name.len(),
             c_escape_str(name),
             name.len()
         )
-        .unwrap();
     }
-    s.push_str("  return 1;\n}\n");
-    Ok(s)
 }
 
 fn top_c_call(module: &Module, f: usize, extra_args: &[String]) -> String {
@@ -4746,11 +4748,27 @@ fn file_stamp(canon: &Path) -> Res<FileStamp> {
     }
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else { return false };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        (meta.permissions().mode() & 0o111) != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(name);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -4761,7 +4779,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 /// `GNU_PROPERTY_X86_FEATURE_1_SHSTK` (used by both the link-level CET probe and post-link DSO check).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
-    if elf.len() < 64 || &elf[0..4] != b"\x7fELF" {
+    if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
         return false;
     }
     let Ok(e_phoff) = usize::try_from(u64::from_le_bytes(elf[32..40].try_into().unwrap())) else {
@@ -4862,7 +4880,39 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
     false
 }
 
-/// Probed host C compiler identity and capabilities (cached by canonical binary + inode/mtime stamp).
+/// Resolves the actual linker binary invoked by the C compiler driver (`ld.lld` when `-fuse-ld=lld`
+/// is used, otherwise `ld` via `cc -print-prog-name=<linker>` with `PATH` fallback).
+fn resolve_driver_linker(cc_str: &str, has_lld: bool, deadline: Option<Instant>) -> Res<(PathBuf, FileStamp)> {
+    let prog = if has_lld { "ld.lld" } else { "ld" };
+    let mut cmd = clean_cc_command(cc_str);
+    cmd.arg(format!("-print-prog-name={prog}"));
+    let out = crate::build::run_cmd_capture_with_deadline(cmd, &format!("{cc_str} -print-prog-name={prog}"), deadline)?;
+    let candidate = if out.status.success() {
+        let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !printed.is_empty() {
+            let p = PathBuf::from(&printed);
+            if is_executable_file(&p) {
+                Some(p)
+            } else if p.components().count() == 1 {
+                find_in_path(&printed)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .or_else(|| find_in_path(prog))
+    .ok_or_else(|| format!("could not resolve driver linker {prog} for C compiler {cc_str}"))?;
+    let canon = fs::canonicalize(&candidate).map_err(|e| format!("canonicalizing linker {}: {e}", candidate.display()))?;
+    let stamp = file_stamp(&canon)?;
+    Ok((canon, stamp))
+}
+
+/// Probed host C compiler & driver-selected linker identity and capabilities (cached by canonical
+/// binary + inode/mtime stamp + linker stamp).
 #[derive(Clone, Debug)]
 pub struct CcInfo {
     pub cc_name: &'static str,
@@ -4870,15 +4920,20 @@ pub struct CcInfo {
     pub canon_cc: PathBuf,
     pub stamp: FileStamp,
     pub lld_key: Option<(PathBuf, FileStamp)>,
+    pub canon_linker: PathBuf,
+    pub linker_stamp: FileStamp,
+    pub cc_sha256: String,
+    pub linker_sha256: String,
     pub version: String,
     pub has_lld: bool,
     pub has_cet_return: bool,
     pub has_stack_clash: bool,
 }
 
-/// Re-resolves C compiler precedence (`clang`, `cc`, `gcc`), canonical compiler target + file stamp,
-/// and `ld.lld` canonical path + file stamp to catch in-place upgrades, symlink repointing, linker
-/// upgrades, or a higher-precedence compiler appearing on `PATH` mid-build.
+/// Re-resolves C compiler precedence (`clang`, `cc`, `gcc`), canonical compiler target, file stamp,
+/// and SHA-256, `ld.lld` canonical path and file stamp, and actual driver-selected linker canonical
+/// path, file stamp, and SHA-256 to catch in-place upgrades, symlink repointing, linker upgrades,
+/// or a higher-precedence compiler appearing on `PATH` mid-build.
 pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> {
     for cand in ["clang", "cc", "gcc"] {
         if cand == info.cc_name {
@@ -4889,9 +4944,9 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
         {
             let mut ver_cmd = clean_cc_command(&canon_higher.to_string_lossy());
             ver_cmd.arg("--version");
-            if crate::build::run_cmd_capture_with_deadline(ver_cmd, &format!("{cand} --version"), deadline)
-                .is_ok_and(|o| o.status.success())
-            {
+            let higher_out =
+                crate::build::run_cmd_capture_with_deadline(ver_cmd, &format!("{cand} --version"), deadline)?;
+            if higher_out.status.success() {
                 return Err(format!(
                     "higher-precedence C compiler {cand} ({}) appeared on PATH during build (previously selected {}); refusing to publish stale provenance",
                     canon_higher.display(),
@@ -4904,7 +4959,10 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
         .ok_or_else(|| format!("C compiler {} disappeared from PATH during build", info.cc_name))?;
     let post_canon = fs::canonicalize(&found).map_err(|e| format!("canonicalizing {}: {e}", found.display()))?;
     let post_stamp = file_stamp(&post_canon)?;
-    if post_canon != info.canon_cc || post_stamp != info.stamp {
+    let post_cc_sha = crate::sha256::hex(
+        &fs::read(&post_canon).map_err(|e| format!("reading {}: {e}", post_canon.display()))?,
+    );
+    if post_canon != info.canon_cc || post_stamp != info.stamp || post_cc_sha != info.cc_sha256 {
         return Err(format!(
             "C compiler {} changed during build ({} -> {}); refusing to publish stale provenance",
             info.cc_name,
@@ -4917,6 +4975,21 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
         .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
     if post_lld_key != info.lld_key {
         return Err("linker ld.lld changed on PATH during build; refusing to publish stale provenance".into());
+    }
+    let (post_canon_linker, post_linker_stamp) =
+        resolve_driver_linker(&post_canon.to_string_lossy(), info.has_lld, deadline)?;
+    let post_linker_sha = crate::sha256::hex(
+        &fs::read(&post_canon_linker).map_err(|e| format!("reading {}: {e}", post_canon_linker.display()))?,
+    );
+    if post_canon_linker != info.canon_linker
+        || post_linker_stamp != info.linker_stamp
+        || post_linker_sha != info.linker_sha256
+    {
+        return Err(format!(
+            "driver-selected linker changed during build ({} -> {}); refusing to publish stale provenance",
+            info.canon_linker.display(),
+            post_canon_linker.display()
+        ));
     }
     Ok(())
 }
@@ -4935,7 +5008,13 @@ fn clean_cc_command(program: &str) -> Command {
     cmd
 }
 
-type CcCacheKey = (PathBuf, FileStamp, Option<(PathBuf, FileStamp)>);
+type CcCacheKey = (
+    &'static str,
+    PathBuf,
+    FileStamp,
+    Option<(PathBuf, FileStamp)>,
+    Option<(PathBuf, FileStamp)>,
+);
 type CcTargetKey = (PathBuf, FileStamp, String);
 
 struct ShardJob {
@@ -4949,10 +5028,14 @@ struct ShardJob {
 }
 
 /// Probes the host C compiler (respecting `deadline`) and memoizes by resolved canonical binary
-/// path + file stamp so repeated builds avoid duplicate spawns while detecting live upgrades.
+/// path + file stamp + linker stamps so repeated builds avoid duplicate spawns while detecting
+/// live compiler/linker upgrades.
 pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Instant>) -> Res<CcInfo> {
     static CACHE: OnceLock<Mutex<HashMap<CcCacheKey, CcInfo>>> = OnceLock::new();
     let lld_key = find_in_path("ld.lld")
+        .and_then(|p| fs::canonicalize(&p).ok())
+        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+    let ld_key = find_in_path("ld")
         .and_then(|p| fs::canonicalize(&p).ok())
         .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
     let private_probe_dir = match probe_root {
@@ -4964,8 +5047,10 @@ pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Insta
         let Ok(canon_cc) = fs::canonicalize(&found) else { continue };
         let Ok(stamp) = file_stamp(&canon_cc) else { continue };
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        let key = (canon_cc.clone(), stamp, lld_key.clone());
-        if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
+        let key = (cc, canon_cc.clone(), stamp, lld_key.clone(), ld_key.clone());
+        if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned()
+            && file_stamp(&hit.canon_linker).is_ok_and(|s| s == hit.linker_stamp)
+        {
             return Ok(hit);
         }
         let cc_str = canon_cc.to_string_lossy().into_owned();
@@ -4984,6 +5069,18 @@ pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Insta
         } else {
             false
         };
+        let (canon_linker, linker_stamp) = resolve_driver_linker(&cc_str, has_lld, deadline)?;
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            return Err("C compiler/linker probe exceeded build time limit".into());
+        }
+        let cc_sha256 = crate::sha256::hex(
+            &fs::read(&canon_cc).map_err(|e| format!("reading {}: {e}", canon_cc.display()))?,
+        );
+        let linker_sha256 = crate::sha256::hex(
+            &fs::read(&canon_linker).map_err(|e| format!("reading {}: {e}", canon_linker.display()))?,
+        );
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let has_cet_return = {
             let (mut c_file, c_path) =
@@ -5035,6 +5132,10 @@ pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Insta
             canon_cc,
             stamp,
             lld_key: lld_key.clone(),
+            canon_linker,
+            linker_stamp,
+            cc_sha256,
+            linker_sha256,
             version,
             has_lld,
             has_cet_return,
@@ -5044,13 +5145,6 @@ pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Insta
         return Ok(info);
     }
     Err("no C compiler found (install clang or gcc)".into())
-}
-
-/// Returns `(compiler_path, version_string, has_lld)`.
-#[allow(dead_code)]
-pub fn detect_cc() -> Res<(String, String, bool)> {
-    let info = detect_cc_with_deadline(None, None)?;
-    Ok((info.cc, info.version, info.has_lld))
 }
 
 /// Returns a deterministic 64-hex SHA-256 fingerprint of the effective C target CPU & ISA feature
@@ -5212,8 +5306,10 @@ pub fn build_c_blot_cdylib_with_info(
         }
 
         let mut base_hash = Sha256::new();
-        base_hash.update(b"wtime-aot-c-obj-v11");
+        base_hash.update(b"wtime-aot-c-obj-v12");
         base_hash.update(cc_info.version.as_bytes());
+        base_hash.update(cc_info.cc_sha256.as_bytes());
+        base_hash.update(cc_info.linker_sha256.as_bytes());
         base_hash.update(target_cpu.as_bytes());
         base_hash.update(cc_target.as_bytes());
         base_hash.update(&[cc_info.has_cet_return as u8]);
@@ -5723,16 +5819,20 @@ mod tests {
 
     #[test]
     fn c_backend_compiles_and_executes_semantics_outlining_and_traps() {
-        if detect_cc().is_err() {
-            return;
-        }
-        let wasm = sample_c_backend_wasm();
-        let root = std::env::temp_dir().join(format!("wtime-aot-cgen-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let root = crate::build::ensure_private_dir(&root).unwrap();
+        let root_guard = crate::build::create_fresh_test_root("wtime-aot-cgen-test");
+        let root = &root_guard.0;
         let cache = root.join("cache");
         let src_dir = root.join("src");
         let so_path = root.join("libtest.so");
+        crate::build::assert_inside_test_root(root, &cache);
+        crate::build::assert_inside_test_root(root, &src_dir);
+        crate::build::assert_inside_test_root(root, &so_path);
+        let Ok(cc_info) = detect_cc_with_deadline(Some(&cache), None) else {
+            return;
+        };
+        assert_eq!(cc_info.cc_sha256.len(), 64);
+        assert_eq!(cc_info.linker_sha256.len(), 64);
+        let wasm = sample_c_backend_wasm();
 
         // Verify source generation triggers structured outlining on `f10` and coalescing on `f2`/`f3`.
         generate_c(&wasm, &src_dir, COpt::Auto).unwrap();
@@ -5742,9 +5842,12 @@ mod tests {
         build_c_blot_cdylib(&wasm, &cache, "native", Some(2), COpt::Auto, Some(Duration::from_secs(120)), &so_path)
             .unwrap();
         assert!(so_path.is_file());
+        verify_cc_unchanged(&cc_info, None).unwrap();
 
         let driver_c = root.join("driver.c");
         let driver_bin = root.join("driver");
+        crate::build::assert_inside_test_root(root, &driver_c);
+        crate::build::assert_inside_test_root(root, &driver_bin);
         fs::write(
             &driver_c,
             r#"
@@ -5903,8 +6006,7 @@ int main(int argc, char **argv) {
 "#,
         )
         .unwrap();
-        let (cc, _, _) = detect_cc().unwrap();
-        let st = Command::new(&cc)
+        let st = Command::new(&cc_info.cc)
             .args(["-O1", "-o"])
             .arg(&driver_bin)
             .arg(&driver_c)
@@ -5921,7 +6023,6 @@ int main(int argc, char **argv) {
         );
         // Verify C fallback `.so` carries `GNU_PROPERTY_X86_FEATURE_1_SHSTK` when compiler supports `-fcf-protection=return`,
         // and verify `c-obj` cached shards were published immutable (`0o444`) with `.o.sha256` sidecars.
-        let cc_info = detect_cc_with_deadline(Some(&cache), None).unwrap();
         let obj_dir = cache.join("c-obj");
         let mut saw_obj = 0usize;
         for entry in fs::read_dir(&obj_dir).unwrap().flatten() {
@@ -5945,7 +6046,6 @@ int main(int argc, char **argv) {
                 "expected C fallback .so to advertise GNU_PROPERTY_X86_FEATURE_1_SHSTK"
             );
         }
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

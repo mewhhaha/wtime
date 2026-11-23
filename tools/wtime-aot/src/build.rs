@@ -749,10 +749,12 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 4", &[]);
+    field(&mut key, "wtime-aot build c 5", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
     field(&mut key, "cc", cc_info.version.as_bytes());
+    field(&mut key, "cc sha256", cc_info.cc_sha256.as_bytes());
+    field(&mut key, "linker sha256", cc_info.linker_sha256.as_bytes());
     field(&mut key, "target cpu", options.target_cpu.as_bytes());
     field(&mut key, "cc target fingerprint", cc_target.as_bytes());
     field(&mut key, "cet return", &[cc_info.has_cet_return as u8]);
@@ -813,9 +815,12 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
             let _ = fs::write(
                 entry.join("key.txt"),
                 format!(
-                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncet return {}\nstack clash {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncc sha256 {}\nlinker {}\nlinker sha256 {}\ncet return {}\nstack clash {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
                     options.c_opt.tag(),
                     cc_info.version,
+                    cc_info.cc_sha256,
+                    cc_info.canon_linker.display(),
+                    cc_info.linker_sha256,
                     cc_info.has_cet_return,
                     cc_info.has_stack_clash,
                     options.target_cpu,
@@ -1264,21 +1269,79 @@ fn rustc_version(toolchain: &str, deadline: Option<std::time::Instant>) -> Resul
 }
 
 #[cfg(test)]
+pub(crate) struct TestTempRoot(pub(crate) PathBuf);
+
+#[cfg(test)]
+impl Drop for TestTempRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn create_fresh_test_root(prefix: &str) -> TestTempRoot {
+    let base = std::env::temp_dir().canonicalize().expect("canonicalize temp_dir");
+    for _ in 0..64 {
+        let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let candidate = base.join(format!("{prefix}-{}-{seq}-{nanos}", std::process::id()));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&candidate) {
+            Ok(()) => {
+                let canon = ensure_private_dir(&candidate).expect("validate fresh test root");
+                return TestTempRoot(canon);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("failed to create fresh test root {}: {e}", candidate.display()),
+        }
+    }
+    panic!("exhausted attempts creating fresh test root for {prefix}");
+}
+
+#[cfg(test)]
+pub(crate) fn assert_inside_test_root(root: &Path, path: &Path) {
+    assert!(
+        !path.components().any(|c| matches!(c, Component::ParentDir)),
+        "test path {} must not contain parent traversal",
+        path.display()
+    );
+    let mut existing = path.parent().expect("test path has parent");
+    while !existing.exists() {
+        existing = existing.parent().expect("ancestor exists");
+    }
+    let canon_existing = existing.canonicalize().expect("canonicalize existing parent");
+    assert!(
+        canon_existing.starts_with(root),
+        "test output {} resolved outside fresh root {}",
+        path.display(),
+        root.display()
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn publish_digest_sidecar_is_immutable_and_rejects_group_writable() {
-        let root = std::env::temp_dir().join(format!("wtime-aot-sidecar-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let dir = ensure_private_dir(&root).unwrap();
+        let root = create_fresh_test_root("wtime-aot-sidecar-test");
+        let dir = &root.0;
         let art = dir.join("library.so");
         let sha_path = dir.join("library.so.sha256");
+        assert_inside_test_root(dir, &art);
+        assert_inside_test_root(dir, &sha_path);
         let payload = b"dummy-verified-artifact";
         fs::write(&art, payload).unwrap();
         mark_artifact_immutable(&art).unwrap();
         let sha = crate::sha256::hex(payload);
-        publish_digest_sidecar(&dir, "library.so", &sha, &sha_path).unwrap();
+        publish_digest_sidecar(dir, "library.so", &sha, &sha_path).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1295,6 +1358,5 @@ mod tests {
                 "group-writable 0o664 sidecar must be rejected"
             );
         }
-        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -717,14 +717,19 @@ pub fn decode(
                     };
                     let n_items = count(&mut s)?;
                     let mut init = Vec::new();
+                    let min_insns_per_item = if expr { 1 } else { 2 };
                     let keep_items = keep_seg
                         && !expr_limit_exceeded
                         && total_elem_items.saturating_add(u64::try_from(n_items).unwrap_or(u64::MAX))
                             <= policy.max_table_elements
-                        && expr_insns.saturating_add(n_items.saturating_mul(2))
-                            <= policy.max_instructions
-                        && expr_imm_elems.saturating_add(n_items.saturating_mul(4))
-                            <= policy.max_instructions;
+                        && n_items
+                            .checked_mul(min_insns_per_item)
+                            .and_then(|d| expr_insns.checked_add(d))
+                            .is_some_and(|t| t <= policy.max_instructions)
+                        && n_items
+                            .checked_mul(4)
+                            .and_then(|d| expr_imm_elems.checked_add(d))
+                            .is_some_and(|t| t <= policy.max_instructions);
                     if keep_items && init.try_reserve_exact(n_items).is_err() {
                         expr_limit_exceeded = true;
                     }
@@ -737,7 +742,7 @@ pub fn decode(
                             expr_limit_exceeded = true;
                             init.clear();
                         }
-                        let retain = keep_seg && !expr_limit_exceeded;
+                        let retain = keep_items && !expr_limit_exceeded;
                         if expr {
                             let (item, over) = expression_bounded(
                                 &mut s,
@@ -1492,7 +1497,9 @@ mod tests {
                 .kind,
             ErrorKind::Decode
         );
-        // Legacy element items charge 2 instructions each against `max_instructions`.
+        // Legacy element items charge 2 instructions & 4 immediate elements each, and skip
+        // allocation/retention upfront (`keep_items == false`) when over limit while still
+        // preserving malformed-precedes-policy ordering.
         let elem_over = module(&[(9, &[1, 1, 0, 3, 0, 0, 0])]);
         assert_eq!(
             decode(
@@ -1506,6 +1513,52 @@ mod tests {
             .unwrap_err()
             .kind,
             ErrorKind::ResourceLimit
+        );
+        let mut legacy_many = vec![1, 1, 0, 50];
+        // 50 legacy func indices (well over `max_instructions: 32` -> `keep_items == false`).
+        legacy_many.extend(std::iter::repeat_n(0u8, 50));
+        let legacy_many_ok = module(&[(9, &legacy_many)]);
+        assert_eq!(
+            decode(
+                &legacy_many_ok,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 32,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+        assert_eq!(
+            decode(
+                &legacy_many_ok,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_table_elements: 10,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+        // Truncate the last index byte to an unterminated LEB128 so malformed syntax still wins.
+        *legacy_many.last_mut().unwrap() = 0x80;
+        let legacy_many_bad = module(&[(9, &legacy_many)]);
+        assert_eq!(
+            decode(
+                &legacy_many_bad,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 32,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Decode
         );
 
         // Parallel decode right at `max_instructions` boundary preserves all bodies cleanly.
