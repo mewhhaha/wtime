@@ -14,11 +14,11 @@
     "5"
   ],
   "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)",
-  "clean_peak_rss_kib": 422760,
-  "clean_seconds": 2.0003707760042744,
+  "clean_peak_rss_kib": 423208,
+  "clean_seconds": 1.767295779005508,
   "compile_environment": {},
-  "core_source_sha256": "cafa75e7ec1c53a10134aeb2eb8d94d1255fb2cb44bf476844d64ac08b5a3cc4",
-  "core_source_sha256_after": "cafa75e7ec1c53a10134aeb2eb8d94d1255fb2cb44bf476844d64ac08b5a3cc4",
+  "core_source_sha256": "3108eb892cb3f8d3c33844371ed23724ffedbc27b8a53c7da7c0200e9ed27edb",
+  "core_source_sha256_after": "3108eb892cb3f8d3c33844371ed23724ffedbc27b8a53c7da7c0200e9ed27edb",
   "cpu": "x86_64",
   "default_dependency_closure_pass": true,
   "default_dependency_violations": [],
@@ -89,9 +89,9 @@
     "crates/wtime-runtime/src/execution/straight.rs": "80409d6de37f20c3e336e0eef2d128a2e4c8b6e56556a01cd0803697fbfd96ea",
     "crates/wtime-runtime/src/gc.rs": "20a964f67876f7b1637213204fea04516ffaa6167fba76f0ef485e4e3c647f26",
     "crates/wtime-runtime/src/gc_exec.rs": "a5232e03bc8259dc64942a485e616cc81ceeba5bd67b6de2412d1c69c597666a",
-    "crates/wtime-runtime/src/lib.rs": "e6757222c7f323fc0677b282357c24a21760cae0f9bf6e78289b681f17f9e11b",
+    "crates/wtime-runtime/src/lib.rs": "79d7c4f419143ebd0412dc0dbd70bae27ce1b9dae49088ebbddb5405d578bcc1",
     "crates/wtime-runtime/src/linear.rs": "4d34e003bb4d8dce25df3947f7e547d2b9be0453e2bc4d9516a7d3f8b9aa72e9",
-    "crates/wtime-runtime/src/linker.rs": "94f757ab8b4d3d9ff22d123adbf8cfa7d1776e0c68f3244a939017a5d0fe898e",
+    "crates/wtime-runtime/src/linker.rs": "27945ce301401dae31ff3802fad3d3947297374166db4789842152920035207b",
     "crates/wtime-runtime/src/numeric.rs": "09f4298cae6d4a666f9cc30d99e987eae8783dca50ded37971cb4d64f7e548a3",
     "crates/wtime-runtime/src/perf.rs": "9ae10299f6a5681fdd3f04be322c7fa89df54cb94e084f1ee713b91c08e3f42b",
     "crates/wtime-runtime/src/reference.rs": "31a8c5d365b1cb5d0e0c0c27fc7d9bd3ef687bdbec3cc8744a6be2422eef7e3a",
@@ -717,13 +717,13 @@
     "tools/wtime-conformance/tests/p121_compact_counts.rs": "262dfd55b09c82886575a2bcac8a737e545ac9f8865336264a6bc197453cd14a"
   },
   "isolated_workspace": "workspace",
-  "isolated_workspace_source_sha256": "22878fbd4249640352343baa133bc52e9fbbd7382bbb765b5c6e938dbb5d0bc3",
+  "isolated_workspace_source_sha256": "60d22e4e69bf03c77ea60b12a7901db846e338e407aa7c0e0357e1371e723462",
   "jobs": 5,
-  "leaf_seconds": 0.09579259600286605,
+  "leaf_seconds": 0.08947698200063314,
   "lock_sha256": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
   "logical_cpus": 16,
   "mode": "default",
-  "release_seconds": 5.284303822998481,
+  "release_seconds": 4.877706715000386,
   "resolved_graph": [
     {
       "dependencies": [
@@ -1342,7 +1342,7 @@
       "version": "261.0.0"
     }
   ],
-  "runtime_leaf_seconds": 0.2713514950009994,
+  "runtime_leaf_seconds": 0.25277764099882916,
   "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
   "schema_version": 2,
   "source_inputs": {
@@ -1409,9 +1409,9 @@
     "crates/wtime-runtime/src/execution/straight.rs": "80409d6de37f20c3e336e0eef2d128a2e4c8b6e56556a01cd0803697fbfd96ea",
     "crates/wtime-runtime/src/gc.rs": "20a964f67876f7b1637213204fea04516ffaa6167fba76f0ef485e4e3c647f26",
     "crates/wtime-runtime/src/gc_exec.rs": "a5232e03bc8259dc64942a485e616cc81ceeba5bd67b6de2412d1c69c597666a",
-    "crates/wtime-runtime/src/lib.rs": "e6757222c7f323fc0677b282357c24a21760cae0f9bf6e78289b681f17f9e11b",
+    "crates/wtime-runtime/src/lib.rs": "79d7c4f419143ebd0412dc0dbd70bae27ce1b9dae49088ebbddb5405d578bcc1",
     "crates/wtime-runtime/src/linear.rs": "4d34e003bb4d8dce25df3947f7e547d2b9be0453e2bc4d9516a7d3f8b9aa72e9",
-    "crates/wtime-runtime/src/linker.rs": "94f757ab8b4d3d9ff22d123adbf8cfa7d1776e0c68f3244a939017a5d0fe898e",
+    "crates/wtime-runtime/src/linker.rs": "27945ce301401dae31ff3802fad3d3947297374166db4789842152920035207b",
     "crates/wtime-runtime/src/numeric.rs": "09f4298cae6d4a666f9cc30d99e987eae8783dca50ded37971cb4d64f7e548a3",
     "crates/wtime-runtime/src/perf.rs": "9ae10299f6a5681fdd3f04be322c7fa89df54cb94e084f1ee713b91c08e3f42b",
     "crates/wtime-runtime/src/reference.rs": "31a8c5d365b1cb5d0e0c0c27fc7d9bd3ef687bdbec3cc8744a6be2422eef7e3a",
@@ -2100,9 +2100,9 @@
     "crates/wtime-runtime/src/execution/straight.rs": "80409d6de37f20c3e336e0eef2d128a2e4c8b6e56556a01cd0803697fbfd96ea",
     "crates/wtime-runtime/src/gc.rs": "20a964f67876f7b1637213204fea04516ffaa6167fba76f0ef485e4e3c647f26",
     "crates/wtime-runtime/src/gc_exec.rs": "a5232e03bc8259dc64942a485e616cc81ceeba5bd67b6de2412d1c69c597666a",
-    "crates/wtime-runtime/src/lib.rs": "e6757222c7f323fc0677b282357c24a21760cae0f9bf6e78289b681f17f9e11b",
+    "crates/wtime-runtime/src/lib.rs": "79d7c4f419143ebd0412dc0dbd70bae27ce1b9dae49088ebbddb5405d578bcc1",
     "crates/wtime-runtime/src/linear.rs": "4d34e003bb4d8dce25df3947f7e547d2b9be0453e2bc4d9516a7d3f8b9aa72e9",
-    "crates/wtime-runtime/src/linker.rs": "94f757ab8b4d3d9ff22d123adbf8cfa7d1776e0c68f3244a939017a5d0fe898e",
+    "crates/wtime-runtime/src/linker.rs": "27945ce301401dae31ff3802fad3d3947297374166db4789842152920035207b",
     "crates/wtime-runtime/src/numeric.rs": "09f4298cae6d4a666f9cc30d99e987eae8783dca50ded37971cb4d64f7e548a3",
     "crates/wtime-runtime/src/perf.rs": "9ae10299f6a5681fdd3f04be322c7fa89df54cb94e084f1ee713b91c08e3f42b",
     "crates/wtime-runtime/src/reference.rs": "31a8c5d365b1cb5d0e0c0c27fc7d9bd3ef687bdbec3cc8744a6be2422eef7e3a",
@@ -2727,11 +2727,11 @@
     "tools/wtime-conformance/tests/interactions.rs": "fd36710c8cd2ef7f3a2883d3f0ab6cbfecace3ae80adf693095228e4f4641938",
     "tools/wtime-conformance/tests/p121_compact_counts.rs": "262dfd55b09c82886575a2bcac8a737e545ac9f8865336264a6bc197453cd14a"
   },
-  "source_sha256": "22878fbd4249640352343baa133bc52e9fbbd7382bbb765b5c6e938dbb5d0bc3",
-  "source_sha256_after": "22878fbd4249640352343baa133bc52e9fbbd7382bbb765b5c6e938dbb5d0bc3",
+  "source_sha256": "60d22e4e69bf03c77ea60b12a7901db846e338e407aa7c0e0357e1371e723462",
+  "source_sha256_after": "60d22e4e69bf03c77ea60b12a7901db846e338e407aa7c0e0357e1371e723462",
   "source_stable": true,
-  "stripped_bytes": 2372360,
+  "stripped_bytes": 2374344,
   "target_initially_empty": true,
-  "unchanged_peak_rss_kib": 29056,
-  "unchanged_seconds": 0.02385054700425826
+  "unchanged_peak_rss_kib": 28504,
+  "unchanged_seconds": 0.024115105996315833
 }
