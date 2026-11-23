@@ -344,6 +344,19 @@ impl Stack {
         }
         Ok(())
     }
+    fn pop_fields(&mut self, fields: &[FieldType]) -> Result<()> {
+        let c = *self
+            .controls
+            .last()
+            .ok_or_else(|| invalid("instruction after final end"))?;
+        for f in fields.iter().rev() {
+            if self.values.len() == c.height && c.unreachable {
+                return Ok(());
+            }
+            self.pop(f.storage.unpacked())?;
+        }
+        Ok(())
+    }
     /// Enforces `max_stack_height` and charges pushed slice elements against `self.types`
     /// (`max_type_work`) BEFORE extending `self.values`, preventing both transient multi-MB stack
     /// allocations and uncharged dead/polymorphic operand-stack traffic.
@@ -751,7 +764,10 @@ pub fn validate(
         };
         for (opt_result, work) in validated {
             let Some(result) = opt_result else {
-                break;
+                return Err(Error::new(
+                    ErrorKind::ResourceLimit,
+                    "parallel validation aborted before completing all bodies",
+                ));
             };
             c.types.charge(work);
             if c.types.exhausted() {
@@ -760,6 +776,10 @@ pub fn validate(
             }
             function_bounds.push(result?)
         }
+        check(
+            function_bounds.len() == pairs.len(),
+            "parallel validation truncated function bounds",
+        )?;
         Ok(())
     })();
     if c.types.exhausted() {
@@ -864,6 +884,10 @@ impl Context<'_> {
                 _ => return Err(invalid("invalid constant expression instruction")),
             }
             self.instruction(&mut s, &[], i)?;
+            budget(
+                s.values.len() <= self.limits.max_stack_height,
+                "validation stack limit exceeded",
+            )?;
         }
         check(s.controls.is_empty(), "unterminated constant expression")
     }

@@ -1,6 +1,6 @@
 use crate::{
     Immediate, Instruction, Reader,
-    instructions::{body_expression, count, expression, val},
+    instructions::{body_expression_bounded, count, expression, val},
 };
 use std::sync::Arc;
 use wtime_types::*;
@@ -369,7 +369,15 @@ pub fn decode(
             }
             2 => {
                 let n = count(&mut s)?;
-                let mut compact_module_bytes: usize = 0;
+                let max_imports = policy
+                    .max_functions
+                    .saturating_add(policy.max_tables)
+                    .saturating_add(policy.max_memories)
+                    .saturating_add(policy.max_globals)
+                    .saturating_add(policy.max_tags);
+                let mut total_imports: usize = 0;
+                let mut compact_expansion_bytes: usize = 0;
+                let mut import_limit_exceeded = false;
                 for _ in 0..n {
                     let module = s.name()?;
                     let name = s.name()?;
@@ -386,47 +394,59 @@ pub fn decode(
                             for _ in 0..n {
                                 let item_name = s.name()?;
                                 let kind = import_kind(&mut s)?;
-                                compact_module_bytes =
-                                    compact_module_bytes.saturating_add(module.len());
-                                if compact_module_bytes > policy.max_module_bytes {
-                                    return Err(Error::new(
-                                        ErrorKind::ResourceLimit,
-                                        "compact import expansion limit",
-                                    ));
+                                total_imports = total_imports.saturating_add(1);
+                                compact_expansion_bytes = compact_expansion_bytes
+                                    .saturating_add(module.len().max(1))
+                                    .saturating_add(item_name.len().max(1))
+                                    .saturating_add(48);
+                                if total_imports > max_imports
+                                    || compact_expansion_bytes > policy.max_module_bytes
+                                {
+                                    import_limit_exceeded = true;
+                                } else {
+                                    m.imports.push(Import {
+                                        module: module.clone(),
+                                        name: item_name,
+                                        kind,
+                                    })
                                 }
-                                m.imports.push(Import {
-                                    module: module.clone(),
-                                    name: item_name,
-                                    kind,
-                                })
                             }
                         } else {
                             let kind = import_kind(&mut s)?;
                             let n = count(&mut s)?;
                             for _ in 0..n {
                                 let item_name = s.name()?;
-                                compact_module_bytes =
-                                    compact_module_bytes.saturating_add(module.len());
-                                if compact_module_bytes > policy.max_module_bytes {
-                                    return Err(Error::new(
-                                        ErrorKind::ResourceLimit,
-                                        "compact import expansion limit",
-                                    ));
+                                total_imports = total_imports.saturating_add(1);
+                                compact_expansion_bytes = compact_expansion_bytes
+                                    .saturating_add(module.len().max(1))
+                                    .saturating_add(item_name.len().max(1))
+                                    .saturating_add(48);
+                                if total_imports > max_imports
+                                    || compact_expansion_bytes > policy.max_module_bytes
+                                {
+                                    import_limit_exceeded = true;
+                                } else {
+                                    m.imports.push(Import {
+                                        module: module.clone(),
+                                        name: item_name,
+                                        kind: kind.clone(),
+                                    })
                                 }
-                                m.imports.push(Import {
-                                    module: module.clone(),
-                                    name: item_name,
-                                    kind: kind.clone(),
-                                })
                             }
                         }
                     } else {
-                        m.imports.push(Import {
-                            module,
-                            name,
-                            kind: import_kind(&mut s)?,
-                        })
+                        let kind = import_kind(&mut s)?;
+                        total_imports = total_imports.saturating_add(1);
+                        if total_imports > max_imports {
+                            import_limit_exceeded = true;
+                        } else {
+                            m.imports.push(Import { module, name, kind })
+                        }
                     }
+                }
+                if import_limit_exceeded {
+                    s.finish()?;
+                    return Err(Error::new(ErrorKind::ResourceLimit, "module import limit"));
                 }
             }
             3 => {
@@ -550,10 +570,21 @@ pub fn decode(
             }
             10 => {
                 let n = count(&mut s)?;
+                if n > policy.max_functions {
+                    // Stream-validate every body without retaining any `Reader` or `Instruction`
+                    // vectors so malformed size/syntax still precedes `ResourceLimit` in O(1) RAM.
+                    for _ in 0..n {
+                        let size = s.u32()?;
+                        let b = s.child(size as usize)?;
+                        let _ = parse_function_body(b, policy, None, false)?;
+                    }
+                    s.finish()?;
+                    return Err(Error::new(ErrorKind::ResourceLimit, "module declaration limit"));
+                }
                 // Each body's bytes first, then the bodies, in parallel when
                 // the section is large; errors are reported in body order, a
                 // malformed size only after the bodies before it.
-                let mut bodies = Vec::new();
+                let mut bodies = Vec::with_capacity(n);
                 let mut sizes = Ok(());
                 for _ in 0..n {
                     match s.u32().and_then(|size| s.child(size as usize)) {
@@ -565,29 +596,22 @@ pub fn decode(
                     }
                 }
                 let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
-                // Decode body syntax and local group headers WITHOUT expanding `FunctionBody::locals`,
-                // and stop retaining decoded instruction vectors per worker once cumulative worker
-                // instructions or bodies exceed policy caps — keeping peak memory bounded while
-                // still checking every body's syntax so malformed bytecode always precedes policy errors.
+                // Share a module-wide instruction retention counter across all workers so neither
+                // a single oversized body nor parallel workers can retain more than
+                // `policy.max_instructions` decoded instructions, while still scanning every body's
+                // syntax in full so malformed bytecode precedes deferred aggregate limits.
+                let shared_insns = std::sync::atomic::AtomicUsize::new(0);
                 let decoded = wtime_types::parallel::map_ordered(
                     &bodies,
                     threads,
-                    || (0usize, 0usize),
-                    |(worker_bodies, worker_insns), b| {
-                        let drop_payload = *worker_bodies >= policy.max_functions
-                            || *worker_insns > policy.max_instructions;
-                        let parsed = parse_function_body(b.clone(), policy, drop_payload)?;
-                        *worker_bodies = worker_bodies.saturating_add(1);
-                        *worker_insns = worker_insns.saturating_add(parsed.insn_count);
-                        Ok(parsed)
-                    },
+                    || (),
+                    |_, b| parse_function_body(b.clone(), policy, Some(&shared_insns), true),
                 );
-                let mut parsed_bodies = Vec::with_capacity(decoded.len().min(policy.max_functions));
+                let mut parsed_bodies = Vec::with_capacity(decoded.len());
                 let mut total_decoded_locals: usize = 0;
                 let mut total_decoded_insns: usize = 0;
                 let mut total_limit_exceeded = false;
                 let mut insn_limit_exceeded = false;
-                let fn_limit_exceeded = decoded.len() > policy.max_functions;
                 for body in decoded {
                     let parsed = body?;
                     total_decoded_locals = total_decoded_locals.saturating_add(parsed.total_locals as usize);
@@ -598,14 +622,11 @@ pub fn decode(
                     if total_decoded_insns > policy.max_instructions {
                         insn_limit_exceeded = true;
                     }
-                    if !total_limit_exceeded && !insn_limit_exceeded && !fn_limit_exceeded {
+                    if !total_limit_exceeded && !insn_limit_exceeded {
                         parsed_bodies.push(parsed);
                     }
                 }
                 sizes?;
-                if fn_limit_exceeded {
-                    return Err(Error::new(ErrorKind::ResourceLimit, "module declaration limit"));
-                }
                 if total_limit_exceeded {
                     return Err(Error::new(ErrorKind::ResourceLimit, "module total local limit"));
                 }
@@ -658,8 +679,18 @@ pub fn decode(
             }
             13 => {
                 let n = count(&mut s)?;
+                let mut tag_limit_exceeded = false;
                 for _ in 0..n {
-                    m.tags.push(tag(&mut s)?)
+                    let t = tag(&mut s)?;
+                    if m.tags.len() >= policy.max_tags {
+                        tag_limit_exceeded = true;
+                    } else {
+                        m.tags.push(t);
+                    }
+                }
+                if tag_limit_exceeded {
+                    s.finish()?;
+                    return Err(Error::new(ErrorKind::ResourceLimit, "tag declaration limit"));
                 }
             }
             _ => unreachable!(),
@@ -706,9 +737,14 @@ struct ParsedBody {
 }
 
 /// One function body of the code section, parsed without expanding `locals`.
-/// When `drop_payload` is true (a worker already exceeded aggregate caps), syntax and per-body
-/// limits are still checked in full but the decoded vectors are dropped immediately to bound RAM.
-fn parse_function_body(mut b: Reader, policy: &ResourceLimits, drop_payload: bool) -> Result<ParsedBody> {
+/// Uses `body_expression_bounded` so instruction/offset vectors are never retained past the
+/// module-wide `policy.max_instructions` cap while full syntax checking still runs.
+fn parse_function_body(
+    mut b: Reader,
+    policy: &ResourceLimits,
+    shared_insns: Option<&std::sync::atomic::AtomicUsize>,
+    keep: bool,
+) -> Result<ParsedBody> {
     let start = b.offset();
     let groups = count(&mut b)?;
     let mut local_groups = Vec::new();
@@ -719,22 +755,27 @@ fn parse_function_body(mut b: Reader, policy: &ResourceLimits, drop_payload: boo
         total = total
             .checked_add(n)
             .ok_or_else(|| b.error("local count overflow"))?;
-        if !drop_payload {
+        if keep && (total as usize) <= policy.max_locals {
             local_groups.push((n, ty));
         }
     }
-    let (instructions, offsets) = body_expression(&mut b)?;
+    let keep_body = keep && (total as usize) <= policy.max_locals;
+    let (instructions, offsets, insn_count) =
+        body_expression_bounded(&mut b, shared_insns, policy.max_instructions, keep_body)?;
     b.finish()?;
     if total as usize > policy.max_locals {
         return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
     }
-    let insn_count = instructions.len();
     Ok(ParsedBody {
-        local_groups: if drop_payload { Vec::new() } else { local_groups },
+        local_groups: if instructions.is_empty() && insn_count > 0 {
+            Vec::new()
+        } else {
+            local_groups
+        },
         total_locals: total,
         insn_count,
-        instructions: if drop_payload { Vec::new() } else { instructions },
-        offsets: if drop_payload { Vec::new() } else { offsets },
+        instructions,
+        offsets,
         span: Span::new(start, b.offset()),
     })
 }

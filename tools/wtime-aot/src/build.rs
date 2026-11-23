@@ -207,7 +207,7 @@ fn validate_trusted_ancestor(anc: &Path, target: &Path, euid: u32) -> Result<(),
     // Reject non-sticky group/world-writable ancestors that would allow directory replacement.
     if (m & 0o022) != 0 && (m & 0o1000) == 0 {
         return Err(format!(
-            "{}: cache ancestor {} is writable without sticky bit",
+            "{}: cache ancestor {} is writable without sticky bit (remediation: run `chmod 700` or pass `--cache` to an owner-private directory)",
             target.display(),
             anc.display()
         ));
@@ -405,9 +405,9 @@ fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_f
     Ok(())
 }
 
-/// Acquires an exclusive publication lock on `entry/.publish.lock`, returning the lock file
-/// and the verified canonical entry directory.
-fn lock_cache_entry(entry: &Path) -> Result<(fs::File, PathBuf), String> {
+/// Acquires an exclusive publication lock on `entry/.publish.lock` within `deadline`, returning
+/// the lock file and the verified canonical entry directory.
+fn lock_cache_entry(entry: &Path, deadline: std::time::Instant) -> Result<(fs::File, PathBuf), String> {
     let canon_entry = ensure_private_dir(entry)?;
     let lock_path = canon_entry.join(".publish.lock");
     let lock_file = fs::File::options()
@@ -417,8 +417,20 @@ fn lock_cache_entry(entry: &Path) -> Result<(fs::File, PathBuf), String> {
         .truncate(false)
         .open(&lock_path)
         .map_err(|e| format!("{}: {e}", lock_path.display()))?;
-    lock_file.lock().map_err(|e| format!("locking {}: {e}", lock_path.display()))?;
-    Ok((lock_file, canon_entry))
+    loop {
+        match lock_file.try_lock() {
+            Ok(()) => return Ok((lock_file, canon_entry)),
+            Err(fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!("timed out waiting for publication lock {}", lock_path.display()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(format!("locking {}: {e}", lock_path.display()));
+            }
+        }
+    }
 }
 
 /// Verifies `artifact` is a non-symlink immutable regular file matching its `.sha256` sidecar.
@@ -452,6 +464,7 @@ fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
 
 /// Fast C99 + parallel `clang` + `ld.lld` build path for Blot ABI 8 cdylibs.
 fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, String> {
+    let deadline = std::time::Instant::now() + options.time_limit;
     let wasm = fs::read(module).map_err(|e| format!("{}: {e}", module.display()))?;
     let cache = ensure_private_dir(cache)?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
@@ -469,7 +482,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
     field(&mut key, "c opt", options.c_opt.tag().as_bytes());
     let key_hex = key.hex();
 
-    let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex))?;
+    let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
     let program = entry.join("library.so");
     let digest_file = entry.join("library.so.sha256");
     if verified_cached_artifact(&program, &digest_file) {
@@ -477,6 +490,9 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
     }
     let _ = fs::remove_file(&program);
     let _ = fs::remove_file(&digest_file);
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .ok_or_else(|| format!("the build exceeded its time limit of {:?}", options.time_limit))?;
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
     let res = crate::cgen::build_c_blot_cdylib(
@@ -485,7 +501,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
         options.target_cpu,
         options.jobs,
         options.c_opt,
-        Some(options.time_limit),
+        Some(remaining),
         &staged,
     );
     match res {
@@ -639,7 +655,8 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
 fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Options, note: &str) -> Result<PathBuf, String> {
     let key = key.hex();
     let cache = &prepared.cache;
-    let (_lock, entry) = lock_cache_entry(&cache.join(&key))?;
+    let deadline = std::time::Instant::now() + options.time_limit;
+    let (_lock, entry) = lock_cache_entry(&cache.join(&key), deadline)?;
     let artifact_name = match options.target {
         crate::codegen::Target::GooseBin => "program",
         crate::codegen::Target::BlotCdylib => "library.so",

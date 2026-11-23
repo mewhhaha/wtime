@@ -60,10 +60,15 @@ impl Context<'_> {
                     "described struct requires descriptor constructor",
                 )?;
                 if i.opcode == 0xfb00 {
-                    for f in t.fields.iter().rev() {
-                        s.pop(f.storage.unpacked())?
-                    }
+                    s.pop_fields(&t.fields)?;
                 } else {
+                    self.types.charge(t.fields.len());
+                    if self.types.exhausted() {
+                        return Err(Error::new(
+                            ErrorKind::ResourceLimit,
+                            "type validation work budget exhausted",
+                        ));
+                    }
                     check(
                         t.fields.iter().all(|f| defaultable(f.storage.unpacked())),
                         "nondefaultable struct field",
@@ -228,10 +233,14 @@ impl Context<'_> {
                 };
                 let out = Ref(RefType::new(i.opcode % 2 == 1, h));
                 self.valtype(out)?;
-                check(
-                    !value_subtype(out, Ref(RefType::new(true, HeapType::Cont)), &self.types),
-                    "continuations cannot be cast",
-                )?;
+                let is_cont = value_subtype(out, Ref(RefType::new(true, HeapType::Cont)), &self.types);
+                if self.types.exhausted() {
+                    return Err(Error::new(
+                        ErrorKind::ResourceLimit,
+                        "type validation work budget exhausted",
+                    ));
+                }
+                check(!is_cont, "continuations cannot be cast")?;
                 let source = match h {
                     HeapType::Func | HeapType::NoFunc => HeapType::Func,
                     HeapType::Extern | HeapType::NoExtern => HeapType::Extern,
@@ -265,10 +274,14 @@ impl Context<'_> {
                 let b = Ref(RefType::new(flags & 2 != 0, to));
                 self.valtype(a)?;
                 self.valtype(b)?;
-                check(
-                    !value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types),
-                    "continuations cannot be cast",
-                )?;
+                let is_cont = value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types);
+                if self.types.exhausted() {
+                    return Err(Error::new(
+                        ErrorKind::ResourceLimit,
+                        "type validation work budget exhausted",
+                    ));
+                }
+                check(!is_cont, "continuations cannot be cast")?;
                 check(
                     value_subtype(b, a, &self.types),
                     "cast target is not a subtype",
@@ -334,10 +347,15 @@ impl Context<'_> {
                     .ok_or_else(|| invalid("struct has no descriptor"))?;
                 s.pop(Ref(RefType::new(true, HeapType::ExactDefined(d))))?;
                 if i.opcode == 0xfb20 {
-                    for f in t.fields.iter().rev() {
-                        s.pop(f.storage.unpacked())?
-                    }
+                    s.pop_fields(&t.fields)?;
                 } else {
+                    self.types.charge(t.fields.len());
+                    if self.types.exhausted() {
+                        return Err(Error::new(
+                            ErrorKind::ResourceLimit,
+                            "type validation work budget exhausted",
+                        ));
+                    }
                     check(
                         t.fields.iter().all(|f| defaultable(f.storage.unpacked())),
                         "nondefaultable struct field",
@@ -363,6 +381,12 @@ impl Context<'_> {
                         &self.types,
                     )
                 });
+                if self.types.exhausted() {
+                    return Err(Error::new(
+                        ErrorKind::ResourceLimit,
+                        "type validation work budget exhausted",
+                    ));
+                }
                 if let Some(v) = actual {
                     check(
                         value_subtype(v, self.reference(n, true), &self.types),
@@ -438,10 +462,14 @@ impl Context<'_> {
                 let b = Ref(RefType::new(flags & 2 != 0, to));
                 self.valtype(a)?;
                 self.valtype(b)?;
-                check(
-                    !value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types),
-                    "continuations cannot be cast",
-                )?;
+                let is_cont = value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types);
+                if self.types.exhausted() {
+                    return Err(Error::new(
+                        ErrorKind::ResourceLimit,
+                        "type validation work budget exhausted",
+                    ));
+                }
+                check(!is_cont, "continuations cannot be cast")?;
                 check(
                     value_subtype(a, Ref(RefType::new(true, HeapType::Any)), &self.types),
                     "cast source must have same heap hierarchy",

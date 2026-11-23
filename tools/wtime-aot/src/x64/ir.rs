@@ -2197,6 +2197,11 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
         let insts = &bb.insts;
         let mut i = 0;
         while i < insts.len() {
+            if let Some(bg) = budget
+                && (i & 4095) == 4095
+            {
+                bg.check_deadline()?;
+            }
             let mut inst = insts[i];
             match &mut inst.op {
                 Op::Load { kind, addr, offset, checked } => {
@@ -2262,8 +2267,18 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
     // Pass 3: Dead-code elimination (single reverse use-count pass with saturating usize counts).
     let n_vals = ir.val_tys.len();
     let mut uses = vec![0usize; n_vals];
-    for bb in &ir.blocks {
-        for inst in &bb.insts {
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        if let Some(bg) = budget
+            && (bi & 255) == 0
+        {
+            bg.check_deadline()?;
+        }
+        for (ii, inst) in bb.insts.iter().enumerate() {
+            if let Some(bg) = budget
+                && (ii & 4095) == 4095
+            {
+                bg.check_deadline()?;
+            }
             inst.op.for_each_use(&ir.val_pool, |v| {
                 uses[v.0 as usize] = uses[v.0 as usize].saturating_add(1);
             });
@@ -2280,7 +2295,12 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
         }
         let mut keep = vec![true; bb.insts.len()];
         let mut any_dropped = false;
-        for (idx, inst) in bb.insts.iter().enumerate().rev() {
+        for (step, (idx, inst)) in bb.insts.iter().enumerate().rev().enumerate() {
+            if let Some(bg) = budget
+                && (step & 4095) == 4095
+            {
+                bg.check_deadline()?;
+            }
             if let Some(res) = inst.res
                 && uses[res.0 as usize] == 0
                 && !inst.op.has_side_effect()

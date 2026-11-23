@@ -171,6 +171,11 @@ fn equivalent(a: TypeIdx, b: TypeIdx, ts: &TypeEnvironment) -> bool {
             return false;
         }
         if seen_groups.insert((start_a, start_b)) {
+            work = work.saturating_add(len_a);
+            ts.charge(len_a);
+            if ts.exhausted() || work > ts.limit {
+                return false;
+            }
             for k in 0..len_a {
                 todo.push((TypeIdx((start_a + k) as u32), TypeIdx((start_b + k) as u32)));
             }
@@ -201,17 +206,31 @@ fn equivalent(a: TypeIdx, b: TypeIdx, ts: &TypeEnvironment) -> bool {
                 _ => return false,
             }
         }
-        let mut vals = vec![];
         match (&a.composite, &b.composite) {
             (CompositeType::Func(a), CompositeType::Func(b)) => {
                 if a.params.len() != b.params.len() || a.results.len() != b.results.len() {
                     return false;
                 }
-                vals.extend(a.params.iter().zip(&b.params));
-                vals.extend(a.results.iter().zip(&b.results));
+                let n_elems = a.params.len().saturating_add(a.results.len());
+                work = work.saturating_add(n_elems);
+                ts.charge(n_elems);
+                if ts.exhausted() || work > ts.limit {
+                    return false;
+                }
+                for (&va, &vb) in a.params.iter().zip(&b.params).chain(a.results.iter().zip(&b.results)) {
+                    if !equal_value(va, vb, start_a, start_b, len_a, &mut todo) {
+                        return false;
+                    }
+                }
             }
             (CompositeType::Struct(a), CompositeType::Struct(b)) => {
                 if a.fields.len() != b.fields.len() {
+                    return false;
+                }
+                let n_fields = a.fields.len();
+                work = work.saturating_add(n_fields);
+                ts.charge(n_fields);
+                if ts.exhausted() || work > ts.limit {
                     return false;
                 }
                 for (a, b) in a.fields.iter().zip(&b.fields) {
@@ -249,11 +268,6 @@ fn equivalent(a: TypeIdx, b: TypeIdx, ts: &TypeEnvironment) -> bool {
                 }
             }
             _ => return false,
-        }
-        for (a, b) in vals {
-            if !equal_value(*a, *b, start_a, start_b, len_a, &mut todo) {
-                return false;
-            }
         }
     }
     true

@@ -131,31 +131,77 @@ pub(crate) fn expression(r: &mut Reader) -> Result<Vec<Instruction>> {
     expression_with_capacity(r, 0)
 }
 /// A function body's instructions and the absolute offset of each in the
-/// module. The reader holds just the body, and instructions average about
-/// three bytes, so reserving for that avoids most regrowth copies.
-pub(crate) fn body_expression(r: &mut Reader) -> Result<(Vec<Instruction>, Vec<u32>)> {
-    // Capped so that a huge body cannot reserve far ahead of decoding.
-    let estimate = (r.remaining() / 3).min(1 << 16);
+/// module. When `keep` is false, or once the shared module-wide instruction
+/// counter exceeds `max_insns`, syntax decoding continues in full (so malformed
+/// bytecode still reports `ErrorKind::Decode`) while dropping all retained
+/// vectors immediately so memory stays strictly bounded.
+pub(crate) fn body_expression_bounded(
+    r: &mut Reader,
+    shared_insns: Option<&std::sync::atomic::AtomicUsize>,
+    max_insns: usize,
+    mut keep: bool,
+) -> Result<(Vec<Instruction>, Vec<u32>, usize)> {
+    use std::sync::atomic::Ordering;
     let mut instructions = Vec::new();
     let mut offsets = Vec::new();
-    // Hints only: a failed reservation leaves growth to push.
-    let _ = instructions.try_reserve_exact(estimate);
-    let _ = offsets.try_reserve_exact(estimate);
+    if keep
+        && shared_insns.is_some_and(|c| c.load(Ordering::Relaxed) > max_insns)
+    {
+        keep = false;
+    }
+    if keep {
+        let estimate = (r.remaining() / 3).min(1 << 16).min(max_insns);
+        let _ = instructions.try_reserve_exact(estimate);
+        let _ = offsets.try_reserve_exact(estimate);
+    }
     let mut depth = 1usize;
+    let mut count = 0usize;
+    let mut uncharged = 0usize;
     while depth > 0 {
-        // An implementation limit, not a malformed module.
         let offset = u32::try_from(r.offset())
             .map_err(|_| Error::new(ErrorKind::ResourceLimit, "module too large for u32 instruction offsets"))?;
-        instructions.push(read_instruction(r, &mut depth)?);
-        offsets.push(offset);
+        let insn = read_instruction(r, &mut depth)?;
+        count = count.saturating_add(1);
+        uncharged += 1;
+        if keep {
+            if uncharged >= 1024 {
+                let over = match shared_insns {
+                    Some(c) => c.fetch_add(uncharged, Ordering::Relaxed).saturating_add(uncharged) > max_insns,
+                    None => count > max_insns,
+                };
+                uncharged = 0;
+                if over {
+                    instructions = Vec::new();
+                    offsets = Vec::new();
+                    keep = false;
+                    continue;
+                }
+            }
+            if count > max_insns {
+                instructions = Vec::new();
+                offsets = Vec::new();
+                keep = false;
+            } else {
+                instructions.push(insn);
+                offsets.push(offset);
+            }
+        }
     }
-    // A body of few, long instructions (one large br_table) would otherwise
-    // keep the estimate reserved for the module's lifetime.
+    if keep && uncharged > 0 {
+        let over = match shared_insns {
+            Some(c) => c.fetch_add(uncharged, Ordering::Relaxed).saturating_add(uncharged) > max_insns,
+            None => count > max_insns,
+        };
+        if over {
+            instructions = Vec::new();
+            offsets = Vec::new();
+        }
+    }
     if instructions.capacity() > instructions.len().saturating_mul(2).max(16) {
         instructions.shrink_to_fit();
         offsets.shrink_to_fit();
     }
-    Ok((instructions, offsets))
+    Ok((instructions, offsets, count))
 }
 fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instruction>> {
     let mut out = Vec::new();

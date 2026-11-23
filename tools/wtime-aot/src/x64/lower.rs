@@ -100,6 +100,14 @@ fn emit_fp_store(asm: &mut Asm, mem: Mem, src: Xmm, ty: Ty) {
 /// Uses `SCRATCH_GP1`/`SCRATCH_FP1` (`R11`/`Xmm15`) for cycle breaking and
 /// `SCRATCH_GP2`/`SCRATCH_FP2` (`R10`/`Xmm14`) for memory-to-memory copies.
 pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) {
+    // Assert distinct destinations across ALL raw moves BEFORE filtering self-moves (`d == s`),
+    // so a buggy caller passing `[(A, A), (A, B)]` trips the assertion instead of silently dropping `(A, A)`.
+    if raw_moves.len() > 1 {
+        let mut seen_dst: HashMap<MoveLoc, ()> = HashMap::with_capacity(raw_moves.len());
+        for &(dst, _, _) in raw_moves {
+            assert!(seen_dst.insert(dst, ()).is_none(), "parallel moves must have distinct destinations");
+        }
+    }
     let mut moves: Vec<(MoveLoc, MoveLoc, Ty)> =
         raw_moves.iter().copied().filter(|&(d, s, _)| d != s).collect();
     let n = moves.len();
@@ -1521,7 +1529,13 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    fn emit_term(&mut self, term: Term, next_bb: Option<u32>) -> Result<(), String> {
+    fn emit_term(
+        &mut self,
+        term: Term,
+        next_bb: Option<u32>,
+        budget: Option<&CompileBudget>,
+        charged_rodata: &mut usize,
+    ) -> Result<(), String> {
         match term {
             Term::Jump { target, args } => {
                 self.emit_edge_moves(target.0, args);
@@ -1617,15 +1631,33 @@ impl<'a> Lower<'a> {
             }
             Term::BrTable { idx, table_idx } => {
                 let bt = &self.ir.br_tables[table_idx as usize];
-                let targets = bt.targets.clone();
+                let n_targets = bt.targets.len();
                 let default = bt.default;
-                if targets.is_empty() {
+                if n_targets == 0 {
                     self.emit_edge_moves(default.0.0, default.1);
                     if next_bb != Some(default.0.0) {
                         self.asm.jmp(self.bb_labels[default.0.0 as usize]);
                     }
                     return Ok(());
                 }
+                // Pre-reserve jump-table rodata against BOTH per-function and cross-worker caps
+                // BEFORE cloning targets or allocating jump-table labels/bytes.
+                let est_rodata = n_targets.saturating_mul(4).saturating_add(4);
+                let projected_rodata = self.asm.local_rodata.len().saturating_add(est_rodata);
+                if projected_rodata > MAX_FN_LOCAL_RODATA_BYTES {
+                    return Err(format!(
+                        "x64: function {} local_rodata ({projected_rodata} B) exceeds cap {MAX_FN_LOCAL_RODATA_BYTES} B",
+                        self.ir.func_index
+                    ));
+                }
+                if let Some(b) = budget {
+                    let dr = projected_rodata.saturating_sub(*charged_rodata);
+                    if dr > 0 {
+                        b.charge_rodata(dr)?;
+                        *charged_rodata = projected_rodata;
+                    }
+                }
+                let targets = bt.targets.clone();
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 if ir != SCRATCH_GP2 {
                     self.asm.mov_rr(false, SCRATCH_GP2, ir);
@@ -1861,7 +1893,7 @@ pub fn lower_ir_to_x64_with_budget(
             }
         }
         let next_bb = alloc.block_order.get(oi + 1).copied();
-        l.emit_term(bb.term, next_bb)?;
+        l.emit_term(bb.term, next_bb, budget, &mut charged_rodata)?;
         check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     }
 

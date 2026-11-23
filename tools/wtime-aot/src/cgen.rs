@@ -4577,14 +4577,28 @@ pub fn generate_c(wasm: &[u8], out: &Path, opt: COpt) -> Res<()> {
     Ok(())
 }
 
+/// Configures a C compiler / linker command with a minimal clean environment (stripping ambient
+/// `CFLAGS`, `CPATH`, `C_INCLUDE_PATH`, `COMPILER_PATH`, `LIBRARY_PATH`, `LD_PRELOAD`, etc.) so
+/// cached `.o` / `.so` outputs depend solely on explicit flags and target fingerprints.
+fn clean_cc_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_clear();
+    for var in ["PATH", "HOME", "TMPDIR"] {
+        if let Some(val) = std::env::var_os(var) {
+            cmd.env(var, val);
+        }
+    }
+    cmd
+}
+
 /// Returns `(compiler_path, version_string, has_lld)`.
 pub fn detect_cc() -> Res<(String, String, bool)> {
     for cc in ["clang", "cc", "gcc"] {
-        if let Ok(out) = Command::new(cc).arg("--version").stdin(Stdio::null()).output()
+        if let Ok(out) = clean_cc_command(cc).arg("--version").stdin(Stdio::null()).output()
             && out.status.success()
         {
             let ver = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(cc).trim().to_string();
-            let has_lld = Command::new("ld.lld")
+            let has_lld = clean_cc_command("ld.lld")
                 .arg("--version")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -4606,7 +4620,7 @@ pub fn cc_target_fingerprint(cc: &str, target_cpu: &str) -> Res<String> {
     if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
         return Ok(hit);
     }
-    let out = Command::new(cc)
+    let out = clean_cc_command(cc)
         .args([&format!("-march={target_cpu}"), "-dM", "-E", "-x", "c", "-"])
         .stdin(Stdio::null())
         .output()
@@ -4700,9 +4714,21 @@ pub fn build_c_blot_cdylib(
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
     let t_total = Instant::now();
     let deadline = time_limit.map(|d| t_total + d);
+    let check_dl = |phase: &str| -> Res<()> {
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            return Err(format!("{phase}: exceeded build time limit"));
+        }
+        Ok(())
+    };
+    check_dl("cgen init")?;
     let (cc, cc_ver, has_lld) = detect_cc()?;
+    check_dl("cgen probe")?;
     let cc_target = cc_target_fingerprint(&cc, target_cpu)?;
+    check_dl("cgen source generation")?;
     let generated = generate_c_sources(wasm, opt, timings)?;
+    check_dl("cgen source generation")?;
 
     let obj_cache = cache.join("c-obj");
     fs::create_dir_all(&obj_cache).map_err(|e| format!("{}: {e}", obj_cache.display()))?;
@@ -4787,7 +4813,7 @@ pub fn build_c_blot_cdylib(
                         let t_one = Instant::now();
                         let obj_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
                         let tmp_obj = cached_obj.with_extension(format!("o.{}.{obj_seq}", std::process::id()));
-                        let mut cmd = Command::new(cc_ref);
+                        let mut cmd = clean_cc_command(cc_ref);
                         cmd.args([
                             opt_flag,
                             &format!("-march={target_cpu}"),
@@ -4848,7 +4874,7 @@ pub fn build_c_blot_cdylib(
         let comp_dt = t_comp.elapsed();
 
         let t_link = Instant::now();
-        let mut link = Command::new(&cc);
+        let mut link = clean_cc_command(&cc);
         link.arg("-shared");
         if has_lld {
             link.arg("-fuse-ld=lld");
