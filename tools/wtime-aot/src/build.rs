@@ -294,11 +294,13 @@ pub(crate) fn create_private_temp_file(dir: Option<&Path>, prefix: &str, suffix:
 
 const MAX_CAPTURE_BYTES: u64 = 16 << 20;
 
-/// Runs `cmd`, capturing stdout/stderr through private `0o600` temp files (eliminating pipe
-/// deadlocks and indefinite reader-EOF hangs from lingering descendants) while keeping `deadline`
-/// active through exit and output collection and cancelling the child tree on timeout.
+/// Runs `cmd`, capturing stdout/stderr through private `0o600` temp files (inside `scratch_dir`
+/// when provided, eliminating pipe deadlocks and descendant reader-EOF hangs), enforcing BOTH
+/// `deadline` AND a live `MAX_CAPTURE_BYTES` disk-output ceiling while running and after exit, and
+/// cancelling the child tree immediately on timeout or output overflow.
 pub(crate) fn run_cmd_capture_with_deadline(
     mut cmd: Command,
+    scratch_dir: Option<&Path>,
     label: &str,
     deadline: Option<std::time::Instant>,
 ) -> Result<std::process::Output, String> {
@@ -307,9 +309,9 @@ pub(crate) fn run_cmd_capture_with_deadline(
     {
         return Err(format!("{label}: exceeded build time limit"));
     }
-    let (mut out_file, out_path) = create_private_temp_file(None, "out", ".log")?;
+    let (mut out_file, out_path) = create_private_temp_file(scratch_dir, "out", ".log")?;
     let _rm_out = RemoveFileOnDrop(out_path);
-    let (mut err_file, err_path) = create_private_temp_file(None, "err", ".log")?;
+    let (mut err_file, err_path) = create_private_temp_file(scratch_dir, "err", ".log")?;
     let _rm_err = RemoveFileOnDrop(err_path);
     let child_out = out_file.try_clone().map_err(|e| format!("{label}: cloning stdout file: {e}"))?;
     let child_err = err_file.try_clone().map_err(|e| format!("{label}: cloning stderr file: {e}"))?;
@@ -322,7 +324,12 @@ pub(crate) fn run_cmd_capture_with_deadline(
     }
     let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
     let pid = child.id();
+    let capture_exceeded = |f: &fs::File| f.metadata().is_ok_and(|m| m.len() > MAX_CAPTURE_BYTES);
     let status = loop {
+        if capture_exceeded(&out_file) || capture_exceeded(&err_file) {
+            terminate_child_tree(&mut child);
+            return Err(format!("{label}: exceeded subprocess output cap ({MAX_CAPTURE_BYTES} bytes)"));
+        }
         match child.try_wait() {
             Ok(Some(st)) => break st,
             Ok(None) => {
@@ -341,6 +348,9 @@ pub(crate) fn run_cmd_capture_with_deadline(
         }
     };
     reap_child_group_after_exit(pid);
+    if capture_exceeded(&out_file) || capture_exceeded(&err_file) {
+        return Err(format!("{label}: exceeded subprocess output cap ({MAX_CAPTURE_BYTES} bytes)"));
+    }
     if let Some(dl) = deadline
         && std::time::Instant::now() >= dl
     {
@@ -745,16 +755,19 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
     let cc_info = crate::cgen::detect_cc_with_deadline(Some(&cache), Some(deadline))?;
-    let cc_target = crate::cgen::cc_target_fingerprint_with_deadline(&cc_info, options.target_cpu, Some(deadline))?;
+    let cc_target =
+        crate::cgen::cc_target_fingerprint_with_deadline(&cc_info, options.target_cpu, Some(&cache), Some(deadline))?;
     check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 5", &[]);
+    field(&mut key, "wtime-aot build c 6", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
     field(&mut key, "cc", cc_info.version.as_bytes());
     field(&mut key, "cc sha256", cc_info.cc_sha256.as_bytes());
+    field(&mut key, "sys headers sha256", cc_info.sys_headers_sha256.as_bytes());
     field(&mut key, "linker sha256", cc_info.linker_sha256.as_bytes());
+    field(&mut key, "link env sha256", cc_info.link_env_sha256.as_bytes());
     field(&mut key, "target cpu", options.target_cpu.as_bytes());
     field(&mut key, "cc target fingerprint", cc_target.as_bytes());
     field(&mut key, "cet return", &[cc_info.has_cet_return as u8]);
@@ -789,7 +802,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     match res {
         Ok(()) => {
             check_deadline(deadline, options.time_limit)?;
-            if let Err(e) = crate::cgen::verify_cc_unchanged(&cc_info, Some(deadline)) {
+            if let Err(e) = crate::cgen::verify_cc_unchanged(&cc_info, Some(&cache), Some(deadline)) {
                 let _ = fs::remove_file(&staged);
                 return Err(e);
             }
@@ -815,12 +828,14 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
             let _ = fs::write(
                 entry.join("key.txt"),
                 format!(
-                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncc sha256 {}\nlinker {}\nlinker sha256 {}\ncet return {}\nstack clash {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncc sha256 {}\nsys headers sha256 {}\nlinker {}\nlinker sha256 {}\nlink env sha256 {}\ncet return {}\nstack clash {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
                     options.c_opt.tag(),
                     cc_info.version,
                     cc_info.cc_sha256,
+                    cc_info.sys_headers_sha256,
                     cc_info.canon_linker.display(),
                     cc_info.linker_sha256,
+                    cc_info.link_env_sha256,
                     cc_info.has_cet_return,
                     cc_info.has_stack_clash,
                     options.target_cpu,
@@ -938,7 +953,7 @@ fn prepare(
     for (name, bytes) in runtime_sources(&rt)? {
         field(&mut key, &name, &bytes);
     }
-    let version = rustc_version(options.toolchain, Some(deadline))?;
+    let version = rustc_version(options.toolchain, Some(&cache), Some(deadline))?;
     field(&mut key, "toolchain", version.as_bytes());
     // The CPU and the features it resolves to here: a program built for one
     // machine's CPU is not reused for another's.
@@ -946,7 +961,7 @@ fn prepare(
     field(
         &mut key,
         "target features",
-        target_features(options.toolchain, options.target_cpu, Some(deadline))?.as_bytes(),
+        target_features(options.toolchain, options.target_cpu, Some(&cache), Some(deadline))?.as_bytes(),
     );
     check_deadline(deadline, options.time_limit)?;
     // A 64-bit memory is flat (allocated whole at its maximum, accessed
@@ -1068,12 +1083,12 @@ fn train_and_merge(
     }
     let mut sysroot_cmd = clean_rustc_command(options.toolchain);
     sysroot_cmd.args(["--print", "sysroot"]);
-    let sysroot = run_cmd_capture_with_deadline(sysroot_cmd, "rustc --print sysroot", Some(deadline))?;
+    let sysroot = run_cmd_capture_with_deadline(sysroot_cmd, Some(profiles), "rustc --print sysroot", Some(deadline))?;
     if !sysroot.status.success() {
         return Err(format!("rustc --print sysroot failed ({})", sysroot.status));
     }
     let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
-    let host = rustc_version(options.toolchain, Some(deadline))?
+    let host = rustc_version(options.toolchain, Some(profiles), Some(deadline))?
         .lines()
         .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
         .ok_or("rustc -vV names no host")?;
@@ -1237,10 +1252,15 @@ fn clean_rustc_command(toolchain: &str) -> Command {
 
 /// The target features `target_cpu` resolves to on this machine
 /// (`rustc --print cfg`).
-fn target_features(toolchain: &str, target_cpu: &str, deadline: Option<std::time::Instant>) -> Result<String, String> {
+fn target_features(
+    toolchain: &str,
+    target_cpu: &str,
+    scratch_dir: Option<&Path>,
+    deadline: Option<std::time::Instant>,
+) -> Result<String, String> {
     let mut cfg_cmd = clean_rustc_command(toolchain);
     cfg_cmd.args(["--print", "cfg", "-C", &format!("target-cpu={target_cpu}")]);
-    let output = run_cmd_capture_with_deadline(cfg_cmd, "rustc --print cfg", deadline)?;
+    let output = run_cmd_capture_with_deadline(cfg_cmd, scratch_dir, "rustc --print cfg", deadline)?;
     if !output.status.success() {
         return Err(format!("target cpu {target_cpu}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
@@ -1249,7 +1269,7 @@ fn target_features(toolchain: &str, target_cpu: &str, deadline: Option<std::time
     // `native` to covers the rest.
     let mut cpus_cmd = clean_rustc_command(toolchain);
     cpus_cmd.args(["--print", "target-cpus", "-C", &format!("target-cpu={target_cpu}")]);
-    let cpus = run_cmd_capture_with_deadline(cpus_cmd, "rustc --print target-cpus", deadline)?;
+    let cpus = run_cmd_capture_with_deadline(cpus_cmd, scratch_dir, "rustc --print target-cpus", deadline)?;
     let listing = String::from_utf8_lossy(&cpus.stdout);
     if let Some(current) = listing.lines().find(|line| line.contains("currently")) {
         features.push_str(current.trim());
@@ -1258,10 +1278,14 @@ fn target_features(toolchain: &str, target_cpu: &str, deadline: Option<std::time
 }
 
 /// `rustc -vV` of the toolchain.
-fn rustc_version(toolchain: &str, deadline: Option<std::time::Instant>) -> Result<String, String> {
+fn rustc_version(
+    toolchain: &str,
+    scratch_dir: Option<&Path>,
+    deadline: Option<std::time::Instant>,
+) -> Result<String, String> {
     let mut cmd = clean_rustc_command(toolchain);
     cmd.arg("-vV");
-    let output = run_cmd_capture_with_deadline(cmd, "rustc -vV", deadline)?;
+    let output = run_cmd_capture_with_deadline(cmd, scratch_dir, "rustc -vV", deadline)?;
     if !output.status.success() {
         return Err(format!("toolchain {toolchain}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
@@ -1312,6 +1336,16 @@ pub(crate) fn assert_inside_test_root(root: &Path, path: &Path) {
         "test path {} must not contain parent traversal",
         path.display()
     );
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        assert!(!meta.file_type().is_symlink(), "test output {} must not be a symlink", path.display());
+        let canon = path.canonicalize().expect("canonicalize existing test path");
+        assert!(
+            canon.starts_with(root),
+            "existing test output {} resolved outside fresh root {}",
+            path.display(),
+            root.display()
+        );
+    }
     let mut existing = path.parent().expect("test path has parent");
     while !existing.exists() {
         existing = existing.parent().expect("ancestor exists");

@@ -740,7 +740,7 @@ pub fn decode(
                             || expr_imm_elems > policy.max_instructions
                         {
                             expr_limit_exceeded = true;
-                            init.clear();
+                            init = Vec::new();
                         }
                         let retain = keep_items && !expr_limit_exceeded;
                         if expr {
@@ -753,7 +753,7 @@ pub fn decode(
                             )?;
                             if over {
                                 expr_limit_exceeded = true;
-                                init.clear();
+                                init = Vec::new();
                             } else if retain {
                                 init.push(item);
                             }
@@ -762,7 +762,7 @@ pub fn decode(
                             expr_insns = expr_insns.saturating_add(2);
                             if expr_insns > policy.max_instructions {
                                 expr_limit_exceeded = true;
-                                init.clear();
+                                init = Vec::new();
                             } else if retain {
                                 init.push(vec![
                                     Instruction {
