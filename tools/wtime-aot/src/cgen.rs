@@ -5032,8 +5032,10 @@ struct ShardJob {
 /// live compiler/linker upgrades.
 pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Instant>) -> Res<CcInfo> {
     static CACHE: OnceLock<Mutex<HashMap<CcCacheKey, CcInfo>>> = OnceLock::new();
-    let lld_key = find_in_path("ld.lld")
-        .and_then(|p| fs::canonicalize(&p).ok())
+    let lld_found = find_in_path("ld.lld");
+    let lld_key = lld_found
+        .as_ref()
+        .and_then(|p| fs::canonicalize(p).ok())
         .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
     let ld_key = find_in_path("ld")
         .and_then(|p| fs::canonicalize(&p).ok())
@@ -5061,8 +5063,12 @@ pub fn detect_cc_with_deadline(probe_root: Option<&Path>, deadline: Option<Insta
             continue;
         }
         let version = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(cc).trim().to_string();
-        let has_lld = if let Some((ref lld_path, _)) = lld_key {
-            let mut lld_cmd = clean_cc_command(&lld_path.to_string_lossy());
+        let has_lld = if lld_key.is_some()
+            && let Some(ref lld_prog) = lld_found
+        {
+            // Invoke the uncanonicalized `ld.lld` path so multicall `/usr/bin/ld.lld -> /usr/bin/lld`
+            // preserves `argv[0] = "ld.lld"` (while `lld_key` stamps the canonical target).
+            let mut lld_cmd = clean_cc_command(&lld_prog.to_string_lossy());
             lld_cmd.arg("--version");
             crate::build::run_cmd_capture_with_deadline(lld_cmd, "ld.lld --version", deadline)
                 .map(|o| o.status.success())?
@@ -5832,6 +5838,11 @@ mod tests {
         };
         assert_eq!(cc_info.cc_sha256.len(), 64);
         assert_eq!(cc_info.linker_sha256.len(), 64);
+        if let Some(lld_prog) = find_in_path("ld.lld")
+            && Command::new(&lld_prog).arg("--version").status().is_ok_and(|s| s.success())
+        {
+            assert!(cc_info.has_lld, "expected ld.lld probe to preserve argv[0] for multicall lld");
+        }
         let wasm = sample_c_backend_wasm();
 
         // Verify source generation triggers structured outlining on `f10` and coalescing on `f2`/`f3`.
