@@ -437,6 +437,7 @@ impl<'a> Lower<'a> {
             self.asm.jcc(Cond::Ae, toob);
             if ci.span == 0 {
                 self.asm.jmp(bad);
+                return Ok(());
             } else {
                 if ci.min_slot > 0 {
                     self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);

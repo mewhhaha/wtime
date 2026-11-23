@@ -1,7 +1,9 @@
 use crate::{
     Immediate, Instruction, Reader,
-    instructions::{body_expression_bounded, count, expression, val},
+    instructions::{body_expression_bounded, count, expression_bounded, val},
 };
+#[cfg(test)]
+use crate::instructions::expression;
 use std::sync::Arc;
 use wtime_types::*;
 #[derive(Clone, Debug)]
@@ -192,15 +194,34 @@ fn import_kind(s: &mut Reader) -> Result<ImportKind> {
         ExternalKind::Tag => ImportKind::Tag(tag(s)?),
     })
 }
-fn values(r: &mut Reader) -> Result<Vec<ValType>> {
+fn values_bounded(
+    r: &mut Reader,
+    type_items: &mut usize,
+    max_type_items: usize,
+    keep: bool,
+) -> Result<(Vec<ValType>, bool)> {
     let n = count(r)?;
-    let mut v = Vec::new();
-    for _ in 0..n {
-        v.push(val(r)?)
+    *type_items = type_items.saturating_add(n);
+    let over = *type_items > max_type_items;
+    if keep && !over {
+        let mut v = Vec::new();
+        for _ in 0..n {
+            v.push(val(r)?);
+        }
+        Ok((v, false))
+    } else {
+        for _ in 0..n {
+            let _ = val(r)?;
+        }
+        Ok((Vec::new(), over))
     }
-    Ok(v)
 }
-fn subtype(r: &mut Reader) -> Result<SubType> {
+fn subtype_bounded(
+    r: &mut Reader,
+    type_items: &mut usize,
+    max_type_items: usize,
+    keep: bool,
+) -> Result<(Option<SubType>, bool)> {
     let mut final_ = true;
     let mut supertype = None;
     if matches!(r.peek()?, 0x4f | 0x50) {
@@ -227,16 +248,30 @@ fn subtype(r: &mut Reader) -> Result<SubType> {
     } else {
         None
     };
+    let mut over = *type_items > max_type_items;
     let composite = match r.byte()? {
-        0x60 => CompositeType::Func(FuncType {
-            params: values(r)?,
-            results: values(r)?,
-        }),
+        0x60 => {
+            let (params, o1) = values_bounded(r, type_items, max_type_items, keep && !over)?;
+            over |= o1;
+            let (results, o2) = values_bounded(r, type_items, max_type_items, keep && !over)?;
+            over |= o2;
+            CompositeType::Func(FuncType { params, results })
+        }
         0x5f => {
             let n = count(r)?;
+            *type_items = type_items.saturating_add(n);
+            if *type_items > max_type_items {
+                over = true;
+            }
             let mut fields = Vec::new();
-            for _ in 0..n {
-                fields.push(field(r)?)
+            if keep && !over {
+                for _ in 0..n {
+                    fields.push(field(r)?);
+                }
+            } else {
+                for _ in 0..n {
+                    let _ = field(r)?;
+                }
             }
             CompositeType::Struct(StructType { fields })
         }
@@ -249,13 +284,20 @@ fn subtype(r: &mut Reader) -> Result<SubType> {
         }),
         _ => return Err(r.error("unknown composite type")),
     };
-    Ok(SubType {
-        final_,
-        supertype,
-        composite,
-        descriptor,
-        describes,
-    })
+    if keep && !over {
+        Ok((
+            Some(SubType {
+                final_,
+                supertype,
+                composite,
+                descriptor,
+                describes,
+            }),
+            false,
+        ))
+    } else {
+        Ok((None, over))
+    }
 }
 fn field(r: &mut Reader) -> Result<FieldType> {
     let storage = match r.peek()? {
@@ -307,6 +349,20 @@ pub fn decode(
     };
     let mut last = 0;
     let mut seen = 0u16;
+    let mut expr_insns: usize = 0;
+    let mut total_elem_items: u64 = 0;
+    let mut decl_limit_exceeded = false;
+    let mut expr_limit_exceeded = false;
+    let mut total_local_limit_exceeded = false;
+    let mut code_insn_limit_exceeded = false;
+    let mut imm_limit_exceeded = false;
+    let max_exports = policy
+        .max_functions
+        .saturating_add(policy.max_tables)
+        .saturating_add(policy.max_memories)
+        .saturating_add(policy.max_globals)
+        .saturating_add(policy.max_tags)
+        .max(65_536);
     while r.remaining() > 0 {
         let id = r.byte()?;
         let len = r.u32()? as usize;
@@ -315,10 +371,12 @@ pub fn decode(
             let name = s.name()?;
             let start = s.offset();
             s.take(s.remaining())?;
-            m.customs.push(CustomSection {
-                name,
-                data: Span::new(start, s.offset()),
-            });
+            if m.customs.len() < max_exports {
+                m.customs.push(CustomSection {
+                    name,
+                    data: Span::new(start, s.offset()),
+                });
+            }
             continue;
         }
         let rank = match id {
@@ -337,8 +395,12 @@ pub fn decode(
         seen |= 1 << id;
         match id {
             1 => {
-                let n = count(&mut s)?;
-                for _ in 0..n {
+                let n_groups = count(&mut s)?;
+                let mut total_types: usize = 0;
+                let mut total_groups: usize = 0;
+                let mut type_items: usize = 0;
+                let mut type_over = false;
+                for _ in 0..n_groups {
                     let explicit = s.peek()? == 0x4e;
                     if explicit {
                         s.feature(s.features().gc, "recursive type groups")?;
@@ -355,16 +417,36 @@ pub fn decode(
                             "recursion group limit",
                         ));
                     }
+                    total_groups = total_groups.saturating_add(1);
+                    total_types = total_types.saturating_add(n);
+                    if total_types > policy.max_types || total_groups > policy.max_types {
+                        type_over = true;
+                    }
                     let mut types = Vec::new();
                     for _ in 0..n {
-                        let ty = subtype(&mut s)?;
-                        m.types.push(match &ty.composite {
-                            CompositeType::Func(f) => f.clone(),
-                            _ => FuncType::default(),
-                        });
-                        types.push(ty)
+                        let (maybe_ty, items_over) = subtype_bounded(
+                            &mut s,
+                            &mut type_items,
+                            policy.max_instructions,
+                            !type_over,
+                        )?;
+                        if items_over {
+                            type_over = true;
+                            types.clear();
+                        } else if let Some(ty) = maybe_ty {
+                            m.types.push(match &ty.composite {
+                                CompositeType::Func(f) => f.clone(),
+                                _ => FuncType::default(),
+                            });
+                            types.push(ty);
+                        }
                     }
-                    m.type_groups.push(TypeGroup { explicit, types })
+                    if !type_over {
+                        m.type_groups.push(TypeGroup { explicit, types });
+                    }
+                }
+                if type_over {
+                    decl_limit_exceeded = true;
                 }
             }
             2 => {
@@ -445,19 +527,23 @@ pub fn decode(
                     }
                 }
                 if import_limit_exceeded {
-                    s.finish()?;
-                    return Err(Error::new(ErrorKind::ResourceLimit, "module import limit"));
+                    decl_limit_exceeded = true;
                 }
             }
             3 => {
                 let n = count(&mut s)?;
-                for _ in 0..n {
-                    m.functions.push(TypeIdx(s.u32()?))
+                for i in 0..n {
+                    let idx = TypeIdx(s.u32()?);
+                    if i < policy.max_functions {
+                        m.functions.push(idx);
+                    } else {
+                        decl_limit_exceeded = true;
+                    }
                 }
             }
             4 => {
                 let n = count(&mut s)?;
-                for _ in 0..n {
+                for i in 0..n {
                     let has_init = s.peek()? == 0x40;
                     if has_init {
                         s.feature(s.features().function_references, "table initializer")?;
@@ -466,37 +552,67 @@ pub fn decode(
                             return Err(s.error("invalid table initializer prefix"));
                         }
                     }
-                    m.tables.push(table(&mut s)?);
-                    m.table_inits.push(if has_init {
-                        Some(expression(&mut s)?)
+                    let tt = table(&mut s)?;
+                    let keep = i < policy.max_tables && !expr_limit_exceeded;
+                    let init = if has_init {
+                        let (expr, over) =
+                            expression_bounded(&mut s, &mut expr_insns, policy.max_instructions, keep)?;
+                        if over {
+                            expr_limit_exceeded = true;
+                        }
+                        Some(expr)
                     } else {
                         None
-                    });
+                    };
+                    if i < policy.max_tables {
+                        m.tables.push(tt);
+                        m.table_inits.push(init);
+                    } else {
+                        decl_limit_exceeded = true;
+                    }
                 }
             }
             5 => {
                 let n = count(&mut s)?;
-                for _ in 0..n {
-                    m.memories.push(memory(&mut s)?)
+                for i in 0..n {
+                    let mem = memory(&mut s)?;
+                    if i < policy.max_memories {
+                        m.memories.push(mem);
+                    } else {
+                        decl_limit_exceeded = true;
+                    }
                 }
             }
             6 => {
                 let n = count(&mut s)?;
-                for _ in 0..n {
-                    m.globals.push(Global {
-                        ty: global(&mut s)?,
-                        init: expression(&mut s)?,
-                    })
+                for i in 0..n {
+                    let ty = global(&mut s)?;
+                    let keep = i < policy.max_globals && !expr_limit_exceeded;
+                    let (init, over) =
+                        expression_bounded(&mut s, &mut expr_insns, policy.max_instructions, keep)?;
+                    if over {
+                        expr_limit_exceeded = true;
+                    }
+                    if i < policy.max_globals {
+                        m.globals.push(Global { ty, init });
+                    } else {
+                        decl_limit_exceeded = true;
+                    }
                 }
             }
             7 => {
                 let n = count(&mut s)?;
-                for _ in 0..n {
-                    m.exports.push(Export {
+                for i in 0..n {
+                    let exp = Export {
                         name: s.name()?,
                         kind: kind(&mut s)?,
                         index: s.u32()?,
-                    })
+                    };
+                    if i < max_exports {
+                        m.exports.push(exp);
+                    } else {
+                        decl_limit_exceeded = true;
+                    }
                 }
             }
             8 => m.start = Some(FuncIdx(s.u32()?)),
@@ -515,15 +631,36 @@ pub fn decode(
                         f & 3 == 0 || s.features().bulk_memory,
                         "bulk element segments",
                     )?;
+                    expr_insns = expr_insns.saturating_add(1);
+                    if expr_insns > policy.max_instructions {
+                        expr_limit_exceeded = true;
+                    }
                     let mode = match f & 3 {
-                        0 => SegmentMode::Active {
-                            index: 0,
-                            offset: expression(&mut s)?,
-                        },
-                        2 => SegmentMode::Active {
-                            index: s.u32()?,
-                            offset: expression(&mut s)?,
-                        },
+                        0 => {
+                            let (offset, over) = expression_bounded(
+                                &mut s,
+                                &mut expr_insns,
+                                policy.max_instructions,
+                                !expr_limit_exceeded,
+                            )?;
+                            if over {
+                                expr_limit_exceeded = true;
+                            }
+                            SegmentMode::Active { index: 0, offset }
+                        }
+                        2 => {
+                            let index = s.u32()?;
+                            let (offset, over) = expression_bounded(
+                                &mut s,
+                                &mut expr_insns,
+                                policy.max_instructions,
+                                !expr_limit_exceeded,
+                            )?;
+                            if over {
+                                expr_limit_exceeded = true;
+                            }
+                            SegmentMode::Active { index, offset }
+                        }
                         1 => SegmentMode::Passive,
                         _ => SegmentMode::Declarative,
                     };
@@ -546,105 +683,144 @@ pub fn decode(
                     } else {
                         RefType::new(false, HeapType::Func)
                     };
-                    let n = count(&mut s)?;
+                    let n_items = count(&mut s)?;
                     let mut init = Vec::new();
-                    for _ in 0..n {
-                        init.push(if expr {
-                            expression(&mut s)?
+                    for _ in 0..n_items {
+                        total_elem_items = total_elem_items.saturating_add(1);
+                        if total_elem_items > policy.max_table_elements {
+                            expr_limit_exceeded = true;
+                            init.clear();
+                        }
+                        if expr {
+                            let (item, over) = expression_bounded(
+                                &mut s,
+                                &mut expr_insns,
+                                policy.max_instructions,
+                                !expr_limit_exceeded,
+                            )?;
+                            if over {
+                                expr_limit_exceeded = true;
+                                init.clear();
+                            } else if !expr_limit_exceeded {
+                                init.push(item);
+                            }
                         } else {
                             let index = s.u32()?;
-                            vec![
-                                Instruction {
-                                    opcode: 0xd2,
-                                    immediate: Immediate::Index(index),
-                                },
-                                Instruction {
-                                    opcode: 0x0b,
-                                    immediate: Immediate::None,
-                                },
-                            ]
-                        })
+                            expr_insns = expr_insns.saturating_add(2);
+                            if expr_insns > policy.max_instructions {
+                                expr_limit_exceeded = true;
+                                init.clear();
+                            } else if !expr_limit_exceeded {
+                                init.push(vec![
+                                    Instruction {
+                                        opcode: 0xd2,
+                                        immediate: Immediate::Index(index),
+                                    },
+                                    Instruction {
+                                        opcode: 0x0b,
+                                        immediate: Immediate::None,
+                                    },
+                                ]);
+                            }
+                        }
                     }
-                    m.elements.push(Element { mode, ty, init })
+                    if !expr_limit_exceeded {
+                        m.elements.push(Element { mode, ty, init });
+                    }
                 }
             }
             10 => {
                 let n = count(&mut s)?;
                 if n > policy.max_functions {
-                    // Stream-validate every body without retaining any `Reader` or `Instruction`
-                    // vectors so malformed size/syntax still precedes `ResourceLimit` in O(1) RAM.
+                    // Stream-validate every body without retaining any `Reader`, `Instruction`,
+                    // or immediate buffers so malformed size/syntax still precedes `ResourceLimit`
+                    // in O(1) RAM.
                     for _ in 0..n {
                         let size = s.u32()?;
                         let b = s.child(size as usize)?;
                         let _ = parse_function_body(b, policy, None, false)?;
                     }
-                    s.finish()?;
-                    return Err(Error::new(ErrorKind::ResourceLimit, "module declaration limit"));
-                }
-                // Each body's bytes first, then the bodies, in parallel when
-                // the section is large; errors are reported in body order, a
-                // malformed size only after the bodies before it.
-                let mut bodies = Vec::with_capacity(n);
-                let mut sizes = Ok(());
-                for _ in 0..n {
-                    match s.u32().and_then(|size| s.child(size as usize)) {
-                        Ok(b) => bodies.push(b),
-                        Err(e) => {
-                            sizes = Err(e);
-                            break;
+                    decl_limit_exceeded = true;
+                } else {
+                    // Each body's bytes first, then the bodies, in parallel when
+                    // the section is large; errors are reported in body order, a
+                    // malformed size only after the bodies before it.
+                    let mut bodies = Vec::with_capacity(n);
+                    let mut sizes = Ok(());
+                    for _ in 0..n {
+                        match s.u32().and_then(|size| s.child(size as usize)) {
+                            Ok(b) => bodies.push(b),
+                            Err(e) => {
+                                sizes = Err(e);
+                                break;
+                            }
                         }
                     }
-                }
-                let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
-                // Share a module-wide instruction retention counter across all workers so neither
-                // a single oversized body nor parallel workers can retain more than
-                // `policy.max_instructions` decoded instructions, while still scanning every body's
-                // syntax in full so malformed bytecode precedes deferred aggregate limits.
-                let shared_insns = std::sync::atomic::AtomicUsize::new(0);
-                let decoded = wtime_types::parallel::map_ordered(
-                    &bodies,
-                    threads,
-                    || (),
-                    |_, b| parse_function_body(b.clone(), policy, Some(&shared_insns), true),
-                );
-                let mut parsed_bodies = Vec::with_capacity(decoded.len());
-                let mut total_decoded_locals: usize = 0;
-                let mut total_decoded_insns: usize = 0;
-                let mut total_limit_exceeded = false;
-                let mut insn_limit_exceeded = false;
-                for body in decoded {
-                    let parsed = body?;
-                    total_decoded_locals = total_decoded_locals.saturating_add(parsed.total_locals as usize);
-                    if total_decoded_locals > policy.max_total_locals {
-                        total_limit_exceeded = true;
+                    let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
+                    let keep_bodies = !decl_limit_exceeded && !expr_limit_exceeded;
+                    // Share a module-wide pre-reserved instruction retention counter across all
+                    // workers (starting at `expr_insns`) so aggregate retained instructions never
+                    // exceed `policy.max_instructions`, while still scanning every body's syntax
+                    // in full so malformed bytecode precedes deferred aggregate limits.
+                    let shared_insns = std::sync::atomic::AtomicUsize::new(expr_insns);
+                    let decoded = wtime_types::parallel::map_ordered(
+                        &bodies,
+                        threads,
+                        || (),
+                        |_, b| parse_function_body(b.clone(), policy, Some(&shared_insns), keep_bodies),
+                    );
+                    let mut parsed_bodies = Vec::with_capacity(decoded.len());
+                    let mut total_decoded_locals: usize = 0;
+                    let mut total_decoded_insns: usize = expr_insns;
+                    for (idx, body) in decoded.into_iter().enumerate() {
+                        let parsed = body?;
+                        total_decoded_locals = total_decoded_locals.saturating_add(parsed.total_locals as usize);
+                        if total_decoded_locals > policy.max_total_locals {
+                            total_local_limit_exceeded = true;
+                        }
+                        total_decoded_insns = total_decoded_insns.saturating_add(parsed.insn_count);
+                        if total_decoded_insns > policy.max_instructions {
+                            code_insn_limit_exceeded = true;
+                        }
+                        if parsed.imm_limit_exceeded {
+                            imm_limit_exceeded = true;
+                        }
+                        if keep_bodies
+                            && !total_local_limit_exceeded
+                            && !code_insn_limit_exceeded
+                            && !imm_limit_exceeded
+                        {
+                            parsed_bodies.push((idx, parsed));
+                        }
                     }
-                    total_decoded_insns = total_decoded_insns.saturating_add(parsed.insn_count);
-                    if total_decoded_insns > policy.max_instructions {
-                        insn_limit_exceeded = true;
+                    sizes?;
+                    if keep_bodies
+                        && !total_local_limit_exceeded
+                        && !code_insn_limit_exceeded
+                        && !imm_limit_exceeded
+                    {
+                        m.code.reserve_exact(parsed_bodies.len());
+                        for (idx, parsed) in parsed_bodies {
+                            // If a valid module near `max_instructions` transiently dropped one
+                            // body due to sibling threads holding unspent batch reservations,
+                            // re-decode just that body sequentially with exact retention.
+                            let parsed = if parsed.dropped && parsed.insn_count > 0 {
+                                parse_function_body(bodies[idx].clone(), policy, None, true)?
+                            } else {
+                                parsed
+                            };
+                            let mut locals = Vec::with_capacity(parsed.total_locals as usize);
+                            for (cnt, ty) in parsed.local_groups {
+                                locals.resize(locals.len() + cnt as usize, ty);
+                            }
+                            m.code.push(FunctionBody {
+                                locals,
+                                instructions: parsed.instructions,
+                                offsets: parsed.offsets,
+                                span: parsed.span,
+                            });
+                        }
                     }
-                    if !total_limit_exceeded && !insn_limit_exceeded {
-                        parsed_bodies.push(parsed);
-                    }
-                }
-                sizes?;
-                if total_limit_exceeded {
-                    return Err(Error::new(ErrorKind::ResourceLimit, "module total local limit"));
-                }
-                if insn_limit_exceeded {
-                    return Err(Error::new(ErrorKind::ResourceLimit, "module instruction limit"));
-                }
-                m.code.reserve_exact(parsed_bodies.len());
-                for parsed in parsed_bodies {
-                    let mut locals = Vec::with_capacity(parsed.total_locals as usize);
-                    for (cnt, ty) in parsed.local_groups {
-                        locals.resize(locals.len() + cnt as usize, ty);
-                    }
-                    m.code.push(FunctionBody {
-                        locals,
-                        instructions: parsed.instructions,
-                        offsets: parsed.offsets,
-                        span: parsed.span,
-                    });
                 }
             }
             11 => {
@@ -652,25 +828,48 @@ pub fn decode(
                 for _ in 0..n {
                     let flags = s.u32()?;
                     s.feature(flags == 0 || s.features().bulk_memory, "bulk data segments")?;
+                    expr_insns = expr_insns.saturating_add(1);
+                    if expr_insns > policy.max_instructions {
+                        expr_limit_exceeded = true;
+                    }
                     let mode = match flags {
-                        0 => SegmentMode::Active {
-                            index: 0,
-                            offset: expression(&mut s)?,
-                        },
+                        0 => {
+                            let (offset, over) = expression_bounded(
+                                &mut s,
+                                &mut expr_insns,
+                                policy.max_instructions,
+                                !expr_limit_exceeded,
+                            )?;
+                            if over {
+                                expr_limit_exceeded = true;
+                            }
+                            SegmentMode::Active { index: 0, offset }
+                        }
                         1 => SegmentMode::Passive,
-                        2 => SegmentMode::Active {
-                            index: s.u32()?,
-                            offset: expression(&mut s)?,
-                        },
+                        2 => {
+                            let index = s.u32()?;
+                            let (offset, over) = expression_bounded(
+                                &mut s,
+                                &mut expr_insns,
+                                policy.max_instructions,
+                                !expr_limit_exceeded,
+                            )?;
+                            if over {
+                                expr_limit_exceeded = true;
+                            }
+                            SegmentMode::Active { index, offset }
+                        }
                         _ => return Err(s.error("invalid data flags")),
                     };
                     let len = s.u32()? as usize;
                     let start = s.offset();
                     s.take(len)?;
-                    m.data.push(Data {
-                        mode,
-                        bytes: Span::new(start, s.offset()),
-                    })
+                    if !expr_limit_exceeded {
+                        m.data.push(Data {
+                            mode,
+                            bytes: Span::new(start, s.offset()),
+                        });
+                    }
                 }
             }
             12 => {
@@ -679,31 +878,40 @@ pub fn decode(
             }
             13 => {
                 let n = count(&mut s)?;
-                let mut tag_limit_exceeded = false;
                 for _ in 0..n {
                     let t = tag(&mut s)?;
                     if m.tags.len() >= policy.max_tags {
-                        tag_limit_exceeded = true;
+                        decl_limit_exceeded = true;
                     } else {
                         m.tags.push(t);
                     }
-                }
-                if tag_limit_exceeded {
-                    s.finish()?;
-                    return Err(Error::new(ErrorKind::ResourceLimit, "tag declaration limit"));
                 }
             }
             _ => unreachable!(),
         };
         s.finish()?;
     }
-    if m.types.len() > policy.max_types
+    if total_local_limit_exceeded {
+        return Err(Error::new(
+            ErrorKind::ResourceLimit,
+            "module total local limit",
+        ));
+    }
+    if code_insn_limit_exceeded || expr_limit_exceeded || imm_limit_exceeded {
+        return Err(Error::new(
+            ErrorKind::ResourceLimit,
+            "module instruction limit",
+        ));
+    }
+    if decl_limit_exceeded
+        || m.types.len() > policy.max_types
         || m.functions.len() > policy.max_functions
         || m.tables.len() > policy.max_tables
         || m.memories.len() > policy.max_memories
         || m.globals.len() > policy.max_globals
         || m.tags.len() > policy.max_tags
-        || m.code.iter().map(|b| b.instructions.len()).sum::<usize>() > policy.max_instructions
+        || expr_insns.saturating_add(m.code.iter().map(|b| b.instructions.len()).sum::<usize>())
+            > policy.max_instructions
     {
         return Err(Error::new(
             ErrorKind::ResourceLimit,
@@ -731,14 +939,17 @@ struct ParsedBody {
     local_groups: Vec<(u32, ValType)>,
     total_locals: u32,
     insn_count: usize,
+    dropped: bool,
+    imm_limit_exceeded: bool,
     instructions: Vec<Instruction>,
     offsets: Vec<u32>,
     span: Span,
 }
 
 /// One function body of the code section, parsed without expanding `locals`.
-/// Uses `body_expression_bounded` so instruction/offset vectors are never retained past the
-/// module-wide `policy.max_instructions` cap while full syntax checking still runs.
+/// Uses `body_expression_bounded` so instruction/offset vectors and immediate
+/// buffers are never retained past the module-wide `policy.max_instructions` cap
+/// while full syntax checking still runs.
 fn parse_function_body(
     mut b: Reader,
     policy: &ResourceLimits,
@@ -755,27 +966,28 @@ fn parse_function_body(
         total = total
             .checked_add(n)
             .ok_or_else(|| b.error("local count overflow"))?;
-        if keep && (total as usize) <= policy.max_locals {
+        if n > 0 && keep && (total as usize) <= policy.max_locals {
             local_groups.push((n, ty));
         }
     }
     let keep_body = keep && (total as usize) <= policy.max_locals;
-    let (instructions, offsets, insn_count) =
-        body_expression_bounded(&mut b, shared_insns, policy.max_instructions, keep_body)?;
+    let parsed_body = body_expression_bounded(&mut b, shared_insns, policy.max_instructions, keep_body)?;
     b.finish()?;
     if total as usize > policy.max_locals {
         return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
     }
     Ok(ParsedBody {
-        local_groups: if instructions.is_empty() && insn_count > 0 {
+        local_groups: if parsed_body.dropped && parsed_body.count > 0 {
             Vec::new()
         } else {
             local_groups
         },
         total_locals: total,
-        insn_count,
-        instructions,
-        offsets,
+        insn_count: parsed_body.count,
+        dropped: parsed_body.dropped,
+        imm_limit_exceeded: parsed_body.imm_exceeded,
+        instructions: parsed_body.instructions,
+        offsets: parsed_body.offsets,
         span: Span::new(start, b.offset()),
     })
 }
@@ -1069,5 +1281,113 @@ mod tests {
         assert_eq!(parse(&bytes).unwrap().memories[0].page_size_log2, 17);
         let bytes = module(&[(5, &[1, 8, 0, 0x80, 2])]);
         assert_eq!(parse(&bytes).unwrap_err().kind, ErrorKind::Decode);
+    }
+    #[test]
+    fn t163_bounded_decode_all_sections_and_skip_immediates() {
+        // Zero-count local groups do not accumulate or exceed local limits.
+        let mut body = vec![4, 0, 0x7f, 0, 0x7e, 0, 0x7d, 0, 0x7c, 0x0b];
+        let mut code = vec![1, body.len() as u8];
+        code.append(&mut body);
+        let zero_locals = module(&[(1, &[1, 0x60, 0, 0]), (3, &[1, 0]), (10, &code)]);
+        let m = decode(
+            &zero_locals,
+            &FeatureSet::default(),
+            &ResourceLimits {
+                max_locals: 0,
+                max_total_locals: 0,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+        assert!(m.code[0].locals.is_empty());
+
+        // Over-limit body with heap-backed `br_table` & `select` immediates still reports
+        // `ResourceLimit` when well-formed and `Decode` when malformed, without retaining.
+        let over_body = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (10, &[1, 12, 0, 0x01, 0x01, 0x0e, 2, 0, 0, 0, 0x1c, 1, 0x7f, 0x0b]),
+        ]);
+        let tight_insn = ResourceLimits {
+            max_instructions: 2,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            decode(&over_body, &FeatureSet::default(), &tight_insn)
+                .unwrap_err()
+                .kind,
+            ErrorKind::ResourceLimit
+        );
+        let malformed_over_body = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (10, &[1, 12, 0, 0x01, 0x01, 0x0e, 2, 0, 0, 0, 0x1c, 1, 0x7f, 0xff]),
+        ]);
+        assert_eq!(
+            decode(&malformed_over_body, &FeatureSet::default(), &tight_insn)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Decode
+        );
+
+        // Over-limit types & legacy element entries reject with `ResourceLimit`, while
+        // malformed syntax in a later section still reports `Decode`.
+        let many_types = module(&[(1, &[3, 0x60, 0, 0, 0x60, 0, 0, 0x60, 0, 0])]);
+        let tight_types = ResourceLimits {
+            max_types: 1,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            decode(&many_types, &FeatureSet::default(), &tight_types)
+                .unwrap_err()
+                .kind,
+            ErrorKind::ResourceLimit
+        );
+        let many_types_then_bad_mem = module(&[
+            (1, &[3, 0x60, 0, 0, 0x60, 0, 0, 0x60, 0, 0]),
+            (5, &[1, 0xff]),
+        ]);
+        assert_eq!(
+            decode(&many_types_then_bad_mem, &FeatureSet::default(), &tight_types)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Decode
+        );
+        // Legacy element items charge 2 instructions each against `max_instructions`.
+        let elem_over = module(&[(9, &[1, 1, 0, 3, 0, 0, 0])]);
+        assert_eq!(
+            decode(
+                &elem_over,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 4,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+
+        // Parallel decode right at `max_instructions` boundary preserves all bodies cleanly.
+        let mut sec3 = vec![4u8];
+        sec3.extend([0, 0, 0, 0]);
+        let mut sec10 = vec![4u8];
+        for _ in 0..4 {
+            sec10.extend([3, 0, 0x01, 0x0b]); // 2 instructions each -> 8 total
+        }
+        let exact_par = module(&[(1, &[1, 0x60, 0, 0]), (3, &sec3), (10, &sec10)]);
+        let m = decode(
+            &exact_par,
+            &FeatureSet::default(),
+            &ResourceLimits {
+                max_instructions: 8,
+                compile_threads: 4,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(m.code.len(), 4);
+        assert!(m.code.iter().all(|b| b.instructions.len() == 2));
     }
 }

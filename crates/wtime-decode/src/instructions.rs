@@ -127,97 +127,206 @@ fn memarg(r: &mut Reader) -> Result<Immediate> {
         memory,
     })
 }
+#[cfg(test)]
 pub(crate) fn expression(r: &mut Reader) -> Result<Vec<Instruction>> {
     expression_with_capacity(r, 0)
 }
+pub(crate) struct BoundedBody {
+    pub instructions: Vec<Instruction>,
+    pub offsets: Vec<u32>,
+    pub count: usize,
+    pub dropped: bool,
+    pub imm_exceeded: bool,
+}
+/// Decodes a constant/initializer expression while charging every decoded
+/// instruction against `expr_insns <= max_insns`. When `keep` is false or the
+/// budget is exceeded, syntax validation continues in full with zero heap
+/// allocations for instructions or variable-length immediates.
+pub(crate) fn expression_bounded(
+    r: &mut Reader,
+    expr_insns: &mut usize,
+    max_insns: usize,
+    mut keep: bool,
+) -> Result<(Vec<Instruction>, bool)> {
+    let mut out = Vec::new();
+    let mut exceeded = *expr_insns > max_insns;
+    if exceeded {
+        keep = false;
+    }
+    let mut depth = 1usize;
+    while depth > 0 {
+        if keep && *expr_insns >= max_insns {
+            keep = false;
+            out = Vec::new();
+        }
+        let mut imm_over = false;
+        let insn = read_instruction(r, &mut depth, keep, max_insns, &mut imm_over)?;
+        *expr_insns = expr_insns.saturating_add(1);
+        if imm_over || *expr_insns > max_insns {
+            exceeded = true;
+            if keep {
+                keep = false;
+                out = Vec::new();
+            }
+        } else if keep {
+            out.push(insn);
+        }
+    }
+    Ok((out, exceeded))
+}
+fn reserve_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, want: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let mut cur = shared.load(Ordering::Relaxed);
+    loop {
+        if cur >= max_total {
+            return 0;
+        }
+        let grant = want.min(max_total - cur);
+        match shared.compare_exchange_weak(cur, cur + grant, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return grant,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+struct QuotaGuard<'a> {
+    shared: Option<&'a std::sync::atomic::AtomicUsize>,
+    rem: usize,
+}
+impl QuotaGuard<'_> {
+    fn release(&mut self) {
+        if self.rem > 0
+            && let Some(s) = self.shared
+        {
+            s.fetch_sub(self.rem, std::sync::atomic::Ordering::Relaxed);
+            self.rem = 0;
+        }
+    }
+}
+impl Drop for QuotaGuard<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 /// A function body's instructions and the absolute offset of each in the
-/// module. When `keep` is false, or once the shared module-wide instruction
-/// counter exceeds `max_insns`, syntax decoding continues in full (so malformed
-/// bytecode still reports `ErrorKind::Decode`) while dropping all retained
-/// vectors immediately so memory stays strictly bounded.
+/// module. Pre-reserves quota from `shared_insns` BEFORE retaining instructions
+/// so aggregate retained instructions across all parallel workers never exceed
+/// `max_insns`. When `keep` is false or quota is exhausted, syntax decoding
+/// continues in full with zero heap allocation (skipping immediate buffers) so
+/// malformed bytecode still reports `ErrorKind::Decode`.
+/// Returns `(instructions, offsets, exact_insn_count, retention_dropped, imm_limit_exceeded)`.
 pub(crate) fn body_expression_bounded(
     r: &mut Reader,
     shared_insns: Option<&std::sync::atomic::AtomicUsize>,
     max_insns: usize,
     mut keep: bool,
-) -> Result<(Vec<Instruction>, Vec<u32>, usize)> {
+) -> Result<BoundedBody> {
     use std::sync::atomic::Ordering;
     let mut instructions = Vec::new();
     let mut offsets = Vec::new();
+    let mut dropped = !keep;
+    let mut imm_exceeded = false;
     if keep
-        && shared_insns.is_some_and(|c| c.load(Ordering::Relaxed) > max_insns)
+        && let Some(c) = shared_insns
+        && c.load(Ordering::Relaxed) >= max_insns
     {
         keep = false;
+        dropped = true;
     }
     if keep {
-        let estimate = (r.remaining() / 3).min(1 << 16).min(max_insns);
+        let avail = match shared_insns {
+            Some(c) => max_insns.saturating_sub(c.load(Ordering::Relaxed)),
+            None => max_insns,
+        };
+        let estimate = (r.remaining() / 3).min(1 << 16).min(avail);
         let _ = instructions.try_reserve_exact(estimate);
         let _ = offsets.try_reserve_exact(estimate);
     }
+    let mut quota = QuotaGuard {
+        shared: shared_insns,
+        rem: 0,
+    };
     let mut depth = 1usize;
     let mut count = 0usize;
-    let mut uncharged = 0usize;
     while depth > 0 {
         let offset = u32::try_from(r.offset())
             .map_err(|_| Error::new(ErrorKind::ResourceLimit, "module too large for u32 instruction offsets"))?;
-        let insn = read_instruction(r, &mut depth)?;
-        count = count.saturating_add(1);
-        uncharged += 1;
         if keep {
-            if uncharged >= 1024 {
-                let over = match shared_insns {
-                    Some(c) => c.fetch_add(uncharged, Ordering::Relaxed).saturating_add(uncharged) > max_insns,
-                    None => count > max_insns,
-                };
-                uncharged = 0;
-                if over {
-                    instructions = Vec::new();
-                    offsets = Vec::new();
-                    keep = false;
-                    continue;
-                }
-            }
-            if count > max_insns {
+            if count >= max_insns {
+                quota.release();
                 instructions = Vec::new();
                 offsets = Vec::new();
                 keep = false;
-            } else {
-                instructions.push(insn);
-                offsets.push(offset);
+                dropped = true;
+            } else if let Some(c) = shared_insns
+                && quota.rem == 0
+            {
+                let want = r.remaining().clamp(1, 1024);
+                quota.rem = reserve_budget(c, max_insns, want);
+                if quota.rem == 0 {
+                    instructions = Vec::new();
+                    offsets = Vec::new();
+                    keep = false;
+                    dropped = true;
+                }
             }
         }
-    }
-    if keep && uncharged > 0 {
-        let over = match shared_insns {
-            Some(c) => c.fetch_add(uncharged, Ordering::Relaxed).saturating_add(uncharged) > max_insns,
-            None => count > max_insns,
-        };
-        if over {
-            instructions = Vec::new();
-            offsets = Vec::new();
+        let mut imm_over = false;
+        let insn = read_instruction(r, &mut depth, keep, max_insns, &mut imm_over)?;
+        count = count.saturating_add(1);
+        if imm_over {
+            imm_exceeded = true;
+            if keep {
+                quota.release();
+                instructions = Vec::new();
+                offsets = Vec::new();
+                keep = false;
+                dropped = true;
+            }
+        } else if keep {
+            if shared_insns.is_some() {
+                quota.rem -= 1;
+            }
+            instructions.push(insn);
+            offsets.push(offset);
         }
     }
+    quota.release();
     if instructions.capacity() > instructions.len().saturating_mul(2).max(16) {
         instructions.shrink_to_fit();
         offsets.shrink_to_fit();
     }
-    Ok((instructions, offsets, count))
+    Ok(BoundedBody {
+        instructions,
+        offsets,
+        count,
+        dropped,
+        imm_exceeded,
+    })
 }
+#[cfg(test)]
 fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instruction>> {
     let mut out = Vec::new();
     // A hint only: a failed reservation leaves growth to push.
     let _ = out.try_reserve_exact(capacity);
     let mut depth = 1usize;
+    let mut imm_over = false;
     while depth > 0 {
-        out.push(read_instruction(r, &mut depth)?);
+        out.push(read_instruction(r, &mut depth, true, usize::MAX, &mut imm_over)?);
     }
     Ok(out)
 }
 /// Decode one instruction and its immediates, without validating control nesting.
 pub fn decode_instruction(r: &mut Reader) -> Result<Instruction> {
-    read_instruction(r, &mut 1)
+    let mut imm_over = false;
+    read_instruction(r, &mut 1, true, usize::MAX, &mut imm_over)
 }
-fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
+fn read_instruction(
+    r: &mut Reader,
+    depth: &mut usize,
+    keep: bool,
+    max_imm_elems: usize,
+    imm_over: &mut bool,
+) -> Result<Instruction> {
     let first = r.byte()?;
     let mut opcode = first as u16;
     let immediate = match first {
@@ -238,20 +347,41 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
         }
         0x0e => {
             let n = count(r)?;
-            let mut v = Vec::new();
-            for _ in 0..n {
-                v.push(r.u32()?)
+            if n > max_imm_elems {
+                *imm_over = true;
             }
-            Immediate::BrTable(v.into_boxed_slice(), r.u32()?)
+            if keep && n <= max_imm_elems {
+                let mut v = Vec::new();
+                for _ in 0..n {
+                    v.push(r.u32()?)
+                }
+                Immediate::BrTable(v.into_boxed_slice(), r.u32()?)
+            } else {
+                for _ in 0..n {
+                    let _ = r.u32()?;
+                }
+                let _ = r.u32()?;
+                Immediate::None
+            }
         }
         0x11 | 0x13 => Immediate::Pair(r.u32()?, r.u32()?),
         0x1c => {
             let n = count(r)?;
-            let mut v = Vec::new();
-            for _ in 0..n {
-                v.push(val(r)?)
+            if n > max_imm_elems {
+                *imm_over = true;
             }
-            Immediate::Types(v.into_boxed_slice())
+            if keep && n <= max_imm_elems {
+                let mut v = Vec::new();
+                for _ in 0..n {
+                    v.push(val(r)?)
+                }
+                Immediate::Types(v.into_boxed_slice())
+            } else {
+                for _ in 0..n {
+                    let _ = val(r)?;
+                }
+                Immediate::None
+            }
         }
         0x28..=0x3e => memarg(r)?,
         0x3f | 0x40 => Immediate::Index(r.u32()?),
@@ -307,7 +437,14 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
             };
             match sub {
                 0..=11 | 92 | 93 => memarg(r)?,
-                12 | 13 => Immediate::Bytes(r.take(16)?.into()),
+                12 | 13 => {
+                    let bytes = r.take(16)?;
+                    if keep {
+                        Immediate::Bytes(bytes.into())
+                    } else {
+                        Immediate::None
+                    }
+                }
                 21..=34 => Immediate::Index(r.byte()? as u32),
                 84..=91 => {
                     let m = memarg(r)?;
@@ -364,16 +501,33 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
             let ty = r.u32()?;
             let tag = if first == 0xe4 { Some(r.u32()?) } else { None };
             let n = count(r)?;
-            let mut handlers = Vec::new();
-            for _ in 0..n {
-                let switch = r.byte()?;
-                if switch > 1 {
-                    return Err(r.error("invalid continuation handler"));
-                }
-                let t = r.u32()?;
-                handlers.push((t, if switch == 0 { Some(r.u32()?) } else { None }));
+            if n > max_imm_elems {
+                *imm_over = true;
             }
-            Immediate::Resume(Box::new(ResumeImmediate { ty, tag, handlers }))
+            if keep && n <= max_imm_elems {
+                let mut handlers = Vec::new();
+                for _ in 0..n {
+                    let switch = r.byte()?;
+                    if switch > 1 {
+                        return Err(r.error("invalid continuation handler"));
+                    }
+                    let t = r.u32()?;
+                    handlers.push((t, if switch == 0 { Some(r.u32()?) } else { None }));
+                }
+                Immediate::Resume(Box::new(ResumeImmediate { ty, tag, handlers }))
+            } else {
+                for _ in 0..n {
+                    let switch = r.byte()?;
+                    if switch > 1 {
+                        return Err(r.error("invalid continuation handler"));
+                    }
+                    let _ = r.u32()?;
+                    if switch == 0 {
+                        let _ = r.u32()?;
+                    }
+                }
+                Immediate::None
+            }
         }
         0x1f => {
             *depth += 1;
@@ -383,19 +537,36 @@ fn read_instruction(r: &mut Reader, depth: &mut usize) -> Result<Instruction> {
                 Immediate::Block(r.signed(33)?)
             };
             let n = count(r)?;
-            let mut catches = Vec::new();
-            for _ in 0..n {
-                let kind = r.byte()?;
-                if kind > 3 {
-                    return Err(r.error("invalid catch kind"));
-                }
-                catches.push(Catch {
-                    kind,
-                    tag: if kind < 2 { Some(r.u32()?) } else { None },
-                    label: r.u32()?,
-                });
+            if n > max_imm_elems {
+                *imm_over = true;
             }
-            Immediate::TryTable(Box::new(TryTableImmediate { block, catches }))
+            if keep && n <= max_imm_elems {
+                let mut catches = Vec::new();
+                for _ in 0..n {
+                    let kind = r.byte()?;
+                    if kind > 3 {
+                        return Err(r.error("invalid catch kind"));
+                    }
+                    catches.push(Catch {
+                        kind,
+                        tag: if kind < 2 { Some(r.u32()?) } else { None },
+                        label: r.u32()?,
+                    });
+                }
+                Immediate::TryTable(Box::new(TryTableImmediate { block, catches }))
+            } else {
+                for _ in 0..n {
+                    let kind = r.byte()?;
+                    if kind > 3 {
+                        return Err(r.error("invalid catch kind"));
+                    }
+                    if kind < 2 {
+                        let _ = r.u32()?;
+                    }
+                    let _ = r.u32()?;
+                }
+                Immediate::None
+            }
         }
         0x0a => Immediate::None,
         0xfe => {

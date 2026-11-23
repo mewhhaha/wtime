@@ -44,6 +44,7 @@ pub const MAX_TOTAL_FUNCREF_SLOTS: usize = 2_097_152;
 pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
 pub const MAX_TOTAL_EXTERN_SLOTS: usize = 65_536;
 pub const MAX_GLOBALS: usize = 65_536;
+pub const MAX_EXPORTS: usize = 65_536;
 pub const MAX_CTX_BYTES: usize = 16 << 20; // 16 MiB (far below i32::MAX)
 pub const MAX_AGGREGATE_CI_TABLE_BYTES: usize = 64 << 20; // 64 MiB
 pub const MAX_AGGREGATE_BR_TABLE_ENTRIES: usize = 4_194_304; // 16 MiB jump tables
@@ -557,15 +558,10 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         if tt.index_type != IndexType::I32 {
             return Err(format!("x64: table64 (table {ti}) is not supported"));
         }
-        if let Some(init_expr) = decoded.table_inits.get(ti).and_then(|o| o.as_ref()) {
-            let is_matching_null = matches!(
-                init_expr.as_slice(),
-                [Instruction { opcode: 0xd0, immediate: Immediate::Heap(ht) }, Instruction { opcode: 0x0b, .. }]
-                    if *ht == tt.element.heap
-            );
-            if !is_matching_null {
-                return Err(format!("x64: non-null table initializer on table {ti} is not supported"));
-            }
+        if decoded.table_inits.get(ti).and_then(|o| o.as_ref()).is_some() {
+            return Err(format!(
+                "x64: explicit table initializer on table {ti} (function-references) is not supported in Stage 1"
+            ));
         }
         match tt.element.heap {
             HeapType::Func if tt.element.nullable => {
@@ -622,10 +618,21 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     }
 
     // Exports: admit functions, globals, and memory 0 (`blot:memory` etc.); reject table/tag exports.
+    if decoded.exports.len() > MAX_EXPORTS {
+        return Err(format!(
+            "x64: module export count ({}) exceeds cap {MAX_EXPORTS}",
+            decoded.exports.len()
+        ));
+    }
     let mut exported_funcs = Vec::new();
     let mut exported_globals = Vec::new();
     let mut exported_mut_globals = vec![false; globals.len()];
-    for exp in &decoded.exports {
+    for (ei, exp) in decoded.exports.iter().enumerate() {
+        if let Some(b) = budget
+            && (ei & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         match exp.kind {
             ExternalKind::Func => {
                 let fi = exp.index as usize;
@@ -861,6 +868,19 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
         .map(|k| k as u32);
 
+    let start = if let Some(s) = decoded.start {
+        let fty = func_type_idx
+            .get(s.0 as usize)
+            .and_then(|&ti| decoded.types.get(ti as usize))
+            .ok_or_else(|| format!("x64: start function index {} out of range", s.0))?;
+        if !fty.params.is_empty() || !fty.results.is_empty() {
+            return Err(format!("x64: start function {} must have signature () -> ()", s.0));
+        }
+        Some(s.0)
+    } else {
+        None
+    };
+
     Ok(X64Module {
         imports,
         func_type_idx,
@@ -878,6 +898,6 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         fixed32,
         active_elem_checks,
         active_data_segs,
-        start: decoded.start.map(|s| s.0),
+        start,
     })
 }

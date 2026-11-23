@@ -27,6 +27,7 @@
 //! key that includes the profile.
 
 use std::fs;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +35,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::sha256::Sha256;
 
 static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
 
 const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
@@ -133,11 +136,119 @@ struct Prepared {
 
 /// Builds (or finds in `cache`) the program for `module`; its path.
 pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, options: &Options) -> Result<PathBuf, String> {
+    let deadline = std::time::Instant::now() + options.time_limit;
     if options.backend == Backend::C {
-        return build_c(module, cache, options);
+        return build_c(module, cache, options, deadline);
     }
-    let prepared = prepare(module, cache, module_path, rt, options)?;
-    cached(&prepared, prepared.key.clone(), &[], options, "")
+    let prepared = prepare(module, cache, module_path, rt, options, deadline)?;
+    cached(&prepared, prepared.key.clone(), &[], options, "", deadline)
+}
+
+fn check_deadline(deadline: std::time::Instant, time_limit: std::time::Duration) -> Result<(), String> {
+    if std::time::Instant::now() >= deadline {
+        return Err(format!("the build exceeded its time limit of {time_limit:?}"));
+    }
+    Ok(())
+}
+
+/// Reads a Wasm input file with a hard pre-allocation byte cap (checking both initial file
+/// metadata AND streaming `Read::take(max_bytes + 1)` so growing files/pipes stay bounded).
+pub(crate) fn read_bounded_wasm(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Ok(meta) = file.metadata()
+        && meta.is_file()
+        && meta.len() > max_bytes as u64
+    {
+        return Err(format!(
+            "{}: input size ({} B) exceeds maximum module limit ({max_bytes} B)",
+            path.display(),
+            meta.len()
+        ));
+    }
+    let mut buf = Vec::new();
+    file.take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if buf.len() > max_bytes {
+        return Err(format!(
+            "{}: input size exceeds maximum module limit ({max_bytes} B)",
+            path.display()
+        ));
+    }
+    Ok(buf)
+}
+
+/// Runs `cmd` in its own Unix process group, capturing stdout/stderr without pipe deadlocks
+/// and terminating the entire process group if `deadline` expires.
+pub(crate) fn run_cmd_capture_with_deadline(
+    mut cmd: Command,
+    label: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<std::process::Output, String> {
+    if let Some(dl) = deadline
+        && std::time::Instant::now() >= dl
+    {
+        return Err(format!("{label}: exceeded build time limit"));
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    std::thread::scope(|scope| {
+        let out_t = scope.spawn(move || {
+            let mut v = Vec::new();
+            if let Some(ref mut p) = stdout_pipe {
+                let _ = p.read_to_end(&mut v);
+            }
+            v
+        });
+        let err_t = scope.spawn(move || {
+            let mut v = Vec::new();
+            if let Some(ref mut p) = stderr_pipe {
+                let _ = p.read_to_end(&mut v);
+            }
+            v
+        });
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break st,
+                Ok(None) => {
+                    if let Some(dl) = deadline
+                        && std::time::Instant::now() >= dl
+                    {
+                        #[cfg(unix)]
+                        {
+                            let group = format!("-{}", child.id());
+                            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = out_t.join();
+                        let _ = err_t.join();
+                        return Err(format!("{label}: exceeded build time limit"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => {
+                    #[cfg(unix)]
+                    {
+                        let group = format!("-{}", child.id());
+                        let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_t.join();
+                    let _ = err_t.join();
+                    return Err(format!("{label}: {e}"));
+                }
+            }
+        };
+        let stdout = out_t.join().unwrap_or_default();
+        let stderr = err_t.join().unwrap_or_default();
+        Ok(std::process::Output { status, stdout, stderr })
+    })
 }
 
 /// Returns the current effective UID on Unix, failing closed if unavailable.
@@ -220,7 +331,7 @@ fn validate_trusted_ancestor(anc: &Path, target: &Path, euid: u32) -> Result<(),
 /// Fails closed if effective UID cannot be determined, `path` contains `..` or targets `/`,
 /// traverses a non-root symlink, has untrusted/non-sticky-writable ancestors, targets a foreign-
 /// owned or pre-existing group/world-writable directory, or fails `0o700` creation/tightening.
-fn ensure_private_dir(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn ensure_private_dir(path: &Path) -> Result<PathBuf, String> {
     #[cfg(not(unix))]
     {
         fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -379,19 +490,26 @@ fn ensure_private_dir(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Marks a newly staged native artifact immutable (`0o555`) before atomic publication on Unix.
-fn mark_artifact_immutable(path: &Path) -> Result<(), String> {
+/// Marks a newly staged native file immutable (`mode`, e.g. `0o555` for `.so` or `0o444` for `.o`) on Unix.
+pub(crate) fn mark_file_immutable(path: &Path, mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o555))
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
             .map_err(|e| format!("{}: cannot mark artifact read-only: {e}", path.display()))?;
     }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
     Ok(())
 }
 
+/// Marks a newly staged native artifact immutable (`0o555`) before atomic publication on Unix.
+fn mark_artifact_immutable(path: &Path) -> Result<(), String> {
+    mark_file_immutable(path, 0o555)
+}
+
 /// Atomically writes `digest_file` containing `sha` (propagating all errors).
-fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_file: &Path) -> Result<(), String> {
+pub(crate) fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_file: &Path) -> Result<(), String> {
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let staged_sha = entry.join(format!("{artifact_name}.sha256.{}.{seq}", std::process::id()));
     if let Err(e) = fs::write(&staged_sha, format!("{sha}\n")) {
@@ -405,23 +523,22 @@ fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &str, digest_f
     Ok(())
 }
 
-/// Acquires an exclusive publication lock on `entry/.publish.lock` within `deadline`, returning
-/// the lock file and the verified canonical entry directory.
-fn lock_cache_entry(entry: &Path, deadline: std::time::Instant) -> Result<(fs::File, PathBuf), String> {
-    let canon_entry = ensure_private_dir(entry)?;
-    let lock_path = canon_entry.join(".publish.lock");
+/// Acquires an exclusive advisory lock on `lock_path` within `deadline`.
+pub(crate) fn lock_file_with_deadline(lock_path: &Path, deadline: Option<std::time::Instant>) -> Result<fs::File, String> {
     let lock_file = fs::File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|e| format!("{}: {e}", lock_path.display()))?;
     loop {
         match lock_file.try_lock() {
-            Ok(()) => return Ok((lock_file, canon_entry)),
+            Ok(()) => return Ok(lock_file),
             Err(fs::TryLockError::WouldBlock) => {
-                if std::time::Instant::now() >= deadline {
+                if let Some(dl) = deadline
+                    && std::time::Instant::now() >= dl
+                {
                     return Err(format!("timed out waiting for publication lock {}", lock_path.display()));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -433,79 +550,96 @@ fn lock_cache_entry(entry: &Path, deadline: std::time::Instant) -> Result<(fs::F
     }
 }
 
-/// Verifies `artifact` is a non-symlink immutable regular file matching its `.sha256` sidecar.
-fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
-    let Ok(art_meta) = fs::symlink_metadata(artifact) else {
-        return false;
-    };
+/// Acquires an exclusive publication lock on `entry/.publish.lock` within `deadline`, returning
+/// the lock file and the verified canonical entry directory.
+fn lock_cache_entry(entry: &Path, deadline: std::time::Instant) -> Result<(fs::File, PathBuf), String> {
+    let canon_entry = ensure_private_dir(entry)?;
+    let lock_path = canon_entry.join(".publish.lock");
+    let lock_file = lock_file_with_deadline(&lock_path, Some(deadline))?;
+    Ok((lock_file, canon_entry))
+}
+
+/// Verifies `artifact` is a non-symlink immutable regular file owned by `euid` matching its
+/// `.sha256` sidecar, returning the exact verified bytes so callers avoid any post-check TOCTOU.
+pub(crate) fn verified_cached_artifact_bytes(artifact: &Path, digest_file: &Path) -> Option<Vec<u8>> {
+    let art_meta = fs::symlink_metadata(artifact).ok()?;
     if art_meta.file_type().is_symlink() || !art_meta.file_type().is_file() {
-        return false;
+        return None;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if art_meta.permissions().mode() & 0o222 != 0 {
-            return false;
+            return None;
         }
         if !current_euid().ok().is_some_and(|euid| art_meta.uid() == euid) {
-            return false;
+            return None;
         }
     }
-    let Ok(sha_meta) = fs::symlink_metadata(digest_file) else {
-        return false;
-    };
+    let sha_meta = fs::symlink_metadata(digest_file).ok()?;
     if sha_meta.file_type().is_symlink() || !sha_meta.file_type().is_file() {
-        return false;
+        return None;
     }
-    fs::read_to_string(digest_file).ok().is_some_and(|expected| {
-        fs::read(artifact).ok().is_some_and(|bytes| crate::sha256::hex(&bytes) == expected.trim())
-    })
+    let expected = fs::read_to_string(digest_file).ok()?;
+    let bytes = fs::read(artifact).ok()?;
+    (crate::sha256::hex(&bytes) == expected.trim()).then_some(bytes)
+}
+
+/// Verifies `artifact` is a non-symlink immutable regular file matching its `.sha256` sidecar.
+fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
+    verified_cached_artifact_bytes(artifact, digest_file).is_some()
 }
 
 /// Fast C99 + parallel `clang` + `ld.lld` build path for Blot ABI 8 cdylibs.
-fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, String> {
-    let deadline = std::time::Instant::now() + options.time_limit;
-    let wasm = fs::read(module).map_err(|e| format!("{}: {e}", module.display()))?;
+fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::Instant) -> Result<PathBuf, String> {
+    check_deadline(deadline, options.time_limit)?;
+    let wasm = read_bounded_wasm(module, MAX_WASM_BYTES_C_RUST)?;
+    check_deadline(deadline, options.time_limit)?;
     let cache = ensure_private_dir(cache)?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
-    let (cc, cc_ver, _) = crate::cgen::detect_cc()?;
-    let cc_target = crate::cgen::cc_target_fingerprint(&cc, options.target_cpu)?;
+    let cc_info = crate::cgen::detect_cc_with_deadline(Some(deadline))?;
+    let cc_target = crate::cgen::cc_target_fingerprint_with_deadline(&cc_info, options.target_cpu, Some(deadline))?;
+    check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 2", &[]);
+    field(&mut key, "wtime-aot build c 3", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
-    field(&mut key, "cc", cc_ver.as_bytes());
+    field(&mut key, "cc", cc_info.version.as_bytes());
     field(&mut key, "target cpu", options.target_cpu.as_bytes());
     field(&mut key, "cc target fingerprint", cc_target.as_bytes());
+    field(&mut key, "cet return", &[cc_info.has_cet_return as u8]);
     field(&mut key, "c opt", options.c_opt.tag().as_bytes());
     let key_hex = key.hex();
 
     let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
+    check_deadline(deadline, options.time_limit)?;
     let program = entry.join("library.so");
     let digest_file = entry.join("library.so.sha256");
     if verified_cached_artifact(&program, &digest_file) {
+        check_deadline(deadline, options.time_limit)?;
         return Ok(program);
     }
     let _ = fs::remove_file(&program);
     let _ = fs::remove_file(&digest_file);
-    let remaining = deadline
-        .checked_duration_since(std::time::Instant::now())
-        .ok_or_else(|| format!("the build exceeded its time limit of {:?}", options.time_limit))?;
+    check_deadline(deadline, options.time_limit)?;
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
-    let res = crate::cgen::build_c_blot_cdylib(
+    let res = crate::cgen::build_c_blot_cdylib_with_info(
         &wasm,
         &cache,
         options.target_cpu,
         options.jobs,
         options.c_opt,
-        Some(remaining),
+        &cc_info,
+        &cc_target,
+        Some(deadline),
         &staged,
     );
     match res {
         Ok(()) => {
+            check_deadline(deadline, options.time_limit)?;
             let so_bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
             let so_sha = crate::sha256::hex(&so_bytes);
             if let Err(e) = mark_artifact_immutable(&staged)
@@ -520,8 +654,10 @@ fn build_c(module: &Path, cache: &Path, options: &Options) -> Result<PathBuf, St
             let _ = fs::write(
                 entry.join("key.txt"),
                 format!(
-                    "key {key_hex}\nbackend c\nc opt {}\ncc {cc_ver}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncet return {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
                     options.c_opt.tag(),
+                    cc_info.version,
+                    cc_info.has_cet_return,
                     options.target_cpu,
                     crate::sha256::hex(&wasm)
                 ),
@@ -545,17 +681,26 @@ pub fn build_trained(
     options: &Options,
     train: &[String],
 ) -> Result<PathBuf, String> {
-    let prepared = prepare(module, cache, module_path, rt, options)?;
+    let deadline = std::time::Instant::now() + options.time_limit;
+    let prepared = prepare(module, cache, module_path, rt, options, deadline)?;
     let mut key = prepared.key.clone();
     field(&mut key, "profile-generate", &[]);
-    let instrumented = cached(&prepared, key, &["-Cprofile-generate".into()], options, "instrumented for profiling\n")?;
+    let instrumented = cached(
+        &prepared,
+        key,
+        &["-Cprofile-generate".into()],
+        options,
+        "instrumented for profiling\n",
+        deadline,
+    )?;
 
     // The training run, in a directory of its own for the raw profiles.
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let profiles = prepared.cache.join("work").join(format!("profile-{}-{seq}", std::process::id()));
+    let work_root = ensure_private_dir(&prepared.cache.join("work"))?;
+    let profiles = work_root.join(format!("profile-{}-{seq}", std::process::id()));
     let _ = fs::remove_dir_all(&profiles);
-    fs::create_dir_all(&profiles).map_err(|e| format!("{}: {e}", profiles.display()))?;
-    let result = train_and_merge(&instrumented, train, &profiles, options);
+    let profiles = ensure_private_dir(&profiles)?;
+    let result = train_and_merge(&instrumented, train, &profiles, options, deadline);
     let profile = result.and_then(|merged| fs::read(&merged).map_err(|e| format!("{}: {e}", merged.display())));
     let profile = match profile {
         Ok(profile) => profile,
@@ -567,12 +712,12 @@ pub fn build_trained(
     let mut key = prepared.key.clone();
     field(&mut key, "profile-use", &profile);
     let digest = crate::sha256::hex(&profile);
-    let stored = prepared.cache.join("work").join(format!("profile-{digest}-{}-{seq}.profdata", std::process::id()));
+    let stored = work_root.join(format!("profile-{digest}-{}-{seq}.profdata", std::process::id()));
     fs::write(&stored, &profile).map_err(|e| format!("{}: {e}", stored.display()))?;
     let _ = fs::remove_dir_all(&profiles);
     let flag = format!("-Cprofile-use={}", stored.display());
     let note = format!("profile-guided: profile sha256 {digest}, training arguments {train:?}\n");
-    let result = cached(&prepared, key, &[flag], options, &note);
+    let result = cached(&prepared, key, &[flag], options, &note, deadline);
     let _ = fs::remove_file(&stored);
     result
 }
@@ -584,9 +729,18 @@ fn field(key: &mut Sha256, name: &str, bytes: &[u8]) {
 }
 
 /// Reads and checks what a build starts from.
-fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, options: &Options) -> Result<Prepared, String> {
+fn prepare(
+    module: &Path,
+    cache: &Path,
+    module_path: Option<&str>,
+    rt: &Path,
+    options: &Options,
+    deadline: std::time::Instant,
+) -> Result<Prepared, String> {
+    check_deadline(deadline, options.time_limit)?;
     let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
-    let wasm = read(module)?;
+    let wasm = read_bounded_wasm(module, MAX_WASM_BYTES_C_RUST)?;
+    check_deadline(deadline, options.time_limit)?;
     // The program reports the module's own name, not where the operator
     // keeps it.
     let module_path = match module_path {
@@ -619,12 +773,17 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
     for (name, bytes) in runtime_sources(&rt)? {
         field(&mut key, &name, &bytes);
     }
-    let version = rustc_version(options.toolchain)?;
+    let version = rustc_version(options.toolchain, Some(deadline))?;
     field(&mut key, "toolchain", version.as_bytes());
     // The CPU and the features it resolves to here: a program built for one
     // machine's CPU is not reused for another's.
     field(&mut key, "target cpu", options.target_cpu.as_bytes());
-    field(&mut key, "target features", target_features(options.toolchain, options.target_cpu)?.as_bytes());
+    field(
+        &mut key,
+        "target features",
+        target_features(options.toolchain, options.target_cpu, Some(deadline))?.as_bytes(),
+    );
+    check_deadline(deadline, options.time_limit)?;
     // A 64-bit memory is flat (allocated whole at its maximum, accessed
     // without a slow path) when this machine grants its maximum.
     let flat64 = match crate::codegen::memory64_max(&wasm)? {
@@ -652,11 +811,19 @@ fn prepare(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, op
 }
 
 /// The program cached under `key`, built with `rustflags` if not there yet.
-fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Options, note: &str) -> Result<PathBuf, String> {
+fn cached(
+    prepared: &Prepared,
+    key: Sha256,
+    rustflags: &[String],
+    options: &Options,
+    note: &str,
+    deadline: std::time::Instant,
+) -> Result<PathBuf, String> {
     let key = key.hex();
     let cache = &prepared.cache;
-    let deadline = std::time::Instant::now() + options.time_limit;
+    check_deadline(deadline, options.time_limit)?;
     let (_lock, entry) = lock_cache_entry(&cache.join(&key), deadline)?;
+    check_deadline(deadline, options.time_limit)?;
     let artifact_name = match options.target {
         crate::codegen::Target::GooseBin => "program",
         crate::codegen::Target::BlotCdylib => "library.so",
@@ -664,19 +831,24 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
     let program = entry.join(artifact_name);
     let digest_file = entry.join(format!("{artifact_name}.sha256"));
     if verified_cached_artifact(&program, &digest_file) {
+        check_deadline(deadline, options.time_limit)?;
         return Ok(program);
     }
     let _ = fs::remove_file(&program);
     let _ = fs::remove_file(&digest_file);
+    check_deadline(deadline, options.time_limit)?;
 
     // Generate and compile in a directory of this build's own, target
     // directory included, then move the program into place: builds of the
     // same or of different modules share nothing while they run.
     let name = format!("aot-{key}");
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let work = cache.join("work").join(format!("{key}-{}-{seq}", std::process::id()));
+    let work_root = ensure_private_dir(&cache.join("work"))?;
+    let work = work_root.join(format!("{key}-{}-{seq}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
-    let result = generate_and_compile(prepared, &work, &name, rustflags, options).and_then(|built| {
+    let work = ensure_private_dir(&work)?;
+    let result = generate_and_compile(prepared, &work, &name, rustflags, options, deadline).and_then(|built| {
+        check_deadline(deadline, options.time_limit)?;
         let staged = entry.join(format!("{artifact_name}.{}.{seq}", std::process::id()));
         fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
         let bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
@@ -700,7 +872,13 @@ fn cached(prepared: &Prepared, key: Sha256, rustflags: &[String], options: &Opti
 
 /// Runs the instrumented program with `train` and merges the profile it
 /// writes into `profiles`; the merged profile's path.
-fn train_and_merge(instrumented: &Path, train: &[String], profiles: &Path, options: &Options) -> Result<PathBuf, String> {
+fn train_and_merge(
+    instrumented: &Path,
+    train: &[String],
+    profiles: &Path,
+    options: &Options,
+    deadline: std::time::Instant,
+) -> Result<PathBuf, String> {
     // The program's own sandbox applies: it reaches files and variables
     // only as `train` grants. Its output is not needed.
     let mut run = Command::new(instrumented);
@@ -711,7 +889,7 @@ fn train_and_merge(instrumented: &Path, train: &[String], profiles: &Path, optio
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     std::os::unix::process::CommandExt::process_group(&mut run, 0);
-    wait(run, "the training run", options.time_limit)?;
+    wait(run, "the training run", deadline, options.time_limit)?;
     let raw: Vec<PathBuf> = fs::read_dir(profiles)
         .map_err(|e| format!("{}: {e}", profiles.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -720,14 +898,14 @@ fn train_and_merge(instrumented: &Path, train: &[String], profiles: &Path, optio
     if raw.is_empty() {
         return Err("the training run wrote no profile".into());
     }
-    let sysroot = Command::new("rustc")
-        .env("RUSTUP_TOOLCHAIN", options.toolchain)
-        .args(["--print", "sysroot"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("rustc: {e}"))?;
+    let mut sysroot_cmd = clean_rustc_command(options.toolchain);
+    sysroot_cmd.args(["--print", "sysroot"]);
+    let sysroot = run_cmd_capture_with_deadline(sysroot_cmd, "rustc --print sysroot", Some(deadline))?;
+    if !sysroot.status.success() {
+        return Err(format!("rustc --print sysroot failed ({})", sysroot.status));
+    }
     let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
-    let host = rustc_version(options.toolchain)?
+    let host = rustc_version(options.toolchain, Some(deadline))?
         .lines()
         .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
         .ok_or("rustc -vV names no host")?;
@@ -743,7 +921,7 @@ fn train_and_merge(instrumented: &Path, train: &[String], profiles: &Path, optio
     let mut merge = Command::new(&profdata);
     merge.arg("merge").arg("-o").arg(&merged).args(&raw).stdin(Stdio::null()).stdout(Stdio::null());
     std::os::unix::process::CommandExt::process_group(&mut merge, 0);
-    wait(merge, "llvm-profdata", options.time_limit)?;
+    wait(merge, "llvm-profdata", deadline, options.time_limit)?;
     Ok(merged)
 }
 
@@ -751,14 +929,21 @@ fn train_and_merge(instrumented: &Path, train: &[String], profiles: &Path, optio
 /// whole; an error unless it succeeds, except that a training run may end
 /// with any exit code (a guest's own failure still profiles the code it
 /// ran).
-fn wait(mut command: Command, what: &str, time_limit: std::time::Duration) -> Result<(), String> {
+fn wait(
+    mut command: Command,
+    what: &str,
+    deadline: std::time::Instant,
+    time_limit: std::time::Duration,
+) -> Result<(), String> {
+    if std::time::Instant::now() >= deadline {
+        return Err(format!("{what} exceeded its time limit of {time_limit:?}"));
+    }
     let mut child = command.spawn().map_err(|e| format!("{what}: {e}"))?;
-    let started = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| format!("{what}: {e}"))? {
             break status;
         }
-        if started.elapsed() > time_limit {
+        if std::time::Instant::now() >= deadline {
             let group = format!("-{}", child.id());
             let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
             let _ = child.wait();
@@ -777,9 +962,18 @@ fn wait(mut command: Command, what: &str, time_limit: std::time::Duration) -> Re
 
 /// Generates the crates into `work` and compiles them there with
 /// `rustflags` added; the program.
-fn generate_and_compile(prepared: &Prepared, work: &Path, name: &str, rustflags: &[String], options: &Options) -> Result<PathBuf, String> {
+fn generate_and_compile(
+    prepared: &Prepared,
+    work: &Path,
+    name: &str,
+    rustflags: &[String],
+    options: &Options,
+    deadline: std::time::Instant,
+) -> Result<PathBuf, String> {
     let Options { toolchain, target_cpu, jobs, time_limit, target: target_kind, .. } = *options;
+    check_deadline(deadline, time_limit)?;
     crate::codegen::generate_target(&prepared.wasm, work, name, &prepared.rt, &prepared.module_path, prepared.flat64, target_kind)?;
+    check_deadline(deadline, time_limit)?;
     let target = work.join("target");
     let mut cargo = Command::new("cargo");
     cargo.env_clear().current_dir(work).stdin(Stdio::null());
@@ -802,18 +996,17 @@ fn generate_and_compile(prepared: &Prepared, work: &Path, name: &str, rustflags:
     // A process group of its own, so that the time limit ends rustc too.
     std::os::unix::process::CommandExt::process_group(&mut cargo, 0);
     let mut child = cargo.spawn().map_err(|e| format!("cargo: {e}"))?;
-    let started = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| format!("cargo: {e}"))? {
             break status;
         }
-        if started.elapsed() > time_limit {
+        if std::time::Instant::now() >= deadline {
             let group = format!("-{}", child.id());
             let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
             let _ = child.wait();
             return Err(format!("the build exceeded its time limit of {:?}", time_limit));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     };
     if !status.success() {
         return Err(format!("cargo build failed ({status})"));
@@ -845,27 +1038,33 @@ fn runtime_sources(rt: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(files)
 }
 
+fn clean_rustc_command(toolchain: &str) -> Command {
+    let mut cmd = Command::new("rustc");
+    cmd.env_clear();
+    for variable in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME"] {
+        if let Some(value) = std::env::var_os(variable) {
+            cmd.env(variable, value);
+        }
+    }
+    cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    cmd
+}
+
 /// The target features `target_cpu` resolves to on this machine
 /// (`rustc --print cfg`).
-fn target_features(toolchain: &str, target_cpu: &str) -> Result<String, String> {
-    let output = Command::new("rustc")
-        .env("RUSTUP_TOOLCHAIN", toolchain)
-        .args(["--print", "cfg", "-C", &format!("target-cpu={target_cpu}")])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("rustc: {e}"))?;
+fn target_features(toolchain: &str, target_cpu: &str, deadline: Option<std::time::Instant>) -> Result<String, String> {
+    let mut cfg_cmd = clean_rustc_command(toolchain);
+    cfg_cmd.args(["--print", "cfg", "-C", &format!("target-cpu={target_cpu}")]);
+    let output = run_cmd_capture_with_deadline(cfg_cmd, "rustc --print cfg", deadline)?;
     if !output.status.success() {
         return Err(format!("target cpu {target_cpu}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
     let mut features = String::from_utf8_lossy(&output.stdout).into_owned();
     // `--print cfg` lists stable features only: the CPU LLVM resolves
     // `native` to covers the rest.
-    let cpus = Command::new("rustc")
-        .env("RUSTUP_TOOLCHAIN", toolchain)
-        .args(["--print", "target-cpus", "-C", &format!("target-cpu={target_cpu}")])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("rustc: {e}"))?;
+    let mut cpus_cmd = clean_rustc_command(toolchain);
+    cpus_cmd.args(["--print", "target-cpus", "-C", &format!("target-cpu={target_cpu}")]);
+    let cpus = run_cmd_capture_with_deadline(cpus_cmd, "rustc --print target-cpus", deadline)?;
     let listing = String::from_utf8_lossy(&cpus.stdout);
     if let Some(current) = listing.lines().find(|line| line.contains("currently")) {
         features.push_str(current.trim());
@@ -874,13 +1073,10 @@ fn target_features(toolchain: &str, target_cpu: &str) -> Result<String, String> 
 }
 
 /// `rustc -vV` of the toolchain.
-fn rustc_version(toolchain: &str) -> Result<String, String> {
-    let output = Command::new("rustc")
-        .env("RUSTUP_TOOLCHAIN", toolchain)
-        .arg("-vV")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("rustc: {e}"))?;
+fn rustc_version(toolchain: &str, deadline: Option<std::time::Instant>) -> Result<String, String> {
+    let mut cmd = clean_rustc_command(toolchain);
+    cmd.arg("-vV");
+    let output = run_cmd_capture_with_deadline(cmd, "rustc -vV", deadline)?;
     if !output.status.success() {
         return Err(format!("toolchain {toolchain}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }

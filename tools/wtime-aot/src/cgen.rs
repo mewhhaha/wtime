@@ -3576,8 +3576,11 @@ fn c_escape_str(s: &str) -> String {
             b'\n' => out.push_str("\\n"),
             b'\r' => out.push_str("\\r"),
             b'\t' => out.push_str("\\t"),
+            // Escape `?` to prevent C99 trigraph sequences (`??=`, `??/`, etc.).
+            b'?' => out.push_str("\\?"),
             0x20..=0x7e => out.push(b as char),
-            _ => write!(out, "\\x{b:02x}").unwrap(),
+            // Fixed 3-digit octal consumes at most 3 octal digits in C99 (unlike greedy `\xHH`).
+            _ => write!(out, "\\{b:03o}").unwrap(),
         }
     }
     out.push('"');
@@ -4577,6 +4580,59 @@ pub fn generate_c(wasm: &[u8], out: &Path, opt: COpt) -> Res<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+type FileStamp = (u64, u64, u64, i64, i64, i64, i64);
+#[cfg(not(unix))]
+type FileStamp = (u64, u64, u32);
+
+fn file_stamp(canon: &Path) -> Res<FileStamp> {
+    let meta = fs::metadata(canon).map_err(|e| format!("stat {}: {e}", canon.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok((
+            meta.dev(),
+            meta.ino(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let (secs, nanos) = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or((0, 0), |d| (d.as_secs(), d.subsec_nanos()));
+        Ok((meta.len(), secs, nanos))
+    }
+}
+
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Probed host C compiler identity and capabilities (cached by canonical binary + inode/mtime stamp).
+#[derive(Clone, Debug)]
+pub struct CcInfo {
+    pub cc: String,
+    pub canon_cc: PathBuf,
+    pub stamp: FileStamp,
+    pub version: String,
+    pub has_lld: bool,
+    pub has_cet_return: bool,
+}
+
 /// Configures a C compiler / linker command with a minimal clean environment (stripping ambient
 /// `CFLAGS`, `CPATH`, `C_INCLUDE_PATH`, `COMPILER_PATH`, `LIBRARY_PATH`, `LD_PRELOAD`, etc.) so
 /// cached `.o` / `.so` outputs depend solely on explicit flags and target fingerprints.
@@ -4591,43 +4647,94 @@ fn clean_cc_command(program: &str) -> Command {
     cmd
 }
 
-/// Returns `(compiler_path, version_string, has_lld)`.
-pub fn detect_cc() -> Res<(String, String, bool)> {
+type CcCacheKey = (PathBuf, FileStamp, Option<(PathBuf, FileStamp)>);
+type CcTargetKey = (PathBuf, FileStamp, String);
+
+struct ShardJob {
+    src_path: PathBuf,
+    local_obj: PathBuf,
+    cached_obj: PathBuf,
+    cached_sha: PathBuf,
+    key: String,
+    opt_flag: &'static str,
+    src_len: usize,
+}
+
+/// Probes the host C compiler (respecting `deadline`) and memoizes by resolved canonical binary
+/// path + file stamp so repeated builds avoid duplicate spawns while detecting live upgrades.
+pub fn detect_cc_with_deadline(deadline: Option<Instant>) -> Res<CcInfo> {
+    static CACHE: OnceLock<Mutex<HashMap<CcCacheKey, CcInfo>>> = OnceLock::new();
+    let lld_key = find_in_path("ld.lld")
+        .and_then(|p| fs::canonicalize(&p).ok())
+        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
     for cc in ["clang", "cc", "gcc"] {
-        if let Ok(out) = clean_cc_command(cc).arg("--version").stdin(Stdio::null()).output()
-            && out.status.success()
-        {
-            let ver = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(cc).trim().to_string();
-            let has_lld = clean_cc_command("ld.lld")
-                .arg("--version")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
-            return Ok((cc.to_string(), ver, has_lld));
+        let Some(found) = find_in_path(cc) else { continue };
+        let Ok(canon_cc) = fs::canonicalize(&found) else { continue };
+        let Ok(stamp) = file_stamp(&canon_cc) else { continue };
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let key = (canon_cc.clone(), stamp, lld_key.clone());
+        if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
+            return Ok(hit);
         }
+        let cc_str = canon_cc.to_string_lossy().into_owned();
+        let mut ver_cmd = clean_cc_command(&cc_str);
+        ver_cmd.arg("--version");
+        let out = crate::build::run_cmd_capture_with_deadline(ver_cmd, &format!("{cc} --version"), deadline)?;
+        if !out.status.success() {
+            continue;
+        }
+        let version = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(cc).trim().to_string();
+        let has_lld = if let Some((ref lld_path, _)) = lld_key {
+            let mut lld_cmd = clean_cc_command(&lld_path.to_string_lossy());
+            lld_cmd.arg("--version");
+            crate::build::run_cmd_capture_with_deadline(lld_cmd, "ld.lld --version", deadline)
+                .map(|o| o.status.success())?
+        } else {
+            false
+        };
+        #[cfg(target_arch = "x86_64")]
+        let has_cet_return = {
+            let mut cet_cmd = clean_cc_command(&cc_str);
+            cet_cmd.args(["-x", "c", "-c", "-fcf-protection=return", "-o", "/dev/null", "-"]);
+            crate::build::run_cmd_capture_with_deadline(cet_cmd, &format!("{cc} -fcf-protection=return"), deadline)
+                .map(|o| o.status.success())?
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let has_cet_return = false;
+        let info = CcInfo { cc: cc_str, canon_cc, stamp, version, has_lld, has_cet_return };
+        cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, info.clone());
+        return Ok(info);
     }
     Err("no C compiler found (install clang or gcc)".into())
 }
 
-/// Returns a deterministic fingerprint of the effective C target CPU & ISA feature macros
-/// enabled by `cc -march=<target_cpu>`, so `-march=native` never aliases across distinct CPUs.
-pub fn cc_target_fingerprint(cc: &str, target_cpu: &str) -> Res<String> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+/// Returns `(compiler_path, version_string, has_lld)`.
+#[allow(dead_code)]
+pub fn detect_cc() -> Res<(String, String, bool)> {
+    let info = detect_cc_with_deadline(None)?;
+    Ok((info.cc, info.version, info.has_lld))
+}
+
+/// Returns a deterministic 64-hex SHA-256 fingerprint of the effective C target CPU & ISA feature
+/// macros enabled by `cc -march=<target_cpu>`, memoized by `(canon_cc, stamp, target_cpu)` and
+/// bounded by `deadline`.
+pub fn cc_target_fingerprint_with_deadline(info: &CcInfo, target_cpu: &str, deadline: Option<Instant>) -> Res<String> {
+    static CACHE: OnceLock<Mutex<HashMap<CcTargetKey, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (cc.to_string(), target_cpu.to_string());
+    let key = (info.canon_cc.clone(), info.stamp, target_cpu.to_string());
     if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
         return Ok(hit);
     }
-    let out = clean_cc_command(cc)
-        .args([&format!("-march={target_cpu}"), "-dM", "-E", "-x", "c", "-"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("probing {cc} -march={target_cpu}: {e}"))?;
+    let mut cmd = clean_cc_command(&info.cc);
+    cmd.args([&format!("-march={target_cpu}"), "-dM", "-E", "-x", "c", "-"]);
+    let out = crate::build::run_cmd_capture_with_deadline(
+        cmd,
+        &format!("probing {} -march={target_cpu}", info.cc),
+        deadline,
+    )?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("{cc} -march={target_cpu} probe failed: {stderr}"));
+        return Err(format!("{} -march={target_cpu} probe failed: {stderr}", info.cc));
     }
     let mut lines: Vec<&str> = std::str::from_utf8(&out.stdout)
         .unwrap_or("")
@@ -4701,7 +4808,8 @@ fn run_cmd_with_deadline(mut cmd: Command, work: &Path, label: &str, deadline: O
 }
 
 /// Compiles `wasm` to a Blot ABI 8 `library.so` via parallel `clang` + `ld.lld`
-/// with per-shard content-addressed `.o` caching under `cache/c-obj`.
+/// with owner-private, immutable, SHA-256-verified per-shard `.o` caching under `cache/c-obj`.
+#[allow(dead_code)]
 pub fn build_c_blot_cdylib(
     wasm: &[u8],
     cache: &Path,
@@ -4711,9 +4819,26 @@ pub fn build_c_blot_cdylib(
     time_limit: Option<Duration>,
     out_so: &Path,
 ) -> Res<()> {
+    let deadline = time_limit.map(|d| Instant::now() + d);
+    let cc_info = detect_cc_with_deadline(deadline)?;
+    let cc_target = cc_target_fingerprint_with_deadline(&cc_info, target_cpu, deadline)?;
+    build_c_blot_cdylib_with_info(wasm, cache, target_cpu, jobs, opt, &cc_info, &cc_target, deadline, out_so)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_c_blot_cdylib_with_info(
+    wasm: &[u8],
+    cache: &Path,
+    target_cpu: &str,
+    jobs: Option<u32>,
+    opt: COpt,
+    cc_info: &CcInfo,
+    cc_target: &str,
+    deadline: Option<Instant>,
+    out_so: &Path,
+) -> Res<()> {
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
     let t_total = Instant::now();
-    let deadline = time_limit.map(|d| t_total + d);
     let check_dl = |phase: &str| -> Res<()> {
         if let Some(dl) = deadline
             && Instant::now() >= dl
@@ -4723,19 +4848,17 @@ pub fn build_c_blot_cdylib(
         Ok(())
     };
     check_dl("cgen init")?;
-    let (cc, cc_ver, has_lld) = detect_cc()?;
-    check_dl("cgen probe")?;
-    let cc_target = cc_target_fingerprint(&cc, target_cpu)?;
+    let cache = crate::build::ensure_private_dir(cache)?;
+    let obj_cache = crate::build::ensure_private_dir(&cache.join("c-obj"))?;
+    let work_root = crate::build::ensure_private_dir(&cache.join("work"))?;
     check_dl("cgen source generation")?;
     let generated = generate_c_sources(wasm, opt, timings)?;
     check_dl("cgen source generation")?;
 
-    let obj_cache = cache.join("c-obj");
-    fs::create_dir_all(&obj_cache).map_err(|e| format!("{}: {e}", obj_cache.display()))?;
     let work_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
-    let work = cache.join("work").join(format!("c-{}-{work_seq}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+    let work_raw = work_root.join(format!("c-{}-{work_seq}", std::process::id()));
+    let _ = fs::remove_dir_all(&work_raw);
+    let work = crate::build::ensure_private_dir(&work_raw)?;
 
     let write_res = (|| -> Res<()> {
         fs::write(work.join("wtime_aot_rt.h"), &generated.rt_h).map_err(|e| format!("wtime_aot_rt.h: {e}"))?;
@@ -4745,18 +4868,22 @@ pub fn build_c_blot_cdylib(
         }
 
         let mut base_hash = Sha256::new();
-        base_hash.update(b"wtime-aot-c-obj-v9");
-        base_hash.update(cc_ver.as_bytes());
+        base_hash.update(b"wtime-aot-c-obj-v10");
+        base_hash.update(cc_info.version.as_bytes());
         base_hash.update(target_cpu.as_bytes());
         base_hash.update(cc_target.as_bytes());
+        base_hash.update(&[cc_info.has_cet_return as u8]);
         base_hash.update(opt.tag().as_bytes());
         base_hash.update(generated.rt_h.as_bytes());
         base_hash.update(generated.types_h.as_bytes());
 
-        let mut obj_paths: Vec<PathBuf> = Vec::with_capacity(generated.shards.len());
-        let mut to_compile: Vec<(usize, PathBuf, PathBuf, &'static str, usize)> = Vec::new();
+        // Link strictly from verified private `work/obj_{idx}.o` files so cached objects are
+        // checked for owner-private immutability + SHA-256 sidecar integrity with zero TOCTOU.
+        let mut link_objs: Vec<PathBuf> = Vec::with_capacity(generated.shards.len());
+        let mut to_compile: Vec<ShardJob> = Vec::new();
         let mut cache_hits = 0usize;
         for (idx, (name, src, opt_flag, hdr_idx)) in generated.shards.iter().enumerate() {
+            check_dl("cgen cache verify")?;
             let mut h = base_hash.clone();
             h.update(opt_flag.as_bytes());
             if let Some(hi) = hdr_idx {
@@ -4765,18 +4892,29 @@ pub fn build_c_blot_cdylib(
             h.update(src.as_bytes());
             let key = h.hex();
             let cached_obj = obj_cache.join(format!("{key}.o"));
-            obj_paths.push(cached_obj.clone());
-            if cached_obj.is_file() {
+            let cached_sha = obj_cache.join(format!("{key}.o.sha256"));
+            let local_obj = work.join(format!("obj_{idx}.o"));
+            link_objs.push(local_obj.clone());
+            if let Some(verified_bytes) = crate::build::verified_cached_artifact_bytes(&cached_obj, &cached_sha) {
+                fs::write(&local_obj, &verified_bytes).map_err(|e| format!("{}: {e}", local_obj.display()))?;
                 cache_hits += 1;
             } else {
                 let src_path = work.join(name);
                 fs::write(&src_path, src).map_err(|e| format!("{}: {e}", src_path.display()))?;
-                to_compile.push((idx, src_path, cached_obj, *opt_flag, src.len()));
+                to_compile.push(ShardJob {
+                    src_path,
+                    local_obj,
+                    cached_obj,
+                    cached_sha,
+                    key,
+                    opt_flag,
+                    src_len: src.len(),
+                });
             }
         }
-        to_compile.sort_by_key(|t| std::cmp::Reverse(t.4));
+        to_compile.sort_by_key(|t| std::cmp::Reverse(t.src_len));
 
-        let is_clang = cc_ver.contains("clang");
+        let is_clang = cc_info.version.contains("clang");
         let t_comp = Instant::now();
         let n_workers = match jobs {
             Some(0) | None => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(64),
@@ -4792,8 +4930,10 @@ pub fn build_c_blot_cdylib(
                 let q = &queue;
                 let err_slot = &first_err;
                 let slow_slot = &slowest;
-                let cc_ref = &cc;
+                let cc_ref = &cc_info.cc;
+                let has_cet_return = cc_info.has_cet_return;
                 let work_ref = &work;
+                let obj_cache_ref = &obj_cache;
                 scope.spawn(move || {
                     loop {
                         if err_slot.lock().unwrap().is_some() {
@@ -4809,10 +4949,19 @@ pub fn build_c_blot_cdylib(
                             break;
                         }
                         let next = { q.lock().unwrap().next() };
-                        let Some((_, src_path, cached_obj, opt_flag, _)) = next else { break };
+                        let Some(ShardJob {
+                            src_path,
+                            local_obj,
+                            cached_obj,
+                            cached_sha,
+                            key,
+                            opt_flag,
+                            ..
+                        }) = next
+                        else {
+                            break;
+                        };
                         let t_one = Instant::now();
-                        let obj_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
-                        let tmp_obj = cached_obj.with_extension(format!("o.{}.{obj_seq}", std::process::id()));
                         let mut cmd = clean_cc_command(cc_ref);
                         cmd.args([
                             opt_flag,
@@ -4826,6 +4975,9 @@ pub fn build_c_blot_cdylib(
                             "-Wno-unused-label",
                             "-Wno-unused-parameter",
                         ]);
+                        if has_cet_return {
+                            cmd.arg("-fcf-protection=return");
+                        }
                         if opt == COpt::Auto && opt_flag == "-O2" && is_clang {
                             cmd.args(["-fno-vectorize", "-fno-slp-vectorize"]);
                         }
@@ -4834,19 +4986,59 @@ pub fn build_c_blot_cdylib(
                             .arg("-c")
                             .arg(&src_path)
                             .arg("-o")
-                            .arg(&tmp_obj);
+                            .arg(&local_obj);
                         let label = format!("{cc_ref} on {}", src_path.display());
                         match run_cmd_with_deadline(cmd, work_ref, &label, deadline) {
                             Ok(()) => {
-                                if let Err(io_err) = fs::rename(&tmp_obj, &cached_obj) {
-                                    let _ = fs::remove_file(&tmp_obj);
+                                let pub_res = (|| -> Res<()> {
+                                    let obj_bytes = fs::read(&local_obj)
+                                        .map_err(|e| format!("{}: {e}", local_obj.display()))?;
+                                    let obj_sha = crate::sha256::hex(&obj_bytes);
+                                    let obj_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
+                                    let tmp_obj = obj_cache_ref.join(format!(
+                                        "{key}.o.{}.{obj_seq}",
+                                        std::process::id()
+                                    ));
+                                    if let Err(e) = fs::write(&tmp_obj, &obj_bytes) {
+                                        let _ = fs::remove_file(&tmp_obj);
+                                        return Err(format!("{}: {e}", tmp_obj.display()));
+                                    }
+                                    if let Err(e) = crate::build::mark_file_immutable(&tmp_obj, 0o444) {
+                                        let _ = fs::remove_file(&tmp_obj);
+                                        return Err(e);
+                                    }
+                                    let _pub_lock = crate::build::lock_file_with_deadline(
+                                        &obj_cache_ref.join(".publish.lock"),
+                                        deadline,
+                                    )?;
+                                    if let Err(e) = fs::rename(&tmp_obj, &cached_obj)
+                                        .map_err(|e| {
+                                            format!(
+                                                "publishing object {} -> {}: {e}",
+                                                tmp_obj.display(),
+                                                cached_obj.display()
+                                            )
+                                        })
+                                        .and_then(|()| {
+                                            crate::build::publish_digest_sidecar(
+                                                obj_cache_ref,
+                                                &format!("{key}.o"),
+                                                &obj_sha,
+                                                &cached_sha,
+                                            )
+                                        })
+                                    {
+                                        let _ = fs::remove_file(&tmp_obj);
+                                        let _ = fs::remove_file(&cached_obj);
+                                        let _ = fs::remove_file(&cached_sha);
+                                        return Err(e);
+                                    }
+                                    Ok(())
+                                })();
+                                if let Err(msg) = pub_res {
                                     let mut e = err_slot.lock().unwrap();
                                     if e.is_none() {
-                                        *e = Some(format!(
-                                            "publishing object {} -> {}: {io_err}",
-                                            tmp_obj.display(),
-                                            cached_obj.display()
-                                        ));
+                                        *e = Some(msg);
                                     }
                                     break;
                                 }
@@ -4857,7 +5049,6 @@ pub fn build_c_blot_cdylib(
                                 }
                             }
                             Err(msg) => {
-                                let _ = fs::remove_file(&tmp_obj);
                                 let mut e = err_slot.lock().unwrap();
                                 if e.is_none() {
                                     *e = Some(msg);
@@ -4874,13 +5065,16 @@ pub fn build_c_blot_cdylib(
         let comp_dt = t_comp.elapsed();
 
         let t_link = Instant::now();
-        let mut link = clean_cc_command(&cc);
+        let mut link = clean_cc_command(&cc_info.cc);
         link.arg("-shared");
-        if has_lld {
+        if cc_info.has_cet_return {
+            link.arg("-fcf-protection=return");
+        }
+        if cc_info.has_lld {
             link.arg("-fuse-ld=lld");
         }
-        link.arg("-o").arg(out_so).args(&obj_paths);
-        run_cmd_with_deadline(link, &work, &format!("{cc} link"), deadline)?;
+        link.arg("-o").arg(out_so).args(&link_objs);
+        run_cmd_with_deadline(link, &work, &format!("{} link", cc_info.cc), deadline)?;
         if timings {
             let (sl_t, sl_name) = slowest.into_inner().unwrap();
             eprintln!(
@@ -4979,10 +5173,12 @@ mod tests {
         wasm.extend(section(5, &[1, 0x01, 1, 1]));
         // Global 0: mut i32 = 0
         wasm.extend(section(6, &[1, 0x7f, 1, 0x41, 0, 0x0b]));
-        // Exports
+        // Exports (including tricky control+hex and trigraph names to verify C99 octal escaping)
         let exports = [
             ("fma_off", 0u32),
+            ("\x01a", 0),
             ("mat_slot", 1),
+            ("a??=b", 1),
             ("cstore_run", 2),
             ("vstore_load", 3),
             ("ci_sum", 4),
@@ -5131,6 +5327,7 @@ mod tests {
         let wasm = sample_c_backend_wasm();
         let root = std::env::temp_dir().join(format!("wtime-aot-cgen-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        let root = crate::build::ensure_private_dir(&root).unwrap();
         let cache = root.join("cache");
         let src_dir = root.join("src");
         let so_path = root.join("libtest.so");
@@ -5177,15 +5374,23 @@ int main(int argc, char **argv) {
     if (!h) { fprintf(stderr, "new failed trap=%u\n", tr); return 2; }
     uint64_t res = 0;
 
-    // 1. FMA-off IEEE-754 exactness
+    // 1. FMA-off IEEE-754 exactness + tricky C99 escaped export names (`\x01a`, `a??=b`)
     if (call_i32(blot_call, h, "fma_off", 0, &res, &tr) != 0 || res != 0) {
         fprintf(stderr, "fma_off failed: res=0x%llx tr=%u\n", (unsigned long long)res, tr);
         return 3;
+    }
+    if (call_i32(blot_call, h, "\001a", 0, &res, &tr) != 0 || res != 0) {
+        fprintf(stderr, "escaped \\001a export failed: res=0x%llx tr=%u\n", (unsigned long long)res, tr);
+        return 14;
     }
     // 2. Selective materialize regression
     if (call_i32(blot_call, h, "mat_slot", 42, &res, &tr) != 0 || (int32_t)res != 342) {
         fprintf(stderr, "mat_slot failed: res=%lld tr=%u\n", (long long)(int32_t)res, tr);
         return 4;
+    }
+    if (call_i32(blot_call, h, "a\?\?=b", 42, &res, &tr) != 0 || (int32_t)res != 342) {
+        fprintf(stderr, "escaped trigraph a\?\?=b export failed: res=%lld tr=%u\n", (long long)(int32_t)res, tr);
+        return 15;
     }
     // 3. Coalesced constant store (in-bounds)
     if (call_i32(blot_call, h, "cstore_run", 256, &res, &tr) != 0 || (int32_t)res != 120) {
@@ -5258,6 +5463,102 @@ int main(int argc, char **argv) {
             run.status,
             String::from_utf8_lossy(&run.stderr)
         );
+        // Verify C fallback `.so` carries `GNU_PROPERTY_X86_FEATURE_1_SHSTK` when compiler supports `-fcf-protection=return`,
+        // and verify `c-obj` cached shards were published immutable (`0o444`) with `.o.sha256` sidecars.
+        let cc_info = detect_cc_with_deadline(None).unwrap();
+        let obj_dir = cache.join("c-obj");
+        let mut saw_obj = 0usize;
+        for entry in fs::read_dir(&obj_dir).unwrap().flatten() {
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "o") {
+                saw_obj += 1;
+                let sha = p.with_extension("o.sha256");
+                assert!(
+                    crate::build::verified_cached_artifact_bytes(&p, &sha).is_some(),
+                    "c-obj shard {} missing immutable/digest verification",
+                    p.display()
+                );
+            }
+        }
+        assert!(saw_obj > 0, "expected cached .o shards under c-obj");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if cc_info.has_cet_return {
+            let so_bytes = fs::read(&so_path).unwrap();
+            assert!(
+                elf64_has_x86_shstk_property(&so_bytes),
+                "expected C fallback .so to advertise GNU_PROPERTY_X86_FEATURE_1_SHSTK"
+            );
+        }
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
+        if elf.len() < 64 || &elf[0..4] != b"\x7fELF" {
+            return false;
+        }
+        let e_phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
+        let e_phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
+        let e_phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+        const PT_NOTE: u32 = 4;
+        const PT_GNU_PROPERTY: u32 = 0x6474_e553;
+        const NT_GNU_PROPERTY_TYPE_0: u32 = 5;
+        const GNU_PROPERTY_X86_FEATURE_1_AND: u32 = 0xc000_0002;
+        const GNU_PROPERTY_X86_FEATURE_1_SHSTK: u32 = 1 << 1;
+        for i in 0..e_phnum {
+            let off = e_phoff + i * e_phentsize;
+            if off + 56 > elf.len() {
+                break;
+            }
+            let p_type = u32::from_le_bytes(elf[off..off + 4].try_into().unwrap());
+            if p_type != PT_NOTE && p_type != PT_GNU_PROPERTY {
+                continue;
+            }
+            let p_offset = u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
+            let p_filesz = u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+            let mut cur = p_offset;
+            let end = p_offset.saturating_add(p_filesz).min(elf.len());
+            while cur + 12 <= end {
+                let namesz = u32::from_le_bytes(elf[cur..cur + 4].try_into().unwrap()) as usize;
+                let descsz = u32::from_le_bytes(elf[cur + 4..cur + 8].try_into().unwrap()) as usize;
+                let ntype = u32::from_le_bytes(elf[cur + 8..cur + 12].try_into().unwrap());
+                let name_start = cur + 12;
+                let name_end = name_start.saturating_add(namesz);
+                let desc_start = (name_end + 3) & !3;
+                let desc_end = desc_start.saturating_add(descsz);
+                if desc_end > end {
+                    break;
+                }
+                if ntype == NT_GNU_PROPERTY_TYPE_0 && &elf[name_start..name_end] == b"GNU\0" {
+                    let mut p = desc_start;
+                    while p + 8 <= desc_end {
+                        let pr_type = u32::from_le_bytes(elf[p..p + 4].try_into().unwrap());
+                        let pr_datasz = u32::from_le_bytes(elf[p + 4..p + 8].try_into().unwrap()) as usize;
+                        let data_start = p + 8;
+                        let data_end = data_start.saturating_add(pr_datasz);
+                        if data_end > desc_end {
+                            break;
+                        }
+                        if pr_type == GNU_PROPERTY_X86_FEATURE_1_AND && pr_datasz >= 4 {
+                            let bits = u32::from_le_bytes(elf[data_start..data_start + 4].try_into().unwrap());
+                            if (bits & GNU_PROPERTY_X86_FEATURE_1_SHSTK) != 0 {
+                                return true;
+                            }
+                        }
+                        p = (data_end + 7) & !7;
+                    }
+                }
+                cur = (desc_end + 3) & !3;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn c_escape_str_avoids_hex_absorption_and_trigraphs() {
+        assert_eq!(c_escape_str("\x01a"), "\"\\001a\"");
+        assert_eq!(c_escape_str("\x017"), "\"\\0017\"");
+        assert_eq!(c_escape_str("a??=b"), "\"a\\?\\?=b\"");
+        assert_eq!(c_escape_str("\u{00e9}f"), "\"\\303\\251f\"");
     }
 }

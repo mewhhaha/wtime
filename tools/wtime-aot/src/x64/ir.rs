@@ -1005,6 +1005,9 @@ impl Builder {
                     let sh = (cb as u64).trailing_zeros() as i32;
                     return self.emit(Ty::I64, Op::I64BinImm(IntBinOp::ShrU, a, sh));
                 }
+                IntBinOp::RemU if (cb as u64).is_power_of_two() && ((cb as u64) - 1) <= i32::MAX as u64 => {
+                    return self.emit(Ty::I64, Op::I64BinImm(IntBinOp::And, a, ((cb as u64) - 1) as i32));
+                }
                 IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU | IntBinOp::Rotl | IntBinOp::Rotr => {
                     let sh = (cb as u32) & 63;
                     if sh == 0 {
@@ -2220,6 +2223,11 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                     let mut run_loads = 1usize;
                     let mut j = i + 1;
                     while j < insts.len() {
+                        if let Some(bg) = budget
+                            && (j & 4095) == 4095
+                        {
+                            bg.check_deadline()?;
+                        }
                         match insts[j].op {
                             Op::Load { kind: lk, addr: la, offset: lo, .. } if la == a => {
                                 let e = (lo as u64) + lk.bytes();

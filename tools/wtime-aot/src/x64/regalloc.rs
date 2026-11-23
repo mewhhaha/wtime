@@ -243,6 +243,11 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
     let mut succs: Vec<Vec<u32>> = vec![Vec::new(); n_blocks];
     let mut succ_seen = vec![u32::MAX; n_blocks];
     for (bi, bb) in ir.blocks.iter().enumerate() {
+        if let Some(b) = budget
+            && (bi & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         let stamp = bi as u32;
         bb.term.for_each_succ(&ir.br_tables, |s| {
             let sid = s.0 as usize;
@@ -253,7 +258,14 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         });
     }
     visited[0] = true;
+    let mut dfs_steps: usize = 0;
     while let Some((b, si)) = dfs.last_mut() {
+        dfs_steps += 1;
+        if let Some(bg) = budget
+            && (dfs_steps & 4095) == 0
+        {
+            bg.check_deadline()?;
+        }
         let cur = *b as usize;
         if *si < succs[cur].len() {
             let nxt = succs[cur][*si];
@@ -288,6 +300,7 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
     let mut scratch_tys: Vec<Ty> = Vec::new();
 
     let mut tick = 0u32;
+    let mut scan_steps: usize = 0;
     for (oi, &bid) in block_order.iter().enumerate() {
         let bb = &ir.blocks[bid as usize];
         block_start[oi] = tick;
@@ -302,6 +315,12 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         }
         tick += 2;
         for inst in &bb.insts {
+            scan_steps += 1;
+            if let Some(bg) = budget
+                && (scan_steps & 4095) == 0
+            {
+                bg.check_deadline()?;
+            }
             let pos_use = tick;
             let pos_def = tick + 1;
             inst.op.for_each_use(&ir.val_pool, |v| {
@@ -433,6 +452,7 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
             (buf[oi * words + (bit >> 6)] & (1u64 << (bit & 63))) != 0
         };
 
+        let mut def_use_steps: usize = 0;
         for (oi, &bid) in block_order.iter().enumerate() {
             let bb = &ir.blocks[bid as usize];
             for &p in &bb.params {
@@ -442,6 +462,12 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
                 }
             }
             for inst in &bb.insts {
+                def_use_steps += 1;
+                if let Some(bg) = budget
+                    && (def_use_steps & 4095) == 0
+                {
+                    bg.check_deadline()?;
+                }
                 inst.op.for_each_use(&ir.val_pool, |v| {
                     let c = cb_id[v.0 as usize];
                     if c != u32::MAX && !has_bit(&live_def, oi, c as usize) {
@@ -523,6 +549,11 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         }
 
         for oi in 0..n_ord {
+            if let Some(bg) = budget
+                && (oi & 4095) == 4095
+            {
+                bg.check_deadline()?;
+            }
             let bs = block_start[oi];
             let be = block_end[oi];
             for w in 0..words {
@@ -586,6 +617,11 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
     let mut gp_intervals: Vec<Interval> = Vec::new();
     let mut fp_intervals: Vec<Interval> = Vec::new();
     for vi in 0..n_vals {
+        if let Some(bg) = budget
+            && (vi & 4095) == 4095
+        {
+            bg.check_deadline()?;
+        }
         let start = def_pos[vi];
         if start == u32::MAX {
             continue;
@@ -603,7 +639,13 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         }
     }
 
+    if let Some(bg) = budget {
+        bg.check_deadline()?;
+    }
     gp_intervals.sort_by_key(|iv| (iv.start, iv.end));
+    if let Some(bg) = budget {
+        bg.check_deadline()?;
+    }
     fp_intervals.sort_by_key(|iv| (iv.start, iv.end));
 
     let mut locs = vec![Loc::Spill(0); n_vals];
@@ -637,7 +679,12 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         }
     };
 
-    for iv in &gp_intervals {
+    for (idx, iv) in gp_intervals.iter().enumerate() {
+        if let Some(bg) = budget
+            && (idx & 4095) == 4095
+        {
+            bg.check_deadline()?;
+        }
         active_gp.retain(|&(_, e, _, _)| e > iv.start);
         let mut used_regs = 0u16;
         for &(_, _, ri, _) in &active_gp {
@@ -708,7 +755,12 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         }
     };
 
-    for iv in &fp_intervals {
+    for (idx, iv) in fp_intervals.iter().enumerate() {
+        if let Some(bg) = budget
+            && (idx & 4095) == 4095
+        {
+            bg.check_deadline()?;
+        }
         active_fp.retain(|&(_, e, _, _)| e > iv.start);
         let mut used_regs = 0u16;
         for &(_, _, ri, _) in &active_fp {
