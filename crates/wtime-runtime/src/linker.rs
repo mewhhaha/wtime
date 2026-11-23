@@ -440,6 +440,36 @@ impl Linker {
                         break 'roots;
                     }
                 }
+                for i in 0..checkpoint.4 {
+                    if let Some(inst) = s.instances.get(i) {
+                        for seg in inst.elems.iter().flatten() {
+                            for &value in seg {
+                                if !visit_root(value, &mut escaped) {
+                                    break 'roots;
+                                }
+                            }
+                        }
+                    }
+                }
+                for &value in s.active_roots.iter().flatten() {
+                    if !visit_root(value, &mut escaped) {
+                        break 'roots;
+                    }
+                }
+                if let Some((tag, payload, cont)) = &s.pending_suspension {
+                    if tag.0.store == s.id && tag.0.index >= checkpoint.5 {
+                        escaped = true;
+                        break 'roots;
+                    }
+                    if !visit_root(Value::Ref(RefValue::Gc(*cont)), &mut escaped) {
+                        break 'roots;
+                    }
+                    for &value in payload {
+                        if !visit_root(value, &mut escaped) {
+                            break 'roots;
+                        }
+                    }
+                }
                 for &value in &s.published {
                     if !visit_root(value, &mut escaped) {
                         break 'roots;

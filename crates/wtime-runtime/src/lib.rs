@@ -3827,4 +3827,306 @@ mod performance_module_ownership {
             RunOutcome::Returned(vec![Value::I32(12345)])
         );
     }
+
+    #[test]
+    fn failed_start_escaping_via_passive_elem_gc_struct_keeps_instance_live() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+
+        let engine = Engine::new(Config {
+            features: FeatureSet::all_phase3_core(),
+            ..Config::default()
+        })
+        .unwrap();
+        let mut store = Store::new(&engine);
+
+        // Provider (pure Wasm, zero host callbacks) holds a mutable GC struct $S
+        // ONLY inside passive element segment 0: (struct.new $S (ref.null $cont)).
+        // Table 0 is cleared back to null immediately after reading $S, so $S is
+        // rooted exclusively in `instances[0].elems[0]`.
+        // Types:
+        //   0: func () -> i32
+        //   1: cont 0
+        //   2: struct (field (mut (ref null 1)))
+        //   3: func () -> (ref null 2)   (get_s)
+        //   4: func () -> i32            (resume_s)
+        let mut prov = b"\0asm\x01\0\0\0".to_vec();
+        sec(
+            &mut prov,
+            1,
+            &[
+                5, 0x60, 0, 1, 0x7f, // t0: () -> i32
+                0x5d, 0, // t1: cont 0
+                0x5f, 1, 0x63, 1, 0x01, // t2: struct { mut (ref null 1) }
+                0x60, 0, 1, 0x63, 2, // t3: () -> (ref null 2)
+                0x60, 0, 1, 0x7f, // t4: () -> i32
+            ],
+        );
+        sec(&mut prov, 3, &[2, 3, 4]);
+        // Table 0: 1 x (ref null 2)
+        sec(&mut prov, 4, &[1, 0x63, 2, 0x00, 1]);
+        sec(
+            &mut prov,
+            7,
+            &[
+                2, 5, b'g', b'e', b't', b'_', b's', 0x00, 0, 8, b'r', b'e', b's', b'u', b'm', b'e',
+                b'_', b's', 0x00, 1,
+            ],
+        );
+        // Passive elem 0 (flags=5, reftype=(ref 2), 1 item):
+        //   ref.null 1 (0xd0 1); struct.new 2 (0xfb 0x00 2); end (0x0b)
+        sec(
+            &mut prov,
+            9,
+            &[1, 0x05, 0x64, 2, 1, 0xd0, 1, 0xfb, 0x00, 2, 0x0b],
+        );
+        // Body 0 (get_s):
+        //   local 0: (ref null 2)
+        //   i32.const 0; i32.const 0; i32.const 1; table.init elem=0 tab=0
+        //   i32.const 0; table.get 0; local.set 0
+        //   i32.const 0; ref.null 2; table.set 0   ;; clear table slot!
+        //   local.get 0; end
+        let b0 = vec![
+            1, 1, 0x63, 2, 0x41, 0, 0x41, 0, 0x41, 1, 0xfc, 12, 0, 0, 0x41, 0, 0x25, 0, 0x21, 0,
+            0x41, 0, 0xd0, 2, 0x26, 0, 0x20, 0, 0x0b,
+        ];
+        // Body 1 (resume_s):
+        //   call 0 (get_s); struct.get 2 0; resume 1 0; end
+        let b1 = vec![0, 0x10, 0, 0xfb, 0x02, 2, 0, 0xe3, 1, 0, 0x0b];
+        let mut pcode = vec![2];
+        for b in [&b0, &b1] {
+            leb(&mut pcode, b.len() as u32);
+            pcode.extend_from_slice(b);
+        }
+        sec(&mut prov, 10, &pcode);
+
+        let prov_mod = engine.compile(&prov).unwrap();
+        let prov_inst = Linker::new(&engine)
+            .instantiate(&mut store, &prov_mod)
+            .unwrap();
+        let External::Func(get_s) = prov_inst.export(&store, "get_s").unwrap() else {
+            unreachable!();
+        };
+        let External::Func(resume_s) = prov_inst.export(&store, "resume_s").unwrap() else {
+            unreachable!();
+        };
+
+        // Failing module imports "m"."get_s" : () -> (ref null 2), captures a
+        // Body::Segment continuation of its own f1, writes it into S.field0 via
+        // struct.set, and traps with unreachable.
+        let mut mod2 = b"\0asm\x01\0\0\0".to_vec();
+        // Types:
+        //   0: func () -> i32
+        //   1: cont 0
+        //   2: struct { mut (ref null 1) }
+        //   3: func () -> (ref null 2)
+        //   4: func () -> ()
+        //   5: func () -> (ref 1)
+        sec(
+            &mut mod2,
+            1,
+            &[
+                6, 0x60, 0, 1, 0x7f, 0x5d, 0, 0x5f, 1, 0x63, 1, 0x01, 0x60, 0, 1, 0x63, 2, 0x60, 0,
+                0, 0x60, 0, 1, 0x64, 1,
+            ],
+        );
+        // Import f0: "m"."get_s" : type 3
+        sec(
+            &mut mod2,
+            2,
+            &[1, 1, b'm', 5, b'g', b'e', b't', b'_', b's', 0x00, 3],
+        );
+        // Defined funcs: f1 = type 0 (suspends then returns 99), f2 = type 4 (start)
+        sec(&mut mod2, 3, &[2, 0, 4]);
+        sec(&mut mod2, 13, &[1, 0x00, 4]); // tag 0: () -> ()
+        sec(&mut mod2, 8, &[2]); // start = f2
+        sec(&mut mod2, 9, &[1, 0x03, 0x00, 1, 1]); // declarative elem declaring f1
+        let m_b0 = vec![0, 0xe2, 0, 0x41, 0xe3, 0x00, 0x0b]; // suspend 0; i32.const 99
+        let m_b1 = vec![
+            1, 1, 0x63, 1, // local 0: (ref null 1)
+            0x02, 5, // block (type 5: () -> (ref 1))
+            0xd2, 1, // ref.func 1
+            0xe0, 1, // cont.new 1
+            0xe3, 1, 1, 0x00, 0, 0, // resume 1 [on tag 0 -> label 0]
+            0x1a, 0x00, // drop; unreachable
+            0x0b, // end block -> (ref 1)
+            0x21, 0, // local.set 0
+            0x10, 0, // call get_s -> (ref null 2)
+            0x20, 0, // local.get 0 -> (ref null 1)
+            0xfb, 0x05, 2, 0,    // struct.set 2 0
+            0x00, // unreachable (fail start!)
+            0x0b,
+        ];
+        let mut mcode = vec![2];
+        for b in [&m_b0, &m_b1] {
+            leb(&mut mcode, b.len() as u32);
+            mcode.extend_from_slice(b);
+        }
+        sec(&mut mod2, 10, &mcode);
+        let mod2 = engine.compile(&mod2).unwrap();
+
+        let mut linker = Linker::new(&engine);
+        linker.define("m", "get_s", External::Func(get_s)).unwrap();
+        let err = linker.instantiate(&mut store, &mod2).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Trap);
+
+        // Resuming the continuation escaped solely through instances[0].elems[0]
+        // must succeed without panicking and store.collect() must stay healthy.
+        store.collect().unwrap();
+        assert_eq!(
+            store.invoke(resume_s, &[]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(99)])
+        );
+    }
+
+    #[test]
+    fn failed_start_escaping_via_active_roots_gc_struct_keeps_instance_live() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+
+        let engine = Engine::new(Config {
+            features: FeatureSet::all_phase3_core(),
+            ..Config::default()
+        })
+        .unwrap();
+        let mut store = Store::new(&engine);
+
+        // Failing inner module imports "m"."get_s" : () -> (ref null 2) (host callback
+        // returning the outer frame's struct S), stores a Body::Segment continuation
+        // of its own function into S.field0, and traps with unreachable.
+        let mut mod2_bytes = b"\0asm\x01\0\0\0".to_vec();
+        sec(
+            &mut mod2_bytes,
+            1,
+            &[
+                6, 0x60, 0, 1, 0x7f, // t0: () -> i32
+                0x5d, 0, // t1: cont 0
+                0x5f, 1, 0x63, 1, 0x01, // t2: struct { mut (ref null 1) }
+                0x60, 0, 1, 0x63, 2, // t3: () -> (ref null 2)
+                0x60, 0, 0, // t4: () -> ()
+                0x60, 0, 1, 0x64, 1, // t5: () -> (ref 1)
+            ],
+        );
+        sec(
+            &mut mod2_bytes,
+            2,
+            &[1, 1, b'm', 5, b'g', b'e', b't', b'_', b's', 0x00, 3],
+        );
+        sec(&mut mod2_bytes, 3, &[2, 0, 4]);
+        sec(&mut mod2_bytes, 13, &[1, 0x00, 4]);
+        sec(&mut mod2_bytes, 8, &[2]);
+        sec(&mut mod2_bytes, 9, &[1, 0x03, 0x00, 1, 1]);
+        let m_b0 = vec![0, 0xe2, 0, 0x41, 0xd5, 0x00, 0x0b]; // suspend 0; i32.const 85
+        let m_b1 = vec![
+            1, 1, 0x63, 1, 0x02, 5, 0xd2, 1, 0xe0, 1, 0xe3, 1, 1, 0x00, 0, 0, 0x1a, 0x00, 0x0b,
+            0x21, 0, 0x10, 0, 0x20, 0, 0xfb, 0x05, 2, 0, 0x00, 0x0b,
+        ];
+        let mut mcode = vec![2];
+        for b in [&m_b0, &m_b1] {
+            leb(&mut mcode, b.len() as u32);
+            mcode.extend_from_slice(b);
+        }
+        sec(&mut mod2_bytes, 10, &mcode);
+        let mod2 = engine.compile(&mod2_bytes).unwrap();
+
+        // Outer module allocates struct S into local 0 (rooted ONLY in active_roots
+        // while the host import runs!), calls host import `trigger(S)`, then resumes
+        // `S.field0` and returns its i32 result (85).
+        let mut outer_bytes = b"\0asm\x01\0\0\0".to_vec();
+        sec(
+            &mut outer_bytes,
+            1,
+            &[
+                5, 0x60, 0, 1, 0x7f, // t0: () -> i32
+                0x5d, 0, // t1: cont 0
+                0x5f, 1, 0x63, 1, 0x01, // t2: struct { mut (ref null 1) }
+                0x60, 1, 0x63, 2, 0, // t3: ((ref null 2)) -> ()
+                0x60, 0, 1, 0x7f, // t4: () -> i32
+            ],
+        );
+        sec(
+            &mut outer_bytes,
+            2,
+            &[
+                1, 1, b'h', 7, b't', b'r', b'i', b'g', b'g', b'e', b'r', 0x00, 3,
+            ],
+        );
+        sec(&mut outer_bytes, 3, &[1, 4]);
+        sec(&mut outer_bytes, 7, &[1, 3, b'r', b'u', b'n', 0x00, 1]);
+        // Body (run):
+        //   local 0: (ref null 2)
+        //   ref.null 1; struct.new 2; local.tee 0; call 0 (trigger)
+        //   local.get 0; struct.get 2 0; resume 1 0; end
+        let o_b0 = vec![
+            1, 1, 0x63, 2, 0xd0, 1, 0xfb, 0x00, 2, 0x22, 0, 0x10, 0, 0x20, 0, 0xfb, 0x02, 2, 0,
+            0xe3, 1, 0, 0x0b,
+        ];
+        let mut ocode = vec![1];
+        leb(&mut ocode, o_b0.len() as u32);
+        ocode.extend_from_slice(&o_b0);
+        sec(&mut outer_bytes, 10, &ocode);
+        let outer_mod = engine.compile(&outer_bytes).unwrap();
+
+        let eng_for_cb = engine.clone();
+        let mod2_for_cb = mod2.clone();
+        let trigger = store
+            .create_module_host_func(&outer_mod, TypeIdx(3), move |caller, args| {
+                let s_val = args[0];
+                let get_s = caller.store().create_module_host_func(
+                    &mod2_for_cb,
+                    TypeIdx(3),
+                    move |_c, _| Ok(RunOutcome::Returned(vec![s_val])),
+                )?;
+                let mut inner_linker = Linker::new(&eng_for_cb);
+                inner_linker.define("m", "get_s", External::Func(get_s))?;
+                let err = inner_linker
+                    .instantiate(caller.store(), &mod2_for_cb)
+                    .unwrap_err();
+                assert_eq!(err.kind, ErrorKind::Trap);
+                Ok(RunOutcome::Returned(vec![]))
+            })
+            .unwrap();
+
+        let mut outer_linker = Linker::new(&engine);
+        outer_linker
+            .define("h", "trigger", External::Func(trigger))
+            .unwrap();
+        let outer_inst = outer_linker.instantiate(&mut store, &outer_mod).unwrap();
+        let External::Func(run) = outer_inst.export(&store, "run").unwrap() else {
+            unreachable!();
+        };
+
+        assert_eq!(
+            store.invoke(run, &[]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(85)])
+        );
+    }
 }
