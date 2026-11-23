@@ -1,1 +1,0 @@
-Original P027 fixtures, CC0-1.0. Encoded using the existing wtime-conformance encoder; source hashes and executed semantic checks are recorded in P027 evidence. Copy source, destination, and pages deliberately use distinct patterns. Cancellation commits the backward first chunk when dst > src.

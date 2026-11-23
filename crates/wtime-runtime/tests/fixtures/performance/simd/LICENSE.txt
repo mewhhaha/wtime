@@ -1,7 +1,0 @@
-SPDX-License-Identifier: CC0-1.0
-
-The original WAT fixtures in this directory are dedicated to the public domain
-under CC0 1.0 Universal. They were written for this task and are not copied
-from the WebAssembly specification test suite.
-
-https://creativecommons.org/publicdomain/zero/1.0/

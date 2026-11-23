@@ -321,11 +321,9 @@ impl LinearBytes {
         self.len = 0;
     }
 
-    /// Test support for code written against the former `Vec<u8>` backing
-    /// (used by tests of some feature configurations only):
+    /// Test support for compact-executor memory growth tests:
     /// zero-extends, or truncates the visible bytes and clears what was cut.
-    #[cfg(test)]
-    #[allow(dead_code)]
+    #[cfg(all(test, feature = "compact-executor"))]
     pub(crate) fn resize(&mut self, new_len: usize, value: u8) {
         assert_eq!(value, 0, "linear memory only grows with zeros");
         if new_len < self.len {

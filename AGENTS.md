@@ -20,7 +20,7 @@
 - Pin Rust `1.99.0` per `rust-toolchain.toml`.
 - Keep changes formatted (`cargo fmt --all -- --check`) and lint-clean
   (`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
-  plus `tools/wtime-aot` and `tools/wtime-aot/rt`).
+  plus `tools/wtime-aot`, `tools/wtime-aot/rt`, and `tools/wtime-goose`).
 - Run `WTIME_AOT_REQUIRE_NATIVE_TESTS=1 cargo test --locked --manifest-path tools/wtime-aot/Cargo.toml`
   when modifying `tools/wtime-aot` so native oracle/ABI/fault tests cannot
   silently skip.

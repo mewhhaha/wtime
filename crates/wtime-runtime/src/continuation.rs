@@ -398,10 +398,18 @@ impl Store {
                         }
                     }
                 } else {
-                    frames.push(self.frame(f, bound, operands.len())?)
+                    let next = self.frame(f, bound, operands.len())?;
+                    self.acquire_local_slots(next.locals.len());
+                    frames.push(next)
                 }
             }
             Body::Segment(mut segment) => {
+                let seg_slots: usize = segment
+                    .frames
+                    .iter()
+                    .try_fold(0usize, |acc, f| acc.checked_add(f.locals.len()))
+                    .ok_or_else(|| err(ErrorKind::ResourceLimit, "active local slots limit"))?;
+                self.check_local_slot_budget(seg_slots, 0)?;
                 self.resume_fuel = Some(segment.fuel);
                 let fd = frames.len();
                 let od = operands.len();
@@ -417,6 +425,7 @@ impl Store {
                 }
                 operands.extend(segment.operands);
                 operands.extend(bound);
+                self.acquire_local_slots(seg_slots);
                 frames.extend(segment.frames);
                 prompts.extend(segment.prompts)
             }
@@ -828,6 +837,9 @@ impl Store {
                 );
                 let r = self.reserve_continuation(ty, roots)?;
                 let segment = Self::capture(frames, operands, prompts, p, self.current_fuel);
+                self.release_local_slots(
+                    segment.frames.iter().map(|f| f.locals.len()).sum::<usize>(),
+                );
                 prompts.pop();
                 self.continuations.insert(
                     r,
@@ -890,6 +902,9 @@ impl Store {
                 );
                 let outgoing = self.reserve_continuation(out_ty, roots)?;
                 let segment = Self::capture(frames, operands, prompts, p, self.current_fuel);
+                self.release_local_slots(
+                    segment.frames.iter().map(|f| f.locals.len()).sum::<usize>(),
+                );
                 self.continuations.insert(
                     outgoing,
                     ContinuationState {

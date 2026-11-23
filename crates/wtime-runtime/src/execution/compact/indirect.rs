@@ -1,4 +1,4 @@
-//! Source-only P042 draft: bounded, instance-local successful call-site answers.
+//! Bounded, instance-local indirect call-site cache for the compact tier.
 //! Every caller checks the live target before consulting this cache.
 use super::*;
 

@@ -24,6 +24,38 @@ fn guest_table_module(min_elements: u32) -> Vec<u8> {
     wasm
 }
 
+fn recursive_locals_module(local_count: u32) -> Vec<u8> {
+    fn leb(out: &mut Vec<u8>, mut n: u32) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    fn section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+        out.push(id);
+        leb(out, payload.len() as u32);
+        out.extend_from_slice(payload);
+    }
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut wasm, 1, &[1, 0x60, 0, 0]); // type () -> ()
+    section(&mut wasm, 3, &[1, 0]); // func 0 -> type 0
+    section(&mut wasm, 7, &[1, 3, b'r', b'e', b'c', 0, 0]); // export "rec"
+    let mut body = vec![1]; // 1 local decl
+    leb(&mut body, local_count);
+    body.push(0x7e); // i64
+    body.extend_from_slice(&[0x10, 0x00, 0x0b]); // call 0; end
+    let mut code = vec![1];
+    leb(&mut code, body.len() as u32);
+    code.extend_from_slice(&body);
+    section(&mut wasm, 10, &code);
+    wasm
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config {
         features: FeatureSet::all_phase3_core(),
@@ -88,10 +120,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     assert_eq!(store.read_memory(large, written * 65536, 1)?, [0]);
+    drop(store);
+    drop(engine);
 
-    // 3. Guest-defined table instantiation. A 16M-element funcref table needs
-    // 512 MiB (32 bytes/Value), exceeding the 128 MiB RLIMIT_AS; instantiation
-    // must fail recoverably and leave the store usable for a small module.
+    // 3. Guest-defined table instantiation on a populated store. Pre-populate
+    // an existing table so rollback traversal exercises live store state under
+    // 128 MiB RLIMIT_AS; a 16M-element funcref table needs ~512 MiB and must
+    // fail recoverably while leaving the store usable for a small module.
     let mut tcfg = Config {
         features: FeatureSet::all_phase3_core(),
         ..Config::default()
@@ -100,6 +135,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tcfg.limits.max_store_table_elements = 1 << 24;
     let tengine = Engine::new(tcfg)?;
     let mut tstore = Store::new(&tengine);
+    let existing_table_mod = tengine.compile(&guest_table_module(4096))?;
+    Linker::new(&tengine).instantiate(&mut tstore, &existing_table_mod)?;
     let huge_table_mod = tengine.compile(&guest_table_module(1 << 24))?;
     let table_err = Linker::new(&tengine)
         .instantiate(&mut tstore, &huge_table_mod)
@@ -107,9 +144,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(table_err.kind, ErrorKind::ResourceLimit);
     let small_table_mod = tengine.compile(&guest_table_module(4))?;
     Linker::new(&tengine).instantiate(&mut tstore, &small_table_mod)?;
+    drop(tstore);
+    drop(tengine);
+
+    // 4. Active frame local-slot budget & real OS fallible frame allocation.
+    // First test default limits (bounded by max_total_locals), then raise
+    // max_total_locals above what fits in 128 MiB RLIMIT_AS to prove
+    // Store::frame's try_reserve_exact catches real OS OOM without aborting.
+    let rec_bytes = recursive_locals_module(50_000);
+    for max_total_locals in [1_000_000usize, 100_000_000usize] {
+        let mut fcfg = Config::default();
+        fcfg.limits.max_total_locals = max_total_locals;
+        let fengine = Engine::new(fcfg)?;
+        let mut fstore = Store::new(&fengine);
+        let rec_mod = fengine.compile(&rec_bytes)?;
+        let rec_inst = Linker::new(&fengine).instantiate(&mut fstore, &rec_mod)?;
+        let wtime_runtime::External::Func(rec_fn) = rec_inst.export(&fstore, "rec")? else {
+            panic!("expected exported func rec");
+        };
+        let frame_err = fstore
+            .invoke(rec_fn, &[])
+            .expect_err("recursive 50k-local module must fail with ResourceLimit");
+        assert_eq!(frame_err.kind, ErrorKind::ResourceLimit);
+        // Verify recovery in the same store after frame limit/OOM exhaustion.
+        let ok_mod = fengine.compile(&guest_table_module(2))?;
+        Linker::new(&fengine).instantiate(&mut fstore, &ok_mod)?;
+    }
 
     println!(
-        "{{\"allocator_failed\":true,\"page_allocation_failed\":true,\"guest_table_allocation_failed\":true,\"pages_written\":{written},\"recovery_passed\":true,\"executed\":1}}"
+        "{{\"allocator_failed\":true,\"page_allocation_failed\":true,\"guest_table_allocation_failed\":true,\"frame_allocation_failed\":true,\"pages_written\":{written},\"recovery_passed\":true,\"executed\":1}}"
     );
     Ok(())
 }

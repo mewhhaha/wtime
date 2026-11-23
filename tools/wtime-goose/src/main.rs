@@ -61,13 +61,18 @@ fn usage_error(message: &str) -> ! {
 }
 
 fn options() -> Options {
-    let mut own: Vec<Vec<u8>> = std::env::args_os().skip(1).map(OsString::into_vec).collect();
+    let mut own: Vec<Vec<u8>> = std::env::args_os()
+        .skip(1)
+        .map(OsString::into_vec)
+        .collect();
     let arguments = own.iter().position(|argument| argument == b"--").map(|at| {
         let rest = own.split_off(at + 1);
         own.pop();
         rest
     });
-    let mut own = own.into_iter().map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let mut own = own
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let (mut module, mut timing_json, mut tier) = (None, None, Tier::Decoded);
     while let Some(argument) = own.next() {
         match argument.as_str() {
@@ -75,9 +80,16 @@ fn options() -> Options {
                 println!("{USAGE}");
                 exit(0)
             }
-            "--timing-json" => timing_json = Some(own.next().unwrap_or_else(|| usage_error("--timing-json needs a path"))),
+            "--timing-json" => {
+                timing_json = Some(
+                    own.next()
+                        .unwrap_or_else(|| usage_error("--timing-json needs a path")),
+                )
+            }
             "--tier" => {
-                let value = own.next().unwrap_or_else(|| usage_error("--tier needs a value"));
+                let value = own
+                    .next()
+                    .unwrap_or_else(|| usage_error("--tier needs a value"));
                 tier = match value.as_str() {
                     "decoded" => Tier::Decoded,
                     "compact" => Tier::Compact,
@@ -88,20 +100,32 @@ fn options() -> Options {
                     },
                 };
             }
-            other if other.starts_with('-') => usage_error(&format!("unrecognized argument {other}")),
+            other if other.starts_with('-') => {
+                usage_error(&format!("unrecognized argument {other}"))
+            }
             _ if module.is_none() => module = Some(argument),
             other => usage_error(&format!("unrecognized argument {other}")),
         }
     }
-    let Some(module) = module else { usage_error("the following arguments are required: module") };
-    Options { module, timing_json, tier, arguments }
+    let Some(module) = module else {
+        usage_error("the following arguments are required: module")
+    };
+    Options {
+        module,
+        timing_json,
+        tier,
+        arguments,
+    }
 }
 
 /// Limits wide enough for the Goose compiler compiled to Wasm: deep recursion
 /// over syntax trees and a large 64-bit memory. wtime keeps guest frames on
 /// the heap, so a deep call stack needs no native stack.
 fn config() -> Config {
-    let mut config = Config { features: FeatureSet::all_phase3_core(), ..Config::default() };
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Config::default()
+    };
     let limits = &mut config.limits;
     limits.max_call_depth = 4_000_000;
     limits.max_stack_height = 64_000_000;
@@ -112,7 +136,10 @@ fn config() -> Config {
     limits.max_module_bytes = 256 << 20;
     // Threads for decoding and validating function bodies; the default (0)
     // lets wtime decide. WTIME_GOOSE_COMPILE_THREADS=1 keeps them on one.
-    if let Some(threads) = std::env::var("WTIME_GOOSE_COMPILE_THREADS").ok().and_then(|v| v.parse().ok()) {
+    if let Some(threads) = std::env::var("WTIME_GOOSE_COMPILE_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         limits.compile_threads = threads;
     }
     config
@@ -125,7 +152,9 @@ fn engine(tier: Tier) -> Result<Engine, String> {
         Tier::Compact => Engine::with_execution_policy(config, ExecutionPolicy::Compact),
         Tier::Register => Engine::with_execution_policy(config, ExecutionPolicy::Register),
         #[cfg(feature = "register-executor")]
-        Tier::RegisterAdaptive(threshold) => Engine::with_register_entry_threshold(config, threshold),
+        Tier::RegisterAdaptive(threshold) => {
+            Engine::with_register_entry_threshold(config, threshold)
+        }
         #[cfg(not(feature = "register-executor"))]
         Tier::RegisterAdaptive(_) => return Err("this build has no register executor".into()),
     };
@@ -142,7 +171,12 @@ struct Outcome {
     engine_total_ns: u128,
 }
 
-fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) -> Result<Outcome, String> {
+fn run_module(
+    data: &[u8],
+    stdin: Vec<u8>,
+    arguments: Vec<Vec<u8>>,
+    tier: Tier,
+) -> Result<Outcome, String> {
     let engine = engine(tier)?;
     let state = Arc::new(Mutex::new(State::new(stdin, arguments)));
     let started = Instant::now();
@@ -155,10 +189,14 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
         compiled = Instant::now();
         let store = store_slot.insert(Store::new(&engine));
         let mut linker = Linker::new(&engine);
-        for (module_name, name, function) in define_imports(store, &module, &state)? {
-            linker.define(&module_name, &name, External::Func(function)).map_err(|error| error.to_string())?;
+        for (module_name, name, function) in define_imports(store, module, &state)? {
+            linker
+                .define(&module_name, &name, External::Func(function))
+                .map_err(|error| error.to_string())?;
         }
-        let instance = linker.instantiate(store, &module).map_err(|error| error.to_string())?;
+        let instance = linker
+            .instantiate(store, module)
+            .map_err(|error| error.to_string())?;
         {
             let mut state = state.lock().expect("host state lock");
             if let Ok(External::Memory(memory)) = instance.export(store, "memory") {
@@ -171,8 +209,9 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
         if instance.export(store, "__set_stack_limits").is_ok() {
             return Err("emscripten standalone modules are not supported by this host".into());
         }
-        let External::Func(start) =
-            instance.export(store, "_start").map_err(|_| "module does not export _start".to_string())?
+        let External::Func(start) = instance
+            .export(store, "_start")
+            .map_err(|_| "module does not export _start".to_string())?
         else {
             return Err("'_start' is not a function".into());
         };
@@ -193,22 +232,30 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
         }
         match outcome? {
             RunOutcome::Returned(_) => Ok(()),
-            RunOutcome::Exception(exception) => Err(format!("uncaught guest exception: {exception:?}")),
+            RunOutcome::Exception(exception) => {
+                Err(format!("uncaught guest exception: {exception:?}"))
+            }
             RunOutcome::Suspended { tag, .. } => Err(format!("guest suspended at {tag:?}")),
         }
     })();
     let ended = Instant::now();
     let mut state = state.lock().expect("host state lock");
-    if std::env::var_os("WTIME_GOOSE_MEMORY").is_some() {
-        if let (Some(memory), Some(store)) = (state.memory, store_slot.as_ref()) {
-            // The memory's length, found by probing: the store has no length query.
-            let (mut low, mut high) = (0u64, 1u64 << 40);
-            while low + 1 < high {
-                let middle = (low + high) / 2;
-                if store.read_memory(memory, middle - 1, 1).is_ok() { low = middle } else { high = middle }
+    if std::env::var_os("WTIME_GOOSE_MEMORY").is_some()
+        && let (Some(memory), Some(store)) = (state.memory, store_slot.as_ref())
+    {
+        // The memory's length, found by probing: the store has no length query.
+        let (mut low, mut high) = (0u64, 1u64 << 40);
+        while low + 1 < high {
+            let middle = (low + high) / 2;
+            if store.read_memory(memory, middle - 1, 1).is_ok() {
+                low = middle
+            } else {
+                high = middle
             }
-            state.err.extend_from_slice(format!("wtime memory bytes: {low}\n").as_bytes());
         }
+        state
+            .err
+            .extend_from_slice(format!("wtime memory bytes: {low}\n").as_bytes());
     }
     let (exit_code, error) = match (result, state.exit, state.failure.take()) {
         (_, Some(code), _) => (code, String::new()),
@@ -233,9 +280,13 @@ fn run_module(data: &[u8], stdin: Vec<u8>, arguments: Vec<Vec<u8>>, tier: Tier) 
 }
 
 fn run(options: &Options) -> Result<i64, String> {
-    let data = std::fs::read(&options.module).map_err(|error| format!("{}: {error}", options.module))?;
+    let data =
+        std::fs::read(&options.module).map_err(|error| format!("{}: {error}", options.module))?;
     let mut input = Vec::new();
-    std::io::stdin().lock().read_to_end(&mut input).map_err(|error| error.to_string())?;
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut input)
+        .map_err(|error| error.to_string())?;
     let program = match &options.arguments {
         None => vec![b"program".to_vec()],
         Some(arguments) => {
@@ -246,9 +297,13 @@ fn run(options: &Options) -> Result<i64, String> {
     };
     let outcome = run_module(&data, input, program, options.tier)?;
     let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(&outcome.stdout).and_then(|()| stdout.flush());
+    let _ = stdout
+        .write_all(&outcome.stdout)
+        .and_then(|()| stdout.flush());
     if !outcome.stderr.is_empty() {
-        let _ = std::io::stderr().lock().write_all((outcome.stderr.clone() + "\n").as_bytes());
+        let _ = std::io::stderr()
+            .lock()
+            .write_all((outcome.stderr.clone() + "\n").as_bytes());
     }
     if let Some(path) = &options.timing_json {
         let json = format!(

@@ -75,6 +75,15 @@ pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
 }
 impl Store {
     pub(super) fn frame(&self, f: Func, args: Vec<Value>, base: usize) -> Result<Frame> {
+        self.frame_with_release(f, args, base, 0)
+    }
+    pub(super) fn frame_with_release(
+        &self,
+        f: Func,
+        args: Vec<Value>,
+        base: usize,
+        releasing_slots: usize,
+    ) -> Result<Frame> {
         let k = self.check(f.0, &self.funcs)?;
         let fun = self.funcs[k].clone();
         for value in &args {
@@ -96,12 +105,19 @@ impl Store {
             .inner
             .decoded()
             .code[fun.body];
+        let total_slots = args
+            .len()
+            .checked_add(body.locals.len())
+            .ok_or_else(|| err(ErrorKind::ResourceLimit, "active local slots limit"))?;
+        self.check_local_slot_budget(total_slots, releasing_slots)?;
         #[cfg(feature = "performance-counters")]
         self.perf.record(perf::Event::Frame, 1);
         let mut locals = args;
         let module = &self.instances[fun.instance].module;
-        // Zero values in runs of one type, reserved at once.
-        locals.reserve_exact(body.locals.len());
+        // Zero values in runs of one type, reserved fallibly at once.
+        locals
+            .try_reserve_exact(body.locals.len())
+            .map_err(|_| err(ErrorKind::ResourceLimit, "frame allocation failed"))?;
         for &(zero, n) in module.data.local_runs[fun.body].iter() {
             locals.resize(locals.len() + n as usize, zero);
         }
@@ -156,6 +172,12 @@ impl Store {
         self.invoke_decoded(f, args)
     }
     pub(super) fn invoke_decoded(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
+        let saved_slots = self.active_local_slots.get();
+        let result = self.invoke_decoded_inner(f, args);
+        self.active_local_slots.set(saved_slots);
+        result
+    }
+    fn invoke_decoded_inner(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
         #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
         let register_capacity_scope = self.register_activation.scope();
         if self.cancellation.is_cancelled() {
@@ -206,7 +228,9 @@ impl Store {
         #[cfg(feature = "performance-counters")]
         self.perf
             .record(perf::Event::Arguments, u64::from(!args.is_empty()));
-        let mut frames = vec![self.frame(f, args.to_vec(), 0)?];
+        let first = self.frame(f, args.to_vec(), 0)?;
+        self.acquire_local_slots(first.locals.len());
+        let mut frames = vec![first];
         // Locals vectors of returned frames, reused by later calls that need
         // the same capacity, so that such a call does not allocate one. The
         // capacity must match: captured continuations are charged by it.
@@ -268,7 +292,9 @@ impl Store {
                     register::Step::Continue => continue,
                     register::Step::ExitToDecoded => {}
                     register::Step::Return => {
-                        frames.pop();
+                        if let Some(f) = frames.pop() {
+                            self.release_local_slots(f.locals.len());
+                        }
                         if frames.is_empty() {
                             for value in &stack {
                                 self.validate_value(*value)?;
@@ -415,7 +441,9 @@ impl Store {
                         #[cfg(feature = "performance-counters")]
                         self.perf
                             .record(perf::Event::CompactResultMove, u64::from(n != 0));
-                        frames.pop();
+                        if let Some(f) = frames.pop() {
+                            self.release_local_slots(f.locals.len());
+                        }
                         if frames.is_empty() {
                             for value in &stack {
                                 self.validate_value(*value)?;
@@ -671,6 +699,7 @@ impl Store {
                         self.perf.record(perf::Event::Branch, u64::from(n != 0));
                         keep(&mut stack, base, n)?;
                         if let Some(f) = frames.pop() {
+                            self.release_local_slots(f.locals.len());
                             retire(&mut spare, f)
                         }
                         if frames.is_empty() {
@@ -702,6 +731,7 @@ impl Store {
                         self.perf.record(perf::Event::Branch, u64::from(n != 0));
                         keep(&mut stack, frame.base, n)?;
                         if let Some(f) = frames.pop() {
+                            self.release_local_slots(f.locals.len());
                             retire(&mut spare, f)
                         }
                         if frames.is_empty() {
@@ -736,6 +766,7 @@ impl Store {
                     );
                     keep(&mut stack, frame.base, frame.function.ty.results.len())?;
                     if let Some(f) = frames.pop() {
+                        self.release_local_slots(f.locals.len());
                         retire(&mut spare, f)
                     }
                     if frames.is_empty() {
@@ -845,6 +876,7 @@ impl Store {
                         let start = stack.len() - n;
                         let tail = matches!(op.opcode, 0x12 | 0x13 | 0x15);
                         let base = if tail { frame.base } else { start };
+                        let releasing = if tail { frame.locals.len() } else { 0 };
                         if !tail && frames.len() >= self.engine.config.limits.max_call_depth {
                             return Err(err(ErrorKind::ResourceLimit, "call depth exhausted"));
                         }
@@ -870,13 +902,23 @@ impl Store {
                                 }
                             }
                         }
-                        let next = compact::guest_frame(self, fun, &stack[start..], base)?;
+                        let next = compact::guest_frame_with_release(
+                            self,
+                            fun,
+                            &stack[start..],
+                            base,
+                            releasing,
+                        )?;
+                        let added = next.locals.len();
                         if tail {
                             stack.truncate(base);
-                            frames.pop();
+                            if let Some(popped) = frames.pop() {
+                                self.release_local_slots(popped.locals.len());
+                            }
                         } else {
                             stack.truncate(start);
                         }
+                        self.acquire_local_slots(added);
                         frames.push(next);
                         continue;
                     }
@@ -898,10 +940,24 @@ impl Store {
                     } else {
                         0
                     };
+                    let tail = matches!(op.opcode, 0x12 | 0x13 | 0x15);
+                    let releasing = if tail { frame.locals.len() } else { 0 };
+                    let total_needed = n
+                        .checked_add(declared)
+                        .ok_or_else(|| err(ErrorKind::ResourceLimit, "active local slots limit"))?;
+                    if self.funcs[checked].host.is_none() {
+                        self.check_local_slot_budget(total_needed, releasing)?;
+                    }
                     let start = stack.len() - n;
-                    let mut args = match spare.iter().rposition(|v| v.capacity() == n + declared) {
+                    let mut args = match spare.iter().rposition(|v| v.capacity() == total_needed) {
                         Some(i) => spare.swap_remove(i),
-                        None => Vec::with_capacity(n + declared),
+                        None => {
+                            let mut v = Vec::new();
+                            v.try_reserve_exact(total_needed).map_err(|_| {
+                                err(ErrorKind::ResourceLimit, "frame allocation failed")
+                            })?;
+                            v
+                        }
                     };
                     args.extend_from_slice(&stack[start..]);
                     stack.truncate(start);
@@ -963,7 +1019,9 @@ impl Store {
                             self.perf
                                 .record(perf::Event::Branch, u64::from(caller_results != 0));
                             keep(&mut stack, caller_base, caller_results)?;
-                            frames.pop();
+                            if let Some(popped) = frames.pop() {
+                                self.release_local_slots(popped.locals.len());
+                            }
                             if frames.is_empty() {
                                 for value in &stack {
                                     self.validate_value(*value)?;
@@ -974,15 +1032,18 @@ impl Store {
                         }
                         continue;
                     }
-                    let tail = matches!(op.opcode, 0x12 | 0x13 | 0x15);
                     let base = if tail { frame.base } else { stack.len() };
-                    let next = self.frame(fun, args, base)?;
+                    let next = self.frame_with_release(fun, args, base, releasing)?;
+                    let added = next.locals.len();
                     if tail {
                         stack.truncate(base);
-                        frames.pop();
+                        if let Some(popped) = frames.pop() {
+                            self.release_local_slots(popped.locals.len());
+                        }
                     } else if frames.len() >= self.engine.config.limits.max_call_depth {
                         return Err(err(ErrorKind::ResourceLimit, "call depth exhausted"));
                     }
+                    self.acquire_local_slots(added);
                     frames.push(next)
                 }
                 0x1a => {
@@ -1446,7 +1507,7 @@ impl Store {
         };
         match op.opcode {
             0xfc09 => {
-                self.instances[ii].data[a] = None;
+                self.instances[ii].data[a] = false;
             }
             0xfc0d => {
                 self.instances[ii].elems[a] = None;
@@ -1500,7 +1561,7 @@ impl Store {
                 let dest = self.instances[ii].mems[mi].0.index;
                 match op.opcode {
                     0xfc08 => {
-                        let data = self.instances[ii].data[a].as_deref().unwrap_or(&[]);
+                        let data = self.instances[ii].data_segment(a).unwrap_or(&[]);
                         let r = range(src, n, data.len())?;
                         self.mems[dest].write(dst, &data[r])?;
                     }
@@ -1916,7 +1977,9 @@ impl Store {
                     if depth == pos {
                         stack.truncate(frame.base);
                         stack.extend(values);
-                        frames.pop();
+                        if let Some(popped) = frames.pop() {
+                            self.release_local_slots(popped.locals.len());
+                        }
                         return Ok(true);
                     }
                     let target = pos
@@ -1936,7 +1999,9 @@ impl Store {
                 }
             }
             let base = frame.base;
-            frames.pop();
+            if let Some(popped) = frames.pop() {
+                self.release_local_slots(popped.locals.len());
+            }
             stack.truncate(base);
         }
         Ok(false)

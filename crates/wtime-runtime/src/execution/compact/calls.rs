@@ -1,4 +1,4 @@
-//! Unexecuted P041 draft. Instance-owned Store handles never enter module IR.
+//! Compact-tier call handling. Instance-owned Store handles never enter module IR.
 use super::*;
 
 pub(super) const CALL_MAX_WORK: usize = 100_000;
@@ -235,6 +235,16 @@ pub(crate) fn guest_frame(
     args: &[Value],
     base: usize,
 ) -> Result<Frame> {
+    guest_frame_with_release(store, target, args, base, 0)
+}
+
+pub(crate) fn guest_frame_with_release(
+    store: &Store,
+    target: Func,
+    args: &[Value],
+    base: usize,
+    releasing_slots: usize,
+) -> Result<Frame> {
     let function = &store.funcs[store.check(target.0, &store.funcs)?];
     if function.host.is_some() {
         return Err(trap("compact guest frame for host"));
@@ -269,6 +279,7 @@ pub(crate) fn guest_frame(
         .len()
         .checked_add(local_types.len())
         .ok_or_else(|| err(ErrorKind::ResourceLimit, "compact local count overflow"))?;
+    store.check_local_slot_budget(total, releasing_slots)?;
     let mut locals = Vec::new();
     locals
         .try_reserve_exact(total)

@@ -713,17 +713,15 @@ int main(int argc, char **argv) {
         fn_drop c_drop = (fn_drop)dlsym(dlc, "blot_aot_drop");
         fn_call_export c_call = (fn_call_export)dlsym(dlc, "blot_aot_call_export");
         fn_get_global c_getg = (fn_get_global)dlsym(dlc, "blot_aot_get_global");
-        // Verify verbatim parity of all trap messages 1..=21 between C and x64!
+        // Verify verbatim parity of all trap messages 1..=22 between C and x64!
         void *dlx = dlopen(argv[1], RTLD_NOW);
         fn_trap_msg x_tm = (fn_trap_msg)dlsym(dlx, "blot_aot_trap_message");
-        for (uint32_t code = 1; code <= 21; code++) {
+        for (uint32_t code = 1; code <= 22; code++) {
             const uint8_t *xp = NULL, *cp = NULL; size_t xl = 0, cl = 0;
             CHECK(x_tm(code, &xp, &xl) == 0 && c_tm(code, &cp, &cl) == 0, "trap_msg(%u) status", code);
             CHECK(xl == cl && memcmp(xp, cp, xl) == 0, "trap_msg(%u) text mismatch between x64 and C", code);
         }
         dlclose(dlx);
-        // Deviation 1: C backend does not have trap code 22
-        CHECK(c_tm(22, &p, &l) == 1, "C backend trap 22 deviation");
         void *hc = c_new(NULL, NULL, 0, &tr);
         CHECK(hc != NULL, "C new");
         // Tricky names match identically between C and x64!
@@ -1821,6 +1819,8 @@ fn rust_c_x64_blot_abi_parity_and_safety() {
         0x20, 0, 0x41, 0, 0x4c, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 6, 0x41,
         1, 0x6a, 0x0b,
     ];
+    // f7: call_mxcsr_internal(x: f64) -> call 4 (mxcsr_subnormal) so f4 has >=1 internal caller!
+    let b7: Vec<u8> = vec![0x20, 0, 0x10, 4];
 
     let wasm = wasm_module(&[
         type_sec(&[
@@ -1829,8 +1829,10 @@ fn rust_c_x64_blot_abi_parity_and_safety() {
             (&[0x7c], &[0x7c]), // t2
         ]),
         section(2, &imp_p),
-        func_sec(&[1, 0, 0, 2, 0, 0]),
-        section(5, &[1, 0x01, 1, 64]),
+        func_sec(&[1, 0, 0, 2, 0, 0, 2]),
+        // Omitted max (flags=0x00, min=1) to verify Rust/C/x64 honor mem_limit_pages
+        // without reserving 4 GiB under tight RLIMIT_AS!
+        section(5, &[1, 0x00, 1]),
         section(6, &glob_p),
         export_sec(&[
             ("blot:memory", 2, 0),
@@ -1840,6 +1842,7 @@ fn rust_c_x64_blot_abi_parity_and_safety() {
             ("mxcsr_subnormal", 0, 4),
             ("div_bool", 0, 5),
             ("recurse", 0, 6),
+            ("call_mxcsr_internal", 0, 7),
             ("g0", 3, 0),
             ("g_ref", 3, 1),
         ]),
@@ -1850,6 +1853,7 @@ fn rust_c_x64_blot_abi_parity_and_safety() {
             enc_body(&[], &b4),
             enc_body(&[(1, 0x7c)], &b5),
             enc_body(&[], &b6),
+            enc_body(&[], &b7),
         ]),
     ]);
 
@@ -1905,9 +1909,13 @@ fn rust_c_x64_blot_abi_parity_and_safety() {
 #include <dlfcn.h>
 #include <pthread.h>
 #include <immintrin.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 typedef int32_t (*host_fn_t)(void *, void *, uint32_t, uint64_t, uint64_t, uint64_t *);
 typedef uint32_t (*fn_u32)(void);
+typedef int32_t (*fn_trap_msg)(uint8_t, const uint8_t **, size_t *);
 typedef int32_t (*fn_imp_name)(uint32_t, const uint8_t **, size_t *, const uint8_t **, size_t *);
 typedef void *(*fn_new)(void *, host_fn_t, uint64_t, uint8_t *);
 typedef void (*fn_drop)(void *);
@@ -1925,7 +1933,10 @@ typedef struct {
     void *h;
     fn_call_export call_export;
     fn_call_i32 active_alloc;
+    fn_mem_data mem_data;
+    fn_mem_data active_mem_data;
     fn_mem_grow mem_grow;
+    fn_get_global getg;
     fn_get_global active_getg;
     fn_set_global setg;
     fn_drop drop;
@@ -1940,12 +1951,20 @@ static int32_t cb_fn(void *u, void *ac, uint32_t idx, uint64_t tok, uint64_t arg
     s->seen_mxcsr = _mm_getcsr();
     uint64_t r64 = 0xaaaa; uint8_t tr = 0;
     if (idx != 0) return 1;
-    // Reentry guards inside callback
+    // Reentry guards inside callback (must fail closed without aliasing active guest state)
     if (s->call_export(s->h, (const uint8_t *)"", 0, 0, &r64, &tr) != 2 || tr != 19) return 1;
     if (s->mem_grow(s->h, 0) != -1) return 1;
     if (s->setg(s->h, (const uint8_t *)"g0", 2, 999) != 1) return 1;
+    uint8_t *outer_mp = (uint8_t *)1; size_t outer_ml = 99;
+    s->mem_data(s->h, &outer_mp, &outer_ml);
+    if (outer_mp != NULL || outer_ml != 0) return 1;
+    uint64_t ogv = 0; uint8_t ogk = 255;
+    if (s->getg(s->h, (const uint8_t *)"g0", 2, &ogv, &ogk) != 1) return 1;
     s->drop(s->h); // must be a safe no-op!
-    // Active call works
+    // Active call APIs work cleanly via ActiveCall*
+    uint8_t *amp = NULL; size_t aml = 0;
+    s->active_mem_data(ac, &amp, &aml);
+    if (amp == NULL || aml != 131072) return 1;
     int32_t ares = 0; uint8_t atr = 0;
     if (s->active_alloc(ac, 5, &ares, &atr) != 0 || ares != 15) return 1;
     uint64_t gv = 0; uint8_t gk = 255;
@@ -1979,6 +1998,7 @@ static int test_one(const char *tag, const char *so_path) {
     void *dl = dlopen(so_path, RTLD_NOW);
     CHECK(dl != NULL, "dlopen: %s", dlerror());
     fn_u32 imp_cnt = (fn_u32)dlsym(dl, "blot_aot_import_count");
+    fn_trap_msg trap_msg = (fn_trap_msg)dlsym(dl, "blot_aot_trap_message");
     fn_imp_name imp_name = (fn_imp_name)dlsym(dl, "blot_aot_import_name");
     fn_new b_new = (fn_new)dlsym(dl, "blot_aot_new");
     fn_drop b_drop = (fn_drop)dlsym(dl, "blot_aot_drop");
@@ -1986,10 +2006,16 @@ static int test_one(const char *tag, const char *so_path) {
     fn_call_i32 call_alloc = (fn_call_i32)dlsym(dl, "blot_aot_call_allocate");
     fn_call_i32 active_alloc = (fn_call_i32)dlsym(dl, "blot_aot_active_allocate");
     fn_mem_data mem_data = (fn_mem_data)dlsym(dl, "blot_aot_mem_data");
+    fn_mem_data active_mem_data = (fn_mem_data)dlsym(dl, "blot_aot_active_mem_data");
     fn_mem_grow mem_grow = (fn_mem_grow)dlsym(dl, "blot_aot_mem_grow");
     fn_get_global getg = (fn_get_global)dlsym(dl, "blot_aot_get_global");
     fn_get_global active_getg = (fn_get_global)dlsym(dl, "blot_aot_active_get_global");
     fn_set_global setg = (fn_set_global)dlsym(dl, "blot_aot_set_global");
+
+    // 0. Trap message parity for code 22 across all 3 backends
+    const uint8_t *tm_ptr = NULL; size_t tm_len = 0;
+    CHECK(trap_msg(22, &tm_ptr, &tm_len) == 0 && tm_len == 19 && memcmp(tm_ptr, "Unsupported CPU ISA", 19) == 0,
+          "trap_message(22) mismatch len=%zu", tm_len);
 
     // 1. Embedded NUL import name byte-exact length
     CHECK(imp_cnt() == 1, "import_count");
@@ -2011,16 +2037,36 @@ static int test_one(const char *tag, const char *so_path) {
     CHECK(mp0 == NULL && ml0 == 0, "null mem_data");
     b_drop(NULL);
 
-    // 3. mem_limit_pages = 2
+    // 3. mem_limit_pages = 2 (module omits max; must NOT allocate 4 GiB!)
     CbState cb;
     memset(&cb, 0, sizeof(cb));
     cb.tag = tag; cb.call_export = call_export; cb.active_alloc = active_alloc;
-    cb.mem_grow = mem_grow; cb.active_getg = active_getg; cb.setg = setg; cb.drop = b_drop;
+    cb.mem_data = mem_data; cb.active_mem_data = active_mem_data;
+    cb.mem_grow = mem_grow; cb.getg = getg; cb.active_getg = active_getg; cb.setg = setg; cb.drop = b_drop;
     void *h = b_new(&cb, cb_fn, 2, &tr);
     CHECK(h != NULL, "new failed tr=%u", tr);
     cb.h = h;
     CHECK(mem_grow(h, 1) == 1, "mem_grow(1) under limit=2");
     CHECK(mem_grow(h, 1) == -1, "mem_grow past limit=2 must fail");
+
+    // 3b. Verify omitted-max backing reservation respects RLIMIT_AS (256 MiB << 4 GiB)
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork failed");
+    if (pid == 0) {
+        struct rlimit rl = { 256ULL * 1024ULL * 1024ULL, 256ULL * 1024ULL * 1024ULL };
+        if (setrlimit(RLIMIT_AS, &rl) != 0) _exit(90);
+        uint8_t ctr = 0;
+        void *ch = b_new(NULL, NULL, 2, &ctr);
+        if (!ch) _exit(91);
+        b_drop(ch);
+        ctr = 0;
+        void *big = b_new(NULL, NULL, 8192, &ctr); // 512 MiB > 256 MiB RLIMIT_AS
+        if (big != NULL || ctr != 12) _exit(92);
+        _exit(0);
+    }
+    int wstatus = 0;
+    CHECK(waitpid(pid, &wstatus, 0) == pid && WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == 0,
+          "RLIMIT_AS backing cap check failed status=0x%x exit=%d", wstatus, WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : -1);
 
     // 4. (NULL, 0), (NULL, 4), invalid UTF-8
     CHECK(call_export(h, NULL, 0, 0, &r64, &tr) == 0, "(NULL, 0) empty export");
@@ -2036,12 +2082,14 @@ static int test_one(const char *tag, const char *so_path) {
     CHECK(call_export(h, (const uint8_t *)"div_bool", 8, 0, &r64, &tr) == 0 && r64 == 1, "div_bool(0) must be NaN");
     CHECK(call_export(h, (const uint8_t *)"div_bool", 8, 5, &r64, &tr) == 0 && r64 == 0, "div_bool(5) must be 0.0");
 
-    // 6. MXCSR isolation + callback reentry/drop-guard/MXCSR restore
+    // 6. MXCSR isolation (including export that ALSO has an internal caller!) + callback reentry
     uint32_t orig_mxcsr = _mm_getcsr();
     uint32_t custom_mxcsr = 0x1f80 | (1u << 15) | (1u << 6);
     _mm_setcsr(custom_mxcsr);
     CHECK(call_export(h, (const uint8_t *)"mxcsr_subnormal", 15, 0, &r64, &tr) == 0 && r64 == 1ULL,
           "mxcsr_subnormal flushed to %llu", (unsigned long long)r64);
+    CHECK(call_export(h, (const uint8_t *)"call_mxcsr_internal", 19, 0, &r64, &tr) == 0 && r64 == 1ULL,
+          "call_mxcsr_internal flushed to %llu", (unsigned long long)r64);
     CHECK((_mm_getcsr() & 0xffc0u) == (custom_mxcsr & 0xffc0u), "host MXCSR not restored after call");
     CHECK(call_export(h, (const uint8_t *)"call_imp", 8, 7, &r64, &tr) == 0 && r64 == 107 && cb.ok == 1,
           "call_imp callback failed r64=%llu ok=%d", (unsigned long long)r64, cb.ok);

@@ -361,11 +361,8 @@ impl Store {
                 }
                 let values = if op == 9 || op == 18 {
                     let bytes = self.instances[ii]
-                        .data
-                        .get(segment)
-                        .ok_or_else(|| trap("data segment index"))?
-                        .as_deref()
-                        .unwrap_or(&[]);
+                        .data_segment(segment)
+                        .ok_or_else(|| trap("data segment index"))?;
                     let width = match field.storage {
                         StorageType::I8 => 1,
                         StorageType::I16 => 2,

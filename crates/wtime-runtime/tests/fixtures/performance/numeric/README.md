@@ -1,9 +1,0 @@
-# P028 original integer arithmetic fixture
-
-`integer_numeric.wat` is a new fixture written for P028 and dedicated under CC0-1.0 (see `LICENSE.txt`). It is not copied from an external test suite. `manifest.json` contains the WAT and encoded Wasm SHA-256 values, expected return values, and the fuel-prefix image for every budget from 0 through 17. Encoding succeeded with the existing conformance encoder; guest validation and execution remain pending.
-
-The exports separately cover wrapping i32/i64 add, subtract, and multiply; i32/i64 and/or/xor; masked i32/i64 left, signed-right, and unsigned-right shifts; contrasting signed and unsigned comparisons at the all-ones boundary; and clz/ctz/popcnt for both widths. Expected values in the manifest are independently calculated using fixed-width masks, two's-complement conversion, masked shift counts, and Python integer bit operations.
-
-The `fuel_prefix` export takes `i32 a, i32 b` and performs three store groups. Each group expands to five source instructions in order (address constant, two parameter reads, arithmetic opcode, store). Under P020's pre-instruction fuel debit, budgets 0..4 leave memory zero; 5..9 allow only the add store; 10..14 allow add and subtract; 15 allows all stores but traps before the final constant; 16 executes the final constant but traps before the implicit function-end instruction; 17 returns 42. The test input `a=2147483647, b=2` makes the stored words `0x80000001`, `0x7ffffffd`, and `0xfffffffe`, so each prefix is independently distinguishable. See `manifest.json` for exact byte strings.
-
-The initial staged oracle expected fuel 16 to return, counting only the 16 explicit instructions. Review of the P020 loop-head accounting and decoded function body confirmed the implicit `end` instruction is also charged. The oracle was corrected before guest execution; there is no executed proof for either prior expectation.

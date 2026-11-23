@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
-use std::{env, fs::File, io::Read, process::ExitCode};
+use std::{
+    env,
+    fs::File,
+    io::{self, Read, Write},
+    process::ExitCode,
+};
 use wtime_runtime::{Config, Engine, External, Linker, RunOutcome, Store, Value};
 use wtime_types::{Error, ErrorKind, FeatureSet};
 
@@ -219,14 +224,26 @@ fn parse_args(raw: Vec<String>) -> Result<Action, CliError> {
     })
 }
 
+fn write_stdout_line(out: &mut impl Write, line: &str) -> Result<bool, CliError> {
+    match writeln!(out, "{line}") {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(CliError::usage(format!("failed to write stdout: {error}"))),
+    }
+}
+
 fn run_args(raw: Vec<String>) -> Result<(), CliError> {
+    let mut stdout = io::stdout().lock();
     let (config, command, path, export, arguments) = match parse_args(raw)? {
         Action::Help => {
-            println!("{HELP}");
+            let _ = write_stdout_line(&mut stdout, HELP)?;
             return Ok(());
         }
         Action::Version => {
-            println!("wtime-cli {}", env!("CARGO_PKG_VERSION"));
+            let _ = write_stdout_line(
+                &mut stdout,
+                &format!("wtime-cli {}", env!("CARGO_PKG_VERSION")),
+            )?;
             return Ok(());
         }
         Action::Command {
@@ -244,16 +261,21 @@ fn run_args(raw: Vec<String>) -> Result<(), CliError> {
     let module = engine.compile(&bytes).map_err(CliError::from_wtime)?;
 
     if command == "check" {
-        println!("valid");
+        let _ = write_stdout_line(&mut stdout, "valid")?;
         return Ok(());
     }
     if command == "hints" {
         let inspection = module.branch_hints();
         for hint in inspection.hints {
-            println!(
-                "function={} offset={} {:?}",
-                hint.function, hint.instruction_offset, hint.likelihood
-            );
+            if !write_stdout_line(
+                &mut stdout,
+                &format!(
+                    "function={} offset={} {:?}",
+                    hint.function, hint.instruction_offset, hint.likelihood
+                ),
+            )? {
+                return Ok(());
+            }
         }
         for diagnostic in inspection.diagnostics {
             eprintln!("ignored optional metadata: {diagnostic}");
@@ -264,7 +286,9 @@ fn run_args(raw: Vec<String>) -> Result<(), CliError> {
         let mut exports = module.exports();
         exports.sort_by(|a, b| a.0.cmp(b.0));
         for (name, kind, index) in exports {
-            println!("{name}\t{kind:?}({index})");
+            if !write_stdout_line(&mut stdout, &format!("{name}\t{kind:?}({index})"))? {
+                return Ok(());
+            }
         }
         return Ok(());
     }
@@ -286,7 +310,9 @@ fn run_args(raw: Vec<String>) -> Result<(), CliError> {
     {
         RunOutcome::Returned(results) => {
             for result in results {
-                println!("{}", format_value(result));
+                if !write_stdout_line(&mut stdout, &format_value(result))? {
+                    return Ok(());
+                }
             }
         }
         RunOutcome::Exception(exception) => {
@@ -400,5 +426,20 @@ mod tests {
         let err = read_bounded(mod_path.to_str().unwrap(), 8).err().unwrap();
         assert_eq!(err.code, 5);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_stdout_line_treats_broken_pipe_as_clean_exit() {
+        struct BrokenPipeWriter;
+        impl Write for BrokenPipeWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut w = BrokenPipeWriter;
+        assert_eq!(write_stdout_line(&mut w, "hello").ok(), Some(false));
     }
 }

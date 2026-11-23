@@ -1,5 +1,5 @@
-//! Bounded typed stack-to-slot translation. Edge values are simultaneous move
-//! requests, not an execution schedule; P060 owns their scheduling.
+//! Bounded typed stack-to-slot translation. Edge values represent simultaneous
+//! move requests scheduled during register lowering.
 use super::ir::*;
 use crate::execution::effects::classify;
 use crate::{Immediate, Module, ValType};
@@ -180,7 +180,7 @@ impl LoweredFunction {
     pub(super) fn lower(module: &Module, body: usize, budget: &mut Budget) -> Checked<Self> {
         Self::translate(module, body, budget, None)
     }
-    #[allow(dead_code)] // Preparation foundation; P064 selects it separately.
+    #[allow(dead_code)] // Used by prefix-admission preparation paths and register-tier tests.
     pub(super) fn lower_prefix(module: &Module, body: usize, budget: &mut Budget) -> Checked<Self> {
         let code = &module
             .data

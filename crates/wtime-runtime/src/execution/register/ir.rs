@@ -132,7 +132,7 @@ pub(super) struct SourceEvent {
 }
 
 /// Internal drafts can only be published against normal Wasm admission.
-/// P058 must bound allocation while constructing these tables, and then use
+/// Lowering bounds allocation while constructing these tables and runs
 /// the aggregate verifier below before retaining anything in a Module.
 pub(super) struct Draft {
     pub operations: Vec<Operation>,
@@ -546,7 +546,7 @@ impl RegisterFunction {
     ) -> Checked<Self> {
         Self::check_draft(module, admission, draft, budget, None)
     }
-    #[allow(dead_code)] // P064 consumes this separately admitted artifact.
+    #[allow(dead_code)] // Used by prefix-admission preparation paths and register-tier tests.
     pub(super) fn from_prefix_draft(
         module: &Module,
         admission: Admission,

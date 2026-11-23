@@ -7,7 +7,7 @@ Run commands from the workspace root with the pinned Rust toolchain (`rust-toolc
 
 `python3 tools/checks/opcode_coverage.py` checks the locked instruction/section/non-opcode inventory and runs an actual decoder dispatch probe. The inventory derives Core 3.0 assignments from `specification/wasm-3.0/5.3-binary.instructions.spectec` at `7e9fb78c63d65018cc111422f657947b3df80d7b`; active proposal assignments carry their separate locked source commits. Reserved gaps and the remaining u32 prefix tails are explicit.
 
-`--require-complete` additionally rejects pending validation/execution/test evidence. A successful ownership or decoder check does not establish complete semantic conformance. Current semantic owners remain explicitly pending audit.
+`--require-complete` additionally rejects pending validation/execution/test evidence. A successful ownership or decoder check does not establish complete semantic conformance. All semantic owners in the locked `v0.1.0` scope are reconciled and audited (`0` pending).
 
 ## Mutation smoke
 

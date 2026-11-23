@@ -101,9 +101,20 @@ All three Blot backends (`x64`, `c`, `rust`) expose the same 18 C-ABI symbols:
   `blot_aot_call_finish_invocation` (return `0` ok, `1` Wasm trap, `2` host error /
   invalid reentry with `*trap_out = 19`, `3` missing/incompatible export or `NULL`
   handle on `call_export`).
-- Memory & globals: `blot_aot_mem_data` (zeroes outputs on `NULL` handle),
-  `blot_aot_mem_grow` (returns `-1` on `NULL` handle, `in_call != 0`, or limit
-  failure), `blot_aot_get_global`, `blot_aot_set_global`.
+- Memory & globals: `blot_aot_mem_data` (zeroes outputs on `NULL` handle or
+  while `in_call != 0`), `blot_aot_mem_grow` (returns `-1` on `NULL` handle,
+  `in_call != 0`, or limit failure), `blot_aot_get_global` (returns `1` on
+  `NULL` handle or while `in_call != 0`), `blot_aot_set_global` (returns `1` on
+  `NULL` handle or while `in_call != 0`).
+- **Handle lifetime & serialization**: a `BlotHandle` is single-threaded and
+  must not be called concurrently from multiple host threads. During a
+  synchronous `host_fn` callback, the handle is marked `in_call != 0`; all
+  handle-taking APIs fail closed before borrowing guest state, and callbacks
+  must access guest memory, globals, or re-entrant exports exclusively through
+  the `ActiveCall*` pointer supplied to `host_fn` (valid only until `host_fn`
+  returns). Any pointer returned by `blot_aot_mem_data` or
+  `blot_aot_active_mem_data` is valid only until the next `blot_aot_mem_grow`,
+  guest call, or `blot_aot_drop`.
 - Active callback APIs (valid only inside `host_fn`): `blot_aot_active_mem_data`,
   `blot_aot_active_allocate`, `blot_aot_active_reset`,
   `blot_aot_active_get_global`. Synchronous callback reentry is capped at

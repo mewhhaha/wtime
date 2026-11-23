@@ -208,11 +208,11 @@ impl Linker {
             } else {
                 Value::zero(ValType::Ref(t.element))
             };
+            s.reserve_table(t.limits.min)?;
             let mut values = Vec::new();
             values
                 .try_reserve_exact(n)
                 .map_err(|_| err(ErrorKind::ResourceLimit, "table allocation"))?;
-            s.reserve_table(t.limits.min)?;
             values.resize(n, init);
             inst.tabs.push(Table(s.h(s.tabs.len())));
             s.tabs.push(Tab {
@@ -233,13 +233,7 @@ impl Linker {
         inst.data = d
             .data
             .iter()
-            .map(|x| {
-                if matches!(x.mode, SegmentMode::Passive) {
-                    Some(d.bytes[x.bytes.start..x.bytes.end].to_vec())
-                } else {
-                    None
-                }
-            })
+            .map(|x| matches!(x.mode, SegmentMode::Passive))
             .collect();
         inst.elems = d
             .elements
@@ -291,16 +285,16 @@ impl Linker {
             }
         }
         for (data_index, data) in d.data.iter().enumerate() {
-            let bytes = d.bytes[data.bytes.start..data.bytes.end].to_vec();
+            let bytes = &d.bytes[data.bytes.start..data.bytes.end];
             if let SegmentMode::Active { index, offset } = &data.mode {
                 let off = address(eval_const(s, &inst, offset)?)?;
                 let mem = &mut s.mems[inst.mems[*index as usize].0.index];
                 let r = range(off, bytes.len(), mem.len()?)?;
                 let _ = r;
-                mem.write(off, &bytes)?;
-                inst.data[data_index] = None
+                mem.write(off, bytes)?;
+                inst.data[data_index] = false
             } else {
-                inst.data[data_index] = Some(bytes)
+                inst.data[data_index] = true
             }
         }
         for e in &d.exports {
@@ -348,34 +342,86 @@ impl Linker {
         let result = self.instantiate_inner(s, m);
         if result.is_err() {
             // References published by the start function keep their instance alive.
-            let mut pending: Vec<Value> = (0..checkpoint.2)
-                .filter_map(|i| s.tabs.get(i))
-                .flat_map(|t| t.values.iter())
-                .chain(
-                    (0..checkpoint.3)
-                        .filter_map(|i| s.globals.get(i))
-                        .map(|g| &g.value),
-                )
-                .chain(s.published.iter())
-                .copied()
-                .collect();
+            // Scan existing roots lazily with bounded work and fallible queuing so
+            // rollback never aborts under tight memory limits.
+            let max_work = s.engine.config.limits.max_gc_mark_work;
+            let mut work = 0usize;
             let mut escaped = false;
-            if let Ok(roots) = s.gc.registered_roots() {
-                pending.extend(roots.into_iter().map(|r| Value::Ref(RefValue::Gc(r))));
-            } else {
-                escaped = true;
-            }
-            if let Ok(roots) = s.value_roots.lock() {
-                pending.extend(roots.iter().filter_map(|r| r.upgrade()).map(|r| *r));
-            } else {
-                escaped = true;
+            let mut pending: Vec<Value> = Vec::new();
+            let mut visit_root = |value: Value, escaped: &mut bool| -> bool {
+                work += 1;
+                if work > max_work {
+                    *escaped = true;
+                    return false;
+                }
+                match value {
+                    Value::Ref(RefValue::Func(f))
+                        if f.0.store == s.id && f.0.index >= checkpoint.0 =>
+                    {
+                        *escaped = true;
+                        false
+                    }
+                    Value::Ref(RefValue::Gc(_) | RefValue::ExternGc(_) | RefValue::Exn(_)) => {
+                        if pending.try_reserve(1).is_err() {
+                            *escaped = true;
+                            return false;
+                        }
+                        pending.push(value);
+                        true
+                    }
+                    _ => true,
+                }
+            };
+            'roots: {
+                for i in 0..checkpoint.2 {
+                    if let Some(tab) = s.tabs.get(i) {
+                        for &value in &tab.values {
+                            if !visit_root(value, &mut escaped) {
+                                break 'roots;
+                            }
+                        }
+                    }
+                }
+                for i in 0..checkpoint.3 {
+                    if let Some(glob) = s.globals.get(i)
+                        && !visit_root(glob.value, &mut escaped)
+                    {
+                        break 'roots;
+                    }
+                }
+                for &value in &s.published {
+                    if !visit_root(value, &mut escaped) {
+                        break 'roots;
+                    }
+                }
+                if let Ok(roots) = s.gc.registered_roots() {
+                    for r in roots {
+                        if !visit_root(Value::Ref(RefValue::Gc(r)), &mut escaped) {
+                            break 'roots;
+                        }
+                    }
+                } else {
+                    escaped = true;
+                    break 'roots;
+                }
+                if let Ok(roots) = s.value_roots.lock() {
+                    for weak in roots.iter() {
+                        if let Some(r) = weak.upgrade()
+                            && !visit_root(*r, &mut escaped)
+                        {
+                            break 'roots;
+                        }
+                    }
+                } else {
+                    escaped = true;
+                    break 'roots;
+                }
             }
             let mut gc_seen = std::collections::HashSet::new();
             let mut exn_seen = std::collections::HashSet::new();
-            let mut work = 0usize;
-            while let Some(value) = pending.pop() {
+            while !escaped && let Some(value) = pending.pop() {
                 work += 1;
-                if work > s.engine.config.limits.max_gc_mark_work {
+                if work > max_work {
                     escaped = true;
                     break;
                 }
@@ -386,17 +432,65 @@ impl Linker {
                         escaped = true;
                         break;
                     }
-                    Value::Ref(RefValue::Gc(r) | RefValue::ExternGc(r)) if gc_seen.insert(r) => {
-                        if let Ok(object) = s.gc.get(r) {
-                            pending.extend_from_slice(&object.fields);
-                            if let Some(r) = object.descriptor {
+                    Value::Ref(RefValue::Gc(r) | RefValue::ExternGc(r)) => {
+                        if gc_seen.try_reserve(1).is_err() {
+                            escaped = true;
+                            break;
+                        }
+                        if gc_seen.insert(r)
+                            && let Ok(object) = s.gc.get(r)
+                        {
+                            for &field in &object.fields {
+                                if matches!(
+                                    field,
+                                    Value::Ref(
+                                        RefValue::Func(_)
+                                            | RefValue::Gc(_)
+                                            | RefValue::ExternGc(_)
+                                            | RefValue::Exn(_)
+                                    )
+                                ) {
+                                    if pending.try_reserve(1).is_err() {
+                                        escaped = true;
+                                        break;
+                                    }
+                                    pending.push(field);
+                                }
+                            }
+                            if !escaped && let Some(r) = object.descriptor {
+                                if pending.try_reserve(1).is_err() {
+                                    escaped = true;
+                                    break;
+                                }
                                 pending.push(Value::Ref(RefValue::Gc(r)));
                             }
                         }
                     }
-                    Value::Ref(RefValue::Exn(r)) if exn_seen.insert(r) => {
-                        if let Ok(i) = s.check(r.0, &s.exceptions) {
-                            pending.extend_from_slice(&s.exceptions[i].payload);
+                    Value::Ref(RefValue::Exn(r)) => {
+                        if exn_seen.try_reserve(1).is_err() {
+                            escaped = true;
+                            break;
+                        }
+                        if exn_seen.insert(r)
+                            && let Ok(i) = s.check(r.0, &s.exceptions)
+                        {
+                            for &field in &s.exceptions[i].payload {
+                                if matches!(
+                                    field,
+                                    Value::Ref(
+                                        RefValue::Func(_)
+                                            | RefValue::Gc(_)
+                                            | RefValue::ExternGc(_)
+                                            | RefValue::Exn(_)
+                                    )
+                                ) {
+                                    if pending.try_reserve(1).is_err() {
+                                        escaped = true;
+                                        break;
+                                    }
+                                    pending.push(field);
+                                }
+                            }
                         }
                     }
                     _ => {}

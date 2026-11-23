@@ -53,10 +53,7 @@ Preparation and memory for the 7.3 MB compiler module:
 Host instructions (callgrind, the most stable metric on this VM): `sieve` 5.57 G originally,
 2.80 G after round 1, 1.36 G at `8f86fdb`, 0.88 G now; the compiler compiling `vm.goose`
 12.6 G after round 1, 6.3 G at `8f86fdb`, 5.0 G now, of which about 1.0 G is decoding and
-validating the module. Full tables: [now](results/fa2128c/tables.md),
-[`8f86fdb`](results/8f86fdb/tables.md), [round 1](results/after/tables.md) and
-[original](results/before/tables.md). Raw samples, binary hashes and RSS are in
-`results/*/*.json`. Benchmarks ran on a shared 4-vCPU VM partly concurrently with builds and
+validating the module. Benchmarks ran on a shared 4-vCPU VM partly concurrently with builds and
 other benchmarks; self-check ranges span separate runs.
 
 **What remains.** wtime is still an interpreter; Wasmtime compiles to native code, and wtime
@@ -77,7 +74,7 @@ adds it as engine `v8`. V8 compiles lazily: Liftoff first, TurboFan for hot code
 background threads. "Process" is the whole process, including Deno's own start-up
 (about 50 ms). Ratios are wtime/V8, below 1 when wtime is faster.
 
-One CPU per engine (`b2c2b04`, before parallel preparation; [tables](results/v8-b2c2b04/tables.md)):
+One CPU per engine (`b2c2b04`, before parallel preparation):
 
 | Example | V8 run | wtime run | wtime / V8 run | V8 process | wtime process | wtime / V8 process |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -88,7 +85,7 @@ One CPU per engine (`b2c2b04`, before parallel preparation; [tables](results/v8-
 | sorting | 360 ms | 24.7 s | 69× | 435 ms | 24.7 s | 58× |
 
 The Goose compiler as Wasm, three CPUs for every engine (`dc33870`, bodies prepared in
-parallel; [tables](results/v8-dc33870/tables.md)):
+parallel):
 
 | Case | V8 prep | wtime prep | V8 run | wtime run | V8 process | wtime process | wtime / V8 process |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -126,8 +123,7 @@ compilers emit Wasm byte-identical to the native (32-bit) and Wasmtime-run
 (64-bit) compilers'. Measured sequentially on one CPU per engine (`--cpu 1`, 5 paired
 rounds, AMD Ryzen 7 3800X, Linux 7.3.4, Rust 1.97.1, Wasmtime 50.0.1, Deno 2.9.8 / V8 15.0)
 with `wtime-aot build` at `037d32c` and Goose compiler from goose-to-wasm `766898a`
-([tables](results/aot-037d32c/tables.md); earlier `0c142ba` baseline in
-[results/aot-0c142ba](results/aot-0c142ba/tables.md)). `bench.py --no-thp` applies
+(earlier `0c142ba` baseline retained in git history). `bench.py --no-thp` applies
 `prctl(PR_SET_THP_DISABLE, 1)` equally to every engine so the host kernel's
 `transparent_hugepage=always` default behaves like standard `madvise` Linux instead of
 faulting 2 MiB huge pages on every sparse anonymous region write (without `--no-thp`,
@@ -200,8 +196,7 @@ What closed the gap and pulled ahead:
 Tried and left out earlier, each measured: one codegen unit (rustc needed more than 11 GB);
 a higher LLVM inline threshold (0.4% fewer instructions); traps by unwinding instead of
 `Result` (result tests after calls are under 1% of instructions); profile-guided builds
-(`wtime-aot build --train`, kept as an option: 0.97–1.02× the plain build,
-[pgo.md](results/aot-0c142ba/pgo.md)); and for chunked memory64, inline byte-wise slow loads
+(`wtime-aot build --train`, kept as an option: 0.97–1.02× the plain build); and for chunked memory64, inline byte-wise slow loads
 and call-free chunk lookups (both slower than cold register-returned slow paths). The whole
 process of a small program sits within ~0.2 ms of `/bin/true`, leaving startup near its floor.
 
@@ -248,7 +243,6 @@ Verification, run on both the baseline and this change:
 - **Conformance:** the pinned spec corpus executed 62,968 core3 cases, 64,297 phase3 cases and
   15 interaction cases with 0 failures, identical to the baseline. Phase3 also passed on the
   Compact, Register and Reference tiers (64,297 each, 0 failures).
-  [Summary](results/after/conformance/summary.json)
 - **Lints and checks:** clippy reports no findings that the baseline doesn't already have. The
   production dependency/unsafe budget has 0 violations. `tools/checks` has 2 failing
   release-audit tests, the same 2 as on the baseline.
@@ -334,8 +328,8 @@ python3 bench.py --cases cases/compiler.json ... --wasmtime-cache DIR --cpu 2 -o
 python3 report.py results/after/*.json
 ```
 
-`cases/*.json` use absolute paths from the measurement machine; adjust `module`, `expected`
-and `cwd` for another checkout. Run a module directly:
+`cases/*.json` use relative `../../../goose-to-wasm` sibling paths; adjust `module`, `expected`
+and `cwd` if your `goose-to-wasm` checkout lives elsewhere. Run a module directly:
 
 ```sh
 wtime-goose [--tier decoded|compact|register|register-adaptive=N] [--timing-json path] module.wasm [-- program arguments]

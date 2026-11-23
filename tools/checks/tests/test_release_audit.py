@@ -28,7 +28,13 @@ class ReleaseAuditTests(unittest.TestCase):
             'requested_allocation_bytes': 512 * 1024 * 1024,
             'executed': 1,
             'exit_code': 0,
-            'stdout': json.dumps({'allocator_failed': True, 'recovery_passed': True, 'executed': 1}),
+            'stdout': json.dumps({
+                'allocator_failed': True,
+                'guest_table_allocation_failed': True,
+                'frame_allocation_failed': True,
+                'recovery_passed': True,
+                'executed': 1,
+            }),
             'stderr': '',
         }
 
@@ -190,6 +196,71 @@ class ReleaseAuditTests(unittest.TestCase):
                 'evidence allocation_failure: worker binary fingerprint is missing or malformed',
                 bad_errors,
             )
+
+    def test_t169_case_12_evidence_target_dir_isolated_and_dirty_rev_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'Cargo.lock').write_text('lock')
+            (root / 'Cargo.toml').write_text('workspace')
+            ev_worker = root / 'target/evidence/debug/wtime-allocation-check'
+            ev_worker.parent.mkdir(parents=True)
+            ev_worker.write_bytes(b'evidence worker')
+            # Simulate cargo test --all-features writing a different binary to target/debug
+            clobbered = root / 'target/debug/wtime-allocation-check'
+            clobbered.parent.mkdir(parents=True)
+            clobbered.write_bytes(b'all-features worker')
+            report = {
+                'passed': True,
+                'source_stable': True,
+                'source_sha256': audit.core_source_hash(root),
+                'architecture': 'x86_64',
+                'command': ['target/evidence/debug/wtime-allocation-check'],
+                'worker_sha256': audit.sha256(ev_worker),
+                'address_space_bytes': 128 * 1024 * 1024,
+                'requested_allocation_bytes': 512 * 1024 * 1024,
+                'executed': 1,
+                'exit_code': 0,
+                'stdout': json.dumps({
+                    'allocator_failed': True,
+                    'guest_table_allocation_failed': True,
+                    'frame_allocation_failed': True,
+                    'recovery_passed': True,
+                    'executed': 1,
+                }),
+                'stderr': '',
+            }
+            errors = []
+            audit._check_allocation_failure(report, errors, root, verify_local_binaries=True)
+            self.assertEqual(errors, [])
+
+            # Missing frame_allocation_failed must fail closed
+            no_frame = {**report, 'stdout': json.dumps({
+                'allocator_failed': True,
+                'guest_table_allocation_failed': True,
+                'frame_allocation_failed': False,
+                'recovery_passed': True,
+                'executed': 1,
+            })}
+            errors = []
+            audit._check_allocation_failure(no_frame, errors, root, verify_local_binaries=True)
+            self.assertIn('evidence allocation_failure: worker did not report allocator failure and successful recovery', errors)
+
+            # Dirty engine_revision must fail closed
+            conf = self.conformance_report(root)
+            conf['engine_revision'] = '1c18cc8-dirty'
+            conf_errors = []
+            audit._check_conformance(conf, 'core3', conf_errors, root, 'abc', 'def')
+            self.assertIn('evidence core3: engine revision is missing or dirty', conf_errors)
+
+    def test_t169_case_13_missing_interaction_corpus_blocks_release(self):
+        manifest = {
+            'schema_version': 1,
+            'evidence': {
+                'interactions': {'path': 'docs/verification/interactions.json', 'sha256': '0' * 64},
+            },
+        }
+        errors = audit.audit(manifest)
+        self.assertIn('evidence interaction_corpus: missing corpus_report or corpus_sha256', errors)
 
 
 if __name__ == '__main__':

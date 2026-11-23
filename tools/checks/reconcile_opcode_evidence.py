@@ -80,7 +80,9 @@ def reconcile(root,reports):
         snapshot.parent.mkdir(parents=True,exist_ok=True)
         if not snapshot.exists():snapshot.write_bytes(p.read_bytes())
         name=str(snapshot.relative_to(root))
-        evidence[name]={'kind':'executed-corpus','path':name,'origin_report':str(p),'report_sha256':report_digest,'binary_sha256':report['binary_sha256'],'profile':report['profile'],'suite':report['suite'],'source_hash':report['source_hash'],'selected':report['selected'],'executed':report['executed'],'executed_opcodes':report['executed_opcodes'],'implementation_sources':report['implementation_sources'],'compatibility':report.get('compatibility',[]),'compatibility_assertions':report.get('compatibility_assertions',0)}
+        try:origin=str(p.resolve().relative_to(root.resolve()))
+        except ValueError:origin=str(p)
+        evidence[name]={'kind':'executed-corpus','path':name,'origin_report':origin,'report_sha256':report_digest,'binary_sha256':report['binary_sha256'],'profile':report['profile'],'suite':report['suite'],'source_hash':report['source_hash'],'selected':report['selected'],'executed':report['executed'],'executed_opcodes':report['executed_opcodes'],'implementation_sources':report['implementation_sources'],'compatibility':report.get('compatibility',[]),'compatibility_assertions':report.get('compatibility_assertions',0)}
     discharged=0
     for row in ledger['instructions']:
         for stage,(file,symbol) in mappings(row['encoding']).items():

@@ -1,8 +1,8 @@
 [
  {
   "name": "compile-squares",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/squares.goose",
    "--stdlib",
@@ -17,8 +17,8 @@
  },
  {
   "name": "compile-vm",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/vm.goose",
    "--stdlib",
@@ -33,8 +33,8 @@
  },
  {
   "name": "compile-sudoku",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/sudoku.goose",
    "--stdlib",
@@ -49,8 +49,8 @@
  },
  {
   "name": "compile-functions",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler32.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler32.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/functions.goose",
    "--stdlib",
@@ -65,8 +65,8 @@
  },
  {
   "name": "compile64-vm",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler64.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler64.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/vm.goose",
    "--stdlib",
@@ -81,8 +81,8 @@
  },
  {
   "name": "compile64-functions",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler64.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler64.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/functions.goose",
    "--stdlib",
@@ -97,8 +97,8 @@
  },
  {
   "name": "compile64-8g-vm",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler64-8g.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler64-8g.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/vm.goose",
    "--stdlib",
@@ -113,8 +113,8 @@
  },
  {
   "name": "compile64-8g-functions",
-  "module": "/home/user/goose-to-wasm/build/cmp/compiler64-8g.wasm",
-  "cwd": "/home/user/goose-to-wasm",
+  "module": "../../../goose-to-wasm/build/cmp/compiler64-8g.wasm",
+  "cwd": "../../../goose-to-wasm",
   "arguments": [
    "examples/functions.goose",
    "--stdlib",

@@ -257,6 +257,35 @@ fn check_deadline(
     Ok(())
 }
 
+/// Opens `path` as a regular file without blocking on FIFOs or special devices.
+fn open_regular_file(path: &Path) -> Result<fs::File, String> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        #[cfg(target_os = "linux")]
+        const O_NONBLOCK_NOCTTY: i32 = 0o4000 | 0o400;
+        #[cfg(not(target_os = "linux"))]
+        const O_NONBLOCK_NOCTTY: i32 = 0x0004 | 0x20000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NONBLOCK_NOCTTY)
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+    };
+    #[cfg(not(unix))]
+    let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{}: input must be a regular file (refusing FIFO, device, or directory)",
+            path.display()
+        ));
+    }
+    Ok(file)
+}
+
 /// Reads a Wasm input file with a hard pre-allocation byte cap (checking initial file
 /// metadata, streaming in 64 KiB chunks, and enforcing `deadline` so growing/stalled inputs stay bounded).
 pub(crate) fn read_bounded_wasm(
@@ -272,7 +301,7 @@ pub(crate) fn read_bounded_wasm(
             path.display()
         ));
     }
-    let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = open_regular_file(path)?;
     if let Ok(meta) = file.metadata()
         && meta.is_file()
         && meta.len() > max_bytes as u64
@@ -327,8 +356,7 @@ pub(crate) fn read_bounded_wasm_for_x64(
             path.display()
         )));
     }
-    let mut file =
-        fs::File::open(path).map_err(|e| BuildError::Failed(format!("{}: {e}", path.display())))?;
+    let mut file = open_regular_file(path).map_err(BuildError::Failed)?;
     if let Ok(meta) = file.metadata()
         && meta.is_file()
         && meta.len() > max_bytes as u64
@@ -2050,5 +2078,38 @@ mod tests {
                 "group-writable 0o664 sidecar must be rejected"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_bounded_wasm_rejects_fifo_without_blocking() {
+        let root = create_fresh_test_root("wtime-aot-fifo-test");
+        let fifo = root.0.join("input.wasm");
+        assert_inside_test_root(&root.0, &fifo);
+        let status = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must execute");
+        assert!(status.success(), "mkfifo failed");
+        let started = std::time::Instant::now();
+        let err = read_bounded_wasm(
+            &fifo,
+            64 << 20,
+            Some(started + std::time::Duration::from_secs(5)),
+        )
+        .expect_err("FIFO must be rejected immediately");
+        assert!(
+            err.contains("regular file"),
+            "unexpected FIFO rejection message: {err}"
+        );
+        let err_x64 =
+            read_bounded_wasm_for_x64(&fifo, Some(started + std::time::Duration::from_secs(5)))
+                .expect_err("x64 reader must reject FIFO immediately");
+        assert!(matches!(err_x64, BuildError::Failed(_)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "FIFO open/check blocked unexpectedly: {:?}",
+            started.elapsed()
+        );
     }
 }

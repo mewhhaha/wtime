@@ -1,6 +1,6 @@
 //! Stage 2 SSA IR optimization pipeline & interprocedural analyses (`#![forbid(unsafe_code)]`).
 //!
-//! Dependency-ordered passes (`CONTINUE.md` §5.1):
+//! Dependency-ordered passes:
 //! 1. `inline_small_helpers`: budgeted bottom-up inlining of non-recursive small helpers (`<= 45` insns).
 //! 2. `rebuild_cfg_and_prune`: unreachable-block pruning, single-pred jump-block merging, exact `bb.preds`,
 //!    Cooper–Harvey–Kennedy dominator tree, and natural-loop discovery.
@@ -973,7 +973,7 @@ pub fn prune_early_block_params(ir: &mut IrFunc, budget: Option<&CompileBudget>)
 }
 
 // ============================================================================
-// 2. Budgeted Small-Leaf Inlining (`CONTINUE.md` §5.1.2)
+// 2. Budgeted Small-Leaf Inlining
 // ============================================================================
 
 /// Computes Tarjan SCCs on the defined-function call graph and returns `(in_cycle, topo_bottom_up)`.
@@ -1536,7 +1536,7 @@ pub fn inline_small_helpers(
 }
 
 // ============================================================================
-// 3. Interprocedural Effect Analysis (`CONTINUE.md` §5.1.3)
+// 3. Interprocedural Effect Analysis
 // ============================================================================
 
 pub struct ModuleEffects {
@@ -1703,7 +1703,7 @@ pub fn compute_module_effects(
 }
 
 // ============================================================================
-// 4. Conservative LICM (`CONTINUE.md` §5.1.4)
+// 4. Conservative LICM
 // ============================================================================
 
 fn is_pure_licm_op(op: &Op) -> bool {

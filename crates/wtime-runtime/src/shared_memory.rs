@@ -94,7 +94,18 @@ impl SharedMemory {
     }
     pub(crate) fn read(&self, address: u64, width: usize) -> Result<Vec<u8>> {
         let state = lock(&self.state)?;
-        Ok(state.bytes[bounds(address, width, state.bytes.len())?].to_vec())
+        let range = bounds(address, width, state.bytes.len())?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(width)
+            .map_err(|_| Error::new(ErrorKind::ResourceLimit, "shared memory allocation failed"))?;
+        out.extend_from_slice(&state.bytes[range]);
+        Ok(out)
+    }
+    pub(crate) fn read_into(&self, address: u64, out: &mut [u8]) -> Result<()> {
+        let state = lock(&self.state)?;
+        let range = bounds(address, out.len(), state.bytes.len())?;
+        out.copy_from_slice(&state.bytes[range]);
+        Ok(())
     }
     pub(crate) fn write(&self, address: u64, bytes: &[u8]) -> Result<()> {
         let mut state = lock(&self.state)?;

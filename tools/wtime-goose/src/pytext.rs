@@ -32,7 +32,9 @@ fn repr(characters: impl Iterator<Item = char> + Clone) -> String {
                 text.push(character);
             }
             // Not printable: controls, the no-break space and the soft hyphen.
-            '\0'..='\x1f' | '\x7f'..='\u{a0}' | '\u{ad}' => text.push_str(&format!("\\x{:02x}", character as u32)),
+            '\0'..='\x1f' | '\x7f'..='\u{a0}' | '\u{ad}' => {
+                text.push_str(&format!("\\x{:02x}", character as u32))
+            }
             _ => text.push(character),
         }
     }
@@ -44,8 +46,14 @@ fn repr(characters: impl Iterator<Item = char> + Clone) -> String {
 /// ASCII whitespace already, it can only hold the two latin-1 ones.
 fn stripped(token: &[u8]) -> &[u8] {
     let space = |byte: &u8| matches!(byte, 0x85 | 0xa0);
-    let start = token.iter().position(|byte| !space(byte)).unwrap_or(token.len());
-    let end = token.iter().rposition(|byte| !space(byte)).map_or(start, |last| last + 1);
+    let start = token
+        .iter()
+        .position(|byte| !space(byte))
+        .unwrap_or(token.len());
+    let end = token
+        .iter()
+        .rposition(|byte| !space(byte))
+        .map_or(start, |last| last + 1);
     &token[start..end]
 }
 
@@ -55,7 +63,10 @@ fn without_underscores(text: &[u8]) -> Option<Vec<u8>> {
     for (index, &byte) in text.iter().enumerate() {
         if byte != b'_' {
             plain.push(byte);
-        } else if index == 0 || !text[index - 1].is_ascii_digit() || !text.get(index + 1).is_some_and(u8::is_ascii_digit) {
+        } else if index == 0
+            || !text[index - 1].is_ascii_digit()
+            || !text.get(index + 1).is_some_and(u8::is_ascii_digit)
+        {
             return None;
         }
     }
@@ -91,7 +102,8 @@ pub fn parse_int(token: &[u8]) -> Result<i64, String> {
             return Err("host input exceeds i64".to_string());
         }
     }
-    i64::try_from(if negative { -value } else { value }).map_err(|_| "host input exceeds i64".to_string())
+    i64::try_from(if negative { -value } else { value })
+        .map_err(|_| "host input exceeds i64".to_string())
 }
 
 /// `float(token)`.
@@ -117,7 +129,10 @@ pub fn normalized_path(path: &[u8]) -> Vec<u8> {
         2 => b"//",
         _ => b"/",
     };
-    let parts: Vec<&[u8]> = path.split(|&byte| byte == b'/').filter(|part| !part.is_empty() && *part != b".").collect();
+    let parts: Vec<&[u8]> = path
+        .split(|&byte| byte == b'/')
+        .filter(|part| !part.is_empty() && *part != b".")
+        .collect();
     let mut normalized = root.to_vec();
     normalized.extend_from_slice(&parts.join(&b'/'));
     if normalized.is_empty() {
@@ -137,13 +152,35 @@ mod tests {
         assert_eq!(parse_int(b"-9223372036854775808"), Ok(i64::MIN));
         assert_eq!(parse_int(b"\xa0+5\x85"), Ok(5));
         assert_eq!(parse_int(b"000000000000000000000000000007"), Ok(7));
-        assert_eq!(parse_int(b"9223372036854775808").unwrap_err(), "host input exceeds i64");
-        assert_eq!(parse_int(b"1__0").unwrap_err(), "invalid literal for int() with base 10: '1__0'");
-        assert_eq!(parse_int(b"\x1f12").unwrap_err(), "invalid literal for int() with base 10: '\\x1f12'");
-        assert_eq!(parse_int(b"a'b").unwrap_err(), "invalid literal for int() with base 10: \"a'b\"");
-        assert_eq!(parse_int(b"a'b\"c").unwrap_err(), "invalid literal for int() with base 10: 'a\\'b\"c'");
-        assert_eq!(parse_int(b"\xe9").unwrap_err(), "invalid literal for int() with base 10: '\u{e9}'");
-        assert!(parse_int(&[b'9'; 4301]).unwrap_err().starts_with("Exceeds the limit (4300 digits)"));
+        assert_eq!(
+            parse_int(b"9223372036854775808").unwrap_err(),
+            "host input exceeds i64"
+        );
+        assert_eq!(
+            parse_int(b"1__0").unwrap_err(),
+            "invalid literal for int() with base 10: '1__0'"
+        );
+        assert_eq!(
+            parse_int(b"\x1f12").unwrap_err(),
+            "invalid literal for int() with base 10: '\\x1f12'"
+        );
+        assert_eq!(
+            parse_int(b"a'b").unwrap_err(),
+            "invalid literal for int() with base 10: \"a'b\""
+        );
+        assert_eq!(
+            parse_int(b"a'b\"c").unwrap_err(),
+            "invalid literal for int() with base 10: 'a\\'b\"c'"
+        );
+        assert_eq!(
+            parse_int(b"\xe9").unwrap_err(),
+            "invalid literal for int() with base 10: '\u{e9}'"
+        );
+        assert!(
+            parse_int(&[b'9'; 4301])
+                .unwrap_err()
+                .starts_with("Exceeds the limit (4300 digits)")
+        );
     }
 
     #[test]
@@ -155,7 +192,10 @@ mod tests {
         assert_eq!(parse_float(b"5."), Ok(5.0));
         assert!(parse_float(b"+NaN").unwrap().is_nan());
         for refused in ["1_.5", ".", "1e", "0x1p3", "infi", "", "1e_3", "1.5f"] {
-            assert_eq!(parse_float(refused.as_bytes()).unwrap_err(), format!("could not convert string to float: '{refused}'"));
+            assert_eq!(
+                parse_float(refused.as_bytes()).unwrap_err(),
+                format!("could not convert string to float: '{refused}'")
+            );
         }
     }
 

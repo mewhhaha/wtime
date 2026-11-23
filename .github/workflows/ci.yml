@@ -20,8 +20,15 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --locked --no-deps --workspace --all-features
-      - name: Verify crates.io package tarballs build cleanly
-        run: cargo package --locked --workspace --exclude wtime-conformance
+      - name: Verify crates.io package tarballs build cleanly and include licenses/READMEs
+        run: |
+          cargo package --locked --workspace --exclude wtime-conformance
+          for crate in wtime-types wtime-decode wtime-validate wtime-runtime wtime-cli; do
+            listing="$(cargo package --locked --list -p "$crate")"
+            printf '%s\n' "$listing" | grep -qx 'LICENSE-MIT'
+            printf '%s\n' "$listing" | grep -qx 'LICENSE-APACHE'
+            printf '%s\n' "$listing" | grep -qx 'README.md'
+          done
       - run: python3 -B tools/checks/dependency_budget.py
       - run: cargo build --locked -p wtime-cli -p wtime-conformance
       - run: python3 -B tools/checks/cli_smoke.py
@@ -50,6 +57,17 @@ jobs:
         env:
           WTIME_AOT_REQUIRE_NATIVE_TESTS: "1"
         run: cargo test --locked --manifest-path tools/wtime-aot/Cargo.toml
+  wtime-goose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path tools/wtime-goose/Cargo.toml -- --check
+      - run: cargo clippy --locked --all-targets --manifest-path tools/wtime-goose/Cargo.toml -- -D warnings
+      - run: cargo test --locked --manifest-path tools/wtime-goose/Cargo.toml
   conformance:
     runs-on: ubuntu-24.04
     steps:
@@ -60,6 +78,7 @@ jobs:
       - run: cargo test --locked -p wtime-conformance
       - run: bash tools/checks/ci.sh full
       - run: bash tools/checks/ci.sh allocation
+      - run: python3 -B tools/checks/release_audit.py --verify-live-dir target/conformance
       - run: cargo build --locked -p wtime-conformance --bin wtime-probe
       - run: python3 -B tools/checks/opcode_coverage.py --require-complete
       - run: python3 -B tools/checks/release_audit.py --portable

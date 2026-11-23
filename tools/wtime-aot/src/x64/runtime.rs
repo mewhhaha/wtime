@@ -2229,6 +2229,9 @@ fn emit_export_mem_data() -> Result<Asm, String> {
 
     a.test_rr(true, Gp::Rdi, Gp::Rdi);
     a.jcc(Cond::E, lbl_null);
+    a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_IN_CALL));
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::Ne, lbl_null);
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_s1);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_MEM_BASE));
@@ -2289,10 +2292,13 @@ fn emit_export_mem_grow() -> Result<Asm, String> {
 }
 
 fn emit_export_get_global() -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(32);
+    let mut a = Asm::with_capacity(48);
     let lbl_missing = a.new_label();
     a.test_rr(true, Gp::Rdi, Gp::Rdi);
     a.jcc(Cond::E, lbl_missing);
+    a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_IN_CALL));
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::Ne, lbl_missing);
     a.jmp_reloc(RelocTarget::Helper(HELPER_READ_GLOBAL));
     a.bind(lbl_missing);
     a.mov_ri32(Gp::Rax, 1);

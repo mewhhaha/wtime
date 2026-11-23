@@ -61,9 +61,13 @@ zero-filled backing.
 
 Because pages are allocated when first written, running out of host memory
 surfaces at that write rather than at creation or `memory.grow`: a guest
-store, `memory.fill`, `memory.copy`, data segment initialization or
-`Store::write_memory` then fails with a `ResourceLimit` error ("memory
-allocation failed"), and the access writes nothing. Bulk operations work in
+store, `memory.fill`, `memory.copy`, data segment initialization,
+`Store::write_memory`, or `Store::read_memory` (for both unshared and shared
+memories) then fails with a `ResourceLimit` error rather than aborting, and
+failed writes leave memory unchanged. Active call frames also enforce an
+aggregate live local-slot budget (`max_total_locals` and
+`max_store_memory_bytes`) with fallible reservation so deep recursion with
+large local tables fails cleanly with `ResourceLimit`. Bulk operations work in
 64 KiB chunks, so, as with cancellation, chunks completed before the failure
 remain written. `memory.grow` itself still returns -1 when the configured
 budgets or the page table cannot accommodate the new size, or when a written

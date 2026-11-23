@@ -1,4 +1,4 @@
-//! Unexecuted P039 draft. Pure numeric adapters retain canonical stack values.
+//! Compact-tier numeric lowering. Pure numeric adapters retain canonical stack values.
 use super::*;
 
 pub(super) fn value_type(ty: &ValType) -> bool {

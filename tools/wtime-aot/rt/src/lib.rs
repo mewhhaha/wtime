@@ -51,6 +51,8 @@ pub enum Trap {
     Exit = 20,
     /// The program read past the end of its input.
     StopIteration = 21,
+    /// Host CPU lacks required ISA features or has active CET shadow stacks.
+    UnsupportedIsa = 22,
 }
 
 impl Trap {
@@ -81,6 +83,7 @@ impl Trap {
             19 => Some(Trap::Host),
             20 => Some(Trap::Exit),
             21 => Some(Trap::StopIteration),
+            22 => Some(Trap::UnsupportedIsa),
             _ => None,
         }
     }
@@ -109,6 +112,7 @@ impl Trap {
             Trap::Host => "Host: host failure",
             Trap::Exit => "program exit",
             Trap::StopIteration => "Host: generator raised StopIteration",
+            Trap::UnsupportedIsa => "Unsupported CPU ISA",
         }
     }
 }
@@ -1938,6 +1942,206 @@ pub mod m32 {
     }
 }
 
+/// Accesses to a dynamically sized 32-bit linear memory (`&[u8]` / `&mut [u8]`)
+/// whose backing capacity is bounded at instantiation by `mem_limit_pages`.
+pub mod m32s {
+    use super::{R, Trap, move_bytes, trap};
+
+    #[inline(always)]
+    fn direct<const N: usize>(
+        bytes: &[u8],
+        len: usize,
+        address: u32,
+        offset: u32,
+    ) -> Option<&[u8; N]> {
+        let active = bytes.get(..len)?;
+        if offset == 0 && N >= 4 {
+            let limit = active.len().checked_sub(N)?;
+            let a = address as usize;
+            if a <= limit {
+                return active.get(a..)?.first_chunk::<N>();
+            }
+            None
+        } else if offset == 0 {
+            let end = (address as usize).checked_add(N)?;
+            active.get(..end)?.last_chunk::<N>()
+        } else {
+            let sub = active.get(offset as usize..)?;
+            let limit = sub.len().checked_sub(N)?;
+            let a = address as usize;
+            if a <= limit {
+                return sub.get(a..)?.first_chunk::<N>();
+            }
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn direct_mut<const N: usize>(
+        bytes: &mut [u8],
+        len: usize,
+        address: u32,
+        offset: u32,
+    ) -> Option<&mut [u8; N]> {
+        let active = bytes.get_mut(..len)?;
+        if offset == 0 && N >= 4 {
+            let limit = active.len().checked_sub(N)?;
+            let a = address as usize;
+            if a <= limit {
+                return active.get_mut(a..)?.first_chunk_mut::<N>();
+            }
+            None
+        } else if offset == 0 {
+            let end = (address as usize).checked_add(N)?;
+            active.get_mut(..end)?.last_chunk_mut::<N>()
+        } else {
+            let sub = active.get_mut(offset as usize..)?;
+            let limit = sub.len().checked_sub(N)?;
+            let a = address as usize;
+            if a <= limit {
+                return sub.get_mut(a..)?.first_chunk_mut::<N>();
+            }
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn l8(bytes: &[u8], len: usize, address: u32, offset: u32) -> R<u8> {
+        let Some(active) = bytes.get(..len) else {
+            return trap(Trap::OutOfBounds);
+        };
+        let Some(at) = (address as usize).checked_add(offset as usize) else {
+            return trap(Trap::OutOfBounds);
+        };
+        match active.get(at) {
+            Some(&b) => Ok(b),
+            None => trap(Trap::OutOfBounds),
+        }
+    }
+
+    #[inline(always)]
+    pub fn s8(bytes: &mut [u8], len: usize, address: u32, offset: u32, value: u8) -> R<()> {
+        let Some(active) = bytes.get_mut(..len) else {
+            return trap(Trap::OutOfBounds);
+        };
+        let Some(at) = (address as usize).checked_add(offset as usize) else {
+            return trap(Trap::OutOfBounds);
+        };
+        match active.get_mut(at) {
+            Some(slot) => {
+                *slot = value;
+                Ok(())
+            }
+            None => trap(Trap::OutOfBounds),
+        }
+    }
+
+    macro_rules! access {
+        ($load:ident, $store:ident, $t:ty, $n:expr) => {
+            #[inline(always)]
+            pub fn $load(bytes: &[u8], len: usize, address: u32, offset: u32) -> R<$t> {
+                match direct::<$n>(bytes, len, address, offset) {
+                    Some(b) => Ok(<$t>::from_le_bytes(*b)),
+                    None => trap(Trap::OutOfBounds),
+                }
+            }
+            #[inline(always)]
+            pub fn $store(
+                bytes: &mut [u8],
+                len: usize,
+                address: u32,
+                offset: u32,
+                value: $t,
+            ) -> R<()> {
+                match direct_mut::<$n>(bytes, len, address, offset) {
+                    Some(b) => {
+                        *b = value.to_le_bytes();
+                        Ok(())
+                    }
+                    None => trap(Trap::OutOfBounds),
+                }
+            }
+        };
+    }
+
+    access!(l16, s16, u16, 2);
+    access!(l32, s32, u32, 4);
+    access!(l64, s64, u64, 8);
+    access!(l128, s128, u128, 16);
+
+    #[inline]
+    pub fn copy(bytes: &mut [u8], len: usize, destination: u32, source: u32, n: u32) -> R<()> {
+        let Some(active) = bytes.get_mut(..len) else {
+            return trap(Trap::OutOfBounds);
+        };
+        let to = destination as usize;
+        let from = source as usize;
+        let count = n as usize;
+        if let Some(to_end) = to.checked_add(count)
+            && let Some(from_end) = from.checked_add(count)
+            && to_end <= active.len()
+            && from_end <= active.len()
+        {
+            active.copy_within(from..from_end, to);
+            return Ok(());
+        }
+        trap(Trap::OutOfBounds)
+    }
+
+    #[inline]
+    pub fn fill(bytes: &mut [u8], len: usize, destination: u32, value: u8, n: u32) -> R<()> {
+        let Some(active) = bytes.get_mut(..len) else {
+            return trap(Trap::OutOfBounds);
+        };
+        let to = destination as usize;
+        if let Some(to_end) = to.checked_add(n as usize)
+            && let Some(dst) = active.get_mut(to..to_end)
+        {
+            dst.fill(value);
+            return Ok(());
+        }
+        trap(Trap::OutOfBounds)
+    }
+
+    #[inline(always)]
+    pub fn copy_n<const N: usize>(
+        bytes: &mut [u8],
+        len: usize,
+        destination: u32,
+        source: u32,
+    ) -> R<()> {
+        if len <= bytes.len()
+            && let Some(limit) = len.checked_sub(N)
+            && destination as usize <= limit
+            && source as usize <= limit
+        {
+            move_bytes::<N>(bytes, destination as usize, source as usize);
+            return Ok(());
+        }
+        trap(Trap::OutOfBounds)
+    }
+
+    #[inline(always)]
+    pub fn fill_n<const N: usize>(
+        bytes: &mut [u8],
+        len: usize,
+        destination: u32,
+        value: u8,
+    ) -> R<()> {
+        if len <= bytes.len()
+            && let Some(limit) = len.checked_sub(N)
+            && destination as usize <= limit
+            && let Some(dst) = bytes
+                .get_mut(destination as usize..)
+                .and_then(|s| s.first_chunk_mut::<N>())
+        {
+            dst.fill(value);
+            return Ok(());
+        }
+        trap(Trap::OutOfBounds)
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn copy_within_overlap(bytes: &mut [u8], from: usize, len: usize, to: usize) {
@@ -2339,14 +2543,26 @@ truncate!(
     18446744073709551616.0f64
 );
 
-/// `n` zero bytes from a zeroed allocation (pages the OS zeroes when first
-/// touched), or the trap when it fails.
+/// `n` zero bytes, checking reservation fallibly before zeroing.
+///
+/// Up to 16 MiB this retains the exact fallibly reserved buffer directly;
+/// larger sparse virtual reservations (`Memory`/`Memory32` in `#![forbid(unsafe_code)]`
+/// safe Rust) use `vec![0u8; n]` after verifying reservation so the OS backs
+/// untouched pages lazily instead of faulting gigabytes of physical RAM.
+/// (`--blot-cdylib` allocates its capped backing directly via `alloc_zeroed`.)
 fn zeroed(n: usize) -> R<Vec<u8>> {
-    let mut probe: Vec<u8> = Vec::new();
-    if probe.try_reserve_exact(n).is_err() {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    if buf.try_reserve_exact(n).is_err() {
         return trap(Trap::AllocationFailed);
     }
-    drop(probe);
+    if n <= (16 << 20) {
+        buf.resize(n, 0);
+        return Ok(buf);
+    }
+    drop(buf);
     Ok(vec![0u8; n])
 }
 

@@ -13,7 +13,10 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use wtime_runtime::{Caller, Error, ErrorKind, External, ExternalType, Func, Memory, Module, RunOutcome, Store, Value};
+use wtime_runtime::{
+    Caller, Error, ErrorKind, External, ExternalType, Func, Memory, Module, RunOutcome, Store,
+    Value,
+};
 use wtime_types::{FuncType, ValType};
 
 use crate::float::{f32_text, f64_text};
@@ -58,10 +61,16 @@ impl State {
         let rest = &self.input[self.token_at..];
         let Some(start) = rest.iter().position(|byte| !space(byte)) else {
             self.token_at = self.input.len();
-            return Err(Error::new(ErrorKind::Host, "generator raised StopIteration"));
+            return Err(Error::new(
+                ErrorKind::Host,
+                "generator raised StopIteration",
+            ));
         };
         let start = self.token_at + start;
-        let end = self.input[start..].iter().position(space).map_or(self.input.len(), |length| start + length);
+        let end = self.input[start..]
+            .iter()
+            .position(space)
+            .map_or(self.input.len(), |length| start + length);
         self.token_at = end;
         Ok(&self.input[start..end])
     }
@@ -98,7 +107,8 @@ impl Cx<'_, '_> {
             return Err(self.fail("negative host address"));
         }
         let memory = self.memory()?;
-        let length = usize::try_from(length).map_err(|_| self.fail("host write is outside exported memory"))?;
+        let length = usize::try_from(length)
+            .map_err(|_| self.fail("host write is outside exported memory"))?;
         self.caller
             .store()
             .read_memory(memory, pointer as u64, length)
@@ -117,8 +127,8 @@ impl Cx<'_, '_> {
     }
 
     fn write64(&mut self, pointer: i64, value: i128) -> Result<(), Error> {
-        let value =
-            u64::try_from(value).map_err(|_| self.fail("'Q' format requires 0 <= number <= 18446744073709551615"))?;
+        let value = u64::try_from(value)
+            .map_err(|_| self.fail("'Q' format requires 0 <= number <= 18446744073709551615"))?;
         self.write(pointer.into(), &value.to_le_bytes())
     }
 
@@ -139,22 +149,33 @@ type Handler = fn(&mut Cx<'_, '_>, &[Value]) -> Result<Out, Error>;
 /// Creates a host function for every function import of `module`, as
 /// `(module, name, function)` for the linker. Other imports are left to the
 /// linker, which refuses them as missing.
-pub fn define_imports(store: &mut Store, module: &Module, state: &Shared) -> Result<Vec<(String, String, Func)>, String> {
+pub fn define_imports(
+    store: &mut Store,
+    module: &Module,
+    state: &Shared,
+) -> Result<Vec<(String, String, Func)>, String> {
     let imports: Vec<(String, String, wtime_types::TypeIdx, FuncType)> = module
         .function_imports()
         .into_iter()
-        .map(|(module_name, name, index, ty)| (module_name.to_string(), name.to_string(), index, ty.clone()))
+        .map(|(module_name, name, index, ty)| {
+            (module_name.to_string(), name.to_string(), index, ty.clone())
+        })
         .collect();
     let mut defined = Vec::new();
     for (module_name, name, index, ty) in imports {
         let Some(handler) = handler_for(&module_name, &name) else {
-            return Err(format!("unsupported direct host import: {module_name}.{name}"));
+            return Err(format!(
+                "unsupported direct host import: {module_name}.{name}"
+            ));
         };
         let declared = ty.results.clone();
         let state = Arc::clone(state);
         let function = store
             .create_module_host_func(module, index, move |caller, values| {
-                let mut cx = Cx { caller, state: &state };
+                let mut cx = Cx {
+                    caller,
+                    state: &state,
+                };
                 let out = handler(&mut cx, values)?;
                 let result = match (out, declared.as_slice()) {
                     (Out::Nothing, []) => vec![],
@@ -162,7 +183,9 @@ pub fn define_imports(store: &mut Store, module: &Module, state: &Shared) -> Res
                     (Out::Integer(value), [ValType::I32]) => vec![Value::I32(value as i32)],
                     (Out::Integer(value), [ValType::I64]) => vec![Value::I64(value)],
                     (Out::Float(value), [ValType::F64]) => vec![Value::F64(value.to_bits())],
-                    (Out::Float(value), [ValType::F32]) => vec![Value::F32((value as f32).to_bits())],
+                    (Out::Float(value), [ValType::F32]) => {
+                        vec![Value::F32((value as f32).to_bits())]
+                    }
                     _ => return Err(cx.fail("host import result does not fit its declared type")),
                 };
                 Ok(RunOutcome::Returned(result))
@@ -216,9 +239,16 @@ fn handler_for(module: &str, name: &str) -> Option<Handler> {
         },
         ("goose", "newline") => |cx, _| cx.print(b"\n"),
         ("goose", "abort") => |cx, values| {
-            let (pointer, length, line) = (integer(cx, values, 0)?, integer(cx, values, 1)?, integer(cx, values, 2)?);
+            let (pointer, length, line) = (
+                integer(cx, values, 0)?,
+                integer(cx, values, 1)?,
+                integer(cx, values, 2)?,
+            );
             let message = cx.read(address(pointer), address(length))?;
-            Err(cx.fail(format!("goose runtime error: {} (line {line})", String::from_utf8_lossy(&message))))
+            Err(cx.fail(format!(
+                "goose runtime error: {} (line {line})",
+                String::from_utf8_lossy(&message)
+            )))
         },
         ("goose", "exit") | ("wasi_snapshot_preview1", "proc_exit") => exit,
         ("env", "bench_input") => |cx, _| {
@@ -229,14 +259,16 @@ fn handler_for(module: &str, name: &str) -> Option<Handler> {
             let parsed = parse_float(cx.state().token()?);
             parsed.map(Out::Float).map_err(|text| cx.fail(text))
         },
-        ("env", "bench_clock") | ("env", "gs_os_clock_ns") => |cx, _| Ok(Out::Integer(monotonic_ns(cx))),
+        ("env", "bench_clock") | ("env", "gs_os_clock_ns") => {
+            |cx, _| Ok(Out::Integer(monotonic_ns(cx)))
+        }
         ("env", "bench_barrier") => |cx, values| match values.first() {
             Some(Value::F32(_) | Value::F64(_)) => Ok(Out::Float(float(cx, values, 0)?)),
             _ => Ok(Out::Integer(integer(cx, values, 0)?)),
         },
-        ("env", "bench_sink") | ("env", "emscripten_notify_memory_growth") | ("env", "gs_os_flush_stdout") => {
-            |_, _| Ok(Out::Nothing)
-        }
+        ("env", "bench_sink")
+        | ("env", "emscripten_notify_memory_growth")
+        | ("env", "gs_os_flush_stdout") => |_, _| Ok(Out::Nothing),
         ("env", "gs_os_read_file") => os_read_file,
         ("env", "gs_os_write_file") => |cx, values| os_write_file(cx, values, false),
         ("env", "gs_os_append_file") => |cx, values| os_write_file(cx, values, true),
@@ -284,10 +316,22 @@ fn handler_for(module: &str, name: &str) -> Option<Handler> {
         ("wasi_snapshot_preview1", "fd_write") => fd_write,
         ("wasi_snapshot_preview1", "fd_read") => fd_read,
         ("wasi_snapshot_preview1", "fd_close") => |cx, values| {
-            Ok(Out::Integer(if (0..=2).contains(&integer(cx, values, 0)?) { 0 } else { 8 }))
+            Ok(Out::Integer(
+                if (0..=2).contains(&integer(cx, values, 0)?) {
+                    0
+                } else {
+                    8
+                },
+            ))
         },
         ("wasi_snapshot_preview1", "fd_seek") => |cx, values| {
-            Ok(Out::Integer(if (0..=2).contains(&integer(cx, values, 0)?) { 70 } else { 8 }))
+            Ok(Out::Integer(
+                if (0..=2).contains(&integer(cx, values, 0)?) {
+                    70
+                } else {
+                    8
+                },
+            ))
         },
         _ => return None,
     };
@@ -332,7 +376,11 @@ struct Arguments<'v> {
 
 impl<'v> Arguments<'v> {
     fn new(values: &'v [Value], kinds: usize) -> Arguments<'v> {
-        Arguments { values, at: 0, wide: values.len() > kinds }
+        Arguments {
+            values,
+            at: 0,
+            wide: values.len() > kinds,
+        }
     }
 
     fn integer(&mut self, cx: &Cx<'_, '_>) -> Result<i64, Error> {
@@ -351,7 +399,11 @@ impl<'v> Arguments<'v> {
 }
 
 fn address(value: i64) -> i128 {
-    if value < 0 { (value & 0xffff_ffff).into() } else { value.into() }
+    if value < 0 {
+        (value & 0xffff_ffff).into()
+    } else {
+        value.into()
+    }
 }
 
 // The goose module.
@@ -401,27 +453,44 @@ fn os_write_file(cx: &mut Cx<'_, '_>, values: &[Value], append: bool) -> Result<
     } else {
         options.write(true).create(true).truncate(true);
     }
-    let written = options.open(OsStr::from_bytes(&path)).and_then(|mut file| file.write_all(&contents));
+    let written = options
+        .open(OsStr::from_bytes(&path))
+        .and_then(|mut file| file.write_all(&contents));
     Ok(Out::Integer(written.is_ok().into()))
 }
 
-fn os_stat(cx: &mut Cx<'_, '_>, values: &[Value], is: fn(&fs::Metadata) -> bool) -> Result<Out, Error> {
+fn os_stat(
+    cx: &mut Cx<'_, '_>,
+    values: &[Value],
+    is: fn(&fs::Metadata) -> bool,
+) -> Result<Out, Error> {
     let (pointer, length) = Arguments::new(values, 1).slice(cx)?;
     let path = cx.read(pointer, length)?;
-    Ok(Out::Integer(fs::metadata(OsStr::from_bytes(&path)).is_ok_and(|kind| is(&kind)).into()))
+    Ok(Out::Integer(
+        fs::metadata(OsStr::from_bytes(&path))
+            .is_ok_and(|kind| is(&kind))
+            .into(),
+    ))
 }
 
 fn os_write(cx: &mut Cx<'_, '_>, values: &[Value], error: bool) -> Result<Out, Error> {
     let (pointer, length) = Arguments::new(values, 1).slice(cx)?;
     let text = cx.read(pointer, length)?;
     let mut state = cx.state();
-    if error { &mut state.err } else { &mut state.out }.extend_from_slice(&text);
+    if error {
+        &mut state.err
+    } else {
+        &mut state.out
+    }
+    .extend_from_slice(&text);
     Ok(Out::Nothing)
 }
 
 fn os_arg(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
     let (index, control) = (integer(cx, values, 0)?, integer(cx, values, 1)?);
-    let argument = usize::try_from(index).ok().and_then(|index| cx.state().arguments.get(index).cloned());
+    let argument = usize::try_from(index)
+        .ok()
+        .and_then(|index| cx.state().arguments.get(index).cloned());
     if let Some(argument) = argument {
         append_bytes(cx, control, &argument)?;
     }
@@ -483,7 +552,9 @@ fn find_any(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
     let members = address(arguments.integer(cx)?);
     let text = cx.read(pointer, length)?;
     let members = cx.read(members, 256)?;
-    let found = text.iter().position(|&byte| members[usize::from(byte)] != 0);
+    let found = text
+        .iter()
+        .position(|&byte| members[usize::from(byte)] != 0);
     Ok(Out::Integer(found.map_or(-1, |index| index as i64)))
 }
 
@@ -499,8 +570,9 @@ fn find_pair(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
     let Ok(distance) = usize::try_from(distance) else {
         return Err(cx.fail("negative gs_find_pair distance is not supported by this host"));
     };
-    let found = (0..text.len().saturating_sub(distance))
-        .find(|&index| first[usize::from(text[index])] != 0 && second[usize::from(text[index + distance])] != 0);
+    let found = (0..text.len().saturating_sub(distance)).find(|&index| {
+        first[usize::from(text[index])] != 0 && second[usize::from(text[index + distance])] != 0
+    });
     Ok(Out::Integer(found.map_or(-1, |index| index as i64)))
 }
 
@@ -509,12 +581,21 @@ fn find_pair(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
 fn iovecs(cx: &mut Cx<'_, '_>, pointer: i64, count: i64) -> Result<Vec<(u64, u64)>, Error> {
     let data = cx.read(pointer.into(), i128::from(count) * 16)?;
     let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
-    Ok(data.chunks_exact(16).map(|pair| (word(&pair[..8]), word(&pair[8..]))).collect())
+    Ok(data
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|pair| (word(&pair[..8]), word(&pair[8..])))
+        .collect())
 }
 
 fn fd_write(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
-    let (fd, pointer, count, written) =
-        (integer(cx, values, 0)?, integer(cx, values, 1)?, integer(cx, values, 2)?, integer(cx, values, 3)?);
+    let (fd, pointer, count, written) = (
+        integer(cx, values, 0)?,
+        integer(cx, values, 1)?,
+        integer(cx, values, 2)?,
+        integer(cx, values, 3)?,
+    );
     if fd != 1 && fd != 2 {
         return Ok(Out::Integer(8));
     }
@@ -522,7 +603,12 @@ fn fd_write(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
     for (start, size) in iovecs(cx, pointer, count)? {
         let text = cx.read(start.into(), size.into())?;
         let mut state = cx.state();
-        if fd == 1 { &mut state.out } else { &mut state.err }.extend_from_slice(&text);
+        if fd == 1 {
+            &mut state.out
+        } else {
+            &mut state.err
+        }
+        .extend_from_slice(&text);
         total += i128::from(size);
     }
     cx.write64(written, total)?;
@@ -530,8 +616,12 @@ fn fd_write(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
 }
 
 fn fd_read(cx: &mut Cx<'_, '_>, values: &[Value]) -> Result<Out, Error> {
-    let (fd, pointer, count, read) =
-        (integer(cx, values, 0)?, integer(cx, values, 1)?, integer(cx, values, 2)?, integer(cx, values, 3)?);
+    let (fd, pointer, count, read) = (
+        integer(cx, values, 0)?,
+        integer(cx, values, 1)?,
+        integer(cx, values, 2)?,
+        integer(cx, values, 3)?,
+    );
     if fd != 0 {
         return Ok(Out::Integer(8));
     }
@@ -563,5 +653,7 @@ fn monotonic_ns(cx: &Cx<'_, '_>) -> i64 {
 }
 
 fn wall_ns() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos() as i64)
 }

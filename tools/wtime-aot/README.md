@@ -125,10 +125,11 @@ directories and immutable SHA-256 sidecars).
 
 Per-backend input and build bounds:
 - **Max input `.wasm` size**: `64 MiB` for `--backend x64`; `256 MiB` for
-  `--backend c` and `--backend rust` (enforced via deadline-checked chunked reads
-  before full buffering).
-- **Build timeout**: `--time-limit SECONDS` (default `3600`) bounds file reads,
-  validation, codegen, and child compiler/linker processes (run builds on
+  `--backend c` and `--backend rust` (inputs must be regular files, opened
+  non-blockingly on Unix to reject FIFOs/devices immediately, and read in
+  deadline-checked 64 KiB chunks before full buffering).
+- **Build timeout**: `--time-limit SECONDS` (default `3600`) bounds regular-file
+  reads, validation, codegen, and child compiler/linker processes (run builds on
   untrusted inputs inside an OS memory cgroup as well).
 - **Source & compiler bounds**: `--backend rust`/`c` cap generated source at
   `1 GiB` (cooperatively enforced across parallel C workers), nesting at `512`,

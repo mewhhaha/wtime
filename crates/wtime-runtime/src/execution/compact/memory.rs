@@ -1,4 +1,4 @@
-//! Source-only P043 draft: checked scalar memory operands and affine bindings.
+//! Compact-tier checked scalar memory operands and affine bindings.
 //! Views and lengths never survive an individual source instruction.
 use super::*;
 

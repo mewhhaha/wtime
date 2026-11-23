@@ -13,16 +13,21 @@ def source_hash(root=ROOT):
     for path in sorted([root/'Cargo.lock',root/'Cargo.toml',*root.glob('crates/**/*.rs'),*root.glob('crates/**/Cargo.toml')]):
         digest.update(str(path.relative_to(root)).encode()+b'\0'+path.read_bytes()+b'\0')
     return digest.hexdigest()
+def _scrub(text):
+    for prefix in dict.fromkeys((str(ROOT.resolve()),str(ROOT))):
+        text=text.replace(prefix+'/','').replace(prefix,'.')
+    return text
 def collect(path):
     command=['cargo','test','--locked','-p','wtime-runtime','--tests']
     before=source_hash()
     result=subprocess.run(command,cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-    counts=[int(n) for n in re.findall(r'test result: ok\. (\d+) passed;',result.stdout)]
+    output=_scrub(result.stdout)
+    counts=[int(n) for n in re.findall(r'test result: ok\. (\d+) passed;',output)]
     stable=source_hash()==before
     passed=result.returncode==0 and sum(counts)>0 and stable
     record={'architecture':platform.machine(),'source_sha256':before,'source_stable':stable,'command':command,
             'native_execution':True,'passed':passed,'tests_executed':sum(counts),'exit_code':result.returncode,
-            'rustc':subprocess.check_output(['rustc','--version'],text=True).strip(),'output':result.stdout}
+            'rustc':subprocess.check_output(['rustc','--version'],text=True).strip(),'output':output}
     path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(record,indent=2)+'\n')
     return passed
 

@@ -53,7 +53,7 @@ struct SourceEvent {
     fuel_charge: u8,
     cancellation_checkpoint: bool,
     materialization_point: bool,
-    /// Unknown until P021 supplies a validated logical stack layout.
+    /// Optional validated logical stack peak for this source instruction.
     transient_stack_peak: Option<usize>,
     /// Existing block/if control destinations. Unresolved branch-depth cases
     /// remain barriers; an in-bounds arbitrary target is not sufficient proof.

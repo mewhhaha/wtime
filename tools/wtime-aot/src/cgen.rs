@@ -1328,7 +1328,12 @@ impl CEmitter {
 }
 
 fn fn_is_inline_helper(module: &Module, f: usize) -> bool {
-    if f < module.imports.len() || module.fn_direct_callers[f] == 0 || module.fn_in_cycle[f] {
+    if f < module.imports.len()
+        || module.fn_direct_callers[f] == 0
+        || module.fn_in_cycle[f]
+        || module.start == Some(f as u32)
+        || module.exported_funcs.contains(&f)
+    {
         return false;
     }
     let insns = module.fn_insns[f];
@@ -5113,7 +5118,7 @@ fn emit_rt_exports_c(
         s.push_str("};\n\n");
     }
 
-    s.push_str("static uint8_t wt_initialize(Ctx *ctx, uint8_t *mb) {\n");
+    s.push_str("static __attribute__((noinline)) uint8_t wt_initialize(Ctx *ctx, uint8_t *mb) {\n");
     for elem in &m.elements {
         if let SegmentMode::Active { index, offset } = &elem.mode {
             let tlen = m.tables.get(*index as usize).map_or(0, |t| t.limits.min);
@@ -5177,6 +5182,7 @@ fn emit_rt_exports_c(
          \x20 case 19: return \"Host: host failure\";\n\
          \x20 case 20: return \"program exit\";\n\
          \x20 case 21: return \"Host: generator raised StopIteration\";\n\
+         \x20 case 22: return \"Unsupported CPU ISA\";\n\
          \x20 default: return NULL;\n\
          \x20 }\n\
          }\n\n\
@@ -5298,7 +5304,8 @@ fn emit_rt_exports_c(
          \x20 h->ctx.host_mxcsr = saved_mxcsr;\n\
          \x20 h->ctx.in_call = 1;\n\
          \x20 wt_set_mxcsr(0x1f80u);\n\
-         \x20 uint8_t tr = wt_initialize(&h->ctx, h->mem);\n\
+         \x20 uint8_t (*volatile wt_init_fn)(Ctx *, uint8_t *) = wt_initialize;\n\
+         \x20 uint8_t tr = wt_init_fn(&h->ctx, h->mem);\n\
          \x20 wt_set_mxcsr(saved_mxcsr);\n\
          \x20 h->ctx.in_call = 0;\n\
          \x20 if (tr) { if (trap_out) *trap_out = tr; free(h->mem); free(h); return NULL; }\n\
@@ -5323,12 +5330,17 @@ fn emit_rt_exports_c(
         } else {
             "BlotHandle *h"
         };
-        writeln!(s, "WT_EXPORT int32_t {fn_name}({param}, int32_t arg, int32_t *res_out, uint8_t *trap_out) {{").unwrap();
         if let Some(f) = export_idx(export_name)
             && module.types[f].params.as_slice() == [ValType::I32]
             && module.types[f].results.as_slice() == [ValType::I32]
         {
             let call = top_c_call(module, f, &["arg".into()]);
+            writeln!(
+                s,
+                "static __attribute__((noinline)) R_i32 wt_thunk_{fn_name}(Ctx *ctx, uint8_t *mb, int32_t arg) {{ return {call}; }}"
+            )
+            .unwrap();
+            writeln!(s, "WT_EXPORT int32_t {fn_name}({param}, int32_t arg, int32_t *res_out, uint8_t *trap_out) {{").unwrap();
             if active {
                 writeln!(
                     s,
@@ -5337,7 +5349,8 @@ fn emit_rt_exports_c(
                        {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} }}\n\
                        uint32_t saved_mxcsr = wt_get_mxcsr();\n\
                        wt_set_mxcsr(0x1f80u);\n\
-                       R_i32 r = {call};\n\
+                       R_i32 (*volatile wt_callee)(Ctx *, uint8_t *, int32_t) = wt_thunk_{fn_name};\n\
+                       R_i32 r = wt_callee(ctx, mb, arg);\n\
                        wt_set_mxcsr(saved_mxcsr);\n\
                        if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n\
                        if (res_out) *res_out = r.v;\n\
@@ -5355,7 +5368,8 @@ fn emit_rt_exports_c(
                        ctx->host_mxcsr = saved_mxcsr;\n\
                        ctx->in_call = 1;\n\
                        wt_set_mxcsr(0x1f80u);\n\
-                       R_i32 r = {call};\n\
+                       R_i32 (*volatile wt_callee)(Ctx *, uint8_t *, int32_t) = wt_thunk_{fn_name};\n\
+                       R_i32 r = wt_callee(ctx, mb, arg);\n\
                        wt_set_mxcsr(saved_mxcsr);\n\
                        ctx->in_call = 0;\n\
                        if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n\
@@ -5365,6 +5379,7 @@ fn emit_rt_exports_c(
                 .unwrap();
             }
         } else {
+            writeln!(s, "WT_EXPORT int32_t {fn_name}({param}, int32_t arg, int32_t *res_out, uint8_t *trap_out) {{").unwrap();
             let pname = if active { "ac" } else { "h" };
             writeln!(
                 s,
@@ -5378,12 +5393,17 @@ fn emit_rt_exports_c(
     emit_fast_i32_i32(&mut s, "blot_aot_active_allocate", "blot:allocate", true);
     emit_fast_i32_i32(&mut s, "blot_aot_active_reset", "blot:reset", true);
 
-    s.push_str("WT_EXPORT int32_t blot_aot_call_finish_invocation(BlotHandle *h, int32_t *res_out, uint8_t *trap_out) {\n");
     if let Some(f) = export_idx("blot:finish_invocation")
         && module.types[f].params.is_empty()
         && module.types[f].results.as_slice() == [ValType::I32]
     {
         let call = top_c_call(module, f, &[]);
+        writeln!(
+            s,
+            "static __attribute__((noinline)) R_i32 wt_thunk_finish_invocation(Ctx *ctx, uint8_t *mb) {{ return {call}; }}"
+        )
+        .unwrap();
+        s.push_str("WT_EXPORT int32_t blot_aot_call_finish_invocation(BlotHandle *h, int32_t *res_out, uint8_t *trap_out) {\n");
         writeln!(
             s,
             "  if (!h || h->ctx.in_call) {{ if (trap_out) *trap_out = TRAP_HOST; return 2; }}\n\
@@ -5394,7 +5414,8 @@ fn emit_rt_exports_c(
                ctx->host_mxcsr = saved_mxcsr;\n\
                ctx->in_call = 1;\n\
                wt_set_mxcsr(0x1f80u);\n\
-               R_i32 r = {call};\n\
+               R_i32 (*volatile wt_callee)(Ctx *, uint8_t *) = wt_thunk_finish_invocation;\n\
+               R_i32 r = wt_callee(ctx, mb);\n\
                wt_set_mxcsr(saved_mxcsr);\n\
                ctx->in_call = 0;\n\
                if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n\
@@ -5403,17 +5424,13 @@ fn emit_rt_exports_c(
         )
         .unwrap();
     } else {
-        s.push_str("  (void)h; (void)res_out; (void)trap_out; return 3;\n}\n\n");
+        s.push_str("WT_EXPORT int32_t blot_aot_call_finish_invocation(BlotHandle *h, int32_t *res_out, uint8_t *trap_out) {\n  (void)h; (void)res_out; (void)trap_out; return 3;\n}\n\n");
     }
 
-    s.push_str(
-        "WT_EXPORT int32_t blot_aot_call_export(BlotHandle *h, const uint8_t *name_ptr, size_t name_len, uint64_t arg_bits, uint64_t *res_out, uint8_t *trap_out) {\n\
-         \x20 if (!h) return 3;\n\
-         \x20 if (h->ctx.in_call) { if (trap_out) *trap_out = TRAP_HOST; return 2; }\n\
-         \x20 Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n\
-         \x20 ctx->stack_floor = wt_stack_floor();\n",
-    );
-    for exp in &m.exports {
+    // Emit noinline opaque thunks for every Blot-compatible export so LLVM cannot hoist/sink
+    // SSE operations across wt_set_mxcsr even under -O2 / -fno-trapping-math.
+    let mut export_thunks: Vec<(String, usize)> = Vec::new();
+    for (ei, exp) in m.exports.iter().enumerate() {
         if exp.kind != ExternalKind::Func {
             continue;
         }
@@ -5428,43 +5445,53 @@ fn emit_rt_exports_c(
             [ValType::Ref(_)] => Some(vec!["arg_bits".into()]),
             _ => None,
         };
-        let ret_body = match ty.results.as_slice() {
-            [] => Some(
-                "uint8_t tr = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (tr) { if (trap_out) *trap_out = tr; return tr == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = 0; return 0;",
-            ),
-            [ValType::I32] => Some(
-                "R_i32 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)(uint32_t)r.v; return 0;",
-            ),
-            [ValType::I64] => Some(
-                "R_i64 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)r.v; return 0;",
-            ),
-            [ValType::F32] => Some(
-                "R_f32 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)wt_f32_to_bits(r.v); return 0;",
-            ),
-            [ValType::F64] => Some(
-                "R_f64 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = wt_f64_to_bits(r.v); return 0;",
-            ),
-            [ValType::Ref(_)] => Some(
-                "R_u64 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = r.v; return 0;",
-            ),
+        let ret_stmt = match ty.results.as_slice() {
+            [] => Some("uint8_t tr = {call}; return (R_u64){0, tr};"),
+            [ValType::I32] => {
+                Some("R_i32 r = {call}; return (R_u64){(uint64_t)(uint32_t)r.v, r.trap};")
+            }
+            [ValType::I64] => Some("R_i64 r = {call}; return (R_u64){(uint64_t)r.v, r.trap};"),
+            [ValType::F32] => {
+                Some("R_f32 r = {call}; return (R_u64){(uint64_t)wt_f32_to_bits(r.v), r.trap};")
+            }
+            [ValType::F64] => {
+                Some("R_f64 r = {call}; return (R_u64){wt_f64_to_bits(r.v), r.trap};")
+            }
+            [ValType::Ref(_)] => Some("return {call};"),
             _ => None,
         };
-        if let (Some(args), Some(body_tmpl)) = (arg_expr, ret_body) {
+        if let (Some(args), Some(stmt_tmpl)) = (arg_expr, ret_stmt) {
             let call = top_c_call(module, f, &args);
-            let body = body_tmpl.replace("{call}", &call);
+            let body = stmt_tmpl.replace("{call}", &call);
             writeln!(
                 s,
-                "  if ({}) {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} uint32_t saved_mxcsr = wt_get_mxcsr(); ctx->host_mxcsr = saved_mxcsr; ctx->in_call = 1; wt_set_mxcsr(0x1f80u); {body} }}",
-                c_name_match_cond(&exp.name)
+                "static __attribute__((noinline)) R_u64 wt_export_thunk_{ei}(Ctx *ctx, uint8_t *mb, uint64_t arg_bits) {{ (void)arg_bits; {body} }}"
             )
             .unwrap();
+            export_thunks.push((exp.name.clone(), ei));
         }
+    }
+
+    s.push_str(
+        "WT_EXPORT int32_t blot_aot_call_export(BlotHandle *h, const uint8_t *name_ptr, size_t name_len, uint64_t arg_bits, uint64_t *res_out, uint8_t *trap_out) {\n\
+         \x20 if (!h) return 3;\n\
+         \x20 if (h->ctx.in_call) { if (trap_out) *trap_out = TRAP_HOST; return 2; }\n\
+         \x20 Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n\
+         \x20 ctx->stack_floor = wt_stack_floor();\n",
+    );
+    for (exp_name, ei) in &export_thunks {
+        writeln!(
+            s,
+            "  if ({}) {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} uint32_t saved_mxcsr = wt_get_mxcsr(); ctx->host_mxcsr = saved_mxcsr; ctx->in_call = 1; wt_set_mxcsr(0x1f80u); R_u64 (*volatile wt_callee)(Ctx *, uint8_t *, uint64_t) = wt_export_thunk_{ei}; R_u64 r = wt_callee(ctx, mb, arg_bits); wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }} if (res_out) *res_out = r.v; return 0; }}",
+            c_name_match_cond(exp_name)
+        )
+        .unwrap();
     }
     s.push_str("  return 3;\n}\n\n");
 
     s.push_str(
         "WT_EXPORT void blot_aot_mem_data(BlotHandle *h, uint8_t **ptr_out, size_t *len_out) {\n\
-         \x20 if (!h) { if (ptr_out) *ptr_out = NULL; if (len_out) *len_out = 0; return; }\n\
+         \x20 if (!h || h->ctx.in_call) { if (ptr_out) *ptr_out = NULL; if (len_out) *len_out = 0; return; }\n\
          \x20 if (ptr_out) *ptr_out = h->mem;\n\
          \x20 if (len_out) *len_out = h->ctx.mem.len;\n\
          }\n\
@@ -5504,7 +5531,7 @@ fn emit_rt_exports_c(
     s.push_str(
         "  return 1;\n}\n\n\
          WT_EXPORT int32_t blot_aot_get_global(BlotHandle *h, const uint8_t *np, size_t nl, uint64_t *vo, uint8_t *ko) {\n\
-         \x20 if (!h) return 1;\n\
+         \x20 if (!h || h->ctx.in_call) return 1;\n\
          \x20 return wt_read_global(&h->ctx, np, nl, vo, ko);\n\
          }\n\
          WT_EXPORT int32_t blot_aot_active_get_global(ActiveCall *ac, const uint8_t *np, size_t nl, uint64_t *vo, uint8_t *ko) {\n\

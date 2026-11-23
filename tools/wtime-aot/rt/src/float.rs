@@ -1,11 +1,9 @@
-//! Copied unchanged from goose-to-wasm `host/rust/src/float.rs` (Apache-2.0).
+//! Shortest round-trip decimal formatting for Wasm `f32`/`f64` values (Apache-2.0,
+//! adapted from goose-to-wasm `host/rust/src/float.rs`).
 //!
-//! Float text, byte for byte what `goose_float` in scripts/run_wasmtime.py gives.
-//!
-//! An f64 is its shortest round-trip digits (what Python's `repr` and Rust's
-//! `{:e}` both choose) in Goose's layout. An f32 is the shortest text that
-//! reads back as the same f32, chosen by the exact-integer steps of
-//! `f32_scientific`; they need about 200 bits, kept here in `Wide`.
+//! An f64 uses its shortest round-trip digits (matching Python's `repr` and Rust's
+//! `{:e}` in Goose's layout). An f32 uses the shortest text that reads back as
+//! the same f32, chosen by the exact-integer steps of `f32_scientific`.
 
 use std::cmp::Ordering;
 

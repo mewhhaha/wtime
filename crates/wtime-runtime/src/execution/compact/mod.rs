@@ -4,7 +4,7 @@ use super::*;
 mod calls;
 mod indirect;
 mod ir;
-pub(crate) use calls::{CallBindings, guest_frame};
+pub(crate) use calls::{CallBindings, guest_frame_with_release};
 pub(crate) use indirect::CallSites;
 pub(crate) use ir::execute::Step;
 pub(crate) use ir::fuse::execute as execute_fusion;

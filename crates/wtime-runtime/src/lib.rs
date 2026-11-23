@@ -36,7 +36,7 @@ use std::{
     },
 };
 pub use wtime_types::*;
-pub use wtime_validate::ExternalKind;
+pub use wtime_validate::{BranchHint, BranchHints, BranchLikelihood, ExternalKind};
 use wtime_validate::{Immediate, ImportKind, Instruction, SegmentMode, ValidatedModule};
 #[cfg(feature = "performance-counters")]
 mod perf;
@@ -331,8 +331,7 @@ impl ControlMap {
             .sum()
     }
     /// Test support: overwrite one entry, to corrupt metadata on purpose.
-    #[cfg(test)]
-    #[allow(dead_code)]
+    #[cfg(all(test, feature = "register-executor"))]
     fn set(&mut self, body: usize, pc: usize, value: Option<(usize, Option<usize>)>) {
         self.bodies[body][pc] = match value {
             Some((end, other)) => ControlEntry {
@@ -559,7 +558,10 @@ impl Mem {
             m.read(off, n)
         } else {
             let r = range(off, n, self.bytes.len())?;
-            let mut out = vec![0; n];
+            let mut out = Vec::new();
+            out.try_reserve_exact(n)
+                .map_err(|_| err(ErrorKind::ResourceLimit, "memory allocation failed"))?;
+            out.resize(n, 0);
             self.bytes.read(r.start, &mut out);
             Ok(out)
         }
@@ -568,7 +570,7 @@ impl Mem {
     #[inline]
     fn read_into(&self, off: u64, out: &mut [u8]) -> Result<()> {
         if let Some(m) = &self.shared {
-            out.copy_from_slice(&m.read(off, out.len())?);
+            m.read_into(off, out)?;
         } else {
             let r = range(off, out.len(), self.bytes.len())?;
             self.bytes.read(r.start, out);
@@ -613,8 +615,19 @@ struct Inst {
     tabs: Vec<Table>,
     globals: Vec<Global>,
     exports: HashMap<String, External>,
-    data: Vec<Option<Vec<u8>>>,
+    data: Vec<bool>,
     elems: Vec<Option<Vec<Value>>>,
+}
+impl Inst {
+    fn data_segment(&self, index: usize) -> Option<&[u8]> {
+        let active = *self.data.get(index)?;
+        if !active {
+            return Some(&[]);
+        }
+        let decoded = self.module.data.inner.decoded();
+        let seg = decoded.data.get(index)?;
+        Some(&decoded.bytes[seg.bytes.start..seg.bytes.end])
+    }
 }
 /// An affine host root; clones retain the same registration until the last drop.
 #[derive(Clone)]
@@ -672,6 +685,7 @@ pub struct Store {
     perf: perf::Counters,
     current_fuel: Option<u64>,
     resume_fuel: Option<Option<u64>>,
+    active_local_slots: std::cell::Cell<usize>,
     cancellation: CancellationToken,
     #[cfg(test)]
     bulk_cancel_after: Option<usize>,
@@ -840,6 +854,7 @@ impl Store {
                 perf: perf::Counters::default(),
                 current_fuel: None,
                 resume_fuel: None,
+                active_local_slots: std::cell::Cell::new(0),
                 cancellation: CancellationToken::default(),
                 #[cfg(test)]
                 bulk_cancel_after: None,
@@ -872,6 +887,35 @@ impl Store {
             index,
             generation: 0,
         }
+    }
+    pub(crate) fn check_local_slot_budget(
+        &self,
+        additional_slots: usize,
+        releasing_slots: usize,
+    ) -> Result<()> {
+        let net = self
+            .active_local_slots
+            .get()
+            .saturating_sub(releasing_slots)
+            .checked_add(additional_slots)
+            .ok_or_else(|| err(ErrorKind::ResourceLimit, "active local slots limit"))?;
+        let limits = &self.engine.config.limits;
+        let max_slots = limits.max_total_locals.max(limits.max_locals);
+        let bytes = (net as u64).saturating_mul(std::mem::size_of::<Value>() as u64);
+        if net > max_slots || bytes > limits.max_store_memory_bytes {
+            return Err(err(ErrorKind::ResourceLimit, "active local slots limit"));
+        }
+        Ok(())
+    }
+    #[inline]
+    pub(crate) fn acquire_local_slots(&self, slots: usize) {
+        self.active_local_slots
+            .set(self.active_local_slots.get().saturating_add(slots));
+    }
+    #[inline]
+    pub(crate) fn release_local_slots(&self, slots: usize) {
+        self.active_local_slots
+            .set(self.active_local_slots.get().saturating_sub(slots));
     }
     fn check<T>(&self, h: Handle, arena: &arena::Arena<T>) -> Result<usize> {
         if h.store != self.id || arena.generation(h.index) != Some(h.generation) {
@@ -3029,5 +3073,95 @@ mod performance_module_ownership {
         );
         drop(s);
         assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn active_local_slot_budget_bounds_recursive_frames_and_allows_tail_calls() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+        // Recursive 50,000-local module (37 bytes): must hit active_local_slots budget cleanly.
+        let mut rec_wasm = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut rec_wasm, 1, &[1, 0x60, 0, 0]);
+        sec(&mut rec_wasm, 3, &[1, 0]);
+        sec(&mut rec_wasm, 7, &[1, 3, b'r', b'e', b'c', 0, 0]);
+        let mut body = vec![1];
+        leb(&mut body, 50_000);
+        body.push(0x7e); // i64
+        body.extend_from_slice(&[0x10, 0x00, 0x0b]); // call 0; end
+        let mut code = vec![1];
+        leb(&mut code, body.len() as u32);
+        code.extend_from_slice(&body);
+        sec(&mut rec_wasm, 10, &code);
+
+        let mut policies = vec![ExecutionPolicy::Decoded];
+        #[cfg(feature = "compact-executor")]
+        policies.push(ExecutionPolicy::Compact);
+        #[cfg(feature = "register-executor")]
+        policies.push(ExecutionPolicy::Register);
+        #[cfg(feature = "execution-reference")]
+        policies.push(ExecutionPolicy::Reference);
+
+        for policy in policies {
+            let engine = Engine::with_execution_policy(Config::default(), policy).unwrap();
+            let module = engine.compile(&rec_wasm).unwrap();
+            let mut store = Store::new(&engine);
+            let inst = Linker::new(&engine)
+                .instantiate(&mut store, &module)
+                .unwrap();
+            let External::Func(f) = inst.export(&store, "rec").unwrap() else {
+                unreachable!();
+            };
+            let err = store.invoke(f, &[]).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::ResourceLimit);
+            assert_eq!(store.active_local_slots.get(), 0);
+        }
+
+        // Tail-recursive 50,000-local countdown for 30 iterations (> max_total_locals if leaked)
+        // must succeed because each tail call releases the caller's locals.
+        let mut tail_wasm = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut tail_wasm, 1, &[1, 0x60, 1, 0x7f, 1, 0x7f]);
+        sec(&mut tail_wasm, 3, &[1, 0]);
+        sec(&mut tail_wasm, 7, &[1, 4, b't', b'a', b'i', b'l', 0, 0]);
+        let mut tbody = vec![1];
+        leb(&mut tbody, 49_999);
+        tbody.push(0x7e);
+        // if local.get 0 == 0 { return 42 } else { return_call 0 (local.get 0 - 1) }
+        tbody.extend_from_slice(&[
+            0x20, 0x00, 0x45, 0x04, 0x7f, 0x41, 42, 0x05, 0x20, 0x00, 0x41, 1, 0x6b, 0x12, 0x00,
+            0x0b, 0x0b,
+        ]);
+        let mut tcode = vec![1];
+        leb(&mut tcode, tbody.len() as u32);
+        tcode.extend_from_slice(&tbody);
+        sec(&mut tail_wasm, 10, &tcode);
+
+        let engine = Engine::new(Config::default()).unwrap();
+        let module = engine.compile(&tail_wasm).unwrap();
+        let mut store = Store::new(&engine);
+        let inst = Linker::new(&engine)
+            .instantiate(&mut store, &module)
+            .unwrap();
+        let External::Func(f) = inst.export(&store, "tail").unwrap() else {
+            unreachable!();
+        };
+        assert_eq!(
+            store.invoke(f, &[Value::I32(30)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(42)])
+        );
+        assert_eq!(store.active_local_slots.get(), 0);
     }
 }

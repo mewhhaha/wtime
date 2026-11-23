@@ -128,17 +128,23 @@ def validate_feature_spec(spec: str, metadata: dict) -> tuple[str, str]:
     return package_name, feature
 
 
+def _scrub_pkg_id(pkg_id: str) -> str:
+    for prefix in dict.fromkeys((f"path+file://{ROOT.resolve().as_posix()}/", f"path+file://{ROOT.as_posix()}/")):
+        pkg_id = pkg_id.replace(prefix, "path+file://./")
+    return pkg_id
+
+
 def _resolved_graph(metadata: dict) -> list[dict]:
     packages = {item["id"]: item for item in metadata.get("packages", [])}
     graph = metadata.get("resolve") or {}
     rows = []
     for node in graph.get("nodes", []):
         rows.append({
-            "package": node["id"],
+            "package": _scrub_pkg_id(node["id"]),
             "features": sorted(node.get("features", [])),
             "dependencies": sorted(
                 [
-                    {"package": dependency["pkg"], "name": dependency["name"],
+                    {"package": _scrub_pkg_id(dependency["pkg"]), "name": dependency["name"],
                      "kinds": [{"kind": kind.get("kind"), "target": kind.get("target")}
                                for kind in dependency.get("dep_kinds", [])]}
                     for dependency in node.get("deps", [])
@@ -257,7 +263,7 @@ def measure(output: Path, feature_spec: str | None = None) -> dict:
             },
             "lock_sha256": hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest(),
             "target_initially_empty": not any(cargo_target.iterdir()),
-            "isolated_workspace": str(build_root),
+            "isolated_workspace": build_root.name,
             "isolated_workspace_source_sha256": before_hash,
             "budgets": dict(LIMITS),
             "source_inputs": before_inputs,

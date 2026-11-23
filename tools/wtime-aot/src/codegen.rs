@@ -2510,8 +2510,13 @@ impl Module {
             let total_l = own_locals.saturating_add(max_l);
             let total_i = own_insns.saturating_add(max_i);
             let total_d = 1usize.saturating_add(max_d);
+            let leaf_locals_cap = if target == Target::BlotCdylib {
+                64
+            } else {
+                LEAF_LOCALS
+            };
             if ok
-                && total_l <= LEAF_LOCALS
+                && total_l <= leaf_locals_cap
                 && total_i <= LEAF_INSTRUCTIONS
                 && total_d <= LEAF_CHAIN_DEPTH
             {
@@ -2706,7 +2711,11 @@ impl Module {
     /// The Rust type of the disjoint memory slice passed to every function.
     fn mb_type(&self) -> &'static str {
         if !self.memory64 {
-            "&mut [u8; CAP32]"
+            if self.target == Target::BlotCdylib {
+                "&mut [u8]"
+            } else {
+                "&mut [u8; CAP32]"
+            }
         } else if self.cap64.is_some() {
             "&mut [u8; CAP64]"
         } else {
@@ -2832,17 +2841,11 @@ impl Module {
         }
         if self.target == Target::BlotCdylib {
             s.push_str("    pub host_ctx: usize,\n");
-            s.push_str("    pub in_call: bool,\n");
             s.push_str("    pub host_mxcsr: u32,\n");
             writeln!(
                 s,
                 "    pub host_call: fn(&mut Ctx, {}, u32, u64, u64) -> R<u64>,\n}}\n",
                 self.mb_type()
-            )
-            .unwrap();
-            writeln!(
-                s,
-                "pub struct Instance {{\n    pub ctx: Ctx,\n    pub mem: Box<[u8; CAP32]>,\n}}\n"
             )
             .unwrap();
             s.push_str("impl Ctx {\n");
@@ -3537,19 +3540,64 @@ impl Module {
         self.emit_initialize(m, &mut s, data)?;
 
         // Host trampoline, MXCSR/stack-floor isolation, & opaque C-ABI handle structs.
+        // `BlotHandle::in_call` lives in a disjoint `Cell<bool>` checked via raw
+        // `addr_of!` before any reference to `ctx` or `mem` is formed, eliminating
+        // aliasing `&mut` borrows if a host callback re-enters on the outer handle.
         s.push_str(
             "pub type HostFn = unsafe extern \"C\" fn(*mut c_void, *mut ActiveCall, u32, u64, u64, *mut u64) -> i32;\n\n\
+             const MAX_FFI_NAME_LEN: usize = 65_536;\n\n\
              #[repr(C)]\n\
              pub struct ActiveCall {\n\
                  ctx: *mut Ctx,\n\
-                 mem: *mut [u8; CAP32],\n\
+                 mem_ptr: *mut u8,\n\
+                 mem_len: usize,\n\
              }\n\n\
              struct HostBridge {\n\
                  user_ctx: *mut c_void,\n\
                  host_fn: Option<HostFn>,\n\
              }\n\n\
+             struct MemBuf {\n\
+                 ptr: *mut u8,\n\
+                 len: usize,\n\
+             }\n\n\
+             impl MemBuf {\n\
+                 fn alloc_zeroed(len: usize) -> R<Self> {\n\
+                     if len == 0 {\n\
+                         return Ok(Self { ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 });\n\
+                     }\n\
+                     let Ok(layout) = std::alloc::Layout::from_size_align(len, 16) else {\n\
+                         return trap(Trap::MemoryTooLarge);\n\
+                     };\n\
+                     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };\n\
+                     if ptr.is_null() {\n\
+                         return trap(Trap::AllocationFailed);\n\
+                     }\n\
+                     Ok(Self { ptr, len })\n\
+                 }\n\
+                 #[inline(always)]\n\
+                 fn as_mut_slice(&mut self) -> &mut [u8] {\n\
+                     unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }\n\
+                 }\n\
+                 #[inline(always)]\n\
+                 fn as_mut_ptr(&self) -> *mut u8 {\n\
+                     if self.len == 0 { std::ptr::null_mut() } else { self.ptr }\n\
+                 }\n\
+             }\n\n\
+             impl Drop for MemBuf {\n\
+                 fn drop(&mut self) {\n\
+                     if self.len > 0 && !self.ptr.is_null() {\n\
+                         if let Ok(layout) = std::alloc::Layout::from_size_align(self.len, 16) {\n\
+                             unsafe { std::alloc::dealloc(self.ptr, layout); }\n\
+                         }\n\
+                         self.ptr = std::ptr::null_mut();\n\
+                         self.len = 0;\n\
+                     }\n\
+                 }\n\
+             }\n\n\
              pub struct BlotHandle {\n\
-                 instance: Instance,\n\
+                 in_call: std::cell::Cell<bool>,\n\
+                 ctx: std::cell::UnsafeCell<Ctx>,\n\
+                 mem: std::cell::UnsafeCell<MemBuf>,\n\
                  bridge: *mut HostBridge,\n\
              }\n\n\
              impl Drop for BlotHandle {\n\
@@ -3561,12 +3609,31 @@ impl Module {
                  }\n\
              }\n\n\
              #[inline(always)]\n\
+             unsafe fn handle_in_call(handle: *mut BlotHandle) -> bool {\n\
+                 unsafe { (*std::ptr::addr_of!((*handle).in_call)).get() }\n\
+             }\n\n\
+             struct InCallGuard(*const std::cell::Cell<bool>);\n\
+             impl InCallGuard {\n\
+                 #[inline(always)]\n\
+                 unsafe fn enter(handle: *mut BlotHandle) -> Self {\n\
+                     let flag = unsafe { std::ptr::addr_of!((*handle).in_call) };\n\
+                     unsafe { (*flag).set(true); }\n\
+                     Self(flag)\n\
+                 }\n\
+             }\n\
+             impl Drop for InCallGuard {\n\
+                 #[inline(always)]\n\
+                 fn drop(&mut self) {\n\
+                     unsafe { (*self.0).set(false); }\n\
+                 }\n\
+             }\n\n\
+             #[inline(always)]\n\
              fn write_trap(out: *mut u8, t: Trap) {\n\
                  if !out.is_null() { unsafe { *out = t.to_code(); } }\n\
              }\n\n\
              fn read_ffi_name<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {\n\
                  if len == 0 { return Some(\"\"); }\n\
-                 if ptr.is_null() { return None; }\n\
+                 if ptr.is_null() || len > MAX_FFI_NAME_LEN { return None; }\n\
                  let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };\n\
                  std::str::from_utf8(bytes).ok()\n\
              }\n\n\
@@ -3589,7 +3656,7 @@ impl Module {
              #[inline(never)]\n\
              fn set_mxcsr(_val: u32) {}\n\n\
              #[inline(never)]\n\
-             fn run_with_wasm_mxcsr<A, O>(ctx: &mut Ctx, mb: &mut [u8; CAP32], arg: A, f: fn(&mut Ctx, &mut [u8; CAP32], A) -> O, save_host_mxcsr: bool) -> O {\n\
+             fn run_with_wasm_mxcsr<A, O>(ctx: &mut Ctx, mb: &mut [u8], arg: A, f: fn(&mut Ctx, &mut [u8], A) -> O, save_host_mxcsr: bool) -> O {\n\
                  let saved = get_mxcsr();\n\
                  if save_host_mxcsr {\n\
                      ctx.host_mxcsr = saved;\n\
@@ -3651,14 +3718,18 @@ impl Module {
              fn blot_stack_floor() -> usize {\n\
                  stack_floor_for(7 << 20)\n\
              }\n\n\
-             fn host_trampoline(ctx: &mut Ctx, mb: &mut [u8; CAP32], import_idx: u32, token: u64, arg_bits: u64) -> R<u64> {\n\
+             fn host_trampoline(ctx: &mut Ctx, mb: &mut [u8], import_idx: u32, token: u64, arg_bits: u64) -> R<u64> {\n\
                  if ctx.host_ctx == 0 { return trap(Trap::Host); }\n\
                  let (user_ctx, host_fn) = unsafe {\n\
                      let bridge = &*(ctx.host_ctx as *const HostBridge);\n\
                      (bridge.user_ctx, bridge.host_fn)\n\
                  };\n\
                  let Some(host_fn) = host_fn else { return trap(Trap::Host); };\n\
-                 let mut active = ActiveCall { ctx: ctx as *mut Ctx, mem: mb as *mut [u8; CAP32] };\n\
+                 let mut active = ActiveCall {\n\
+                     ctx: ctx as *mut Ctx,\n\
+                     mem_ptr: mb.as_mut_ptr(),\n\
+                     mem_len: mb.len(),\n\
+                 };\n\
                  let mut res: u64 = 0;\n\
                  let saved_host_mxcsr = ctx.host_mxcsr;\n\
                  set_mxcsr(saved_host_mxcsr);\n\
@@ -3720,7 +3791,11 @@ impl Module {
                      Ok(m) => m,\n\
                      Err(t) => {{ write_trap(trap_out, t); return std::ptr::null_mut(); }}\n\
                  }};\n\
-                 let mem = match alloc32::<CAP32>() {{\n\
+                 let Some(cap_bytes) = mem_meta.max_pages.checked_mul(65536).and_then(|n| usize::try_from(n).ok()) else {{\n\
+                     write_trap(trap_out, Trap::MemoryTooLarge);\n\
+                     return std::ptr::null_mut();\n\
+                 }};\n\
+                 let mut mem = match MemBuf::alloc_zeroed(cap_bytes) {{\n\
                      Ok(m) => m,\n\
                      Err(t) => {{ write_trap(trap_out, t); return std::ptr::null_mut(); }}\n\
                  }};\n\
@@ -3738,7 +3813,7 @@ impl Module {
                 writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
             }
         }
-        s.push_str("    let ctx = Ctx {\n        stack_floor,\n        mem: mem_meta,\n");
+        s.push_str("    let mut ctx = Ctx {\n        stack_floor,\n        mem: mem_meta,\n");
         for k in 0..self.globals.len() {
             if self.global_consts[k].is_none() {
                 writeln!(s, "        g{k},").unwrap();
@@ -3749,24 +3824,26 @@ impl Module {
         }
         s.push_str(
             "        host_ctx,\n\
-                 in_call: true,\n\
                  host_mxcsr: 0x1f80,\n\
                  host_call: host_trampoline,\n\
              };\n\
-             let mut instance = Instance { ctx, mem };\n\
-             let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut instance.ctx, &mut instance.mem, (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
-             instance.ctx.in_call = false;\n\
+             let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut ctx, mem.as_mut_slice(), (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
              if let Err(t) = init_res {\n\
                  unsafe { drop(Box::from_raw(bridge)); }\n\
                  write_trap(trap_out, t);\n\
                  return std::ptr::null_mut();\n\
              }\n\
-             Box::into_raw(Box::new(BlotHandle { instance, bridge }))\n\
+             Box::into_raw(Box::new(BlotHandle {\n\
+                 in_call: std::cell::Cell::new(false),\n\
+                 ctx: std::cell::UnsafeCell::new(ctx),\n\
+                 mem: std::cell::UnsafeCell::new(mem),\n\
+                 bridge,\n\
+             }))\n\
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_drop(handle: *mut BlotHandle) {\n\
                  if handle.is_null() { return; }\n\
-                 if unsafe { (*handle).instance.ctx.in_call } { return; }\n\
+                 if unsafe { handle_in_call(handle) } { return; }\n\
                  unsafe { drop(Box::from_raw(handle)); }\n\
              }\n\n",
         );
@@ -3794,9 +3871,10 @@ impl Module {
                     writeln!(
                         s,
                         "    if active.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
-                             let (ctx_ptr, mem_ptr) = unsafe {{ ((*active).ctx, (*active).mem) }};\n\
-                             if ctx_ptr.is_null() || mem_ptr.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
-                             let (ctx, mb) = unsafe {{ (&mut *ctx_ptr, &mut *mem_ptr) }};\n\
+                             let (ctx_ptr, mem_ptr, mem_len) = unsafe {{ ((*active).ctx, (*active).mem_ptr, (*active).mem_len) }};\n\
+                             if ctx_ptr.is_null() || (mem_len > 0 && mem_ptr.is_null()) {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                             let ctx = unsafe {{ &mut *ctx_ptr }};\n\
+                             let mb = unsafe {{ std::slice::from_raw_parts_mut(if mem_len == 0 {{ std::ptr::NonNull::dangling().as_ptr() }} else {{ mem_ptr }}, mem_len) }};\n\
                              if sp_here() <= ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
                              match run_with_wasm_mxcsr::<i32, R<i32>>(ctx, mb, arg, |ctx, mb, arg| {call}, false) {{\n\
                                  Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
@@ -3808,14 +3886,13 @@ impl Module {
                 } else {
                     writeln!(
                         s,
-                        "    if handle.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
-                             let inst = unsafe {{ &mut (*handle).instance }};\n\
-                             if inst.ctx.in_call {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
-                             inst.ctx.stack_floor = blot_stack_floor();\n\
-                             if sp_here() <= inst.ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
-                             inst.ctx.in_call = true;\n\
-                             let res = run_with_wasm_mxcsr::<i32, R<i32>>(&mut inst.ctx, &mut *inst.mem, arg, |ctx, mb, arg| {call}, true);\n\
-                             inst.ctx.in_call = false;\n\
+                        "    if handle.is_null() || unsafe {{ handle_in_call(handle) }} {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                             let _guard = unsafe {{ InCallGuard::enter(handle) }};\n\
+                             let ctx = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).ctx)).get() }};\n\
+                             let mem = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).mem)).get() }};\n\
+                             ctx.stack_floor = blot_stack_floor();\n\
+                             if sp_here() <= ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
+                             let res = run_with_wasm_mxcsr::<i32, R<i32>>(ctx, mem.as_mut_slice(), arg, |ctx, mb, arg| {call}, true);\n\
                              match res {{\n\
                                  Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
                                  Err(Trap::Host) => {{ write_trap(trap_out, Trap::Host); 2 }}\n\
@@ -3847,14 +3924,13 @@ impl Module {
             let call = self.top_call(f, &[]);
             writeln!(
                 s,
-                "    if handle.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
-                     let inst = unsafe {{ &mut (*handle).instance }};\n\
-                     if inst.ctx.in_call {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
-                     inst.ctx.stack_floor = blot_stack_floor();\n\
-                     if sp_here() <= inst.ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
-                     inst.ctx.in_call = true;\n\
-                     let res = run_with_wasm_mxcsr::<(), R<i32>>(&mut inst.ctx, &mut *inst.mem, (), |ctx, mb, ()| {call}, true);\n\
-                     inst.ctx.in_call = false;\n\
+                "    if handle.is_null() || unsafe {{ handle_in_call(handle) }} {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                     let _guard = unsafe {{ InCallGuard::enter(handle) }};\n\
+                     let ctx = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).ctx)).get() }};\n\
+                     let mem = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).mem)).get() }};\n\
+                     ctx.stack_floor = blot_stack_floor();\n\
+                     if sp_here() <= ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
+                     let res = run_with_wasm_mxcsr::<(), R<i32>>(ctx, mem.as_mut_slice(), (), |ctx, mb, ()| {call}, true);\n\
                      match res {{\n\
                          Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
                          Err(Trap::Host) => {{ write_trap(trap_out, Trap::Host); 2 }}\n\
@@ -3871,10 +3947,12 @@ impl Module {
             "#[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_call_export(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, arg_bits: u64, res_out: *mut u64, trap_out: *mut u8) -> i32 {\n\
                  if handle.is_null() { return 3; }\n\
-                 let inst = unsafe { &mut (*handle).instance };\n\
-                 if inst.ctx.in_call { write_trap(trap_out, Trap::Host); return 2; }\n\
+                 if unsafe { handle_in_call(handle) } { write_trap(trap_out, Trap::Host); return 2; }\n\
                  let Some(name) = read_ffi_name(name_ptr, name_len) else { return 3; };\n\
-                 inst.ctx.stack_floor = blot_stack_floor();\n\
+                 let _guard = unsafe { InCallGuard::enter(handle) } ;\n\
+                 let ctx = unsafe { &mut *(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let mem = unsafe { &mut *(*std::ptr::addr_of!((*handle).mem)).get() };\n\
+                 ctx.stack_floor = blot_stack_floor();\n\
                  let res: R<u64> = match name {\n",
         );
         for exp in &m.exports {
@@ -3905,7 +3983,7 @@ impl Module {
                 let call = self.top_call(f, &args);
                 writeln!(
                     s,
-                    "        {:?} => {{\n            if sp_here() <= inst.ctx.stack_floor {{ Err(Trap::CallStackExhausted) }} else {{\n                inst.ctx.in_call = true;\n                let out = run_with_wasm_mxcsr::<u64, R<u64>>(&mut inst.ctx, &mut *inst.mem, arg_bits, |ctx, mb, arg_bits| {{ let _ = arg_bits; {call}{rmap} }}, true);\n                inst.ctx.in_call = false;\n                out\n            }}\n        }},",
+                    "        {:?} => {{\n            if sp_here() <= ctx.stack_floor {{ Err(Trap::CallStackExhausted) }} else {{\n                run_with_wasm_mxcsr::<u64, R<u64>>(ctx, mem.as_mut_slice(), arg_bits, |ctx, mb, arg_bits| {{ let _ = arg_bits; {call}{rmap} }}, true)\n            }}\n        }},",
                     exp.name
                 )
                 .unwrap();
@@ -3926,17 +4004,18 @@ impl Module {
         s.push_str(
             "#[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_mem_data(handle: *mut BlotHandle, ptr_out: *mut *mut u8, len_out: *mut usize) {\n\
-                 if handle.is_null() {\n\
+                 if handle.is_null() || unsafe { handle_in_call(handle) } {\n\
                      unsafe {\n\
                          if !ptr_out.is_null() { *ptr_out = std::ptr::null_mut(); }\n\
                          if !len_out.is_null() { *len_out = 0; }\n\
                      }\n\
                      return;\n\
                  }\n\
-                 let inst = unsafe { &mut (*handle).instance };\n\
+                 let ctx = unsafe { &*(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let mem = unsafe { &*(*std::ptr::addr_of!((*handle).mem)).get() };\n\
                  unsafe {\n\
-                     if !ptr_out.is_null() { *ptr_out = inst.mem.as_mut_ptr(); }\n\
-                     if !len_out.is_null() { *len_out = inst.ctx.mem.len; }\n\
+                     if !ptr_out.is_null() { *ptr_out = mem.as_mut_ptr(); }\n\
+                     if !len_out.is_null() { *len_out = ctx.mem.len; }\n\
                  }\n\
              }\n\n\
              #[unsafe(no_mangle)]\n\
@@ -3948,26 +4027,25 @@ impl Module {
                      }\n\
                      return;\n\
                  }\n\
-                 let (ctx_ptr, mem_ptr) = unsafe { ((*active).ctx, (*active).mem) };\n\
-                 if ctx_ptr.is_null() || mem_ptr.is_null() {\n\
+                 let (ctx_ptr, mem_ptr, mem_len) = unsafe { ((*active).ctx, (*active).mem_ptr, (*active).mem_len) };\n\
+                 if ctx_ptr.is_null() || (mem_len > 0 && mem_ptr.is_null()) {\n\
                      unsafe {\n\
                          if !ptr_out.is_null() { *ptr_out = std::ptr::null_mut(); }\n\
                          if !len_out.is_null() { *len_out = 0; }\n\
                      }\n\
                      return;\n\
                  }\n\
-                 let (ctx, mb) = unsafe { (&*ctx_ptr, &mut *mem_ptr) };\n\
+                 let ctx = unsafe { &*ctx_ptr };\n\
                  unsafe {\n\
-                     if !ptr_out.is_null() { *ptr_out = mb.as_mut_ptr(); }\n\
+                     if !ptr_out.is_null() { *ptr_out = if mem_len == 0 { std::ptr::null_mut() } else { mem_ptr }; }\n\
                      if !len_out.is_null() { *len_out = ctx.mem.len; }\n\
                  }\n\
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_mem_grow(handle: *mut BlotHandle, delta_pages: u64) -> i64 {\n\
-                 if handle.is_null() { return -1; }\n\
-                 let inst = unsafe { &mut (*handle).instance };\n\
-                 if inst.ctx.in_call { return -1; }\n\
-                 inst.ctx.mem.grow(delta_pages)\n\
+                 if handle.is_null() || unsafe { handle_in_call(handle) } { return -1; }\n\
+                 let ctx = unsafe { &mut *(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 ctx.mem.grow(delta_pages)\n\
              }\n\n",
         );
 
@@ -3996,10 +4074,10 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_get_global(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, val_out: *mut u64, kind_out: *mut u8) -> i32 {\n\
-                 if handle.is_null() { return 1; }\n\
+                 if handle.is_null() || unsafe { handle_in_call(handle) } { return 1; }\n\
                  let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
-                 let inst = unsafe { &(*handle).instance };\n\
-                 let Some((v, k)) = read_global(&inst.ctx, name) else { return 1; };\n\
+                 let ctx = unsafe { &*(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let Some((v, k)) = read_global(ctx, name) else { return 1; };\n\
                  unsafe {\n\
                      if !val_out.is_null() { *val_out = v; }\n\
                      if !kind_out.is_null() { *kind_out = k; }\n\
@@ -4022,10 +4100,9 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_set_global(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, val: u64) -> i32 {\n\
-                 if handle.is_null() { return 1; }\n\
-                 let ctx = unsafe { &mut (*handle).instance.ctx };\n\
-                 if ctx.in_call { return 1; }\n\
+                 if handle.is_null() || unsafe { handle_in_call(handle) } { return 1; }\n\
                  let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
+                 let ctx = unsafe { &mut *(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
                  match name {\n",
         );
         for (name, gi, vt, mutable) in &self.exported_globals {
@@ -4433,12 +4510,17 @@ impl Emitter {
             }
         } else if module.fixed32.is_none() {
             self.line("ml = ctx.mem.len;");
+            let max_expr = if module.target == Target::BlotCdylib {
+                "mb.len()"
+            } else {
+                "CAP32"
+            };
             if module.min_bytes > 0 {
                 self.line(&format!(
-                    "if ml < MIN_BYTES || ml > CAP32 {{ return {oob}; }}"
+                    "if ml < MIN_BYTES || ml > {max_expr} {{ return {oob}; }}"
                 ));
             } else {
-                self.line(&format!("if ml > CAP32 {{ return {oob}; }}"));
+                self.line(&format!("if ml > {max_expr} {{ return {oob}; }}"));
             }
         }
         Ok(())
@@ -4916,14 +4998,16 @@ impl<'a> Function<'a> {
             fn_return_type(&ty.results)?
         )
         .unwrap();
-        // Calls check the native stack left unless this function heads a small
-        // acyclic call subtree well inside the 4+ MiB guard margin. Using
-        // `MaybeUninit::uninit()` avoids a dead stack write in every prologue.
+        // Calls check the remaining native stack against a conservative frame
+        // estimate unless this function heads a tiny acyclic subtree safely
+        // inside the configured stack headroom. Using `MaybeUninit::uninit()`
+        // avoids a dead stack write in every prologue.
         if !self.module.fn_no_stack_check[self.index] {
             let stack_trap = ret_err_expr(fn_abi, "Trap::CallStackExhausted")?;
+            let frame_est = self.locals.len().saturating_mul(16).saturating_add(4096);
             writeln!(
                 out,
-                "    let frame = std::mem::MaybeUninit::<u8>::uninit();\n    if (frame.as_ptr() as usize) < ctx.stack_floor {{ return {stack_trap}; }}"
+                "    let frame = std::mem::MaybeUninit::<u8>::uninit();\n    let sp = frame.as_ptr() as usize;\n    if sp <= ctx.stack_floor || sp - ctx.stack_floor < {frame_est}usize {{ return {stack_trap}; }}"
             )
             .unwrap();
         }
@@ -4955,14 +5039,19 @@ impl<'a> Function<'a> {
                 }
             } else {
                 writeln!(out, "    let mut ml: usize = ctx.mem.len;").unwrap();
+                let max_expr = if self.module.target == Target::BlotCdylib {
+                    "mb.len()"
+                } else {
+                    "CAP32"
+                };
                 if self.module.min_bytes > 0 {
                     writeln!(
                         out,
-                        "    if ml < MIN_BYTES || ml > CAP32 {{ return {oob}; }}"
+                        "    if ml < MIN_BYTES || ml > {max_expr} {{ return {oob}; }}"
                     )
                     .unwrap();
                 } else {
-                    writeln!(out, "    if ml > CAP32 {{ return {oob}; }}").unwrap();
+                    writeln!(out, "    if ml > {max_expr} {{ return {oob}; }}").unwrap();
                 }
             }
         }
@@ -5647,6 +5736,9 @@ impl<'a> Function<'a> {
                     .and_then(|k| k.parse::<usize>().ok());
                 let ml = self.ml();
                 match constant {
+                    Some(k @ 1..=COPY_INLINE) if !self.module.memory64 && self.module.target == Target::BlotCdylib => {
+                        e.line(&format!("t!(m32s::copy_n::<{k}>(mb, {ml}, {dst} as u32, {src} as u32){suf});"))
+                    }
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
                         e.line(&format!("t!(m32::copy_n::<CAP32, {k}>(mb, {ml}, {dst} as u32, {src} as u32){suf});"))
                     }
@@ -5658,6 +5750,9 @@ impl<'a> Function<'a> {
                     }
                     Some(k @ 1..=COPY_INLINE) => {
                         e.line(&format!("t!(m64::copy_n::<{k}>(mb, {ml}, &mut ctx.outer, {dst} as u64, {src} as u64){suf});"))
+                    }
+                    _ if !self.module.memory64 && self.module.target == Target::BlotCdylib => {
+                        e.line(&format!("t!(m32s::copy(mb, {ml}, {dst} as u32, {src} as u32, {n} as u32){suf});"));
                     }
                     _ if !self.module.memory64 => {
                         e.line(&format!("t!(m32::copy::<CAP32>(mb, {ml}, {dst} as u32, {src} as u32, {n} as u32){suf});"));
@@ -5679,6 +5774,9 @@ impl<'a> Function<'a> {
                     .and_then(|k| k.parse::<usize>().ok());
                 let ml = self.ml();
                 match constant {
+                    Some(k @ 1..=COPY_INLINE) if !self.module.memory64 && self.module.target == Target::BlotCdylib => {
+                        e.line(&format!("t!(m32s::fill_n::<{k}>(mb, {ml}, {dst} as u32, {value} as u8){suf});"))
+                    }
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
                         e.line(&format!("t!(m32::fill_n::<CAP32, {k}>(mb, {ml}, {dst} as u32, {value} as u8){suf});"))
                     }
@@ -5690,6 +5788,9 @@ impl<'a> Function<'a> {
                     }
                     Some(k @ 1..=COPY_INLINE) => {
                         e.line(&format!("t!(m64::fill_n::<{k}>(mb, {ml}, &mut ctx.outer, {dst} as u64, {value} as u8){suf});"))
+                    }
+                    _ if !self.module.memory64 && self.module.target == Target::BlotCdylib => {
+                        e.line(&format!("t!(m32s::fill(mb, {ml}, {dst} as u32, {value} as u8, {n} as u32){suf});"));
                     }
                     _ if !self.module.memory64 => {
                         e.line(&format!("t!(m32::fill::<CAP32>(mb, {ml}, {dst} as u32, {value} as u8, {n} as u32){suf});"));
@@ -5853,7 +5954,9 @@ impl<'a> Function<'a> {
             0xfd00 => (16, ValType::V128, "{}"),
             op => return Err(format!("load {op:#x}")),
         };
-        let loaded = if !self.module.memory64 {
+        let loaded = if !self.module.memory64 && self.module.target == Target::BlotCdylib {
+            format!("t!(m32s::l{}(mb, {ml}, {a} as u32, {offset}){suf})", n * 8)
+        } else if !self.module.memory64 {
             format!("t!(m32::l{}(mb, {ml}, {a} as u32, {offset}){suf})", n * 8)
         } else if self.module.cap64.is_some() {
             format!(
@@ -5895,7 +5998,12 @@ impl<'a> Function<'a> {
             0xfd0b => (16, v.to_string()),
             op => return Err(format!("store {op:#x}")),
         };
-        let store = if !self.module.memory64 {
+        let store = if !self.module.memory64 && self.module.target == Target::BlotCdylib {
+            format!(
+                "t!(m32s::s{}(mb, {ml}, {a} as u32, {offset}, {value}){suf});",
+                n * 8
+            )
+        } else if !self.module.memory64 {
             format!(
                 "t!(m32::s{}(mb, {ml}, {a} as u32, {offset}, {value}){suf});",
                 n * 8

@@ -1,6 +1,6 @@
-//! Reference dispatcher seeded from the immutable P001 source archive.
-//! Shares admission, frames, memory/numeric/GC/continuation helpers deliberately;
-//! it is not an independent oracle for bugs in those helpers. External/frozen
+//! Reference interpreter dispatcher for differential cross-checking against
+//! the default and experimental execution tiers. Shares admission, frames, and
+//! memory/numeric/GC/continuation helpers deliberately; external/frozen
 //! binaries remain necessary for differential validation of shared semantics.
 use super::*;
 use crate::execution::Label;
@@ -27,6 +27,12 @@ pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
 }
 impl Store {
     pub(super) fn invoke_reference(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
+        let saved_slots = self.active_local_slots.get();
+        let result = self.invoke_reference_inner(f, args);
+        self.active_local_slots.set(saved_slots);
+        result
+    }
+    fn invoke_reference_inner(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
         if self.cancellation.is_cancelled() {
             return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
         }
@@ -69,7 +75,9 @@ impl Store {
             self.publish_values(&out);
             return Ok(RunOutcome::Returned(out));
         }
-        let mut frames = vec![self.frame(f, args.to_vec(), 0)?];
+        let first = self.frame(f, args.to_vec(), 0)?;
+        self.acquire_local_slots(first.locals.len());
+        let mut frames = vec![first];
         let mut stack = vec![];
         let mut fuel = self.engine.config.limits.fuel;
         let mut prompts = Vec::new();
@@ -214,7 +222,9 @@ impl Store {
                         let n = frame.function.ty.results.len();
                         let base = frame.base;
                         keep(&mut stack, base, n)?;
-                        frames.pop();
+                        if let Some(popped) = frames.pop() {
+                            self.release_local_slots(popped.locals.len());
+                        }
                         if frames.is_empty() {
                             for value in &stack {
                                 self.validate_value(*value)?;
@@ -241,7 +251,9 @@ impl Store {
                     if depth == frame.labels.len() {
                         let n = frame.function.ty.results.len();
                         keep(&mut stack, frame.base, n)?;
-                        frames.pop();
+                        if let Some(popped) = frames.pop() {
+                            self.release_local_slots(popped.locals.len());
+                        }
                         if frames.is_empty() {
                             for value in &stack {
                                 self.validate_value(*value)?;
@@ -268,7 +280,9 @@ impl Store {
                 }
                 0xf => {
                     keep(&mut stack, frame.base, frame.function.ty.results.len())?;
-                    frames.pop();
+                    if let Some(popped) = frames.pop() {
+                        self.release_local_slots(popped.locals.len());
+                    }
                     if frames.is_empty() {
                         for value in &stack {
                             self.validate_value(*value)?;
@@ -379,7 +393,9 @@ impl Store {
                         stack.extend(out);
                         if matches!(op.opcode, 0x12 | 0x13 | 0x15) {
                             keep(&mut stack, caller_base, caller_results)?;
-                            frames.pop();
+                            if let Some(popped) = frames.pop() {
+                                self.release_local_slots(popped.locals.len());
+                            }
                             if frames.is_empty() {
                                 for value in &stack {
                                     self.validate_value(*value)?;
@@ -391,14 +407,19 @@ impl Store {
                         continue;
                     }
                     let tail = matches!(op.opcode, 0x12 | 0x13 | 0x15);
+                    let releasing = if tail { frame.locals.len() } else { 0 };
                     let base = if tail { frame.base } else { stack.len() };
-                    let next = self.frame(fun, args, base)?;
+                    let next = self.frame_with_release(fun, args, base, releasing)?;
+                    let added = next.locals.len();
                     if tail {
                         stack.truncate(base);
-                        frames.pop();
+                        if let Some(popped) = frames.pop() {
+                            self.release_local_slots(popped.locals.len());
+                        }
                     } else if frames.len() >= self.engine.config.limits.max_call_depth {
                         return Err(err(ErrorKind::ResourceLimit, "call depth exhausted"));
                     }
+                    self.acquire_local_slots(added);
                     frames.push(next)
                 }
                 0x1a => {

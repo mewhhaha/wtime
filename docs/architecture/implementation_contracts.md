@@ -1,14 +1,16 @@
 # Core implementation contracts
 
-This file fixes the initial choices that later tasks must consume. It is a plan, not existing code. T002 writes these contracts into repository documentation; T003 creates the package/module skeletons. If a precise signature must change for correctness, change the contract task and its consumers together rather than building a parallel API.
+This document records the cross-crate architectural and semantic contracts
+enforced across `wtime-types`, `wtime-decode`, `wtime-validate`,
+`wtime-runtime`, `wtime-cli`, and `tools/wtime-conformance`.
 
-## Execution model and task workflow
+## Testing and fixture conventions
 
-Implement with `gpt-6.1-sol`, reasoning `low`, once the user starts implementation. Use Luna for exploration and mechanical chores. Every task lists prerequisite outputs, expected paths, a concrete recipe, test cases and commands. Read the prerequisite files first. Do not attempt to solve later proposal work while implementing a baseline task; establish the extensible data shape, implement the assigned subset, and reject disabled/unsupported encodings explicitly.
-
-For each task: inspect current interfaces → add its smallest failing fixture → implement its named behavior → run targeted tests → run changed crates' checks → record evidence. Do not rename modules or introduce a new abstraction just to make the task look self-contained. A task may extend an existing module rather than create a new file at every listed path.
-
-A test named `tNNN_...` belongs to TNNN. Test commands filter on that prefix; verify the reported count is positive and includes the intended cases. Core fixtures are raw .wasm byte arrays or checked-in binaries assembled separately. WAT/WAST parsing lives only in `wtime-conformance`, never in core dev-dependencies. All tasks can add regression cases to a shared feature test file as long as names retain their task prefix.
+Core fixtures are raw `.wasm` byte arrays or checked-in binaries assembled
+separately. WAT/WAST parsing lives only in `wtime-conformance`, never in core
+production or dev dependencies. Regression tests verify both expected positive
+outcomes and explicit rejection of invalid, disabled-feature, and resource-limit
+inputs.
 
 ## Package and module conventions
 
@@ -56,11 +58,11 @@ The validator's entry point is conceptually:
 ```text
 validate(bytes, feature_set, resource_limits) -> Result<ValidatedModule, Error>
 ```
-T002/T033 settle Rust argument ownership using the Arc-backed decoder. Only successful full validation constructs ValidatedModule. It exposes immutable declarations/body instructions/control evidence; it cannot be mutated into a different program. Runtime consumes it through validator exports and need not import decoder as another direct dependency.
+The validator uses the Arc-backed decoder output. Only successful full validation constructs `ValidatedModule`. It exposes immutable declarations, body instructions, and control evidence; it cannot be mutated into a different program. Runtime consumes it through validator exports and does not import `wtime-decode` as a direct dependency.
 
 ## Engine, Store and linking interfaces
 
-Implement these operations with concrete types; T002 documents exact Rust signatures before consumers begin:
+Core embedding entry points use concrete types (see [api.md](api.md) for exact Rust signatures):
 ```text
 Engine::new(config) -> Result<Engine, Error>
 Engine::compile(bytes) -> Result<Module, Error>
@@ -93,13 +95,13 @@ Root providers enumerate active frames, tables/globals, host tokens, pending val
 
 ## Shared-memory synchronization
 
-Baseline backend: ordinary byte storage behind locks, not unsafe mixed-width atomic aliases. Atomic operations participate in one defined SC coordinator across all shareable memories that can communicate. Lock order: SC coordinator first when required, then memory locks in stable handle order, then waiter metadata as documented by T130/T133; no opposite nested acquisition.
+Baseline backend: ordinary byte storage behind locks, not unsafe mixed-width atomic aliases. Atomic operations participate in one defined SC coordinator across all shareable memories that can communicate. Lock order: SC coordinator first when required, then memory locks in stable handle order, then waiter metadata; no opposite nested acquisition.
 
-A wait operation checks alignment/bounds/value and installs its waiter under the relevant synchronization before releasing locks. It then blocks without the coordinator/memory lock. Notify chooses at most count waiters, updates durable waiter state and wakes them. A condition-variable loop rechecks state after spurious wakeups; timeout and notify race resolution removes a waiter exactly once. Document the chosen state machine and show it against the pinned wait/notify semantics.
+A wait operation checks alignment/bounds/value and installs its waiter under the relevant synchronization before releasing locks. It then blocks without the coordinator/memory lock. Notify chooses at most count waiters, updates durable waiter state and wakes them. A condition-variable loop rechecks state after spurious wakeups; timeout and notify race resolution removes a waiter exactly once.
 
 ## Conformance tool command contract
 
-T012 implements this CLI; later tasks can rely on it:
+`tools/wtime-conformance` exposes the conformance runner and WAT encoder CLI:
 ```sh
 cargo run --locked -p wtime-conformance -- run \
   --profile <mvp|stable-core|all-phase3-core> \
@@ -109,6 +111,6 @@ cargo run --locked -p wtime-conformance -- encode input.wat -o output.wasm
 ```
 The suite names/profile mapping come from an immutable corpus manifest. Reports include source hash, engine revision, profile, selected/executed/failed/skipped/unsupported assertion counts and replay commands. Any selected unknown directive or unintended empty selection exits nonzero. Support exact bit results, canonical/arithmetic NaN patterns and relaxed allowed-result sets. Adapter translates outcomes; it never executes programs through a reference engine.
 
-Reserve suite names `mvp`, `core3`, `phase3` and `interactions` for the aggregate runs. Proposal suites use the exact catalog ID in SOURCES.json, such as `fixed-width_simd`, `garbage_collection`, `exception_handling` and `custom-descs`. CLI profile spellings use hyphens; internal Rust identifiers may use underscores. Implement the aliases/selection once in T011/T012 so later task commands run unchanged.
+Reserve suite names `mvp`, `core3`, `phase3` and `interactions` for the aggregate runs. Proposal suites use the exact catalog ID in `docs/architecture/spec-lock.json`, such as `fixed-width_simd`, `garbage_collection`, `exception_handling` and `custom-descs`. CLI profile spellings use hyphens; internal Rust identifiers use underscores.
 
-T011 fetches to an ignored cache from pinned sources, with checksum/license provenance. No curl-to-main in CI. Tooling may have a pinned external reference executable for differential tests; it is never linked into core.
+`tools/checks/fetch_corpus.py` fetches to an ignored cache from pinned sources, with checksum/license provenance. No curl-to-main in CI. Tooling may invoke a pinned external reference executable for differential tests; it is never linked into core.

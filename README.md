@@ -103,8 +103,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --workspace --all-featur
 python3 -B tools/checks/dependency_budget.py
 python3 -B -m unittest discover -s tools/checks/tests -v
 python3 -B tools/checks/opcode_coverage.py --require-complete
-python3 -B tools/checks/release_audit.py
+python3 -B tools/checks/release_audit.py --portable
 ```
+
+*(On a checkout that also built the pinned release-evidence binaries into
+`target/evidence/` per [docs/release-readiness.md](docs/release-readiness.md),
+run strict `python3 -B tools/checks/release_audit.py` without `--portable`.)*
 
 To test the standalone AOT compiler (requires `clang` and `lld` on Linux x86-64):
 
@@ -128,9 +132,10 @@ Generate a binary `.wasm` from `.wat` with the separate conformance tool:
 cargo run --locked -p wtime-conformance -- encode module.wat -o module.wasm
 ```
 
-`--profile` accepts `mvp`, `stable-core`, and `all-phase3-core`. Disabled
-features, invalid modules, guest traps, guest exceptions, and host/resource
-failures are distinct outcomes with dedicated CLI exit codes (`0`–`5`; run
+`--profile` accepts `mvp`, `stable-core`, and `all-phase3-core`. CLI exit codes
+distinguish outcomes explicitly (`0` success, `1` usage/I/O/host/link error,
+`2` decode/validation/disabled-feature error, `3` guest trap, `4` uncaught guest
+exception or suspension, `5` resource limit or cancellation; run
 `wtime-cli --help`).
 
 ## Architecture & Documentation
@@ -140,7 +145,7 @@ failures are distinct outcomes with dedicated CLI exit codes (`0`–`5`; run
 - `wtime-validate`: validator producing sealed `ValidatedModule` values.
 - `wtime-runtime`: interpreter engine, canonical types, store, linker, GC, and
   shared memory.
-- `wtime-cli`: thin CLI for `check`, `exports`, and `run`.
+- `wtime-cli`: thin CLI for `check`, `exports`, `hints`, and `run`.
 
 Further reading:
 - [Embedding guide](docs/embedding.md) and [native examples](examples/README.md)

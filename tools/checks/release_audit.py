@@ -116,6 +116,40 @@ def _stable_core_report(report: dict, label: str, errors: list[str], root: Path)
         errors.append(f'{label}: core source hash is missing or stale')
 
 
+def _worker_candidates(root: Path) -> list[Path]:
+    return [
+        root / 'target/evidence/debug/wtime-allocation-check',
+        root / 'target/debug/wtime-allocation-check',
+    ]
+
+
+def _conformance_candidates(root: Path) -> list[Path]:
+    return [
+        root / 'target/evidence/release/wtime-conformance',
+        root / 'target/evidence/debug/wtime-conformance',
+        root / 'target/release/wtime-conformance',
+        root / 'target/debug/wtime-conformance',
+    ]
+
+
+def _probe_candidates(root: Path) -> list[Path]:
+    return [
+        root / 'target/evidence/debug/wtime-probe',
+        root / 'target/debug/wtime-probe',
+    ]
+
+
+def _worker_command_matches(command: object, worker: Path, root: Path) -> bool:
+    if not isinstance(command, list) or len(command) != 1 or not isinstance(command[0], str):
+        return False
+    accepted = {str(worker.resolve())}
+    try:
+        accepted.add(worker.resolve().relative_to(root.resolve()).as_posix())
+    except ValueError:
+        pass
+    return command[0] in accepted
+
+
 def _check_allocation_failure(report: dict, errors: list[str], root: Path, *,
                               verify_local_binaries: bool = True) -> None:
     """Validate the allocation-failure producer's concrete report schema/provenance."""
@@ -126,20 +160,25 @@ def _check_allocation_failure(report: dict, errors: list[str], root: Path, *,
         errors.append(f'{label}: core source hash is missing or stale')
     if report.get('architecture') not in ('x86_64', 'aarch64'):
         errors.append(f'{label}: native architecture is missing or unsupported')
-    worker = root / 'target/debug/wtime-allocation-check'
     command = report.get('command')
     worker_digest = report.get('worker_sha256')
     if verify_local_binaries:
-        if not worker.is_file() or command != [str(worker.resolve())]:
+        available = [candidate for candidate in _worker_candidates(root) if candidate.is_file()]
+        matching_cmd = [candidate for candidate in available if _worker_command_matches(command, candidate, root)]
+        if not matching_cmd:
             errors.append(f'{label}: worker command is missing or does not match the local worker')
-        if (not worker.is_file() or not isinstance(worker_digest, str)
+        if (not isinstance(worker_digest, str)
                 or not re.fullmatch(r'[0-9a-f]{64}', worker_digest)
-                or worker_digest != sha256(worker)):
+                or not any(sha256(candidate) == worker_digest for candidate in (matching_cmd or available))):
             errors.append(f'{label}: worker binary fingerprint is missing or stale')
     else:
+        allowed_suffixes = (
+            'target/evidence/debug/wtime-allocation-check',
+            'target/debug/wtime-allocation-check',
+        )
         if (not isinstance(command, list) or len(command) != 1
                 or not isinstance(command[0], str)
-                or not command[0].endswith('target/debug/wtime-allocation-check')):
+                or not command[0].endswith(allowed_suffixes)):
             errors.append(f'{label}: worker command is missing or malformed')
         if not isinstance(worker_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', worker_digest):
             errors.append(f'{label}: worker binary fingerprint is missing or malformed')
@@ -153,6 +192,8 @@ def _check_allocation_failure(report: dict, errors: list[str], root: Path, *,
         result = {}
     if (report.get('executed') != 1 or report.get('exit_code') != 0
             or result.get('allocator_failed') is not True
+            or result.get('guest_table_allocation_failed') is not True
+            or result.get('frame_allocation_failed') is not True
             or result.get('recovery_passed') is not True or result.get('executed') != 1):
         errors.append(f'{label}: worker did not report allocator failure and successful recovery')
 
@@ -174,14 +215,13 @@ def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
     source_hash = report.get('source_hash', '')
     if not source_hash.startswith(f'corpus-lock:{corpus_revision};'):
         errors.append(f'{label}: corpus lock hash is missing or stale')
-    if report.get('engine_revision') in (None, '', 'HEAD'):
-        errors.append(f'{label}: engine revision is missing')
+    engine_revision = report.get('engine_revision')
+    if engine_revision in (None, '', 'HEAD') or (isinstance(engine_revision, str) and engine_revision.endswith('-dirty')):
+        errors.append(f'{label}: engine revision is missing or dirty')
     if not re.fullmatch(r'[0-9a-f]{64}', report.get('binary_sha256', '')):
         errors.append(f'{label}: executed binary fingerprint is missing')
     elif verify_local_binaries:
-        binaries = [root / 'target/debug/wtime-conformance',
-                    root / 'target/release/wtime-conformance']
-        available = [binary for binary in binaries if binary.is_file()]
+        available = [binary for binary in _conformance_candidates(root) if binary.is_file()]
         if not available:
             errors.append(f'{label}: current conformance executable is missing')
         elif not any(sha256(binary) == report['binary_sha256'] for binary in available):
@@ -314,8 +354,8 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path | None = TASKS_
                 errors.append(f'{label}: generator fingerprint is missing or stale')
             target_digest = report.get('target_sha256')
             if verify_local_binaries:
-                probe = root / 'target/debug/wtime-probe'
-                if not probe.is_file() or target_digest != sha256(probe):
+                probes = [probe for probe in _probe_candidates(root) if probe.is_file()]
+                if not probes or not any(sha256(probe) == target_digest for probe in probes):
                     errors.append(f'{label}: target binary fingerprint is missing or stale')
             elif not isinstance(target_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', target_digest):
                 errors.append(f'{label}: target binary fingerprint is missing or malformed')
@@ -353,15 +393,19 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path | None = TASKS_
                 errors.append(f'{label}: cancellation or stale-generation regression was not executed')
         elif key == 'allocation_failure':
             _check_allocation_failure(report, errors, root, verify_local_binaries=verify_local_binaries)
-    interaction_entry = evidence.get('interactions', {})
-    if interaction_entry.get('corpus_report'):
-        related = {**interaction_entry, 'path': interaction_entry['corpus_report'],
-                   'sha256': interaction_entry.get('corpus_sha256')}
-        report = _report(root, related, 'interaction_corpus', errors)
-        if report is not None:
-            _check_conformance(report, 'interaction_corpus', errors, root, lock['core_spec_commit'],
-                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest(),
-                               verify_local_binaries=verify_local_binaries)
+    if 'interactions' in evidence:
+        interaction_entry = evidence.get('interactions')
+        corpus_report = interaction_entry.get('corpus_report') if isinstance(interaction_entry, dict) else None
+        corpus_sha = interaction_entry.get('corpus_sha256') if isinstance(interaction_entry, dict) else None
+        if not corpus_report or not corpus_sha:
+            errors.append('evidence interaction_corpus: missing corpus_report or corpus_sha256')
+        else:
+            related = {**interaction_entry, 'path': corpus_report, 'sha256': corpus_sha}
+            report = _report(root, related, 'interaction_corpus', errors)
+            if report is not None:
+                _check_conformance(report, 'interaction_corpus', errors, root, lock['core_spec_commit'],
+                                   hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest(),
+                                   verify_local_binaries=verify_local_binaries)
 
     toolchain = manifest.get('toolchain', {})
     if not toolchain.get('rustc') or not toolchain.get('supported_targets'):
@@ -386,6 +430,44 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path | None = TASKS_
     return errors
 
 
+def audit_live_dir(live_dir: Path, *, root: Path = ROOT) -> list[str]:
+    """Strictly verify freshly generated CI conformance and allocation reports."""
+    errors: list[str] = []
+    lock_path = root / 'docs/architecture/spec-lock.json'
+    corpus_lock_path = root / 'docs/architecture/corpus-lock.json'
+    if not lock_path.is_file() or not corpus_lock_path.is_file():
+        return ['missing source lock or corpus lock']
+    spec_revision = json.loads(lock_path.read_text())['core_spec_commit']
+    corpus_digest = hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest()
+    for filename, key in (
+        ('core3.json', 'core3'),
+        ('phase3.json', 'phase3'),
+        ('interactions.json', 'interaction_corpus'),
+    ):
+        path = live_dir / filename
+        if not path.is_file():
+            errors.append(f'live {key}: report is missing ({path})')
+            continue
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            errors.append(f'live {key}: report is not valid JSON')
+            continue
+        _check_conformance(report, key, errors, root, spec_revision, corpus_digest,
+                           verify_local_binaries=True)
+    alloc_path = live_dir / 'allocation-failure.json'
+    if not alloc_path.is_file():
+        errors.append(f'live allocation_failure: report is missing ({alloc_path})')
+    else:
+        try:
+            alloc_report = json.loads(alloc_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            errors.append('live allocation_failure: report is not valid JSON')
+        else:
+            _check_allocation_failure(alloc_report, errors, root, verify_local_binaries=True)
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, default=MANIFEST)
@@ -395,7 +477,21 @@ def main() -> int:
         action='store_true',
         help='verify all source, lock, corpus, generator, fixture, and report digests without requiring local target/ binaries to match the release-machine ELF SHA-256',
     )
+    parser.add_argument(
+        '--verify-live-dir',
+        type=Path,
+        default=None,
+        help='strictly validate freshly generated conformance/allocation reports in DIR against local target/ binaries',
+    )
     args = parser.parse_args()
+    if args.verify_live_dir is not None:
+        errors = audit_live_dir(args.verify_live_dir)
+        if errors:
+            print('\n'.join(errors), file=sys.stderr)
+            print(f'Live conformance audit blocked: {len(errors)} unresolved gate(s)')
+            return 1
+        print(f'Live conformance audit passed: {args.verify_live_dir}')
+        return 0
     try:
         manifest = json.loads(args.manifest.read_text())
     except (OSError, json.JSONDecodeError) as error:
