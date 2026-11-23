@@ -1268,3 +1268,111 @@ fn stage2_audit_br_table_not_inlined_and_val_pool_cap_atomic() {
         "rejected inline due to val_pool cap must leave original Op::Call untouched"
     );
 }
+
+#[test]
+fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
+    use super::asm::RelocTarget;
+    use super::opt;
+    use super::regalloc::AllocConfig;
+
+    // 1. Short-jump relaxation (`rel8` 2B vs `rel32` 5-6B) + exact reloc & jump-table offset shifting:
+    let mut a = Asm::new();
+    let l_short = a.new_label();
+    let l_far = a.new_label();
+    a.jmp(l_short);
+    a.jcc(Cond::Ne, l_short);
+    a.jmp(l_far);
+    a.bind(l_short);
+    // Emit a local rodata reloc AFTER a relaxed short jump to prove reloc.at shifts accurately.
+    let loff = a.intern_f32(1.5f32.to_bits());
+    let loff_dup = a.intern_f32(1.5f32.to_bits());
+    assert_eq!(loff, loff_dup, "intern_f32 must deduplicate identical bit patterns");
+    a.movss_rip(Xmm::Xmm0, RelocTarget::LocalRodata(loff));
+    let jt = a.add_jump_table(&[l_short, l_far]);
+    a.lea_rip(Gp::Rax, RelocTarget::LocalRodata(jt));
+    // Pad >130 bytes so `l_far` stays rel32 while `l_short` relaxes to rel8.
+    for _ in 0..40 {
+        a.add_ri(true, Gp::Rax, 1);
+    }
+    a.bind(l_far);
+    a.ret();
+    let pre_len = a.code.len();
+    a.finish_labels().unwrap();
+    // Relaxing `jmp l_short` (-3 B) + `jne l_short` (-4 B) must shrink code by exactly 7 bytes.
+    assert_eq!(a.code.len(), pre_len - 7, "short-jump relaxation must shrink rel8 branches accurately");
+    assert_eq!(a.code[0], 0xeb, "first jmp must relax to short rel8 (0xeb)");
+    assert_eq!(a.code[2], 0x75, "jcc Cond::Ne must relax to short rel8 (0x75)");
+    assert_eq!(a.code[4], 0xe9, "far jmp >127B must stay rel32 (0xe9)");
+    assert_eq!(a.relocs.len(), 2);
+    assert_eq!(a.relocs[0].patch_off, 4 + 5 + 4, "movss_rip reloc patch_off must shift cleanly after rel8 relaxation");
+    assert_eq!(a.relocs[0].next_ip_off, 4 + 5 + 8, "movss_rip reloc next_ip_off must shift cleanly after rel8 relaxation");
+
+    // 2. Dead loop-carried phi cycle pruning + post-inlining const32 folding:
+    // f0: inlineable helper(x): `(x + 15) & -16`
+    let mut b0 = vec![0x20, 0, 0x41, 15, 0x6a, 0x41];
+    leb_i32(&mut b0, -16);
+    b0.push(0x71);
+    // f1(n): loop `i` from 0..n, modifying 20 loop-local temporaries (l2..l21) that are OVERWRITTEN
+    // before being read in every iteration + calling f0(136) (must const-fold to 144!).
+    let mut b1 = Vec::new();
+    // l1 = i = 0; l2..l21 = dead/loop-local f32/i32 temporaries
+    b1.extend_from_slice(&[0x41, 0, 0x21, 1]);
+    b1.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]); // block; loop
+    b1.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // br_if done (i >=u n)
+    for lx in 2u32..22 {
+        // lx = i + lx (overwritten every iter, read inside same iter, never loop-carried!)
+        b1.push(0x20); b1.push(1);
+        b1.push(0x41); leb_i32(&mut b1, lx as i32);
+        b1.push(0x6a);
+        b1.push(0x21); leb_u32(&mut b1, lx);
+    }
+    // Use l2 once inside loop, leave l3..l21 unused (dead phi cycles across loop if unpruned!)
+    b1.extend_from_slice(&[0x20, 2, 0x1a]); // drop(l2)
+    b1.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
+    // Return f0(136) + i
+    b1.push(0x41); leb_i32(&mut b1, 136);
+    b1.extend_from_slice(&[0x10, 0, 0x20, 1, 0x6a]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 0x01, 1, 1]), // fixed 1-page memory -> frees R13!
+        export_sec(&[("test_fn", 0, 1)]),
+        code_sec(&[enc_body(&[], &b0), enc_body(&[(21, 0x7f)], &b1)]),
+    ]);
+    let val = wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let dec = val.decoded();
+    let module = admit_x64_module(dec).unwrap();
+    assert_eq!(module.fixed32, Some(65_536), "min==max==1 must set fixed32");
+    assert_eq!(module.pinned_global, None, "no globals -> R12 freed");
+
+    let mut irs: Vec<IrFunc> = (0..dec.code.len())
+        .map(|bi| {
+            let mut ir = lower_wasm_to_ir(dec, &module, bi).unwrap();
+            opt::prune_early_block_params(&mut ir, None).unwrap();
+            ir
+        })
+        .collect();
+    opt::inline_small_helpers(&mut irs, &module, None).unwrap();
+    let eff = opt::compute_module_effects(&irs, &module, None).unwrap();
+    opt::optimize_func_stage2(&mut irs[1], &module, &eff, None).unwrap();
+    verify_ir(&irs[1], &module).unwrap();
+
+    // Every single one of the 20 loop-local temporaries must have been pruned from the loop header!
+    let max_params = irs[1].blocks.iter().skip(1).map(|b| b.params.len()).max().unwrap_or(0);
+    assert!(
+        max_params <= 2,
+        "dead loop-carried local cycles must be pruned (got {max_params} params on loop/merge block)"
+    );
+    // Inlined `f0(136)` -> `(136 + 15) & -16` must constant-fold to `ConstI32(144)`!
+    let has_144 = irs[1]
+        .blocks
+        .iter()
+        .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::ConstI32(144))));
+    assert!(has_144, "post-inlining const32 folding must fold f0(136) -> ConstI32(144)");
+
+    // Dynamic R12 + R13 allocation verifier check:
+    let cfg = AllocConfig { allow_r12: true, allow_r13: true };
+    let alloc = super::regalloc::allocate_with_config(&irs[1], cfg, None).unwrap();
+    super::verify::verify_alloc_with_config(&irs[1], &alloc, cfg).unwrap();
+}

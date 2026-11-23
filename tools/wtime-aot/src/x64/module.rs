@@ -914,13 +914,17 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         global_consts.push(if can_fold { Some(global_inits[k]) } else { None });
     }
 
-    // Pick single hottest non-const mutable I32/I64 global for `R12` pinning.
+    // Pin the hottest mutable scalar I32/I64 global in `R12` ONLY when its static access density
+    // justifies giving up a callee-saved GP register across every function (e.g. LLVM/Rust shadow
+    // `$__stack_pointer` averages >= 3 accesses/fn; Blot modules average ~1 access/fn and win much
+    // more from having `R12` as a 3rd general-purpose callee-saved register!).
+    let min_pin_accesses = decoded.code.len().saturating_mul(3).max(16);
     let pinned_global = (0..globals.len())
         .filter(|&k| {
             global_consts[k].is_none()
                 && globals[k].1
                 && matches!(globals[k].0, ValType::I32 | ValType::I64)
-                && (global_reads[k] + global_writes[k]) > 0
+                && (global_reads[k] + global_writes[k]) >= min_pin_accesses
         })
         .max_by_key(|&k| (global_reads[k] + global_writes[k], std::cmp::Reverse(k)))
         .map(|k| k as u32);

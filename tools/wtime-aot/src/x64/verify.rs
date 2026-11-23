@@ -12,12 +12,11 @@ use std::collections::{HashMap, HashSet};
 
 use wtime_types::ValType;
 
-use super::asm::Gp;
 use super::ir::{CmpBranchKind, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange};
 use super::module::{MAX_FRAME_BYTES, X64Module};
 use super::regalloc::{
-    AllocResult, GP_ALLOC, GP_CALLEE_SAVED, HelperKind, Loc, MASK_GP_CALLER, MASK_RAX_RDX, MASK_RCX,
-    MASK_XMM_CALLER, XMM_ALLOC, XMM_CALLEE_SAVED, helper_clobbers, layout_args, layout_rets,
+    AllocConfig, AllocResult, HelperKind, Loc, MASK_GP_CALLER, MASK_RAX_RDX, MASK_RCX, MASK_XMM_CALLER,
+    RematConst, XMM_ALLOC, XMM_CALLEE_SAVED, helper_clobbers, layout_args, layout_rets,
 };
 
 fn check_val_range(ir: &IrFunc, r: ValRange, ctx: &str) -> Result<(), String> {
@@ -763,10 +762,15 @@ fn spill_width(ty: Ty) -> i32 {
     if ty == Ty::V128 { 16 } else { 8 }
 }
 
-/// Verifies register/spill class validity, callee-save tracking, frame alignment & sizing,
+/// Verifies register/spill/remat validity, callee-save tracking, frame alignment & sizing,
 /// physical register & spill-slot disjointness across all live sets, clobber safety across
 /// calls/helpers/div/shifts, and distinct edge-copy destinations.
+#[allow(dead_code)]
 pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
+    verify_alloc_with_config(ir, alloc, AllocConfig::default())
+}
+
+pub fn verify_alloc_with_config(ir: &IrFunc, alloc: &AllocResult, cfg: AllocConfig) -> Result<(), String> {
     let n_vals = ir.val_tys.len();
     let n_blocks = ir.blocks.len();
     if alloc.locs.len() != n_vals {
@@ -793,7 +797,7 @@ pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
     }
     let mut used_callee_set = HashSet::new();
     for &g in &alloc.used_callee_gp {
-        if !GP_CALLEE_SAVED.contains(&g) || !used_callee_set.insert(g) {
+        if !cfg.is_callee_saved_gp(g) || !used_callee_set.insert(g) {
             return Err(format!("verify_alloc fn {}: invalid used_callee_gp {g:?}", ir.func_index));
         }
     }
@@ -868,6 +872,7 @@ pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
 
     // Collect defined values across reachable blocks and check their location validity.
     let mut defined_in_reach = vec![false; n_vals];
+    let mut expected_remat: Vec<Option<RematConst>> = vec![None; n_vals];
     let mut has_any_clobber_or_call = false;
     for &b in &alloc.block_order {
         let bb = &ir.blocks[b as usize];
@@ -877,6 +882,13 @@ pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
         for inst in &bb.insts {
             if let Some(r) = inst.res {
                 defined_in_reach[r.0 as usize] = true;
+                expected_remat[r.0 as usize] = match inst.op {
+                    Op::ConstI32(c) => Some(RematConst::I32(c)),
+                    Op::ConstI64(c) => Some(RematConst::I64(c)),
+                    Op::ConstF32(b) => Some(RematConst::F32(b)),
+                    Op::ConstF64(b) => Some(RematConst::F64(b)),
+                    _ => None,
+                };
             }
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
@@ -928,10 +940,10 @@ pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
                 if ty.is_fp() {
                     return Err(format!("verify_alloc fn {}: FP value v{vi} ({ty:?}) in GP {g:?}", ir.func_index));
                 }
-                if !GP_ALLOC.contains(&g) {
+                if !cfg.is_alloc_gp(g) {
                     return Err(format!("verify_alloc fn {}: value v{vi} in non-allocatable GP {g:?}", ir.func_index));
                 }
-                if matches!(g, Gp::Rbx | Gp::Rbp) && !used_callee_set.contains(&g) {
+                if cfg.is_callee_saved_gp(g) && !used_callee_set.contains(&g) {
                     return Err(format!("verify_alloc fn {}: callee-saved {g:?} used without saving", ir.func_index));
                 }
             }
@@ -956,6 +968,14 @@ pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
                     return Err(format!(
                         "verify_alloc fn {}: invalid spill Loc::Spill({off}) for v{vi} ({ty:?}, width {w}, range {spill_base}..{spill_limit})",
                         ir.func_index
+                    ));
+                }
+            }
+            Loc::Remat(rc) => {
+                if expected_remat[vi] != Some(rc) {
+                    return Err(format!(
+                        "verify_alloc fn {}: invalid Loc::Remat({rc:?}) for v{vi} (expected {:?})",
+                        ir.func_index, expected_remat[vi]
                     ));
                 }
             }
@@ -1036,6 +1056,7 @@ pub fn verify_alloc(ir: &IrFunc, alloc: &AllocResult) -> Result<(), String> {
                     let w = spill_width(ir.val_tys[vi as usize]);
                     spills.push((off, off + w, vi));
                 }
+                Loc::Remat(_) => {}
             }
         }
         spills.sort_by_key(|&(s, e, _)| (s, e));

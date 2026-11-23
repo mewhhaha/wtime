@@ -25,6 +25,25 @@ use super::asm::{Gp, Xmm};
 use super::ir::{IntBinOp, IrFunc, Op, Term, Ty};
 use super::module::{CompileBudget, MAX_FRAME_BYTES, MAX_LIVENESS_BYTES, MAX_LIVENESS_WORK_UNITS};
 
+/// Pure scalar constant value that can be rematerialized cheaply at use sites with zero stack slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RematConst {
+    I32(i32),
+    I64(i64),
+    F32(u32),
+    F64(u64),
+}
+
+impl RematConst {
+    #[inline]
+    pub const fn is_zero(self) -> bool {
+        matches!(
+            self,
+            RematConst::I32(0) | RematConst::I64(0) | RematConst::F32(0) | RematConst::F64(0)
+        )
+    }
+}
+
 /// Physical location assigned to an SSA `Val`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loc {
@@ -32,6 +51,73 @@ pub enum Loc {
     Xmm(Xmm),
     /// Stack spill slot at `[rsp + offset]` (8-byte aligned for scalars, 16-byte aligned for V128).
     Spill(i32),
+    /// Rematerialized constant (zero stack slot, zero def code, zero register/clobber interference).
+    Remat(RematConst),
+}
+
+/// Optional module-wide extra callee-saved GP registers freed when pinning is unnecessary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AllocConfig {
+    /// True when `layout.pinned_global.is_none()`, freeing `R12` as a 3rd callee-saved GP register.
+    pub allow_r12: bool,
+    /// True when `layout.fixed_mem_bytes.is_some()`, freeing `R13` as a 4th callee-saved GP register.
+    pub allow_r13: bool,
+}
+
+impl AllocConfig {
+    pub fn gp_alloc(self) -> ([Gp; 11], usize) {
+        let mut regs = [
+            Gp::Rax,
+            Gp::Rcx,
+            Gp::Rdx,
+            Gp::Rsi,
+            Gp::Rdi,
+            Gp::R8,
+            Gp::R9,
+            Gp::Rbx,
+            Gp::Rbp,
+            Gp::R12,
+            Gp::R13,
+        ];
+        let mut n = 9usize;
+        if self.allow_r12 {
+            regs[n] = Gp::R12;
+            n += 1;
+        }
+        if self.allow_r13 {
+            regs[n] = Gp::R13;
+            n += 1;
+        }
+        (regs, n)
+    }
+
+    pub fn gp_callee_saved(self) -> ([Gp; 4], usize) {
+        let mut regs = [Gp::Rbx, Gp::Rbp, Gp::R12, Gp::R13];
+        let mut n = 2usize;
+        if self.allow_r12 {
+            regs[n] = Gp::R12;
+            n += 1;
+        }
+        if self.allow_r13 {
+            regs[n] = Gp::R13;
+            n += 1;
+        }
+        (regs, n)
+    }
+
+    #[inline]
+    pub const fn is_callee_saved_gp(self, g: Gp) -> bool {
+        matches!(g, Gp::Rbx | Gp::Rbp)
+            || (self.allow_r12 && matches!(g, Gp::R12))
+            || (self.allow_r13 && matches!(g, Gp::R13))
+    }
+
+    #[inline]
+    pub const fn is_alloc_gp(self, g: Gp) -> bool {
+        matches!(g, Gp::Rax | Gp::Rcx | Gp::Rdx | Gp::Rsi | Gp::Rdi | Gp::R8 | Gp::R9 | Gp::Rbx | Gp::Rbp)
+            || (self.allow_r12 && matches!(g, Gp::R12))
+            || (self.allow_r13 && matches!(g, Gp::R13))
+    }
 }
 
 pub const CALL_GP_ARGS: [Gp; 6] = [Gp::Rdi, Gp::Rsi, Gp::Rdx, Gp::Rcx, Gp::R8, Gp::R9];
@@ -50,7 +136,9 @@ pub const CALL_FP_RETS: [Xmm; 8] = CALL_FP_ARGS;
 
 #[allow(dead_code)]
 pub const GP_CALLER_SAVED: [Gp; 7] = [Gp::Rax, Gp::Rcx, Gp::Rdx, Gp::Rsi, Gp::Rdi, Gp::R8, Gp::R9];
+#[allow(dead_code)]
 pub const GP_CALLEE_SAVED: [Gp; 2] = [Gp::Rbx, Gp::Rbp];
+#[allow(dead_code)]
 pub const GP_ALLOC: [Gp; 9] = [
     Gp::Rax,
     Gp::Rcx,
@@ -246,20 +334,36 @@ struct Interval {
     clob_gp: u16,
     clob_xmm: u16,
     score: u64,
+    remat: Option<RematConst>,
 }
 
 /// Computes RPO order of reachable blocks, exact cross-block liveness, and linear-scan allocation.
 #[allow(dead_code)]
 pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
-    allocate_with_budget(ir, None)
+    allocate_with_config(ir, AllocConfig::default(), None)
+}
+
+/// Computes RPO order, exact cross-block liveness, and linear-scan allocation with default register partition.
+#[allow(dead_code)]
+pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<AllocResult, String> {
+    allocate_with_config(ir, AllocConfig::default(), budget)
 }
 
 /// Computes RPO order, exact cross-block liveness (charging concurrent peak liveness memory BEFORE
-/// allocation), and linear-scan allocation while polling `budget`'s cooperative deadline.
-pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<AllocResult, String> {
+/// allocation), constant rematerialization, spill-slot coalescing, and linear-scan allocation while
+/// polling `budget`'s cooperative deadline.
+pub fn allocate_with_config(
+    ir: &IrFunc,
+    cfg: AllocConfig,
+    budget: Option<&CompileBudget>,
+) -> Result<AllocResult, String> {
     if let Some(b) = budget {
         b.check_deadline()?;
     }
+    let (gp_alloc_buf, gp_alloc_len) = cfg.gp_alloc();
+    let gp_alloc = &gp_alloc_buf[..gp_alloc_len];
+    let (gp_callee_buf, gp_callee_len) = cfg.gp_callee_saved();
+    let gp_callee = &gp_callee_buf[..gp_callee_len];
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
@@ -322,6 +426,7 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
     let mut def_block = vec![u32::MAX; n_vals];
     let mut last_use = vec![0u32; n_vals];
     let mut cross_block = vec![false; n_vals];
+    let mut val_remat: Vec<Option<RematConst>> = vec![None; n_vals];
     let mut clobbers: Vec<Clobber> = Vec::new();
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
@@ -423,6 +528,13 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
                 if last_use[vi] < pos_def {
                     last_use[vi] = pos_def;
                 }
+                val_remat[vi] = match inst.op {
+                    Op::ConstI32(c) => Some(RematConst::I32(c)),
+                    Op::ConstI64(c) => Some(RematConst::I64(c)),
+                    Op::ConstF32(b) => Some(RematConst::F32(b)),
+                    Op::ConstF64(b) => Some(RematConst::F64(b)),
+                    _ => None,
+                };
             }
             tick += 2;
         }
@@ -684,19 +796,24 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
     let mut val_weight = vec![0u32; n_vals];
     let mut hint_gp: Vec<Option<Gp>> = vec![None; n_vals];
     let mut hint_xmm: Vec<Option<Xmm>> = vec![None; n_vals];
-    // For coalescing: up to 2 preferred peer values (phi/loop-backedge/two-addr LHS).
-    let mut hint_peers: Vec<[u32; 2]> = vec![[u32::MAX, u32::MAX]; n_vals];
-    let add_peer = |peers: &mut Vec<[u32; 2]>, a: u32, b: u32| {
+    // For coalescing: up to 4 preferred peer values (phi/sibling-edge-arg/two-addr LHS).
+    let mut hint_peers: Vec<[u32; 4]> = vec![[u32::MAX; 4]; n_vals];
+    let add_peer = |peers: &mut Vec<[u32; 4]>, a: u32, b: u32| {
         if a == b {
             return;
         }
         let slot = &mut peers[a as usize];
-        if slot[0] == u32::MAX || slot[0] == b {
-            slot[0] = b;
-        } else if slot[1] == u32::MAX {
-            slot[1] = b;
+        for entry in slot.iter_mut() {
+            if *entry == b {
+                return;
+            }
+            if *entry == u32::MAX {
+                *entry = b;
+                return;
+            }
         }
     };
+    let mut first_edge_arg: Vec<u32> = vec![u32::MAX; n_vals];
 
     // Hint entry params with their incoming ABI registers.
     if !ir.params.is_empty() {
@@ -738,15 +855,31 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
             if let Some(r) = inst.res {
                 val_weight[r.0 as usize] = val_weight[r.0 as usize].saturating_add(w);
                 match inst.op {
-                    Op::I32Bin(_, a, _)
-                    | Op::I64Bin(_, a, _)
-                    | Op::I32BinImm(_, a, _)
-                    | Op::I64BinImm(_, a, _)
-                    | Op::F32Bin(_, a, _)
-                    | Op::F64Bin(_, a, _)
-                    | Op::Select { a, .. }
-                    | Op::CmpSelect { tv: a, .. } => {
+                    Op::I32Bin(bop, a, b) | Op::I64Bin(bop, a, b) => {
                         add_peer(&mut hint_peers, r.0, a.0);
+                        if matches!(
+                            bop,
+                            IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor
+                        ) {
+                            add_peer(&mut hint_peers, r.0, b.0);
+                        }
+                    }
+                    Op::I32BinImm(_, a, _) | Op::I64BinImm(_, a, _) => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                    }
+                    Op::F32Bin(bop, a, b) | Op::F64Bin(bop, a, b) => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                        if matches!(bop, super::ir::FloatBinOp::Add | super::ir::FloatBinOp::Mul) {
+                            add_peer(&mut hint_peers, r.0, b.0);
+                        }
+                    }
+                    Op::Select { a, b, .. } => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                        add_peer(&mut hint_peers, r.0, b.0);
+                    }
+                    Op::CmpSelect { tv, fv, .. } => {
+                        add_peer(&mut hint_peers, r.0, tv.0);
+                        add_peer(&mut hint_peers, r.0, fv.0);
                     }
                     _ => {}
                 }
@@ -797,6 +930,15 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
             for (&p, &a) in params.iter().zip(avals) {
                 add_peer(&mut hint_peers, p.0, a.0);
                 add_peer(&mut hint_peers, a.0, p.0);
+                if a != p {
+                    let prev = first_edge_arg[p.0 as usize];
+                    if prev == u32::MAX {
+                        first_edge_arg[p.0 as usize] = a.0;
+                    } else if prev != a.0 {
+                        add_peer(&mut hint_peers, a.0, prev);
+                        add_peer(&mut hint_peers, prev, a.0);
+                    }
+                }
             }
         };
         match bb.term {
@@ -835,6 +977,9 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         }
     }
 
+    let mut locs = vec![Loc::Spill(0); n_vals];
+    let mut assigned = vec![false; n_vals];
+
     let mut gp_intervals: Vec<Interval> = Vec::new();
     let mut fp_intervals: Vec<Interval> = Vec::new();
     for vi in 0..n_vals {
@@ -852,9 +997,36 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         let lo = clobbers.partition_point(|c| c.pos <= start);
         let hi = clobbers.partition_point(|c| c.pos < clob_end);
         let (clob_gp, clob_xmm) = query_clobbers(lo, hi);
+        let ty = ir.val_tys[vi];
+        if let Some(rc) = val_remat[vi] {
+            // Always rematerialize zeros (0-cycle `xor`/`xorps`, direct immediate stores — eliminates all
+            // `bb0` `cached_zeros` live ranges and stack spills!), call/clobber-crossing constants, and
+            // non-loop constants (`val_weight <= 2`). Hot non-zero loop constants without calls may still
+            // occupy a free caller-saved register (never callee-saved, never spilling).
+            let crosses_clobber = if ty.is_fp() { clob_xmm != 0 } else { clob_gp != 0 };
+            if rc.is_zero() || crosses_clobber || val_weight[vi] <= 2 {
+                locs[vi] = Loc::Remat(rc);
+                assigned[vi] = true;
+                continue;
+            }
+        }
         let len = (end - start).max(1) as u64;
-        let score = (u64::from(val_weight[vi].max(1)) << 12) / len;
-        let iv = Interval { val: vi as u32, start, end, ty: ir.val_tys[vi], clob_gp, clob_xmm, score };
+        let score = if val_remat[vi].is_some() {
+            // Rematerializable constants are always preferred eviction victims over real values.
+            0
+        } else {
+            ((u64::from(val_weight[vi].max(1)) << 12) / len).max(1)
+        };
+        let iv = Interval {
+            val: vi as u32,
+            start,
+            end,
+            ty,
+            clob_gp,
+            clob_xmm,
+            score,
+            remat: val_remat[vi],
+        };
         if iv.ty.is_fp() {
             fp_intervals.push(iv);
         } else {
@@ -871,37 +1043,68 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
     }
     fp_intervals.sort_by_key(|iv| (iv.start, iv.end));
 
-    let mut locs = vec![Loc::Spill(0); n_vals];
-    let mut assigned = vec![false; n_vals];
     let mut next_spill_off: i32 = 0;
-
-    // 5a. Linear scan for GP intervals with hinting, loop-weighted eviction, & O(log S) spill expiry.
+    // Exact current max `end` for each 8-byte spill slot (`idx = off / 8`); `u32::MAX` marks non-8B/padding slots.
+    let mut slot8_end: Vec<u32> = Vec::new();
     let mut free_spills8: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
-    // Active entries: `(start, end, reg_idx, val, score)`.
-    let mut active_gp: Vec<(u32, u32, usize, u32, u64)> = Vec::with_capacity(GP_ALLOC.len());
 
-    let alloc_spill8 = |start: u32,
+    // Allocates an 8-byte spill slot for `val` over `[start, end]`, first attempting O(1) spill-slot
+    // coalescing with any already-spilled non-interfering `hint_peers` value to eliminate edge-copy
+    // trampolines, then reusing the earliest expired 8-byte slot, else bumping `next_spill_off`.
+    let alloc_spill8 = |val: u32,
+                        start: u32,
                         end: u32,
+                        locs: &[Loc],
+                        assigned: &[bool],
+                        slot8_end: &mut Vec<u32>,
                         free: &mut BinaryHeap<Reverse<(u32, i32)>>,
                         next: &mut i32|
      -> Result<i32, String> {
-        if let Some(&Reverse((e, _))) = free.peek()
-            && e <= start
-        {
-            let Reverse((_, off)) = free.pop().unwrap();
-            free.push(Reverse((end, off)));
-            Ok(off)
-        } else {
-            let off = *next;
-            let after = off.checked_add(8).ok_or("x64: spill stack size overflow")?;
-            if after > MAX_FRAME_BYTES {
-                return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
+        for &peer in &hint_peers[val as usize] {
+            if peer != u32::MAX
+                && assigned[peer as usize]
+                && ir.val_tys[peer as usize] != Ty::V128
+                && let Loc::Spill(poff) = locs[peer as usize]
+            {
+                let si = (poff / 8) as usize;
+                if si < slot8_end.len() && slot8_end[si] <= start {
+                    slot8_end[si] = end;
+                    free.push(Reverse((end, poff)));
+                    return Ok(poff);
+                }
             }
-            *next = after;
-            free.push(Reverse((end, off)));
-            Ok(off)
         }
+        while let Some(&Reverse((e, off))) = free.peek() {
+            if e > start {
+                break;
+            }
+            free.pop();
+            let si = (off / 8) as usize;
+            if si < slot8_end.len() && slot8_end[si] == e {
+                slot8_end[si] = end;
+                free.push(Reverse((end, off)));
+                return Ok(off);
+            }
+        }
+        let off = *next;
+        let after = off.checked_add(8).ok_or("x64: spill stack size overflow")?;
+        if after > MAX_FRAME_BYTES {
+            return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
+        }
+        *next = after;
+        let si = (off / 8) as usize;
+        if slot8_end.len() <= si {
+            slot8_end.resize(si + 1, u32::MAX);
+        }
+        slot8_end[si] = end;
+        free.push(Reverse((end, off)));
+        Ok(off)
     };
+
+    // 5a. Linear scan for GP intervals with dynamic R12/R13, remat, hinting, & spill-slot coalescing.
+    // Active entries: `(start, end, reg_idx, val, score, remat)`.
+    let mut active_gp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> = Vec::with_capacity(gp_alloc.len());
+    const GP_CALLER_COUNT: usize = 7;
 
     for (idx, iv) in gp_intervals.iter().enumerate() {
         if let Some(bg) = budget
@@ -909,20 +1112,23 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         {
             bg.check_deadline()?;
         }
-        active_gp.retain(|&(_, e, _, _, _)| e > iv.start);
+        active_gp.retain(|&(_, e, _, _, _, _)| e > iv.start);
         let mut used_regs = 0u16;
-        for &(_, _, ri, _, _) in &active_gp {
-            used_regs |= 1 << GP_ALLOC[ri].id();
+        for &(_, _, ri, _, _, _) in &active_gp {
+            used_regs |= 1 << gp_alloc[ri].id();
         }
         let forbidden = used_regs | iv.clob_gp;
 
-        // Try coalescing peer register first, then ABI hint register, then first free in GP_ALLOC.
+        // Rematerializable constants may only take a free caller-saved register (never callee-saved).
+        let search_regs = if iv.remat.is_some() { &gp_alloc[..GP_CALLER_COUNT] } else { gp_alloc };
+
+        // Try coalescing peer register first, then ABI hint register, then first free in search_regs.
         let mut chosen: Option<(usize, Gp)> = None;
         for &peer in &hint_peers[iv.val as usize] {
             if peer != u32::MAX && assigned[peer as usize]
                 && let Loc::Gp(g) = locs[peer as usize]
                 && (forbidden & (1 << g.id())) == 0
-                && let Some(ri) = GP_ALLOC.iter().position(|&x| x == g)
+                && let Some(ri) = search_regs.iter().position(|&x| x == g)
             {
                 chosen = Some((ri, g));
                 break;
@@ -931,12 +1137,12 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         if chosen.is_none()
             && let Some(g) = hint_gp[iv.val as usize]
             && (forbidden & (1 << g.id())) == 0
-            && let Some(ri) = GP_ALLOC.iter().position(|&x| x == g)
+            && let Some(ri) = search_regs.iter().position(|&x| x == g)
         {
             chosen = Some((ri, g));
         }
         if chosen.is_none() {
-            chosen = GP_ALLOC
+            chosen = search_regs
                 .iter()
                 .enumerate()
                 .find(|&(_, &g)| (forbidden & (1 << g.id())) == 0)
@@ -946,30 +1152,56 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         if let Some((ri, g)) = chosen {
             locs[iv.val as usize] = Loc::Gp(g);
             assigned[iv.val as usize] = true;
-            active_gp.push((iv.start, iv.end, ri, iv.val, iv.score));
+            active_gp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
+        } else if let Some(rc) = iv.remat {
+            // Zero-cost fallback for constants: rematerialize instead of spilling or evicting.
+            locs[iv.val as usize] = Loc::Remat(rc);
+            assigned[iv.val as usize] = true;
         } else {
-            // Evict the active candidate with lowest spill score (tie-break: furthest end).
+            // Evict the active candidate with lowest spill score (remat constants have score 0; tie-break: furthest end).
             let best_evict = active_gp
                 .iter()
                 .enumerate()
-                .filter(|&(_, &(_, e, ri, _, sc))| {
-                    (iv.clob_gp & (1 << GP_ALLOC[ri].id())) == 0
+                .filter(|&(_, &(_, e, ri, _, sc, _))| {
+                    (iv.clob_gp & (1 << gp_alloc[ri].id())) == 0
                         && (sc < iv.score || (sc == iv.score && e > iv.end))
                 })
-                .min_by(|&(_, &(_, ea, _, _, sa)), &(_, &(_, eb, _, _, sb))| {
+                .min_by(|&(_, &(_, ea, _, _, sa, _)), &(_, &(_, eb, _, _, sb, _))| {
                     sa.cmp(&sb).then_with(|| eb.cmp(&ea))
                 })
                 .map(|(ai, _)| ai);
             if let Some(ai) = best_evict {
-                let (ev_start, ev_end, ri, ev_val, _) = active_gp.swap_remove(ai);
-                let g = GP_ALLOC[ri];
-                let sp = alloc_spill8(ev_start, ev_end, &mut free_spills8, &mut next_spill_off)?;
-                locs[ev_val as usize] = Loc::Spill(sp);
+                let (ev_start, ev_end, ri, ev_val, _, ev_remat) = active_gp.swap_remove(ai);
+                let g = gp_alloc[ri];
+                if let Some(rc) = ev_remat {
+                    locs[ev_val as usize] = Loc::Remat(rc);
+                } else {
+                    let sp = alloc_spill8(
+                        ev_val,
+                        ev_start,
+                        ev_end,
+                        &locs,
+                        &assigned,
+                        &mut slot8_end,
+                        &mut free_spills8,
+                        &mut next_spill_off,
+                    )?;
+                    locs[ev_val as usize] = Loc::Spill(sp);
+                }
                 locs[iv.val as usize] = Loc::Gp(g);
                 assigned[iv.val as usize] = true;
-                active_gp.push((iv.start, iv.end, ri, iv.val, iv.score));
+                active_gp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
             } else {
-                let sp = alloc_spill8(iv.start, iv.end, &mut free_spills8, &mut next_spill_off)?;
+                let sp = alloc_spill8(
+                    iv.val,
+                    iv.start,
+                    iv.end,
+                    &locs,
+                    &assigned,
+                    &mut slot8_end,
+                    &mut free_spills8,
+                    &mut next_spill_off,
+                )?;
                 locs[iv.val as usize] = Loc::Spill(sp);
                 assigned[iv.val as usize] = true;
             }
@@ -978,11 +1210,16 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
 
     // 5b. Linear scan for FP/V128 intervals (caller-saved Xmm0..Xmm7 + callee-saved Xmm8..Xmm13).
     let mut free_spills16: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
-    let mut active_fp: Vec<(u32, u32, usize, u32, u64)> = Vec::with_capacity(XMM_ALLOC.len());
+    let mut active_fp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> = Vec::with_capacity(XMM_ALLOC.len());
+    const XMM_CALLER_COUNT: usize = 8;
 
-    let alloc_spill_fp = |ty: Ty,
+    let alloc_spill_fp = |val: u32,
+                          ty: Ty,
                           start: u32,
                           end: u32,
+                          locs: &[Loc],
+                          assigned: &[bool],
+                          slot8_end: &mut Vec<u32>,
                           free8: &mut BinaryHeap<Reverse<(u32, i32)>>,
                           free16: &mut BinaryHeap<Reverse<(u32, i32)>>,
                           next: &mut i32|
@@ -1005,7 +1242,7 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
                 Ok(off)
             }
         } else {
-            alloc_spill8(start, end, free8, next)
+            alloc_spill8(val, start, end, locs, assigned, slot8_end, free8, next)
         }
     };
 
@@ -1015,19 +1252,20 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         {
             bg.check_deadline()?;
         }
-        active_fp.retain(|&(_, e, _, _, _)| e > iv.start);
+        active_fp.retain(|&(_, e, _, _, _, _)| e > iv.start);
         let mut used_regs = 0u16;
-        for &(_, _, ri, _, _) in &active_fp {
+        for &(_, _, ri, _, _, _) in &active_fp {
             used_regs |= 1 << XMM_ALLOC[ri].id();
         }
         let forbidden = used_regs | iv.clob_xmm;
+        let search_regs = if iv.remat.is_some() { &XMM_ALLOC[..XMM_CALLER_COUNT] } else { &XMM_ALLOC[..] };
 
         let mut chosen: Option<(usize, Xmm)> = None;
         for &peer in &hint_peers[iv.val as usize] {
             if peer != u32::MAX && assigned[peer as usize]
                 && let Loc::Xmm(x) = locs[peer as usize]
                 && (forbidden & (1 << x.id())) == 0
-                && let Some(ri) = XMM_ALLOC.iter().position(|&r| r == x)
+                && let Some(ri) = search_regs.iter().position(|&r| r == x)
             {
                 chosen = Some((ri, x));
                 break;
@@ -1036,12 +1274,12 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         if chosen.is_none()
             && let Some(x) = hint_xmm[iv.val as usize]
             && (forbidden & (1 << x.id())) == 0
-            && let Some(ri) = XMM_ALLOC.iter().position(|&r| r == x)
+            && let Some(ri) = search_regs.iter().position(|&r| r == x)
         {
             chosen = Some((ri, x));
         }
         if chosen.is_none() {
-            chosen = XMM_ALLOC
+            chosen = search_regs
                 .iter()
                 .enumerate()
                 .find(|&(_, &x)| (forbidden & (1 << x.id())) == 0)
@@ -1051,30 +1289,59 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
         if let Some((ri, x)) = chosen {
             locs[iv.val as usize] = Loc::Xmm(x);
             assigned[iv.val as usize] = true;
-            active_fp.push((iv.start, iv.end, ri, iv.val, iv.score));
+            active_fp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
+        } else if let Some(rc) = iv.remat {
+            locs[iv.val as usize] = Loc::Remat(rc);
+            assigned[iv.val as usize] = true;
         } else {
             let best_evict = active_fp
                 .iter()
                 .enumerate()
-                .filter(|&(_, &(_, e, ri, _, sc))| {
+                .filter(|&(_, &(_, e, ri, _, sc, _))| {
                     (iv.clob_xmm & (1 << XMM_ALLOC[ri].id())) == 0
                         && (sc < iv.score || (sc == iv.score && e > iv.end))
                 })
-                .min_by(|&(_, &(_, ea, _, _, sa)), &(_, &(_, eb, _, _, sb))| {
+                .min_by(|&(_, &(_, ea, _, _, sa, _)), &(_, &(_, eb, _, _, sb, _))| {
                     sa.cmp(&sb).then_with(|| eb.cmp(&ea))
                 })
                 .map(|(ai, _)| ai);
             if let Some(ai) = best_evict {
-                let (ev_start, ev_end, ri, ev_val, _) = active_fp.swap_remove(ai);
+                let (ev_start, ev_end, ri, ev_val, _, ev_remat) = active_fp.swap_remove(ai);
                 let x = XMM_ALLOC[ri];
-                let ev_ty = ir.val_tys[ev_val as usize];
-                let sp = alloc_spill_fp(ev_ty, ev_start, ev_end, &mut free_spills8, &mut free_spills16, &mut next_spill_off)?;
-                locs[ev_val as usize] = Loc::Spill(sp);
+                if let Some(rc) = ev_remat {
+                    locs[ev_val as usize] = Loc::Remat(rc);
+                } else {
+                    let ev_ty = ir.val_tys[ev_val as usize];
+                    let sp = alloc_spill_fp(
+                        ev_val,
+                        ev_ty,
+                        ev_start,
+                        ev_end,
+                        &locs,
+                        &assigned,
+                        &mut slot8_end,
+                        &mut free_spills8,
+                        &mut free_spills16,
+                        &mut next_spill_off,
+                    )?;
+                    locs[ev_val as usize] = Loc::Spill(sp);
+                }
                 locs[iv.val as usize] = Loc::Xmm(x);
                 assigned[iv.val as usize] = true;
-                active_fp.push((iv.start, iv.end, ri, iv.val, iv.score));
+                active_fp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
             } else {
-                let sp = alloc_spill_fp(iv.ty, iv.start, iv.end, &mut free_spills8, &mut free_spills16, &mut next_spill_off)?;
+                let sp = alloc_spill_fp(
+                    iv.val,
+                    iv.ty,
+                    iv.start,
+                    iv.end,
+                    &locs,
+                    &assigned,
+                    &mut slot8_end,
+                    &mut free_spills8,
+                    &mut free_spills16,
+                    &mut next_spill_off,
+                )?;
                 locs[iv.val as usize] = Loc::Spill(sp);
                 assigned[iv.val as usize] = true;
             }
@@ -1094,13 +1361,13 @@ pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Resu
             continue;
         }
         match loc {
-            Loc::Gp(g) if matches!(g, Gp::Rbx | Gp::Rbp) => used_callee_gp_mask |= 1 << g.id(),
+            Loc::Gp(g) if cfg.is_callee_saved_gp(g) => used_callee_gp_mask |= 1 << g.id(),
             Loc::Xmm(x) if x.id() >= 8 => used_callee_xmm_mask |= 1 << x.id(),
             _ => {}
         }
     }
     let mut used_callee_gp = Vec::new();
-    for &g in &GP_CALLEE_SAVED {
+    for &g in gp_callee {
         if (used_callee_gp_mask & (1 << g.id())) != 0 {
             used_callee_gp.push(g);
         }

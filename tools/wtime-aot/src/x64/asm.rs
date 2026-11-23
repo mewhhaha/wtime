@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Gp {
@@ -228,11 +230,19 @@ pub struct JumpTablePatch {
     pub label: Label,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixupKind {
+    Jmp,
+    Jcc(u8),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LocalFixup {
+    inst_off: u32,
     patch_off: u32,
     next_ip_off: u32,
     label: Label,
+    kind: FixupKind,
 }
 
 pub struct Asm {
@@ -242,6 +252,8 @@ pub struct Asm {
     pub jt_patches: Vec<JumpTablePatch>,
     labels: Vec<Option<u32>>,
     fixups: Vec<LocalFixup>,
+    f32_pool: HashMap<u32, u32>,
+    f64_pool: HashMap<u64, u32>,
 }
 
 impl Asm {
@@ -253,6 +265,8 @@ impl Asm {
             jt_patches: Vec::new(),
             labels: Vec::new(),
             fixups: Vec::new(),
+            f32_pool: HashMap::new(),
+            f64_pool: HashMap::new(),
         }
     }
 
@@ -264,7 +278,29 @@ impl Asm {
             jt_patches: Vec::new(),
             labels: Vec::new(),
             fixups: Vec::new(),
+            f32_pool: HashMap::new(),
+            f64_pool: HashMap::new(),
         }
+    }
+
+    #[inline]
+    pub fn intern_f32(&mut self, bits: u32) -> u32 {
+        if let Some(&off) = self.f32_pool.get(&bits) {
+            return off;
+        }
+        let off = self.add_local_rodata(4, &bits.to_le_bytes());
+        self.f32_pool.insert(bits, off);
+        off
+    }
+
+    #[inline]
+    pub fn intern_f64(&mut self, bits: u64) -> u32 {
+        if let Some(&off) = self.f64_pool.get(&bits) {
+            return off;
+        }
+        let off = self.add_local_rodata(8, &bits.to_le_bytes());
+        self.f64_pool.insert(bits, off);
+        off
     }
 
     #[inline]
@@ -285,26 +321,146 @@ impl Asm {
         self.labels[label.0 as usize] = Some(self.pos());
     }
 
-    /// Resolves all local branch fixups. Must be called before linking.
+    /// Resolves all local branch fixups, relaxing branches whose target lies within `rel8`
+    /// (`[-128, 127]`) from 5/6-byte `rel32` encodings to 2-byte `rel8` encodings while
+    /// keeping `labels` and `relocs` exact. Must be called before linking.
     pub fn finish_labels(&mut self) -> Result<(), String> {
         if self.code.len() > i32::MAX as usize {
             return Err(format!("function machine code ({} B) exceeds rel32 range", self.code.len()));
         }
+        let n_fix = self.fixups.len();
+        if n_fix == 0 {
+            return Ok(());
+        }
+        // Validate every fixup label upfront.
+        let mut target_orig = Vec::with_capacity(n_fix);
         for f in &self.fixups {
-            let target = self
+            let t = self
                 .labels
                 .get(f.label.0 as usize)
                 .and_then(|&o| o)
                 .ok_or_else(|| format!("unbound label {}", f.label.0))?;
-            let rel = i128::from(target) - i128::from(f.next_ip_off);
-            let rel32 = i32::try_from(rel).map_err(|_| "local branch displacement exceeds rel32".to_string())?;
-            let p = f.patch_off as usize;
-            let end = p.checked_add(4).ok_or("local branch patch offset overflow")?;
-            if end > self.code.len() {
-                return Err(format!("local branch patch offset {p} exceeds code len {}", self.code.len()));
-            }
-            self.code[p..end].copy_from_slice(&rel32.to_le_bytes());
+            target_orig.push(t);
         }
+
+        // Monotonic short-branch relaxation (2 iterations catch cascading shrinks cleanly):
+        // shrinking a `jmp rel32` (5 B -> 2 B) saves 3 B; `jcc rel32` (6 B -> 2 B) saves 4 B.
+        let mut is_short = vec![false; n_fix];
+        let mut saved_prefix = vec![0u32; n_fix + 1];
+        let mut any_short = false;
+        for _pass in 0..3 {
+            let mut changed = false;
+            let shift_of = |orig_off: u32, fixups: &[LocalFixup], prefix: &[u32]| -> u32 {
+                let idx = fixups.partition_point(|fx| fx.next_ip_off <= orig_off);
+                prefix[idx]
+            };
+            for (i, f) in self.fixups.iter().enumerate() {
+                if is_short[i] {
+                    continue;
+                }
+                let save = match f.kind {
+                    FixupKind::Jmp => 3u32,
+                    FixupKind::Jcc(_) => 4u32,
+                };
+                let t_cur = i64::from(target_orig[i]) - i64::from(shift_of(target_orig[i], &self.fixups, &saved_prefix));
+                let ip_cur = i64::from(f.inst_off) - i64::from(saved_prefix[i]) + 2;
+                let adj = if target_orig[i] >= f.next_ip_off { i64::from(save) } else { 0 };
+                let rel = (t_cur - adj) - ip_cur;
+                if i8::try_from(rel).is_ok() {
+                    is_short[i] = true;
+                    any_short = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+            let mut acc = 0u32;
+            for (i, f) in self.fixups.iter().enumerate() {
+                saved_prefix[i] = acc;
+                if is_short[i] {
+                    acc += match f.kind {
+                        FixupKind::Jmp => 3,
+                        FixupKind::Jcc(_) => 4,
+                    };
+                }
+            }
+            saved_prefix[n_fix] = acc;
+        }
+
+        if !any_short {
+            for (i, f) in self.fixups.iter().enumerate() {
+                let rel = i128::from(target_orig[i]) - i128::from(f.next_ip_off);
+                let rel32 = i32::try_from(rel).map_err(|_| "local branch displacement exceeds rel32".to_string())?;
+                let p = f.patch_off as usize;
+                let end = p.checked_add(4).ok_or("local branch patch offset overflow")?;
+                if end > self.code.len() {
+                    return Err(format!("local branch patch offset {p} exceeds code len {}", self.code.len()));
+                }
+                self.code[p..end].copy_from_slice(&rel32.to_le_bytes());
+            }
+            self.fixups.clear();
+            return Ok(());
+        }
+
+        // Recompute final exact label offsets, reloc offsets, and compact machine code in O(code.len()).
+        let shift_of = |orig_off: u32| -> u32 {
+            let idx = self.fixups.partition_point(|fx| fx.next_ip_off <= orig_off);
+            saved_prefix[idx]
+        };
+        for off in self.labels.iter_mut().flatten() {
+            *off -= shift_of(*off);
+        }
+        for rel in &mut self.relocs {
+            let sh = shift_of(rel.patch_off);
+            rel.patch_off -= sh;
+            rel.next_ip_off -= sh;
+        }
+
+        let total_saved = saved_prefix[n_fix] as usize;
+        let mut new_code = Vec::with_capacity(self.code.len() - total_saved);
+        let mut cursor = 0usize;
+        for (i, f) in self.fixups.iter().enumerate() {
+            let inst_start = f.inst_off as usize;
+            let orig_end = f.next_ip_off as usize;
+            new_code.extend_from_slice(&self.code[cursor..inst_start]);
+            let target_new = self.labels[f.label.0 as usize].unwrap();
+            if is_short[i] {
+                let new_next_ip = new_code.len() as u32 + 2;
+                let rel = i64::from(target_new) - i64::from(new_next_ip);
+                let rel8 = i8::try_from(rel).map_err(|_| "short branch displacement overflow".to_string())?;
+                match f.kind {
+                    FixupKind::Jmp => {
+                        new_code.push(0xeb);
+                        new_code.push(rel8 as u8);
+                    }
+                    FixupKind::Jcc(c) => {
+                        new_code.push(0x70 + c);
+                        new_code.push(rel8 as u8);
+                    }
+                }
+            } else {
+                let orig_len = (orig_end - inst_start) as u32;
+                let new_next_ip = new_code.len() as u32 + orig_len;
+                let rel = i128::from(target_new) - i128::from(new_next_ip);
+                let rel32 = i32::try_from(rel).map_err(|_| "local branch displacement exceeds rel32".to_string())?;
+                match f.kind {
+                    FixupKind::Jmp => {
+                        new_code.push(0xe9);
+                        new_code.extend_from_slice(&rel32.to_le_bytes());
+                    }
+                    FixupKind::Jcc(c) => {
+                        new_code.push(0x0f);
+                        new_code.push(0x80 + c);
+                        new_code.extend_from_slice(&rel32.to_le_bytes());
+                    }
+                }
+            }
+            cursor = orig_end;
+        }
+        new_code.extend_from_slice(&self.code[cursor..]);
+        debug_assert_eq!(new_code.len(), self.code.len() - total_saved);
+        self.code = new_code;
         self.fixups.clear();
         Ok(())
     }
@@ -503,20 +659,22 @@ impl Asm {
     // ---- Branches & calls ----
 
     pub fn jmp(&mut self, label: Label) {
+        let inst_off = self.pos();
         self.emit_u8(0xe9);
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.fixups.push(LocalFixup { patch_off, next_ip_off, label });
+        self.fixups.push(LocalFixup { inst_off, patch_off, next_ip_off, label, kind: FixupKind::Jmp });
     }
 
     pub fn jcc(&mut self, cond: Cond, label: Label) {
+        let inst_off = self.pos();
         self.emit_u8(0x0f);
         self.emit_u8(0x80 + cond as u8);
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.fixups.push(LocalFixup { patch_off, next_ip_off, label });
+        self.fixups.push(LocalFixup { inst_off, patch_off, next_ip_off, label, kind: FixupKind::Jcc(cond as u8) });
     }
 
     pub fn jmp_reg(&mut self, r: Gp) {
@@ -626,28 +784,18 @@ impl Asm {
         self.modrm_reg(src.lo(), dst.lo());
     }
 
-    /// Loads 32-bit zero-extended immediate into `dst`.
-    /// Note: `imm == 0` emits `xor dst32, dst32`, which modifies `RFLAGS` — do not
-    /// call with `imm == 0` between a `cmp`/`test` and a dependent `jcc`/`cmovcc`/`setcc`.
-    pub fn mov_ri32(&mut self, dst: Gp, imm: u32) {
-        if imm == 0 {
-            self.xor_rr(false, dst, dst);
-            return;
-        }
+    /// Loads 32-bit zero-extended immediate into `dst` without modifying `RFLAGS` (even for `0`).
+    pub fn mov_ri32_preserve_flags(&mut self, dst: Gp, imm: u32) {
         self.rex(false, 0, 0, dst.hi(), false);
         self.emit_u8(0xb8 + dst.lo());
         self.emit_u32(imm);
     }
 
-    /// Loads 64-bit immediate into `dst`.
-    /// Note: `imm == 0` emits `xor dst32, dst32`, which modifies `RFLAGS`.
-    pub fn mov_ri64(&mut self, dst: Gp, imm: u64) {
-        if imm == 0 {
-            self.xor_rr(false, dst, dst);
-        } else if imm <= u32::MAX as u64 {
-            self.mov_ri32(dst, imm as u32);
+    /// Loads 64-bit immediate into `dst` without modifying `RFLAGS` (even for `0`).
+    pub fn mov_ri64_preserve_flags(&mut self, dst: Gp, imm: u64) {
+        if imm <= u32::MAX as u64 {
+            self.mov_ri32_preserve_flags(dst, imm as u32);
         } else if (imm as i64) >= i32::MIN as i64 && (imm as i64) <= i32::MAX as i64 {
-            // Sign-extended 32-bit immediate (7 bytes vs 10).
             self.rex(true, 0, 0, dst.hi(), false);
             self.emit_u8(0xc7);
             self.modrm_reg(0, dst.lo());
@@ -656,6 +804,27 @@ impl Asm {
             self.rex(true, 0, 0, dst.hi(), false);
             self.emit_u8(0xb8 + dst.lo());
             self.emit_u64(imm);
+        }
+    }
+
+    /// Loads 32-bit zero-extended immediate into `dst`.
+    /// Note: `imm == 0` emits `xor dst32, dst32`, which modifies `RFLAGS` — do not
+    /// call with `imm == 0` between a `cmp`/`test` and a dependent `jcc`/`cmovcc`/`setcc`.
+    pub fn mov_ri32(&mut self, dst: Gp, imm: u32) {
+        if imm == 0 {
+            self.xor_rr(false, dst, dst);
+            return;
+        }
+        self.mov_ri32_preserve_flags(dst, imm);
+    }
+
+    /// Loads 64-bit immediate into `dst`.
+    /// Note: `imm == 0` emits `xor dst32, dst32`, which modifies `RFLAGS`.
+    pub fn mov_ri64(&mut self, dst: Gp, imm: u64) {
+        if imm == 0 {
+            self.xor_rr(false, dst, dst);
+        } else {
+            self.mov_ri64_preserve_flags(dst, imm);
         }
     }
 
@@ -1056,6 +1225,28 @@ impl Asm {
         self.emit_u8(0x7e);
         self.modrm_reg(src.lo(), dst.lo());
     }
+
+    fn sse_xm(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, mem: Mem) {
+        if let Some(p) = prefix {
+            self.emit_u8(p);
+        }
+        self.rex_mem(false, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(op);
+        self.modrm_mem(dst.lo(), mem);
+    }
+
+    pub fn addss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x58, d, m); }
+    pub fn subss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x5c, d, m); }
+    pub fn mulss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x59, d, m); }
+    pub fn divss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x5e, d, m); }
+    pub fn ucomiss_xm(&mut self, a: Xmm, m: Mem) { self.sse_xm(None, 0x2e, a, m); }
+
+    pub fn addsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x58, d, m); }
+    pub fn subsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x5c, d, m); }
+    pub fn mulsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x59, d, m); }
+    pub fn divsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x5e, d, m); }
+    pub fn ucomisd_xm(&mut self, a: Xmm, m: Mem) { self.sse_xm(Some(0x66), 0x2e, a, m); }
 
     pub fn addss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x58, d, s); }
     pub fn subss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x5c, d, s); }

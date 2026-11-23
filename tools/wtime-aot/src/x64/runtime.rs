@@ -441,47 +441,53 @@ pub fn emit_trunc_helper(top: TruncOp, ro: &RodataConsts) -> Result<Asm, String>
     Ok(a)
 }
 
-/// Shared syscall-only `grow_core(R15 = Ctx*, R13 = mem_len, Rdi = delta: u64) -> Rax (old_pages | -1i64)`.
-/// Updates `R13` and `ctx->mem_len` ONLY after `mprotect` succeeds; never touches `R14` or `Xmm*`.
-pub fn emit_helper_grow_core(hooks: RuntimeTestHooks) -> Result<Asm, String> {
+/// Shared syscall-only `grow_core(R15 = Ctx*, Rdi = delta: u64) -> Rax (old_pages | -1i64)`.
+/// Updates `ctx->mem_len` (and `R13` when `!fixed_mem`) ONLY after `mprotect` succeeds;
+/// never touches `R14`, `Xmm*`, or (when `fixed_mem`) `R13`.
+pub fn emit_helper_grow_core(fixed_mem: bool, hooks: RuntimeTestHooks) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(128);
     let lbl_ok = a.new_label();
     let lbl_fail = a.new_label();
 
-    // old_pages = R13 >> 16
-    a.mov_rr(true, Gp::Rax, Gp::R13);
+    // old_pages = ctx->mem_len >> 16
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
     a.shr_imm(true, Gp::Rax, 16);
 
     // delta == 0 -> return old_pages immediately without mprotect.
     a.test_rr(true, Gp::Rdi, Gp::Rdi);
     a.jcc(Cond::E, lbl_ok);
 
-    // Wrap-proof unsigned 64-bit check: delta <= max_pages && old_pages <= max_pages - delta
-    a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_MEM_MAX_PAGES));
-    a.cmp_rr(true, Gp::Rdi, Gp::Rcx);
-    a.jcc(Cond::A, lbl_fail);
-    a.sub_rr(true, Gp::Rcx, Gp::Rdi);
-    a.cmp_rr(true, Gp::Rax, Gp::Rcx);
-    a.jcc(Cond::A, lbl_fail);
+    if fixed_mem {
+        // Fixed-size memory (`min == max`): any non-zero grow always fails without touching R13.
+        a.jmp(lbl_fail);
+    } else {
+        // Wrap-proof unsigned 64-bit check: delta <= max_pages && old_pages <= max_pages - delta
+        a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_MEM_MAX_PAGES));
+        a.cmp_rr(true, Gp::Rdi, Gp::Rcx);
+        a.jcc(Cond::A, lbl_fail);
+        a.sub_rr(true, Gp::Rcx, Gp::Rdi);
+        a.cmp_rr(true, Gp::Rax, Gp::Rcx);
+        a.jcc(Cond::A, lbl_fail);
 
-    // Save old_pages in R8, delta_bytes = delta << 16 in R9.
-    a.mov_rr(true, Gp::R8, Gp::Rax);
-    a.mov_rr(true, Gp::R9, Gp::Rdi);
-    a.shl_imm(true, Gp::R9, 16);
+        // Save old_pages in R8, delta_bytes = delta << 16 in R9.
+        a.mov_rr(true, Gp::R8, Gp::Rax);
+        a.mov_rr(true, Gp::R9, Gp::Rdi);
+        a.shl_imm(true, Gp::R9, 16);
 
-    // mprotect(ctx->mem_base + old_len, delta_bytes, PROT_READ | PROT_WRITE)
-    a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
-    a.add_rr(true, Gp::Rdi, Gp::R13);
-    a.mov_rr(true, Gp::Rsi, Gp::R9);
-    a.mov_ri32(Gp::Rdx, PROT_RW);
-    emit_mprotect_syscall(&mut a, hooks, MprotectSiteMarker::grow_memory());
-    a.cmp_ri(true, Gp::Rax, -4095);
-    a.jcc(Cond::Ae, lbl_fail);
+        // mprotect(ctx->mem_base + old_len, delta_bytes, PROT_READ | PROT_WRITE)
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
+        a.add_rr(true, Gp::Rdi, Gp::R13);
+        a.mov_rr(true, Gp::Rsi, Gp::R9);
+        a.mov_ri32(Gp::Rdx, PROT_RW);
+        emit_mprotect_syscall(&mut a, hooks, MprotectSiteMarker::grow_memory());
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_fail);
 
-    // Commit new mem_len to both R13 and ctx->mem_len.
-    a.add_rr(true, Gp::R13, Gp::R9);
-    a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_LEN), Gp::R13);
-    a.mov_rr(true, Gp::Rax, Gp::R8);
+        // Commit new mem_len to both R13 and ctx->mem_len.
+        a.add_rr(true, Gp::R13, Gp::R9);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_LEN), Gp::R13);
+        a.mov_rr(true, Gp::Rax, Gp::R8);
+    }
     a.bind(lbl_ok);
     a.ret();
 
@@ -509,26 +515,41 @@ pub fn emit_helper_mem_grow() -> Result<Asm, String> {
 
 /// Wasm `memory.copy(Rdi = dst: u32, Rsi = src: u32, Rdx = len: u32) -> R11d = 0 | TRAP_OOB`.
 /// Performs 64-bit unsigned bounds checks FIRST (including `len == 0`), early-returns on `len == 0`
-/// BEFORE touching `R14` (`NULL` for 0-capacity memories), and handles overlapping backward copies
-/// with an unsigned non-zero countdown (`sub rcx, 1; ...; test rcx, rcx; jnz`).
-pub fn emit_helper_mem_copy() -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(128);
+/// BEFORE touching `R14` (`NULL` for 0-capacity memories), uses branch-light overlap-safe head+tail
+/// loads/stores for `len <= 32` (avoiding `rep movsb` startup penalty on small arena/packet copies),
+/// 16-byte XMM14 backward chunks for large overlapping copies, and `rep movsb` for large forward copies.
+pub fn emit_helper_mem_copy(fixed_mem: bool) -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(256);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
+    let lbl_le15 = a.new_label();
+    let lbl_le7 = a.new_label();
+    let lbl_le3 = a.new_label();
+    let lbl_one = a.new_label();
+    let lbl_large = a.new_label();
     let lbl_fwd = a.new_label();
-    let lbl_bwd_loop = a.new_label();
+    let lbl_bwd16 = a.new_label();
+    let lbl_bwd1_check = a.new_label();
+    let lbl_bwd1 = a.new_label();
 
     // Defensive 32-bit zero extension.
     a.mov_rr(false, Gp::Rdi, Gp::Rdi);
     a.mov_rr(false, Gp::Rsi, Gp::Rsi);
     a.mov_rr(false, Gp::Rdx, Gp::Rdx);
 
+    let len_reg = if fixed_mem {
+        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
+        Gp::R10
+    } else {
+        Gp::R13
+    };
+
     // Bounds checks FIRST (even when len == 0!).
     a.lea(true, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, 0));
-    a.cmp_rr(true, Gp::Rax, Gp::R13);
+    a.cmp_rr(true, Gp::Rax, len_reg);
     a.jcc(Cond::A, lbl_oob);
     a.lea(true, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, 0));
-    a.cmp_rr(true, Gp::Rcx, Gp::R13);
+    a.cmp_rr(true, Gp::Rcx, len_reg);
     a.jcc(Cond::A, lbl_oob);
 
     // Early return on len == 0 or dst == src BEFORE touching R14.
@@ -537,28 +558,127 @@ pub fn emit_helper_mem_copy() -> Result<Asm, String> {
     a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
     a.jcc(Cond::E, lbl_ok);
 
-    // Forward if dst < src || dst >= src + len (`rcx` already holds `src + len`).
+    // Fast overlap-safe small copies (`len <= 32`): load both head and tail BEFORE storing either!
+    a.cmp_ri(true, Gp::Rdx, 32);
+    a.jcc(Cond::A, lbl_large);
+    a.add_rr(true, Gp::Rdi, Gp::R14);
+    a.add_rr(true, Gp::Rsi, Gp::R14);
+    a.cmp_ri(true, Gp::Rdx, 16);
+    a.jcc(Cond::B, lbl_le15);
+    // 16..=32 bytes: overlap-safe 2x XMM load then 2x store.
+    a.movdqu_xm(Xmm::Xmm14, Mem::base(Gp::Rsi));
+    a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -16));
+    a.movdqu_mx(Mem::base(Gp::Rdi), Xmm::Xmm14);
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm15);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_le15);
+    a.cmp_ri(true, Gp::Rdx, 8);
+    a.jcc(Cond::B, lbl_le7);
+    // 8..=15 bytes: overlap-safe 2x 64-bit load then 2x store.
+    a.mov_rm(true, Gp::Rax, Mem::base(Gp::Rsi));
+    a.mov_rm(true, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -8));
+    a.mov_mr(true, Mem::base(Gp::Rdi), Gp::Rax);
+    a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -8), Gp::Rcx);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_le7);
+    a.cmp_ri(true, Gp::Rdx, 4);
+    a.jcc(Cond::B, lbl_le3);
+    // 4..=7 bytes: overlap-safe 2x 32-bit load then 2x store.
+    a.mov_rm(false, Gp::Rax, Mem::base(Gp::Rsi));
+    a.mov_rm(false, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -4));
+    a.mov_mr(false, Mem::base(Gp::Rdi), Gp::Rax);
+    a.mov_mr(false, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -4), Gp::Rcx);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_le3);
+    a.cmp_ri(true, Gp::Rdx, 1);
+    a.jcc(Cond::E, lbl_one);
+    // 2..=3 bytes: overlap-safe 16-bit head + 8-bit tail.
+    a.movzx_rm16(false, Gp::Rax, Mem::base(Gp::Rsi));
+    a.movzx_rm8(false, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -1));
+    a.mov_mr16(Mem::base(Gp::Rdi), Gp::Rax);
+    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -1), Gp::Rcx);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_one);
+    a.movzx_rm8(false, Gp::Rax, Mem::base(Gp::Rsi));
+    a.mov_mr8(Mem::base(Gp::Rdi), Gp::Rax);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    // Large copy (`len > 32`): forward if `dst < src || dst >= src + len` (`rcx == src + len`).
+    a.bind(lbl_large);
     a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
     a.jcc(Cond::B, lbl_fwd);
     a.cmp_rr(true, Gp::Rdi, Gp::Rcx);
     a.jcc(Cond::Ae, lbl_fwd);
 
-    // Backward copy (src < dst < src + len), unsigned non-zero countdown.
+    // Large overlapping backward copy: 16-byte XMM14 chunks then byte tail.
     a.add_rr(true, Gp::Rdi, Gp::R14);
     a.add_rr(true, Gp::Rsi, Gp::R14);
     a.mov_rr(true, Gp::Rcx, Gp::Rdx);
-    a.bind(lbl_bwd_loop);
+    a.bind(lbl_bwd16);
+    a.sub_ri(true, Gp::Rcx, 16);
+    a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Xmm::Xmm14);
+    a.cmp_ri(true, Gp::Rcx, 16);
+    a.jcc(Cond::Ae, lbl_bwd16);
+    a.bind(lbl_bwd1_check);
+    a.test_rr(true, Gp::Rcx, Gp::Rcx);
+    a.jcc(Cond::E, lbl_ok);
+    a.bind(lbl_bwd1);
     a.sub_ri(true, Gp::Rcx, 1);
     a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
     a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
     a.test_rr(true, Gp::Rcx, Gp::Rcx);
-    a.jcc(Cond::Ne, lbl_bwd_loop);
+    a.jcc(Cond::Ne, lbl_bwd1);
     a.xor_rr(false, Gp::R11, Gp::R11);
     a.ret();
 
     a.bind(lbl_fwd);
     a.add_rr(true, Gp::Rdi, Gp::R14);
     a.add_rr(true, Gp::Rsi, Gp::R14);
+    // For medium forward copies (`33..=1024` B), a 32-byte XMM14/XMM15 loop avoids `rep movsb`'s
+    // microcode startup latency; larger copies or tight forward overlaps (`0 < src - dst < 32`)
+    // use `rep movsb`.
+    let lbl_fwd_rep = a.new_label();
+    let lbl_fwd32 = a.new_label();
+    let lbl_fwd_tail = a.new_label();
+    a.cmp_ri(true, Gp::Rdx, 1024);
+    a.jcc(Cond::A, lbl_fwd_rep);
+    // `lbl_fwd_tail` loads `[src + len - 32 .. src + len]` after `lbl_fwd32` may have written up
+    // to `dst + len - 2`. That is overlap-safe iff the ranges are disjoint (`dst >= src + len`, so
+    // `(src - dst) as u64 >= 2^64 - 4 GiB >= 32`) or `src - dst >= 32`.
+    a.mov_rr(true, Gp::Rax, Gp::Rsi);
+    a.sub_rr(true, Gp::Rax, Gp::Rdi);
+    a.cmp_ri(true, Gp::Rax, 32);
+    a.jcc(Cond::B, lbl_fwd_rep);
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    a.lea(true, Gp::R8, Mem::base_disp(Gp::Rdx, -32)); // len > 32, so r8 >= 1
+    a.bind(lbl_fwd32);
+    a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+    a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 16));
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Xmm::Xmm14);
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 16), Xmm::Xmm15);
+    a.add_ri(true, Gp::Rcx, 32);
+    a.cmp_rr(true, Gp::Rcx, Gp::R8);
+    a.jcc(Cond::B, lbl_fwd32);
+    a.bind(lbl_fwd_tail);
+    // Final overlapping 32-byte tail `[len - 32 .. len]` finishes any remainder `1..=32` in 4 insns.
+    a.movdqu_xm(Xmm::Xmm14, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -32));
+    a.movdqu_xm(Xmm::Xmm15, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, -16));
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -32), Xmm::Xmm14);
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm15);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_fwd_rep);
     a.mov_rr(true, Gp::Rcx, Gp::Rdx);
     a.rep_movsb();
 
@@ -575,17 +695,29 @@ pub fn emit_helper_mem_copy() -> Result<Asm, String> {
 }
 
 /// Wasm `memory.fill(Rdi = dst: u32, Rsi = val: u32, Rdx = len: u32) -> R11d = 0 | TRAP_OOB`.
-pub fn emit_helper_mem_fill() -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(64);
+pub fn emit_helper_mem_fill(fixed_mem: bool) -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(192);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
+    let lbl_large = a.new_label();
+    let lbl_le15 = a.new_label();
+    let lbl_le7 = a.new_label();
+    let lbl_le3 = a.new_label();
+    let lbl_one = a.new_label();
 
     a.mov_rr(false, Gp::Rdi, Gp::Rdi);
     a.mov_rr(false, Gp::Rdx, Gp::Rdx);
 
+    let len_reg = if fixed_mem {
+        a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
+        Gp::R10
+    } else {
+        Gp::R13
+    };
+
     // Bounds check FIRST (even when len == 0!).
     a.lea(true, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, 0));
-    a.cmp_rr(true, Gp::Rax, Gp::R13);
+    a.cmp_rr(true, Gp::Rax, len_reg);
     a.jcc(Cond::A, lbl_oob);
 
     // Early return on len == 0 BEFORE touching R14.
@@ -593,6 +725,53 @@ pub fn emit_helper_mem_fill() -> Result<Asm, String> {
     a.jcc(Cond::E, lbl_ok);
 
     a.add_rr(true, Gp::Rdi, Gp::R14);
+    a.cmp_ri(true, Gp::Rdx, 32);
+    a.jcc(Cond::A, lbl_large);
+
+    // Fast small fill (`len <= 32`): broadcast byte into 64-bit Rax.
+    a.movzx_rr8(Gp::Rax, Gp::Rsi);
+    a.mov_ri64(Gp::Rcx, 0x0101_0101_0101_0101);
+    a.imul_rr(true, Gp::Rax, Gp::Rcx);
+
+    a.cmp_ri(true, Gp::Rdx, 16);
+    a.jcc(Cond::B, lbl_le15);
+    a.movq_xr(Xmm::Xmm14, Gp::Rax);
+    a.punpcklqdq(Xmm::Xmm14, Xmm::Xmm14);
+    a.movdqu_mx(Mem::base(Gp::Rdi), Xmm::Xmm14);
+    a.movdqu_mx(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -16), Xmm::Xmm14);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_le15);
+    a.cmp_ri(true, Gp::Rdx, 8);
+    a.jcc(Cond::B, lbl_le7);
+    a.mov_mr(true, Mem::base(Gp::Rdi), Gp::Rax);
+    a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -8), Gp::Rax);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_le7);
+    a.cmp_ri(true, Gp::Rdx, 4);
+    a.jcc(Cond::B, lbl_le3);
+    a.mov_mr(false, Mem::base(Gp::Rdi), Gp::Rax);
+    a.mov_mr(false, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -4), Gp::Rax);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_le3);
+    a.cmp_ri(true, Gp::Rdx, 1);
+    a.jcc(Cond::E, lbl_one);
+    a.mov_mr16(Mem::base(Gp::Rdi), Gp::Rax);
+    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rdx, 1, -1), Gp::Rax);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_one);
+    a.mov_mr8(Mem::base(Gp::Rdi), Gp::Rax);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+
+    a.bind(lbl_large);
     a.mov_rr(false, Gp::Rax, Gp::Rsi);
     a.mov_rr(true, Gp::Rcx, Gp::Rdx);
     a.rep_stosb();
@@ -675,9 +854,13 @@ pub fn emit_helper_host_call(module: &X64Module, layout: &CtxLayout, ro: &Rodata
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 16));
 
     // Switch back to guest stack and restore guest state.
+    // Note: when `module.fixed32.is_some()`, `R13` is a callee-saved GP register preserved by SysV ABI
+    // and `mem_len` is immutable, so we must NOT overwrite `R13`!
     a.mov_rm(true, Gp::Rsp, Mem::base_disp(Gp::R15, OFF_ACTIVE_GUEST_RSP));
     a.ldmxcsr_rip(RelocTarget::Rodata(ro.mxcsr_wasm));
-    a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
+    if module.fixed32.is_none() {
+        a.mov_rm(true, Gp::R13, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
+    }
     emit_pinned_load(&mut a, module, layout);
 
     // Restore saved callee-saved Xmm8..Xmm13, nesting pointers, and pop 120-byte link frame.
@@ -2390,16 +2573,17 @@ pub fn emit_all_helpers(
         debug_assert_eq!(HELPER_TRUNC_BASE + i as u32, op as u32);
         helpers.push(emit_trunc_helper(op, ro)?);
     }
+    let fixed_mem = module.fixed32.is_some();
     debug_assert_eq!(helpers.len(), HELPER_MEM_GROW as usize);
     helpers.push(emit_helper_mem_grow()?);
     debug_assert_eq!(helpers.len(), HELPER_MEM_COPY as usize);
-    helpers.push(emit_helper_mem_copy()?);
+    helpers.push(emit_helper_mem_copy(fixed_mem)?);
     debug_assert_eq!(helpers.len(), HELPER_MEM_FILL as usize);
-    helpers.push(emit_helper_mem_fill()?);
+    helpers.push(emit_helper_mem_fill(fixed_mem)?);
     debug_assert_eq!(helpers.len(), HELPER_HOST_CALL as usize);
     helpers.push(emit_helper_host_call(module, layout, ro)?);
     debug_assert_eq!(helpers.len(), HELPER_GROW_CORE as usize);
-    helpers.push(emit_helper_grow_core(hooks)?);
+    helpers.push(emit_helper_grow_core(fixed_mem, hooks)?);
     debug_assert_eq!(helpers.len(), HELPER_INITIALIZE as usize);
     helpers.push(emit_helper_initialize(module, layout, tables)?);
     debug_assert_eq!(helpers.len(), HELPER_READ_GLOBAL as usize);

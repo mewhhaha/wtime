@@ -33,12 +33,14 @@ use module::{
     CompileBudget, MAX_CTX_BYTES, MAX_TOTAL_CODE_BYTES, MAX_TOTAL_RODATA_BYTES, X64ConstVal, X64Module,
     admit_x64_module_with_budget, x64_validate_features, x64_validate_limits,
 };
-use regalloc::{AllocResult, allocate_with_budget};
+use regalloc::{AllocConfig, AllocResult, allocate_with_config};
 use runtime::{
     EXPORT_NAMES, RuntimeTables, RuntimeTestHooks, TRAP_MESSAGES, emit_all_exports, emit_all_helpers,
     emit_import_trampoline, export_val_kind, global_kind_code,
 };
-pub use verify::{verify_alloc, verify_ir};
+#[cfg(test)]
+pub use verify::verify_alloc;
+pub use verify::{verify_alloc_with_config, verify_ir};
 
 /// Dedicated CLI exit code emitted when `--backend x64` cleanly rejects a module on admission
 /// (distinct from exit code `1` for usage/I/O/timeout/compiler errors).
@@ -122,6 +124,8 @@ pub struct CiTableLayout {
 #[derive(Clone, Debug)]
 pub struct CtxLayout {
     pub pinned_global: Option<u32>,
+    /// `Some(fixed_bytes)` iff memory 0 is fixed-size (`min == max`), freeing `R13` as a 4th callee-saved GP reg.
+    pub fixed_mem_bytes: Option<u64>,
     pub global_offs: Vec<i32>,
     pub extern_tables: BTreeMap<u32, (i32, u32)>,
     pub ci_tables: Vec<CiTableLayout>,
@@ -167,6 +171,7 @@ impl CtxLayout {
         }
         Ok(Self {
             pinned_global: module.pinned_global,
+            fixed_mem_bytes: module.fixed32,
             global_offs,
             extern_tables,
             ci_tables,
@@ -855,7 +860,13 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
                             func_index,
                             opts.opt,
                             Some(&budget),
-                        );
+                        )
+                        .and_then(|mut ir| {
+                            if opts.opt {
+                                opt::prune_early_block_params(&mut ir, Some(&budget))?;
+                            }
+                            Ok(ir)
+                        });
                         loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
                         match res {
                             Ok(ir) => local_out.push((bi, ir)),
@@ -904,6 +915,10 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
 
         // Phase 5c (parallel): per-function Stage 2 IR opt (when `opts.opt`), optional `verify_ir`,
         // register allocation, and optional `verify_alloc`.
+        let alloc_cfg = AllocConfig {
+            allow_r12: layout.pinned_global.is_none(),
+            allow_r13: layout.fixed_mem_bytes.is_some(),
+        };
         let work_queue: Mutex<Vec<(usize, IrFunc)>> = Mutex::new(irs.into_iter().enumerate().collect());
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
@@ -932,10 +947,10 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
                                 verify_ir(&ir, &module)?;
                             }
                             let tr = Instant::now();
-                            let alloc = allocate_with_budget(&ir, Some(&budget))?;
+                            let alloc = allocate_with_config(&ir, alloc_cfg, Some(&budget))?;
                             loc_ra = loc_ra.saturating_add(tr.elapsed().as_nanos() as u64);
                             if opts.verify {
-                                verify_alloc(&ir, &alloc)?;
+                                verify_alloc_with_config(&ir, &alloc, alloc_cfg)?;
                             }
                             Ok(alloc)
                         })();

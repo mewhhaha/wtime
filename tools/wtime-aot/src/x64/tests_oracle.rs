@@ -1494,3 +1494,203 @@ fn oracle_stage2_audit_regressions_magic64_rem_deep_blocks_and_dead_br_table() {
     ];
     assert_oracle_matrix("stage2_audit_regressions", &wasm, &calls, &[], &[]);
 }
+
+#[test]
+fn oracle_stage25_remat_fixed_mem_r13_self_nan_and_dynamic_memcopy_fill() {
+    // Fixed 1-page memory (`min=1, max=1`) frees R13 as a 4th callee-saved GP register, and no
+    // hot mutable global frees R12 as a 3rd callee-saved GP register.
+    // Exercises:
+    //  f0: dynamic `memory.copy` + `memory.fill` across ALL fast/medium/large buckets
+    //      (`0, 1, 2, 3, 4, 7, 8, 15, 16, 24, 32, 33, 64, 100, 1024, 1025, 1200`), both forward and
+    //      overlapping backward (shift 1 and shift 17), plus `memory.grow(0)`/`memory.grow(1)` on fixed memory,
+    //      while keeping 10 GP locals live across every helper call (proving R12/R13 preservation!).
+    //  f1: `Loc::Remat(0)` + non-zero constants in `CmpSelect` (proving RFLAGS preservation!),
+    //      direct immediate `Store` + `GlobalSet` + overflow-return `Remat` values!
+    //  f2: self-NaN `f32.eq(x, x)` / `f32.ne(x, x)` in `CmpSelect`, `CmpBranch`, and `F32Cmp`
+    //      on +0.0, -0.0, 1.5, +inf, -inf, qNaN, sNaN.
+    //  f3: 10-return multi-value helper returning remat constants (0, 0.0f32, 0.0f64, 42, -1) into overflow buffer.
+
+    // f0(len: i32) -> i32:
+    //   fills [0..2048] with distinct byte pattern `((i * 37 + 13) & 255)`,
+    //   keeps 8 GP locals (l2..l9) initialized from `len` live across:
+    //     1) dynamic memory.fill(4096, 0xA5, len)
+    //     2) dynamic forward memory.copy(8192, 0, len)
+    //     3) dynamic backward-overlap memory.copy(1 + 12288, 12288, len) after seeding [12288..12288+len]
+    //     4) dynamic backward-overlap shift-17 memory.copy(17 + 16384, 16384, len)
+    //     5) memory.grow(0) (must return 1) and memory.grow(1) (must return -1 on fixed 1-page memory)
+    //   hashes affected ranges + all 8 preserved GP locals!
+    let mut b0 = Vec::new();
+    // Seed [0..2048] with non-repeating pattern using l1 = i
+    b0.extend_from_slice(&[
+        0x41, 0, 0x21, 1,
+        0x02, 0x40, 0x03, 0x40,
+        0x20, 1, 0x41,
+    ]);
+    leb_i32(&mut b0, 2048);
+    b0.extend_from_slice(&[
+        0x4f, 0x0d, 1,
+        0x20, 1,
+        0x20, 1, 0x41, 37, 0x6c, 0x41, 13, 0x6a, 0x41,
+    ]);
+    leb_i32(&mut b0, 255);
+    b0.extend_from_slice(&[
+        0x71, 0x3a, 0, 0, // store8 [i]
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1,
+        0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Seed l2..l9 (8 GP locals) with distinct values derived from `len` (forces R12 & R13 usage!).
+    for k in 0..8u32 {
+        b0.extend_from_slice(&[0x20, 0, 0x41]);
+        leb_i32(&mut b0, (k as i32 + 1) * 97);
+        b0.extend_from_slice(&[0x73, 0x21]); // xor, local.set (2+k)
+        leb_u32(&mut b0, 2 + k);
+    }
+    // 1. Dynamic memory.fill(4096, 0xA5, len)
+    b0.push(0x41); leb_i32(&mut b0, 4096);
+    b0.push(0x41); leb_i32(&mut b0, 0xA5);
+    b0.extend_from_slice(&[0x20, 0, 0xfc, 0x0b, 0x00]);
+    // 2. Dynamic forward memory.copy(8192, 0, len)
+    b0.push(0x41); leb_i32(&mut b0, 8192);
+    b0.extend_from_slice(&[0x41, 0, 0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+    // 3. Seed [12288..12288+len] from [0..len], then backward overlap shift +1: copy(12289, 12288, len)
+    b0.push(0x41); leb_i32(&mut b0, 12288);
+    b0.extend_from_slice(&[0x41, 0, 0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+    b0.push(0x41); leb_i32(&mut b0, 12289);
+    b0.push(0x41); leb_i32(&mut b0, 12288);
+    b0.extend_from_slice(&[0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+    // 4. Seed [16384..16384+len] from [0..len], then backward overlap shift +17: copy(16401, 16384, len)
+    b0.push(0x41); leb_i32(&mut b0, 16384);
+    b0.extend_from_slice(&[0x41, 0, 0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+    b0.push(0x41); leb_i32(&mut b0, 16401);
+    b0.push(0x41); leb_i32(&mut b0, 16384);
+    b0.extend_from_slice(&[0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+    // 4b. Overlapping FORWARD shifts (-1, -17, -32) exercising the `src - dst < 32` guard and `== 32` boundary!
+    for (base, shift) in [(20480i32, 1i32), (24576, 17), (28672, 32)] {
+        b0.push(0x41); leb_i32(&mut b0, base + shift);
+        b0.extend_from_slice(&[0x41, 0, 0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+        b0.push(0x41); leb_i32(&mut b0, base);
+        b0.push(0x41); leb_i32(&mut b0, base + shift);
+        b0.extend_from_slice(&[0x20, 0, 0xfc, 0x0a, 0x00, 0x00]);
+    }
+    // 5. memory.grow(0) + memory.grow(1) + memory.size on fixed 1-page memory
+    b0.extend_from_slice(&[0x41, 0, 0x40, 0x00, 0x41, 1, 0x40, 0x00, 0x6a, 0x3f, 0x00, 0x6a]);
+    // Fold all 8 live GP locals l2..l9 into accumulator in l10:
+    b0.extend_from_slice(&[0x21, 10]);
+    for k in 0..8u32 {
+        b0.extend_from_slice(&[0x20, 10, 0x41, 31, 0x6c, 0x20]);
+        leb_u32(&mut b0, 2 + k);
+        b0.extend_from_slice(&[0x73, 0x21, 10]);
+    }
+    // Hash bytes across all fill/copy target regions (forward, backward-overlap, forward-overlap):
+    for base in [4096i32, 8192, 12288, 16384, 20480, 24576, 28672] {
+        b0.extend_from_slice(&[0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40]);
+        b0.extend_from_slice(&[0x20, 1, 0x20, 0, 0x41, 20, 0x6a, 0x4f, 0x0d, 1]);
+        b0.extend_from_slice(&[0x20, 10, 0x41, 31, 0x6c, 0x20, 1, 0x41]);
+        leb_i32(&mut b0, base);
+        b0.extend_from_slice(&[0x6a, 0x2d, 0, 0, 0x6a, 0x21, 10]);
+        b0.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
+    }
+    b0.extend_from_slice(&[0x20, 10]);
+
+    // f3 (type 2): () -> (10 i32s + 10 f32s) returning rematerialized zeros & constants into overflow buffer!
+    let mut b3 = Vec::new();
+    for k in 0..10i32 {
+        b3.push(0x41);
+        leb_i32(&mut b3, if k % 2 == 0 { 0 } else { k * 7 - 3 });
+    }
+    for k in 0..10u32 {
+        b3.push(0x43);
+        let bits = if k % 2 == 0 { 0.0f32.to_bits() } else { (k as f32 + 0.5).to_bits() };
+        b3.extend_from_slice(&bits.to_le_bytes());
+    }
+
+    // f1(x: i32) -> i32: tests Remat(0) in CmpSelect (RFLAGS preservation!), direct remat Store & GlobalSet, & f3 overflow ret!
+    let mut b1 = Vec::new();
+    // Direct immediate stores of 0 and non-zero remat constants to [0..32]:
+    b1.extend_from_slice(&[0x41, 0, 0x41, 0, 0x36, 2, 0]); // store i32 0
+    b1.extend_from_slice(&[0x41, 4, 0x42, 0, 0x37, 3, 0]); // store i64 0
+    b1.extend_from_slice(&[0x41, 12, 0x43, 0, 0, 0, 0, 0x38, 2, 0]); // store f32 0.0
+    b1.extend_from_slice(&[0x41, 16, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0x39, 3, 0]); // store f64 0.0
+    b1.extend_from_slice(&[0x41, 0, 0x24, 0]); // global.set 0 = 0
+    // CmpSelect with Remat(0) as both tv and fv (must NOT clobber EFLAGS with xor!):
+    // a = select(0, 77, x > 5); b = select(99, 0, x < -5)
+    b1.extend_from_slice(&[0x41, 0, 0x41]);
+    leb_i32(&mut b1, 77);
+    b1.extend_from_slice(&[0x20, 0, 0x41, 5, 0x4a, 0x1b]);
+    b1.extend_from_slice(&[0x41]);
+    leb_i32(&mut b1, 99);
+    b1.extend_from_slice(&[0x41, 0, 0x20, 0, 0x41]);
+    leb_i32(&mut b1, -5);
+    b1.extend_from_slice(&[0x48, 0x1b, 0x6a]); // a + b
+    // Call f3() -> 10 i32s + 10 f32s; fold all 20 returned values!
+    b1.extend_from_slice(&[0x10, 3]);
+    b1.extend(std::iter::repeat_n(0x92u8, 9)); // f32.add
+    b1.extend_from_slice(&[0xfc, 0x00]); // i32.trunc_sat_f32_s
+    b1.extend(std::iter::repeat_n(0x6au8, 11)); // i32.add (12 i32s -> 1 i32)
+    b1.extend_from_slice(&[0x23, 0, 0x6a]); // + global 0
+
+    // f2(x: f32) -> i32: tests self-NaN `f32.eq(x, x)` & `f32.ne(x, x)` in CmpSelect, CmpBranch, and F32Cmp!
+    let mut b2 = Vec::new();
+    // r1 = select(x, 42.0f32, f32.eq(x, x)) -> i32.trunc_sat_f32_s
+    b2.extend_from_slice(&[0x20, 0, 0x43]);
+    b2.extend_from_slice(&42.0f32.to_bits().to_le_bytes());
+    b2.extend_from_slice(&[0x20, 0, 0x20, 0, 0x5b, 0x1b, 0xfc, 0x00]);
+    // r2 = if f32.ne(x, x) { 1000 } else { 2000 }
+    b2.extend_from_slice(&[0x20, 0, 0x20, 0, 0x5c, 0x04, 0x7f, 0x41]);
+    leb_i32(&mut b2, 1000);
+    b2.extend_from_slice(&[0x05, 0x41]);
+    leb_i32(&mut b2, 2000);
+    b2.extend_from_slice(&[0x0b, 0x6a]);
+    // r3 = f32.eq(x, x) * 10 + f32.ne(x, x) * 100
+    b2.extend_from_slice(&[0x20, 0, 0x20, 0, 0x5b, 0x41, 10, 0x6c, 0x6a]);
+    b2.extend_from_slice(&[0x20, 0, 0x20, 0, 0x5c, 0x41]);
+    leb_i32(&mut b2, 100);
+    b2.extend_from_slice(&[0x6c, 0x6a]);
+
+    let mut f3_rets = vec![0x7fu8; 10];
+    f3_rets.extend([0x7du8; 10]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[
+            (&[0x7f], &[0x7f]), // 0: (i32)->(i32)
+            (&[0x7d], &[0x7f]), // 1: (f32)->(i32)
+            (&[], &f3_rets),    // 2: ()->(10 i32, 10 f32)
+        ]),
+        func_sec(&[0, 0, 1, 2]),
+        section(5, &[1, 0x01, 1, 1]), // FIXED 1-page memory (frees R13!)
+        // 1 mutable global with only 2 accesses -> below pin threshold -> frees R12!
+        section(6, &[1, 0x7f, 1, 0x41, 7, 0x0b]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("mem_dyn", 0, 0),
+            ("remat_sel", 0, 1),
+            ("self_nan", 0, 2),
+        ]),
+        code_sec(&[
+            enc_body(&[(10, 0x7f)], &b0),
+            enc_body(&[], &b1),
+            enc_body(&[], &b2),
+            enc_body(&[], &b3),
+        ]),
+    ]);
+
+    let mut calls = Vec::new();
+    for len in [0, 1, 2, 3, 4, 7, 8, 15, 16, 24, 32, 33, 63, 64, 65, 100, 1024, 1025, 1200] {
+        calls.push(c("mem_dyn", ArgSpec::I32(len)));
+    }
+    for x in [-10, -5, 0, 5, 10] {
+        calls.push(c("remat_sel", ArgSpec::I32(x)));
+    }
+    for bits in [
+        0.0f32.to_bits(),
+        (-0.0f32).to_bits(),
+        1.5f32.to_bits(),
+        f32::INFINITY.to_bits(),
+        f32::NEG_INFINITY.to_bits(),
+        0x7fc0_0000, // qNaN
+        0x7f80_0001, // sNaN
+    ] {
+        calls.push(c("self_nan", ArgSpec::F32(bits)));
+    }
+    assert_oracle_matrix("stage25_features", &wasm, &calls, &[], &[(0, 32)]);
+}
