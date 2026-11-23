@@ -416,7 +416,7 @@ impl PreparedModule {
         pc: usize,
         frame: &mut Frame,
         stack: &mut Vec<Value>,
-        store: &Store,
+        store: &mut Store,
     ) -> Result<super::execute::Step> {
         let prepared = self
             .functions

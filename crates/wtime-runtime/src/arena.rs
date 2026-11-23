@@ -117,6 +117,12 @@ impl<T> Arena<T> {
             slot.generation = slot.generation.saturating_add(1);
         }
     }
+    /// Reclaims slots appended since `len` when no handle at `>= len` could
+    /// have escaped to pre-existing Store state or host callers.
+    pub fn truncate_unpublished(&mut self, len: usize) {
+        self.slots.truncate(len);
+        self.free.retain(|&index| index < len);
+    }
     pub fn live_len(&self) -> usize {
         self.slots
             .iter()

@@ -49,7 +49,9 @@ def collect(worker, output):
             result.returncode == 0
             and data.get('allocator_failed') is True
             and data.get('guest_table_allocation_failed') is True
+            and data.get('element_allocation_failed') is True
             and data.get('frame_allocation_failed') is True
+            and data.get('label_allocation_failed') is True
             and data.get('recovery_passed') is True
             and data.get('executed') == 1
         )

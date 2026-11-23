@@ -208,10 +208,8 @@ impl ControlPlans {
         source_pc: usize,
         frame: &mut Frame,
         stack: &mut Vec<Value>,
-        store: &Store,
+        store: &mut Store,
     ) -> Result<Option<super::execute::Step>> {
-        #[cfg(not(feature = "performance-counters"))]
-        let _ = store;
         match op.opcode {
             0 => return Err(trap("unreachable")),
             2..=4 => {
@@ -226,15 +224,18 @@ impl ControlPlans {
                     .len()
                     .checked_sub(block.params as usize)
                     .ok_or_else(|| trap("block stack underflow"))?;
-                frame.labels.push(Label {
-                    catches: Vec::new(),
-                    start: source_pc + 1,
-                    end: block.end as usize,
-                    height,
-                    params: block.params as usize,
-                    results: block.results as usize,
-                    loop_: op.opcode == 3,
-                });
+                store.push_label(
+                    &mut frame.labels,
+                    Label {
+                        try_table_pc: None,
+                        start: source_pc + 1,
+                        end: block.end as usize,
+                        height,
+                        params: block.params as usize,
+                        results: block.results as usize,
+                        loop_: op.opcode == 3,
+                    },
+                )?;
                 if !condition {
                     frame.pc = if block.other == NO_ELSE {
                         block.end as usize
@@ -252,6 +253,7 @@ impl ControlPlans {
             }
             0x0b => {
                 if let Some(label) = frame.labels.pop() {
+                    store.release_labels(1);
                     keep(stack, label.height, label.results)?;
                     #[cfg(feature = "performance-counters")]
                     store.perf.record(
@@ -317,7 +319,9 @@ impl ControlPlans {
                 );
                 frame.pc = destination;
                 let retain = position + usize::from(label.loop_);
+                let removed = frame.labels.len() - retain;
                 frame.labels.truncate(retain);
+                store.release_labels(removed);
             }
             0x0f => return Ok(Some(super::execute::Step::Return)),
             _ => return Ok(None),

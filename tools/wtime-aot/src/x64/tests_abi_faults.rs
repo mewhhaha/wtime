@@ -2141,3 +2141,315 @@ int main(int argc, char **argv) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn rust_c_x64_small_stack_ctx_heap_and_long_export_parity() {
+    let root = crate::build::create_fresh_test_root("wtime-aot-small-stack-long-exp");
+
+    fn leb(out: &mut Vec<u8>, mut n: u32) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+        out.push(id);
+        leb(out, payload.len() as u32);
+        out.extend_from_slice(payload);
+    }
+
+    // Build a module exercising:
+    // 1. A 65,537-byte valid export name returning 42 (must succeed on all 3 backends).
+    // 2. 16 mutable externref tables x 4,096 entries (512 KiB > 256 KiB thread stack)
+    //    proving blot_aot_new initializes Ctx/tables on the heap without stack overflow.
+    // 3. A large-frame function `big_frame` with 4,096 live i64 locals loaded from memory
+    //    across an opaque host call so LLVM must spill ~32 KiB+; invoking it on a padded
+    //    256 KiB pthread stack must trap cleanly with TRAP_CALL_STACK (8), never SIGSEGV.
+    let long_name = "a".repeat(65_537);
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+    // Types: 0: (i32) -> i64 (host tick), 1: () -> i32 (long export), 2: (i32) -> i32 (big_frame)
+    sec(
+        &mut wasm,
+        1,
+        &[
+            3, 0x60, 1, 0x7f, 1, 0x7e, 0x60, 0, 1, 0x7f, 0x60, 1, 0x7f, 1, 0x7f,
+        ],
+    );
+    // Import: env.tick : type 0
+    sec(
+        &mut wasm,
+        2,
+        &[1, 3, b'e', b'n', b'v', 4, b't', b'i', b'c', b'k', 0x00, 0],
+    );
+    // Defined funcs: f1 = type 1 (long export), f2 = type 2 (big_frame)
+    sec(&mut wasm, 3, &[2, 1, 2]);
+    // 16 fixed-size mutable externref tables of 4,096 entries each (512 KiB total)
+    let mut tabs = vec![16];
+    for _ in 0..16 {
+        tabs.push(0x6f); // externref
+        tabs.push(0x01); // min + max
+        leb(&mut tabs, 4096);
+        leb(&mut tabs, 4096);
+    }
+    sec(&mut wasm, 4, &tabs);
+    // Memory: min 1 page, max 2 pages
+    sec(&mut wasm, 5, &[1, 0x01, 1, 2]);
+    // Exports: long_name -> f1, "big_frame" -> f2
+    let mut exps = vec![2];
+    leb(&mut exps, long_name.len() as u32);
+    exps.extend_from_slice(long_name.as_bytes());
+    exps.extend_from_slice(&[0x00, 1]);
+    leb(&mut exps, 9);
+    exps.extend_from_slice(b"big_frame");
+    exps.extend_from_slice(&[0x00, 2]);
+    sec(&mut wasm, 7, &exps);
+
+    // Body 0 (f1): i32.const 42; end
+    let b1 = vec![0, 0x41, 42, 0x0b];
+    // Body 1 (f2, param l0: i32): 768 i64 locals loaded from memory across call env.tick
+    // (forces >6 KiB real frame spill while compiling in seconds under LLVM -O3).
+    let n_locals = 768u32;
+    let mut b2 = vec![1];
+    leb(&mut b2, n_locals);
+    b2.push(0x7e); // i64
+    for k in 1..=n_locals {
+        b2.extend_from_slice(&[0x20, 0, 0x29, 0x03]); // local.get 0; i64.load align=3
+        leb(&mut b2, (k - 1) * 8);
+        b2.push(0x21); // local.set k
+        leb(&mut b2, k);
+    }
+    b2.extend_from_slice(&[0x20, 0, 0x10, 0]); // acc = call env.tick(l0)
+    for k in 1..=n_locals {
+        b2.push(0x20); // local.get k
+        leb(&mut b2, k);
+        b2.push(0x85); // i64.xor
+    }
+    b2.extend_from_slice(&[0xa7, 0x0b]); // i32.wrap_i64; end
+
+    let mut code = vec![2];
+    leb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    leb(&mut code, b2.len() as u32);
+    code.extend_from_slice(&b2);
+    sec(&mut wasm, 10, &code);
+
+    let wasm_path = root.0.join("mod.wasm");
+    fs::write(&wasm_path, &wasm).unwrap();
+
+    // 1. x64 backend
+    let x64_so = root.0.join("x64.so");
+    let x64_bytes = compile_wasm_to_x64_so(&wasm, &X64CompileOptions::default()).unwrap();
+    fs::write(&x64_so, &x64_bytes).unwrap();
+
+    // 2. C backend
+    let c_cache = root.0.join("c_cache");
+    let c_so = root.0.join("c.so");
+    crate::cgen::build_c_blot_cdylib(
+        &wasm,
+        &c_cache,
+        "native",
+        Some(2),
+        crate::cgen::COpt::O1,
+        Some(Duration::from_secs(120)),
+        &c_so,
+    )
+    .expect("c compile");
+
+    // 3. Rust backend (--blot-cdylib, 1.99.0)
+    let rust_cache = root.0.join("rust_cache");
+    let rt_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
+    let rust_opts = crate::build::Options {
+        toolchain: "1.99.0",
+        target_cpu: "native",
+        jobs: Some(2),
+        time_limit: Duration::from_secs(180),
+        target: crate::codegen::Target::BlotCdylib,
+        backend: crate::build::Backend::Rust,
+        c_opt: crate::cgen::COpt::O1,
+    };
+    let rust_so = crate::build::build(
+        &wasm_path,
+        &rust_cache,
+        Some("mod.wasm"),
+        &rt_path,
+        &rust_opts,
+    )
+    .expect("rust compile");
+
+    const DRIVER_C: &str = r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int32_t (*host_fn_t)(void *, void *, uint32_t, uint64_t, uint64_t, uint64_t *);
+typedef void *(*fn_new)(void *, host_fn_t, uint64_t, uint8_t *);
+typedef void (*fn_drop)(void *);
+typedef int32_t (*fn_call_export)(void *, const uint8_t *, size_t, uint64_t, uint64_t *, uint8_t *);
+
+static int32_t tick_cb(void *u, void *ac, uint32_t idx, uint64_t tok, uint64_t arg, uint64_t *res) {
+    (void)u; (void)ac; (void)idx; (void)tok; (void)arg;
+    *res = 7;
+    return 0;
+}
+
+typedef struct {
+    const char *label;
+    const char *so_path;
+    int rc;
+} Job;
+
+static int __attribute__((noinline)) call_near_floor(
+    uintptr_t floor,
+    fn_call_export call_fn,
+    void *h,
+    const char *long_name,
+    const char *label,
+    uint64_t *r64,
+    uint8_t *tr
+) {
+    volatile uint8_t frame[4096];
+    frame[0] = 1;
+    frame[sizeof(frame) - 1] = 2;
+    uintptr_t sp = (uintptr_t)&frame[0];
+    if (sp > floor + 10 * 1024) {
+        return call_near_floor(floor, call_fn, h, long_name, label, r64, tr);
+    }
+    // At this exact depth (~6-10 KiB above stack_floor), a tiny export MUST still succeed
+    // (proving we have not crossed stack_floor), while `big_frame` MUST trap in its
+    // pre-frame stub on C and Rust (and succeed on x64's dedicated 8 MiB stack).
+    uint64_t lr = 0; uint8_t ltr = 0;
+    int lrc = call_fn(h, (const uint8_t *)long_name, 65537, 0, &lr, &ltr);
+    if (lrc != 0 || lr != 42) {
+        fprintf(stderr, "[%s] small export near floor failed lrc=%d lr=%llu ltr=%u\n",
+                label, lrc, (unsigned long long)lr, ltr);
+        return -99;
+    }
+    return call_fn(h, (const uint8_t *)"big_frame", 9, 0, r64, tr);
+}
+
+static void *worker(void *arg) {
+    Job *j = (Job *)arg;
+    void *dl = dlopen(j->so_path, RTLD_NOW);
+    if (!dl) { fprintf(stderr, "[%s] dlopen: %s\n", j->label, dlerror()); j->rc = 1; return NULL; }
+    fn_new b_new = (fn_new)dlsym(dl, "blot_aot_new");
+    fn_drop b_drop = (fn_drop)dlsym(dl, "blot_aot_drop");
+    fn_call_export b_call = (fn_call_export)dlsym(dl, "blot_aot_call_export");
+    uint8_t tr = 0;
+    // 1. Instantiate 512 KiB of externref tables on a 256 KiB thread stack!
+    void *h = b_new(NULL, tick_cb, 2, &tr);
+    if (!h) { fprintf(stderr, "[%s] blot_aot_new failed tr=%u\n", j->label, tr); dlclose(dl); j->rc = 2; return NULL; }
+
+    // 2. Call 65,537-byte export name (must return 42 on all 3 backends).
+    char *long_name = (char *)malloc(65537);
+    memset(long_name, 'a', 65537);
+    uint64_t r64 = 0;
+    int rc = b_call(h, (const uint8_t *)long_name, 65537, 0, &r64, &tr);
+    if (rc != 0 || r64 != 42) {
+        fprintf(stderr, "[%s] 65537-byte export failed rc=%d r64=%llu tr=%u\n", j->label, rc, (unsigned long long)r64, tr);
+        free(long_name); b_drop(h); dlclose(dl); j->rc = 3; return NULL;
+    }
+
+    // 3a. Unpadded big_frame on 256 KiB stack has ~120 KiB headroom and must succeed on all 3 backends.
+    tr = 0;
+    r64 = 0;
+    rc = b_call(h, (const uint8_t *)"big_frame", 9, 0, &r64, &tr);
+    if (rc != 0 || r64 != 7) {
+        fprintf(stderr, "[%s] unpadded big_frame expected ok(7), got rc=%d r64=%llu tr=%u\n",
+                j->label, rc, (unsigned long long)r64, tr);
+        free(long_name); b_drop(h); dlclose(dl); j->rc = 6; return NULL;
+    }
+
+    // 3b. Step down to ~6-10 KiB above this thread's stack_floor:
+    //    x64 runs on its dedicated 8 MiB stack (succeeds returning 7), while
+    //    C and Rust run on the host thread stack and must trap cleanly (rc=1, trap=8)
+    //    in their pre-frame wrapper rather than overflowing the stack guard page.
+    pthread_attr_t cur_attr;
+    void *saddr = NULL; size_t ssize = 0;
+    if (pthread_getattr_np(pthread_self(), &cur_attr) != 0 ||
+        pthread_attr_getstack(&cur_attr, &saddr, &ssize) != 0) {
+        fprintf(stderr, "[%s] pthread_getattr_np failed\n", j->label);
+        free(long_name); b_drop(h); dlclose(dl); j->rc = 7; return NULL;
+    }
+    pthread_attr_destroy(&cur_attr);
+    uintptr_t headroom = ssize >= (256ULL << 10) ? (128ULL << 10) : (uintptr_t)(ssize / 2);
+    uintptr_t floor = (uintptr_t)saddr + headroom;
+    tr = 0;
+    r64 = 0;
+    rc = call_near_floor(floor, b_call, h, long_name, j->label, &r64, &tr);
+    free(long_name);
+    if (rc == -99) {
+        b_drop(h); dlclose(dl); j->rc = 8; return NULL;
+    }
+    if (strcmp(j->label, "x64") == 0) {
+        if (rc != 0 || r64 != 7) {
+            fprintf(stderr, "[x64] big_frame expected ok(7), got rc=%d r64=%llu tr=%u\n", rc, (unsigned long long)r64, tr);
+            b_drop(h); dlclose(dl); j->rc = 4; return NULL;
+        }
+    } else {
+        if (rc != 1 || tr != 8) {
+            fprintf(stderr, "[%s] big_frame near stack_floor expected trap 8, got rc=%d r64=%llu tr=%u\n",
+                    j->label, rc, (unsigned long long)r64, tr);
+            b_drop(h); dlclose(dl); j->rc = 5; return NULL;
+        }
+    }
+
+    b_drop(h);
+    dlclose(dl);
+    j->rc = 0;
+    return NULL;
+}
+
+static int run_one(const char *label, const char *so_path) {
+    pthread_t th;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    if (pthread_attr_setstacksize(&attr, 256 * 1024) != 0) return 99;
+    Job job = { label, so_path, -1 };
+    if (pthread_create(&th, &attr, worker, &job) != 0) return 98;
+    pthread_attr_destroy(&attr);
+    pthread_join(th, NULL);
+    return job.rc;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 4) return 2;
+    int r;
+    if ((r = run_one("x64", argv[1])) != 0) return 10 + r;
+    if ((r = run_one("c", argv[2])) != 0) return 20 + r;
+    if ((r = run_one("rust", argv[3])) != 0) return 30 + r;
+    return 0;
+}
+"#;
+    let Some(driver) = compile_c_test_bin(
+        &root.0,
+        "small_stack_driver",
+        DRIVER_C,
+        &["-ldl", "-pthread"],
+    ) else {
+        return;
+    };
+    let out = Command::new(&driver)
+        .args([
+            x64_so.to_str().unwrap(),
+            c_so.to_str().unwrap(),
+            rust_so.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "small-stack/long-export 3-backend driver failed ({:?}):\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

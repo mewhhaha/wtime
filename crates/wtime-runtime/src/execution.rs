@@ -18,7 +18,10 @@ mod straight;
 use super::*;
 #[derive(Clone)]
 pub(super) struct Label {
-    pub(super) catches: Vec<wtime_validate::Catch>,
+    /// Source PC of the `try_table` instruction owning this label's catch list
+    /// (`None` for ordinary `block`/`loop`/`if` labels). Catch clauses are read
+    /// directly from the immutable decoded module instead of cloned per entry.
+    pub(super) try_table_pc: Option<usize>,
     pub(super) start: usize,
     pub(super) end: usize,
     pub(super) height: usize,
@@ -172,9 +175,11 @@ impl Store {
         self.invoke_decoded(f, args)
     }
     pub(super) fn invoke_decoded(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
-        let saved_slots = self.active_local_slots.get();
+        let saved_slots = self.active_local_slots;
+        let saved_labels = self.active_labels;
         let result = self.invoke_decoded_inner(f, args);
-        self.active_local_slots.set(saved_slots);
+        self.active_local_slots = saved_slots;
+        self.active_labels = saved_labels;
         result
     }
     fn invoke_decoded_inner(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
@@ -294,6 +299,7 @@ impl Store {
                     register::Step::Return => {
                         if let Some(f) = frames.pop() {
                             self.release_local_slots(f.locals.len());
+                            self.release_labels(f.labels.len());
                         }
                         if frames.is_empty() {
                             for value in &stack {
@@ -337,8 +343,8 @@ impl Store {
                             self.compact_prefix_dispatches.saturating_add(1);
                     }
                 }
-                let step = self.instances[inst_id]
-                    .module
+                let compact_module = self.instances[inst_id].module.clone();
+                let step = compact_module
                     .data
                     .compact
                     .as_ref()
@@ -443,6 +449,7 @@ impl Store {
                             .record(perf::Event::CompactResultMove, u64::from(n != 0));
                         if let Some(f) = frames.pop() {
                             self.release_local_slots(f.locals.len());
+                            self.release_labels(f.labels.len());
                         }
                         if frames.is_empty() {
                             for value in &stack {
@@ -592,8 +599,7 @@ impl Store {
                     let Immediate::TryTable(table) = &op.immediate else {
                         return Err(trap("try_table immediate"));
                     };
-                    let (block, catches) = (&table.block, &table.catches);
-                    let (a, r) = arity(block, module);
+                    let (a, r) = arity(&table.block, module);
                     let (end, _) = module
                         .data
                         .control
@@ -603,15 +609,18 @@ impl Store {
                         .len()
                         .checked_sub(a)
                         .ok_or_else(|| trap("try_table stack underflow"))?;
-                    frame.labels.push(Label {
-                        catches: catches.clone(),
-                        start: pc + 1,
-                        end,
-                        height,
-                        params: a,
-                        results: r,
-                        loop_: false,
-                    });
+                    self.push_label(
+                        &mut frame.labels,
+                        Label {
+                            try_table_pc: Some(pc),
+                            start: pc + 1,
+                            end,
+                            height,
+                            params: a,
+                            results: r,
+                            loop_: false,
+                        },
+                    )?;
                 }
                 0x08 | 0x0a => {
                     let ex = if op.opcode == 0x08 {
@@ -666,15 +675,18 @@ impl Store {
                         .len()
                         .checked_sub(a)
                         .ok_or_else(|| trap("block stack underflow"))?;
-                    frame.labels.push(Label {
-                        catches: vec![],
-                        start: pc + 1,
-                        end,
-                        height,
-                        params: a,
-                        results: r,
-                        loop_: op.opcode == 3,
-                    });
+                    self.push_label(
+                        &mut frame.labels,
+                        Label {
+                            try_table_pc: None,
+                            start: pc + 1,
+                            end,
+                            height,
+                            params: a,
+                            results: r,
+                            loop_: op.opcode == 3,
+                        },
+                    )?;
                     if !cond {
                         frame.pc = other.map_or(end, |x| x + 1)
                     }
@@ -688,6 +700,7 @@ impl Store {
                 }
                 0xb => {
                     if let Some(l) = frame.labels.pop() {
+                        self.release_labels(1);
                         #[cfg(feature = "performance-counters")]
                         self.perf
                             .record(perf::Event::Branch, u64::from(l.results != 0));
@@ -700,6 +713,7 @@ impl Store {
                         keep(&mut stack, base, n)?;
                         if let Some(f) = frames.pop() {
                             self.release_local_slots(f.locals.len());
+                            self.release_labels(f.labels.len());
                             retire(&mut spare, f)
                         }
                         if frames.is_empty() {
@@ -732,6 +746,7 @@ impl Store {
                         keep(&mut stack, frame.base, n)?;
                         if let Some(f) = frames.pop() {
                             self.release_local_slots(f.locals.len());
+                            self.release_labels(f.labels.len());
                             retire(&mut spare, f)
                         }
                         if frames.is_empty() {
@@ -755,7 +770,9 @@ impl Store {
                         )?;
                         frame.pc = if l.loop_ { l.start } else { l.end + 1 };
                         let retain = pos + usize::from(l.loop_);
-                        frame.labels.truncate(retain)
+                        let removed = frame.labels.len() - retain;
+                        frame.labels.truncate(retain);
+                        self.release_labels(removed);
                     }
                 }
                 0xf => {
@@ -767,6 +784,7 @@ impl Store {
                     keep(&mut stack, frame.base, frame.function.ty.results.len())?;
                     if let Some(f) = frames.pop() {
                         self.release_local_slots(f.locals.len());
+                        self.release_labels(f.labels.len());
                         retire(&mut spare, f)
                     }
                     if frames.is_empty() {
@@ -914,6 +932,7 @@ impl Store {
                             stack.truncate(base);
                             if let Some(popped) = frames.pop() {
                                 self.release_local_slots(popped.locals.len());
+                                self.release_labels(popped.labels.len());
                             }
                         } else {
                             stack.truncate(start);
@@ -1021,6 +1040,7 @@ impl Store {
                             keep(&mut stack, caller_base, caller_results)?;
                             if let Some(popped) = frames.pop() {
                                 self.release_local_slots(popped.locals.len());
+                                self.release_labels(popped.labels.len());
                             }
                             if frames.is_empty() {
                                 for value in &stack {
@@ -1039,6 +1059,7 @@ impl Store {
                         stack.truncate(base);
                         if let Some(popped) = frames.pop() {
                             self.release_local_slots(popped.locals.len());
+                            self.release_labels(popped.labels.len());
                         }
                     } else if frames.len() >= self.engine.config.limits.max_call_depth {
                         return Err(err(ErrorKind::ResourceLimit, "call depth exhausted"));
@@ -1236,7 +1257,7 @@ impl Store {
                         stack.push(value)
                     }
                     if null == (op.opcode == 0xd5) {
-                        Self::branch_handler(&mut frames, &mut stack, label as usize)?;
+                        self.branch_handler(&mut frames, &mut stack, label as usize)?;
                     }
                     if frames.is_empty() {
                         self.publish_values(&stack);
@@ -1291,7 +1312,7 @@ impl Store {
                     };
                     stack.push(value);
                     if success == (op.opcode == 0xfb18 || op.opcode == 0xfb25) {
-                        Self::branch_handler(&mut frames, &mut stack, label as usize)?;
+                        self.branch_handler(&mut frames, &mut stack, label as usize)?;
                     }
                     if frames.is_empty() {
                         for value in &stack {
@@ -1949,24 +1970,40 @@ impl Store {
 
 impl Store {
     pub(super) fn unwind_exception(
-        &self,
+        &mut self,
         ex: ExceptionRef,
         frames: &mut Vec<Frame>,
         stack: &mut Vec<Value>,
     ) -> Result<bool> {
-        let exception = &self.exceptions[self.check(ex.0, &self.exceptions)?];
+        let ex_idx = self.check(ex.0, &self.exceptions)?;
+        let ex_tag = self.exceptions[ex_idx].tag;
         while let Some(frame) = frames.last_mut() {
             for pos in (0..frame.labels.len()).rev() {
+                let Some(try_pc) = frame.labels[pos].try_table_pc else {
+                    continue;
+                };
                 let ii = frame.function.instance;
-                for catch in frame.labels[pos].catches.clone() {
-                    if catch
-                        .tag
-                        .is_some_and(|n| self.instances[ii].tags[n as usize] != exception.tag)
-                    {
-                        continue;
-                    }
+                let matched = {
+                    let Immediate::TryTable(table) =
+                        &self.instances[ii].module.data.inner.decoded().code[frame.function.body]
+                            .instructions[try_pc]
+                            .immediate
+                    else {
+                        return Err(trap("try_table immediate"));
+                    };
+                    table
+                        .catches
+                        .iter()
+                        .find(|catch| {
+                            catch
+                                .tag
+                                .is_none_or(|n| self.instances[ii].tags[n as usize] == ex_tag)
+                        })
+                        .cloned()
+                };
+                if let Some(catch) = matched {
                     let mut values = if catch.tag.is_some() {
-                        exception.payload.clone()
+                        self.exceptions[ex_idx].payload.clone()
                     } else {
                         vec![]
                     };
@@ -1979,6 +2016,7 @@ impl Store {
                         stack.extend(values);
                         if let Some(popped) = frames.pop() {
                             self.release_local_slots(popped.locals.len());
+                            self.release_labels(popped.labels.len());
                         }
                         return Ok(true);
                     }
@@ -1994,13 +2032,16 @@ impl Store {
                         label.end + 1
                     };
                     let retain = target + usize::from(label.loop_);
+                    let removed = frame.labels.len() - retain;
                     frame.labels.truncate(retain);
+                    self.release_labels(removed);
                     return Ok(true);
                 }
             }
             let base = frame.base;
             if let Some(popped) = frames.pop() {
                 self.release_local_slots(popped.locals.len());
+                self.release_labels(popped.labels.len());
             }
             stack.truncate(base);
         }

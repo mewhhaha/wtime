@@ -685,7 +685,8 @@ pub struct Store {
     perf: perf::Counters,
     current_fuel: Option<u64>,
     resume_fuel: Option<Option<u64>>,
-    active_local_slots: std::cell::Cell<usize>,
+    active_local_slots: usize,
+    active_labels: usize,
     cancellation: CancellationToken,
     #[cfg(test)]
     bulk_cancel_after: Option<usize>,
@@ -854,7 +855,8 @@ impl Store {
                 perf: perf::Counters::default(),
                 current_fuel: None,
                 resume_fuel: None,
-                active_local_slots: std::cell::Cell::new(0),
+                active_local_slots: 0,
+                active_labels: 0,
                 cancellation: CancellationToken::default(),
                 #[cfg(test)]
                 bulk_cancel_after: None,
@@ -895,7 +897,6 @@ impl Store {
     ) -> Result<()> {
         let net = self
             .active_local_slots
-            .get()
             .saturating_sub(releasing_slots)
             .checked_add(additional_slots)
             .ok_or_else(|| err(ErrorKind::ResourceLimit, "active local slots limit"))?;
@@ -908,14 +909,47 @@ impl Store {
         Ok(())
     }
     #[inline]
-    pub(crate) fn acquire_local_slots(&self, slots: usize) {
-        self.active_local_slots
-            .set(self.active_local_slots.get().saturating_add(slots));
+    pub(crate) fn acquire_local_slots(&mut self, slots: usize) {
+        self.active_local_slots = self.active_local_slots.saturating_add(slots);
     }
     #[inline]
-    pub(crate) fn release_local_slots(&self, slots: usize) {
-        self.active_local_slots
-            .set(self.active_local_slots.get().saturating_sub(slots));
+    pub(crate) fn release_local_slots(&mut self, slots: usize) {
+        self.active_local_slots = self.active_local_slots.saturating_sub(slots);
+    }
+    pub(crate) fn check_label_budget(&self, additional_labels: usize) -> Result<()> {
+        let net = self
+            .active_labels
+            .checked_add(additional_labels)
+            .ok_or_else(|| err(ErrorKind::ResourceLimit, "active control labels limit"))?;
+        let limits = &self.engine.config.limits;
+        let max_labels = limits.max_total_locals.max(limits.max_locals);
+        let bytes = (net as u64).saturating_mul(std::mem::size_of::<execution::Label>() as u64);
+        if net > max_labels || bytes > limits.max_store_memory_bytes {
+            return Err(err(ErrorKind::ResourceLimit, "active control labels limit"));
+        }
+        Ok(())
+    }
+    #[inline]
+    pub(crate) fn push_label(
+        &mut self,
+        labels: &mut Vec<execution::Label>,
+        label: execution::Label,
+    ) -> Result<()> {
+        self.check_label_budget(1)?;
+        labels
+            .try_reserve(1)
+            .map_err(|_| err(ErrorKind::ResourceLimit, "label stack allocation failed"))?;
+        labels.push(label);
+        self.active_labels = self.active_labels.saturating_add(1);
+        Ok(())
+    }
+    #[inline]
+    pub(crate) fn acquire_labels(&mut self, count: usize) {
+        self.active_labels = self.active_labels.saturating_add(count);
+    }
+    #[inline]
+    pub(crate) fn release_labels(&mut self, count: usize) {
+        self.active_labels = self.active_labels.saturating_sub(count);
     }
     fn check<T>(&self, h: Handle, arena: &arena::Arena<T>) -> Result<usize> {
         if h.store != self.id || arena.generation(h.index) != Some(h.generation) {
@@ -3107,6 +3141,7 @@ mod performance_module_ownership {
         code.extend_from_slice(&body);
         sec(&mut rec_wasm, 10, &code);
 
+        #[allow(unused_mut)]
         let mut policies = vec![ExecutionPolicy::Decoded];
         #[cfg(feature = "compact-executor")]
         policies.push(ExecutionPolicy::Compact);
@@ -3127,7 +3162,8 @@ mod performance_module_ownership {
             };
             let err = store.invoke(f, &[]).unwrap_err();
             assert_eq!(err.kind, ErrorKind::ResourceLimit);
-            assert_eq!(store.active_local_slots.get(), 0);
+            assert_eq!(store.active_local_slots, 0);
+            assert_eq!(store.active_labels, 0);
         }
 
         // Tail-recursive 50,000-local countdown for 30 iterations (> max_total_locals if leaked)
@@ -3162,6 +3198,329 @@ mod performance_module_ownership {
             store.invoke(f, &[Value::I32(30)]).unwrap(),
             RunOutcome::Returned(vec![Value::I32(42)])
         );
-        assert_eq!(store.active_local_slots.get(), 0);
+        assert_eq!(store.active_local_slots, 0);
+        assert_eq!(store.active_labels, 0);
+    }
+
+    #[cfg(not(any(
+        feature = "performance-counters",
+        all(feature = "register-executor", feature = "execution-reference")
+    )))]
+    #[test]
+    fn default_feature_store_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Store>();
+    }
+
+    #[test]
+    fn branch_handler_releases_local_slots_and_labels() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+        // f0 has 50,000 locals, increments global 0, pushes a nested block and exits function via `br_on_null 1`.
+        // f1 calls f0 25 times in a loop (25 * 50,000 = 1,250,000 > max_total_locals = 1,000,000).
+        // Must succeed and return 25 with 0 leaked slots/labels.
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut wasm, 1, &[2, 0x60, 0, 0, 0x60, 0, 1, 0x7f]);
+        sec(&mut wasm, 3, &[2, 0, 1]);
+        sec(&mut wasm, 6, &[1, 0x7f, 1, 0x41, 0, 0x0b]);
+        sec(&mut wasm, 7, &[1, 3, b'r', b'u', b'n', 0, 1]);
+        let mut b0 = vec![1];
+        leb(&mut b0, 50_000);
+        b0.push(0x7e);
+        // global.set 0 (i32.add (global.get 0) 1); block (ref.null func; br_on_null 1; drop) end; end
+        b0.extend_from_slice(&[
+            0x23, 0, 0x41, 1, 0x6a, 0x24, 0, 0x02, 0x40, 0xd0, 0x70, 0xd5, 0x01, 0x1a, 0x0b, 0x0b,
+        ]);
+        let b1 = vec![
+            1, 1, 0x7f, // 1 i32 local
+            0x41, 25, 0x21, 0, // local.set 0 = 25
+            0x03, 0x40, // loop
+            0x10, 0x00, // call 0
+            0x20, 0, 0x41, 1, 0x6b, 0x22, 0, 0x0d, 0,    // local.tee 0 (l0 - 1); br_if 0
+            0x0b, // end loop
+            0x23, 0,    // global.get 0
+            0x0b, // end func
+        ];
+        let mut code = vec![2];
+        leb(&mut code, b0.len() as u32);
+        code.extend_from_slice(&b0);
+        leb(&mut code, b1.len() as u32);
+        code.extend_from_slice(&b1);
+        sec(&mut wasm, 10, &code);
+
+        let engine = Engine::new(Config::default()).unwrap();
+        let module = engine.compile(&wasm).unwrap();
+        let mut store = Store::new(&engine);
+        let inst = Linker::new(&engine)
+            .instantiate(&mut store, &module)
+            .unwrap();
+        let External::Func(run) = inst.export(&store, "run").unwrap() else {
+            unreachable!();
+        };
+        assert_eq!(
+            store.invoke(run, &[]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(25)])
+        );
+        assert_eq!(store.active_local_slots, 0);
+        assert_eq!(store.active_labels, 0);
+    }
+
+    #[test]
+    fn active_label_budget_and_try_table_catch_sharing() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+        // 1. 5,000 nested blocks around `call 0`: must hit active_labels budget cleanly.
+        let depth = 5_000usize;
+        let mut block_wasm = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut block_wasm, 1, &[1, 0x60, 0, 0]);
+        sec(&mut block_wasm, 3, &[1, 0]);
+        sec(&mut block_wasm, 7, &[1, 3, b'r', b'u', b'n', 0, 0]);
+        let mut body = vec![0];
+        for _ in 0..depth {
+            body.extend_from_slice(&[0x02, 0x40]);
+        }
+        body.extend_from_slice(&[0x10, 0x00]);
+        body.extend(std::iter::repeat_n(0x0b, depth));
+        body.push(0x0b);
+        let mut code = vec![1];
+        leb(&mut code, body.len() as u32);
+        code.extend_from_slice(&body);
+        sec(&mut block_wasm, 10, &code);
+
+        #[allow(unused_mut)]
+        let mut policies = vec![ExecutionPolicy::Decoded];
+        #[cfg(feature = "compact-executor")]
+        policies.push(ExecutionPolicy::Compact);
+        #[cfg(feature = "register-executor")]
+        policies.push(ExecutionPolicy::Register);
+        #[cfg(feature = "execution-reference")]
+        policies.push(ExecutionPolicy::Reference);
+        for policy in policies {
+            let engine = Engine::with_execution_policy(Config::default(), policy).unwrap();
+            let module = engine.compile(&block_wasm).unwrap();
+            let mut store = Store::new(&engine);
+            let inst = Linker::new(&engine)
+                .instantiate(&mut store, &module)
+                .unwrap();
+            let External::Func(f) = inst.export(&store, "run").unwrap() else {
+                unreachable!();
+            };
+            let err = store.invoke(f, &[]).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::ResourceLimit);
+            assert_eq!(store.active_labels, 0);
+        }
+
+        // 2. 100 nested `try_table` blocks each with 2,000 `catch_all 0` clauses around `call 0`:
+        // catches are shared zero-copy from the module and active labels stay bounded.
+        let mut try_wasm = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut try_wasm, 1, &[1, 0x60, 0, 0]);
+        sec(&mut try_wasm, 3, &[1, 0]);
+        sec(&mut try_wasm, 7, &[1, 3, b'r', b'u', b'n', 0, 0]);
+        let mut tbody = vec![0];
+        for _ in 0..100 {
+            tbody.extend_from_slice(&[0x1f, 0x40]);
+            leb(&mut tbody, 2_000);
+            for _ in 0..2_000 {
+                tbody.extend_from_slice(&[0x02, 0x00]);
+            }
+        }
+        tbody.extend_from_slice(&[0x10, 0x00]);
+        tbody.extend(std::iter::repeat_n(0x0b, 100));
+        tbody.push(0x0b);
+        let mut tcode = vec![1];
+        leb(&mut tcode, tbody.len() as u32);
+        tcode.extend_from_slice(&tbody);
+        sec(&mut try_wasm, 10, &tcode);
+
+        let engine = Engine::new(Config::default()).unwrap();
+        let module = engine.compile(&try_wasm).unwrap();
+        let mut store = Store::new(&engine);
+        let inst = Linker::new(&engine)
+            .instantiate(&mut store, &module)
+            .unwrap();
+        let External::Func(f) = inst.export(&store, "run").unwrap() else {
+            unreachable!();
+        };
+        let err = store.invoke(f, &[]).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ResourceLimit);
+        assert_eq!(store.active_labels, 0);
+    }
+
+    #[test]
+    fn failed_instantiation_pre_escape_reclaims_arena_slots_without_root_scan() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+        // Populate store with a 4,096-element table while max_gc_mark_work = 16.
+        // Previously, any rollback root scan exhausted max_gc_mark_work and kept
+        // failed private allocations alive.
+        let mut cfg = Config::default();
+        cfg.limits.max_gc_mark_work = 16;
+        let engine = Engine::new(cfg).unwrap();
+        let mut store = Store::new(&engine);
+        let mut existing = b"\0asm\x01\0\0\0".to_vec();
+        let mut tpay = vec![1, 0x70, 0x00];
+        leb(&mut tpay, 4096);
+        sec(&mut existing, 4, &tpay);
+        let existing_mod = engine.compile(&existing).unwrap();
+        Linker::new(&engine)
+            .instantiate(&mut store, &existing_mod)
+            .unwrap();
+        let before = (
+            store.funcs.len(),
+            store.mems.len(),
+            store.tabs.len(),
+            store.globals.len(),
+            store.instances.len(),
+        );
+
+        // Module with private func, memory, table (1 elem), and an active element segment
+        // targeting its OWN private table out of bounds (offset 10 > len 1): nothing can escape.
+        let mut failing = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut failing, 1, &[1, 0x60, 0, 0]);
+        sec(&mut failing, 3, &[1, 0]);
+        sec(&mut failing, 4, &[1, 0x70, 0x00, 1]);
+        sec(&mut failing, 5, &[1, 0x00, 1]);
+        sec(&mut failing, 6, &[1, 0x7f, 0, 0x41, 7, 0x0b]);
+        // Active elem targeting table 0 at offset 10 with 1 func index 0
+        sec(&mut failing, 9, &[1, 0x00, 0x41, 10, 0x0b, 1, 0]);
+        sec(&mut failing, 10, &[1, 2, 0, 0x0b]);
+        let failing_mod = engine.compile(&failing).unwrap();
+
+        for _ in 0..20 {
+            let err = Linker::new(&engine)
+                .instantiate(&mut store, &failing_mod)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Trap);
+            assert_eq!(
+                (
+                    store.funcs.len(),
+                    store.mems.len(),
+                    store.tabs.len(),
+                    store.globals.len(),
+                    store.instances.len(),
+                ),
+                before,
+                "pre-escape rollback must reclaim arena slots with zero tombstones"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_instantiation_after_imported_table_escape_keeps_callee_instance_live() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+
+        let engine = Engine::new(Config::default()).unwrap();
+        let mut store = Store::new(&engine);
+
+        // Provider exports a 1-element funcref table "t" and a caller "call0" -> i32.
+        let mut prov = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut prov, 1, &[1, 0x60, 0, 1, 0x7f]); // t0: () -> i32
+        sec(&mut prov, 3, &[1, 0]);
+        sec(&mut prov, 4, &[1, 0x70, 0x00, 1]);
+        sec(
+            &mut prov,
+            7,
+            &[
+                2, 1, b't', 0x01, 0, 5, b'c', b'a', b'l', b'l', b'0', 0x00, 0,
+            ],
+        );
+        // body: i32.const 0; call_indirect type 0 table 0; end
+        sec(&mut prov, 10, &[1, 7, 0, 0x41, 0, 0x11, 0, 0, 0x0b]);
+        let prov_mod = engine.compile(&prov).unwrap();
+        let prov_inst = Linker::new(&engine)
+            .instantiate(&mut store, &prov_mod)
+            .unwrap();
+        let External::Table(tbl) = prov_inst.export(&store, "t").unwrap() else {
+            unreachable!();
+        };
+        let External::Func(call0) = prov_inst.export(&store, "call0").unwrap() else {
+            unreachable!();
+        };
+
+        // Failing module imports table "m"."t", writes its own defined func (returning 42)
+        // into imported table slot 0 via an active elem segment, and then traps in an
+        // out-of-bounds active data segment. Per Wasm Core 3.0 §4.5.4, the escaped
+        // funcref stays live and callable through the imported table.
+        let mut mod2 = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut mod2, 1, &[1, 0x60, 0, 1, 0x7f]);
+        sec(&mut mod2, 2, &[1, 1, b'm', 1, b't', 0x01, 0x70, 0x00, 1]);
+        sec(&mut mod2, 3, &[1, 0]);
+        sec(&mut mod2, 5, &[1, 0x00, 1]); // 1-page memory
+        sec(&mut mod2, 9, &[1, 0x00, 0x41, 0, 0x0b, 1, 0]); // active elem: tab 0 @ 0 = [func 0]
+        sec(&mut mod2, 10, &[1, 4, 0, 0x41, 42, 0x0b]); // func 0: () -> 42
+        // Active data at offset 65536 (out of bounds for 1-page memory) with 1 byte
+        let mut dsec = vec![1, 0x00, 0x41];
+        // signed LEB128 for 65536 = 0x80, 0x80, 0x04
+        dsec.extend_from_slice(&[0x80, 0x80, 0x04, 0x0b, 1, 0xaa]);
+        sec(&mut mod2, 11, &dsec);
+        let mod2 = engine.compile(&mod2).unwrap();
+
+        let mut linker = Linker::new(&engine);
+        linker.define("m", "t", External::Table(tbl)).unwrap();
+        let err = linker.instantiate(&mut store, &mod2).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Trap);
+
+        // Calling the escaped funcref must succeed and return 42 without panicking.
+        assert_eq!(
+            store.invoke(call0, &[]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(42)])
+        );
     }
 }

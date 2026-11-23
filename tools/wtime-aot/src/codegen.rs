@@ -2836,8 +2836,8 @@ impl Module {
                 writeln!(s, "    pub g{k}: {},", rust_type(*t)?).unwrap();
             }
         }
-        for (&tbl, &len) in &self.mut_extern_tables {
-            writeln!(s, "    pub t{tbl}: [u64; {len}],").unwrap();
+        for &tbl in self.mut_extern_tables.keys() {
+            writeln!(s, "    pub t{tbl}: Box<[u64]>,").unwrap();
         }
         if self.target == Target::BlotCdylib {
             s.push_str("    pub host_ctx: usize,\n");
@@ -3459,7 +3459,7 @@ impl Module {
             }
         }
         for (&tbl, &len) in &self.mut_extern_tables {
-            writeln!(s, "        t{tbl}: [0u64; {len}],").unwrap();
+            writeln!(s, "        t{tbl}: wtime_aot_rt::zeroed_u64({len})?,").unwrap();
         }
         writeln!(
             s,
@@ -3539,14 +3539,25 @@ impl Module {
         self.emit_fns_impl(&mut s, paths)?;
         self.emit_initialize(m, &mut s, data)?;
 
+        let max_ffi_name_len = m
+            .exports
+            .iter()
+            .map(|e| e.name.len())
+            .chain(self.exported_globals.iter().map(|(n, ..)| n.len()))
+            .max()
+            .unwrap_or(0);
         // Host trampoline, MXCSR/stack-floor isolation, & opaque C-ABI handle structs.
         // `BlotHandle::in_call` lives in a disjoint `Cell<bool>` checked via raw
         // `addr_of!` before any reference to `ctx` or `mem` is formed, eliminating
         // aliasing `&mut` borrows if a host callback re-enters on the outer handle.
-        s.push_str(
+        writeln!(
+            s,
             "pub type HostFn = unsafe extern \"C\" fn(*mut c_void, *mut ActiveCall, u32, u64, u64, *mut u64) -> i32;\n\n\
-             const MAX_FFI_NAME_LEN: usize = 65_536;\n\n\
-             #[repr(C)]\n\
+             const MAX_FFI_NAME_LEN: usize = {max_ffi_name_len};\n"
+        )
+        .unwrap();
+        s.push_str(
+            "#[repr(C)]\n\
              pub struct ActiveCall {\n\
                  ctx: *mut Ctx,\n\
                  mem_ptr: *mut u8,\n\
@@ -3596,11 +3607,13 @@ impl Module {
              }\n\n\
              pub struct BlotHandle {\n\
                  in_call: std::cell::Cell<bool>,\n\
-                 ctx: std::cell::UnsafeCell<Ctx>,\n\
+                 ctx: std::cell::UnsafeCell<Box<Ctx>>,\n\
                  mem: std::cell::UnsafeCell<MemBuf>,\n\
                  bridge: *mut HostBridge,\n\
-             }\n\n\
-             impl Drop for BlotHandle {\n\
+             }\n\n",
+        );
+        s.push_str(
+            "impl Drop for BlotHandle {\n\
                  fn drop(&mut self) {\n\
                      if !self.bridge.is_null() {\n\
                          unsafe { drop(Box::from_raw(self.bridge)); }\n\
@@ -3813,39 +3826,71 @@ impl Module {
                 writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
             }
         }
-        s.push_str("    let mut ctx = Ctx {\n        stack_floor,\n        mem: mem_meta,\n");
+        for (&tbl, &len) in &self.mut_extern_tables {
+            writeln!(
+                s,
+                "    let t{tbl} = match wtime_aot_rt::zeroed_u64({len}) {{\n\
+                 \x20       Ok(v) => v,\n\
+                 \x20       Err(t) => {{ unsafe {{ drop(Box::from_raw(bridge)); }} write_trap(trap_out, t); return std::ptr::null_mut(); }}\n\
+                 \x20   }};"
+            )
+            .unwrap();
+        }
+        // Allocate `Ctx` directly on the heap via fallible `alloc_zeroed` so
+        // modules with large contexts never build `Ctx` on the host thread stack.
+        s.push_str(
+            "    let ctx_layout = std::alloc::Layout::new::<Ctx>();\n\
+                 let ctx_raw = unsafe { std::alloc::alloc_zeroed(ctx_layout) as *mut Ctx };\n\
+                 if ctx_raw.is_null() {\n\
+                     unsafe { drop(Box::from_raw(bridge)); }\n\
+                     write_trap(trap_out, Trap::AllocationFailed);\n\
+                     return std::ptr::null_mut();\n\
+                 }\n\
+                 unsafe {\n\
+                     std::ptr::addr_of_mut!((*ctx_raw).stack_floor).write(stack_floor);\n\
+                     std::ptr::addr_of_mut!((*ctx_raw).mem).write(mem_meta);\n",
+        );
         for k in 0..self.globals.len() {
             if self.global_consts[k].is_none() {
-                writeln!(s, "        g{k},").unwrap();
+                writeln!(
+                    s,
+                    "        std::ptr::addr_of_mut!((*ctx_raw).g{k}).write(g{k});"
+                )
+                .unwrap();
             }
         }
-        for (&tbl, &len) in &self.mut_extern_tables {
-            writeln!(s, "        t{tbl}: [0u64; {len}],").unwrap();
+        for &tbl in self.mut_extern_tables.keys() {
+            writeln!(
+                s,
+                "        std::ptr::addr_of_mut!((*ctx_raw).t{tbl}).write(t{tbl});"
+            )
+            .unwrap();
         }
         s.push_str(
-            "        host_ctx,\n\
-                 host_mxcsr: 0x1f80,\n\
-                 host_call: host_trampoline,\n\
-             };\n\
-             let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut ctx, mem.as_mut_slice(), (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
-             if let Err(t) = init_res {\n\
-                 unsafe { drop(Box::from_raw(bridge)); }\n\
-                 write_trap(trap_out, t);\n\
-                 return std::ptr::null_mut();\n\
-             }\n\
-             Box::into_raw(Box::new(BlotHandle {\n\
-                 in_call: std::cell::Cell::new(false),\n\
-                 ctx: std::cell::UnsafeCell::new(ctx),\n\
-                 mem: std::cell::UnsafeCell::new(mem),\n\
-                 bridge,\n\
-             }))\n\
-             }\n\n\
-             #[unsafe(no_mangle)]\n\
-             pub extern \"C\" fn blot_aot_drop(handle: *mut BlotHandle) {\n\
-                 if handle.is_null() { return; }\n\
-                 if unsafe { handle_in_call(handle) } { return; }\n\
-                 unsafe { drop(Box::from_raw(handle)); }\n\
-             }\n\n",
+            "        std::ptr::addr_of_mut!((*ctx_raw).host_ctx).write(host_ctx);\n\
+                     std::ptr::addr_of_mut!((*ctx_raw).host_mxcsr).write(0x1f80);\n\
+                     std::ptr::addr_of_mut!((*ctx_raw).host_call).write(host_trampoline);\n\
+                 }\n\
+                 let mut ctx: Box<Ctx> = unsafe { Box::from_raw(ctx_raw) };\n\
+                 let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut ctx, mem.as_mut_slice(), (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
+                 if let Err(t) = init_res {\n\
+                     unsafe { drop(Box::from_raw(bridge)); }\n\
+                     write_trap(trap_out, t);\n\
+                     return std::ptr::null_mut();\n\
+                 }\n\
+                 Box::into_raw(Box::new(BlotHandle {\n\
+                     in_call: std::cell::Cell::new(false),\n\
+                     ctx: std::cell::UnsafeCell::new(ctx),\n\
+                     mem: std::cell::UnsafeCell::new(mem),\n\
+                     bridge,\n\
+                 }))\n\
+                 }\n\n\
+                 #[unsafe(no_mangle)]\n\
+                 pub extern \"C\" fn blot_aot_drop(handle: *mut BlotHandle) {\n\
+                     if handle.is_null() { return; }\n\
+                     if unsafe { handle_in_call(handle) } { return; }\n\
+                     unsafe { drop(Box::from_raw(handle)); }\n\
+                 }\n\n",
         );
 
         // Helper for calling a single-param/single-result Blot export.
@@ -3888,7 +3933,7 @@ impl Module {
                         s,
                         "    if handle.is_null() || unsafe {{ handle_in_call(handle) }} {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
                              let _guard = unsafe {{ InCallGuard::enter(handle) }};\n\
-                             let ctx = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).ctx)).get() }};\n\
+                             let ctx: &mut Ctx = unsafe {{ &mut **(*std::ptr::addr_of!((*handle).ctx)).get() }};\n\
                              let mem = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).mem)).get() }};\n\
                              ctx.stack_floor = blot_stack_floor();\n\
                              if sp_here() <= ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
@@ -3926,7 +3971,7 @@ impl Module {
                 s,
                 "    if handle.is_null() || unsafe {{ handle_in_call(handle) }} {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
                      let _guard = unsafe {{ InCallGuard::enter(handle) }};\n\
-                     let ctx = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).ctx)).get() }};\n\
+                     let ctx: &mut Ctx = unsafe {{ &mut **(*std::ptr::addr_of!((*handle).ctx)).get() }};\n\
                      let mem = unsafe {{ &mut *(*std::ptr::addr_of!((*handle).mem)).get() }};\n\
                      ctx.stack_floor = blot_stack_floor();\n\
                      if sp_here() <= ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
@@ -3950,7 +3995,7 @@ impl Module {
                  if unsafe { handle_in_call(handle) } { write_trap(trap_out, Trap::Host); return 2; }\n\
                  let Some(name) = read_ffi_name(name_ptr, name_len) else { return 3; };\n\
                  let _guard = unsafe { InCallGuard::enter(handle) } ;\n\
-                 let ctx = unsafe { &mut *(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let ctx: &mut Ctx = unsafe { &mut **(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
                  let mem = unsafe { &mut *(*std::ptr::addr_of!((*handle).mem)).get() };\n\
                  ctx.stack_floor = blot_stack_floor();\n\
                  let res: R<u64> = match name {\n",
@@ -4011,7 +4056,7 @@ impl Module {
                      }\n\
                      return;\n\
                  }\n\
-                 let ctx = unsafe { &*(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let ctx: &Ctx = unsafe { &**(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
                  let mem = unsafe { &*(*std::ptr::addr_of!((*handle).mem)).get() };\n\
                  unsafe {\n\
                      if !ptr_out.is_null() { *ptr_out = mem.as_mut_ptr(); }\n\
@@ -4044,7 +4089,7 @@ impl Module {
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_mem_grow(handle: *mut BlotHandle, delta_pages: u64) -> i64 {\n\
                  if handle.is_null() || unsafe { handle_in_call(handle) } { return -1; }\n\
-                 let ctx = unsafe { &mut *(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let ctx: &mut Ctx = unsafe { &mut **(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
                  ctx.mem.grow(delta_pages)\n\
              }\n\n",
         );
@@ -4076,7 +4121,7 @@ impl Module {
              pub extern \"C\" fn blot_aot_get_global(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, val_out: *mut u64, kind_out: *mut u8) -> i32 {\n\
                  if handle.is_null() || unsafe { handle_in_call(handle) } { return 1; }\n\
                  let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
-                 let ctx = unsafe { &*(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let ctx: &Ctx = unsafe { &**(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
                  let Some((v, k)) = read_global(ctx, name) else { return 1; };\n\
                  unsafe {\n\
                      if !val_out.is_null() { *val_out = v; }\n\
@@ -4102,7 +4147,7 @@ impl Module {
              pub extern \"C\" fn blot_aot_set_global(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, val: u64) -> i32 {\n\
                  if handle.is_null() || unsafe { handle_in_call(handle) } { return 1; }\n\
                  let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
-                 let ctx = unsafe { &mut *(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
+                 let ctx: &mut Ctx = unsafe { &mut **(*std::ptr::addr_of!((*handle).ctx)).get() };\n\
                  match name {\n",
         );
         for (name, gi, vt, mutable) in &self.exported_globals {
@@ -4962,54 +5007,80 @@ impl<'a> Function<'a> {
             "ctx: &mut Ctx".to_string(),
             format!("mb: {}", self.module.mb_type()),
         ];
+        let mut call_args = vec!["ctx".to_string(), "mb".to_string()];
         for &g in &fn_reg_globals {
             all.push(format!(
                 "mut gv{g}: {}",
                 rust_type(self.module.globals[g as usize].0)?
             ));
+            call_args.push(format!("gv{g}"));
         }
         for (i, t) in ty.params.iter().enumerate() {
             all.push(format!("mut l{i}: {}", rust_type(*t)?));
+            call_args.push(format!("l{i}"));
         }
         let is_root = self.module.start == Some(self.index as u32)
             || self.module.entry == Some(self.index as u32)
             || self.module.reserve == Some(self.index as u32)
             || (self.module.target == Target::BlotCdylib
                 && self.module.exported_funcs.contains(&self.index));
-        let inline_always = self.module.fn_inline_always(self.index);
-        let should_inline = !self.module.fn_in_cycle[self.index]
-            && (code.len() <= INLINE_INSTRUCTIONS
-                || (!self.module.fn_has_calls[self.index]
-                    && code.len() <= INLINE_LEAF_INSTRUCTIONS
-                    && self.module.fn_callers[self.index] <= INLINE_LEAF_MAX_CALLERS)
-                || (!is_root
-                    && self.module.fn_callers[self.index] == 1
-                    && code.len() <= INLINE_SINGLE_CALLER_INSTRUCTIONS));
-        if inline_always {
-            writeln!(out, "#[inline(always)]").unwrap();
-        } else if should_inline {
-            writeln!(out, "#[inline]").unwrap();
-        }
-        writeln!(
-            out,
-            "pub fn f{}<M>({}) -> {}\nwhere\n    Ctx: Fns<M>,\n{{",
-            self.index,
-            all.join(", "),
-            fn_return_type(&ty.results)?
-        )
-        .unwrap();
-        // Calls check the remaining native stack against a conservative frame
-        // estimate unless this function heads a tiny acyclic subtree safely
-        // inside the configured stack headroom. Using `MaybeUninit::uninit()`
-        // avoids a dead stack write in every prologue.
-        if !self.module.fn_no_stack_check[self.index] {
+        let need_stack_check = !self.module.fn_no_stack_check[self.index];
+        // Conservative frame-size bound (locals + expression spills + call overhead).
+        let frame_est = self
+            .locals
+            .len()
+            .saturating_mul(24)
+            .saturating_add(code.len().min(65_536).saturating_mul(4))
+            .saturating_add(8192);
+        // For larger functions (including large leaf functions), check stack headroom
+        // inside a tiny wrapper BEFORE calling a `#[inline(never)]` body so LLVM
+        // cannot allocate a giant stack frame prologue past the guard page before the
+        // check executes.
+        let need_large_stub = self.locals.len() > 64 || code.len() > 256;
+        let ret_ty = fn_return_type(&ty.results)?;
+        if need_large_stub {
             let stack_trap = ret_err_expr(fn_abi, "Trap::CallStackExhausted")?;
-            let frame_est = self.locals.len().saturating_mul(16).saturating_add(4096);
             writeln!(
                 out,
-                "    let frame = std::mem::MaybeUninit::<u8>::uninit();\n    let sp = frame.as_ptr() as usize;\n    if sp <= ctx.stack_floor || sp - ctx.stack_floor < {frame_est}usize {{ return {stack_trap}; }}"
+                "pub fn f{}<M>({}) -> {ret_ty}\nwhere\n    Ctx: Fns<M>,\n{{\n    let frame = std::mem::MaybeUninit::<u8>::uninit();\n    let sp = frame.as_ptr() as usize;\n    if sp <= ctx.stack_floor || sp - ctx.stack_floor < {frame_est}usize {{ return {stack_trap}; }}\n    f{}_body::<M>({})\n}}\n\n#[inline(never)]\nfn f{}_body<M>({}) -> {ret_ty}\nwhere\n    Ctx: Fns<M>,\n{{",
+                self.index,
+                all.join(", "),
+                self.index,
+                call_args.join(", "),
+                self.index,
+                all.join(", "),
             )
             .unwrap();
+        } else {
+            let inline_always = self.module.fn_inline_always(self.index);
+            let should_inline = !self.module.fn_in_cycle[self.index]
+                && (code.len() <= INLINE_INSTRUCTIONS
+                    || (!self.module.fn_has_calls[self.index]
+                        && code.len() <= INLINE_LEAF_INSTRUCTIONS
+                        && self.module.fn_callers[self.index] <= INLINE_LEAF_MAX_CALLERS)
+                    || (!is_root
+                        && self.module.fn_callers[self.index] == 1
+                        && code.len() <= INLINE_SINGLE_CALLER_INSTRUCTIONS));
+            if inline_always {
+                writeln!(out, "#[inline(always)]").unwrap();
+            } else if should_inline {
+                writeln!(out, "#[inline]").unwrap();
+            }
+            writeln!(
+                out,
+                "pub fn f{}<M>({}) -> {ret_ty}\nwhere\n    Ctx: Fns<M>,\n{{",
+                self.index,
+                all.join(", "),
+            )
+            .unwrap();
+            if need_stack_check {
+                let stack_trap = ret_err_expr(fn_abi, "Trap::CallStackExhausted")?;
+                writeln!(
+                    out,
+                    "    let frame = std::mem::MaybeUninit::<u8>::uninit();\n    let sp = frame.as_ptr() as usize;\n    if sp <= ctx.stack_floor || sp - ctx.stack_floor < {frame_est}usize {{ return {stack_trap}; }}"
+                )
+                .unwrap();
+            }
         }
         if uses_ml {
             let oob = ret_err_expr(fn_abi, "Trap::OutOfBounds")?;
@@ -6715,8 +6786,8 @@ mod tests {
         // O(1) static fn-pointer table emitted for 5-target call_indirect
         assert!(lib_src.contains("static CI0_TBL: [Option<Ci0Fn>; 5]"));
         assert!(lib_src.contains("pub extern \"C\" fn blot_aot_call_export"));
-        // Externref table field emitted in Ctx
-        assert!(core_src.contains("pub t1: [u64; 1],"));
+        // Externref table field emitted in Ctx (heap-allocated Box<[u64]>)
+        assert!(core_src.contains("pub t1: Box<[u64]>,"));
         // ScalarPair & Pair32 return ABIs used for void / 2x32-bit pairs, R<i32> for i32
         assert!(fns_src.contains("-> Option<Trap>"));
         assert!(fns_src.contains("-> (u64, Option<Trap>)"));

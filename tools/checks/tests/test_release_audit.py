@@ -31,7 +31,9 @@ class ReleaseAuditTests(unittest.TestCase):
             'stdout': json.dumps({
                 'allocator_failed': True,
                 'guest_table_allocation_failed': True,
+                'element_allocation_failed': True,
                 'frame_allocation_failed': True,
+                'label_allocation_failed': True,
                 'recovery_passed': True,
                 'executed': 1,
             }),
@@ -124,7 +126,7 @@ class ReleaseAuditTests(unittest.TestCase):
             'unsupported': 0, 'text_tool_errors': 0,
             'profile': 'stable-core', 'suite': 'core3',
             'source_hash': 'corpus-lock:def;fixture:abc',
-            'engine_revision': 'dirty-fixture',
+            'engine_revision': 'a' * 40,
             'binary_sha256': audit.sha256(binary),
             'implementation_sources': {'engine.rs': audit.sha256(source)},
             'core_spec_commit': 'abc',
@@ -223,7 +225,9 @@ class ReleaseAuditTests(unittest.TestCase):
                 'stdout': json.dumps({
                     'allocator_failed': True,
                     'guest_table_allocation_failed': True,
+                    'element_allocation_failed': True,
                     'frame_allocation_failed': True,
+                    'label_allocation_failed': True,
                     'recovery_passed': True,
                     'executed': 1,
                 }),
@@ -233,24 +237,50 @@ class ReleaseAuditTests(unittest.TestCase):
             audit._check_allocation_failure(report, errors, root, verify_local_binaries=True)
             self.assertEqual(errors, [])
 
-            # Missing frame_allocation_failed must fail closed
-            no_frame = {**report, 'stdout': json.dumps({
-                'allocator_failed': True,
-                'guest_table_allocation_failed': True,
-                'frame_allocation_failed': False,
-                'recovery_passed': True,
-                'executed': 1,
-            })}
-            errors = []
-            audit._check_allocation_failure(no_frame, errors, root, verify_local_binaries=True)
-            self.assertIn('evidence allocation_failure: worker did not report allocator failure and successful recovery', errors)
+            # Missing frame/element/label allocation flags must fail closed
+            for missing_field in ('element_allocation_failed', 'frame_allocation_failed', 'label_allocation_failed'):
+                payload = {
+                    'allocator_failed': True,
+                    'guest_table_allocation_failed': True,
+                    'element_allocation_failed': True,
+                    'frame_allocation_failed': True,
+                    'label_allocation_failed': True,
+                    'recovery_passed': True,
+                    'executed': 1,
+                }
+                payload[missing_field] = False
+                bad_report = {**report, 'stdout': json.dumps(payload)}
+                errors = []
+                audit._check_allocation_failure(bad_report, errors, root, verify_local_binaries=True)
+                self.assertIn(
+                    'evidence allocation_failure: worker did not report allocator failure and successful recovery',
+                    errors,
+                )
 
-            # Dirty engine_revision must fail closed
+            # Dirty or non-40-char engine_revision must fail closed
             conf = self.conformance_report(root)
-            conf['engine_revision'] = '1c18cc8-dirty'
+            for bad_rev in ('1c18cc8-dirty', 'arbitrary-string', 'a' * 39):
+                conf['engine_revision'] = bad_rev
+                conf_errors = []
+                audit._check_conformance(conf, 'core3', conf_errors, root, 'abc', 'def')
+                self.assertIn(
+                    'evidence core3: engine revision must be a clean 40-character commit SHA',
+                    conf_errors,
+                )
+
+            # Full-suite selection check must fail closed when a corpus file is omitted
+            conf['engine_revision'] = 'a' * 40
+            fake_lock = {
+                'suites': {'core3': ['spec/a.wast', 'spec/b.wast']},
+                'files': [
+                    {'path': 'spec/a.wast', 'sha256': '1' * 64},
+                    {'path': 'spec/b.wast', 'sha256': '2' * 64},
+                ],
+            }
+            conf['source_hash'] = f"corpus-lock:def;.cache/spec/a.wast:{'1' * 64}"
             conf_errors = []
-            audit._check_conformance(conf, 'core3', conf_errors, root, 'abc', 'def')
-            self.assertIn('evidence core3: engine revision is missing or dirty', conf_errors)
+            audit._check_conformance(conf, 'core3', conf_errors, root, 'abc', 'def', corpus_lock=fake_lock)
+            self.assertTrue(any('full suite selection incomplete' in e for e in conf_errors))
 
     def test_t169_case_13_missing_interaction_corpus_blocks_release(self):
         manifest = {

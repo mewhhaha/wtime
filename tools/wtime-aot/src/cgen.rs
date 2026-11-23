@@ -1767,7 +1767,7 @@ fn emit_c_function(
     let params = c_fn_params(module, index, true)?;
     let frame_slots = locals.len().saturating_add(e.scratch_decls.len());
     let need_large_stub = frame_slots > 64;
-    let frame_est = (frame_slots as u64).saturating_mul(16).saturating_add(4096);
+    let frame_est = (frame_slots as u64).saturating_mul(24).saturating_add(8192);
     if need_large_stub {
         let body_name = if is_inline_leaf {
             format!("f{index}_inl_body")

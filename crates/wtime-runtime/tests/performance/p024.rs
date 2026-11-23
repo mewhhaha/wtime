@@ -118,19 +118,34 @@ fn p024_captured_module_lifetime() {
 }
 
 #[test]
-fn p024_restored_captures_account_for_owned_catches() {
+fn p024_restored_captures_share_immutable_catches() {
     let mut sizes = vec![];
     for name in ["captured_try_table_one", "captured_try_table_four"] {
         let (mut store, instance) = load(name);
-        assert!(matches!(
-            run(&mut store, instance, "run", &[]).unwrap(),
-            RunOutcome::Suspended { .. }
-        ));
+        let RunOutcome::Suspended { continuation, .. } =
+            run(&mut store, instance, "run", &[]).unwrap()
+        else {
+            panic!()
+        };
         sizes.push(store.continuation_bytes());
+        assert_eq!(
+            run(
+                &mut store,
+                instance,
+                "resume",
+                &[Value::Ref(RefValue::Gc(continuation))]
+            )
+            .unwrap(),
+            RunOutcome::Returned(vec![Value::I32(29)])
+        );
     }
     assert!(sizes[0] > 0);
-    // Rejected candidate shared these payloads. The restored predecessor owns them.
-    assert!(sizes[1] > sizes[0], "owned catch payloads must be charged");
+    // Labels store only `try_table_pc` and borrow catch clauses zero-copy from
+    // the immutable module, so wider catch lists add zero cloned bytes per capture.
+    assert_eq!(
+        sizes[1], sizes[0],
+        "try_table catch lists must be shared zero-copy from immutable module storage"
+    );
 }
 #[test]
 fn p024_restored_try_table_normal_path_keeps_result() {
@@ -154,7 +169,7 @@ fn p024_restored_try_table_normal_path_keeps_result() {
 }
 #[cfg(feature = "execution-reference")]
 #[test]
-fn p024_reference_captures_keep_owned_catch_accounting() {
+fn p024_reference_captures_share_immutable_catches() {
     let engine = Engine::with_execution_policy(
         Config {
             features: FeatureSet::all_phase3_core(),
@@ -191,9 +206,10 @@ fn p024_reference_captures_keep_owned_catch_accounting() {
             RunOutcome::Returned(vec![Value::I32(29)])
         );
     }
-    assert!(
-        sizes[1] > sizes[0],
-        "frozen reference catch vectors remain owned and charged"
+    assert!(sizes[0] > 0);
+    assert_eq!(
+        sizes[1], sizes[0],
+        "reference captures must also share try_table catch lists zero-copy"
     );
 }
 

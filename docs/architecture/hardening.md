@@ -35,18 +35,31 @@ compatible installed nightly and is not silently counted as run.
 The allocator test is distinct from a configured budget rejection. Build
 `wtime-allocation-check` and run `python3 tools/checks/allocation_failure.py`.
 Unshared linear memory is stored as 64 KiB pages allocated on first write, so
-the worker exercises both allocation points under a process address-space
-limit of 128 MiB. Creating a permitted 1 TiB memory64 memory fails in the
-fallible reservation of its 256 MiB page table; the worker checks the resource
-error, then creates and accesses a one-page memory and a 512 MiB memory under a
-two-object store budget, proving the failed construction left no partially
-registered memory. It then writes one byte to each page of the 512 MiB memory:
-once the address space is exhausted the write returns the same resource error
-instead of aborting, and the bytes already written remain readable. The
-guarantee covers linear-memory pages and page tables; other small runtime
-allocations (argument vectors, frames, error messages) still use infallible
-allocation and can abort the process at the exact point of exhaustion. The
-report includes the actual worker exit/output and its executable fingerprint.
+the worker exercises each major guest-controlled allocation point under a
+process address-space limit of 128 MiB:
+1. Creating a permitted 1 TiB memory64 memory fails in the fallible reservation
+   of its 256 MiB page table; the worker checks the resource error, then creates
+   and accesses a one-page memory and a 512 MiB memory under a two-object store
+   budget, proving the failed construction left no partially registered memory.
+2. Writing one byte to each page of the 512 MiB memory fails recoverably once
+   the address space is exhausted, leaving bytes already written intact.
+3. Instantiating a 16M-element guest table on a populated store fails
+   recoverably in fallible table reservation and rolls back unpublished private
+   allocations without aborting or leaking arena slots.
+4. Initializing a large passive element segment fails recoverably in fallible
+   element reservation and leaves the store usable.
+5. Executing a recursive 50,000-local module fails cleanly against both the
+   default active local-slot budget and real OS `try_reserve_exact` OOM.
+6. Executing deeply nested control blocks and nested `try_table` blocks with
+   large catch tables fails cleanly against both the active label budget and
+   fallible label-stack reservation (with zero-copy `try_table` catch clauses).
+
+The guarantee covers linear-memory pages and page tables, guest tables, passive
+and active element buffers, active call-frame local and argument vectors,
+`Store::read_memory` / `SharedMemory::read` buffers, and control label stacks;
+small fixed runtime metadata (error strings, small host wrappers) still uses
+standard Rust allocation. The report includes the actual worker exit/output and
+its executable fingerprint.
 
 The Decoded tier lowers a function body once it has run four times its length
 in instructions (at least 64): 16 bytes per instruction, kept with the module

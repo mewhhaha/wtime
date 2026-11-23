@@ -155,7 +155,9 @@ pub struct ResourceLimits {
     pub max_tags: usize,
     /// Maximum number of locals (parameters plus declared locals) in a single function.
     pub max_locals: usize,
-    /// Maximum aggregate number of locals across all functions in a module.
+    /// Maximum aggregate number of locals across all functions in a module;
+    /// at runtime also bounds aggregate active frame local slots and active
+    /// control labels across live call frames in a `Store`.
     pub max_total_locals: usize,
     /// Maximum operand stack height during validation and execution.
     pub max_stack_height: usize,

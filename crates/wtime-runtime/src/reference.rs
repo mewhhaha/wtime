@@ -27,9 +27,11 @@ pub(super) fn keep(s: &mut Vec<Value>, height: usize, n: usize) -> Result<()> {
 }
 impl Store {
     pub(super) fn invoke_reference(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
-        let saved_slots = self.active_local_slots.get();
+        let saved_slots = self.active_local_slots;
+        let saved_labels = self.active_labels;
         let result = self.invoke_reference_inner(f, args);
-        self.active_local_slots.set(saved_slots);
+        self.active_local_slots = saved_slots;
+        self.active_labels = saved_labels;
         result
     }
     fn invoke_reference_inner(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
@@ -121,8 +123,7 @@ impl Store {
                     let Immediate::TryTable(table) = &op.immediate else {
                         return Err(trap("try_table immediate"));
                     };
-                    let (block, catches) = (&table.block, &table.catches);
-                    let (a, r) = arity(block, &module);
+                    let (a, r) = arity(&table.block, &module);
                     let (end, _) = module
                         .data
                         .control
@@ -132,15 +133,18 @@ impl Store {
                         .len()
                         .checked_sub(a)
                         .ok_or_else(|| trap("try_table stack underflow"))?;
-                    frame.labels.push(Label {
-                        catches: catches.clone(),
-                        start: pc + 1,
-                        end,
-                        height,
-                        params: a,
-                        results: r,
-                        loop_: false,
-                    });
+                    self.push_label(
+                        &mut frame.labels,
+                        Label {
+                            try_table_pc: Some(pc),
+                            start: pc + 1,
+                            end,
+                            height,
+                            params: a,
+                            results: r,
+                            loop_: false,
+                        },
+                    )?;
                 }
                 0x08 | 0x0a => {
                     let ex = if op.opcode == 0x08 {
@@ -195,15 +199,18 @@ impl Store {
                         .len()
                         .checked_sub(a)
                         .ok_or_else(|| trap("block stack underflow"))?;
-                    frame.labels.push(Label {
-                        catches: vec![],
-                        start: pc + 1,
-                        end,
-                        height,
-                        params: a,
-                        results: r,
-                        loop_: op.opcode == 3,
-                    });
+                    self.push_label(
+                        &mut frame.labels,
+                        Label {
+                            try_table_pc: None,
+                            start: pc + 1,
+                            end,
+                            height,
+                            params: a,
+                            results: r,
+                            loop_: op.opcode == 3,
+                        },
+                    )?;
                     if !cond {
                         frame.pc = other.map_or(end, |x| x + 1)
                     }
@@ -217,6 +224,7 @@ impl Store {
                 }
                 0xb => {
                     if let Some(l) = frame.labels.pop() {
+                        self.release_labels(1);
                         keep(&mut stack, l.height, l.results)?;
                     } else {
                         let n = frame.function.ty.results.len();
@@ -224,6 +232,7 @@ impl Store {
                         keep(&mut stack, base, n)?;
                         if let Some(popped) = frames.pop() {
                             self.release_local_slots(popped.locals.len());
+                            self.release_labels(popped.labels.len());
                         }
                         if frames.is_empty() {
                             for value in &stack {
@@ -253,6 +262,7 @@ impl Store {
                         keep(&mut stack, frame.base, n)?;
                         if let Some(popped) = frames.pop() {
                             self.release_local_slots(popped.locals.len());
+                            self.release_labels(popped.labels.len());
                         }
                         if frames.is_empty() {
                             for value in &stack {
@@ -275,13 +285,16 @@ impl Store {
                         )?;
                         frame.pc = if l.loop_ { l.start } else { l.end + 1 };
                         let retain = pos + usize::from(l.loop_);
-                        frame.labels.truncate(retain)
+                        let removed = frame.labels.len() - retain;
+                        frame.labels.truncate(retain);
+                        self.release_labels(removed);
                     }
                 }
                 0xf => {
                     keep(&mut stack, frame.base, frame.function.ty.results.len())?;
                     if let Some(popped) = frames.pop() {
                         self.release_local_slots(popped.locals.len());
+                        self.release_labels(popped.labels.len());
                     }
                     if frames.is_empty() {
                         for value in &stack {
@@ -395,6 +408,7 @@ impl Store {
                             keep(&mut stack, caller_base, caller_results)?;
                             if let Some(popped) = frames.pop() {
                                 self.release_local_slots(popped.locals.len());
+                                self.release_labels(popped.labels.len());
                             }
                             if frames.is_empty() {
                                 for value in &stack {
@@ -415,6 +429,7 @@ impl Store {
                         stack.truncate(base);
                         if let Some(popped) = frames.pop() {
                             self.release_local_slots(popped.locals.len());
+                            self.release_labels(popped.labels.len());
                         }
                     } else if frames.len() >= self.engine.config.limits.max_call_depth {
                         return Err(err(ErrorKind::ResourceLimit, "call depth exhausted"));
@@ -585,7 +600,7 @@ impl Store {
                         stack.push(value)
                     }
                     if null == (op.opcode == 0xd5) {
-                        Self::branch_handler(&mut frames, &mut stack, label as usize)?;
+                        self.branch_handler(&mut frames, &mut stack, label as usize)?;
                     }
                     if frames.is_empty() {
                         self.publish_values(&stack);
@@ -640,7 +655,7 @@ impl Store {
                     };
                     stack.push(value);
                     if success == (op.opcode == 0xfb18 || op.opcode == 0xfb25) {
-                        Self::branch_handler(&mut frames, &mut stack, label as usize)?;
+                        self.branch_handler(&mut frames, &mut stack, label as usize)?;
                     }
                     if frames.is_empty() {
                         for value in &stack {

@@ -17,7 +17,13 @@ impl Linker {
         self.defs.insert((m.into(), n.into()), v);
         Ok(())
     }
-    fn instantiate_inner(&self, s: &mut Store, m: &Module) -> Result<Instance> {
+    fn instantiate_inner(
+        &self,
+        s: &mut Store,
+        m: &Module,
+        imported_table_limit: usize,
+        may_have_escaped: &mut bool,
+    ) -> Result<Instance> {
         if self.engine != s.engine.id || m.data.engine != self.engine {
             return Err(err(ErrorKind::Link, "engine mismatch"));
         }
@@ -230,26 +236,16 @@ impl Linker {
                 value: v,
             })
         }
-        inst.data = d
-            .data
-            .iter()
-            .map(|x| matches!(x.mode, SegmentMode::Passive))
-            .collect();
-        inst.elems = d
-            .elements
-            .iter()
-            .map(|x| {
-                if matches!(x.mode, SegmentMode::Passive) {
-                    x.init
-                        .iter()
-                        .map(|e| eval_const(s, &inst, e))
-                        .collect::<Result<Vec<_>>>()
-                        .map(Some)
-                } else {
-                    Ok(None)
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut data_flags = Vec::new();
+        data_flags
+            .try_reserve_exact(d.data.len())
+            .map_err(|_| err(ErrorKind::ResourceLimit, "data segment allocation"))?;
+        data_flags.extend(
+            d.data
+                .iter()
+                .map(|x| matches!(x.mode, SegmentMode::Passive)),
+        );
+        inst.data = data_flags;
         #[cfg(feature = "compact-executor")]
         if s.engine.policy == ExecutionPolicy::Compact {
             inst.call_sites = execution::compact::CallSites::prepare(s, m);
@@ -264,39 +260,45 @@ impl Linker {
             inst.memory_bindings =
                 execution::compact::MemoryBindings::prepare(s, m, &inst.mems).map(Arc::new);
         }
-        s.instances.push(inst.clone());
+        let mut elems_out = Vec::new();
+        elems_out
+            .try_reserve_exact(d.elements.len())
+            .map_err(|_| err(ErrorKind::ResourceLimit, "element segment allocation"))?;
+        let mut active_elems = Vec::new();
         for (elem_index, el) in d.elements.iter().enumerate() {
-            let vals = el
-                .init
-                .iter()
-                .map(|x| eval_const(s, &inst, x))
-                .collect::<Result<Vec<_>>>()?;
+            let mut vals = Vec::new();
+            vals.try_reserve_exact(el.init.len())
+                .map_err(|_| err(ErrorKind::ResourceLimit, "element segment allocation"))?;
+            for x in &el.init {
+                vals.push(eval_const(s, &inst, x)?);
+            }
             match &el.mode {
                 SegmentMode::Active { index, offset } => {
                     let off = address(eval_const(s, &inst, offset)?)?;
-                    let tab = &mut s.tabs[inst.tabs[*index as usize].0.index];
-                    let r = range(off, vals.len(), tab.values.len())
-                        .map_err(|_| trap("table out of bounds"))?;
-                    tab.values[r].copy_from_slice(&vals);
-                    inst.elems[elem_index] = None
+                    active_elems
+                        .try_reserve(1)
+                        .map_err(|_| err(ErrorKind::ResourceLimit, "element segment allocation"))?;
+                    active_elems.push((elem_index, *index, off));
+                    elems_out.push(Some(vals));
                 }
-                SegmentMode::Passive => inst.elems[elem_index] = Some(vals),
-                SegmentMode::Declarative => inst.elems[elem_index] = None,
+                SegmentMode::Passive => elems_out.push(Some(vals)),
+                SegmentMode::Declarative => elems_out.push(None),
             }
         }
+        inst.elems = elems_out;
+        let mut active_datas = Vec::new();
         for (data_index, data) in d.data.iter().enumerate() {
-            let bytes = &d.bytes[data.bytes.start..data.bytes.end];
             if let SegmentMode::Active { index, offset } = &data.mode {
                 let off = address(eval_const(s, &inst, offset)?)?;
-                let mem = &mut s.mems[inst.mems[*index as usize].0.index];
-                let r = range(off, bytes.len(), mem.len()?)?;
-                let _ = r;
-                mem.write(off, bytes)?;
-                inst.data[data_index] = false
-            } else {
-                inst.data[data_index] = true
+                active_datas
+                    .try_reserve(1)
+                    .map_err(|_| err(ErrorKind::ResourceLimit, "data segment allocation"))?;
+                active_datas.push((data_index, *index, off));
             }
         }
+        inst.exports
+            .try_reserve(d.exports.len())
+            .map_err(|_| err(ErrorKind::ResourceLimit, "export table allocation"))?;
         for e in &d.exports {
             let x = match e.kind {
                 ExternalKind::Tag => External::Tag(inst.tags[e.index as usize]),
@@ -308,9 +310,35 @@ impl Linker {
             inst.exports.insert(e.name.clone(), x);
         }
         let start = d.start.map(|x| inst.funcs[x.as_usize()]);
-        s.instances[ii] = inst;
+        // Per Wasm Core 3.0 §4.5.4, publish the instance before executing active
+        // element/data initialization so any defined funcref written into an
+        // imported table remains backed by a live instance even if a subsequent
+        // active segment traps.
+        debug_assert_eq!(s.instances.len(), ii);
+        s.instances.push(inst);
+        for (elem_index, table_index, off) in active_elems {
+            let tab_idx = s.instances[ii].tabs[table_index as usize].0.index;
+            let vals = s.instances[ii].elems[elem_index].take().unwrap_or_default();
+            let tab = &mut s.tabs[tab_idx];
+            let r = range(off, vals.len(), tab.values.len())
+                .map_err(|_| trap("table out of bounds"))?;
+            if tab_idx < imported_table_limit && !vals.is_empty() {
+                *may_have_escaped = true;
+            }
+            tab.values[r].copy_from_slice(&vals);
+        }
+        for (data_index, mem_index, off) in active_datas {
+            let data = &d.data[data_index];
+            let bytes = &d.bytes[data.bytes.start..data.bytes.end];
+            let mem_idx = s.instances[ii].mems[mem_index as usize].0.index;
+            let mem = &mut s.mems[mem_idx];
+            let _ = range(off, bytes.len(), mem.len()?)?;
+            mem.write(off, bytes)?;
+            s.instances[ii].data[data_index] = false;
+        }
         let out = Instance(s.h(ii));
         if let Some(f) = start {
+            *may_have_escaped = true;
             match s.invoke(f, &[])? {
                 RunOutcome::Returned(_) => {}
                 RunOutcome::Exception(_) => {
@@ -339,11 +367,28 @@ impl Linker {
             s.tags.len(),
             s.exceptions.len(),
         );
-        let result = self.instantiate_inner(s, m);
+        let mut may_have_escaped = false;
+        let result = self.instantiate_inner(s, m, checkpoint.2, &mut may_have_escaped);
         if result.is_err() {
-            // References published by the start function keep their instance alive.
-            // Scan existing roots lazily with bounded work and fallible queuing so
-            // rollback never aborts under tight memory limits.
+            if !may_have_escaped {
+                // Nothing from this instantiation could have been observed by
+                // pre-existing tables, globals, host callbacks, or roots:
+                // reclaim the appended arena slots directly without tombstones.
+                s.funcs.truncate_unpublished(checkpoint.0);
+                s.mems.truncate_unpublished(checkpoint.1);
+                s.tabs.truncate_unpublished(checkpoint.2);
+                s.globals.truncate_unpublished(checkpoint.3);
+                s.instances.truncate_unpublished(checkpoint.4);
+                s.tags.truncate_unpublished(checkpoint.5);
+                s.tag_instances.retain(|k, _| *k < checkpoint.5);
+                s.tag_modules.retain(|k, _| *k < checkpoint.5);
+                s.tag_canonical.retain(|k, _| *k < checkpoint.5);
+                s.exceptions.truncate_unpublished(checkpoint.6);
+                return result;
+            }
+            // References published by an imported table write or start function
+            // keep their instance alive. Scan existing roots lazily with bounded
+            // work and fallible queuing so rollback never aborts under tight memory.
             let max_work = s.engine.config.limits.max_gc_mark_work;
             let mut work = 0usize;
             let mut escaped = false;

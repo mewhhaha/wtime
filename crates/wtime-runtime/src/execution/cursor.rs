@@ -179,14 +179,17 @@ impl MaterializedState {
                     .iter()
                     .take(VALUE_LIMIT)
                     .map(|l| {
+                        let catch_len = l.try_table_pc.map_or(0, |pc| {
+                            match &module.data.inner.decoded().code[frame.function.body]
+                                .instructions[pc]
+                                .immediate
+                            {
+                                Immediate::TryTable(table) => table.catches.len(),
+                                _ => 0,
+                            }
+                        });
                         (
-                            l.start,
-                            l.end,
-                            l.height,
-                            l.params,
-                            l.results,
-                            l.loop_,
-                            l.catches.len(),
+                            l.start, l.end, l.height, l.params, l.results, l.loop_, catch_len,
                         )
                     })
                     .collect(),

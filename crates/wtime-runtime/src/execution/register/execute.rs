@@ -711,6 +711,8 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
     {
         apply_moves(&edge.moves, bank)?;
     }
+    let edges_len = function.edges.len();
+    let recipe_locals_len = recipe.locals.len();
     match opcode {
         2..=4 => {
             let instruction = instruction.ok_or_else(|| trap("register control source"))?;
@@ -725,21 +727,25 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
                 .checked_add(recipe.operands.len())
                 .and_then(|height| height.checked_sub(params + usize::from(opcode == 4)))
                 .ok_or_else(|| trap("register label height"))?;
-            frame.labels.push(Label {
-                catches: vec![],
-                start: pc + 1,
-                end,
-                height,
-                params,
-                results,
-                loop_: opcode == 3,
-            });
+            store.push_label(
+                &mut frame.labels,
+                Label {
+                    try_table_pc: None,
+                    start: pc + 1,
+                    end,
+                    height,
+                    params,
+                    results,
+                    loop_: opcode == 3,
+                },
+            )?;
         }
         0xb => {
             frame
                 .labels
                 .pop()
                 .ok_or_else(|| trap("register label end"))?;
+            store.release_labels(1);
         }
         0xc..=0xe if taken => {
             let depth = if let Some(depth) = table_depth {
@@ -757,18 +763,20 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
             if depth < frame.labels.len() {
                 let index = frame.labels.len() - depth - 1;
                 let retain = index + usize::from(frame.labels[index].loop_);
+                let removed = frame.labels.len() - retain;
                 frame.labels.truncate(retain);
+                store.release_labels(removed);
             } else if depth != frame.labels.len() {
                 return Err(trap("register branch depth"));
             }
         }
         _ => {}
     }
-    if next == function.edges.len() {
+    if next == edges_len {
         results(
             bank,
             None,
-            recipe.locals.len(),
+            recipe_locals_len,
             &frame.function.ty.results,
             frame.base,
             stack,

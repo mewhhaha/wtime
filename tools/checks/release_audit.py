@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -193,21 +194,72 @@ def _check_allocation_failure(report: dict, errors: list[str], root: Path, *,
     if (report.get('executed') != 1 or report.get('exit_code') != 0
             or result.get('allocator_failed') is not True
             or result.get('guest_table_allocation_failed') is not True
+            or result.get('element_allocation_failed') is not True
             or result.get('frame_allocation_failed') is not True
+            or result.get('label_allocation_failed') is not True
             or result.get('recovery_passed') is not True or result.get('executed') != 1):
         errors.append(f'{label}: worker did not report allocator failure and successful recovery')
 
 
+def _git_head(root: Path) -> str | None:
+    if not (root / '.git').exists():
+        return None
+    proc = subprocess.run(
+        ['git', 'rev-parse', 'HEAD'],
+        cwd=root,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    rev = proc.stdout.strip()
+    return rev if re.fullmatch(r'[0-9a-f]{40}', rev) else None
+
+
+def _git_revision_matches_core_tree(root: Path, revision: str) -> bool:
+    head = _git_head(root)
+    if head is None:
+        return True
+    if revision == head:
+        return True
+    anc = subprocess.run(
+        ['git', 'merge-base', '--is-ancestor', revision, head],
+        cwd=root,
+        capture_output=True,
+    )
+    if anc.returncode != 0:
+        return False
+    diff = subprocess.run(
+        ['git', 'diff', '--quiet', f'{revision}..{head}', '--', 'Cargo.toml', 'Cargo.lock', 'crates/'],
+        cwd=root,
+        capture_output=True,
+    )
+    return diff.returncode == 0
+
+
+def _source_hash_entries(source_hash: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for part in source_hash.split(';'):
+        path, sep, digest = part.rpartition(':')
+        if sep and path and digest:
+            entries[path] = digest
+    return entries
+
+
 def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
                        spec_revision: str, corpus_revision: str, *,
-                       verify_local_binaries: bool = True) -> None:
+                       verify_local_binaries: bool = True,
+                       corpus_lock: dict | None = None,
+                       expected_revision: str | None = None,
+                       check_git_provenance: bool = False) -> None:
     label = f'evidence {key}'
     selected, executed = report.get('selected', 0), report.get('executed', 0)
     if not isinstance(selected, int) or selected <= 0 or executed != selected:
         errors.append(f'{label}: selected assertions were skipped, empty, or unaccounted')
     if any(report.get(field, 0) != 0 for field in ('failed', 'skipped', 'unsupported', 'text_tool_errors')):
         errors.append(f'{label}: failures, unsupported directives, skips, or tool errors remain')
-    expected = {'core3': ('stable-core', 'core3'),
+    expected = {'mvp': ('mvp', 'mvp'),
+                'core3': ('stable-core', 'core3'),
                 'phase3': ('all-phase3-core', 'phase3'),
                 'interaction_corpus': ('all-phase3-core', 'interactions')}.get(key)
     if expected and (report.get('profile'), report.get('suite')) != expected:
@@ -215,9 +267,36 @@ def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
     source_hash = report.get('source_hash', '')
     if not source_hash.startswith(f'corpus-lock:{corpus_revision};'):
         errors.append(f'{label}: corpus lock hash is missing or stale')
+    if isinstance(corpus_lock, dict) and expected:
+        suite_name = expected[1]
+        suite_files = corpus_lock.get('suites', {}).get(suite_name)
+        if isinstance(suite_files, list) and suite_files:
+            pinned = {row['path']: row['sha256'] for row in corpus_lock.get('files', []) if 'path' in row and 'sha256' in row}
+            recorded = _source_hash_entries(source_hash)
+            missing_or_mismatched = []
+            for rel in suite_files:
+                expected_sha = pinned.get(rel)
+                if not expected_sha:
+                    continue
+                resolved = (root / '.cache' / rel).resolve()
+                try:
+                    recorded_key = resolved.relative_to(root.resolve()).as_posix()
+                except ValueError:
+                    recorded_key = rel
+                if recorded.get(recorded_key) != expected_sha and recorded.get(rel) != expected_sha:
+                    missing_or_mismatched.append(rel)
+            if missing_or_mismatched:
+                errors.append(f'{label}: full suite selection incomplete ({len(missing_or_mismatched)} corpus file(s) missing or stale)')
+            replay = report.get('replay')
+            if isinstance(replay, str) and "'--filter' 'all'" not in replay and '--filter all' not in replay:
+                errors.append(f'{label}: replay command did not select full suite (--filter all)')
     engine_revision = report.get('engine_revision')
-    if engine_revision in (None, '', 'HEAD') or (isinstance(engine_revision, str) and engine_revision.endswith('-dirty')):
-        errors.append(f'{label}: engine revision is missing or dirty')
+    if not isinstance(engine_revision, str) or not re.fullmatch(r'[0-9a-f]{40}', engine_revision):
+        errors.append(f'{label}: engine revision must be a clean 40-character commit SHA')
+    elif expected_revision is not None and engine_revision != expected_revision:
+        errors.append(f'{label}: engine revision {engine_revision} does not match checkout HEAD {expected_revision}')
+    elif check_git_provenance and not _git_revision_matches_core_tree(root, engine_revision):
+        errors.append(f'{label}: engine revision {engine_revision} does not match current core tree provenance')
     if not re.fullmatch(r'[0-9a-f]{64}', report.get('binary_sha256', '')):
         errors.append(f'{label}: executed binary fingerprint is missing')
     elif verify_local_binaries:
@@ -343,7 +422,9 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path | None = TASKS_
         elif key in ('core3', 'phase3', 'interaction_corpus'):
             _check_conformance(report, key, errors, root, lock['core_spec_commit'],
                                hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest(),
-                               verify_local_binaries=verify_local_binaries)
+                               verify_local_binaries=verify_local_binaries,
+                               corpus_lock=corpus_lock if corpus_lock_path.is_file() else None,
+                               check_git_provenance=True)
         elif key in ('fuzz', 'differential'):
             if report.get('failed') != 0 or report.get('selected', 0) <= 0 or report.get('executed') != report.get('selected') or report.get('failures'):
                 errors.append(f'{label}: run is empty, incomplete, or has failures')
@@ -405,7 +486,9 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path | None = TASKS_
             if report is not None:
                 _check_conformance(report, 'interaction_corpus', errors, root, lock['core_spec_commit'],
                                    hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest(),
-                                   verify_local_binaries=verify_local_binaries)
+                                   verify_local_binaries=verify_local_binaries,
+                                   corpus_lock=corpus_lock if corpus_lock_path.is_file() else None,
+                                   check_git_provenance=True)
 
     toolchain = manifest.get('toolchain', {})
     if not toolchain.get('rustc') or not toolchain.get('supported_targets'):
@@ -438,8 +521,11 @@ def audit_live_dir(live_dir: Path, *, root: Path = ROOT) -> list[str]:
     if not lock_path.is_file() or not corpus_lock_path.is_file():
         return ['missing source lock or corpus lock']
     spec_revision = json.loads(lock_path.read_text())['core_spec_commit']
+    corpus_lock = json.loads(corpus_lock_path.read_text())
     corpus_digest = hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest()
+    head_rev = _git_head(root)
     for filename, key in (
+        ('mvp.json', 'mvp'),
         ('core3.json', 'core3'),
         ('phase3.json', 'phase3'),
         ('interactions.json', 'interaction_corpus'),
@@ -454,7 +540,9 @@ def audit_live_dir(live_dir: Path, *, root: Path = ROOT) -> list[str]:
             errors.append(f'live {key}: report is not valid JSON')
             continue
         _check_conformance(report, key, errors, root, spec_revision, corpus_digest,
-                           verify_local_binaries=True)
+                           verify_local_binaries=True,
+                           corpus_lock=corpus_lock,
+                           expected_revision=head_rev)
     alloc_path = live_dir / 'allocation-failure.json'
     if not alloc_path.is_file():
         errors.append(f'live allocation_failure: report is missing ({alloc_path})')

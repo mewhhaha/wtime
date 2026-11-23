@@ -94,14 +94,6 @@ fn capture_bytes(frames: &[Frame], operands: usize, prompts: &[Prompt]) -> usize
                     .saturating_mul(std::mem::size_of::<crate::execution::Label>()),
             )
             .saturating_add(signature_bytes(&frame.function.ty));
-        for label in &frame.labels {
-            bytes = bytes.saturating_add(
-                label
-                    .catches
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<wtime_validate::Catch>()),
-            );
-        }
     }
     for prompt in prompts {
         bytes = bytes.saturating_add(
@@ -392,6 +384,10 @@ impl Store {
                             continuation,
                         } => {
                             self.pending_suspension = Some((tag, payload, continuation));
+                            let cleared_slots: usize = frames.iter().map(|f| f.locals.len()).sum();
+                            let cleared_labels: usize = frames.iter().map(|f| f.labels.len()).sum();
+                            self.release_local_slots(cleared_slots);
+                            self.release_labels(cleared_labels);
                             frames.clear();
                             operands.clear();
                             return Ok(None);
@@ -409,7 +405,13 @@ impl Store {
                     .iter()
                     .try_fold(0usize, |acc, f| acc.checked_add(f.locals.len()))
                     .ok_or_else(|| err(ErrorKind::ResourceLimit, "active local slots limit"))?;
+                let seg_labels: usize = segment
+                    .frames
+                    .iter()
+                    .try_fold(0usize, |acc, f| acc.checked_add(f.labels.len()))
+                    .ok_or_else(|| err(ErrorKind::ResourceLimit, "active control labels limit"))?;
                 self.check_local_slot_budget(seg_slots, 0)?;
+                self.check_label_budget(seg_labels)?;
                 self.resume_fuel = Some(segment.fuel);
                 let fd = frames.len();
                 let od = operands.len();
@@ -426,6 +428,7 @@ impl Store {
                 operands.extend(segment.operands);
                 operands.extend(bound);
                 self.acquire_local_slots(seg_slots);
+                self.acquire_labels(seg_labels);
                 frames.extend(segment.frames);
                 prompts.extend(segment.prompts)
             }
@@ -484,6 +487,7 @@ impl Store {
         self.continuation_type(prompt.instance, n.as_usize())
     }
     pub(super) fn branch_handler(
+        &mut self,
         frames: &mut Vec<Frame>,
         operands: &mut Vec<Value>,
         depth: usize,
@@ -494,7 +498,10 @@ impl Store {
         if depth == frame.labels.len() {
             let n = frame.function.ty.results.len();
             crate::execution::keep(operands, frame.base, n)?;
-            frames.pop();
+            if let Some(popped) = frames.pop() {
+                self.release_local_slots(popped.locals.len());
+                self.release_labels(popped.labels.len());
+            }
             return Ok(());
         }
         let pos = frame
@@ -517,7 +524,10 @@ impl Store {
         } else {
             label.end + 1
         };
-        frame.labels.truncate(pos + usize::from(label.loop_));
+        let retain = pos + usize::from(label.loop_);
+        let removed = frame.labels.len() - retain;
+        frame.labels.truncate(retain);
+        self.release_labels(removed);
         Ok(())
     }
     fn unhandled_continuation(
@@ -840,6 +850,7 @@ impl Store {
                 self.release_local_slots(
                     segment.frames.iter().map(|f| f.locals.len()).sum::<usize>(),
                 );
+                self.release_labels(segment.frames.iter().map(|f| f.labels.len()).sum::<usize>());
                 prompts.pop();
                 self.continuations.insert(
                     r,
@@ -852,7 +863,7 @@ impl Store {
                 );
                 operands.extend(payload);
                 operands.push(Value::Ref(RefValue::Gc(r)));
-                Self::branch_handler(frames, operands, label as usize)?;
+                self.branch_handler(frames, operands, label as usize)?;
             }
             0xe6 => {
                 let Immediate::Pair(ty, tag) = i.immediate else {
@@ -905,6 +916,7 @@ impl Store {
                 self.release_local_slots(
                     segment.frames.iter().map(|f| f.locals.len()).sum::<usize>(),
                 );
+                self.release_labels(segment.frames.iter().map(|f| f.labels.len()).sum::<usize>());
                 self.continuations.insert(
                     outgoing,
                     ContinuationState {

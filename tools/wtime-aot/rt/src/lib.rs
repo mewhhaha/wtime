@@ -125,6 +125,16 @@ impl fmt::Display for Trap {
 
 pub type R<T> = Result<T, Trap>;
 
+/// Fallibly allocate a zeroed `Box<[u64]>` on the heap for fixed-size
+/// externref tables without placing large arrays on the host thread stack.
+pub fn zeroed_u64(len: usize) -> R<Box<[u64]>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| Trap::AllocationFailed)?;
+    v.resize(len, 0);
+    Ok(v.into_boxed_slice())
+}
+
 /// Cold inlined wrapper for trap returns: gives LLVM cold branch-weight
 /// hints while staying inlined so fast-path bounds-check proofs stay intact.
 #[cold]

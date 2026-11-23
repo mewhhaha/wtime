@@ -221,7 +221,9 @@ impl Store {
                     keep(stack, l.height, if l.loop_ { l.params } else { l.results })?;
                     *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
                     let retain = pos + usize::from(l.loop_);
-                    frame.labels.truncate(retain)
+                    let removed = frame.labels.len() - retain;
+                    frame.labels.truncate(retain);
+                    self.release_labels(removed);
                 }};
             }
             // The label of the block, loop or if at `at`.
@@ -232,15 +234,18 @@ impl Store {
                         .len()
                         .checked_sub(a)
                         .ok_or_else(|| trap("block stack underflow"))?;
-                    frame.labels.push(Label {
-                        catches: vec![],
-                        start: $at + 1,
-                        end: $end as usize,
-                        height,
-                        params: a,
-                        results: $results as usize,
-                        loop_: $loop_,
-                    });
+                    self.push_label(
+                        &mut frame.labels,
+                        Label {
+                            try_table_pc: None,
+                            start: $at + 1,
+                            end: $end as usize,
+                            height,
+                            params: a,
+                            results: $results as usize,
+                            loop_: $loop_,
+                        },
+                    )?;
                 }};
             }
             // The `if` at `at`, whose condition is `cond`. A false condition
@@ -601,6 +606,7 @@ impl Store {
                     let Some(l) = frame.labels.pop() else {
                         decline!()
                     };
+                    self.release_labels(1);
                     #[cfg(feature = "performance-counters")]
                     self.perf
                         .record(perf::Event::Branch, u64::from(l.results != 0));
@@ -734,15 +740,18 @@ impl Store {
                                 .len()
                                 .checked_sub(a)
                                 .ok_or_else(|| trap("block stack underflow"))?;
-                            frame.labels.push(Label {
-                                catches: vec![],
-                                start: pc + 1,
-                                end,
-                                height,
-                                params: a,
-                                results: r,
-                                loop_: opcode == 3,
-                            });
+                            self.push_label(
+                                &mut frame.labels,
+                                Label {
+                                    try_table_pc: None,
+                                    start: pc + 1,
+                                    end,
+                                    height,
+                                    params: a,
+                                    results: r,
+                                    loop_: opcode == 3,
+                                },
+                            )?;
                             if !cond {
                                 *pc_ref = other.map_or(end, |x| x + 1)
                             }
@@ -758,6 +767,7 @@ impl Store {
                             let Some(l) = frame.labels.pop() else {
                                 decline!()
                             };
+                            self.release_labels(1);
                             #[cfg(feature = "performance-counters")]
                             self.perf
                                 .record(perf::Event::Branch, u64::from(l.results != 0));
@@ -806,7 +816,9 @@ impl Store {
                                 *pc_ref = if l.loop_ { l.start } else { l.end + 1 };
                                 let back = l.loop_;
                                 let retain = pos + usize::from(l.loop_);
+                                let removed = frame.labels.len() - retain;
                                 frame.labels.truncate(retain);
+                                self.release_labels(removed);
                                 // A loop iteration of a cold body warms it. Once
                                 // warm, the body is lowered and the run ends with
                                 // nothing charged, so that the general loop goes

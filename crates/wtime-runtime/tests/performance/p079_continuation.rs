@@ -21,13 +21,6 @@ fn physical_state_bytes(store: &Store) -> usize {
                         + (frame.function.ty.params.capacity()
                             + frame.function.ty.results.capacity())
                             * std::mem::size_of::<ValType>();
-                    bytes += frame
-                        .labels
-                        .iter()
-                        .map(|label| {
-                            label.catches.capacity() * std::mem::size_of::<wtime_validate::Catch>()
-                        })
-                        .sum::<usize>();
                 }
                 bytes += segment
                     .prompts
