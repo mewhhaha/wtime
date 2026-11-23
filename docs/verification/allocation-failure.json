@@ -1,16 +1,16 @@
 {
   "passed": true,
   "source_stable": true,
-  "source_sha256": "ee70778a269bc3fdc28567bcb7d13f434368394de2ad799a1d9ebacb64e810dc",
+  "source_sha256": "199df67f35cb99f88410938ea583d8a7520ff1922bcb366175aa5e6a1dee0924",
   "architecture": "x86_64",
   "command": [
-    "/home/mewhhaha/src/wtime/target/debug/wtime-allocation-check"
+    "target/evidence/debug/wtime-allocation-check"
   ],
-  "worker_sha256": "9b5561b7efdfa8e9198eec3521df979fbc87f33a9bde4681d7babc7faeef5f16",
+  "worker_sha256": "b9d0a7151ecc1407eaa9176561bca18614672d1727ac9ec912d4b5b368a7909c",
   "address_space_bytes": 134217728,
   "requested_allocation_bytes": 536870912,
   "executed": 1,
   "exit_code": 0,
-  "stdout": "{\"allocator_failed\":true,\"page_allocation_failed\":true,\"guest_table_allocation_failed\":true,\"pages_written\":1928,\"recovery_passed\":true,\"executed\":1}\n",
+  "stdout": "{\"allocator_failed\":true,\"page_allocation_failed\":true,\"guest_table_allocation_failed\":true,\"frame_allocation_failed\":true,\"pages_written\":1928,\"recovery_passed\":true,\"executed\":1}\n",
   "stderr": ""
 }

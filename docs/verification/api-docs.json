@@ -1,5 +1,5 @@
 {
-  "source_sha256": "ee70778a269bc3fdc28567bcb7d13f434368394de2ad799a1d9ebacb64e810dc",
+  "source_sha256": "199df67f35cb99f88410938ea583d8a7520ff1922bcb366175aa5e6a1dee0924",
   "source_stable": true,
   "executed": 4,
   "passed": true,
@@ -17,7 +17,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "20 + 22 = 42\n",
-      "stderr": "   Compiling wtime-runtime v0.1.0 (/home/mewhhaha/src/wtime/crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n     Running `target/debug/examples/embedding`\n"
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running `target/evidence/debug/examples/embedding`\n"
     },
     {
       "command": [
@@ -32,11 +32,11 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "suspended with 7; resumed with 9\n",
-      "stderr": "   Compiling wtime-runtime v0.1.0 (/home/mewhhaha/src/wtime/crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n     Running `target/debug/examples/suspension`\n"
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s\n     Running `target/evidence/debug/examples/suspension`\n"
     },
     {
       "command": [
-        "target/debug/wtime-cli",
+        "target/evidence/debug/wtime-cli",
         "--profile",
         "all-phase3-core",
         "run",
@@ -50,7 +50,7 @@
     },
     {
       "command": [
-        "target/debug/wtime-cli",
+        "target/evidence/debug/wtime-cli",
         "--profile",
         "all-phase3-core",
         "run",
@@ -64,9 +64,9 @@
     }
   ],
   "documents": {
-    "docs/embedding.md": "1ce60693da90a7ec5ae15ba01b884bca4bfdc910a883b883d8bbdf4e60dfba58",
+    "docs/embedding.md": "bdc6b1ae1df00d33ff422508133d7ccc3896e5e5e1ea561b4909ebe7c561e74f",
     "examples/README.md": "64926d38d7bb32bf80a51cc13a8a92e0f2c3dbb0cba6b274a8cb6511d5d74862",
-    "README.md": "36d10a27ea8c276c540329332fbf848c219214f00309310508700717dd3dd963",
+    "README.md": "7fce3d78a6b02e01e3e863bd8c07139251eaf2b9e6854abc542463e8fe6af820",
     "examples/memory64-table64.wat": "666790be61e72bfa60bbe77486d9584fabfc3ab78bed2a057b3339cb4fdccbd6",
     "examples/memory64-table64.wasm": "3920201aeccfd378c6e88a8882392bbcb3cbf1b040ba604c1064b158708d5990",
     "docs/architecture/api.md": "cb61d31789dfa962a4817320f579a346c9109f136eb06414a37d3ced954e59af",
