@@ -323,7 +323,7 @@ impl LinearBytes {
 
     /// Test support for compact-executor memory growth tests:
     /// zero-extends, or truncates the visible bytes and clears what was cut.
-    #[cfg(all(test, feature = "compact-executor"))]
+    #[cfg(all(test, feature = "compact-executor", feature = "execution-reference"))]
     pub(crate) fn resize(&mut self, new_len: usize, value: u8) {
         assert_eq!(value, 0, "linear memory only grows with zeros");
         if new_len < self.len {

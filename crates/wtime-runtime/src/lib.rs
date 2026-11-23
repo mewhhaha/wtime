@@ -3324,7 +3324,10 @@ mod performance_module_ownership {
         #[cfg(feature = "execution-reference")]
         policies.push(ExecutionPolicy::Reference);
         for policy in policies {
-            let engine = Engine::with_execution_policy(Config::default(), policy).unwrap();
+            let mut cfg = Config::default();
+            cfg.limits.max_call_depth = 64;
+            cfg.limits.max_total_locals = 64_000;
+            let engine = Engine::with_execution_policy(cfg, policy).unwrap();
             let module = engine.compile(&block_wasm).unwrap();
             let mut store = Store::new(&engine);
             let inst = Linker::new(&engine)
@@ -3521,6 +3524,307 @@ mod performance_module_ownership {
         assert_eq!(
             store.invoke(call0, &[]).unwrap(),
             RunOutcome::Returned(vec![Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn failed_start_escaping_continuation_keeps_instance_live() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+
+        let engine = Engine::new(Config {
+            features: FeatureSet::all_phase3_core(),
+            ..Config::default()
+        })
+        .unwrap();
+        let mut store = Store::new(&engine);
+
+        // Provider exports:
+        // - type 0: func () -> i32
+        // - type 1: cont 0
+        // - table "t": 2 x (ref null 1)
+        // - func "resume_slot" (i32) -> i32: resumes table[slot] with no handlers
+        let mut prov = b"\0asm\x01\0\0\0".to_vec();
+        // Types: 0 = func () -> i32, 1 = cont 0, 2 = func (i32) -> i32
+        sec(
+            &mut prov,
+            1,
+            &[3, 0x60, 0, 1, 0x7f, 0x5d, 0, 0x60, 1, 0x7f, 1, 0x7f],
+        );
+        sec(&mut prov, 3, &[1, 2]);
+        // Table 0: (ref null 1), min 2
+        sec(&mut prov, 4, &[1, 0x63, 1, 0x00, 2]);
+        sec(
+            &mut prov,
+            7,
+            &[
+                2, 1, b't', 0x01, 0, 11, b'r', b'e', b's', b'u', b'm', b'e', b'_', b's', b'l',
+                b'o', b't', 0x00, 0,
+            ],
+        );
+        // body: local.get 0; table.get 0; resume 1 0; end
+        sec(
+            &mut prov,
+            10,
+            &[1, 9, 0, 0x20, 0, 0x25, 0, 0xe3, 1, 0, 0x0b],
+        );
+        let prov_mod = engine.compile(&prov).unwrap();
+        let prov_inst = Linker::new(&engine)
+            .instantiate(&mut store, &prov_mod)
+            .unwrap();
+        let External::Table(tbl) = prov_inst.export(&store, "t").unwrap() else {
+            unreachable!();
+        };
+        let External::Func(resume_slot) = prov_inst.export(&store, "resume_slot").unwrap() else {
+            unreachable!();
+        };
+
+        // Failing module imports table "m"."t" of type (ref null 1), defines:
+        // - tag 0: () -> ()
+        // - f0 (type 0): suspend 0; i32.const 99
+        // - f1 (type 0): i32.const 77
+        // - f2 (start, type 2):
+        //     slot 0 <- Body::Segment captured by suspending f0 inside resume/on tag 0
+        //     slot 1 <- Body::Start(f1) via cont.new 1 (ref.func 1)
+        //     unreachable (traps start!)
+        let mut mod2 = b"\0asm\x01\0\0\0".to_vec();
+        // Types:
+        //   0 = func () -> i32
+        //   1 = cont 0
+        //   2 = func () -> ()
+        //   3 = func () -> (ref 1)
+        sec(
+            &mut mod2,
+            1,
+            &[
+                4, 0x60, 0, 1, 0x7f, 0x5d, 0, 0x60, 0, 0, 0x60, 0, 1, 0x64, 1,
+            ],
+        );
+        sec(&mut mod2, 2, &[1, 1, b'm', 1, b't', 0x01, 0x63, 1, 0x00, 2]);
+        sec(&mut mod2, 3, &[3, 0, 0, 2]);
+        sec(&mut mod2, 13, &[1, 0x00, 2]);
+        sec(&mut mod2, 8, &[2]);
+        sec(&mut mod2, 9, &[1, 0x03, 0x00, 2, 0, 1]);
+        // Body 0 (f0): suspend 0; i32.const 99; end
+        let b0 = vec![0, 0xe2, 0, 0x41, 0xe3, 0x00, 0x0b];
+        // Body 1 (f1): i32.const 77; end
+        let b1 = vec![0, 0x41, 0xcd, 0x00, 0x0b];
+        let b2 = vec![
+            1, 1, 0x63, 1, // 1 local: (ref null 1)
+            0x02, 3, // block (type 3: () -> (ref 1))
+            0xd2, 0, // ref.func 0
+            0xe0, 1, // cont.new 1
+            0xe3, 1, 1, 0x00, 0, 0,    // resume 1 [on tag 0 -> label 0]
+            0x1a, // drop (i32)
+            0x00, // unreachable
+            0x0b, // end block -> (ref 1)
+            0x21, 0, // local.set 0
+            0x41, 0, 0x20, 0, 0x26, 0, // table.set 0 (slot 0 = suspended segment)
+            0x41, 1, 0xd2, 1, 0xe0, 1, 0x26, 0,    // table.set 0 (slot 1 = Body::Start(f1))
+            0x00, // unreachable (fail start!)
+            0x0b,
+        ];
+        let mut code = vec![3];
+        for b in [&b0, &b1, &b2] {
+            leb(&mut code, b.len() as u32);
+            code.extend_from_slice(b);
+        }
+        sec(&mut mod2, 10, &code);
+        let mod2 = engine.compile(&mod2).unwrap();
+
+        let mut linker = Linker::new(&engine);
+        linker.define("m", "t", External::Table(tbl)).unwrap();
+        let err = linker.instantiate(&mut store, &mod2).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Trap);
+
+        // Both escaped continuations (Body::Segment and Body::Start) must resume cleanly!
+        assert_eq!(
+            store.invoke(resume_slot, &[Value::I32(0)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(99)])
+        );
+        assert_eq!(
+            store.invoke(resume_slot, &[Value::I32(1)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(77)])
+        );
+    }
+
+    #[test]
+    fn failed_start_escaping_exnref_keeps_exception_and_tag_live_across_collect() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+
+        let engine = Engine::new(Config::default()).unwrap();
+        let mut store = Store::new(&engine);
+
+        // Provider exports a 1-element exnref table "t".
+        let mut prov = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut prov, 4, &[1, 0x69, 0x00, 1]); // table 0: exnref, min 1
+        sec(&mut prov, 7, &[1, 1, b't', 0x01, 0]);
+        let prov_mod = engine.compile(&prov).unwrap();
+        let prov_inst = Linker::new(&engine)
+            .instantiate(&mut store, &prov_mod)
+            .unwrap();
+        let External::Table(tbl) = prov_inst.export(&store, "t").unwrap() else {
+            unreachable!();
+        };
+
+        // Failing module imports table "m"."t" (exnref), defines tag 0 (() -> ()),
+        // and its start function throws tag 0, catches exnref via try_table (catch_all_ref 0),
+        // stores exnref at table[0], and traps with unreachable.
+        let mut mod2 = b"\0asm\x01\0\0\0".to_vec();
+        sec(&mut mod2, 1, &[1, 0x60, 0, 0]);
+        sec(&mut mod2, 2, &[1, 1, b'm', 1, b't', 0x01, 0x69, 0x00, 1]);
+        sec(&mut mod2, 3, &[1, 0]);
+        sec(&mut mod2, 13, &[1, 0x00, 0]); // tag 0: type 0
+        sec(&mut mod2, 8, &[0]); // start = f0
+        // body:
+        //   local 0: exnref
+        //   block (result exnref)
+        //     try_table (catch_all_ref 0)
+        //       throw 0
+        //     end
+        //     unreachable
+        //   end
+        //   local.set 0; i32.const 0; local.get 0; table.set 0; unreachable
+        let body = vec![
+            1, 1, 0x69, // 1 local: exnref
+            0x02, 0x69, // block (result exnref)
+            0x1f, 0x40, 1, 0x03, 0, // try_table () [catch_all_ref 0]
+            0x08, 0,    // throw 0
+            0x0b, // end try_table
+            0x00, // unreachable
+            0x0b, // end block -> exnref
+            0x21, 0, // local.set 0
+            0x41, 0, 0x20, 0, 0x26, 0,    // table.set 0
+            0x00, // unreachable (fail start!)
+            0x0b,
+        ];
+        let mut code = vec![1];
+        leb(&mut code, body.len() as u32);
+        code.extend_from_slice(&body);
+        sec(&mut mod2, 10, &code);
+        let mod2 = engine.compile(&mod2).unwrap();
+
+        let mut linker = Linker::new(&engine);
+        linker.define("m", "t", External::Table(tbl)).unwrap();
+        let err = linker.instantiate(&mut store, &mod2).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Trap);
+
+        // Escaped exnref and its module-defined tag must remain live across GC.
+        store.collect().unwrap();
+        let Value::Ref(RefValue::Exn(ex)) = store.tabs[tbl.0.index].values[0] else {
+            panic!("expected live exnref in imported table");
+        };
+        let tag = store.exception_tag(ex).unwrap();
+        assert!(store.exception_payload(ex).unwrap().is_empty());
+        assert_eq!(store.tags[tag.0.index].params.len(), 0);
+    }
+
+    #[test]
+    fn extern_convert_any_gc_object_survives_collect() {
+        fn leb(out: &mut Vec<u8>, mut n: u32) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn sec(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len() as u32);
+            out.extend_from_slice(payload);
+        }
+
+        let engine = Engine::new(Config::default()).unwrap();
+        let mut store = Store::new(&engine);
+
+        // Module with struct type 0 { (field i32) }, mutable externref global 0,
+        // `store_it(x: i32)` -> stores extern.convert_any(struct.new 0 (x)) into global 0,
+        // `read_it() -> i32` -> struct.get 0 0 (ref.cast (ref 0) (any.convert_extern (global.get 0))).
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        // Types:
+        //   0: struct (field (mut=0) i32) -> 0x5f 1 0x7f 0x00
+        //   1: func (i32) -> ()
+        //   2: func () -> i32
+        sec(
+            &mut wasm,
+            1,
+            &[3, 0x5f, 1, 0x7f, 0x00, 0x60, 1, 0x7f, 0, 0x60, 0, 1, 0x7f],
+        );
+        sec(&mut wasm, 3, &[2, 1, 2]);
+        // Global 0: (mut externref) = ref.null extern
+        sec(&mut wasm, 6, &[1, 0x6f, 1, 0xd0, 0x6f, 0x0b]);
+        sec(
+            &mut wasm,
+            7,
+            &[
+                2, 8, b's', b't', b'o', b'r', b'e', b'_', b'i', b't', 0x00, 0, 7, b'r', b'e', b'a',
+                b'd', b'_', b'i', b't', 0x00, 1,
+            ],
+        );
+        // Body 0 (store_it): local.get 0; struct.new 0 (0xfb 0x00 0); extern.convert_any (0xfb 0x1b); global.set 0; end
+        let b0 = vec![0, 0x20, 0, 0xfb, 0x00, 0, 0xfb, 0x1b, 0x24, 0, 0x0b];
+        // Body 1 (read_it): global.get 0; any.convert_extern (0xfb 0x1a); ref.cast 0 (0xfb 0x16 0); struct.get 0 0 (0xfb 0x02 0 0); end
+        let b1 = vec![
+            0, 0x23, 0, 0xfb, 0x1a, 0xfb, 0x16, 0, 0xfb, 0x02, 0, 0, 0x0b,
+        ];
+        let mut code = vec![2];
+        for b in [&b0, &b1] {
+            leb(&mut code, b.len() as u32);
+            code.extend_from_slice(b);
+        }
+        sec(&mut wasm, 10, &code);
+
+        let module = engine.compile(&wasm).unwrap();
+        let inst = Linker::new(&engine)
+            .instantiate(&mut store, &module)
+            .unwrap();
+        let External::Func(store_it) = inst.export(&store, "store_it").unwrap() else {
+            unreachable!();
+        };
+        let External::Func(read_it) = inst.export(&store, "read_it").unwrap() else {
+            unreachable!();
+        };
+
+        store.invoke(store_it, &[Value::I32(12345)]).unwrap();
+        let stats = store.collect().unwrap();
+        assert_eq!(stats.live, 1, "ExternGc object must remain live across GC");
+        assert_eq!(stats.reclaimed, 0);
+        assert_eq!(
+            store.invoke(read_it, &[]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(12345)])
         );
     }
 }

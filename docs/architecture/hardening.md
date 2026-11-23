@@ -50,9 +50,10 @@ process address-space limit of 128 MiB:
    element reservation and leaves the store usable.
 5. Executing a recursive 50,000-local module fails cleanly against both the
    default active local-slot budget and real OS `try_reserve_exact` OOM.
-6. Executing deeply nested control blocks and nested `try_table` blocks with
-   large catch tables fails cleanly against both the active label budget and
-   fallible label-stack reservation (with zero-copy `try_table` catch clauses).
+6. Executing deeply nested control blocks fails cleanly against both the active
+   label budget and fallible label-stack reservation, while nested `try_table`
+   blocks with large catch tables share catch clauses zero-copy from immutable
+   module storage and terminate cleanly on call depth without copying or aborting.
 
 The guarantee covers linear-memory pages and page tables, guest tables, passive
 and active element buffers, active call-frame local and argument vectors,

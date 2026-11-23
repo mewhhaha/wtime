@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -281,6 +282,23 @@ class ReleaseAuditTests(unittest.TestCase):
             conf_errors = []
             audit._check_conformance(conf, 'core3', conf_errors, root, 'abc', 'def', corpus_lock=fake_lock)
             self.assertTrue(any('full suite selection incomplete' in e for e in conf_errors))
+
+            # Git provenance diff must include tools/wtime-conformance/ changes
+            git_root = root / 'gitrepo'
+            git_root.mkdir()
+            (git_root / 'tools/wtime-conformance').mkdir(parents=True)
+            (git_root / 'tools/wtime-conformance/probe.txt').write_text('v1\n')
+            subprocess.run(['git', 'init', '-q'], cwd=git_root, check=True)
+            subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=git_root, check=True)
+            subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=git_root, check=True)
+            subprocess.run(['git', 'add', '.'], cwd=git_root, check=True)
+            subprocess.run(['git', 'commit', '-q', '-m', 'init'], cwd=git_root, check=True)
+            rev1 = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=git_root, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertTrue(audit._git_revision_matches_core_tree(git_root, rev1))
+            (git_root / 'tools/wtime-conformance/probe.txt').write_text('v2\n')
+            subprocess.run(['git', 'add', '.'], cwd=git_root, check=True)
+            subprocess.run(['git', 'commit', '-q', '-m', 'runner edit'], cwd=git_root, check=True)
+            self.assertFalse(audit._git_revision_matches_core_tree(git_root, rev1))
 
     def test_t169_case_13_missing_interaction_corpus_blocks_release(self):
         manifest = {

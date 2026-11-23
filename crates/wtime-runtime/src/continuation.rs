@@ -27,6 +27,68 @@ pub(super) struct ContinuationState {
     type_ids: (Vec<Option<CanonicalTypeId>>, Vec<Option<CanonicalTypeId>>),
     bound: Vec<Value>,
 }
+impl ContinuationState {
+    /// Checks whether this continuation directly references a function, instance,
+    /// or tag allocated at/after the given rollback checkpoints, and fallibly
+    /// enqueues all contained reference values (`bound`, detached frame locals,
+    /// and detached operands) into `pending` for transitive reachability tracing.
+    pub(super) fn trace_escape(
+        &self,
+        store_id: u64,
+        func_cp: usize,
+        inst_cp: usize,
+        tag_cp: usize,
+        pending: &mut Vec<Value>,
+    ) -> std::result::Result<bool, ()> {
+        let enqueue = |pending: &mut Vec<Value>, v: Value| -> std::result::Result<(), ()> {
+            if matches!(
+                v,
+                Value::Ref(
+                    RefValue::Func(_) | RefValue::Gc(_) | RefValue::ExternGc(_) | RefValue::Exn(_)
+                )
+            ) {
+                pending.try_reserve(1).map_err(|_| ())?;
+                pending.push(v);
+            }
+            Ok(())
+        };
+        for &v in &self.bound {
+            enqueue(pending, v)?;
+        }
+        match self.body.as_ref() {
+            Some(Body::Start(f)) => {
+                if f.0.store == store_id && f.0.index >= func_cp {
+                    return Ok(true);
+                }
+            }
+            Some(Body::Segment(seg)) => {
+                for frame in &seg.frames {
+                    if frame.function.instance >= inst_cp {
+                        return Ok(true);
+                    }
+                    for &v in &frame.locals {
+                        enqueue(pending, v)?;
+                    }
+                }
+                for prompt in &seg.prompts {
+                    if prompt.instance >= inst_cp
+                        || prompt
+                            .handlers
+                            .iter()
+                            .any(|(tag, _)| tag.0.store == store_id && tag.0.index >= tag_cp)
+                    {
+                        return Ok(true);
+                    }
+                }
+                for &v in &seg.operands {
+                    enqueue(pending, v)?;
+                }
+            }
+            None => {}
+        }
+        Ok(false)
+    }
+}
 pub(super) fn retire_prompts(depth: usize, prompts: &mut Vec<Prompt>) {
     while prompts.last().is_some_and(|p| p.frame_depth >= depth) {
         prompts.pop();

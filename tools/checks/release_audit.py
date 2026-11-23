@@ -230,7 +230,10 @@ def _git_revision_matches_core_tree(root: Path, revision: str) -> bool:
     if anc.returncode != 0:
         return False
     diff = subprocess.run(
-        ['git', 'diff', '--quiet', f'{revision}..{head}', '--', 'Cargo.toml', 'Cargo.lock', 'crates/'],
+        [
+            'git', 'diff', '--quiet', f'{revision}..{head}', '--',
+            'Cargo.toml', 'Cargo.lock', 'crates/', 'tools/wtime-conformance/',
+        ],
         cwd=root,
         capture_output=True,
     )

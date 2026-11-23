@@ -156,7 +156,7 @@ impl Store {
                         pending.extend_from_slice(&self.exceptions[index].payload);
                     }
                 }
-                Value::Ref(RefValue::Gc(r)) if gc_seen.insert(r) => {
+                Value::Ref(RefValue::Gc(r) | RefValue::ExternGc(r)) if gc_seen.insert(r) => {
                     let object = self.gc.get(r)?;
                     pending.extend_from_slice(&object.fields);
                     if let Some(r) = object.descriptor {

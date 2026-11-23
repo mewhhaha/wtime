@@ -406,6 +406,12 @@ impl Linker {
                         *escaped = true;
                         false
                     }
+                    Value::Ref(RefValue::Exn(r))
+                        if r.0.store == s.id && r.0.index >= checkpoint.6 =>
+                    {
+                        *escaped = true;
+                        false
+                    }
                     Value::Ref(RefValue::Gc(_) | RefValue::ExternGc(_) | RefValue::Exn(_)) => {
                         if pending.try_reserve(1).is_err() {
                             *escaped = true;
@@ -482,36 +488,55 @@ impl Linker {
                             escaped = true;
                             break;
                         }
-                        if gc_seen.insert(r)
-                            && let Ok(object) = s.gc.get(r)
-                        {
-                            for &field in &object.fields {
-                                if matches!(
-                                    field,
-                                    Value::Ref(
-                                        RefValue::Func(_)
-                                            | RefValue::Gc(_)
-                                            | RefValue::ExternGc(_)
-                                            | RefValue::Exn(_)
-                                    )
-                                ) {
+                        if gc_seen.insert(r) {
+                            if let Ok(object) = s.gc.get(r) {
+                                for &field in &object.fields {
+                                    if matches!(
+                                        field,
+                                        Value::Ref(
+                                            RefValue::Func(_)
+                                                | RefValue::Gc(_)
+                                                | RefValue::ExternGc(_)
+                                                | RefValue::Exn(_)
+                                        )
+                                    ) {
+                                        if pending.try_reserve(1).is_err() {
+                                            escaped = true;
+                                            break;
+                                        }
+                                        pending.push(field);
+                                    }
+                                }
+                                if !escaped && let Some(desc) = object.descriptor {
                                     if pending.try_reserve(1).is_err() {
                                         escaped = true;
                                         break;
                                     }
-                                    pending.push(field);
+                                    pending.push(Value::Ref(RefValue::Gc(desc)));
                                 }
                             }
-                            if !escaped && let Some(r) = object.descriptor {
-                                if pending.try_reserve(1).is_err() {
-                                    escaped = true;
-                                    break;
+                            if !escaped && let Some(cont) = s.continuations.get(&r) {
+                                match cont.trace_escape(
+                                    s.id,
+                                    checkpoint.0,
+                                    checkpoint.4,
+                                    checkpoint.5,
+                                    &mut pending,
+                                ) {
+                                    Ok(false) => {}
+                                    Ok(true) | Err(()) => {
+                                        escaped = true;
+                                        break;
+                                    }
                                 }
-                                pending.push(Value::Ref(RefValue::Gc(r)));
                             }
                         }
                     }
                     Value::Ref(RefValue::Exn(r)) => {
+                        if r.0.store == s.id && r.0.index >= checkpoint.6 {
+                            escaped = true;
+                            break;
+                        }
                         if exn_seen.try_reserve(1).is_err() {
                             escaped = true;
                             break;
@@ -519,6 +544,11 @@ impl Linker {
                         if exn_seen.insert(r)
                             && let Ok(i) = s.check(r.0, &s.exceptions)
                         {
+                            let tag = s.exceptions[i].tag;
+                            if tag.0.store == s.id && tag.0.index >= checkpoint.5 {
+                                escaped = true;
+                                break;
+                            }
                             for &field in &s.exceptions[i].payload {
                                 if matches!(
                                     field,

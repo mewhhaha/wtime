@@ -3821,23 +3821,10 @@ impl Module {
                  let host_ctx = bridge as usize;"
         )
         .unwrap();
-        for (k, (t, init)) in self.globals.iter().enumerate() {
-            if self.global_consts[k].is_none() {
-                writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
-            }
-        }
-        for (&tbl, &len) in &self.mut_extern_tables {
-            writeln!(
-                s,
-                "    let t{tbl} = match wtime_aot_rt::zeroed_u64({len}) {{\n\
-                 \x20       Ok(v) => v,\n\
-                 \x20       Err(t) => {{ unsafe {{ drop(Box::from_raw(bridge)); }} write_trap(trap_out, t); return std::ptr::null_mut(); }}\n\
-                 \x20   }};"
-            )
-            .unwrap();
-        }
-        // Allocate `Ctx` directly on the heap via fallible `alloc_zeroed` so
-        // modules with large contexts never build `Ctx` on the host thread stack.
+        // Allocate `Ctx` directly on the heap via fallible `alloc_zeroed` and
+        // initialize globals in-place so modules with large contexts or many
+        // mutable globals never materialize `Ctx` or global temporaries on the
+        // host thread stack.
         s.push_str(
             "    let ctx_layout = std::alloc::Layout::new::<Ctx>();\n\
                  let ctx_raw = unsafe { std::alloc::alloc_zeroed(ctx_layout) as *mut Ctx };\n\
@@ -3850,11 +3837,13 @@ impl Module {
                      std::ptr::addr_of_mut!((*ctx_raw).stack_floor).write(stack_floor);\n\
                      std::ptr::addr_of_mut!((*ctx_raw).mem).write(mem_meta);\n",
         );
-        for k in 0..self.globals.len() {
+        for (k, g) in m.globals.iter().enumerate() {
             if self.global_consts[k].is_none() {
+                let init = constant(&g.init, k, "(*ctx_raw).", &self.global_consts)
+                    .map_err(|e| format!("global {k}: {e}"))?;
                 writeln!(
                     s,
-                    "        std::ptr::addr_of_mut!((*ctx_raw).g{k}).write(g{k});"
+                    "        std::ptr::addr_of_mut!((*ctx_raw).g{k}).write({init});"
                 )
                 .unwrap();
             }
@@ -3862,7 +3851,7 @@ impl Module {
         for &tbl in self.mut_extern_tables.keys() {
             writeln!(
                 s,
-                "        std::ptr::addr_of_mut!((*ctx_raw).t{tbl}).write(t{tbl});"
+                "        std::ptr::addr_of_mut!((*ctx_raw).t{tbl}).write(Box::<[u64]>::default());"
             )
             .unwrap();
         }
@@ -3871,8 +3860,20 @@ impl Module {
                      std::ptr::addr_of_mut!((*ctx_raw).host_mxcsr).write(0x1f80);\n\
                      std::ptr::addr_of_mut!((*ctx_raw).host_call).write(host_trampoline);\n\
                  }\n\
-                 let mut ctx: Box<Ctx> = unsafe { Box::from_raw(ctx_raw) };\n\
-                 let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut ctx, mem.as_mut_slice(), (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
+                 let mut ctx: Box<Ctx> = unsafe { Box::from_raw(ctx_raw) };\n",
+        );
+        for (&tbl, &len) in &self.mut_extern_tables {
+            writeln!(
+                s,
+                "    ctx.t{tbl} = match wtime_aot_rt::zeroed_u64({len}) {{\n\
+                 \x20       Ok(v) => v,\n\
+                 \x20       Err(t) => {{ unsafe {{ drop(Box::from_raw(bridge)); }} write_trap(trap_out, t); return std::ptr::null_mut(); }}\n\
+                 \x20   }};"
+            )
+            .unwrap();
+        }
+        s.push_str(
+            "    let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut ctx, mem.as_mut_slice(), (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
                  if let Err(t) = init_res {\n\
                      unsafe { drop(Box::from_raw(bridge)); }\n\
                      write_trap(trap_out, t);\n\
@@ -5025,12 +5026,16 @@ impl<'a> Function<'a> {
             || (self.module.target == Target::BlotCdylib
                 && self.module.exported_funcs.contains(&self.index));
         let need_stack_check = !self.module.fn_no_stack_check[self.index];
-        // Conservative frame-size bound (locals + expression spills + call overhead).
-        let frame_est = self
-            .locals
-            .len()
-            .saturating_mul(24)
-            .saturating_add(code.len().min(65_536).saturating_mul(4))
+        // Conservative frame-size bound (per-type locals + expression spills + call overhead).
+        let local_est: usize = self.locals.iter().fold(0usize, |acc, t| {
+            let slot = match t {
+                ValType::V128 => 48,
+                _ => 24,
+            };
+            acc.saturating_add(slot)
+        });
+        let frame_est = local_est
+            .saturating_add(code.len().min(262_144).saturating_mul(6))
             .saturating_add(8192);
         // For larger functions (including large leaf functions), check stack headroom
         // inside a tiny wrapper BEFORE calling a `#[inline(never)]` body so LLVM

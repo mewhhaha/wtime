@@ -319,6 +319,33 @@ impl Store {
                 register_capacity_scope.observe(&frames);
                 frames.last_mut().unwrap()
             };
+            // Instructions are borrowed from a module handle held outside the
+            // store, refreshed only when execution moves to another module, so
+            // dispatch (including the experimental compact tier) neither clones
+            // the handle nor the instruction on steady-state steps.
+            // Instances are append-only while published, so the cache is keyed
+            // by instance index. After an instruction that may run host code
+            // (which can instantiate or roll back unpublished instances) the
+            // handle is compared again before reuse.
+            if module_stale || module_cache.as_ref().is_none_or(|(id, _)| *id != inst_id) {
+                let current = &self.instances[inst_id].module;
+                if !module_cache
+                    .as_ref()
+                    .is_some_and(|(_, cached)| Arc::ptr_eq(&cached.data, &current.data))
+                {
+                    module_cache = Some((inst_id, current.clone()));
+                } else if let Some(cached) = module_cache.as_mut() {
+                    cached.0 = inst_id;
+                }
+                #[cfg(feature = "compact-executor")]
+                {
+                    module_stale = false;
+                }
+            }
+            let module: &Module = &module_cache
+                .as_ref()
+                .expect("module cache was just filled")
+                .1;
             #[cfg(feature = "compact-executor")]
             let mut prepared_instruction = None;
             #[cfg(feature = "compact-executor")]
@@ -332,8 +359,7 @@ impl Store {
                 #[cfg(feature = "execution-reference")]
                 {
                     self.compact_dispatches = self.compact_dispatches.saturating_add(1);
-                    if self.instances[inst_id]
-                        .module
+                    if module
                         .data
                         .compact
                         .as_ref()
@@ -343,8 +369,7 @@ impl Store {
                             self.compact_prefix_dispatches.saturating_add(1);
                     }
                 }
-                let compact_module = self.instances[inst_id].module.clone();
-                let step = compact_module
+                let step = module
                     .data
                     .compact
                     .as_ref()
@@ -462,28 +487,6 @@ impl Store {
                     }
                 }
             }
-            // Instructions are borrowed from a module handle held outside the
-            // store, refreshed only when execution moves to another module, so
-            // dispatch neither clones the handle nor the instruction.
-            // Instances are append-only while published, so the cache is keyed
-            // by instance index. After an instruction that may run host code
-            // (which can instantiate or roll back unpublished instances) the
-            // handle is compared again before reuse.
-            if module_stale || module_cache.as_ref().is_none_or(|(id, _)| *id != inst_id) {
-                let current = &self.instances[inst_id].module;
-                if !module_cache
-                    .as_ref()
-                    .is_some_and(|(_, cached)| Arc::ptr_eq(&cached.data, &current.data))
-                {
-                    module_cache = Some((inst_id, current.clone()));
-                } else if let Some(cached) = module_cache.as_mut() {
-                    cached.0 = inst_id;
-                }
-            }
-            let module: &Module = &module_cache
-                .as_ref()
-                .expect("module cache was just filled")
-                .1;
             let ops = &module.data.inner.decoded().code[frame.function.body].instructions;
             // Straight-line instructions of a plain Decoded frame run without
             // returning here. The reference build keeps every instruction on
