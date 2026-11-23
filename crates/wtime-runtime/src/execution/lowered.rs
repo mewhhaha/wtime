@@ -23,9 +23,22 @@ pub(crate) enum Op {
     Slow,
     Nop,
     /// `block`, `loop`, `if`: the end and else positions and the arity.
-    Block { end: u32, params: u16, results: u16 },
-    Loop { end: u32, params: u16, results: u16 },
-    If { end: u32, other: u32, params: u16, results: u16 },
+    Block {
+        end: u32,
+        params: u16,
+        results: u16,
+    },
+    Loop {
+        end: u32,
+        params: u16,
+        results: u16,
+    },
+    If {
+        end: u32,
+        other: u32,
+        params: u16,
+        results: u16,
+    },
     Else,
     End,
     Br(u32),
@@ -38,7 +51,10 @@ pub(crate) enum Op {
     GlobalGet(u32),
     GlobalSet(u32),
     /// A scalar load or store on memory 0, by opcode and static offset.
-    Memory0 { opcode: u16, offset: u64 },
+    Memory0 {
+        opcode: u16,
+        offset: u64,
+    },
     I32Const(i32),
     I64Const(i64),
     F32Const(u32),
@@ -53,44 +69,108 @@ pub(crate) enum Op {
     // would. The second instruction keeps its own op, so the array stays one
     // op per instruction; no pair's second instruction is a branch target,
     // because no first instruction is a control instruction (see `group`).
-    LocalSetGet { set: u32, get: u32 },
-    LocalGetGet { first: u32, second: u32 },
-    LocalGetI32Const { local: u32, value: i32 },
+    LocalSetGet {
+        set: u32,
+        get: u32,
+    },
+    LocalGetGet {
+        first: u32,
+        second: u32,
+    },
+    LocalGetI32Const {
+        local: u32,
+        value: i32,
+    },
     I32ConstAdd(i32),
-    GlobalGetLocalSet { global: u32, local: u32 },
+    GlobalGetLocalSet {
+        global: u32,
+        local: u32,
+    },
     I32AddLocalSet(u32),
-    LocalGetLocalSet { from: u32, to: u32 },
-    LocalGetGlobalSet { local: u32, global: u32 },
+    LocalGetLocalSet {
+        from: u32,
+        to: u32,
+    },
+    LocalGetGlobalSet {
+        local: u32,
+        global: u32,
+    },
     /// `i32.add; load` on memory 0 with a 32-bit static offset.
-    I32AddLoad { offset: u32, opcode: u16 },
+    I32AddLoad {
+        offset: u32,
+        opcode: u16,
+    },
     // Fused expressions over locals: the op at the first instruction runs
     // them all without materializing intermediate operands, charging each
     // later instruction before it runs with the operand-stack height it
     // would have. As with pairs, every other instruction keeps its own op.
     /// `local.get local; T.const value; binop` for an inline integer binop
     /// of type T (an i64 constant that fits in i32 is stored narrowed).
-    LocalConstBin { local: u32, value: i32, opcode: u16 },
+    LocalConstBin {
+        local: u32,
+        value: i32,
+        opcode: u16,
+    },
     /// `local.get local; T.const value; binop; local.set to`.
-    LocalConstBinSet { local: u32, value: i32, to: u32, opcode: u16 },
+    LocalConstBinSet {
+        local: u32,
+        value: i32,
+        to: u32,
+        opcode: u16,
+    },
     /// `local.get local; load` on memory 0 with a 32-bit static offset.
-    LocalLoad { local: u32, offset: u32, opcode: u16 },
+    LocalLoad {
+        local: u32,
+        offset: u32,
+        opcode: u16,
+    },
     /// `local.get local; load; local.set to`.
-    LocalLoadSet { local: u32, offset: u32, to: u32, opcode: u16 },
+    LocalLoadSet {
+        local: u32,
+        offset: u32,
+        to: u32,
+        opcode: u16,
+    },
     /// `local.get addr; local.get value; store` on memory 0.
-    LocalLocalStore { addr: u32, value: u32, offset: u32, opcode: u16 },
+    LocalLocalStore {
+        addr: u32,
+        value: u32,
+        offset: u32,
+        opcode: u16,
+    },
     /// `local.get a; local.get b; binop` for an inline integer binop.
-    LocalLocalBin { a: u32, b: u32, opcode: u16 },
+    LocalLocalBin {
+        a: u32,
+        b: u32,
+        opcode: u16,
+    },
     /// `local.get local; unop` for i32.eqz or an inline integer conversion.
-    LocalUnary { local: u32, opcode: u16 },
+    LocalUnary {
+        local: u32,
+        opcode: u16,
+    },
     /// `local.get local; i32.wrap_i64; i32.const value; binop`.
-    LocalWrapConstBin { local: u32, value: i32, opcode: u16 },
+    LocalWrapConstBin {
+        local: u32,
+        value: i32,
+        opcode: u16,
+    },
     // A computation ending in a conditional: the control instruction may
     // close a group because it is preceded by an instruction of the group,
     // so it is neither a branch target nor a resumption point either.
     /// An inline integer operator or i32.eqz, then `if` with these fields.
-    IntIf { opcode: u16, end: u32, other: u32, params: u16, results: u16 },
+    IntIf {
+        opcode: u16,
+        end: u32,
+        other: u32,
+        params: u16,
+        results: u16,
+    },
     /// An inline integer operator or i32.eqz, then `br_if depth`.
-    IntBrIf { opcode: u16, depth: u32 },
+    IntBrIf {
+        opcode: u16,
+        depth: u32,
+    },
 }
 
 /// The fused op for two consecutive lowered ops, if any.
@@ -104,15 +184,52 @@ fn fuse(first: Op, second: Op) -> Option<Op> {
         (Op::LocalGet(first), Op::LocalGet(second)) => Op::LocalGetGet { first, second },
         (Op::LocalGet(from), Op::LocalSet(to)) => Op::LocalGetLocalSet { from, to },
         (Op::LocalGet(local), Op::GlobalSet(global)) => Op::LocalGetGlobalSet { local, global },
-        (Op::Int(0x6a), Op::Memory0 { opcode, offset }) if is_load(opcode) => {
-            Op::I32AddLoad { offset: u32::try_from(offset).ok()?, opcode }
+        (Op::Int(0x6a), Op::Memory0 { opcode, offset }) if is_load(opcode) => Op::I32AddLoad {
+            offset: u32::try_from(offset).ok()?,
+            opcode,
+        },
+        (Op::LocalGet(local), Op::I32Eqz) => Op::LocalUnary {
+            local,
+            opcode: 0x45,
+        },
+        (Op::LocalGet(local), Op::Int(opcode)) if is_unary(opcode) => {
+            Op::LocalUnary { local, opcode }
         }
-        (Op::LocalGet(local), Op::I32Eqz) => Op::LocalUnary { local, opcode: 0x45 },
-        (Op::LocalGet(local), Op::Int(opcode)) if is_unary(opcode) => Op::LocalUnary { local, opcode },
-        (Op::Int(opcode), Op::If { end, other, params, results }) => Op::IntIf { opcode, end, other, params, results },
-        (Op::I32Eqz, Op::If { end, other, params, results }) => Op::IntIf { opcode: 0x45, end, other, params, results },
+        (
+            Op::Int(opcode),
+            Op::If {
+                end,
+                other,
+                params,
+                results,
+            },
+        ) => Op::IntIf {
+            opcode,
+            end,
+            other,
+            params,
+            results,
+        },
+        (
+            Op::I32Eqz,
+            Op::If {
+                end,
+                other,
+                params,
+                results,
+            },
+        ) => Op::IntIf {
+            opcode: 0x45,
+            end,
+            other,
+            params,
+            results,
+        },
         (Op::Int(opcode), Op::BrIf(depth)) => Op::IntBrIf { opcode, depth },
-        (Op::I32Eqz, Op::BrIf(depth)) => Op::IntBrIf { opcode: 0x45, depth },
+        (Op::I32Eqz, Op::BrIf(depth)) => Op::IntBrIf {
+            opcode: 0x45,
+            depth,
+        },
         _ => return None,
     })
 }
@@ -127,30 +244,86 @@ fn fuse_expression(ops: &[Op], pc: usize) -> Option<(usize, Op)> {
         _ => None,
     };
     let offset32 = |offset: u64| u32::try_from(offset).ok();
-    let Some(Op::LocalGet(local)) = at(0) else { return None };
+    let Some(Op::LocalGet(local)) = at(0) else {
+        return None;
+    };
     match (at(1), at(2), at(3)) {
         (value, Some(Op::Int(opcode)), set) if constant(value, opcode).is_some() => {
             let value = constant(value, opcode)?;
             Some(match set {
-                Some(Op::LocalSet(to)) => (4, Op::LocalConstBinSet { local, value, to, opcode }),
-                _ => (3, Op::LocalConstBin { local, value, opcode }),
+                Some(Op::LocalSet(to)) => (
+                    4,
+                    Op::LocalConstBinSet {
+                        local,
+                        value,
+                        to,
+                        opcode,
+                    },
+                ),
+                _ => (
+                    3,
+                    Op::LocalConstBin {
+                        local,
+                        value,
+                        opcode,
+                    },
+                ),
             })
         }
         (Some(Op::Memory0 { opcode, offset }), set, _) if is_load(opcode) => {
             let offset = offset32(offset)?;
             Some(match set {
-                Some(Op::LocalSet(to)) => (3, Op::LocalLoadSet { local, offset, to, opcode }),
-                _ => (2, Op::LocalLoad { local, offset, opcode }),
+                Some(Op::LocalSet(to)) => (
+                    3,
+                    Op::LocalLoadSet {
+                        local,
+                        offset,
+                        to,
+                        opcode,
+                    },
+                ),
+                _ => (
+                    2,
+                    Op::LocalLoad {
+                        local,
+                        offset,
+                        opcode,
+                    },
+                ),
             })
         }
-        (Some(Op::LocalGet(value)), Some(Op::Memory0 { opcode, offset }), _) if !is_load(opcode) => {
-            Some((3, Op::LocalLocalStore { addr: local, value, offset: offset32(offset)?, opcode }))
+        (Some(Op::LocalGet(value)), Some(Op::Memory0 { opcode, offset }), _)
+            if !is_load(opcode) =>
+        {
+            Some((
+                3,
+                Op::LocalLocalStore {
+                    addr: local,
+                    value,
+                    offset: offset32(offset)?,
+                    opcode,
+                },
+            ))
         }
-        (Some(Op::LocalGet(b)), Some(Op::Int(opcode)), _) if !is_unary(opcode) => {
-            Some((3, Op::LocalLocalBin { a: local, b, opcode }))
-        }
-        (Some(Op::Int(0xa7)), Some(Op::I32Const(value)), Some(Op::Int(opcode))) if i32_binop(opcode) => {
-            Some((4, Op::LocalWrapConstBin { local, value, opcode }))
+        (Some(Op::LocalGet(b)), Some(Op::Int(opcode)), _) if !is_unary(opcode) => Some((
+            3,
+            Op::LocalLocalBin {
+                a: local,
+                b,
+                opcode,
+            },
+        )),
+        (Some(Op::Int(0xa7)), Some(Op::I32Const(value)), Some(Op::Int(opcode)))
+            if i32_binop(opcode) =>
+        {
+            Some((
+                4,
+                Op::LocalWrapConstBin {
+                    local,
+                    value,
+                    opcode,
+                },
+            ))
         }
         _ => None,
     }
@@ -247,7 +420,10 @@ fn group(ops: &mut [Op]) {
 
 /// The groups that can start at `pc`, as (instructions covered, fused op).
 fn candidates(ops: &[Op], pc: usize) -> [Option<(usize, Op)>; 2] {
-    let pair = ops.get(pc + 1).and_then(|&second| fuse(ops[pc], second)).map(|op| (2, op));
+    let pair = ops
+        .get(pc + 1)
+        .and_then(|&second| fuse(ops[pc], second))
+        .map(|op| (2, op));
     [fuse_expression(ops, pc), pair]
 }
 
@@ -260,9 +436,22 @@ fn lower_one(module: &Module, body: usize, pc: usize, i: &Instruction) -> Option
             let (end, other) = module.data.control.get(body, pc)?;
             let end = u32::try_from(end).ok()?;
             match i.opcode {
-                0x02 => Op::Block { end, params, results },
-                0x03 => Op::Loop { end, params, results },
-                _ => Op::If { end, other: other.map_or(Some(NO_ELSE), |x| u32::try_from(x).ok())?, params, results },
+                0x02 => Op::Block {
+                    end,
+                    params,
+                    results,
+                },
+                0x03 => Op::Loop {
+                    end,
+                    params,
+                    results,
+                },
+                _ => Op::If {
+                    end,
+                    other: other.map_or(Some(NO_ELSE), |x| u32::try_from(x).ok())?,
+                    params,
+                    results,
+                },
             }
         }
         (0x05, _) => Op::Else,
@@ -277,7 +466,15 @@ fn lower_one(module: &Module, body: usize, pc: usize, i: &Instruction) -> Option
         (0x22, Immediate::Index(x)) => Op::LocalTee(*x),
         (0x23, Immediate::Index(x)) => Op::GlobalGet(*x),
         (0x24, Immediate::Index(x)) => Op::GlobalSet(*x),
-        (0x28..=0x3e, Immediate::MemArg { memory: 0, offset, .. }) => Op::Memory0 { opcode: i.opcode, offset: *offset },
+        (
+            0x28..=0x3e,
+            Immediate::MemArg {
+                memory: 0, offset, ..
+            },
+        ) => Op::Memory0 {
+            opcode: i.opcode,
+            offset: *offset,
+        },
         (0x28..=0x3e, _) => Op::Slow,
         (0x41, Immediate::I32(x)) => Op::I32Const(*x),
         (0x42, Immediate::I64(x)) => Op::I64Const(*x),
@@ -311,42 +508,110 @@ mod tests {
             Op::Int(0x6c),
             Op::LocalSet(2),
             Op::LocalGet(2),
-            Op::Memory0 { opcode: 0x29, offset: 16 },
+            Op::Memory0 {
+                opcode: 0x29,
+                offset: 16,
+            },
             Op::LocalGet(3),
             Op::I64Const(-3),
             Op::Int(0x7c),
             Op::LocalGet(0),
             Op::LocalGet(1),
-            Op::Memory0 { opcode: 0x36, offset: 1 << 32 },
+            Op::Memory0 {
+                opcode: 0x36,
+                offset: 1 << 32,
+            },
             Op::End,
         ];
         let original = ops;
         group(&mut ops);
         let mut expected = original;
-        expected[1] = Op::LocalConstBinSet { local: 1, value: 8, to: 2, opcode: 0x6c };
-        expected[5] = Op::LocalLoad { local: 2, offset: 16, opcode: 0x29 };
-        expected[7] = Op::LocalConstBin { local: 3, value: -3, opcode: 0x7c };
+        expected[1] = Op::LocalConstBinSet {
+            local: 1,
+            value: 8,
+            to: 2,
+            opcode: 0x6c,
+        };
+        expected[5] = Op::LocalLoad {
+            local: 2,
+            offset: 16,
+            opcode: 0x29,
+        };
+        expected[7] = Op::LocalConstBin {
+            local: 3,
+            value: -3,
+            opcode: 0x7c,
+        };
         // An offset beyond 32 bits leaves the store unfused.
-        expected[10] = Op::LocalGetGet { first: 0, second: 1 };
+        expected[10] = Op::LocalGetGet {
+            first: 0,
+            second: 1,
+        };
         assert_eq!(ops, expected);
     }
 
     #[test]
     fn every_pair_forms() {
-        let store = Op::Memory0 { opcode: 0x36, offset: 0 };
+        let store = Op::Memory0 {
+            opcode: 0x36,
+            offset: 0,
+        };
         // Each pair, then an op that groups with neither of its instructions.
         let cases = [
-            ([Op::LocalSet(0), Op::LocalGet(1), store], Op::LocalSetGet { set: 0, get: 1 }),
-            ([Op::LocalGet(0), Op::LocalGet(1), Op::End], Op::LocalGetGet { first: 0, second: 1 }),
-            ([Op::LocalGet(0), Op::I32Const(7), Op::End], Op::LocalGetI32Const { local: 0, value: 7 }),
-            ([Op::I32Const(7), Op::Int(0x6a), Op::End], Op::I32ConstAdd(7)),
-            ([Op::GlobalGet(0), Op::LocalSet(1), Op::End], Op::GlobalGetLocalSet { global: 0, local: 1 }),
-            ([Op::Int(0x6a), Op::LocalSet(1), Op::End], Op::I32AddLocalSet(1)),
-            ([Op::LocalGet(0), Op::LocalSet(1), Op::End], Op::LocalGetLocalSet { from: 0, to: 1 }),
-            ([Op::LocalGet(0), Op::GlobalSet(1), Op::End], Op::LocalGetGlobalSet { local: 0, global: 1 }),
             (
-                [Op::Int(0x6a), Op::Memory0 { opcode: 0x28, offset: 4 }, Op::End],
-                Op::I32AddLoad { offset: 4, opcode: 0x28 },
+                [Op::LocalSet(0), Op::LocalGet(1), store],
+                Op::LocalSetGet { set: 0, get: 1 },
+            ),
+            (
+                [Op::LocalGet(0), Op::LocalGet(1), Op::End],
+                Op::LocalGetGet {
+                    first: 0,
+                    second: 1,
+                },
+            ),
+            (
+                [Op::LocalGet(0), Op::I32Const(7), Op::End],
+                Op::LocalGetI32Const { local: 0, value: 7 },
+            ),
+            (
+                [Op::I32Const(7), Op::Int(0x6a), Op::End],
+                Op::I32ConstAdd(7),
+            ),
+            (
+                [Op::GlobalGet(0), Op::LocalSet(1), Op::End],
+                Op::GlobalGetLocalSet {
+                    global: 0,
+                    local: 1,
+                },
+            ),
+            (
+                [Op::Int(0x6a), Op::LocalSet(1), Op::End],
+                Op::I32AddLocalSet(1),
+            ),
+            (
+                [Op::LocalGet(0), Op::LocalSet(1), Op::End],
+                Op::LocalGetLocalSet { from: 0, to: 1 },
+            ),
+            (
+                [Op::LocalGet(0), Op::GlobalSet(1), Op::End],
+                Op::LocalGetGlobalSet {
+                    local: 0,
+                    global: 1,
+                },
+            ),
+            (
+                [
+                    Op::Int(0x6a),
+                    Op::Memory0 {
+                        opcode: 0x28,
+                        offset: 4,
+                    },
+                    Op::End,
+                ],
+                Op::I32AddLoad {
+                    offset: 4,
+                    opcode: 0x28,
+                },
             ),
         ];
         for (mut ops, pair) in cases {
@@ -365,7 +630,12 @@ mod tests {
             Op::BrIf(1),
             Op::LocalGet(0),
             Op::I32Eqz,
-            Op::If { end: 9, other: NO_ELSE, params: 0, results: 0 },
+            Op::If {
+                end: 9,
+                other: NO_ELSE,
+                params: 0,
+                results: 0,
+            },
             Op::LocalGet(1),
             Op::Int(0xa7),
             Op::End,
@@ -378,10 +648,26 @@ mod tests {
         let original = ops;
         group(&mut ops);
         let mut expected = original;
-        expected[2] = Op::IntBrIf { opcode: 0x46, depth: 1 };
-        expected[5] = Op::IntIf { opcode: 0x45, end: 9, other: NO_ELSE, params: 0, results: 0 };
-        expected[7] = Op::LocalUnary { local: 1, opcode: 0xa7 };
-        expected[10] = Op::LocalWrapConstBin { local: 1, value: 3, opcode: 0x6c };
+        expected[2] = Op::IntBrIf {
+            opcode: 0x46,
+            depth: 1,
+        };
+        expected[5] = Op::IntIf {
+            opcode: 0x45,
+            end: 9,
+            other: NO_ELSE,
+            params: 0,
+            results: 0,
+        };
+        expected[7] = Op::LocalUnary {
+            local: 1,
+            opcode: 0xa7,
+        };
+        expected[10] = Op::LocalWrapConstBin {
+            local: 1,
+            value: 3,
+            opcode: 0x6c,
+        };
         assert_eq!(ops, expected);
     }
 
@@ -399,13 +685,32 @@ mod tests {
             Op::Int(0x7c),
             Op::Int(0xa7),
             Op::I32Eqz,
-            Op::Memory0 { opcode: 0x28, offset: 0 },
-            Op::Memory0 { opcode: 0x36, offset: 0 },
+            Op::Memory0 {
+                opcode: 0x28,
+                offset: 0,
+            },
+            Op::Memory0 {
+                opcode: 0x36,
+                offset: 0,
+            },
             Op::GlobalGet(0),
             Op::GlobalSet(0),
-            Op::Block { end: 9, params: 0, results: 0 },
-            Op::Loop { end: 9, params: 0, results: 0 },
-            Op::If { end: 9, other: NO_ELSE, params: 0, results: 0 },
+            Op::Block {
+                end: 9,
+                params: 0,
+                results: 0,
+            },
+            Op::Loop {
+                end: 9,
+                params: 0,
+                results: 0,
+            },
+            Op::If {
+                end: 9,
+                other: NO_ELSE,
+                params: 0,
+                results: 0,
+            },
             Op::Else,
             Op::End,
             Op::Br(0),
@@ -416,7 +721,15 @@ mod tests {
         let control = |op: Op| {
             matches!(
                 op,
-                Op::Block { .. } | Op::Loop { .. } | Op::If { .. } | Op::Else | Op::End | Op::Br(_) | Op::BrIf(_) | Op::Leave | Op::Slow
+                Op::Block { .. }
+                    | Op::Loop { .. }
+                    | Op::If { .. }
+                    | Op::Else
+                    | Op::End
+                    | Op::Br(_)
+                    | Op::BrIf(_)
+                    | Op::Leave
+                    | Op::Slow
             )
         };
         let n = alphabet.len();
@@ -428,7 +741,10 @@ mod tests {
                 assert!(len >= 2 && len <= ops.len(), "{ops:?}");
                 assert!(!control(ops[0]), "{ops:?}");
                 assert!(ops[1..len - 1].iter().all(|&op| !control(op)), "{ops:?}");
-                assert!(!control(ops[len - 1]) || matches!(ops[len - 1], Op::If { .. } | Op::BrIf(_)), "{ops:?}");
+                assert!(
+                    !control(ops[len - 1]) || matches!(ops[len - 1], Op::If { .. } | Op::BrIf(_)),
+                    "{ops:?}"
+                );
             }
         }
         assert!(groups > 1000);
@@ -437,9 +753,22 @@ mod tests {
     #[test]
     fn fused_pairs_never_start_with_control() {
         let controls = [
-            Op::Block { end: 1, params: 0, results: 0 },
-            Op::Loop { end: 1, params: 0, results: 0 },
-            Op::If { end: 1, other: NO_ELSE, params: 0, results: 0 },
+            Op::Block {
+                end: 1,
+                params: 0,
+                results: 0,
+            },
+            Op::Loop {
+                end: 1,
+                params: 0,
+                results: 0,
+            },
+            Op::If {
+                end: 1,
+                other: NO_ELSE,
+                params: 0,
+                results: 0,
+            },
             Op::Else,
             Op::End,
             Op::Br(0),
@@ -447,7 +776,13 @@ mod tests {
             Op::Leave,
             Op::Slow,
         ];
-        let any = [Op::LocalGet(0), Op::LocalSet(0), Op::I32Const(0), Op::Int(0x6a), Op::GlobalSet(0)];
+        let any = [
+            Op::LocalGet(0),
+            Op::LocalSet(0),
+            Op::I32Const(0),
+            Op::Int(0x6a),
+            Op::GlobalSet(0),
+        ];
         for first in controls {
             for second in any {
                 assert_eq!(fuse(first, second), None);

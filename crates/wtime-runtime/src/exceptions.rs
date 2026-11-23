@@ -1,7 +1,9 @@
 //! Store-owned exception identities; guest throws never use native unwinding.
 use super::*;
+/// Store-bound handle to an exception or stack-switching tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Tag(pub(super) Handle);
+/// Store-bound, generation-checked handle to a live WebAssembly exception object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExceptionRef(pub(super) Handle);
 #[derive(Clone, Debug)]
@@ -10,6 +12,7 @@ pub(super) struct Exception {
     pub(super) payload: Vec<Value>,
 }
 impl Store {
+    /// Creates a host-defined tag with an abstract [`FuncType`] signature.
     pub fn create_tag(&mut self, ty: FuncType) -> Result<Tag> {
         if ty.params.iter().chain(&ty.results).any(|t| {
             matches!(
@@ -38,6 +41,7 @@ impl Store {
         self.tags.push(ty);
         Ok(tag)
     }
+    /// Creates a tag whose signature (including concrete module types) comes from `ty` in `module`.
     pub fn create_module_tag(&mut self, module: &Module, ty: TypeIdx) -> Result<Tag> {
         if module.data.engine != self.engine.id {
             return Err(err(ErrorKind::Host, "tag module engine mismatch"));
@@ -70,6 +74,7 @@ impl Store {
         self.tag_modules.insert(tag.0.index, module.clone());
         Ok(tag)
     }
+    /// Allocates and publishes a new exception object for `tag` with the given `payload`.
     pub fn create_exception(&mut self, tag: Tag, payload: &[Value]) -> Result<ExceptionRef> {
         let ex = self.allocate_exception(tag, payload)?;
         self.publish_values(&[Value::Ref(RefValue::Exn(ex))]);
@@ -121,9 +126,11 @@ impl Store {
         });
         Ok(ex)
     }
+    /// Returns the [`Tag`] associated with a live exception handle.
     pub fn exception_tag(&self, ex: ExceptionRef) -> Result<Tag> {
         Ok(self.exceptions[self.check(ex.0, &self.exceptions)?].tag)
     }
+    /// Returns the payload values carried by a live exception handle.
     pub fn exception_payload(&self, ex: ExceptionRef) -> Result<&[Value]> {
         Ok(&self.exceptions[self.check(ex.0, &self.exceptions)?].payload)
     }

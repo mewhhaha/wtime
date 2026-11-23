@@ -55,7 +55,7 @@ def non_opcode_mappings(feature):
         d=('crates/wtime-decode/src/instructions.rs','read_instruction');v=('crates/wtime-validate/src/lib.rs','simd');e=('crates/wtime-runtime/src/simd.rs','execute')
     elif feature=='extended-const':v=('crates/wtime-validate/src/lib.rs','constant');e=('crates/wtime-runtime/src/lib.rs','eval_const')
     elif feature in ('garbage_collection','custom-descs'):
-        d=('crates/wtime-decode/src/module.rs','subtype');v=('crates/wtime-validate/src/types.rs','validate_types');e=('crates/wtime-runtime/src/canonical.rs','intern_group')
+        d=('crates/wtime-decode/src/module.rs','subtype_bounded');v=('crates/wtime-validate/src/types.rs','validate_types');e=('crates/wtime-runtime/src/canonical.rs','intern_group')
     elif feature=='stack-switching':v=('crates/wtime-validate/src/continuations.rs','continuation');e=('crates/wtime-runtime/src/continuation.rs','cont_step')
     elif feature=='exception_handling':v=('crates/wtime-validate/src/exceptions.rs','add_tag');e=('crates/wtime-runtime/src/execution.rs','unwind_exception')
     elif feature=='threads':d=('crates/wtime-decode/src/module.rs','limits');v=('crates/wtime-validate/src/atomics.rs','atomic');e=('crates/wtime-runtime/src/execution.rs','atomic')
@@ -112,14 +112,16 @@ def reconcile(root,reports):
             best=min(matching,key=lambda e:e['selected']);owner.update({'status':'implemented','path':best['path'],'symbol':'executed','evidence':{'kind':'corpus-report','report':best['path']}})
         else:owner.update({'status':'pending-audit'});owner.pop('evidence',None)
     focused={
-        'annotations':[('docs/verification/annotations.json','wtime-conformance','t159_',['t159_case_01','t159_case_02','t159_case_03'])],
-        'branch-hinting':[('docs/verification/branch-hints-decode.json','wtime-decode','metadata',['metadata::tests::t158_case_01','metadata::tests::t158_case_02','metadata::tests::t158_case_03']),('docs/verification/branch-hints-cli.json','wtime-cli','t158_',['t158_hints_do_not_change_execution'])],
+        'annotations':[('annotations.json','wtime-conformance','t159_',['t159_case_01','t159_case_02','t159_case_03'])],
+        'branch-hinting':[('branch-hints-decode.json','wtime-decode','metadata',['metadata::tests::t158_case_01','metadata::tests::t158_case_02','metadata::tests::t158_case_03']),('branch-hints-cli.json','wtime-cli','t158_',['t158_hints_do_not_change_execution'])],
     }
     for row in ledger['non_opcode_features']:
         proofs=[]
-        for report_path,package,test_filter,names in focused.get(row['feature'],[]):
-            p=root/report_path
-            if not p.is_file():break
+        for report_name,package,test_filter,names in focused.get(row['feature'],[]):
+            candidates=[f'target/conformance/{report_name}',f'docs/verification/{report_name}']
+            found_pair=next(((rel,root/rel) for rel in candidates if (root/rel).is_file()),None)
+            if found_pair is None:break
+            report_path,p=found_pair
             r=json.loads(p.read_text())
             expected=['cargo','test','--locked','-p',package,test_filter]
             if package=='wtime-conformance' and test_filter=='t159_' and r.get('command')==['cargo','test','--locked','-p',package,'--test','annotations']:expected=r['command']
@@ -168,7 +170,7 @@ def reconcile(root,reports):
             rule.pop('unbound_test_references',None)
             for item in entry['test_evidence']:
                 if item.get('kind')=='locked-corpus-case':
-                    fresh=[e for e in evidence.values() if e['suite']==item['required_suite'] and e['profile']==item['required_profile'] and e['implementation_sources'].get(entry['handler']['path'])==proof['handler_source_sha256'] and any(Path(source).resolve()==(root/item['path']).resolve() and sha==item['source_sha256'] for source,_,sha in (part.rpartition(':') for part in e['source_hash'].split(';')))]
+                    fresh=[e for e in evidence.values() if e['suite']==item['required_suite'] and e['profile']==item['required_profile'] and e['implementation_sources'].get(entry['handler']['path'])==proof['handler_source_sha256'] and any((root/source).resolve()==(root/item['path']).resolve() and sha==item['source_sha256'] for source,_,sha in (part.rpartition(':') for part in e['source_hash'].split(';')))]
                     if fresh:
                         latest=min(fresh,key=lambda e:e['selected'])
                         item={**item,'passing_report':latest['path'],'passing_report_sha256':latest['report_sha256'],'report_binary_sha256':latest['binary_sha256']}
@@ -184,7 +186,7 @@ def reconcile(root,reports):
                     if symbol not in (root/item['path']).read_text():raise ValueError('missing premise test '+item['symbol'])
                     tests.append({**item,'symbol':symbol,'source_sha256':digest(root/item['path'])})
                 else:
-                    matching=[e for e in evidence.values() if e['suite'] in ('phase3','core3') and e['implementation_sources'].get(entry['handler']['path'])==proof['handler_source_sha256'] and any(Path(source).resolve()==(root/item['path']).resolve() and sha==item['source_sha256'] for source,_,sha in (part.rpartition(':') for part in e['source_hash'].split(';')))]
+                    matching=[e for e in evidence.values() if e['suite'] in ('phase3','core3') and e['implementation_sources'].get(entry['handler']['path'])==proof['handler_source_sha256'] and any((root/source).resolve()==(root/item['path']).resolve() and sha==item['source_sha256'] for source,_,sha in (part.rpartition(':') for part in e['source_hash'].split(';')))]
                     if matching:
                         report=min(matching,key=lambda e:e['selected'])
                         tests.append({**item,'kind':'locked-corpus-file','passing_report':report['path'],'passing_report_sha256':report['report_sha256'],'report_binary_sha256':report['binary_sha256'],'required_suite':report['suite'],'required_profile':report['profile']})

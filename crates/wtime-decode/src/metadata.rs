@@ -2,22 +2,34 @@
 //! or change its instructions. Source: branch-hinting 23ce0bb32bbb690ce08877154e3879af060fb1d4.
 use crate::{DecodedModule, ImportKind, Reader};
 use wtime_types::{Error, ErrorKind, Result};
+/// Predicted branch direction recorded in a `metadata.code.branch_hint` custom section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchLikelihood {
+    /// Branch is hinted as unlikely to be taken (`0`).
     Unlikely,
+    /// Branch is hinted as likely to be taken (`1`).
     Likely,
 }
+/// A validated branch hint targeting an `if` or `br_if` instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BranchHint {
+    /// Function index in the module's function index space.
     pub function: u32,
+    /// Byte offset of the target instruction relative to the start of the function body.
     pub instruction_offset: u32,
+    /// Absolute byte offset of the target instruction within the module binary.
     pub absolute_offset: usize,
+    /// Hinted branch likelihood.
     pub likelihood: BranchLikelihood,
 }
+/// Result of inspecting optional `metadata.code.branch_hint` custom sections.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BranchHints {
+    /// Successfully parsed branch hints.
     pub hints: Vec<BranchHint>,
+    /// Number of malformed, misplaced, or duplicate branch-hint sections ignored.
     pub ignored_sections: usize,
+    /// Non-fatal diagnostic messages explaining why sections were ignored.
     pub diagnostics: Vec<String>,
 }
 fn invalid(message: &str) -> Error {

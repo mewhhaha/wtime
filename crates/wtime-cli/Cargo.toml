@@ -1,9 +1,16 @@
 [package]
 name = "wtime-cli"
+description = "Command-line interface for validating, inspecting, and running WebAssembly modules with wtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 wtime-types.workspace = true
 wtime-runtime.workspace = true

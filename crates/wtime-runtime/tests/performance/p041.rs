@@ -12,8 +12,10 @@ const NONNUMERIC: &[u8] = include_bytes!("../fixtures/performance/p041/nonnumeri
 const ROOTS: &[u8] = include_bytes!("../fixtures/performance/p041/host-gc-reentry.wasm");
 
 fn engine(policy: ExecutionPolicy, fuel: Option<u64>, depth: usize) -> Engine {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     config.limits.fuel = fuel;
     config.limits.max_call_depth = depth;
     Engine::with_execution_policy(config, policy).unwrap()

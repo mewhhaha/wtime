@@ -2,7 +2,10 @@ use super::*;
 impl Context<'_> {
     pub(super) fn add_tag(&mut self, t: TagType) -> Result<()> {
         self.enabled(self.features.exception_handling)?;
-        budget(self.tags.len() < self.limits.max_tags, "tag declaration limit exceeded")?;
+        budget(
+            self.tags.len() < self.limits.max_tags,
+            "tag declaration limit exceeded",
+        )?;
         let ti = t.function.as_usize();
         let ty = self.ty(ti)?;
         check(

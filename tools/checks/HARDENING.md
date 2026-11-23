@@ -1,7 +1,7 @@
 # Reproducible decoder and execution hardening
 
 These are development tools. The runtime never invokes an independent engine.
-Run commands from the workspace root after sourcing `/workspace/.setup/rust-env.sh`.
+Run commands from the workspace root with the pinned Rust toolchain (`rust-toolchain.toml`).
 
 ## Opcode ownership
 

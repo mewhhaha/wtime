@@ -158,7 +158,9 @@ fn p144_nested_reentry_restores_scope_and_rejects_reset() {
             store.register_activation_snapshot(),
             RegisterActivationSnapshot::default()
         );
-        eprintln!("P144_METRIC {{\"case\":\"reentry\",\"cancel\":{cancel},\"peak_frames\":1,\"outer_released_before_callback\":true,\"cleanup\":true}}");
+        eprintln!(
+            "P144_METRIC {{\"case\":\"reentry\",\"cancel\":{cancel},\"peak_frames\":1,\"outer_released_before_callback\":true,\"cleanup\":true}}"
+        );
     }
 }
 

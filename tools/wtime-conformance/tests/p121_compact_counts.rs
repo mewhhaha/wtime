@@ -2,6 +2,7 @@
 
 // Include the report accumulator directly so overflow behavior is tested without
 // reaching into or changing the runtime.
+#[allow(dead_code)]
 mod adapter {
     #[derive(Clone, Copy, Debug, Default)]
     pub struct PreparationCounts {
@@ -17,6 +18,7 @@ mod adapter {
         pub overflowed: bool,
     }
 }
+#[allow(dead_code)]
 #[path = "../src/report.rs"]
 mod report;
 
@@ -121,9 +123,15 @@ fn p121_compact_counts_are_per_module_and_checked() {
             .unwrap()
             > 0
     );
+    let features = output
+        .split("--features ")
+        .nth(1)
+        .and_then(|rest| rest.split([' ', '"']).next())
+        .map(|list| list.split(',').collect::<Vec<_>>())
+        .unwrap_or_default();
     assert!(
-        output.contains("--features compact-executor,performance-counters"),
-        "the replay command retains both diagnostic features"
+        features.contains(&"compact-executor") && features.contains(&"performance-counters"),
+        "the replay command retains both diagnostic features: {features:?}"
     );
     assert!(
         field(&output, "optimized_compact_source_events")
@@ -241,7 +249,10 @@ fn p121_fallback_is_derived_without_double_count_and_hidden_failures_fail() {
     report.selected = 1;
     report.executed = 1;
     report.execution_counts = Some(report::ExecutionCounts::default());
-    assert!(report.ok(), "directive outcome status remains independent of coverage gating");
+    assert!(
+        report.ok(),
+        "directive outcome status remains independent of coverage gating"
+    );
     report.execution_counts = Some(report::ExecutionCounts {
         total_dispatched_source_events: 1,
         optimized_compact_source_events: 1,

@@ -5,7 +5,9 @@ pub(super) fn exec(op: u16, s: &mut Vec<Value>) -> Result<()> {
     // Errors and their order match pop/check/push.
     macro_rules! unary {
         ($v:ident,$e:expr) => {{
-            let slot = s.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
+            let slot = s
+                .last_mut()
+                .ok_or_else(|| trap("operand stack underflow"))?;
             let Value::$v(a) = *slot else {
                 return Err(trap("numeric type mismatch"));
             };
@@ -17,7 +19,9 @@ pub(super) fn exec(op: u16, s: &mut Vec<Value>) -> Result<()> {
             let Value::$v(b) = pop(s)? else {
                 return Err(trap("numeric type mismatch"));
             };
-            let slot = s.last_mut().ok_or_else(|| trap("operand stack underflow"))?;
+            let slot = s
+                .last_mut()
+                .ok_or_else(|| trap("operand stack underflow"))?;
             let Value::$v(a) = *slot else {
                 return Err(trap("numeric type mismatch"));
             };

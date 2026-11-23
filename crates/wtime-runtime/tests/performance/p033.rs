@@ -2,8 +2,7 @@ use wtime_runtime::*;
 
 const TABLE_TARGETS: &[u8] =
     include_bytes!("../fixtures/performance/gc/changed_indirect_target.wasm");
-const NOMINAL_EXACT: &[u8] =
-    include_bytes!("../fixtures/performance/gc/nominal_exact_casts.wasm");
+const NOMINAL_EXACT: &[u8] = include_bytes!("../fixtures/performance/gc/nominal_exact_casts.wasm");
 const TYPED_FUNCTION_REFS: &[u8] =
     include_bytes!("../fixtures/performance/gc/typed_function_refs.wasm");
 
@@ -95,7 +94,10 @@ fn assert_gc_lifecycle(bytes: &[u8], counts: &[(i32, i32, usize)]) {
         assert_eq!(run_i32(&mut store, instance, n), expected, "input n={n}");
         let stats = store.collect().unwrap();
         assert_eq!(stats.live, 0, "live GC objects after n={n}");
-        assert_eq!(stats.reclaimed, allocations, "reclaimed objects after n={n}");
+        assert_eq!(
+            stats.reclaimed, allocations,
+            "reclaimed objects after n={n}"
+        );
         assert_eq!(store.gc_payload_bytes(), 0, "retained payload after n={n}");
     }
 }

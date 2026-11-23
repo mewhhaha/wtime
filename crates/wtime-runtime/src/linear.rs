@@ -71,7 +71,11 @@ impl LinearBytes {
             return true;
         }
         let pages = page_count(new_len);
-        if self.pages.try_reserve(pages.saturating_sub(self.pages.len())).is_err() {
+        if self
+            .pages
+            .try_reserve(pages.saturating_sub(self.pages.len()))
+            .is_err()
+        {
             return false;
         }
         // A written last page that was shorter than a full page extends to
@@ -82,7 +86,9 @@ impl LinearBytes {
         {
             let size = (new_len - last * PAGE).min(PAGE);
             if page.len() < size {
-                let Ok(mut extended) = zeroed_page(size.max(page.len().saturating_mul(2)).min(PAGE)) else {
+                let Ok(mut extended) =
+                    zeroed_page(size.max(page.len().saturating_mul(2)).min(PAGE))
+                else {
                     return false;
                 };
                 extended[..page.len()].copy_from_slice(page);
@@ -112,13 +118,19 @@ impl LinearBytes {
     /// and the page is allocated; false leaves it to the general path.
     #[inline(always)]
     pub(crate) fn write_array<const N: usize>(&mut self, at: usize, data: [u8; N]) -> bool {
-        let Some(end) = at.checked_add(N) else { return false };
+        let Some(end) = at.checked_add(N) else {
+            return false;
+        };
         if end > self.len {
             return false;
         }
         let offset = at & MASK;
-        let Some(Some(page)) = self.pages.get_mut(at >> PAGE_BITS) else { return false };
-        let Some(slot) = page.get_mut(offset..offset + N) else { return false };
+        let Some(Some(page)) = self.pages.get_mut(at >> PAGE_BITS) else {
+            return false;
+        };
+        let Some(slot) = page.get_mut(offset..offset + N) else {
+            return false;
+        };
         slot.copy_from_slice(&data);
         true
     }
@@ -189,7 +201,10 @@ impl LinearBytes {
     /// nonzero bytes and are kept.
     fn release(&mut self, first: usize, end: usize) {
         for page in &mut self.pages[first..end] {
-            if page.as_deref().is_some_and(|bytes| bytes.iter().all(|&byte| byte == 0)) {
+            if page
+                .as_deref()
+                .is_some_and(|bytes| bytes.iter().all(|&byte| byte == 0))
+            {
                 *page = None;
             }
         }
@@ -235,7 +250,12 @@ impl LinearBytes {
     /// Sets `count` bytes at `at` to `byte`, allocating every page it needs
     /// before changing any. Zeroing a page that was never written leaves it
     /// unallocated.
-    pub(crate) fn fill(&mut self, at: usize, count: usize, byte: u8) -> Result<(), AllocationFailed> {
+    pub(crate) fn fill(
+        &mut self,
+        at: usize,
+        count: usize,
+        byte: u8,
+    ) -> Result<(), AllocationFailed> {
         let pieces = |mut at: usize, mut count: usize| {
             std::iter::from_fn(move || {
                 (count > 0).then(|| {
@@ -274,7 +294,9 @@ impl LinearBytes {
         count: usize,
         scratch: &mut Vec<u8>,
     ) -> Result<(), AllocationFailed> {
-        scratch.try_reserve(count.saturating_sub(scratch.len())).map_err(|_| AllocationFailed)?;
+        scratch
+            .try_reserve(count.saturating_sub(scratch.len()))
+            .map_err(|_| AllocationFailed)?;
         scratch.resize(count, 0);
         self.read(source, scratch);
         self.write(destination, scratch)
@@ -284,7 +306,12 @@ impl LinearBytes {
     /// memory's length (a grown last page may hold more).
     pub(crate) fn written_pages(&self) -> impl Iterator<Item = (usize, &[u8])> {
         self.pages.iter().enumerate().filter_map(|(index, page)| {
-            page.as_deref().map(|bytes| (index * PAGE, &bytes[..bytes.len().min(self.len - index * PAGE)]))
+            page.as_deref().map(|bytes| {
+                (
+                    index * PAGE,
+                    &bytes[..bytes.len().min(self.len - index * PAGE)],
+                )
+            })
         })
     }
 
@@ -341,7 +368,9 @@ impl std::ops::Index<usize> for LinearBytes {
 impl std::ops::IndexMut<usize> for LinearBytes {
     fn index_mut(&mut self, at: usize) -> &mut u8 {
         assert!(at < self.len, "linear memory index out of range");
-        &mut self.page_mut(at >> PAGE_BITS).expect("test memory allocation")[at & MASK]
+        &mut self
+            .page_mut(at >> PAGE_BITS)
+            .expect("test memory allocation")[at & MASK]
     }
 }
 
@@ -407,10 +436,14 @@ mod tests {
         let mut scratch = Vec::new();
         let pattern: Vec<u8> = (0..300).map(|i| i as u8).collect();
         memory.write(PAGE - 100, &pattern).unwrap();
-        memory.copy_within(PAGE - 100, PAGE - 99, 300, &mut scratch).unwrap();
+        memory
+            .copy_within(PAGE - 100, PAGE - 99, 300, &mut scratch)
+            .unwrap();
         assert_eq!(bytes(&memory, PAGE - 99, 300), pattern);
         memory.write(PAGE - 100, &pattern).unwrap();
-        memory.copy_within(PAGE - 99, PAGE - 100, 299, &mut scratch).unwrap();
+        memory
+            .copy_within(PAGE - 99, PAGE - 100, 299, &mut scratch)
+            .unwrap();
         assert_eq!(bytes(&memory, PAGE - 100, 299), pattern[1..]);
     }
 
@@ -446,7 +479,10 @@ mod tests {
         assert_eq!(memory.allocated_bytes(), PAGE + 3);
         assert_eq!(bytes(&memory, 8, 3), [0, 8, 0]);
         assert_eq!(bytes(&memory, PAGE, 3), [0, 0, 9]);
-        let pages: Vec<(usize, usize)> = memory.written_pages().map(|(at, page)| (at, page.len())).collect();
+        let pages: Vec<(usize, usize)> = memory
+            .written_pages()
+            .map(|(at, page)| (at, page.len()))
+            .collect();
         assert_eq!(pages, [(0, PAGE), (PAGE, 3)]);
     }
 
@@ -460,7 +496,10 @@ mod tests {
             assert!(memory.grow_to(len));
             memory.write(len - 1, &[(len % 251) as u8]).unwrap();
             let allocated = memory.allocated_bytes();
-            assert!(allocated >= len && allocated <= 2 * len, "len={len} allocated={allocated}");
+            assert!(
+                allocated >= len && allocated <= 2 * len,
+                "len={len} allocated={allocated}"
+            );
             if allocated != previous {
                 reallocations += 1;
                 previous = allocated;
@@ -482,7 +521,10 @@ mod tests {
         let mut memory = LinearBytes::zeroed(4).unwrap();
         memory.write(0, &[1, 2, 3, 4]).unwrap();
         assert!(memory.grow_to(5));
-        let pages: Vec<(usize, Vec<u8>)> = memory.written_pages().map(|(at, page)| (at, page.to_vec())).collect();
+        let pages: Vec<(usize, Vec<u8>)> = memory
+            .written_pages()
+            .map(|(at, page)| (at, page.to_vec()))
+            .collect();
         assert_eq!(pages, [(0, vec![1, 2, 3, 4, 0])]);
     }
 
@@ -491,7 +533,9 @@ mod tests {
         let mut memory = LinearBytes::zeroed(4 * PAGE).unwrap();
         let mut scratch = Vec::new();
         memory.write(PAGE / 2, &vec![0; 2 * PAGE]).unwrap();
-        memory.copy_within(0, 2 * PAGE, 2 * PAGE, &mut scratch).unwrap();
+        memory
+            .copy_within(0, 2 * PAGE, 2 * PAGE, &mut scratch)
+            .unwrap();
         assert_eq!(memory.allocated_pages(), 0);
         memory.write(10, &[3]).unwrap();
         memory.copy_within(0, 2 * PAGE, PAGE, &mut scratch).unwrap();

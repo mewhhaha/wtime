@@ -11,11 +11,20 @@ use std::cmp::Ordering;
 
 /// The text of an f64 as `goose.print_f64` and `goose.format_f64` give it.
 pub fn f64_text(value: f64) -> String {
-    if let Some(text) = special(value.is_nan(), value.is_infinite(), value == 0.0, value.is_sign_negative()) {
+    if let Some(text) = special(
+        value.is_nan(),
+        value.is_infinite(),
+        value == 0.0,
+        value.is_sign_negative(),
+    ) {
         return text.to_string();
     }
     let (digits, exponent) = f64_shortest(value.abs());
-    layout(value.is_sign_negative(), digits.to_string().trim_end_matches('0'), exponent)
+    layout(
+        value.is_sign_negative(),
+        digits.to_string().trim_end_matches('0'),
+        exponent,
+    )
 }
 
 /// The shortest digits that read back as a positive finite f64, as an
@@ -29,17 +38,28 @@ pub fn f64_text(value: f64) -> String {
 fn f64_shortest(magnitude: f64) -> (u64, i32) {
     // `{:e}` gives d[.ddd]e[-]x.
     let scientific = format!("{magnitude:e}");
-    let (mantissa, exponent) = scientific.split_once('e').expect("scientific text has an exponent");
-    let exponent: i32 = exponent.parse().expect("scientific text has a decimal exponent");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("scientific text has an exponent");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("scientific text has a decimal exponent");
     let count = mantissa.len() as i32 - i32::from(mantissa.len() > 1);
-    let digits = mantissa.bytes().filter(u8::is_ascii_digit).fold(0u64, |digits, digit| digits * 10 + u64::from(digit - b'0'));
+    let digits = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .fold(0u64, |digits, digit| digits * 10 + u64::from(digit - b'0'));
     if digits % 2 == 0 {
         return (digits, exponent);
     }
     // The value is significand * 2**binary, both reduced so that it is odd.
     let bits = magnitude.to_bits();
     let (biased, fraction) = ((bits >> 52) as i32, bits & ((1 << 52) - 1));
-    let significand = if biased != 0 { fraction | 1 << 52 } else { fraction };
+    let significand = if biased != 0 {
+        fraction | 1 << 52
+    } else {
+        fraction
+    };
     let binary = biased.max(1) - 1075 + significand.trailing_zeros() as i32;
     let significand = significand >> significand.trailing_zeros();
     // The last digit counts 10**last. Half way to the next text up or down is
@@ -50,9 +70,13 @@ fn f64_shortest(magnitude: f64) -> (u64, i32) {
         let fives = 5u128.checked_pow(ten.unsigned_abs());
         match fives {
             // odd * 5**ten * 2**ten is the value: an odd number at 2**binary.
-            Some(fives) if ten >= 0 => binary == ten && u128::from(odd).checked_mul(fives) == Some(u128::from(significand)),
+            Some(fives) if ten >= 0 => {
+                binary == ten && u128::from(odd).checked_mul(fives) == Some(u128::from(significand))
+            }
             // The value times 10**-ten is the odd number.
-            Some(fives) => binary == ten && u128::from(significand).checked_mul(fives) == Some(u128::from(odd)),
+            Some(fives) => {
+                binary == ten && u128::from(significand).checked_mul(fives) == Some(u128::from(odd))
+            }
             None => false,
         }
     };
@@ -74,7 +98,12 @@ fn f64_shortest(magnitude: f64) -> (u64, i32) {
 
 /// The text of an f32 as `goose.print_f32` and `goose.format_f32` give it.
 pub fn f32_text(value: f32) -> String {
-    if let Some(text) = special(value.is_nan(), value.is_infinite(), value == 0.0, value.is_sign_negative()) {
+    if let Some(text) = special(
+        value.is_nan(),
+        value.is_infinite(),
+        value == 0.0,
+        value.is_sign_negative(),
+    ) {
         return text.to_string();
     }
     let (digits, exponent) = f32_scientific(value.abs());
@@ -133,7 +162,11 @@ fn layout(negative: bool, digits: &str, exponent: i32) -> String {
 fn f32_scientific(magnitude: f32) -> (String, i32) {
     let bits = magnitude.to_bits();
     let (biased, fraction) = ((bits >> 23) as i32, bits & 0x7F_FFFF);
-    let significand = if biased != 0 { fraction | 0x80_0000 } else { fraction };
+    let significand = if biased != 0 {
+        fraction | 0x80_0000
+    } else {
+        fraction
+    };
     // The value is quarter * 2**binary; what reads back as it reaches from
     // quarter - below to quarter + 2 in the same unit, ends included when the
     // significand is even, since reading rounds a tie to the even significand.
@@ -164,7 +197,10 @@ fn f32_scientific(magnitude: f32) -> (String, i32) {
     loop {
         let (value_unit, decimal_unit) = scaled(exponent - precision + 1);
         let exact = value_unit.times(quarter);
-        let (low, high) = (value_unit.times(quarter - below), value_unit.times(quarter + 2));
+        let (low, high) = (
+            value_unit.times(quarter - below),
+            value_unit.times(quarter + 2),
+        );
         let truncated = exact.divided_by(&decimal_unit);
         let mut best: Option<(u64, Wide)> = None;
         for digits in [truncated, truncated + 1] {
@@ -177,7 +213,11 @@ fn f32_scientific(magnitude: f32) -> (String, i32) {
             if !inside {
                 continue;
             }
-            let distance = if candidate > exact { candidate.minus(&exact) } else { exact.minus(&candidate) };
+            let distance = if candidate > exact {
+                candidate.minus(&exact)
+            } else {
+                exact.minus(&candidate)
+            };
             let better = match &best {
                 None => true,
                 Some((_, least)) => distance < *least || (distance == *least && digits % 2 == 0),
@@ -228,10 +268,10 @@ impl Wide {
         assert!(self.bits() + bits <= 256, "f32 text arithmetic overflowed");
         let (whole, part) = ((bits / 64) as usize, bits % 64);
         let mut words = [0u64; 4];
-        for index in whole..4 {
-            words[index] = self.0[index - whole] << part;
+        for (index, slot) in words.iter_mut().enumerate().skip(whole) {
+            *slot = self.0[index - whole] << part;
             if part != 0 && index > whole {
-                words[index] |= self.0[index - whole - 1] >> (64 - part);
+                *slot |= self.0[index - whole - 1] >> (64 - part);
             }
         }
         Wide(words)
@@ -240,10 +280,10 @@ impl Wide {
     fn minus(&self, other: &Wide) -> Wide {
         let mut words = [0u64; 4];
         let mut borrow = false;
-        for index in 0..4 {
+        for (index, slot) in words.iter_mut().enumerate() {
             let (difference, first) = self.0[index].overflowing_sub(other.0[index]);
             let (difference, second) = difference.overflowing_sub(u64::from(borrow));
-            words[index] = difference;
+            *slot = difference;
             borrow = first || second;
         }
         assert!(!borrow, "f32 text arithmetic went negative");
@@ -277,7 +317,10 @@ impl Wide {
     fn divided_by(&self, divisor: &Wide) -> u64 {
         assert!(divisor.bits() != 0, "f32 text arithmetic divided by zero");
         let shift = divisor.bits().saturating_sub(64);
-        assert!(self.bits().saturating_sub(shift) <= 128, "f32 text quotient is too large");
+        assert!(
+            self.bits().saturating_sub(shift) <= 128,
+            "f32 text quotient is too large"
+        );
         let estimate = self.top(shift) / divisor.top(shift);
         let mut quotient = u64::try_from(estimate).expect("f32 text quotient is too large");
         while divisor.times(quotient) > *self {
@@ -307,6 +350,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn f64_layouts() {
         for (value, text) in [
             (0.0, "0.0"),
@@ -368,10 +412,24 @@ mod tests {
     #[test]
     fn wide_division() {
         let ten_to_fifty = Wide::power_of_ten(50);
-        assert_eq!(ten_to_fifty.times(123_456_789).divided_by(&ten_to_fifty), 123_456_789);
-        assert_eq!(ten_to_fifty.times(7).minus(&Wide([1, 0, 0, 0])).divided_by(&ten_to_fifty), 6);
+        assert_eq!(
+            ten_to_fifty.times(123_456_789).divided_by(&ten_to_fifty),
+            123_456_789
+        );
+        assert_eq!(
+            ten_to_fifty
+                .times(7)
+                .minus(&Wide([1, 0, 0, 0]))
+                .divided_by(&ten_to_fifty),
+            6
+        );
         assert_eq!(Wide([0, 0, 1, 0]).shifted(70).bits(), 199);
-        assert_eq!(Wide([5, 0, 0, 0]).shifted(130).divided_by(&Wide([1, 0, 0, 0]).shifted(128)), 20);
+        assert_eq!(
+            Wide([5, 0, 0, 0])
+                .shifted(130)
+                .divided_by(&Wide([1, 0, 0, 0]).shifted(128)),
+            20
+        );
         assert!(Wide([0, 1, 0, 0]) > Wide([u64::MAX, 0, 0, 0]));
     }
 }

@@ -1,11 +1,15 @@
 use super::*;
 impl Linker {
+    /// Creates an empty linker bound to `e`.
     pub fn new(e: &Engine) -> Self {
         Self {
             engine: e.id,
             defs: HashMap::new(),
         }
     }
+    /// Registers an importable external item under `(module, name)`.
+    ///
+    /// Returns an [`ErrorKind::Link`] error if `(m, n)` is already defined.
     pub fn define(&mut self, m: &str, n: &str, v: External) -> Result<()> {
         if self.defs.contains_key(&(m.into(), n.into())) {
             return Err(err(ErrorKind::Link, "duplicate definition"));
@@ -168,8 +172,13 @@ impl Linker {
         }
         #[cfg(feature = "compact-executor")]
         if s.engine.policy == ExecutionPolicy::Compact
-            && m.data.compact.as_ref().is_some_and(|program| program.needs_bindings()) {
-            inst.call_bindings = execution::compact::CallBindings::prepare(s, m, &inst.funcs).map(Arc::new);
+            && m.data
+                .compact
+                .as_ref()
+                .is_some_and(|program| program.needs_bindings())
+        {
+            inst.call_bindings =
+                execution::compact::CallBindings::prepare(s, m, &inst.funcs).map(Arc::new);
         }
         for t in &d.memories {
             let n = t
@@ -192,19 +201,24 @@ impl Linker {
             if t.limits.min > s.engine.config.limits.max_table_elements {
                 return Err(err(ErrorKind::ResourceLimit, "table limit"));
             }
-            s.reserve_table(t.limits.min)?;
             let n = usize::try_from(t.limits.min)
                 .map_err(|_| err(ErrorKind::ResourceLimit, "table allocation overflow"))?;
-            inst.tabs.push(Table(s.h(s.tabs.len())));
             let init = if let Some(expr) = d.table_inits.get(table_index).and_then(|x| x.as_ref()) {
                 eval_const(s, &inst, expr)?
             } else {
                 Value::zero(ValType::Ref(t.element))
             };
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(n)
+                .map_err(|_| err(ErrorKind::ResourceLimit, "table allocation"))?;
+            s.reserve_table(t.limits.min)?;
+            values.resize(n, init);
+            inst.tabs.push(Table(s.h(s.tabs.len())));
             s.tabs.push(Tab {
                 instance: Some(ii),
                 ty: *t,
-                values: vec![init; n],
+                values,
             })
         }
         for g in &d.globals {
@@ -248,8 +262,13 @@ impl Linker {
         }
         #[cfg(feature = "compact-executor")]
         if s.engine.policy == ExecutionPolicy::Compact
-            && m.data.compact.as_ref().is_some_and(|program| program.needs_memory_bindings()) {
-            inst.memory_bindings = execution::compact::MemoryBindings::prepare(s, m, &inst.mems).map(Arc::new);
+            && m.data
+                .compact
+                .as_ref()
+                .is_some_and(|program| program.needs_memory_bindings())
+        {
+            inst.memory_bindings =
+                execution::compact::MemoryBindings::prepare(s, m, &inst.mems).map(Arc::new);
         }
         s.instances.push(inst.clone());
         for (elem_index, el) in d.elements.iter().enumerate() {
@@ -313,6 +332,9 @@ impl Linker {
 }
 
 impl Linker {
+    /// Instantiates a compiled [`Module`] inside `s`, resolving imports from this linker and running any `start` function.
+    ///
+    /// On failure, unescaped private allocations made during instantiation are rolled back.
     pub fn instantiate(&self, s: &mut Store, m: &Module) -> Result<Instance> {
         let checkpoint = (
             s.funcs.len(),

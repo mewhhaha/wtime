@@ -1,8 +1,15 @@
 [package]
 name = "wtime-decode"
+description = "Bounded, zero-dependency, safe-Rust WebAssembly binary decoder for wtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
 wtime-types.workspace = true

@@ -1,11 +1,4 @@
 mod accounting;
-#[cfg(not(feature = "execution-reference"))]
-mod straight;
-#[cfg(not(feature = "execution-reference"))]
-pub(crate) mod lowered;
-#[cfg(feature = "register-executor")]
-#[allow(dead_code)]
-pub(super) mod register;
 #[cfg(feature = "compact-executor")]
 #[allow(dead_code)]
 pub(super) mod compact;
@@ -13,8 +6,15 @@ pub(super) mod compact;
 pub(crate) mod cursor;
 #[allow(dead_code)]
 mod effects;
+#[cfg(not(feature = "execution-reference"))]
+pub(crate) mod lowered;
 #[allow(dead_code)]
 pub(super) mod plan;
+#[cfg(feature = "register-executor")]
+#[allow(dead_code)]
+pub(super) mod register;
+#[cfg(not(feature = "execution-reference"))]
+mod straight;
 use super::*;
 #[derive(Clone)]
 pub(super) struct Label {
@@ -107,9 +107,13 @@ impl Store {
         }
         #[cfg(feature = "compact-executor")]
         let compact = self.engine.policy == ExecutionPolicy::Compact
-            && module.data.compact.as_ref().is_some_and(|program| program.contains(fun.body)
-                && (!program.has_calls(fun.body) || self.instances[fun.instance].call_bindings.is_some())
-                && (!program.has_memory(fun.body) || self.instances[fun.instance].memory_bindings.is_some()));
+            && module.data.compact.as_ref().is_some_and(|program| {
+                program.contains(fun.body)
+                    && (!program.has_calls(fun.body)
+                        || self.instances[fun.instance].call_bindings.is_some())
+                    && (!program.has_memory(fun.body)
+                        || self.instances[fun.instance].memory_bindings.is_some())
+            });
         #[cfg(all(feature = "compact-executor", feature = "performance-counters"))]
         if self.engine.policy == ExecutionPolicy::Compact && !compact {
             self.perf.record(perf::Event::CompactFallbackFrame, 1);
@@ -117,11 +121,20 @@ impl Store {
         #[allow(unused_mut)]
         let mut labels = vec![];
         #[cfg(feature = "register-executor")]
-        let register = if self.engine.policy == ExecutionPolicy::Register { register::activate_entry(self, fun.instance, fun.body, &locals, &mut labels) } else { None };
+        let register = if self.engine.policy == ExecutionPolicy::Register {
+            register::activate_entry(self, fun.instance, fun.body, &locals, &mut labels)
+        } else {
+            None
+        };
         #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
-        if self.engine.policy == ExecutionPolicy::Register && register.is_none() { self.register_fallback_frames.set(self.register_fallback_frames.get().saturating_add(1)); }
+        if self.engine.policy == ExecutionPolicy::Register && register.is_none() {
+            self.register_fallback_frames
+                .set(self.register_fallback_frames.get().saturating_add(1));
+        }
         #[cfg(all(feature = "register-executor", feature = "performance-counters"))]
-        if self.engine.policy == ExecutionPolicy::Register && register.is_none() { self.perf.record(perf::Event::RegisterFallbackFrame, 1); }
+        if self.engine.policy == ExecutionPolicy::Register && register.is_none() {
+            self.perf.record(perf::Event::RegisterFallbackFrame, 1);
+        }
         Ok(Frame {
             #[cfg(feature = "register-executor")]
             register,
@@ -134,6 +147,7 @@ impl Store {
             labels,
         })
     }
+    /// Invokes a guest or host function handle with `args` inside this store.
     pub fn invoke(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
         #[cfg(feature = "execution-reference")]
         if self.engine.policy == ExecutionPolicy::Reference {
@@ -206,13 +220,20 @@ impl Store {
         let mut precharged = false;
         // A straight-line run that hands an instruction back has already
         // counted it in the diagnostic counters.
-        #[cfg(all(not(feature = "execution-reference"), any(feature = "performance-counters", feature = "opcode-coverage")))]
+        #[cfg(all(
+            not(feature = "execution-reference"),
+            any(feature = "performance-counters", feature = "opcode-coverage")
+        ))]
         let mut counted = false;
         loop {
             #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
             register_capacity_scope.observe(&frames);
             #[cfg(feature = "register-executor")]
-            let operand_height = if frames.last().is_some_and(|frame| frame.register.is_some()) { register::logical_height(frames.last().unwrap(), self)? } else { stack.len() };
+            let operand_height = if frames.last().is_some_and(|frame| frame.register.is_some()) {
+                register::logical_height(frames.last().unwrap(), self)?
+            } else {
+                stack.len()
+            };
             #[cfg(not(feature = "register-executor"))]
             let operand_height = stack.len();
             // A straight-line run may already have charged this instruction.
@@ -221,10 +242,18 @@ impl Store {
             #[cfg(feature = "execution-reference")]
             let charge = true;
             if charge {
-                accounting::next_source(self, &mut fuel, frames.len(), operand_height, &mut prompts)?;
+                accounting::next_source(
+                    self,
+                    &mut fuel,
+                    frames.len(),
+                    operand_height,
+                    &mut prompts,
+                )?;
             }
             #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
-            if self.materialization_request.is_some() && frames.last().is_some_and(|frame| frame.register.is_some()) {
+            if self.materialization_request.is_some()
+                && frames.last().is_some_and(|frame| frame.register.is_some())
+            {
                 register::materialize(frames.last_mut().unwrap(), &mut stack, self)?;
             }
             #[cfg(feature = "execution-reference")]
@@ -237,11 +266,13 @@ impl Store {
             if frame.register.is_some() {
                 match register::step(frame, &mut stack, self)? {
                     register::Step::Continue => continue,
-                    register::Step::ExitToDecoded => {},
+                    register::Step::ExitToDecoded => {}
                     register::Step::Return => {
                         frames.pop();
                         if frames.is_empty() {
-                            for value in &stack { self.validate_value(*value)?; }
+                            for value in &stack {
+                                self.validate_value(*value)?;
+                            }
                             self.publish_values(&stack);
                             return Ok(RunOutcome::Returned(stack));
                         }
@@ -263,15 +294,28 @@ impl Store {
             #[cfg(feature = "compact-executor")]
             if frame.compact {
                 let pc = frame.pc;
-                frame.pc = pc.checked_add(1).ok_or_else(|| trap("compact instruction pointer overflow"))?;
+                frame.pc = pc
+                    .checked_add(1)
+                    .ok_or_else(|| trap("compact instruction pointer overflow"))?;
                 #[cfg(feature = "execution-reference")]
                 {
                     self.compact_dispatches = self.compact_dispatches.saturating_add(1);
-                    if self.instances[inst_id].module.data.compact.as_ref().is_some_and(|p| p.is_prefix_step(frame.function.body, pc)) {
-                        self.compact_prefix_dispatches = self.compact_prefix_dispatches.saturating_add(1);
+                    if self.instances[inst_id]
+                        .module
+                        .data
+                        .compact
+                        .as_ref()
+                        .is_some_and(|p| p.is_prefix_step(frame.function.body, pc))
+                    {
+                        self.compact_prefix_dispatches =
+                            self.compact_prefix_dispatches.saturating_add(1);
                     }
                 }
-                let step = self.instances[inst_id].module.data.compact.as_ref()
+                let step = self.instances[inst_id]
+                    .module
+                    .data
+                    .compact
+                    .as_ref()
                     .ok_or_else(|| trap("missing admitted compact program"))?
                     .step(frame.function.body, pc, frame, &mut stack, self)?;
                 match step {
@@ -280,14 +324,25 @@ impl Store {
                         // once. Canonical locals/operands/labels/prompts/fuel
                         // stay in this loop; the decoded handler executes once.
                         frame.compact = false;
-                        let original = self.instances[inst_id].module.data.inner.decoded().code[frame.function.body]
-                            .instructions.get(pc).ok_or_else(|| trap("compact exit source cursor"))?;
-                        if original.opcode != opcode { return Err(trap("compact exit source identity")); }
+                        let original = self.instances[inst_id].module.data.inner.decoded().code
+                            [frame.function.body]
+                            .instructions
+                            .get(pc)
+                            .ok_or_else(|| trap("compact exit source cursor"))?;
+                        if original.opcode != opcode {
+                            return Err(trap("compact exit source identity"));
+                        }
                         #[cfg(feature = "execution-reference")]
                         {
                             self.compact_dispatches = self.compact_dispatches.saturating_sub(1);
-                            let family = match opcode { 0xfb00..=0xfbff | 0xd0..=0xd6 => 0, 0x08..=0x0a | 0x1f => 1, 0xe0..=0xe6 => 2, _ => 3 };
-                            self.compact_exits[family] = self.compact_exits[family].saturating_add(1);
+                            let family = match opcode {
+                                0xfb00..=0xfbff | 0xd0..=0xd6 => 0,
+                                0x08..=0x0a | 0x1f => 1,
+                                0xe0..=0xe6 => 2,
+                                _ => 3,
+                            };
+                            self.compact_exits[family] =
+                                self.compact_exits[family].saturating_add(1);
                             self.compact_last_exit = Some((pc, opcode));
                         }
                         let op = original.clone();
@@ -295,7 +350,10 @@ impl Store {
                         {
                             self.perf.record(perf::Event::Dispatch, 1);
                             self.perf.record(perf::Event::InstructionClone, 1);
-                            self.perf.record(perf::Event::InstructionBytes, perf::immediate_copy_bytes(&op.immediate));
+                            self.perf.record(
+                                perf::Event::InstructionBytes,
+                                perf::immediate_copy_bytes(&op.immediate),
+                            );
                         }
                         #[cfg(feature = "opcode-coverage")]
                         crate::coverage::record(op.opcode);
@@ -303,7 +361,15 @@ impl Store {
                     }
                     compact::Step::Continue => continue,
                     compact::Step::Fusion(pattern) => {
-                        compact::execute_fusion(pattern, frame, &mut stack, self, &mut fuel, frame_depth, &mut prompts)?;
+                        compact::execute_fusion(
+                            pattern,
+                            frame,
+                            &mut stack,
+                            self,
+                            &mut fuel,
+                            frame_depth,
+                            &mut prompts,
+                        )?;
                         continue;
                     }
                     compact::Step::Memory(access) => {
@@ -312,19 +378,33 @@ impl Store {
                     }
                     compact::Step::Call { index, tail } => {
                         let instance = &self.instances[inst_id];
-                        let binding = instance.call_bindings.as_ref()
+                        let binding = instance
+                            .call_bindings
+                            .as_ref()
                             .ok_or_else(|| trap("missing compact instance bindings"))?
                             .resolve(self, instance, index)?;
-                        let source = instance.module.data.inner.decoded().code[frame.function.body].instructions.get(pc)
+                        let source = instance.module.data.inner.decoded().code[frame.function.body]
+                            .instructions
+                            .get(pc)
                             .ok_or_else(|| trap("compact call source cursor"))?;
                         let opcode = if tail { 0x12 } else { 0x10 };
-                        if source.opcode != opcode || !matches!(source.immediate, Immediate::Index(value) if value == index) {
+                        if source.opcode != opcode
+                            || !matches!(source.immediate, Immediate::Index(value) if value == index)
+                        {
                             return Err(trap("compact call source identity"));
                         }
-                        prepared_instruction = Some((Instruction { opcode, immediate: Immediate::Index(index) }, pc));
+                        prepared_instruction = Some((
+                            Instruction {
+                                opcode,
+                                immediate: Immediate::Index(index),
+                            },
+                            pc,
+                        ));
                         bound_call = Some(binding);
                         #[cfg(feature = "execution-reference")]
-                        { self.compact_bound_calls = self.compact_bound_calls.saturating_add(1); }
+                        {
+                            self.compact_bound_calls = self.compact_bound_calls.saturating_add(1);
+                        }
                         #[cfg(feature = "performance-counters")]
                         self.perf.record(perf::Event::CompactBoundCall, 1);
                     }
@@ -333,10 +413,13 @@ impl Store {
                         let base = frame.base;
                         compact::keep(&mut stack, base, n)?;
                         #[cfg(feature = "performance-counters")]
-                        self.perf.record(perf::Event::CompactResultMove, u64::from(n != 0));
+                        self.perf
+                            .record(perf::Event::CompactResultMove, u64::from(n != 0));
                         frames.pop();
                         if frames.is_empty() {
-                            for value in &stack { self.validate_value(*value)?; }
+                            for value in &stack {
+                                self.validate_value(*value)?;
+                            }
                             self.publish_values(&stack);
                             return Ok(RunOutcome::Returned(stack));
                         }
@@ -353,13 +436,19 @@ impl Store {
             // handle is compared again before reuse.
             if module_stale || module_cache.as_ref().is_none_or(|(id, _)| *id != inst_id) {
                 let current = &self.instances[inst_id].module;
-                if !module_cache.as_ref().is_some_and(|(_, cached)| Arc::ptr_eq(&cached.data, &current.data)) {
+                if !module_cache
+                    .as_ref()
+                    .is_some_and(|(_, cached)| Arc::ptr_eq(&cached.data, &current.data))
+                {
                     module_cache = Some((inst_id, current.clone()));
                 } else if let Some(cached) = module_cache.as_mut() {
                     cached.0 = inst_id;
                 }
             }
-            let module: &Module = &module_cache.as_ref().expect("module cache was just filled").1;
+            let module: &Module = &module_cache
+                .as_ref()
+                .expect("module cache was just filled")
+                .1;
             let ops = &module.data.inner.decoded().code[frame.function.body].instructions;
             // Straight-line instructions of a plain Decoded frame run without
             // returning here. The reference build keeps every instruction on
@@ -376,7 +465,10 @@ impl Store {
                 if plain && charge {
                     match self.run_straight(inst_id, frame, module, ops, &mut stack, &mut fuel)? {
                         straight::Straight::Declined => {
-                            #[cfg(any(feature = "performance-counters", feature = "opcode-coverage"))]
+                            #[cfg(any(
+                                feature = "performance-counters",
+                                feature = "opcode-coverage"
+                            ))]
                             {
                                 counted = true;
                             }
@@ -384,7 +476,10 @@ impl Store {
                         straight::Straight::Ran => continue,
                         straight::Straight::Charged => {
                             precharged = true;
-                            #[cfg(any(feature = "performance-counters", feature = "opcode-coverage"))]
+                            #[cfg(any(
+                                feature = "performance-counters",
+                                feature = "opcode-coverage"
+                            ))]
                             {
                                 counted = true;
                             }
@@ -397,59 +492,70 @@ impl Store {
             let (op, pc): (&Instruction, usize) = match &prepared_instruction {
                 Some((op, pc)) => (op, *pc),
                 None => {
-            let op = ops
-                .get(frame.pc)
-                .ok_or_else(|| trap("instruction pointer out of bounds"))?;
-            #[cfg(all(not(feature = "execution-reference"), any(feature = "performance-counters", feature = "opcode-coverage")))]
-            let count = !std::mem::take(&mut counted);
-            #[cfg(all(feature = "execution-reference", any(feature = "performance-counters", feature = "opcode-coverage")))]
-            let count = true;
-            #[cfg(feature = "performance-counters")]
-            if count {
-                self.perf.record(perf::Event::Dispatch, 1);
+                    let op = ops
+                        .get(frame.pc)
+                        .ok_or_else(|| trap("instruction pointer out of bounds"))?;
+                    #[cfg(all(
+                        not(feature = "execution-reference"),
+                        any(feature = "performance-counters", feature = "opcode-coverage")
+                    ))]
+                    let count = !std::mem::take(&mut counted);
+                    #[cfg(all(
+                        feature = "execution-reference",
+                        any(feature = "performance-counters", feature = "opcode-coverage")
+                    ))]
+                    let count = true;
+                    #[cfg(feature = "performance-counters")]
+                    if count {
+                        self.perf.record(perf::Event::Dispatch, 1);
 
-                self.perf.record(perf::Event::InstructionClone, 1);
-                self.perf.record(
-                    perf::Event::InstructionBytes,
-                    perf::immediate_copy_bytes(&op.immediate),
-                );
-            }
-            #[cfg(feature = "opcode-coverage")]
-            if count {
-                crate::coverage::record(op.opcode);
-            }
-            let pc = frame.pc;
-            frame.pc += 1;
-            (op, pc)
+                        self.perf.record(perf::Event::InstructionClone, 1);
+                        self.perf.record(
+                            perf::Event::InstructionBytes,
+                            perf::immediate_copy_bytes(&op.immediate),
+                        );
+                    }
+                    #[cfg(feature = "opcode-coverage")]
+                    if count {
+                        crate::coverage::record(op.opcode);
+                    }
+                    let pc = frame.pc;
+                    frame.pc += 1;
+                    (op, pc)
                 }
             };
             #[cfg(not(feature = "compact-executor"))]
             let (op, pc) = {
-            let op = ops
-                .get(frame.pc)
-                .ok_or_else(|| trap("instruction pointer out of bounds"))?
-                ;
-            #[cfg(all(not(feature = "execution-reference"), any(feature = "performance-counters", feature = "opcode-coverage")))]
-            let count = !std::mem::take(&mut counted);
-            #[cfg(all(feature = "execution-reference", any(feature = "performance-counters", feature = "opcode-coverage")))]
-            let count = true;
-            #[cfg(feature = "performance-counters")]
-            if count {
-                self.perf.record(perf::Event::Dispatch, 1);
+                let op = ops
+                    .get(frame.pc)
+                    .ok_or_else(|| trap("instruction pointer out of bounds"))?;
+                #[cfg(all(
+                    not(feature = "execution-reference"),
+                    any(feature = "performance-counters", feature = "opcode-coverage")
+                ))]
+                let count = !std::mem::take(&mut counted);
+                #[cfg(all(
+                    feature = "execution-reference",
+                    any(feature = "performance-counters", feature = "opcode-coverage")
+                ))]
+                let count = true;
+                #[cfg(feature = "performance-counters")]
+                if count {
+                    self.perf.record(perf::Event::Dispatch, 1);
 
-                self.perf.record(perf::Event::InstructionClone, 1);
-                self.perf.record(
-                    perf::Event::InstructionBytes,
-                    perf::immediate_copy_bytes(&op.immediate),
-                );
-            }
-            #[cfg(feature = "opcode-coverage")]
-            if count {
-                crate::coverage::record(op.opcode);
-            }
-            let pc = frame.pc;
-            frame.pc += 1;
-            (op, pc)
+                    self.perf.record(perf::Event::InstructionClone, 1);
+                    self.perf.record(
+                        perf::Event::InstructionBytes,
+                        perf::immediate_copy_bytes(&op.immediate),
+                    );
+                }
+                #[cfg(feature = "opcode-coverage")]
+                if count {
+                    crate::coverage::record(op.opcode);
+                }
+                let pc = frame.pc;
+                frame.pc += 1;
+                (op, pc)
             };
             // Calls may reach host code; continuation resumption may too.
             module_stale = matches!(op.opcode, 0x10..=0x15 | 0xe0..=0xe6);
@@ -460,7 +566,10 @@ impl Store {
                     };
                     let (block, catches) = (&table.block, &table.catches);
                     let (a, r) = arity(block, module);
-                    let (end, _) = module.data.control.get(frame.function.body, pc)
+                    let (end, _) = module
+                        .data
+                        .control
+                        .get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
                         .len()
@@ -520,7 +629,10 @@ impl Store {
                     } else {
                         true
                     };
-                    let (end, other) = module.data.control.get(frame.function.body, pc)
+                    let (end, other) = module
+                        .data
+                        .control
+                        .get(frame.function.body, pc)
                         .ok_or_else(|| trap("missing control boundary"))?;
                     let height = stack
                         .len()
@@ -620,7 +732,7 @@ impl Store {
                     #[cfg(feature = "performance-counters")]
                     self.perf.record(
                         perf::Event::Branch,
-                        u64::from(frame.function.ty.results.len() != 0),
+                        u64::from(!frame.function.ty.results.is_empty()),
                     );
                     keep(&mut stack, frame.base, frame.function.ty.results.len())?;
                     if let Some(f) = frames.pop() {
@@ -638,9 +750,16 @@ impl Store {
                     let fun = match op.immediate {
                         Immediate::Index(x) if op.opcode == 0x10 || op.opcode == 0x12 => {
                             #[cfg(feature = "compact-executor")]
-                            { bound_call.map_or_else(|| self.instances[inst_id].funcs[x as usize], |binding| binding.0) }
+                            {
+                                bound_call.map_or_else(
+                                    || self.instances[inst_id].funcs[x as usize],
+                                    |binding| binding.0,
+                                )
+                            }
                             #[cfg(not(feature = "compact-executor"))]
-                            { self.instances[inst_id].funcs[x as usize] }
+                            {
+                                self.instances[inst_id].funcs[x as usize]
+                            }
                         }
                         Immediate::Pair(t, table) => {
                             let ix = address(pop(&mut stack)?)?;
@@ -654,7 +773,14 @@ impl Store {
                             };
                             #[cfg(feature = "compact-executor")]
                             let compatible = self.compact_indirect_compatible(
-                                inst_id, module, frame.function.body, pc, op.opcode, t as usize, f)?;
+                                inst_id,
+                                module,
+                                frame.function.body,
+                                pc,
+                                op.opcode,
+                                t as usize,
+                                f,
+                            )?;
                             #[cfg(not(feature = "compact-executor"))]
                             let compatible = self
                                 .engine
@@ -667,8 +793,7 @@ impl Store {
                                     false,
                                     self.engine.config.limits.max_type_work,
                                 )?;
-                            if !compatible
-                            {
+                            if !compatible {
                                 return Err(trap("indirect call type mismatch"));
                             }
                             f
@@ -679,7 +804,14 @@ impl Store {
                             };
                             #[cfg(feature = "compact-executor")]
                             let compatible = self.compact_indirect_compatible(
-                                inst_id, module, frame.function.body, pc, op.opcode, t as usize, f)?;
+                                inst_id,
+                                module,
+                                frame.function.body,
+                                pc,
+                                op.opcode,
+                                t as usize,
+                                f,
+                            )?;
                             #[cfg(not(feature = "compact-executor"))]
                             let compatible = self
                                 .engine
@@ -692,8 +824,7 @@ impl Store {
                                     false,
                                     self.engine.config.limits.max_type_work,
                                 )?;
-                            if !compatible
-                            {
+                            if !compatible {
                                 return Err(trap("call_ref type mismatch"));
                             }
                             f
@@ -702,7 +833,8 @@ impl Store {
                     };
                     let checked = self.check(fun.0, &self.funcs)?;
                     #[cfg(feature = "compact-executor")]
-                    let n = bound_call.map_or(self.funcs[checked].ty.params.len(), |binding| binding.1);
+                    let n =
+                        bound_call.map_or(self.funcs[checked].ty.params.len(), |binding| binding.1);
                     #[cfg(not(feature = "compact-executor"))]
                     let n = self.funcs[checked].ty.params.len();
                     if n > stack.len() {
@@ -718,12 +850,22 @@ impl Store {
                         }
                         if !tail {
                             let mut stopped = None;
-                            match compact::try_inline_leaf(self, fun, inst_id, &mut stack, &mut fuel,
-                                frame_depth, &mut prompts, &mut stopped) {
+                            match compact::try_inline_leaf(
+                                self,
+                                fun,
+                                inst_id,
+                                &mut stack,
+                                &mut fuel,
+                                frame_depth,
+                                &mut prompts,
+                                &mut stopped,
+                            ) {
                                 Ok(true) => continue,
-                                Ok(false) => {},
+                                Ok(false) => {}
                                 Err(error) => {
-                                    if let Some(callee) = stopped { frames.push(callee); }
+                                    if let Some(callee) = stopped {
+                                        frames.push(callee);
+                                    }
                                     return Err(error);
                                 }
                             }
@@ -745,8 +887,14 @@ impl Store {
                     // frame does not reallocate.
                     let declared = if self.funcs[checked].host.is_none() {
                         let callee = &self.funcs[checked];
-                        self.instances[callee.instance].module.data.inner.decoded().code
-                            .get(callee.body).map_or(0, |body| body.locals.len())
+                        self.instances[callee.instance]
+                            .module
+                            .data
+                            .inner
+                            .decoded()
+                            .code
+                            .get(callee.body)
+                            .map_or(0, |body| body.locals.len())
                     } else {
                         0
                     };
@@ -771,7 +919,11 @@ impl Store {
                         let is_ref = |value: &&Value| matches!(value, Value::Ref(_));
                         let mut roots: Vec<Value> = stack.iter().filter(is_ref).copied().collect();
                         roots.extend(args.iter().filter(is_ref).copied());
-                        roots.extend(frames.iter().flat_map(|f| f.locals.iter().filter(is_ref).copied()));
+                        roots.extend(
+                            frames
+                                .iter()
+                                .flat_map(|f| f.locals.iter().filter(is_ref).copied()),
+                        );
                         #[cfg(feature = "performance-counters")]
                         self.perf
                             .record(perf::Event::Roots, u64::from(!roots.is_empty()));
@@ -848,7 +1000,10 @@ impl Store {
                     let Immediate::Index(x) = op.immediate else {
                         return Err(trap("index immediate"));
                     };
-                    let value = *frame.locals.get(x as usize).ok_or_else(|| trap("local index"))?;
+                    let value = *frame
+                        .locals
+                        .get(x as usize)
+                        .ok_or_else(|| trap("local index"))?;
                     stack.push(value)
                 }
                 0x21 => {
@@ -856,14 +1011,20 @@ impl Store {
                         return Err(trap("index immediate"));
                     };
                     let value = pop(&mut stack)?;
-                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                    *frame
+                        .locals
+                        .get_mut(x as usize)
+                        .ok_or_else(|| trap("local index"))? = value
                 }
                 0x22 => {
                     let Immediate::Index(x) = op.immediate else {
                         return Err(trap("index immediate"));
                     };
                     let value = *stack.last().ok_or_else(|| trap("empty stack"))?;
-                    *frame.locals.get_mut(x as usize).ok_or_else(|| trap("local index"))? = value
+                    *frame
+                        .locals
+                        .get_mut(x as usize)
+                        .ok_or_else(|| trap("local index"))? = value
                 }
                 0x23..=0x26 => {
                     let Immediate::Index(x) = op.immediate else {
@@ -1148,7 +1309,13 @@ impl Store {
     /// fixed-width one, in bounds and within one allocated or unwritten page,
     /// and `addr` is an address; otherwise None and nothing is recorded.
     #[inline(always)]
-    pub(super) fn load_fast(&mut self, index: usize, code: u16, addr: Value, offset: u64) -> Option<Value> {
+    pub(super) fn load_fast(
+        &mut self,
+        index: usize,
+        code: u16,
+        addr: Value,
+        offset: u64,
+    ) -> Option<Value> {
         let mem = &self.mems[index];
         if mem.shared.is_some() {
             return None;
@@ -1181,7 +1348,14 @@ impl Store {
     /// requiring `value` to be of the stored type and the page allocated;
     /// false leaves memory unchanged.
     #[inline(always)]
-    pub(super) fn store_fast(&mut self, index: usize, code: u16, addr: Value, value: Value, offset: u64) -> bool {
+    pub(super) fn store_fast(
+        &mut self,
+        index: usize,
+        code: u16,
+        addr: Value,
+        value: Value,
+        offset: u64,
+    ) -> bool {
         let mem = &mut self.mems[index];
         if mem.shared.is_some() {
             return false;
@@ -1191,7 +1365,9 @@ impl Store {
             Value::I64(x) => x as u64,
             _ => return false,
         };
-        let Some(at) = a.checked_add(offset).and_then(|a| usize::try_from(a).ok()) else { return false };
+        let Some(at) = a.checked_add(offset).and_then(|a| usize::try_from(a).ok()) else {
+            return false;
+        };
         let bytes = &mut mem.bytes;
         match (code, value) {
             (0x36, Value::I32(x)) => bytes.write_array::<4>(at, x.to_le_bytes()),
@@ -1206,7 +1382,13 @@ impl Store {
     /// `memory_access_raw` for everything its fast paths leave, with every
     /// error.
     #[inline(never)]
-    pub(super) fn memory_slow(&mut self, index: usize, code: u16, offset: u64, s: &mut Vec<Value>) -> Result<()> {
+    pub(super) fn memory_slow(
+        &mut self,
+        index: usize,
+        code: u16,
+        offset: u64,
+        s: &mut Vec<Value>,
+    ) -> Result<()> {
         let store = code >= 0x36;
         let value = if store { Some(pop(s)?) } else { None };
         let off = address(pop(s)?)?
@@ -1344,13 +1526,17 @@ impl Store {
                                     .bytes
                                     .copy_within(from, dst as usize + chunk, amount, &mut scratch)
                                     .map_err(allocation_failed)?;
-                            } else if self.mems[source].shared.is_none() && self.mems[dest].shared.is_none() {
+                            } else if self.mems[source].shared.is_none()
+                                && self.mems[dest].shared.is_none()
+                            {
                                 // Two unshared memories: one reused buffer.
                                 #[cfg(feature = "performance-counters")]
                                 self.perf.record(perf::Event::BulkSliceChunk, 1);
                                 scratch
                                     .try_reserve(amount.saturating_sub(scratch.len()))
-                                    .map_err(|_| err(ErrorKind::ResourceLimit, "memory allocation failed"))?;
+                                    .map_err(|_| {
+                                        err(ErrorKind::ResourceLimit, "memory allocation failed")
+                                    })?;
                                 scratch.resize(amount, 0);
                                 self.mems[source].read_into(from as u64, &mut scratch)?;
                                 self.mems[dest].write(dst + chunk as u64, &scratch)?;
@@ -1368,7 +1554,11 @@ impl Store {
                         let unshared = self.mems[dest].shared.is_none();
                         // Shared memories take their writes from a buffer, sized
                         // to the fill rather than to a whole chunk.
-                        let buffer = if unshared { Vec::new() } else { vec![src as u8; n.min(FILL_CHUNK)] };
+                        let buffer = if unshared {
+                            Vec::new()
+                        } else {
+                            vec![src as u8; n.min(FILL_CHUNK)]
+                        };
                         let mut done = 0;
                         while done < n {
                             if self.cancellation.is_cancelled() {
@@ -1379,7 +1569,10 @@ impl Store {
                             if unshared {
                                 #[cfg(feature = "performance-counters")]
                                 self.perf.record(perf::Event::BulkSliceChunk, 1);
-                                self.mems[dest].bytes.fill(at, amount, src as u8).map_err(allocation_failed)?;
+                                self.mems[dest]
+                                    .bytes
+                                    .fill(at, amount, src as u8)
+                                    .map_err(allocation_failed)?;
                             } else {
                                 self.mems[dest].write(at as u64, &buffer[..amount])?;
                             }

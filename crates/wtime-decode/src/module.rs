@@ -1,96 +1,160 @@
-use crate::{
-    Immediate, Instruction, Reader,
-    instructions::{body_expression_bounded, count, expression_bounded, try_reserve_exact_budget, val},
-};
 #[cfg(test)]
 use crate::instructions::expression;
+use crate::{
+    Immediate, Instruction, Reader,
+    instructions::{
+        body_expression_bounded, count, expression_bounded, try_reserve_exact_budget, val,
+    },
+};
 use std::sync::Arc;
 use wtime_types::*;
+/// Decoded representation of a WebAssembly binary module.
 #[derive(Clone, Debug)]
 pub struct DecodedModule {
+    /// Original owned module bytes referenced by all decoded [`Span`]s.
     pub bytes: Arc<[u8]>,
+    /// Custom sections in appearance order.
     pub customs: Vec<CustomSection>,
+    /// Flattened function signatures indexed by module type index (non-function types use an empty placeholder).
     pub types: Vec<FuncType>,
+    /// Decoded recursion groups from the type section.
     pub type_groups: Vec<TypeGroup>,
+    /// Module imports in declaration order (with compact imports expanded).
     pub imports: Vec<Import>,
+    /// Declared type index for each defined (non-imported) function.
     pub functions: Vec<TypeIdx>,
+    /// Defined table types.
     pub tables: Vec<TableType>,
+    /// Optional explicit initializer expressions for each defined table.
     pub table_inits: Vec<Option<Vec<Instruction>>>,
+    /// Defined linear memory types.
     pub memories: Vec<MemoryType>,
+    /// Defined global variables and their initializer expressions.
     pub globals: Vec<Global>,
+    /// Module exports in declaration order.
     pub exports: Vec<Export>,
+    /// Optional start function index.
     pub start: Option<FuncIdx>,
+    /// Element segments from the element section.
     pub elements: Vec<Element>,
+    /// Data segments from the data section.
     pub data: Vec<Data>,
+    /// Decoded function bodies corresponding to `functions`.
     pub code: Vec<FunctionBody>,
+    /// Optional declared data segment count from the data count section.
     pub data_count: Option<u32>,
+    /// Defined tag types.
     pub tags: Vec<TagType>,
 }
+/// A custom section decoded from a WebAssembly binary.
 #[derive(Clone, Debug)]
 pub struct CustomSection {
+    /// UTF-8 custom section name.
     pub name: String,
+    /// Payload byte span inside [`DecodedModule::bytes`].
     pub data: Span,
 }
+/// A single import declaration from the import section.
 #[derive(Clone, Debug)]
 pub struct Import {
+    /// Imported module name.
     pub module: String,
+    /// Imported entity name within `module`.
     pub name: String,
+    /// Kind and descriptor of the imported entity.
     pub kind: ImportKind,
 }
+/// Descriptor specifying the kind and type of an [`Import`].
 #[derive(Clone, Debug)]
 pub enum ImportKind {
+    /// Function import by type index.
     Func(TypeIdx),
+    /// Exact function import (`custom-descriptors` proposal) by type index.
     ExactFunc(TypeIdx),
+    /// Table import.
     Table(TableType),
+    /// Linear memory import.
     Memory(MemoryType),
+    /// Global variable import.
     Global(GlobalType),
+    /// Tag import.
     Tag(TagType),
 }
+/// Kind of an exported or external WebAssembly entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalKind {
+    /// Function.
     Func,
+    /// Table.
     Table,
+    /// Linear memory.
     Memory,
+    /// Global variable.
     Global,
+    /// Exception or continuation tag.
     Tag,
 }
+/// A single export declaration from the export section.
 #[derive(Clone, Debug)]
 pub struct Export {
+    /// UTF-8 export name.
     pub name: String,
+    /// Entity kind being exported.
     pub kind: ExternalKind,
+    /// Index in the corresponding entity index space.
     pub index: u32,
 }
+/// A defined global variable from the global section.
 #[derive(Clone, Debug)]
 pub struct Global {
+    /// Value type and mutability of the global.
     pub ty: GlobalType,
+    /// Constant initializer expression instructions.
     pub init: Vec<Instruction>,
 }
+/// A decoded function body from the code section.
 #[derive(Clone, Debug)]
 pub struct FunctionBody {
+    /// Expanded declared local variable types (excluding parameters).
     pub locals: Vec<ValType>,
+    /// Decoded instruction stream, ending with the function's `end` opcode.
     pub instructions: Vec<Instruction>,
     /// The absolute module offset at which each instruction starts.
     pub offsets: Vec<u32>,
+    /// Byte span of the function body payload within [`DecodedModule::bytes`].
     pub span: Span,
 }
+/// Initialization mode of a data or element segment.
 #[derive(Clone, Debug)]
 pub enum SegmentMode {
+    /// Retained for explicit runtime initialization (`memory.init` / `table.init`).
     Passive,
+    /// Automatically copied into a memory or table during instantiation.
     Active {
+        /// Target memory or table index.
         index: u32,
+        /// Constant expression computing the destination offset.
         offset: Vec<Instruction>,
     },
+    /// Declarative element segment used only to declare function references.
     Declarative,
 }
+/// A data segment from the data section.
 #[derive(Clone, Debug)]
 pub struct Data {
+    /// Segment initialization mode.
     pub mode: SegmentMode,
+    /// Byte span of the raw data payload within [`DecodedModule::bytes`].
     pub bytes: Span,
 }
+/// An element segment from the element section.
 #[derive(Clone, Debug)]
 pub struct Element {
+    /// Segment initialization mode.
     pub mode: SegmentMode,
+    /// Element reference type.
     pub ty: RefType,
+    /// Constant initializer expressions for each element item.
     pub init: Vec<Vec<Instruction>>,
 }
 fn boolean(r: &mut Reader) -> Result<bool> {
@@ -318,6 +382,7 @@ fn field(r: &mut Reader) -> Result<FieldType> {
         mutable: boolean(r)?,
     })
 }
+/// Decodes a WebAssembly binary module under the given feature policy and resource limits.
 pub fn decode(
     bytes: &[u8],
     _features: &FeatureSet,
@@ -722,7 +787,8 @@ pub fn decode(
                     let min_insns_per_item = if expr { 1 } else { 2 };
                     let keep_items = keep_seg
                         && !expr_limit_exceeded
-                        && total_elem_items.saturating_add(u64::try_from(n_items).unwrap_or(u64::MAX))
+                        && total_elem_items
+                            .saturating_add(u64::try_from(n_items).unwrap_or(u64::MAX))
                             <= policy.max_table_elements
                         && n_items
                             .checked_mul(min_insns_per_item)
@@ -891,8 +957,17 @@ pub fn decode(
                             // If a valid module near `max_instructions` or `max_total_locals`
                             // transiently dropped one body due to sibling threads holding unspent
                             // reservations, re-decode just that body sequentially with exact retention.
-                            let parsed = if parsed.dropped && (parsed.insn_count > 0 || parsed.total_locals > 0) {
-                                parse_function_body(bodies[idx].clone(), policy, None, None, None, true)?
+                            let parsed = if parsed.dropped
+                                && (parsed.insn_count > 0 || parsed.total_locals > 0)
+                            {
+                                parse_function_body(
+                                    bodies[idx].clone(),
+                                    policy,
+                                    None,
+                                    None,
+                                    None,
+                                    true,
+                                )?
                             } else {
                                 parsed
                             };
@@ -1007,7 +1082,9 @@ pub fn decode(
     if m.data_count.is_none() && saw_data_count_op {
         return Err(r.error("data count section required"));
     }
-    if m.data_count.is_some_and(|n| n as usize != decoded_data_count) {
+    if m.data_count
+        .is_some_and(|n| n as usize != decoded_data_count)
+    {
         return Err(r.error("data count mismatch"));
     }
     if rec_group_limit_exceeded {
@@ -1097,7 +1174,9 @@ fn parse_function_body(
                 dropped_locals = true;
             } else {
                 let reserved = match shared_locals {
-                    Some(shared) => try_reserve_exact_budget(shared, policy.max_total_locals, n as usize),
+                    Some(shared) => {
+                        try_reserve_exact_budget(shared, policy.max_total_locals, n as usize)
+                    }
                     None => (total as usize) <= policy.max_total_locals,
                 };
                 if reserved {
@@ -1452,7 +1531,10 @@ mod tests {
         let over_body = module(&[
             (1, &[1, 0x60, 0, 0]),
             (3, &[1, 0]),
-            (10, &[1, 12, 0, 0x01, 0x01, 0x0e, 2, 0, 0, 0, 0x1c, 1, 0x7f, 0x0b]),
+            (
+                10,
+                &[1, 12, 0, 0x01, 0x01, 0x0e, 2, 0, 0, 0, 0x1c, 1, 0x7f, 0x0b],
+            ),
         ]);
         let tight_insn = ResourceLimits {
             max_instructions: 2,
@@ -1467,7 +1549,10 @@ mod tests {
         let malformed_over_body = module(&[
             (1, &[1, 0x60, 0, 0]),
             (3, &[1, 0]),
-            (10, &[1, 12, 0, 0x01, 0x01, 0x0e, 2, 0, 0, 0, 0x1c, 1, 0x7f, 0xff]),
+            (
+                10,
+                &[1, 12, 0, 0x01, 0x01, 0x0e, 2, 0, 0, 0, 0x1c, 1, 0x7f, 0xff],
+            ),
         ]);
         assert_eq!(
             decode(&malformed_over_body, &FeatureSet::default(), &tight_insn)
@@ -1494,9 +1579,13 @@ mod tests {
             (5, &[1, 0xff]),
         ]);
         assert_eq!(
-            decode(&many_types_then_bad_mem, &FeatureSet::default(), &tight_types)
-                .unwrap_err()
-                .kind,
+            decode(
+                &many_types_then_bad_mem,
+                &FeatureSet::default(),
+                &tight_types
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::Decode
         );
         // Legacy element items charge 2 instructions & 4 immediate elements each, and skip
@@ -1620,11 +1709,8 @@ mod tests {
             (
                 10,
                 &[
-                    1, 17, 0,
-                    0x1c, 3, 0x7f, 0x7f, 0x7f,
-                    0x1c, 3, 0x7f, 0x7f, 0x7f,
-                    0x1c, 3, 0x7f, 0x7f, 0x7f,
-                    0xff,
+                    1, 17, 0, 0x1c, 3, 0x7f, 0x7f, 0x7f, 0x1c, 3, 0x7f, 0x7f, 0x7f, 0x1c, 3, 0x7f,
+                    0x7f, 0x7f, 0xff,
                 ],
             ),
         ]);
@@ -1672,7 +1758,7 @@ mod tests {
             (1, &[1, 0x60, 0, 0]),
             (3, &[1, 0]),
             (10, &[1, 5, 0, 0x01, 0x01, 0x01, 0x0b]), // 4 insns
-            (11, &[3, 1, 0, 1, 0, 1, 0]),              // +3 data headers = 7 > 6
+            (11, &[3, 1, 0, 1, 0, 1, 0]),             // +3 data headers = 7 > 6
         ]);
         assert_eq!(
             decode(
@@ -1748,10 +1834,7 @@ mod tests {
             ErrorKind::Decode
         );
         // (c) data count mismatch on an over-limit data section.
-        let dc_mismatch_over = module(&[
-            (12, &[5]),
-            (11, &[3, 1, 0, 1, 0, 1, 0]),
-        ]);
+        let dc_mismatch_over = module(&[(12, &[5]), (11, &[3, 1, 0, 1, 0, 1, 0])]);
         assert_eq!(
             decode(
                 &dc_mismatch_over,

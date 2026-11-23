@@ -19,7 +19,7 @@ fn load(name: &str) -> (Store, Instance) {
         }
         _ => panic!("unknown P027 fixture"),
     };
-    let module = e.compile(&bytes).unwrap();
+    let module = e.compile(bytes).unwrap();
     let mut s = Store::new(&e);
     let i = Linker::new(&e).instantiate(&mut s, &module).unwrap();
     (s, i)
@@ -93,7 +93,7 @@ fn p027_distinct_memory_copy_changes_destination_and_preserves_source() {
                 run(&mut s, i, &[Value::I32(n as i32), Value::I32(repetitions)]).unwrap(),
                 RunOutcome::Returned(vec![])
             );
-            copy_path(&s, ((n + 65535) / 65536 * repetitions as usize) as u64);
+            copy_path(&s, (n.div_ceil(65536) * repetitions as usize) as u64);
             assert_eq!(s.read_memory(src, 0, source.len()).unwrap(), source);
             assert_eq!(s.read_memory(dst, 0, expected.len()).unwrap(), expected);
         }
@@ -231,11 +231,19 @@ fn copy_path(_s: &Store, _chunks: u64) {
         let c = _s.performance_counters();
         assert_eq!(
             c.read_vec_operations,
-            if EXPECT_DIRECT_MEMORY_BULK { 0 } else { _chunks }
+            if EXPECT_DIRECT_MEMORY_BULK {
+                0
+            } else {
+                _chunks
+            }
         );
         assert_eq!(
             c.bulk_slice_chunks,
-            if EXPECT_DIRECT_MEMORY_BULK { _chunks } else { 0 }
+            if EXPECT_DIRECT_MEMORY_BULK {
+                _chunks
+            } else {
+                0
+            }
         );
         assert_eq!(c.table_copy_snapshot_chunks, 0);
     }
@@ -284,7 +292,7 @@ fn p027_fill_exact_images_zero_odd_and_multiple_chunks() {
                 assert_eq!(
                     c.bulk_slice_chunks,
                     if EXPECT_DIRECT_MEMORY_BULK {
-                        ((n + 65535) / 65536 * reps) as u64
+                        (n.div_ceil(65536) * reps) as u64
                     } else {
                         0
                     }

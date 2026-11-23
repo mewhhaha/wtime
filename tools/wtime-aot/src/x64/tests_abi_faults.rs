@@ -15,15 +15,30 @@ use super::tests_unit::{
 };
 use super::{X64CompileOptions, compile_wasm_to_x64_so};
 
-fn compile_c_test_bin(root: &Path, name: &str, src: &str, extra_flags: &[&str]) -> Option<std::path::PathBuf> {
-    let cc = crate::cgen::detect_cc_with_deadline("native", None, None).ok()?;
+fn compile_c_test_bin(
+    root: &Path,
+    name: &str,
+    src: &str,
+    extra_flags: &[&str],
+) -> Option<std::path::PathBuf> {
+    let Ok(cc) = crate::cgen::detect_cc_with_deadline("native", None, None) else {
+        if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") {
+            panic!(
+                "WTIME_AOT_REQUIRE_NATIVE_TESTS=1 is set, but no host C compiler was detected for {name}"
+            );
+        }
+        return None;
+    };
     let c_path = root.join(format!("{name}.c"));
     let bin = root.join(name);
     crate::build::assert_inside_test_root(root, &c_path);
     crate::build::assert_inside_test_root(root, &bin);
     fs::write(&c_path, src).unwrap();
     let mut cmd = Command::new(&cc.cc_path);
-    cmd.args(["-O1", "-o"]).arg(&bin).arg(&c_path).args(extra_flags);
+    cmd.args(["-O1", "-o"])
+        .arg(&bin)
+        .arg(&c_path)
+        .args(extra_flags);
     let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
@@ -47,11 +62,20 @@ fn build_abi18_wasm() -> Vec<u8> {
     // 6: (externref) -> (externref)
     let mut imp_p = vec![3];
     // imp 0: "" :: "" () -> ()  (tests empty import module & name non-null .rodata pointers!)
-    enc_str(&mut imp_p, ""); enc_str(&mut imp_p, ""); imp_p.push(0); leb_u32(&mut imp_p, 2);
+    enc_str(&mut imp_p, "");
+    enc_str(&mut imp_p, "");
+    imp_p.push(0);
+    leb_u32(&mut imp_p, 2);
     // imp 1: "\x01a" :: "a??=b" (i32) -> (i32) (tricky escape + trigraph import AND re-exported!)
-    enc_str(&mut imp_p, "\x01a"); enc_str(&mut imp_p, "a??=b"); imp_p.push(0); leb_u32(&mut imp_p, 0);
+    enc_str(&mut imp_p, "\x01a");
+    enc_str(&mut imp_p, "a??=b");
+    imp_p.push(0);
+    leb_u32(&mut imp_p, 0);
     // imp 2: "env" :: "cb_f32" (f32) -> (f32) (re-exported import!)
-    enc_str(&mut imp_p, "env"); enc_str(&mut imp_p, "cb_f32"); imp_p.push(0); leb_u32(&mut imp_p, 4);
+    enc_str(&mut imp_p, "env");
+    enc_str(&mut imp_p, "cb_f32");
+    imp_p.push(0);
+    leb_u32(&mut imp_p, 4);
 
     // Globals:
     // g0: mut i32 = 100 (pinned!)
@@ -62,20 +86,34 @@ fn build_abi18_wasm() -> Vec<u8> {
     // g5: mut f64 = 2.25
     // g6: immut i32 = 7 (non-exported)
     let mut glob_p = vec![6];
-    glob_p.extend_from_slice(&[0x7f, 1, 0x41]); leb_i32(&mut glob_p, 100); glob_p.push(0x0b);
-    glob_p.extend_from_slice(&[0x7f, 0, 0x41]); leb_i32(&mut glob_p, -5); glob_p.push(0x0b);
+    glob_p.extend_from_slice(&[0x7f, 1, 0x41]);
+    leb_i32(&mut glob_p, 100);
+    glob_p.push(0x0b);
+    glob_p.extend_from_slice(&[0x7f, 0, 0x41]);
+    leb_i32(&mut glob_p, -5);
+    glob_p.push(0x0b);
     glob_p.extend_from_slice(&[0x6f, 0, 0xd0, 0x6f, 0x0b]);
-    glob_p.extend_from_slice(&[0x7d, 1, 0x43]); glob_p.extend_from_slice(&1.5f32.to_bits().to_le_bytes()); glob_p.push(0x0b);
-    glob_p.extend_from_slice(&[0x7e, 1, 0x42]); super::tests_unit::leb_i64(&mut glob_p, 0x1122_3344_5566_7788); glob_p.push(0x0b);
-    glob_p.extend_from_slice(&[0x7c, 1, 0x44]); glob_p.extend_from_slice(&2.25f64.to_bits().to_le_bytes()); glob_p.push(0x0b);
+    glob_p.extend_from_slice(&[0x7d, 1, 0x43]);
+    glob_p.extend_from_slice(&1.5f32.to_bits().to_le_bytes());
+    glob_p.push(0x0b);
+    glob_p.extend_from_slice(&[0x7e, 1, 0x42]);
+    super::tests_unit::leb_i64(&mut glob_p, 0x1122_3344_5566_7788);
+    glob_p.push(0x0b);
+    glob_p.extend_from_slice(&[0x7c, 1, 0x44]);
+    glob_p.extend_from_slice(&2.25f64.to_bits().to_le_bytes());
+    glob_p.push(0x0b);
 
     // f3 (type 0): blot:allocate(arg): if arg == -99 trap unreachable; if arg == -50 call imp 1 (reentrant callback!);
     //              else g0 += arg; return g0
     let mut b3 = Vec::new();
-    b3.extend_from_slice(&[0x20, 0, 0x41]); leb_i32(&mut b3, -99);
+    b3.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b3, -99);
     b3.extend_from_slice(&[0x46, 0x04, 0x40, 0x00, 0x0b]);
-    b3.extend_from_slice(&[0x20, 0, 0x41]); leb_i32(&mut b3, -50);
-    b3.extend_from_slice(&[0x46, 0x04, 0x7f, 0x41, 7, 0x10, 1, 0x05, 0x23, 0, 0x20, 0, 0x6a, 0x24, 0, 0x23, 0, 0x0b]);
+    b3.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b3, -50);
+    b3.extend_from_slice(&[
+        0x46, 0x04, 0x7f, 0x41, 7, 0x10, 1, 0x05, 0x23, 0, 0x20, 0, 0x6a, 0x24, 0, 0x23, 0, 0x0b,
+    ]);
 
     // f4 (type 0): blot:reset(arg): g0 = arg; return arg + 1
     let b4 = vec![0x20, 0, 0x24, 0, 0x20, 0, 0x41, 1, 0x6a];
@@ -88,7 +126,8 @@ fn build_abi18_wasm() -> Vec<u8> {
 
     // f7 (type 0): recurse(n): if n <= 0 return 0 else return 1 + recurse(n - 1)
     let b7 = vec![
-        0x20, 0, 0x41, 0, 0x4c, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 7, 0x41, 1, 0x6a, 0x0b,
+        0x20, 0, 0x41, 0, 0x4c, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 7, 0x41,
+        1, 0x6a, 0x0b,
     ];
 
     // f8 (type 5): mxcsr_check(x: f64) -> (x + 1e-320) * 1.0 (verifies subnormals & round-to-nearest-even under 0x1f80!)
@@ -109,14 +148,20 @@ fn build_abi18_wasm() -> Vec<u8> {
     // f13 (type 0): large_frame() with 200 live i64 locals -> forces > 1.6 KiB spill frame
     let mut b13 = Vec::new();
     for i in 1..=200u32 {
-        b13.push(0x20); b13.push(0); b13.push(0xac);
-        b13.push(0x42); super::tests_unit::leb_i64(&mut b13, i as i64);
+        b13.push(0x20);
+        b13.push(0);
+        b13.push(0xac);
+        b13.push(0x42);
+        super::tests_unit::leb_i64(&mut b13, i as i64);
         b13.push(0x7c);
-        b13.push(0x21); leb_u32(&mut b13, i);
+        b13.push(0x21);
+        leb_u32(&mut b13, i);
     }
     b13.extend_from_slice(&[0x42, 0]);
     for i in 1..=200u32 {
-        b13.push(0x20); leb_u32(&mut b13, i); b13.push(0x7c);
+        b13.push(0x20);
+        leb_u32(&mut b13, i);
+        b13.push(0x7c);
     }
     b13.push(0xa7);
 
@@ -147,12 +192,12 @@ fn build_abi18_wasm() -> Vec<u8> {
             ("echo_ref", 0, 11),
             ("void_fn", 0, 12),
             ("large_frame", 0, 13),
-            ("", 0, 12),          // empty export name!
-            ("\x01a", 0, 3),      // control + hex digit!
-            ("\x017", 0, 4),      // control + octal digit!
-            ("a??=b", 0, 5),      // C trigraph!
-            ("reexp_i32", 0, 1),  // re-exported import (i32)->(i32)
-            ("reexp_f32", 0, 2),  // re-exported import (f32)->(f32)
+            ("", 0, 12),         // empty export name!
+            ("\x01a", 0, 3),     // control + hex digit!
+            ("\x017", 0, 4),     // control + octal digit!
+            ("a??=b", 0, 5),     // C trigraph!
+            ("reexp_i32", 0, 1), // re-exported import (i32)->(i32)
+            ("reexp_f32", 0, 2), // re-exported import (f32)->(f32)
             ("g_mut_i32", 3, 0),
             ("g_neg_i32", 3, 1),
             ("g_ref_null", 3, 2),
@@ -185,7 +230,9 @@ fn abi18_full_behavioral_parity_reentry_mxcsr_pthread_and_c_deviations() {
     let so_bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: false },
+            isa: TargetIsa {
+                has_abm_bmi1: false,
+            },
             jobs: 2,
             deadline: None,
             opt: true,
@@ -202,7 +249,11 @@ fn abi18_full_behavioral_parity_reentry_mxcsr_pthread_and_c_deviations() {
         section(11, &[1, 0x00, 0x41, 1, 0x0b, 0]), // active data off=1, len=0 on 0-page memory -> TRAP_OOB (2)!
     ]);
     let oob_init_so = root.0.join("oob_init.so");
-    fs::write(&oob_init_so, compile_wasm_to_x64_so(&oob_init_wasm, &X64CompileOptions::default()).unwrap()).unwrap();
+    fs::write(
+        &oob_init_so,
+        compile_wasm_to_x64_so(&oob_init_wasm, &X64CompileOptions::default()).unwrap(),
+    )
+    .unwrap();
 
     // Also compile a 0-capacity memory + empty global export module (for Deviation #2 & empty-global `(NULL, 0)`).
     let mut z_glob = vec![1, 0x7f, 0x00, 0x41];
@@ -245,7 +296,12 @@ fn abi18_full_behavioral_parity_reentry_mxcsr_pthread_and_c_deviations() {
         )
         .is_ok();
 
-    let Some(driver) = compile_c_test_bin(&root.0, "abi18_driver", ABI18_DRIVER_C, &["-ldl", "-pthread"]) else {
+    let Some(driver) = compile_c_test_bin(
+        &root.0,
+        "abi18_driver",
+        ABI18_DRIVER_C,
+        &["-ldl", "-pthread"],
+    ) else {
         return;
     };
     let mut cmd = Command::new(&driver);
@@ -677,11 +733,14 @@ int main(int argc, char **argv) {
         // Both x64 (folded RefNull) and C (Ctx-stored RefNull) return (rc=0, val=0, kind=4)!
         CHECK(c_getg(hc, (const uint8_t *)"g_ref_null", 10, &gv, &gk) == 0 && gk == 4 && gv == 0,
               "C RefNull global parity mismatch: gv=%llu gk=%u", (unsigned long long)gv, gk);
-        // Deviation 6: C backend inherits host MXCSR (DAZ|FTZ causes subnormal f32.add to flush to 0 -> returns 0!)
+        // Both x64 and C now save/set/restore MXCSR=0x1f80 around guest execution (preserving subnormals!).
         uint32_t saved_mxcsr = _mm_getcsr();
-        _mm_setcsr(0x1f80 | (1u << 15) | (1u << 6));
-        CHECK(c_call(hc, (const uint8_t *)"mxcsr_check", 11, 0, &r64, &tr) == 0 && r64 == 0ULL,
-              "C backend MXCSR inheritance deviation: expected 0, got %llu", (unsigned long long)r64);
+        uint32_t custom_c_mxcsr = 0x1f80 | (1u << 15) | (1u << 6);
+        _mm_setcsr(custom_c_mxcsr);
+        CHECK(c_call(hc, (const uint8_t *)"mxcsr_check", 11, 0, &r64, &tr) == 0 && r64 == 1ULL,
+              "C backend must run with MXCSR=0x1f80 (subnormals preserved): expected 1, got %llu", (unsigned long long)r64);
+        CHECK((_mm_getcsr() & 0xffc0u) == (custom_c_mxcsr & 0xffc0u),
+              "C backend must restore host MXCSR after call");
         _mm_setcsr(saved_mxcsr);
         c_drop(hc);
         dlclose(dlc);
@@ -715,7 +774,8 @@ fn fault_injection_cpuid_and_cet_shstk() {
         export_sec(&[("blot:allocate", 0, 0), ("inc", 0, 0)]),
         code_sec(&[enc_body(&[], &[0x20, 0, 0x41, 1, 0x6a])]),
     ]);
-    let Some(driver) = compile_c_test_bin(&root.0, "cpuid_driver", CPUID_DRIVER_C, &["-ldl"]) else {
+    let Some(driver) = compile_c_test_bin(&root.0, "cpuid_driver", CPUID_DRIVER_C, &["-ldl"])
+    else {
         return;
     };
 
@@ -726,20 +786,163 @@ fn fault_injection_cpuid_and_cet_shstk() {
     const CET_SS: u32 = 1 << 7;
 
     let cases: [(&str, bool, CpuidSource, RdsspSource, bool); 11] = [
-        ("v2_missing_leaf1", false, CpuidSource::Mock { max_leaf: 0, ecx1: OK_ECX1, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
-        ("v2_missing_sse41", false, CpuidSource::Mock { max_leaf: 7, ecx1: 1 << 23, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
-        ("v2_missing_popcnt", false, CpuidSource::Mock { max_leaf: 7, ecx1: 1 << 19, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
-        ("v3_missing_leaf7", true, CpuidSource::Mock { max_leaf: 6, ecx1: OK_ECX1, ext_max: OK_EXT_MAX, ext_ecx: OK_EXT_ECX, ebx7: OK_EBX7, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
+        (
+            "v2_missing_leaf1",
+            false,
+            CpuidSource::Mock {
+                max_leaf: 0,
+                ecx1: OK_ECX1,
+                ext_max: 0,
+                ext_ecx: 0,
+                ebx7: 0,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v2_missing_sse41",
+            false,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: 1 << 23,
+                ext_max: 0,
+                ext_ecx: 0,
+                ebx7: 0,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v2_missing_popcnt",
+            false,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: 1 << 19,
+                ext_max: 0,
+                ext_ecx: 0,
+                ebx7: 0,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v3_missing_leaf7",
+            true,
+            CpuidSource::Mock {
+                max_leaf: 6,
+                ecx1: OK_ECX1,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: OK_EBX7,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
         // Unsigned check: 0x8000_0000 < 0x8000_0001 must fail even with bit 31 set!
-        ("v3_ext_max_unsigned", true, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: 0x8000_0000, ext_ecx: OK_EXT_ECX, ebx7: OK_EBX7, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
-        ("v3_missing_lzcnt", true, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: OK_EXT_MAX, ext_ecx: 0, ebx7: OK_EBX7, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
-        ("v3_missing_bmi1", true, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: OK_EXT_MAX, ext_ecx: OK_EXT_ECX, ebx7: 0, ecx7: 0 }, RdsspSource::Mock { ssp: 0 }, false),
+        (
+            "v3_ext_max_unsigned",
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: 0x8000_0000,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: OK_EBX7,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v3_missing_lzcnt",
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: 0,
+                ebx7: OK_EBX7,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v3_missing_bmi1",
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: 0,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
         // Preserved max_leaf >= 7 probes CET_SS EVEN ON x64-v2!
-        ("v2_cet_active_fails", false, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: CET_SS }, RdsspSource::Mock { ssp: 0x7fff_1000 }, false),
-        ("v2_cet_off_passes", false, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: CET_SS }, RdsspSource::Mock { ssp: 0 }, true),
+        (
+            "v2_cet_active_fails",
+            false,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: 0,
+                ext_ecx: 0,
+                ebx7: 0,
+                ecx7: CET_SS,
+            },
+            RdsspSource::Mock { ssp: 0x7fff_1000 },
+            false,
+        ),
+        (
+            "v2_cet_off_passes",
+            false,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: 0,
+                ext_ecx: 0,
+                ebx7: 0,
+                ecx7: CET_SS,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            true,
+        ),
         // When CET_SS == 0, non-zero mock ssp is bypassed completely!
-        ("v2_no_cet_bypasses", false, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: 0 }, RdsspSource::Mock { ssp: 0x7fff_1000 }, true),
-        ("v3_all_ok", true, CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: OK_EXT_MAX, ext_ecx: OK_EXT_ECX, ebx7: OK_EBX7, ecx7: CET_SS }, RdsspSource::Mock { ssp: 0 }, true),
+        (
+            "v2_no_cet_bypasses",
+            false,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: 0,
+                ext_ecx: 0,
+                ebx7: 0,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0x7fff_1000 },
+            true,
+        ),
+        (
+            "v3_all_ok",
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: OK_EBX7,
+                ecx7: CET_SS,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            true,
+        ),
     ];
 
     for (tag, has_abm_bmi1, cpuid, rdssp, expect_ok) in cases {
@@ -752,13 +955,24 @@ fn fault_injection_cpuid_and_cet_shstk() {
                 deadline: None,
                 opt: true,
                 verify: true,
-                hooks: RuntimeTestHooks { cpuid, rdssp, syscall_fault: SyscallFault::None },
+                hooks: RuntimeTestHooks {
+                    cpuid,
+                    rdssp,
+                    syscall_fault: SyscallFault::None,
+                },
             },
         )
         .unwrap();
         fs::write(&so_path, &bytes).unwrap();
-        let mode = if expect_ok { "expect_ok" } else { "expect_fail22" };
-        let out = Command::new(&driver).args([so_path.to_str().unwrap(), mode]).output().unwrap();
+        let mode = if expect_ok {
+            "expect_ok"
+        } else {
+            "expect_fail22"
+        };
+        let out = Command::new(&driver)
+            .args([so_path.to_str().unwrap(), mode])
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "cpuid case {tag} failed ({}): {}",
@@ -777,13 +991,22 @@ fn fault_injection_cpuid_and_cet_shstk() {
     let bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: false },
+            isa: TargetIsa {
+                has_abm_bmi1: false,
+            },
             jobs: 1,
             deadline: None,
             opt: true,
             verify: true,
             hooks: RuntimeTestHooks {
-                cpuid: CpuidSource::Mock { max_leaf: 7, ecx1: OK_ECX1, ext_max: 0, ext_ecx: 0, ebx7: 0, ecx7: 0 },
+                cpuid: CpuidSource::Mock {
+                    max_leaf: 7,
+                    ecx1: OK_ECX1,
+                    ext_max: 0,
+                    ext_ecx: 0,
+                    ebx7: 0,
+                    ecx7: 0,
+                },
                 rdssp: RdsspSource::Mock { ssp: 0x7fff_2000 },
                 syscall_fault: SyscallFault::None,
             },
@@ -901,7 +1124,12 @@ fn fault_injection_rlimit_as_and_per_site_mprotect() {
         export_sec(&[("blot:memory", 2, 0), ("grow", 0, 0)]),
         code_sec(&[enc_body(&[], &[0x20, 0, 0x40, 0x00])]),
     ]);
-    let Some(driver) = compile_c_test_bin(&root.0, "syscall_fault_driver", SYSCALL_FAULT_DRIVER_C, &["-ldl"]) else {
+    let Some(driver) = compile_c_test_bin(
+        &root.0,
+        "syscall_fault_driver",
+        SYSCALL_FAULT_DRIVER_C,
+        &["-ldl"],
+    ) else {
         return;
     };
 
@@ -910,7 +1138,9 @@ fn fault_injection_rlimit_as_and_per_site_mprotect() {
         let b = compile_wasm_to_x64_so(
             &wasm,
             &X64CompileOptions {
-                isa: TargetIsa { has_abm_bmi1: false },
+                isa: TargetIsa {
+                    has_abm_bmi1: false,
+                },
                 jobs: 1,
                 deadline: None,
                 opt: true,
@@ -928,9 +1158,18 @@ fn fault_injection_rlimit_as_and_per_site_mprotect() {
     };
 
     let so_ok = build_variant("ok", SyscallFault::None);
-    let so_stack = build_variant("fail_stack", SyscallFault::FailMprotectAt(MprotectSite::GuestStack));
-    let so_init_mem = build_variant("fail_init_mem", SyscallFault::FailMprotectAt(MprotectSite::InitialMemory));
-    let so_grow = build_variant("fail_grow", SyscallFault::FailMprotectAt(MprotectSite::GrowMemory));
+    let so_stack = build_variant(
+        "fail_stack",
+        SyscallFault::FailMprotectAt(MprotectSite::GuestStack),
+    );
+    let so_init_mem = build_variant(
+        "fail_init_mem",
+        SyscallFault::FailMprotectAt(MprotectSite::InitialMemory),
+    );
+    let so_grow = build_variant(
+        "fail_grow",
+        SyscallFault::FailMprotectAt(MprotectSite::GrowMemory),
+    );
 
     let out = Command::new(&driver)
         .args([
@@ -1092,8 +1331,13 @@ fn fault_injection_signal_at_floor_watchdog() {
         let mut b = Vec::new();
         // Force a 16-local (~160 B) frame identically in both spin & probe!
         for i in 1..=16u32 {
-            b.push(0x20); b.push(0); b.push(0x41); leb_i32(&mut b, i as i32); b.push(0x6a);
-            b.push(0x21); leb_u32(&mut b, i);
+            b.push(0x20);
+            b.push(0);
+            b.push(0x41);
+            leb_i32(&mut b, i as i32);
+            b.push(0x6a);
+            b.push(0x21);
+            leb_u32(&mut b, i);
         }
         b.extend_from_slice(&[0x20, 0, 0x45, 0x04, 0x7f]); // if d == 0
         if is_spin {
@@ -1111,7 +1355,9 @@ fn fault_injection_signal_at_floor_watchdog() {
         // so constant folding & DCE cannot eliminate them and every frame is ~160 B!
         b.extend_from_slice(&[0x20, 1]);
         for i in 2..=16u32 {
-            b.push(0x20); leb_u32(&mut b, i); b.push(0x73); // i32.xor
+            b.push(0x20);
+            leb_u32(&mut b, i);
+            b.push(0x73); // i32.xor
         }
         b.extend_from_slice(&[0x41, 8, 0x28, 2, 0, 0x71, 0x6a]); // (xor_all & mem[8]) + rec_res
         b.push(0x0b);
@@ -1122,7 +1368,11 @@ fn fault_injection_signal_at_floor_watchdog() {
         type_sec(&[(&[], &[0x7f]), (&[0x7f], &[0x7f])]),
         func_sec(&[0, 1, 1]),
         section(5, &[1, 0x01, 1, 1]),
-        export_sec(&[("blot:memory", 2, 0), ("floor_spin", 0, 1), ("probe_depth", 0, 2)]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("floor_spin", 0, 1),
+            ("probe_depth", 0, 2),
+        ]),
         code_sec(&[
             enc_body(&[], &[0x41, 0, 0x28, 2, 0]), // f0: i32.load(0)
             b_frame(true),
@@ -1134,7 +1384,9 @@ fn fault_injection_signal_at_floor_watchdog() {
     let so_bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: false },
+            isa: TargetIsa {
+                has_abm_bmi1: false,
+            },
             jobs: 1,
             deadline: None,
             opt: true,
@@ -1145,7 +1397,12 @@ fn fault_injection_signal_at_floor_watchdog() {
     .unwrap();
     fs::write(&so_path, &so_bytes).unwrap();
 
-    let Some(driver) = compile_c_test_bin(&root.0, "signal_floor_driver", SIGNAL_FLOOR_DRIVER_C, &["-ldl", "-pthread"]) else {
+    let Some(driver) = compile_c_test_bin(
+        &root.0,
+        "signal_floor_driver",
+        SIGNAL_FLOOR_DRIVER_C,
+        &["-ldl", "-pthread"],
+    ) else {
         return;
     };
     let out = Command::new(&driver).arg(&so_path).output().unwrap();
@@ -1367,27 +1624,37 @@ fn stage2_host_callback_xmm8_13_clobber_preservation() {
     // f1 (type 0): blot:allocate(n) -> n + 100 (also touches XMM0..XMM15 inside guest reentry!)
     let mut b1 = Vec::new();
     for i in 1..=10u32 {
-        b1.push(0x44); b1.extend_from_slice(&(i as f64 * 1000.0).to_bits().to_le_bytes());
-        b1.push(0x21); leb_u32(&mut b1, i);
+        b1.push(0x44);
+        b1.extend_from_slice(&(i as f64 * 1000.0).to_bits().to_le_bytes());
+        b1.push(0x21);
+        leb_u32(&mut b1, i);
     }
-    b1.push(0x20); b1.push(1);
+    b1.push(0x20);
+    b1.push(1);
     for i in 2..=10u32 {
-        b1.push(0x20); leb_u32(&mut b1, i); b1.push(0xa0);
+        b1.push(0x20);
+        leb_u32(&mut b1, i);
+        b1.push(0xa0);
     }
     b1.extend_from_slice(&[0xfc, 0x02, 0x20, 0, 0x6a]); // trunc_sat + n
 
     // f2 (type 1: (f64) -> (f64)): holds 10 distinct f64 values live across host import 0!
     let mut b2 = Vec::new();
     for i in 1..=10u32 {
-        b2.push(0x20); b2.push(0);
-        b2.push(0x44); b2.extend_from_slice(&(i as f64 * 1.5).to_bits().to_le_bytes());
+        b2.push(0x20);
+        b2.push(0);
+        b2.push(0x44);
+        b2.extend_from_slice(&(i as f64 * 1.5).to_bits().to_le_bytes());
         b2.push(0xa0);
-        b2.push(0x21); leb_u32(&mut b2, i);
+        b2.push(0x21);
+        leb_u32(&mut b2, i);
     }
     b2.extend_from_slice(&[0x41, 7, 0x10, 0, 0xb7, 0x21, 11]); // r = f64(clobber_xmm(7))
     b2.extend_from_slice(&[0x20, 11]);
     for i in 1..=10u32 {
-        b2.push(0x20); leb_u32(&mut b2, i); b2.push(0xa0);
+        b2.push(0x20);
+        leb_u32(&mut b2, i);
+        b2.push(0xa0);
     }
 
     let wasm = wasm_module(&[
@@ -1402,7 +1669,9 @@ fn stage2_host_callback_xmm8_13_clobber_preservation() {
     let so_bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: false },
+            isa: TargetIsa {
+                has_abm_bmi1: false,
+            },
             jobs: 1,
             deadline: None,
             opt: true,
@@ -1493,13 +1762,332 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#;
-    let Some(driver) = compile_c_test_bin(&root.0, "xmm_clobber_driver", DRIVER_C, &["-ldl"]) else {
+    let Some(driver) = compile_c_test_bin(&root.0, "xmm_clobber_driver", DRIVER_C, &["-ldl"])
+    else {
         return;
     };
     let out = Command::new(&driver).arg(&so_path).output().unwrap();
     assert!(
         out.status.success(),
         "xmm clobber driver failed ({:?}):\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn rust_c_x64_blot_abi_parity_and_safety() {
+    let root = crate::build::create_fresh_test_root("wtime-aot-3backend-abi");
+
+    // Module exercising:
+    // - embedded NUL import ("a\0b"."c\0d": (i32)->(i32))
+    // - memory min=1 max=64 (to test mem_limit_pages=2)
+    // - mutable i32 global "g0" + immut externref null global "g_ref"
+    // - empty export "" () -> ()
+    // - blot:allocate (i32) -> (i32)
+    // - call_imp (i32) -> (i32)
+    // - mxcsr_subnormal (f64) -> (f64)
+    // - div_bool (i32) -> (i32): 1 iff (0.0 / ((x == 5) as f64)) is NaN
+    // - recurse (i32) -> (i32)
+    let mut imp_p = vec![1];
+    enc_str(&mut imp_p, "a\0b");
+    enc_str(&mut imp_p, "c\0d");
+    imp_p.push(0);
+    leb_u32(&mut imp_p, 0);
+
+    let mut glob_p = vec![2];
+    glob_p.extend_from_slice(&[0x7f, 1, 0x41]);
+    leb_i32(&mut glob_p, 10);
+    glob_p.push(0x0b);
+    glob_p.extend_from_slice(&[0x6f, 0, 0xd0, 0x6f, 0x0b]);
+
+    // f1: "" () -> ()
+    let b1: Vec<u8> = vec![];
+    // f2: blot:allocate(a) -> g0 += a; return g0
+    let b2: Vec<u8> = vec![0x23, 0, 0x20, 0, 0x6a, 0x24, 0, 0x23, 0];
+    // f3: call_imp(a) -> call 0 (a)
+    let b3: Vec<u8> = vec![0x20, 0, 0x10, 0];
+    // f4: mxcsr_subnormal(x: f64) -> x + 5e-324
+    let mut b4: Vec<u8> = vec![0x20, 0, 0x44];
+    b4.extend_from_slice(&1u64.to_le_bytes());
+    b4.push(0xa0);
+    // f5: div_bool(x: i32) -> let d = 0.0 / f64.convert_i32_s(x == 5); (d != d) as i32
+    let mut b5: Vec<u8> = vec![0x44];
+    b5.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
+    b5.extend_from_slice(&[0x20, 0, 0x41, 5, 0x46, 0xb7, 0xa3, 0x22, 1, 0x20, 1, 0x62]);
+    // f6: recurse(n) -> if n <= 0 { 0 } else { 1 + recurse(n - 1) }
+    let b6: Vec<u8> = vec![
+        0x20, 0, 0x41, 0, 0x4c, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 6, 0x41,
+        1, 0x6a, 0x0b,
+    ];
+
+    let wasm = wasm_module(&[
+        type_sec(&[
+            (&[0x7f], &[0x7f]), // t0
+            (&[], &[]),         // t1
+            (&[0x7c], &[0x7c]), // t2
+        ]),
+        section(2, &imp_p),
+        func_sec(&[1, 0, 0, 2, 0, 0]),
+        section(5, &[1, 0x01, 1, 64]),
+        section(6, &glob_p),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("", 0, 1),
+            ("blot:allocate", 0, 2),
+            ("call_imp", 0, 3),
+            ("mxcsr_subnormal", 0, 4),
+            ("div_bool", 0, 5),
+            ("recurse", 0, 6),
+            ("g0", 3, 0),
+            ("g_ref", 3, 1),
+        ]),
+        code_sec(&[
+            enc_body(&[], &b1),
+            enc_body(&[], &b2),
+            enc_body(&[], &b3),
+            enc_body(&[], &b4),
+            enc_body(&[(1, 0x7c)], &b5),
+            enc_body(&[], &b6),
+        ]),
+    ]);
+
+    let wasm_path = root.0.join("parity3.wasm");
+    fs::write(&wasm_path, &wasm).unwrap();
+
+    // 1. x64 backend
+    let x64_so = root.0.join("parity3_x64.so");
+    let x64_bytes = compile_wasm_to_x64_so(&wasm, &X64CompileOptions::default()).unwrap();
+    fs::write(&x64_so, &x64_bytes).unwrap();
+
+    // 2. C backend
+    let c_cache = root.0.join("c_cache");
+    let c_so = root.0.join("parity3_c.so");
+    crate::cgen::build_c_blot_cdylib(
+        &wasm,
+        &c_cache,
+        "native",
+        Some(2),
+        crate::cgen::COpt::Auto,
+        Some(Duration::from_secs(120)),
+        &c_so,
+    )
+    .unwrap();
+
+    // 3. Rust backend (--blot-cdylib, 1.99.0)
+    let rust_cache = root.0.join("rust_cache");
+    let rt_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
+    let rust_opts = crate::build::Options {
+        toolchain: "1.99.0",
+        target_cpu: "native",
+        jobs: Some(2),
+        time_limit: Duration::from_secs(180),
+        target: crate::codegen::Target::BlotCdylib,
+        backend: crate::build::Backend::Rust,
+        c_opt: crate::cgen::COpt::Auto,
+    };
+    let rust_so = crate::build::build(
+        &wasm_path,
+        &rust_cache,
+        Some("parity3.wasm"),
+        &rt_path,
+        &rust_opts,
+    )
+    .expect("rust --blot-cdylib build must succeed on 1.99.0");
+
+    const DRIVER_3_C: &str = r#"
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <immintrin.h>
+
+typedef int32_t (*host_fn_t)(void *, void *, uint32_t, uint64_t, uint64_t, uint64_t *);
+typedef uint32_t (*fn_u32)(void);
+typedef int32_t (*fn_imp_name)(uint32_t, const uint8_t **, size_t *, const uint8_t **, size_t *);
+typedef void *(*fn_new)(void *, host_fn_t, uint64_t, uint8_t *);
+typedef void (*fn_drop)(void *);
+typedef int32_t (*fn_call_export)(void *, const uint8_t *, size_t, uint64_t, uint64_t *, uint8_t *);
+typedef int32_t (*fn_call_i32)(void *, int32_t, int32_t *, uint8_t *);
+typedef void (*fn_mem_data)(void *, uint8_t **, size_t *);
+typedef int64_t (*fn_mem_grow)(void *, uint64_t);
+typedef int32_t (*fn_get_global)(void *, const uint8_t *, size_t, uint64_t *, uint8_t *);
+typedef int32_t (*fn_set_global)(void *, const uint8_t *, size_t, uint64_t);
+
+#define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "FAIL(%s): ", tag); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); return 1; } } while (0)
+
+typedef struct {
+    const char *tag;
+    void *h;
+    fn_call_export call_export;
+    fn_call_i32 active_alloc;
+    fn_mem_grow mem_grow;
+    fn_get_global active_getg;
+    fn_set_global setg;
+    fn_drop drop;
+    uint32_t seen_mxcsr;
+    int ok;
+} CbState;
+
+static int32_t cb_fn(void *u, void *ac, uint32_t idx, uint64_t tok, uint64_t arg, uint64_t *res) {
+    (void)tok;
+    CbState *s = (CbState *)u;
+    const char *tag = s->tag;
+    s->seen_mxcsr = _mm_getcsr();
+    uint64_t r64 = 0xaaaa; uint8_t tr = 0;
+    if (idx != 0) return 1;
+    // Reentry guards inside callback
+    if (s->call_export(s->h, (const uint8_t *)"", 0, 0, &r64, &tr) != 2 || tr != 19) return 1;
+    if (s->mem_grow(s->h, 0) != -1) return 1;
+    if (s->setg(s->h, (const uint8_t *)"g0", 2, 999) != 1) return 1;
+    s->drop(s->h); // must be a safe no-op!
+    // Active call works
+    int32_t ares = 0; uint8_t atr = 0;
+    if (s->active_alloc(ac, 5, &ares, &atr) != 0 || ares != 15) return 1;
+    uint64_t gv = 0; uint8_t gk = 255;
+    if (s->active_getg(ac, (const uint8_t *)"g0", 2, &gv, &gk) != 0 || gk != 0 || gv != 15) return 1;
+    (void)tag;
+    s->ok = 1;
+    *res = arg + 100;
+    return 0;
+}
+
+typedef struct {
+    fn_call_export call_export;
+    void *h;
+    int rc;
+} ThArg;
+
+static void *small_th(void *p) {
+    ThArg *a = (ThArg *)p;
+    uint64_t r = 0; uint8_t tr = 0;
+    if (a->call_export(a->h, (const uint8_t *)"recurse", 7, 5, &r, &tr) != 0 || r != 5) {
+        a->rc = 10; return NULL;
+    }
+    if (a->call_export(a->h, (const uint8_t *)"recurse", 7, 1000000, &r, &tr) != 1 || tr != 8) {
+        a->rc = 11; return NULL;
+    }
+    a->rc = 0;
+    return NULL;
+}
+
+static int test_one(const char *tag, const char *so_path) {
+    void *dl = dlopen(so_path, RTLD_NOW);
+    CHECK(dl != NULL, "dlopen: %s", dlerror());
+    fn_u32 imp_cnt = (fn_u32)dlsym(dl, "blot_aot_import_count");
+    fn_imp_name imp_name = (fn_imp_name)dlsym(dl, "blot_aot_import_name");
+    fn_new b_new = (fn_new)dlsym(dl, "blot_aot_new");
+    fn_drop b_drop = (fn_drop)dlsym(dl, "blot_aot_drop");
+    fn_call_export call_export = (fn_call_export)dlsym(dl, "blot_aot_call_export");
+    fn_call_i32 call_alloc = (fn_call_i32)dlsym(dl, "blot_aot_call_allocate");
+    fn_call_i32 active_alloc = (fn_call_i32)dlsym(dl, "blot_aot_active_allocate");
+    fn_mem_data mem_data = (fn_mem_data)dlsym(dl, "blot_aot_mem_data");
+    fn_mem_grow mem_grow = (fn_mem_grow)dlsym(dl, "blot_aot_mem_grow");
+    fn_get_global getg = (fn_get_global)dlsym(dl, "blot_aot_get_global");
+    fn_get_global active_getg = (fn_get_global)dlsym(dl, "blot_aot_active_get_global");
+    fn_set_global setg = (fn_set_global)dlsym(dl, "blot_aot_set_global");
+
+    // 1. Embedded NUL import name byte-exact length
+    CHECK(imp_cnt() == 1, "import_count");
+    const uint8_t *mp = NULL, *np = NULL; size_t ml = 0, nl = 0;
+    CHECK(imp_name(0, &mp, &ml, &np, &nl) == 0 && ml == 3 && memcmp(mp, "a\0b", 3) == 0 && nl == 3 && memcmp(np, "c\0d", 3) == 0,
+          "embedded NUL import name mismatch ml=%zu nl=%zu", ml, nl);
+
+    // 2. Null handle guards
+    uint64_t r64 = 0x1234; int32_t r32 = 0x1234; uint8_t tr = 0;
+    CHECK(call_export(NULL, (const uint8_t *)"", 0, 0, &r64, &tr) == 3, "null call_export");
+    CHECK(call_alloc(NULL, 1, &r32, &tr) == 2 && tr == 19, "null call_alloc");
+    CHECK(active_alloc(NULL, 1, &r32, &tr) == 2 && tr == 19, "null active_alloc");
+    CHECK(mem_grow(NULL, 0) == -1, "null mem_grow");
+    CHECK(getg(NULL, (const uint8_t *)"g0", 2, &r64, &tr) == 1, "null getg");
+    CHECK(active_getg(NULL, (const uint8_t *)"g0", 2, &r64, &tr) == 1, "null active_getg");
+    CHECK(setg(NULL, (const uint8_t *)"g0", 2, 1) == 1, "null setg");
+    uint8_t *mp0 = (uint8_t *)1; size_t ml0 = 99;
+    mem_data(NULL, &mp0, &ml0);
+    CHECK(mp0 == NULL && ml0 == 0, "null mem_data");
+    b_drop(NULL);
+
+    // 3. mem_limit_pages = 2
+    CbState cb;
+    memset(&cb, 0, sizeof(cb));
+    cb.tag = tag; cb.call_export = call_export; cb.active_alloc = active_alloc;
+    cb.mem_grow = mem_grow; cb.active_getg = active_getg; cb.setg = setg; cb.drop = b_drop;
+    void *h = b_new(&cb, cb_fn, 2, &tr);
+    CHECK(h != NULL, "new failed tr=%u", tr);
+    cb.h = h;
+    CHECK(mem_grow(h, 1) == 1, "mem_grow(1) under limit=2");
+    CHECK(mem_grow(h, 1) == -1, "mem_grow past limit=2 must fail");
+
+    // 4. (NULL, 0), (NULL, 4), invalid UTF-8
+    CHECK(call_export(h, NULL, 0, 0, &r64, &tr) == 0, "(NULL, 0) empty export");
+    CHECK(call_export(h, NULL, 4, 0, &r64, &tr) == 3, "(NULL, 4) export");
+    const uint8_t bad_utf8[2] = {0xff, 0xfe};
+    CHECK(call_export(h, bad_utf8, 2, 0, &r64, &tr) == 3, "invalid UTF-8 call_export");
+    CHECK(getg(h, bad_utf8, 2, &r64, &tr) == 1, "invalid UTF-8 getg");
+    CHECK(setg(h, bad_utf8, 2, 1) == 1, "invalid UTF-8 setg");
+    uint64_t gv = 99; uint8_t gk = 255;
+    CHECK(getg(h, (const uint8_t *)"g_ref", 5, &gv, &gk) == 0 && gk == 4 && gv == 0, "g_ref null");
+
+    // 5. Float div 0.0 / (cmp as f64) -> NaN regression
+    CHECK(call_export(h, (const uint8_t *)"div_bool", 8, 0, &r64, &tr) == 0 && r64 == 1, "div_bool(0) must be NaN");
+    CHECK(call_export(h, (const uint8_t *)"div_bool", 8, 5, &r64, &tr) == 0 && r64 == 0, "div_bool(5) must be 0.0");
+
+    // 6. MXCSR isolation + callback reentry/drop-guard/MXCSR restore
+    uint32_t orig_mxcsr = _mm_getcsr();
+    uint32_t custom_mxcsr = 0x1f80 | (1u << 15) | (1u << 6);
+    _mm_setcsr(custom_mxcsr);
+    CHECK(call_export(h, (const uint8_t *)"mxcsr_subnormal", 15, 0, &r64, &tr) == 0 && r64 == 1ULL,
+          "mxcsr_subnormal flushed to %llu", (unsigned long long)r64);
+    CHECK((_mm_getcsr() & 0xffc0u) == (custom_mxcsr & 0xffc0u), "host MXCSR not restored after call");
+    CHECK(call_export(h, (const uint8_t *)"call_imp", 8, 7, &r64, &tr) == 0 && r64 == 107 && cb.ok == 1,
+          "call_imp callback failed r64=%llu ok=%d", (unsigned long long)r64, cb.ok);
+    CHECK((cb.seen_mxcsr & 0xffc0u) == (custom_mxcsr & 0xffc0u), "host MXCSR not restored in callback");
+    CHECK((_mm_getcsr() & 0xffc0u) == (custom_mxcsr & 0xffc0u), "host MXCSR not restored after callback");
+    _mm_setcsr(orig_mxcsr);
+
+    // 7. 128 KiB pthread clean stack overflow trap
+    pthread_t th; pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    CHECK(pthread_attr_setstacksize(&attr, 128 * 1024) == 0, "pthread_attr_setstacksize");
+    ThArg ta = { call_export, h, -1 };
+    CHECK(pthread_create(&th, &attr, small_th, &ta) == 0, "pthread_create");
+    pthread_attr_destroy(&attr);
+    pthread_join(th, NULL);
+    CHECK(ta.rc == 0, "128 KiB pthread failed rc=%d", ta.rc);
+
+    b_drop(h);
+    dlclose(dl);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 4) return 2;
+    if (test_one("x64", argv[1]) != 0) return 10;
+    if (test_one("c", argv[2]) != 0) return 11;
+    if (test_one("rust", argv[3]) != 0) return 12;
+    return 0;
+}
+"#;
+    let Some(driver) =
+        compile_c_test_bin(&root.0, "abi3_driver", DRIVER_3_C, &["-ldl", "-pthread"])
+    else {
+        return;
+    };
+    let out = Command::new(&driver)
+        .args([
+            x64_so.to_str().unwrap(),
+            c_so.to_str().unwrap(),
+            rust_so.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "3-backend ABI parity driver failed ({:?}):\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)

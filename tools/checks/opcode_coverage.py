@@ -115,7 +115,7 @@ def check_ledger(ledger, scope_features, root=ROOT, probe=None, verify_freshness
                             actual=json.loads(report_path.read_text())
                             if actual.get('suite')!=proof.get('required_suite') or actual.get('profile')!=proof.get('required_profile') or actual.get('binary_sha256')!=proof.get('report_binary_sha256') or actual.get('selected',0)<=0 or actual.get('selected')!=actual.get('executed') or any(actual.get(k,0) for k in ('failed','skipped','unsupported','text_tool_errors')):
                                 errors.append('formal premise case lacks passing corpus: '+str(test))
-                            if not any(Path(source).resolve()==(root/proof['path']).resolve() and sha==proof['source_sha256'] for source,_,sha in (entry.rpartition(':') for entry in actual.get('source_hash','').split(';'))):
+                            if not any((root/source).resolve()==(root/proof['path']).resolve() and sha==proof['source_sha256'] for source,_,sha in (entry.rpartition(':') for entry in actual.get('source_hash','').split(';'))):
                                 errors.append('formal premise case absent from corpus digest: '+str(test))
                             handler_path=rule['premise_evidence'][0]['handler']['path']
                             if actual.get('implementation_sources',{}).get(handler_path)!=file_hash(root/handler_path):

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 //! Shared source-level types and policy for the wtime WebAssembly engine.
 //! Runtime handles and canonical type identities deliberately live elsewhere.
 mod error;

@@ -53,6 +53,7 @@ impl Store {
         }
         self.gc_matches(0, value, RefType::new(false, heap))
     }
+    /// Returns the host-assigned external identity for an `externref` (including one internalized via `any.convert_extern`), or `None` for other values.
     pub fn extern_identity(&self, value: Value) -> Result<Option<u32>> {
         self.validate_value(value)?;
         if let Value::Ref(RefValue::Extern(r) | RefValue::InternalExtern(r)) = value {
@@ -616,14 +617,7 @@ mod tests {
     }
     fn op(store: &mut Store, opcode: u16, immediate: Immediate, s: &mut Vec<Value>) {
         store
-            .gc_exec(
-                0,
-                &Instruction {
-                    opcode,
-                    immediate,
-                },
-                s,
-            )
+            .gc_exec(0, &Instruction { opcode, immediate }, s)
             .unwrap()
     }
     #[test]

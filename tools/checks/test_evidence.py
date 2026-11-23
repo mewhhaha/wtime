@@ -28,9 +28,10 @@ def collect(command, report):
     return record['passed']
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--package',required=True);parser.add_argument('--filter',default='');parser.add_argument('--report',required=True,type=Path)
+    parser=argparse.ArgumentParser();parser.add_argument('--package',required=True);parser.add_argument('--test',default='');parser.add_argument('--filter',default='');parser.add_argument('--report',required=True,type=Path)
     args=parser.parse_args()
     command=['cargo','test','--locked','-p',args.package]
+    if args.test:command.extend(['--test',args.test])
     if args.filter:command.append(args.filter)
     return 0 if collect(command,args.report) else 1
 if __name__=='__main__':raise SystemExit(main())

@@ -1,9 +1,16 @@
 [package]
 name = "wtime-runtime"
+description = "Safe-Rust, zero-dependency WebAssembly interpreter runtime with fuel, cancellation, and nonmoving GC"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [features]
 default = []
 # Development-only tracing; omitted from production builds.
@@ -16,6 +23,7 @@ execution-reference = []
 compact-executor = []
 register-executor = []
 experimental-executors = ["compact-executor", "register-executor"]
+
 [dependencies]
 wtime-types.workspace = true
 wtime-validate.workspace = true

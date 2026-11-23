@@ -1,5 +1,0 @@
-{
-  "argv": ["python3", "-B", "target/recovery/wasmtime-current-package-0001/package.py"],
-  "cwd": "/workspace/wtime",
-  "purpose": "Package completed P146 reports while preserving the existing parent-owned README.md."
-}

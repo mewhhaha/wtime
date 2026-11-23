@@ -131,6 +131,7 @@ impl CallSites {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn site(
         &self,
         store: u64,
@@ -170,6 +171,7 @@ impl CallSites {
         Ok(Some(index))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn lookup(
         &self,
         store: u64,
@@ -192,6 +194,7 @@ impl CallSites {
 
     // Invoke only after the current canonical registry query has succeeded.
     // Failed queries, null refs, stale handles and table misses never publish.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn remember(
         &mut self,
         store: u64,
@@ -220,6 +223,7 @@ impl CallSites {
 impl Store {
     // Uses the common decoded indirect/ref source boundary. It does not move
     // operands or enter a callback; all host/guest/root handling stays shared.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compact_indirect_compatible(
         &mut self,
         instance: usize,

@@ -136,8 +136,10 @@ fn p050_recursive_imported_effectful_leaves_decline_and_expansion_bounded() {
             assert!(s.compact_inline_declines() > before);
         }
         for cross_instance in [false, true] {
-            let mut c = Config::default();
-            c.features = FeatureSet::all_phase3_core();
+            let c = Config {
+                features: FeatureSet::all_phase3_core(),
+                ..Default::default()
+            };
             let e = Engine::with_execution_policy(c, policy).unwrap();
             let mut s = Store::new(&e);
             let target = if cross_instance {

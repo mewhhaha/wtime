@@ -13,8 +13,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static NEXT_WORK_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -23,8 +23,9 @@ use wtime_types::ValType;
 use wtime_validate::{DecodedModule, ExternalKind, Immediate, Instruction, SegmentMode};
 
 use crate::codegen::{
-    BitSet, CI_TABLE_MAX_SPAN, CI_TABLE_MIN_TARGETS, COPY_INLINE, ConstVal, GLOBAL_LINES_PER_INSTRUCTION, MAX_LOCALS,
-    MAX_NESTING, MAX_PENDING, MAX_SOURCE_BYTES, Module, Target, validate_module, visit_live,
+    BitSet, CI_TABLE_MAX_SPAN, CI_TABLE_MIN_TARGETS, COPY_INLINE, ConstVal,
+    GLOBAL_LINES_PER_INSTRUCTION, MAX_LOCALS, MAX_NESTING, MAX_PENDING, MAX_SOURCE_BYTES, Module,
+    Target, validate_module, visit_live,
 };
 use crate::sha256::Sha256;
 
@@ -49,7 +50,9 @@ impl COpt {
             "O2" | "2" => Ok(COpt::O2),
             "O1" | "1" => Ok(COpt::O1),
             "O0" | "0" => Ok(COpt::O0),
-            _ => Err(format!("invalid --c-opt {s:?} (expected auto, O2, O1, or O0)")),
+            _ => Err(format!(
+                "invalid --c-opt {s:?} (expected auto, O2, O1, or O0)"
+            )),
         }
     }
 
@@ -498,6 +501,19 @@ static inline int64_t wt_mem_grow(Mem32Meta *m, uint64_t delta) {
 }
 
 #if defined(WT_NEED_LIBC)
+#if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
+static inline uint32_t wt_get_mxcsr(void) {
+    uint32_t v = 0;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(v) : : "memory");
+    return v;
+}
+static inline void wt_set_mxcsr(uint32_t v) {
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(v) : "memory");
+}
+#else
+static inline uint32_t wt_get_mxcsr(void) { return 0x1f80u; }
+static inline void wt_set_mxcsr(uint32_t v) { (void)v; }
+#endif
 #if defined(__linux__)
 static __thread uintptr_t wt_tls_stack_low = 0;
 static __thread uintptr_t wt_tls_stack_high = 0;
@@ -612,7 +628,12 @@ fn c_const_val(c: ConstVal) -> String {
     }
 }
 
-fn c_constant(expression: &[Instruction], globals: usize, prefix: &str, consts: &[Option<ConstVal>]) -> Res<String> {
+fn c_constant(
+    expression: &[Instruction],
+    globals: usize,
+    prefix: &str,
+    consts: &[Option<ConstVal>],
+) -> Res<String> {
     let mut stack: Vec<String> = Vec::new();
     for i in expression {
         let value = match (i.opcode, &i.immediate) {
@@ -631,27 +652,39 @@ fn c_constant(expression: &[Instruction], globals: usize, prefix: &str, consts: 
             }
             (0x23, _) => return Err("global.get of a later global".into()),
             (0x6a, _) => {
-                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else { return Err("const expr underflow".into()) };
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return Err("const expr underflow".into());
+                };
                 format!("wt_i32_add({a}, {b})")
             }
             (0x6b, _) => {
-                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else { return Err("const expr underflow".into()) };
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return Err("const expr underflow".into());
+                };
                 format!("wt_i32_sub({a}, {b})")
             }
             (0x6c, _) => {
-                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else { return Err("const expr underflow".into()) };
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return Err("const expr underflow".into());
+                };
                 format!("wt_i32_mul({a}, {b})")
             }
             (0x7c, _) => {
-                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else { return Err("const expr underflow".into()) };
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return Err("const expr underflow".into());
+                };
                 format!("wt_i64_add({a}, {b})")
             }
             (0x7d, _) => {
-                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else { return Err("const expr underflow".into()) };
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return Err("const expr underflow".into());
+                };
                 format!("wt_i64_sub({a}, {b})")
             }
             (0x7e, _) => {
-                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else { return Err("const expr underflow".into()) };
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return Err("const expr underflow".into());
+                };
                 format!("wt_i64_mul({a}, {b})")
             }
             (op, _) => return Err(format!("unsupported constant instruction {op:#x}")),
@@ -682,7 +715,10 @@ struct MultiRets {
 
 impl MultiRets {
     fn new() -> Self {
-        Self { map: BTreeMap::new(), list: Vec::new() }
+        Self {
+            map: BTreeMap::new(),
+            list: Vec::new(),
+        }
     }
 
     fn abi_for(&mut self, results: &[ValType]) -> CRetAbi {
@@ -694,7 +730,10 @@ impl MultiRets {
             [ValType::F64] => CRetAbi::F64,
             [ValType::Ref(_)] => CRetAbi::U64,
             [ValType::V128] => CRetAbi::V128,
-            [a @ (ValType::I32 | ValType::F32), b @ (ValType::I32 | ValType::F32)] => CRetAbi::Pair32(*a, *b),
+            [
+                a @ (ValType::I32 | ValType::F32),
+                b @ (ValType::I32 | ValType::F32),
+            ] => CRetAbi::Pair32(*a, *b),
             ts => {
                 let key: Vec<u8> = ts.iter().map(|&t| val_type_key(t)).collect();
                 if let Some(&id) = self.map.get(&key) {
@@ -718,7 +757,10 @@ impl MultiRets {
             [ValType::F64] => CRetAbi::F64,
             [ValType::Ref(_)] => CRetAbi::U64,
             [ValType::V128] => CRetAbi::V128,
-            [a @ (ValType::I32 | ValType::F32), b @ (ValType::I32 | ValType::F32)] => CRetAbi::Pair32(*a, *b),
+            [
+                a @ (ValType::I32 | ValType::F32),
+                b @ (ValType::I32 | ValType::F32),
+            ] => CRetAbi::Pair32(*a, *b),
             ts => {
                 let key: Vec<u8> = ts.iter().map(|&t| val_type_key(t)).collect();
                 CRetAbi::Multi(self.map[&key])
@@ -827,13 +869,28 @@ struct Dep {
 
 impl Dep {
     fn local(x: u32) -> Dep {
-        Dep { locals: vec![x], globals: false, max_slot: None, pending: true }
+        Dep {
+            locals: vec![x],
+            globals: false,
+            max_slot: None,
+            pending: true,
+        }
     }
     fn global() -> Dep {
-        Dep { locals: vec![], globals: true, max_slot: None, pending: true }
+        Dep {
+            locals: vec![],
+            globals: true,
+            max_slot: None,
+            pending: true,
+        }
     }
     fn slot_ref(slot: usize) -> Dep {
-        Dep { locals: vec![], globals: false, max_slot: Some(slot), pending: false }
+        Dep {
+            locals: vec![],
+            globals: false,
+            max_slot: Some(slot),
+            pending: false,
+        }
     }
     fn union(mut self, other: &Dep) -> Dep {
         for x in &other.locals {
@@ -938,7 +995,9 @@ impl CEmitter {
     }
 
     fn declare(&mut self, name: &str, c_ty: &str) -> String {
-        self.scratch_decls.entry(name.to_string()).or_insert_with(|| c_ty.to_string());
+        self.scratch_decls
+            .entry(name.to_string())
+            .or_insert_with(|| c_ty.to_string());
         name.to_string()
     }
 
@@ -991,7 +1050,9 @@ impl CEmitter {
 
     fn store_globals_for_call(&mut self, module: &Module, callee: usize) {
         for x in self.globals_set.clone() {
-            if self.dirty_globals.contains(x) && (module.fn_reads[callee].contains(x) || module.fn_writes[callee].contains(x)) {
+            if self.dirty_globals.contains(x)
+                && (module.fn_reads[callee].contains(x) || module.fn_writes[callee].contains(x))
+            {
                 self.line(&format!("ctx->g{x} = gv{x};"));
                 self.dirty_globals.remove(x);
             }
@@ -1016,12 +1077,17 @@ impl CEmitter {
 
     fn store_globals_for_ci(&mut self, module: &Module, ci_id: usize) {
         for x in self.globals_set.clone() {
-            if self.dirty_globals.contains(x) && (module.ci_reads[ci_id].contains(x) || module.ci_writes[ci_id].contains(x)) {
+            if self.dirty_globals.contains(x)
+                && (module.ci_reads[ci_id].contains(x) || module.ci_writes[ci_id].contains(x))
+            {
                 self.line(&format!("ctx->g{x} = gv{x};"));
                 self.dirty_globals.remove(x);
             }
         }
-        if module.ci_targets[ci_id].iter().any(|&(_, f)| module.reserve_imports[f]) {
+        if module.ci_targets[ci_id]
+            .iter()
+            .any(|&(_, f)| module.reserve_imports[f])
+        {
             for g in self.reg_globals.clone() {
                 if module.ci_reads[ci_id].contains(g) || module.ci_writes[ci_id].contains(g) {
                     self.line(&format!("ctx->g{g} = gv{g};"));
@@ -1050,7 +1116,10 @@ impl CEmitter {
     }
 
     fn pop_dep(&mut self) -> Res<(String, ValType, Dep)> {
-        let (v, t) = self.stack.pop().ok_or_else(|| "operand stack underflow".to_string())?;
+        let (v, t) = self
+            .stack
+            .pop()
+            .ok_or_else(|| "operand stack underflow".to_string())?;
         let dep = self.deps.pop().unwrap_or_default();
         Ok((v, t, dep))
     }
@@ -1097,7 +1166,10 @@ impl CEmitter {
         }
         self.stack.push((format!("({expr})"), t));
         self.pending.push(at);
-        self.deps.push(Dep { pending: true, ..dep });
+        self.deps.push(Dep {
+            pending: true,
+            ..dep
+        });
         Ok(())
     }
 
@@ -1116,7 +1188,8 @@ impl CEmitter {
         for idx in (0..pending.len()).rev() {
             let k = pending[idx];
             let direct = reads(&self.deps[k]) && only.is_none_or(|only| only.contains(&k));
-            let clobbered = min_written != usize::MAX && self.deps[k].max_slot.is_some_and(|s| s >= min_written);
+            let clobbered = min_written != usize::MAX
+                && self.deps[k].max_slot.is_some_and(|s| s >= min_written);
             if direct || clobbered {
                 mark[idx] = true;
                 min_written = min_written.min(k);
@@ -1142,7 +1215,10 @@ impl CEmitter {
         if self.stack.len() < n {
             return Err("operand stack underflow".into());
         }
-        Ok(self.stack[self.stack.len() - n..].iter().map(|(v, _)| v.clone()).collect())
+        Ok(self.stack[self.stack.len() - n..]
+            .iter()
+            .map(|(v, _)| v.clone())
+            .collect())
     }
 
     fn assign(&mut self, vars: &[String], types: &[ValType], values: &[String]) -> Res<()> {
@@ -1170,7 +1246,11 @@ impl CEmitter {
     }
 
     fn branch(&mut self, depth: usize) -> Res<()> {
-        let at = self.frames.len().checked_sub(depth + 1).ok_or("branch depth")?;
+        let at = self
+            .frames
+            .len()
+            .checked_sub(depth + 1)
+            .ok_or("branch depth")?;
         if let Some(outer_count) = self.outline.as_ref().map(|o| o.outer_count)
             && at < outer_count
         {
@@ -1190,7 +1270,11 @@ impl CEmitter {
             for (k, (v, &t)) in values.iter().zip(&tys).enumerate() {
                 let tag = c_ty_tag(t);
                 let cty = c_type(t)?;
-                self.outline.as_mut().unwrap().outer_br_slots.insert((k, tag), cty);
+                self.outline
+                    .as_mut()
+                    .unwrap()
+                    .outer_br_slots
+                    .insert((k, tag), cty);
                 self.line(&format!("st->br_{k}_{tag} = {v};"));
             }
             let w_locals = self.outline.as_ref().unwrap().write_shared_locals.clone();
@@ -1216,7 +1300,10 @@ impl CEmitter {
             Kind::Loop => {
                 let vars = self.frames[at].loop_vars.clone();
                 let values = self.top(vars.len())?;
-                let tys: Vec<ValType> = self.stack[self.stack.len() - vars.len()..].iter().map(|(_, t)| *t).collect();
+                let tys: Vec<ValType> = self.stack[self.stack.len() - vars.len()..]
+                    .iter()
+                    .map(|(_, t)| *t)
+                    .collect();
                 self.assign(&vars, &tys, &values)?;
                 self.line(&format!("goto L{label}_head;"));
             }
@@ -1265,8 +1352,16 @@ fn ci_uses_table(module: &Module, ci_id: usize) -> bool {
 fn c_fn_params(module: &Module, f: usize, named: bool) -> Res<String> {
     let ty = &module.types[f];
     let mut parts = vec![
-        if named { "Ctx *restrict ctx".to_string() } else { "Ctx *restrict".to_string() },
-        if named { "uint8_t *restrict mb".to_string() } else { "uint8_t *restrict".to_string() },
+        if named {
+            "Ctx *restrict ctx".to_string()
+        } else {
+            "Ctx *restrict".to_string()
+        },
+        if named {
+            "uint8_t *restrict mb".to_string()
+        } else {
+            "uint8_t *restrict".to_string()
+        },
     ];
     for g in module.fn_reg_globals(f) {
         let rt = c_type(module.globals[g as usize].0)?;
@@ -1303,8 +1398,16 @@ fn c_ci_params(module: &Module, ci_id: usize, named: bool) -> Res<String> {
     let (_, ti) = module.ci_sigs[ci_id];
     let ty = &module.module_types[ti as usize];
     let mut parts = vec![
-        if named { "Ctx *restrict ctx".to_string() } else { "Ctx *restrict".to_string() },
-        if named { "uint8_t *restrict mb".to_string() } else { "uint8_t *restrict".to_string() },
+        if named {
+            "Ctx *restrict ctx".to_string()
+        } else {
+            "Ctx *restrict".to_string()
+        },
+        if named {
+            "uint8_t *restrict mb".to_string()
+        } else {
+            "uint8_t *restrict".to_string()
+        },
     ];
     for &g in &module.ci_reg_globals[ci_id] {
         let rt = c_type(module.globals[g as usize].0)?;
@@ -1333,8 +1436,16 @@ fn c_ci_params(module: &Module, ci_id: usize, named: bool) -> Res<String> {
 fn c_import_params(module: &Module, k: usize, named: bool) -> Res<String> {
     let ty = &module.types[k];
     let mut parts = vec![
-        if named { "Ctx *ctx".to_string() } else { "Ctx *".to_string() },
-        if named { "uint8_t *mb".to_string() } else { "uint8_t *".to_string() },
+        if named {
+            "Ctx *ctx".to_string()
+        } else {
+            "Ctx *".to_string()
+        },
+        if named {
+            "uint8_t *mb".to_string()
+        } else {
+            "uint8_t *".to_string()
+        },
     ];
     for (i, t) in ty.params.iter().enumerate() {
         let rt = c_type(*t)?;
@@ -1359,7 +1470,10 @@ fn block_type(module: &Module, immediate: &Immediate) -> Res<(Vec<ValType>, Vec<
         Immediate::Block(-17) => (vec![], vec![ValType::EXTERNREF]),
         Immediate::BlockType(t) => (vec![], vec![*t]),
         Immediate::Block(n) if *n >= 0 => {
-            let t = module.module_types.get(*n as usize).ok_or("block type index out of range")?;
+            let t = module
+                .module_types
+                .get(*n as usize)
+                .ok_or("block type index out of range")?;
             (t.params.clone(), t.results.clone())
         }
         _ => return Err("unsupported block type".into()),
@@ -1399,45 +1513,56 @@ fn emit_c_function(
     let mut sites = 1usize;
     let mut uses_ml = false;
     let is_fixed = module.fixed32.is_some();
-    visit_live(code, &module.noreturn_imports, |i| match (i.opcode, &i.immediate) {
-        (0x23 | 0x24, Immediate::Index(x))
-            if (*x as usize) < n_globals && module.global_consts[*x as usize].is_none() && !reg_set.contains(x) =>
-        {
-            let entry = uses.entry(*x).or_default();
-            if i.opcode == 0x23 {
-                entry.0 += 1;
-            } else {
-                entry.1 += 1;
+    visit_live(code, &module.noreturn_imports, |i| {
+        match (i.opcode, &i.immediate) {
+            (0x23 | 0x24, Immediate::Index(x))
+                if (*x as usize) < n_globals
+                    && module.global_consts[*x as usize].is_none()
+                    && !reg_set.contains(x) =>
+            {
+                let entry = uses.entry(*x).or_default();
+                if i.opcode == 0x23 {
+                    entry.0 += 1;
+                } else {
+                    entry.1 += 1;
+                }
             }
-        }
-        (0x0c..=0x0f, _) => sites += 1,
-        (0x10, Immediate::Index(c)) if !module.noreturn_imports.get(*c as usize).copied().unwrap_or(false) => {
-            sites += 1;
-            let c = *c as usize;
-            call_targets.push(c);
-            if let Some(r) = module.fn_reads.get(c) {
-                callee_touches.union_with(r);
+            (0x0c..=0x0f, _) => sites += 1,
+            (0x10, Immediate::Index(c))
+                if !module
+                    .noreturn_imports
+                    .get(*c as usize)
+                    .copied()
+                    .unwrap_or(false) =>
+            {
+                sites += 1;
+                let c = *c as usize;
+                call_targets.push(c);
+                if let Some(r) = module.fn_reads.get(c) {
+                    callee_touches.union_with(r);
+                }
+                if let Some(w) = module.fn_writes.get(c) {
+                    callee_touches.union_with(w);
+                }
             }
-            if let Some(w) = module.fn_writes.get(c) {
-                callee_touches.union_with(w);
+            (0x11, Immediate::Pair(ti, tbl)) => {
+                sites += 1;
+                if let Some(&ci_id) = module.ci_index.get(&(*tbl, *ti)) {
+                    ci_calls.push(ci_id);
+                    callee_touches.union_with(&module.ci_reads[ci_id]);
+                    callee_touches.union_with(&module.ci_writes[ci_id]);
+                }
             }
-        }
-        (0x11, Immediate::Pair(ti, tbl)) => {
-            sites += 1;
-            if let Some(&ci_id) = module.ci_index.get(&(*tbl, *ti)) {
-                ci_calls.push(ci_id);
-                callee_touches.union_with(&module.ci_reads[ci_id]);
-                callee_touches.union_with(&module.ci_writes[ci_id]);
+            (0x12..=0x15, _) => sites += 1,
+            (0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b, _) if !is_fixed => {
+                uses_ml = true;
             }
+            _ => {}
         }
-        (0x12..=0x15, _) => sites += 1,
-        (0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b, _) if !is_fixed => {
-            uses_ml = true;
-        }
-        _ => {}
     });
 
-    let mut ranked: Vec<(u32, usize, usize)> = uses.into_iter().map(|(x, (r, w))| (x, r, w)).collect();
+    let mut ranked: Vec<(u32, usize, usize)> =
+        uses.into_iter().map(|(x, (r, w))| (x, r, w)).collect();
     ranked.sort_by_key(|&(x, r, w)| (std::cmp::Reverse(r + w), x));
     let allowance = GLOBAL_LINES_PER_INSTRUCTION * code.len() + 64;
     let mut cost = 0;
@@ -1461,7 +1586,9 @@ fn emit_c_function(
                 }
             }
             for &ci_id in &ci_calls {
-                if is_set && (module.ci_reads[ci_id].contains(x) || module.ci_writes[ci_id].contains(x)) {
+                if is_set
+                    && (module.ci_reads[ci_id].contains(x) || module.ci_writes[ci_id].contains(x))
+                {
                     spill_sites += 1;
                 }
                 if module.ci_net_writes[ci_id].contains(x) {
@@ -1472,7 +1599,10 @@ fn emit_c_function(
             if !is_set && reads <= reload_sites + 1 {
                 continue;
             }
-            if is_set && spill_sites + reload_sites > total_uses * 2 && spill_sites + reload_sites > 2 {
+            if is_set
+                && spill_sites + reload_sites > total_uses * 2
+                && spill_sites + reload_sites > 2
+            {
                 continue;
             }
         }
@@ -1588,18 +1718,33 @@ fn emit_c_function(
             coalesced_ops += ops;
             pc = next_pc;
             if e.over {
-                return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                return Err(format!(
+                    "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                ));
             }
             continue;
         }
         let i = &code[pc];
-        emit_c_insn(module, multi, &locals, &ml_expr, &mut e, pc, i, &loop_written_globals)
-            .map_err(|err| format!("function {index} insn {pc} ({:#x}): {err}", i.opcode))?;
+        emit_c_insn(
+            module,
+            multi,
+            &locals,
+            &ml_expr,
+            &mut e,
+            pc,
+            i,
+            &loop_written_globals,
+        )
+        .map_err(|err| format!("function {index} insn {pc} ({:#x}): {err}", i.opcode))?;
         if e.over {
-            return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+            return Err(format!(
+                "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+            ));
         }
         if e.frames.len() > MAX_NESTING {
-            return Err(format!("function {index} insn {pc}: blocks nested deeper than {MAX_NESTING}"));
+            return Err(format!(
+                "function {index} insn {pc}: blocks nested deeper than {MAX_NESTING}"
+            ));
         }
         if e.frames.is_empty() {
             break;
@@ -1611,7 +1756,8 @@ fn emit_c_function(
     // For functions with > 64 locals/scratches, emit a tiny pre-prologue entry stub checking
     // remaining thread stack headroom against the conservative frame estimate BEFORE entering
     // a `noinline` body so a large compiler-generated prologue cannot hit the stack guard page.
-    let mut out = String::with_capacity(e.s.len() + locals.len() * 24 + e.scratch_decls.len() * 24 + 512);
+    let mut out =
+        String::with_capacity(e.s.len() + locals.len() * 24 + e.scratch_decls.len() * 24 + 512);
     let ret_ty = c_ret_type(&fn_abi);
     let params = c_fn_params(module, index, true)?;
     let frame_slots = locals.len().saturating_add(e.scratch_decls.len());
@@ -1623,7 +1769,11 @@ fn emit_c_function(
         } else {
             format!("f{index}_body")
         };
-        writeln!(out, "static __attribute__((noinline)) {ret_ty} {body_name}({params}) {{").unwrap();
+        writeln!(
+            out,
+            "static __attribute__((noinline)) {ret_ty} {body_name}({params}) {{"
+        )
+        .unwrap();
     } else if is_inline_leaf {
         writeln!(out, "static inline {ret_ty} f{index}_inl({params}) {{").unwrap();
     } else {
@@ -1651,7 +1801,12 @@ fn emit_c_function(
         writeln!(out, "wt_oob: return {};", c_ret_trap(&fn_abi, "TRAP_OOB")).unwrap();
     }
     if e.used_table_oob {
-        writeln!(out, "wt_toob: return {};", c_ret_trap(&fn_abi, "TRAP_TABLE_OOB")).unwrap();
+        writeln!(
+            out,
+            "wt_toob: return {};",
+            c_ret_trap(&fn_abi, "TRAP_TABLE_OOB")
+        )
+        .unwrap();
     }
     if e.used_tr_label {
         writeln!(out, "wt_trap: return {};", c_ret_trap(&fn_abi, "wt_tc")).unwrap();
@@ -1718,11 +1873,17 @@ fn try_emit_coalesced_mem_run(
         }
         tbl.push_str("\n  };");
         e.line(&tbl);
-        e.line(&format!("  uint64_t wt_ca = (uint64_t)(uint32_t)(l{base_local}) + {base_off}ULL;"));
-        e.line(&format!("  if (WT_LIKELY(wt_ca + {bytes}ULL <= (uint64_t)({ml_expr}))) {{"));
+        e.line(&format!(
+            "  uint64_t wt_ca = (uint64_t)(uint32_t)(l{base_local}) + {base_off}ULL;"
+        ));
+        e.line(&format!(
+            "  if (WT_LIKELY(wt_ca + {bytes}ULL <= (uint64_t)({ml_expr}))) {{"
+        ));
         e.line(&format!("    memcpy(mb + wt_ca, wt_cs_{id}, {bytes}u);"));
         e.line("  } else {");
-        e.line(&format!("    for (uint32_t wt_ck = 0; wt_ck < {count}u; wt_ck++) {{"));
+        e.line(&format!(
+            "    for (uint32_t wt_ck = 0; wt_ck < {count}u; wt_ck++) {{"
+        ));
         e.line(&format!(
             "      if (WT_UNLIKELY(wt_s32(mb, {ml_expr}, (uint32_t)(l{base_local}), {base_off}u + wt_ck * 4u, wt_cs_{id}[wt_ck]))) {go}"
         ));
@@ -1738,14 +1899,23 @@ fn try_emit_coalesced_mem_run(
         let bytes = count * 4;
         let go = e.trap_oob_goto();
         e.line("{");
-        e.line(&format!("  uint64_t wt_ca = (uint64_t)(uint32_t)(l{base_local}) + {base_off}ULL;"));
-        e.line(&format!("  if (WT_LIKELY(wt_ca + {bytes}ULL <= (uint64_t)({ml_expr}))) {{"));
+        e.line(&format!(
+            "  uint64_t wt_ca = (uint64_t)(uint32_t)(l{base_local}) + {base_off}ULL;"
+        ));
+        e.line(&format!(
+            "  if (WT_LIKELY(wt_ca + {bytes}ULL <= (uint64_t)({ml_expr}))) {{"
+        ));
         for (k, expr) in vals.iter().enumerate() {
             e.line(&format!("    wt_s32_u(mb + wt_ca + {}u, {expr});", k * 4));
         }
         e.line("  } else {");
-        e.line(&format!("    uint32_t wt_vs[{count}] = {{ {} }};", vals.join(", ")));
-        e.line(&format!("    for (uint32_t wt_ck = 0; wt_ck < {count}u; wt_ck++) {{"));
+        e.line(&format!(
+            "    uint32_t wt_vs[{count}] = {{ {} }};",
+            vals.join(", ")
+        ));
+        e.line(&format!(
+            "    for (uint32_t wt_ck = 0; wt_ck < {count}u; wt_ck++) {{"
+        ));
         e.line(&format!(
             "      if (WT_UNLIKELY(wt_s32(mb, {ml_expr}, (uint32_t)(l{base_local}), {base_off}u + wt_ck * 4u, wt_vs[wt_ck]))) {go}"
         ));
@@ -1762,13 +1932,21 @@ fn try_emit_coalesced_mem_run(
         let go = e.trap_oob_goto();
         let max_end = max_off as u64 + 4;
         e.line("{");
-        e.line(&format!("  uint64_t wt_ca = (uint64_t)(uint32_t)(l{base_local});"));
-        e.line(&format!("  if (WT_UNLIKELY(wt_ca + {max_end}ULL > (uint64_t)({ml_expr}))) {go}"));
+        e.line(&format!(
+            "  uint64_t wt_ca = (uint64_t)(uint32_t)(l{base_local});"
+        ));
+        e.line(&format!(
+            "  if (WT_UNLIKELY(wt_ca + {max_end}ULL > (uint64_t)({ml_expr}))) {go}"
+        ));
         for &(off, dst, is_f32) in &items {
             if is_f32 {
-                e.line(&format!("  l{dst} = wt_f32_bits(wt_l32_u(mb + wt_ca + {off}u));"));
+                e.line(&format!(
+                    "  l{dst} = wt_f32_bits(wt_l32_u(mb + wt_ca + {off}u));"
+                ));
             } else {
-                e.line(&format!("  l{dst} = (int32_t)wt_l32_u(mb + wt_ca + {off}u);"));
+                e.line(&format!(
+                    "  l{dst} = (int32_t)wt_l32_u(mb + wt_ca + {off}u);"
+                ));
             }
         }
         e.line("}");
@@ -1780,20 +1958,35 @@ fn try_emit_coalesced_mem_run(
 
 /// Matches a contiguous run of `>= VAR_STORE_RUN_MIN` triples:
 /// `local.get $base; (i32.const | f32.const | local.get $v); (i32.store | f32.store) offset=base+4*k`.
-fn match_var_store32_run(code: &[Instruction], pc: usize, locals: &[ValType]) -> Option<(u32, u32, Vec<String>, usize)> {
+fn match_var_store32_run(
+    code: &[Instruction],
+    pc: usize,
+    locals: &[ValType],
+) -> Option<(u32, u32, Vec<String>, usize)> {
     let parse_one = |at: usize| -> Option<(u32, u64, String)> {
         let a = code.get(at)?;
         let b = code.get(at + 1)?;
         let c = code.get(at + 2)?;
-        let (0x20, Immediate::Index(base)) = (a.opcode, &a.immediate) else { return None };
-        let Immediate::MemArg { memory: 0, offset, .. } = c.immediate else { return None };
+        let (0x20, Immediate::Index(base)) = (a.opcode, &a.immediate) else {
+            return None;
+        };
+        let Immediate::MemArg {
+            memory: 0, offset, ..
+        } = c.immediate
+        else {
+            return None;
+        };
         let val_expr = match (b.opcode, &b.immediate, c.opcode) {
             (0x41, Immediate::I32(v), 0x36) => format!("{:#x}u", *v as u32),
             (0x43, Immediate::F32(bits), 0x38) => format!("{bits:#x}u"),
-            (0x20, Immediate::Index(vloc), 0x36) if locals.get(*vloc as usize) == Some(&ValType::I32) => {
+            (0x20, Immediate::Index(vloc), 0x36)
+                if locals.get(*vloc as usize) == Some(&ValType::I32) =>
+            {
                 format!("(uint32_t)(l{vloc})")
             }
-            (0x20, Immediate::Index(vloc), 0x38) if locals.get(*vloc as usize) == Some(&ValType::F32) => {
+            (0x20, Immediate::Index(vloc), 0x38)
+                if locals.get(*vloc as usize) == Some(&ValType::F32) =>
+            {
                 format!("wt_f32_to_bits(l{vloc})")
             }
             _ => return None,
@@ -1832,14 +2025,23 @@ fn match_load32_run(code: &[Instruction], pc: usize) -> Option<Load32Run> {
         let a = code.get(at)?;
         let b = code.get(at + 1)?;
         let c = code.get(at + 2)?;
-        let (0x20, Immediate::Index(base)) = (a.opcode, &a.immediate) else { return None };
+        let (0x20, Immediate::Index(base)) = (a.opcode, &a.immediate) else {
+            return None;
+        };
         let is_f32 = match b.opcode {
             0x28 => false,
             0x2a => true,
             _ => return None,
         };
-        let Immediate::MemArg { memory: 0, offset, .. } = b.immediate else { return None };
-        let (0x21, Immediate::Index(dst)) = (c.opcode, &c.immediate) else { return None };
+        let Immediate::MemArg {
+            memory: 0, offset, ..
+        } = b.immediate
+        else {
+            return None;
+        };
+        let (0x21, Immediate::Index(dst)) = (c.opcode, &c.immediate) else {
+            return None;
+        };
         if offset + 4 > u32::MAX as u64 {
             return None;
         }
@@ -1878,13 +2080,20 @@ fn match_const_store32_run(code: &[Instruction], pc: usize) -> Option<(u32, u32,
         let a = code.get(at)?;
         let b = code.get(at + 1)?;
         let c = code.get(at + 2)?;
-        let (0x20, Immediate::Index(local)) = (a.opcode, &a.immediate) else { return None };
+        let (0x20, Immediate::Index(local)) = (a.opcode, &a.immediate) else {
+            return None;
+        };
         let val = match (b.opcode, &b.immediate, c.opcode) {
             (0x41, Immediate::I32(v), 0x36) => *v as u32,
             (0x43, Immediate::F32(bits), 0x38) => *bits,
             _ => return None,
         };
-        let Immediate::MemArg { memory: 0, offset, .. } = c.immediate else { return None };
+        let Immediate::MemArg {
+            memory: 0, offset, ..
+        } = c.immediate
+        else {
+            return None;
+        };
         Some((*local, offset, val))
     };
     let (base_local, base_off, first_val) = parse_one(pc)?;
@@ -1911,20 +2120,25 @@ fn match_const_store32_run(code: &[Instruction], pc: usize) -> Option<(u32, u32,
 }
 
 #[cfg(not(target_endian = "little"))]
-fn match_const_store32_run(_code: &[Instruction], _pc: usize) -> Option<(u32, u32, Vec<u32>, usize)> {
+fn match_const_store32_run(
+    _code: &[Instruction],
+    _pc: usize,
+) -> Option<(u32, u32, Vec<u32>, usize)> {
     None
 }
 
 /// Operand stack `(pops, pushes)` for pure numeric opcodes handled by `emit_c_numeric`.
 fn c_numeric_arity(op: u16) -> Option<(usize, usize)> {
     let pops = match op {
-        0x45 | 0x50 | 0x67..=0x69 | 0x79..=0x7b | 0x8b..=0x91 | 0x99..=0x9f | 0xa7..=0xc4 | 0xfc00..=0xfc07 => 1,
-        0x46..=0x4f
-        | 0x51..=0x66
-        | 0x6a..=0x78
-        | 0x7c..=0x8a
-        | 0x92..=0x98
-        | 0xa0..=0xa6 => 2,
+        0x45
+        | 0x50
+        | 0x67..=0x69
+        | 0x79..=0x7b
+        | 0x8b..=0x91
+        | 0x99..=0x9f
+        | 0xa7..=0xc4
+        | 0xfc00..=0xfc07 => 1,
+        0x46..=0x4f | 0x51..=0x66 | 0x6a..=0x78 | 0x7c..=0x8a | 0x92..=0x98 | 0xa0..=0xa6 => 2,
         _ => return None,
     };
     Some((pops, 1))
@@ -1940,7 +2154,11 @@ struct OutlinePlan {
 /// `[start_pc, end_pc)` suitable for parallel compilation in separate `.c` shards.
 /// Supports non-zero baseline operand-stack heights `base_h` whenever no
 /// instruction inside `[start_pc, end_pc)` reads or pops any slot `< base_h`.
-fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> Option<Vec<OutlinePlan>> {
+fn find_outline_chunks(
+    module: &Module,
+    index: usize,
+    code: &[Instruction],
+) -> Option<Vec<OutlinePlan>> {
     struct WFrame {
         id: usize,
         kind: Kind,
@@ -1973,7 +2191,11 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
     let mut effective_total = 0usize;
 
     let br_arity = |fr: &WFrame| -> usize {
-        if fr.kind == Kind::Loop { fr.params } else { fr.results.len() }
+        if fr.kind == Kind::Loop {
+            fr.params
+        } else {
+            fr.results.len()
+        }
     };
 
     let mut pc = 0usize;
@@ -2008,7 +2230,8 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
             let cur = frames.last().unwrap();
             let key = (cur.id, cur.in_else, stack_len);
             let entry = seq_depth.entry(key).or_insert_with(|| {
-                let snap: Vec<(Kind, Vec<ValType>)> = frames.iter().map(|f| (f.kind, f.results.clone())).collect();
+                let snap: Vec<(Kind, Vec<ValType>)> =
+                    frames.iter().map(|f| (f.kind, f.results.clone())).collect();
                 (frames.len() - 1, stack_len, snap, Vec::new())
             });
             entry.3.push(pc);
@@ -2086,19 +2309,25 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
                 stack_len = f.height + f.results.len();
             }
             0x0c => {
-                let Immediate::Index(d) = i.immediate else { return None };
+                let Immediate::Index(d) = i.immediate else {
+                    return None;
+                };
                 let at = frames.len().checked_sub(d as usize + 1)?;
                 min_slot_touched[pc] = stack_len.checked_sub(br_arity(&frames[at]))?;
                 frames.last_mut().unwrap().unreachable = true;
             }
             0x0d => {
-                let Immediate::Index(d) = i.immediate else { return None };
+                let Immediate::Index(d) = i.immediate else {
+                    return None;
+                };
                 let at = frames.len().checked_sub(d as usize + 1)?;
                 stack_len = stack_len.checked_sub(1)?;
                 min_slot_touched[pc] = stack_len.checked_sub(br_arity(&frames[at]))?;
             }
             0x0e => {
-                let Immediate::BrTable(ref targets, default) = i.immediate else { return None };
+                let Immediate::BrTable(ref targets, default) = i.immediate else {
+                    return None;
+                };
                 stack_len = stack_len.checked_sub(1)?;
                 let mut m = stack_len;
                 for &d in targets.iter().chain(std::iter::once(&default)) {
@@ -2113,17 +2342,26 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
                 frames.last_mut().unwrap().unreachable = true;
             }
             0x10 => {
-                let Immediate::Index(f) = i.immediate else { return None };
+                let Immediate::Index(f) = i.immediate else {
+                    return None;
+                };
                 let fty = module.types.get(f as usize)?;
                 let base = stack_len.checked_sub(fty.params.len())?;
                 min_slot_touched[pc] = base;
                 stack_len = base + fty.results.len();
-                if module.noreturn_imports.get(f as usize).copied().unwrap_or(false) {
+                if module
+                    .noreturn_imports
+                    .get(f as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     frames.last_mut().unwrap().unreachable = true;
                 }
             }
             0x11 => {
-                let Immediate::Pair(ti, _) = i.immediate else { return None };
+                let Immediate::Pair(ti, _) = i.immediate else {
+                    return None;
+                };
                 let fty = module.module_types.get(ti as usize)?;
                 let base = stack_len.checked_sub(fty.params.len() + 1)?;
                 min_slot_touched[pc] = base;
@@ -2208,7 +2446,11 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
                     && !overlaps(&chosen, run_start, prev)
                     && stack_safe(run_start, prev, base_h)
                 {
-                    chosen.push(OutlinePlan { start_pc: run_start, end_pc: prev, outer_frames: snap.clone() });
+                    chosen.push(OutlinePlan {
+                        start_pc: run_start,
+                        end_pc: prev,
+                        outer_frames: snap.clone(),
+                    });
                 }
                 if step > OUTLINE_CHUNK_MAX
                     && step < code.len().saturating_sub(200)
@@ -2222,13 +2464,21 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
                 continue;
             }
             if cur - run_start >= OUTLINE_CHUNK_TARGET {
-                let end = if cur - run_start <= OUTLINE_CHUNK_MAX { cur } else { prev };
+                let end = if cur - run_start <= OUTLINE_CHUNK_MAX {
+                    cur
+                } else {
+                    prev
+                };
                 if end > run_start
                     && end - run_start < code.len().saturating_sub(200)
                     && !overlaps(&chosen, run_start, end)
                     && stack_safe(run_start, end, base_h)
                 {
-                    chosen.push(OutlinePlan { start_pc: run_start, end_pc: end, outer_frames: snap.clone() });
+                    chosen.push(OutlinePlan {
+                        start_pc: run_start,
+                        end_pc: end,
+                        outer_frames: snap.clone(),
+                    });
                     run_start = end;
                 } else {
                     run_start = cur;
@@ -2242,14 +2492,22 @@ fn find_outline_chunks(module: &Module, index: usize, code: &[Instruction]) -> O
             && !overlaps(&chosen, run_start, prev)
             && stack_safe(run_start, prev, base_h)
         {
-            chosen.push(OutlinePlan { start_pc: run_start, end_pc: prev, outer_frames: snap });
+            chosen.push(OutlinePlan {
+                start_pc: run_start,
+                end_pc: prev,
+                outer_frames: snap,
+            });
         }
     }
 
     // Second pass: outline any remaining huge un-split single loops/blocks as their own shards.
     for (a, b, base_h, snap) in deferred_gaps {
         if !overlaps(&chosen, a, b) && stack_safe(a, b, base_h) {
-            chosen.push(OutlinePlan { start_pc: a, end_pc: b, outer_frames: snap });
+            chosen.push(OutlinePlan {
+                start_pc: a,
+                end_pc: b,
+                outer_frames: snap,
+            });
         }
     }
 
@@ -2309,14 +2567,27 @@ fn try_outline_c_function(
                 (0x21 | 0x22, Immediate::Index(x)) => {
                     chunk_writes[ci].insert(*x);
                 }
-                (0x24, Immediate::Index(x)) if (*x as usize) < n_globals && module.global_consts[*x as usize].is_none() => {
+                (0x24, Immediate::Index(x))
+                    if (*x as usize) < n_globals && module.global_consts[*x as usize].is_none() =>
+                {
                     if reg_set.contains(x) {
                         chunk_reg_writes[ci].insert(*x);
                         written_reg_globals.insert(*x);
                     }
                 }
-                (0x10, Immediate::Index(c)) if !module.noreturn_imports.get(*c as usize).copied().unwrap_or(false) => {
-                    if module.fn_may_grow.get(*c as usize).copied().unwrap_or(false) {
+                (0x10, Immediate::Index(c))
+                    if !module
+                        .noreturn_imports
+                        .get(*c as usize)
+                        .copied()
+                        .unwrap_or(false) =>
+                {
+                    if module
+                        .fn_may_grow
+                        .get(*c as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
                         chunk_may_grow[ci] = true;
                     }
                 }
@@ -2371,8 +2642,16 @@ fn try_outline_c_function(
         .filter(|&(_, &cnt)| cnt >= 2)
         .map(|(x, _)| x as u32)
         .collect();
-    let written_regs_vec: Vec<u32> = fn_reg_globals.iter().copied().filter(|g| written_reg_globals.contains(g)).collect();
-    let param_regs_vec: Vec<u32> = fn_reg_globals.iter().copied().filter(|g| !written_reg_globals.contains(g)).collect();
+    let written_regs_vec: Vec<u32> = fn_reg_globals
+        .iter()
+        .copied()
+        .filter(|g| written_reg_globals.contains(g))
+        .collect();
+    let param_regs_vec: Vec<u32> = fn_reg_globals
+        .iter()
+        .copied()
+        .filter(|g| !written_reg_globals.contains(g))
+        .collect();
 
     // Emit each chunk as its own standalone helper function `uint32_t f{index}_c{ci}(...)`.
     struct ChunkMeta {
@@ -2389,10 +2668,26 @@ fn try_outline_c_function(
 
     for (ci, pl) in plans.iter().enumerate() {
         let slice = &code[pl.start_pc..pl.end_pc];
-        let touch_shared: Vec<u32> = chunk_touches[ci].iter().copied().filter(|x| shared_locals.contains(x)).collect();
-        let write_shared: Vec<u32> = chunk_writes[ci].iter().copied().filter(|x| shared_locals.contains(x)).collect();
-        let private_locals: Vec<u32> = chunk_touches[ci].iter().copied().filter(|x| !shared_locals.contains(x)).collect();
-        let write_regs: Vec<u32> = written_regs_vec.iter().copied().filter(|g| chunk_reg_writes[ci].contains(g)).collect();
+        let touch_shared: Vec<u32> = chunk_touches[ci]
+            .iter()
+            .copied()
+            .filter(|x| shared_locals.contains(x))
+            .collect();
+        let write_shared: Vec<u32> = chunk_writes[ci]
+            .iter()
+            .copied()
+            .filter(|x| shared_locals.contains(x))
+            .collect();
+        let private_locals: Vec<u32> = chunk_touches[ci]
+            .iter()
+            .copied()
+            .filter(|x| !shared_locals.contains(x))
+            .collect();
+        let write_regs: Vec<u32> = written_regs_vec
+            .iter()
+            .copied()
+            .filter(|g| chunk_reg_writes[ci].contains(g))
+            .collect();
 
         // Analyze globals & ml usage inside this chunk slice.
         let mut uses: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
@@ -2403,7 +2698,9 @@ fn try_outline_c_function(
         for i in slice {
             match (i.opcode, &i.immediate) {
                 (0x23 | 0x24, Immediate::Index(x))
-                    if (*x as usize) < n_globals && module.global_consts[*x as usize].is_none() && !reg_set.contains(x) =>
+                    if (*x as usize) < n_globals
+                        && module.global_consts[*x as usize].is_none()
+                        && !reg_set.contains(x) =>
                 {
                     let entry = uses.entry(*x).or_default();
                     if i.opcode == 0x23 {
@@ -2413,7 +2710,13 @@ fn try_outline_c_function(
                     }
                 }
                 (0x0c..=0x0f, _) => sites += 1,
-                (0x10, Immediate::Index(c)) if !module.noreturn_imports.get(*c as usize).copied().unwrap_or(false) => {
+                (0x10, Immediate::Index(c))
+                    if !module
+                        .noreturn_imports
+                        .get(*c as usize)
+                        .copied()
+                        .unwrap_or(false) =>
+                {
                     sites += 1;
                     call_targets.push(*c as usize);
                 }
@@ -2429,7 +2732,8 @@ fn try_outline_c_function(
                 _ => {}
             }
         }
-        let mut ranked: Vec<(u32, usize, usize)> = uses.into_iter().map(|(x, (r, w))| (x, r, w)).collect();
+        let mut ranked: Vec<(u32, usize, usize)> =
+            uses.into_iter().map(|(x, (r, w))| (x, r, w)).collect();
         ranked.sort_by_key(|&(x, r, w)| (std::cmp::Reverse(r + w), x));
         let allowance = GLOBAL_LINES_PER_INSTRUCTION * slice.len() + 64;
         let mut cost = 0;
@@ -2444,7 +2748,8 @@ fn try_outline_c_function(
                 let mut spill_sites = 0usize;
                 let mut reload_sites = 0usize;
                 for &c in &call_targets {
-                    if is_set && (module.fn_reads[c].contains(x) || module.fn_writes[c].contains(x)) {
+                    if is_set && (module.fn_reads[c].contains(x) || module.fn_writes[c].contains(x))
+                    {
                         spill_sites += 1;
                     }
                     if module.fn_net_writes[c].contains(x) {
@@ -2452,7 +2757,9 @@ fn try_outline_c_function(
                     }
                 }
                 for &cid in &ci_calls {
-                    if is_set && (module.ci_reads[cid].contains(x) || module.ci_writes[cid].contains(x)) {
+                    if is_set
+                        && (module.ci_reads[cid].contains(x) || module.ci_writes[cid].contains(x))
+                    {
                         spill_sites += 1;
                     }
                     if module.ci_net_writes[cid].contains(x) {
@@ -2463,7 +2770,10 @@ fn try_outline_c_function(
                 if !is_set && reads <= reload_sites + 1 {
                     continue;
                 }
-                if is_set && spill_sites + reload_sites > total_uses * 2 && spill_sites + reload_sites > 2 {
+                if is_set
+                    && spill_sites + reload_sites > total_uses * 2
+                    && spill_sites + reload_sites > 2
+                {
                     continue;
                 }
             }
@@ -2578,18 +2888,40 @@ fn try_outline_c_function(
         let mut coalesced = 0usize;
         while spc < slice.len() {
             if ce.frames.last().is_some_and(|f| !f.unreachable)
-                && let Some((next_spc, ops)) =
-                    try_emit_coalesced_mem_run(&mut ce, slice, spc, locals, &ml_expr, &mut cstore_id)?
+                && let Some((next_spc, ops)) = try_emit_coalesced_mem_run(
+                    &mut ce,
+                    slice,
+                    spc,
+                    locals,
+                    &ml_expr,
+                    &mut cstore_id,
+                )?
             {
                 coalesced += ops;
                 spc = next_spc;
                 continue;
             }
             let i = &slice[spc];
-            emit_c_insn(module, multi, locals, &ml_expr, &mut ce, spc, i, &loop_written_globals)
-                .map_err(|err| format!("function {index} chunk {ci} insn {spc} ({:#x}): {err}", i.opcode))?;
+            emit_c_insn(
+                module,
+                multi,
+                locals,
+                &ml_expr,
+                &mut ce,
+                spc,
+                i,
+                &loop_written_globals,
+            )
+            .map_err(|err| {
+                format!(
+                    "function {index} chunk {ci} insn {spc} ({:#x}): {err}",
+                    i.opcode
+                )
+            })?;
             if ce.over {
-                return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                return Err(format!(
+                    "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                ));
             }
             spc += 1;
         }
@@ -2613,7 +2945,10 @@ fn try_outline_c_function(
 
         let cname = format!("f{index}_c{ci}");
         let mut p_types = vec!["Ctx *restrict".to_string(), "uint8_t *restrict".to_string()];
-        let mut p_named = vec!["Ctx *restrict ctx".to_string(), "uint8_t *restrict mb".to_string()];
+        let mut p_named = vec![
+            "Ctx *restrict ctx".to_string(),
+            "uint8_t *restrict mb".to_string(),
+        ];
         for &g in &param_regs_vec {
             let rt = c_type(module.globals[g as usize].0)?;
             p_types.push(rt.to_string());
@@ -2630,7 +2965,12 @@ fn try_outline_c_function(
         let chunk_stub = chunk_slots > 64;
         let chunk_est = (chunk_slots as u64).saturating_mul(16).saturating_add(4096);
         if chunk_stub {
-            writeln!(csrc, "static __attribute__((noinline)) uint32_t {cname}_body({}) {{", p_named.join(", ")).unwrap();
+            writeln!(
+                csrc,
+                "static __attribute__((noinline)) uint32_t {cname}_body({}) {{",
+                p_named.join(", ")
+            )
+            .unwrap();
         } else {
             writeln!(csrc, "uint32_t {cname}({}) {{", p_named.join(", ")).unwrap();
         }
@@ -2645,7 +2985,13 @@ fn try_outline_c_function(
             writeln!(csrc, "  {} l{x} = st->l{x};", c_type(locals[x as usize])?).unwrap();
         }
         for &x in &private_locals {
-            writeln!(csrc, "  {} l{x} = {};", c_type(locals[x as usize])?, c_zero(locals[x as usize])?).unwrap();
+            writeln!(
+                csrc,
+                "  {} l{x} = {};",
+                c_type(locals[x as usize])?,
+                c_zero(locals[x as usize])?
+            )
+            .unwrap();
         }
         for &x in &init_cached {
             let t = module.globals[x as usize].0;
@@ -2699,7 +3045,9 @@ fn try_outline_c_function(
 
     // Build per-function state header `f{index}_st.h`.
     let hdr_name = format!("f{index}_st.h");
-    let mut hdr = format!("#ifndef WT_F{index}_ST_H\n#define WT_F{index}_ST_H\n#include \"types.h\"\n\ntypedef struct F{index}State {{\n");
+    let mut hdr = format!(
+        "#ifndef WT_F{index}_ST_H\n#define WT_F{index}_ST_H\n#include \"types.h\"\n\ntypedef struct F{index}State {{\n"
+    );
     for &x in &shared_locals {
         writeln!(hdr, "  {} l{x};", c_type(locals[x as usize])?).unwrap();
     }
@@ -2712,7 +3060,11 @@ fn try_outline_c_function(
     for ((k, tag), cty) in &all_br_slots {
         writeln!(hdr, "  {cty} br_{k}_{tag};").unwrap();
     }
-    if shared_locals.is_empty() && written_regs_vec.is_empty() && !(any_used_return && fn_abi != CRetAbi::Void) && all_br_slots.is_empty() {
+    if shared_locals.is_empty()
+        && written_regs_vec.is_empty()
+        && !(any_used_return && fn_abi != CRetAbi::Void)
+        && all_br_slots.is_empty()
+    {
         hdr.push_str("  uint8_t _dummy;\n");
     }
     writeln!(hdr, "}} F{index}State;\n#endif").unwrap();
@@ -2723,7 +3075,11 @@ fn try_outline_c_function(
         if chunk_of_pc[pc].is_some() {
             continue;
         }
-        if matches!(i.opcode, 0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b) && !is_fixed {
+        if matches!(
+            i.opcode,
+            0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b
+        ) && !is_fixed
+        {
             uses_ml = true;
         }
     }
@@ -2769,7 +3125,11 @@ fn try_outline_c_function(
     };
     e.declare("wt_oc", "uint32_t");
     let empty_loops: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
-    let chunk_by_start: BTreeMap<usize, usize> = plans.iter().enumerate().map(|(ci, pl)| (pl.start_pc, ci)).collect();
+    let chunk_by_start: BTreeMap<usize, usize> = plans
+        .iter()
+        .enumerate()
+        .map(|(ci, pl)| (pl.start_pc, ci))
+        .collect();
 
     let mut pc = 0usize;
     let mut parent_insns = 0usize;
@@ -2833,7 +3193,9 @@ fn try_outline_c_function(
         emit_c_insn(module, multi, locals, &ml_expr, &mut e, pc, i, &empty_loops)
             .map_err(|err| format!("function {index} parent insn {pc} ({:#x}): {err}", i.opcode))?;
         if e.over {
-            return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+            return Err(format!(
+                "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+            ));
         }
         if e.frames.is_empty() {
             break;
@@ -2849,10 +3211,16 @@ fn try_outline_c_function(
     let mut out = String::with_capacity(e.s.len() + parent_decl_locals.len() * 24 + 512);
     let ret_ty = c_ret_type(&fn_abi);
     let params = c_fn_params(module, index, true)?;
-    let extra_est = (parent_decl_locals.len().saturating_add(e.scratch_decls.len()) as u64)
+    let extra_est = (parent_decl_locals
+        .len()
+        .saturating_add(e.scratch_decls.len()) as u64)
         .saturating_mul(16)
         .saturating_add(4096);
-    writeln!(out, "static __attribute__((noinline)) {ret_ty} f{index}_body({params}) {{").unwrap();
+    writeln!(
+        out,
+        "static __attribute__((noinline)) {ret_ty} f{index}_body({params}) {{"
+    )
+    .unwrap();
     if uses_ml {
         writeln!(out, "  size_t ml = ctx->mem.len;").unwrap();
     }
@@ -2871,7 +3239,12 @@ fn try_outline_c_function(
         writeln!(out, "wt_oob: return {};", c_ret_trap(&fn_abi, "TRAP_OOB")).unwrap();
     }
     if e.used_table_oob {
-        writeln!(out, "wt_toob: return {};", c_ret_trap(&fn_abi, "TRAP_TABLE_OOB")).unwrap();
+        writeln!(
+            out,
+            "wt_toob: return {};",
+            c_ret_trap(&fn_abi, "TRAP_TABLE_OOB")
+        )
+        .unwrap();
     }
     if e.used_tr_label {
         writeln!(out, "wt_trap: return {};", c_ret_trap(&fn_abi, "wt_tc")).unwrap();
@@ -2918,7 +3291,9 @@ fn emit_c_insn(
                 e.dead += 1;
                 return Ok(());
             }
-            0x06..=0x0a | 0x18 | 0x19 | 0x1f => return Err(format!("unsupported instruction {op:#x}")),
+            0x06..=0x0a | 0x18 | 0x19 | 0x1f => {
+                return Err(format!("unsupported instruction {op:#x}"));
+            }
             0x05 if e.dead > 0 => return Ok(()),
             0x0b if e.dead > 0 => {
                 e.dead -= 1;
@@ -3043,7 +3418,11 @@ fn emit_c_insn(
             }
             frame.has_else = true;
             frame.unreachable = false;
-            let (height, params, restored_dirty) = (frame.height, frame.if_params.clone(), frame.if_entry_dirty.clone());
+            let (height, params, restored_dirty) = (
+                frame.height,
+                frame.if_params.clone(),
+                frame.if_entry_dirty.clone(),
+            );
             e.dirty_globals = restored_dirty;
             e.stack.truncate(height);
             e.deps.truncate(height);
@@ -3188,8 +3567,14 @@ fn emit_c_insn(
             let Immediate::Pair(ti, tbl) = i.immediate else {
                 return Err("call_indirect immediate".into());
             };
-            let &ci_id = module.ci_index.get(&(tbl, ti)).ok_or("call_indirect not registered")?;
-            let ty = module.module_types.get(ti as usize).ok_or("call_indirect type")?;
+            let &ci_id = module
+                .ci_index
+                .get(&(tbl, ti))
+                .ok_or("call_indirect not registered")?;
+            let ty = module
+                .module_types
+                .get(ti as usize)
+                .ok_or("call_indirect type")?;
             let (idx, _) = e.pop()?;
             let n = ty.params.len();
             if e.stack.len() < n {
@@ -3224,7 +3609,11 @@ fn emit_c_insn(
             let (c, _, dc) = e.pop_dep()?;
             let (b, _, db) = e.pop_dep()?;
             let (a, t, da) = e.pop_dep()?;
-            e.push_pure(t, &format!("({c}) ? ({a}) : ({b})"), da.union(&db).union(&dc))?;
+            e.push_pure(
+                t,
+                &format!("({c}) ? ({a}) : ({b})"),
+                da.union(&db).union(&dc),
+            )?;
         }
         0x20 => {
             let x = index()? as usize;
@@ -3251,14 +3640,23 @@ fn emit_c_insn(
             if let Some(c) = module.global_consts[x] {
                 e.push_plain(*t, c_const_val(c));
             } else {
-                let place = if e.globals_cached.contains(&(x as u32)) { format!("gv{x}") } else { format!("ctx->g{x}") };
+                let place = if e.globals_cached.contains(&(x as u32)) {
+                    format!("gv{x}")
+                } else {
+                    format!("ctx->g{x}")
+                };
                 e.push_pure(*t, &place, Dep::global())?;
             }
         }
         0x24 => {
             let x = index()?;
             let (v, _) = e.pop()?;
-            if module.global_consts.get(x as usize).and_then(|c| *c).is_some() {
+            if module
+                .global_consts
+                .get(x as usize)
+                .and_then(|c| *c)
+                .is_some()
+            {
                 // Proven constant global.
             } else {
                 e.materialize(|d| d.globals, None)?;
@@ -3316,26 +3714,40 @@ fn emit_c_insn(
         0x40 => {
             let (n, _) = e.pop()?;
             if let Some(bytes) = module.fixed32 {
-                e.push(ValType::I32, &format!("(({n}) == 0 ? {} : -1)", bytes >> 16))?;
+                e.push(
+                    ValType::I32,
+                    &format!("(({n}) == 0 ? {} : -1)", bytes >> 16),
+                )?;
             } else {
-                e.push(ValType::I32, &format!("(int32_t)wt_mem_grow(&ctx->mem, (uint64_t)(uint32_t)({n}))"))?;
+                e.push(
+                    ValType::I32,
+                    &format!("(int32_t)wt_mem_grow(&ctx->mem, (uint64_t)(uint32_t)({n}))"),
+                )?;
                 e.refresh_ml(module);
             }
         }
         0x41 => {
-            let Immediate::I32(v) = i.immediate else { return Err("i32.const".into()) };
+            let Immediate::I32(v) = i.immediate else {
+                return Err("i32.const".into());
+            };
             e.push_plain(ValType::I32, c_i32_lit(v));
         }
         0x42 => {
-            let Immediate::I64(v) = i.immediate else { return Err("i64.const".into()) };
+            let Immediate::I64(v) = i.immediate else {
+                return Err("i64.const".into());
+            };
             e.push_plain(ValType::I64, c_i64_lit(v));
         }
         0x43 => {
-            let Immediate::F32(v) = i.immediate else { return Err("f32.const".into()) };
+            let Immediate::F32(v) = i.immediate else {
+                return Err("f32.const".into());
+            };
             e.push_plain(ValType::F32, format!("wt_f32_bits({v:#x}u)"));
         }
         0x44 => {
-            let Immediate::F64(v) = i.immediate else { return Err("f64.const".into()) };
+            let Immediate::F64(v) = i.immediate else {
+                return Err("f64.const".into());
+            };
             e.push_plain(ValType::F64, format!("wt_f64_bits({v:#x}ULL)"));
         }
         0xfc0a => {
@@ -3349,7 +3761,9 @@ fn emit_c_insn(
             {
                 e.declare("tu0", "uint32_t");
                 e.declare("tu1", "uint32_t");
-                e.line(&format!("tu0 = (uint32_t)({dst}); tu1 = (uint32_t)({src});"));
+                e.line(&format!(
+                    "tu0 = (uint32_t)({dst}); tu1 = (uint32_t)({src});"
+                ));
                 e.line(&format!("if (WT_UNLIKELY((uint64_t)tu0 + {k}ULL > (uint64_t)({ml}) || (uint64_t)tu1 + {k}ULL > (uint64_t)({ml}))) {go}"));
                 e.line(&format!("memmove(mb + tu0, mb + tu1, {k}u);"));
             } else {
@@ -3367,36 +3781,55 @@ fn emit_c_insn(
             {
                 e.declare("tu0", "uint32_t");
                 e.line(&format!("tu0 = (uint32_t)({dst});"));
-                e.line(&format!("if (WT_UNLIKELY((uint64_t)tu0 + {k}ULL > (uint64_t)({ml}))) {go}"));
+                e.line(&format!(
+                    "if (WT_UNLIKELY((uint64_t)tu0 + {k}ULL > (uint64_t)({ml}))) {go}"
+                ));
                 e.line(&format!("memset(mb + tu0, (uint8_t)({val}), {k}u);"));
             } else {
                 e.line(&format!("if (WT_UNLIKELY(wt_mfill(mb, {ml}, (uint32_t)({dst}), (uint8_t)({val}), (uint32_t)({n})))) {go}"));
             }
         }
         0xfd0c => {
-            let Immediate::Bytes(ref b) = i.immediate else { return Err("v128.const".into()) };
+            let Immediate::Bytes(ref b) = i.immediate else {
+                return Err("v128.const".into());
+            };
             let bytes: [u8; 16] = b.as_ref().try_into().map_err(|_| "v128.const")?;
             let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
             let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-            e.push_plain(ValType::V128, format!("(((wt_v128){lo}ULL) | (((wt_v128){hi}ULL) << 64))"));
+            e.push_plain(
+                ValType::V128,
+                format!("(((wt_v128){lo}ULL) | (((wt_v128){hi}ULL) << 64))"),
+            );
         }
         0xfd0f..=0xfd11 => {
             let (a, _) = e.pop()?;
             let expr = match op {
-                0xfd0f => format!("(((wt_v128)(uint8_t)({a})) * ((((wt_v128)0x0101010101010101ULL) << 64) | 0x0101010101010101ULL))"),
-                0xfd10 => format!("(((wt_v128)(uint16_t)({a})) * ((((wt_v128)0x0001000100010001ULL) << 64) | 0x0001000100010001ULL))"),
-                _ => format!("(((wt_v128)(uint32_t)({a})) * ((((wt_v128)0x0000000100000001ULL) << 64) | 0x0000000100000001ULL))"),
+                0xfd0f => format!(
+                    "(((wt_v128)(uint8_t)({a})) * ((((wt_v128)0x0101010101010101ULL) << 64) | 0x0101010101010101ULL))"
+                ),
+                0xfd10 => format!(
+                    "(((wt_v128)(uint16_t)({a})) * ((((wt_v128)0x0001000100010001ULL) << 64) | 0x0001000100010001ULL))"
+                ),
+                _ => format!(
+                    "(((wt_v128)(uint32_t)({a})) * ((((wt_v128)0x0000000100000001ULL) << 64) | 0x0000000100000001ULL))"
+                ),
             };
             e.push(ValType::V128, &expr)?;
         }
         0xfd12 => {
             let (a, _) = e.pop()?;
-            e.push(ValType::V128, &format!("(((wt_v128)(uint64_t)({a})) | (((wt_v128)(uint64_t)({a})) << 64))"))?;
+            e.push(
+                ValType::V128,
+                &format!("(((wt_v128)(uint64_t)({a})) | (((wt_v128)(uint64_t)({a})) << 64))"),
+            )?;
         }
         0xfd1d => {
             let lane = index()?;
             let (v, _) = e.pop()?;
-            e.push(ValType::I64, &format!("(int64_t)(uint64_t)(({v}) >> {})", 64 * lane))?;
+            e.push(
+                ValType::I64,
+                &format!("(int64_t)(uint64_t)(({v}) >> {})", 64 * lane),
+            )?;
         }
         0xfd1e => {
             let lane = index()?;
@@ -3421,7 +3854,12 @@ fn emit_c_call_results(e: &mut CEmitter, results: &[ValType], abi: &CRetAbi, raw
             e.line(&format!("ctr = {raw};"));
             e.line(&format!("if (WT_UNLIKELY(ctr)) {go}"));
         }
-        CRetAbi::I32 | CRetAbi::I64 | CRetAbi::F32 | CRetAbi::F64 | CRetAbi::U64 | CRetAbi::V128 => {
+        CRetAbi::I32
+        | CRetAbi::I64
+        | CRetAbi::F32
+        | CRetAbi::F64
+        | CRetAbi::U64
+        | CRetAbi::V128 => {
             let rty = c_ret_type(abi);
             let r = format!("cr_{rty}");
             e.declare(&r, &rty);
@@ -3454,7 +3892,10 @@ fn emit_c_call_results(e: &mut CEmitter, results: &[ValType], abi: &CRetAbi, raw
 }
 
 fn emit_c_load(e: &mut CEmitter, ml: &str, i: &Instruction) -> Res<()> {
-    let Immediate::MemArg { memory: 0, offset, .. } = i.immediate else {
+    let Immediate::MemArg {
+        memory: 0, offset, ..
+    } = i.immediate
+    else {
         return Err("memory load on another memory".into());
     };
     let (a, _) = e.pop()?;
@@ -3464,31 +3905,135 @@ fn emit_c_load(e: &mut CEmitter, ml: &str, i: &Instruction) -> Res<()> {
         e.set_unreachable();
         return Ok(());
     }
-    let (bytes, uty, raw_ty, raw_var, res_ty, conv): (usize, &str, &str, &str, ValType, &str) = match i.opcode {
-        0x28 => (4, "wt_u32u", "uint32_t", "tm32", ValType::I32, "(int32_t)({})"),
-        0x29 => (8, "wt_u64u", "uint64_t", "tm64", ValType::I64, "(int64_t)({})"),
-        0x2a => (4, "wt_u32u", "uint32_t", "tm32", ValType::F32, "wt_f32_bits({})"),
-        0x2b => (8, "wt_u64u", "uint64_t", "tm64", ValType::F64, "wt_f64_bits({})"),
-        0x2c => (1, "uint8_t", "uint8_t", "tm8", ValType::I32, "(int32_t)(int8_t)({})"),
-        0x2d => (1, "uint8_t", "uint8_t", "tm8", ValType::I32, "(int32_t)({})"),
-        0x2e => (2, "wt_u16u", "uint16_t", "tm16", ValType::I32, "(int32_t)(int16_t)({})"),
-        0x2f => (2, "wt_u16u", "uint16_t", "tm16", ValType::I32, "(int32_t)({})"),
-        0x30 => (1, "uint8_t", "uint8_t", "tm8", ValType::I64, "(int64_t)(int8_t)({})"),
-        0x31 => (1, "uint8_t", "uint8_t", "tm8", ValType::I64, "(int64_t)({})"),
-        0x32 => (2, "wt_u16u", "uint16_t", "tm16", ValType::I64, "(int64_t)(int16_t)({})"),
-        0x33 => (2, "wt_u16u", "uint16_t", "tm16", ValType::I64, "(int64_t)({})"),
-        0x34 => (4, "wt_u32u", "uint32_t", "tm32", ValType::I64, "(int64_t)(int32_t)({})"),
-        0x35 => (4, "wt_u32u", "uint32_t", "tm32", ValType::I64, "(int64_t)({})"),
-        0xfd00 => (16, "wt_u128u", "wt_v128", "tm128", ValType::V128, "{}"),
-        op => return Err(format!("load {op:#x}")),
-    };
+    let (bytes, uty, raw_ty, raw_var, res_ty, conv): (usize, &str, &str, &str, ValType, &str) =
+        match i.opcode {
+            0x28 => (
+                4,
+                "wt_u32u",
+                "uint32_t",
+                "tm32",
+                ValType::I32,
+                "(int32_t)({})",
+            ),
+            0x29 => (
+                8,
+                "wt_u64u",
+                "uint64_t",
+                "tm64",
+                ValType::I64,
+                "(int64_t)({})",
+            ),
+            0x2a => (
+                4,
+                "wt_u32u",
+                "uint32_t",
+                "tm32",
+                ValType::F32,
+                "wt_f32_bits({})",
+            ),
+            0x2b => (
+                8,
+                "wt_u64u",
+                "uint64_t",
+                "tm64",
+                ValType::F64,
+                "wt_f64_bits({})",
+            ),
+            0x2c => (
+                1,
+                "uint8_t",
+                "uint8_t",
+                "tm8",
+                ValType::I32,
+                "(int32_t)(int8_t)({})",
+            ),
+            0x2d => (
+                1,
+                "uint8_t",
+                "uint8_t",
+                "tm8",
+                ValType::I32,
+                "(int32_t)({})",
+            ),
+            0x2e => (
+                2,
+                "wt_u16u",
+                "uint16_t",
+                "tm16",
+                ValType::I32,
+                "(int32_t)(int16_t)({})",
+            ),
+            0x2f => (
+                2,
+                "wt_u16u",
+                "uint16_t",
+                "tm16",
+                ValType::I32,
+                "(int32_t)({})",
+            ),
+            0x30 => (
+                1,
+                "uint8_t",
+                "uint8_t",
+                "tm8",
+                ValType::I64,
+                "(int64_t)(int8_t)({})",
+            ),
+            0x31 => (
+                1,
+                "uint8_t",
+                "uint8_t",
+                "tm8",
+                ValType::I64,
+                "(int64_t)({})",
+            ),
+            0x32 => (
+                2,
+                "wt_u16u",
+                "uint16_t",
+                "tm16",
+                ValType::I64,
+                "(int64_t)(int16_t)({})",
+            ),
+            0x33 => (
+                2,
+                "wt_u16u",
+                "uint16_t",
+                "tm16",
+                ValType::I64,
+                "(int64_t)({})",
+            ),
+            0x34 => (
+                4,
+                "wt_u32u",
+                "uint32_t",
+                "tm32",
+                ValType::I64,
+                "(int64_t)(int32_t)({})",
+            ),
+            0x35 => (
+                4,
+                "wt_u32u",
+                "uint32_t",
+                "tm32",
+                ValType::I64,
+                "(int64_t)({})",
+            ),
+            0xfd00 => (16, "wt_u128u", "wt_v128", "tm128", ValType::V128, "{}"),
+            op => return Err(format!("load {op:#x}")),
+        };
     e.declare(raw_var, raw_ty);
-    e.line(&format!("WT_L({bytes}ULL, {uty}, mb, {ml}, (uint32_t)({a}), {offset}u, {raw_var});"));
+    e.line(&format!(
+        "WT_L({bytes}ULL, {uty}, mb, {ml}, (uint32_t)({a}), {offset}u, {raw_var});"
+    ));
     e.push(res_ty, &conv.replace("{}", raw_var))
 }
 
 fn emit_c_store(e: &mut CEmitter, ml: &str, i: &Instruction) -> Res<()> {
-    let Immediate::MemArg { memory: 0, offset, .. } = i.immediate else {
+    let Immediate::MemArg {
+        memory: 0, offset, ..
+    } = i.immediate
+    else {
         return Err("memory store on another memory".into());
     };
     let (v, _) = e.pop()?;
@@ -3509,7 +4054,9 @@ fn emit_c_store(e: &mut CEmitter, ml: &str, i: &Instruction) -> Res<()> {
         0xfd0b => (16, "wt_u128u", v),
         op => return Err(format!("store {op:#x}")),
     };
-    e.line(&format!("WT_S({bytes}ULL, {uty}, mb, {ml}, (uint32_t)({a}), {offset}u, {val_expr});"));
+    e.line(&format!(
+        "WT_S({bytes}ULL, {uty}, mb, {ml}, (uint32_t)({a}), {offset}u, {val_expr});"
+    ));
     Ok(())
 }
 
@@ -3707,7 +4254,12 @@ struct GeneratedC {
     shards: Vec<(String, String, &'static str, Option<usize>)>,
 }
 
-fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<Instant>) -> Res<GeneratedC> {
+fn generate_c_sources(
+    wasm: &[u8],
+    opt: COpt,
+    timings: bool,
+    deadline: Option<Instant>,
+) -> Res<GeneratedC> {
     let check_dl = |phase: &str| -> Res<()> {
         if let Some(dl) = deadline
             && Instant::now() >= dl
@@ -3729,7 +4281,9 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
 
     let locals_total: usize = m.code.iter().map(|b| b.locals.len()).sum();
     if locals_total > MAX_LOCALS {
-        return Err(format!("the module declares {locals_total} locals, more than {MAX_LOCALS}"));
+        return Err(format!(
+            "the module declares {locals_total} locals, more than {MAX_LOCALS}"
+        ));
     }
 
     let t2 = Instant::now();
@@ -3744,37 +4298,64 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
     // Emit all defined functions in parallel across threads, cooperatively polling `deadline`.
     let base = module.imports.len();
     let n_defs = m.code.len();
-    let n_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(n_defs.max(1));
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(n_defs.max(1));
     let mut results: Vec<Option<Res<EmittedFn>>> = (0..n_defs).map(|_| None).collect();
     let chunk_size = n_defs.div_ceil(n_threads).max(1);
+    let used_bytes = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (chunk_idx, slice) in results.chunks_mut(chunk_size).enumerate() {
             let start = chunk_idx * chunk_size;
             let module_ref = &module;
             let multi_ref = &multi;
+            let used_ref = &used_bytes;
             handles.push(scope.spawn(move || {
                 for (offset, slot) in slice.iter_mut().enumerate() {
                     if let Some(dl) = deadline
                         && (offset & 63) == 0
                         && Instant::now() >= dl
                     {
-                        *slot = Some(Err("cgen function emission: exceeded build time limit".into()));
+                        *slot = Some(Err(
+                            "cgen function emission: exceeded build time limit".into()
+                        ));
+                        break;
+                    }
+                    let used = used_ref.load(Ordering::Acquire);
+                    if used >= MAX_SOURCE_BYTES {
+                        *slot = Some(Err(format!(
+                            "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                        )));
                         break;
                     }
                     let k = start + offset;
                     let idx = base + k;
                     let body = &m.code[k];
                     let inl = fn_is_inline_helper(module_ref, idx);
-                    *slot = Some(emit_c_function(
+                    let res = emit_c_function(
                         module_ref,
                         multi_ref,
                         idx,
                         &body.locals,
                         &body.instructions,
                         inl,
-                        MAX_SOURCE_BYTES,
-                    ));
+                        MAX_SOURCE_BYTES - used,
+                    );
+                    if let Ok(ref ef) = res {
+                        let fn_bytes = ef.source.len()
+                            + ef.chunks.iter().map(|c| c.source.len()).sum::<usize>()
+                            + ef.state_header.as_ref().map_or(0, |(_, h)| h.len());
+                        let prev = used_ref.fetch_add(fn_bytes, Ordering::AcqRel);
+                        if prev.saturating_add(fn_bytes) > MAX_SOURCE_BYTES {
+                            *slot = Some(Err(format!(
+                                "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                            )));
+                            break;
+                        }
+                    }
+                    *slot = Some(res);
                 }
             }));
         }
@@ -3788,11 +4369,20 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
     for slot in results {
         let ef = match slot {
             Some(r) => r?,
-            None => return Err("cgen function emission: exceeded build time limit".into()),
+            None => {
+                return Err(
+                    "cgen function emission: exceeded build time limit or source budget".into(),
+                );
+            }
         };
-        total_bytes += ef.source.len();
+        let fn_bytes = ef.source.len()
+            + ef.chunks.iter().map(|c| c.source.len()).sum::<usize>()
+            + ef.state_header.as_ref().map_or(0, |(_, h)| h.len());
+        total_bytes = total_bytes.saturating_add(fn_bytes);
         if total_bytes > MAX_SOURCE_BYTES {
-            return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+            return Err(format!(
+                "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+            ));
         }
         emitted.push(ef);
     }
@@ -3821,7 +4411,7 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
     for (&tbl, &len) in &module.mut_extern_tables {
         writeln!(types_h, "  uint64_t t{tbl}[{len}];").unwrap();
     }
-    types_h.push_str("  void *host_user_ctx;\n  BlotHostFn host_fn;\n} Ctx;\n\n");
+    types_h.push_str("  void *host_user_ctx;\n  BlotHostFn host_fn;\n  uint8_t in_call;\n  uint32_t host_mxcsr;\n} Ctx;\n\n");
     types_h.push_str("typedef struct { Ctx *ctx; uint8_t *mem; } ActiveCall;\n\n");
 
     for ci_id in 0..module.ci_sigs.len() {
@@ -3852,8 +4442,17 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
         for i in 0..ty.params.len() {
             call_args.push(format!("p{i}"));
         }
-        writeln!(types_h, "typedef {ret_ty} (*Ci{ci_id}Fn)({});", fn_ptys.join(", ")).unwrap();
-        writeln!(types_h, "extern const Ci{ci_id}Fn WT_CI{ci_id}_TBL[{span}];").unwrap();
+        writeln!(
+            types_h,
+            "typedef {ret_ty} (*Ci{ci_id}Fn)({});",
+            fn_ptys.join(", ")
+        )
+        .unwrap();
+        writeln!(
+            types_h,
+            "extern const Ci{ci_id}Fn WT_CI{ci_id}_TBL[{span}];"
+        )
+        .unwrap();
         writeln!(
             types_h,
             "static inline {ret_ty} wt_ci{ci_id}({}) {{\n  uint32_t u = (uint32_t)idx;\n  if (WT_UNLIKELY(u >= {tlen}u)) return {oob};\n  if (WT_UNLIKELY(u < {min_slot}u || u - {min_slot}u >= {span}u)) return {bad};\n  Ci{ci_id}Fn fn = WT_CI{ci_id}_TBL[u - {min_slot}u];\n  if (WT_UNLIKELY(!fn)) return {bad};\n  return fn({});\n}}\n",
@@ -3910,22 +4509,23 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
     let hot_buckets = bucket_pool(hot_normal_fns);
     let cold_buckets = bucket_pool(cold_normal_fns);
 
-    let opt_for_fn = |insns: usize, n_locals: usize, has_loops: bool, n_labels: usize| -> &'static str {
-        match opt {
-            COpt::O2 => "-O2",
-            COpt::O1 => "-O1",
-            COpt::O0 => "-O0",
-            COpt::Auto => {
-                if n_locals > DEBUG_INIT_MIN_LOCALS && !has_loops && n_labels <= 16 {
-                    "-O0"
-                } else if insns >= HUGE_FN_O1_INSNS {
-                    "-O1"
-                } else {
-                    "-O2"
+    let opt_for_fn =
+        |insns: usize, n_locals: usize, has_loops: bool, n_labels: usize| -> &'static str {
+            match opt {
+                COpt::O2 => "-O2",
+                COpt::O1 => "-O1",
+                COpt::O0 => "-O0",
+                COpt::Auto => {
+                    if n_locals > DEBUG_INIT_MIN_LOCALS && !has_loops && n_labels <= 16 {
+                        "-O0"
+                    } else if insns >= HUGE_FN_O1_INSNS {
+                        "-O1"
+                    } else {
+                        "-O2"
+                    }
                 }
             }
-        }
-    };
+        };
 
     let mut extra_headers: Vec<(String, String)> = Vec::new();
     let mut shards: Vec<(String, String, &'static str, Option<usize>)> = Vec::new();
@@ -3938,7 +4538,12 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
             outlined_count += ef.chunks.len();
             let mut chunk_decls = String::new();
             for ch in &ef.chunks {
-                writeln!(chunk_decls, "extern uint32_t {}({});", ch.name, ch.params_sig).unwrap();
+                writeln!(
+                    chunk_decls,
+                    "extern uint32_t {}({});",
+                    ch.name, ch.params_sig
+                )
+                .unwrap();
             }
             // Pack consecutive small chunks of the same function into ~160KB shards
             // so we avoid spawning hundreds of tiny clang processes while keeping
@@ -3946,14 +4551,23 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
             let mut group: Vec<&OutlinedChunk> = Vec::new();
             let mut group_bytes = 0usize;
             let mut group_idx = 0usize;
-            let mut flush_group = |group: &mut Vec<&OutlinedChunk>, group_bytes: &mut usize, group_idx: &mut usize| -> Res<()> {
+            let mut flush_group = |group: &mut Vec<&OutlinedChunk>,
+                                   group_bytes: &mut usize,
+                                   group_idx: &mut usize|
+             -> Res<()> {
                 if group.is_empty() {
                     return Ok(());
                 }
                 let max_insns = group.iter().map(|c| c.insns).max().unwrap_or(0);
                 let ch_flag = opt_for_fn(max_insns, 0, true, 100);
-                let ch_src = assemble_chunk_group_shard(&module, &multi, group, &hdr_name, &inline_helpers)?;
-                shards.push((format!("f{}_g{}.c", ef.index, *group_idx), ch_src, ch_flag, Some(hdr_idx)));
+                let ch_src =
+                    assemble_chunk_group_shard(&module, &multi, group, &hdr_name, &inline_helpers)?;
+                shards.push((
+                    format!("f{}_g{}.c", ef.index, *group_idx),
+                    ch_src,
+                    ch_flag,
+                    Some(hdr_idx),
+                ));
                 *group_idx += 1;
                 group.clear();
                 *group_bytes = 0;
@@ -3969,8 +4583,19 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
             flush_group(&mut group, &mut group_bytes, &mut group_idx)?;
 
             let p_flag = opt_for_fn(ef.insns, 0, true, 100);
-            let p_src = assemble_shard(&module, &multi, &[ef], &inline_helpers, Some((&hdr_name, &chunk_decls)))?;
-            shards.push((format!("big_{}.c", shards.len()), p_src, p_flag, Some(hdr_idx)));
+            let p_src = assemble_shard(
+                &module,
+                &multi,
+                &[ef],
+                &inline_helpers,
+                Some((&hdr_name, &chunk_decls)),
+            )?;
+            shards.push((
+                format!("big_{}.c", shards.len()),
+                p_src,
+                p_flag,
+                Some(hdr_idx),
+            ));
         } else {
             let flag = opt_for_fn(ef.insns, ef.n_locals, ef.has_loops, ef.n_labels);
             let src = assemble_shard(&module, &multi, &[ef], &inline_helpers, None)?;
@@ -4007,7 +4632,12 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<In
         );
     }
 
-    Ok(GeneratedC { rt_h: WTIME_AOT_RT_H.to_string(), types_h, extra_headers, shards })
+    Ok(GeneratedC {
+        rt_h: WTIME_AOT_RT_H.to_string(),
+        types_h,
+        extra_headers,
+        shards,
+    })
 }
 
 /// Collects inline helpers transitively reachable from `roots` in topological
@@ -4036,7 +4666,14 @@ fn collect_inline_closure(
         needed_cis.extend(ef.called_cis.iter().copied());
         for &callee in &ef.called_funcs {
             if inline_helpers.contains_key(&callee) {
-                dfs(callee, inline_helpers, visited, order, needed_ext_fns, needed_cis);
+                dfs(
+                    callee,
+                    inline_helpers,
+                    visited,
+                    order,
+                    needed_ext_fns,
+                    needed_cis,
+                );
             } else {
                 needed_ext_fns.insert(callee);
             }
@@ -4047,7 +4684,14 @@ fn collect_inline_closure(
     let mut order = Vec::new();
     for &r in roots {
         if inline_helpers.contains_key(&r) {
-            dfs(r, inline_helpers, &mut visited, &mut order, needed_ext_fns, needed_cis);
+            dfs(
+                r,
+                inline_helpers,
+                &mut visited,
+                &mut order,
+                needed_ext_fns,
+                needed_cis,
+            );
         } else {
             needed_ext_fns.insert(r);
         }
@@ -4069,16 +4713,29 @@ fn assemble_chunk_group_shard(
         needed_cis.extend(ch.called_cis.iter().copied());
     }
     let mut needed_ext_fns: BTreeSet<usize> = BTreeSet::new();
-    let inl_order = collect_inline_closure(&root_calls, inline_helpers, &mut needed_ext_fns, &mut needed_cis);
+    let inl_order = collect_inline_closure(
+        &root_calls,
+        inline_helpers,
+        &mut needed_ext_fns,
+        &mut needed_cis,
+    );
 
     let body_len = chunks.iter().map(|c| c.source.len()).sum::<usize>()
-        + inl_order.iter().map(|idx| inline_helpers[idx].source.len()).sum::<usize>();
+        + inl_order
+            .iter()
+            .map(|idx| inline_helpers[idx].source.len())
+            .sum::<usize>();
     let mut s = String::with_capacity(body_len + 4096);
     writeln!(s, "#include \"types.h\"\n#include \"{state_hdr}\"\n").unwrap();
     for f in needed_ext_fns {
         if f < module.imports.len() {
             let ret = c_ret_type(&multi.lookup(&module.types[f].results));
-            writeln!(s, "extern {ret} wt_import{f}({});", c_import_params(module, f, false)?).unwrap();
+            writeln!(
+                s,
+                "extern {ret} wt_import{f}({});",
+                c_import_params(module, f, false)?
+            )
+            .unwrap();
         } else {
             let ret = c_ret_type(&multi.lookup(&module.types[f].results));
             writeln!(s, "extern {ret} f{f}({});", c_fn_params(module, f, false)?).unwrap();
@@ -4090,7 +4747,12 @@ fn assemble_chunk_group_shard(
         }
         let (_, ti) = module.ci_sigs[ci_id];
         let ret = c_ret_type(&multi.lookup(&module.module_types[ti as usize].results));
-        writeln!(s, "extern {ret} wt_ci{ci_id}({});", c_ci_params(module, ci_id, false)?).unwrap();
+        writeln!(
+            s,
+            "extern {ret} wt_ci{ci_id}({});",
+            c_ci_params(module, ci_id, false)?
+        )
+        .unwrap();
     }
     for ch in chunks {
         writeln!(s, "uint32_t {}({});", ch.name, ch.params_sig).unwrap();
@@ -4120,10 +4782,18 @@ fn assemble_shard(
         needed_cis.extend(f.called_cis.iter().copied());
     }
     let mut needed_ext_fns: BTreeSet<usize> = BTreeSet::new();
-    let inl_order = collect_inline_closure(&root_calls, inline_helpers, &mut needed_ext_fns, &mut needed_cis);
+    let inl_order = collect_inline_closure(
+        &root_calls,
+        inline_helpers,
+        &mut needed_ext_fns,
+        &mut needed_cis,
+    );
 
     let body_len: usize = fns.iter().map(|f| f.source.len()).sum::<usize>()
-        + inl_order.iter().map(|idx| inline_helpers[idx].source.len()).sum::<usize>();
+        + inl_order
+            .iter()
+            .map(|idx| inline_helpers[idx].source.len())
+            .sum::<usize>();
     let mut s = String::with_capacity(body_len + 4096);
     s.push_str("#include \"types.h\"\n");
     if let Some((hdr_name, chunk_decls)) = extra_hdr {
@@ -4134,7 +4804,12 @@ fn assemble_shard(
     for f in needed_ext_fns {
         if f < module.imports.len() {
             let ret = c_ret_type(&multi.lookup(&module.types[f].results));
-            writeln!(s, "extern {ret} wt_import{f}({});", c_import_params(module, f, false)?).unwrap();
+            writeln!(
+                s,
+                "extern {ret} wt_import{f}({});",
+                c_import_params(module, f, false)?
+            )
+            .unwrap();
         } else if !defined.contains(&f) {
             let ret = c_ret_type(&multi.lookup(&module.types[f].results));
             writeln!(s, "extern {ret} f{f}({});", c_fn_params(module, f, false)?).unwrap();
@@ -4146,11 +4821,22 @@ fn assemble_shard(
         }
         let (_, ti) = module.ci_sigs[ci_id];
         let ret = c_ret_type(&multi.lookup(&module.module_types[ti as usize].results));
-        writeln!(s, "extern {ret} wt_ci{ci_id}({});", c_ci_params(module, ci_id, false)?).unwrap();
+        writeln!(
+            s,
+            "extern {ret} wt_ci{ci_id}({});",
+            c_ci_params(module, ci_id, false)?
+        )
+        .unwrap();
     }
     for f in fns {
         let ret = c_ret_type(&multi.lookup(&module.types[f.index].results));
-        writeln!(s, "{ret} f{}({});", f.index, c_fn_params(module, f.index, false)?).unwrap();
+        writeln!(
+            s,
+            "{ret} f{}({});",
+            f.index,
+            c_fn_params(module, f.index, false)?
+        )
+        .unwrap();
     }
     s.push('\n');
     for idx in inl_order {
@@ -4195,12 +4881,22 @@ fn emit_rt_exports_c(
     }
     let mut extern_fns = BTreeSet::new();
     let mut helper_cis = BTreeSet::new();
-    let inl_order = collect_inline_closure(&root_calls, inline_helpers, &mut extern_fns, &mut helper_cis);
+    let inl_order = collect_inline_closure(
+        &root_calls,
+        inline_helpers,
+        &mut extern_fns,
+        &mut helper_cis,
+    );
 
     // Forward-declare imports and switch-based CIs (in case inline helpers call them).
     for k in 0..module.imports.len() {
         let ret = c_ret_type(&multi.lookup(&module.types[k].results));
-        writeln!(s, "{ret} wt_import{k}({});", c_import_params(module, k, false)?).unwrap();
+        writeln!(
+            s,
+            "{ret} wt_import{k}({});",
+            c_import_params(module, k, false)?
+        )
+        .unwrap();
     }
     for ci_id in 0..module.ci_sigs.len() {
         if ci_uses_table(module, ci_id) {
@@ -4208,7 +4904,12 @@ fn emit_rt_exports_c(
         }
         let (_, ti) = module.ci_sigs[ci_id];
         let ret = c_ret_type(&multi.lookup(&module.module_types[ti as usize].results));
-        writeln!(s, "{ret} wt_ci{ci_id}({});", c_ci_params(module, ci_id, false)?).unwrap();
+        writeln!(
+            s,
+            "{ret} wt_ci{ci_id}({});",
+            c_ci_params(module, ci_id, false)?
+        )
+        .unwrap();
     }
     for f in extern_fns {
         if f >= module.imports.len() {
@@ -4226,7 +4927,9 @@ fn emit_rt_exports_c(
          \x20 if (WT_UNLIKELY(!ctx->host_fn)) return (R_u64){0, TRAP_HOST};\n\
          \x20 ActiveCall ac = { ctx, mb };\n\
          \x20 uint64_t res = 0;\n\
+         \x20 wt_set_mxcsr(ctx->host_mxcsr);\n\
          \x20 int32_t st = ctx->host_fn(ctx->host_user_ctx, &ac, idx, tok, arg, &res);\n\
+         \x20 wt_set_mxcsr(0x1f80u);\n\
          \x20 if (st == 0) return (R_u64){res, 0};\n\
          \x20 return (R_u64){0, TRAP_HOST};\n\
          }\n\n",
@@ -4238,13 +4941,24 @@ fn emit_rt_exports_c(
             [] => ("0ULL".to_string(), "0ULL".to_string()),
             [ValType::Ref(_)] => ("p0".to_string(), "0ULL".to_string()),
             [ValType::I32] => ("0ULL".to_string(), "(uint64_t)(uint32_t)p0".to_string()),
-            [ValType::F32] => ("0ULL".to_string(), "(uint64_t)wt_f32_to_bits(p0)".to_string()),
-            [ValType::Ref(_), ValType::I32] => ("p0".to_string(), "(uint64_t)(uint32_t)p1".to_string()),
-            [ValType::Ref(_), ValType::F32] => ("p0".to_string(), "(uint64_t)wt_f32_to_bits(p1)".to_string()),
+            [ValType::F32] => (
+                "0ULL".to_string(),
+                "(uint64_t)wt_f32_to_bits(p0)".to_string(),
+            ),
+            [ValType::Ref(_), ValType::I32] => {
+                ("p0".to_string(), "(uint64_t)(uint32_t)p1".to_string())
+            }
+            [ValType::Ref(_), ValType::F32] => {
+                ("p0".to_string(), "(uint64_t)wt_f32_to_bits(p1)".to_string())
+            }
             [ValType::Ref(_), ValType::I64] => ("p0".to_string(), "(uint64_t)p1".to_string()),
             [ValType::Ref(_), ValType::F64] => ("p0".to_string(), "wt_f64_to_bits(p1)".to_string()),
             [ValType::Ref(_), ValType::Ref(_)] => ("p0".to_string(), "p1".to_string()),
-            _ => return Err(format!("Blot import {mod_name:?}.{name:?} has unsupported params")),
+            _ => {
+                return Err(format!(
+                    "Blot import {mod_name:?}.{name:?} has unsupported params"
+                ));
+            }
         };
         let ret_ok = match ty.results.as_slice() {
             [] => "return 0;".to_string(),
@@ -4253,7 +4967,11 @@ fn emit_rt_exports_c(
             [ValType::F32] => "return (R_f32){wt_f32_bits((uint32_t)r.v), 0};".to_string(),
             [ValType::F64] => "return (R_f64){wt_f64_bits(r.v), 0};".to_string(),
             [ValType::Ref(_)] => "return (R_u64){r.v, 0};".to_string(),
-            _ => return Err(format!("Blot import {mod_name:?}.{name:?} has unsupported results")),
+            _ => {
+                return Err(format!(
+                    "Blot import {mod_name:?}.{name:?} has unsupported results"
+                ));
+            }
         };
         writeln!(
             s,
@@ -4280,7 +4998,10 @@ fn emit_rt_exports_c(
         if use_table {
             let min_slot = targets[0].0 as usize;
             let span = (targets.last().unwrap().0 as usize) - min_slot + 1;
-            let mut fn_pnamed = vec!["Ctx *restrict ctx".to_string(), "uint8_t *restrict mb".to_string()];
+            let mut fn_pnamed = vec![
+                "Ctx *restrict ctx".to_string(),
+                "uint8_t *restrict mb".to_string(),
+            ];
             for &g in &module.ci_reg_globals[ci_id] {
                 let rt = c_type(module.globals[g as usize].0)?;
                 fn_pnamed.push(format!("{rt} gv{g}"));
@@ -4317,7 +5038,12 @@ fn emit_rt_exports_c(
                     } else {
                         format!("f{f}({})", a.join(", "))
                     };
-                    writeln!(s, "static {ret_ty} {wname}({}) {{ return {call}; }}", fn_pnamed.join(", ")).unwrap();
+                    writeln!(
+                        s,
+                        "static {ret_ty} {wname}({}) {{ return {call}; }}",
+                        fn_pnamed.join(", ")
+                    )
+                    .unwrap();
                     wrappers.insert(f, wname.clone());
                     wname
                 };
@@ -4329,7 +5055,12 @@ fn emit_rt_exports_c(
             }
             s.push_str("};\n\n");
         } else {
-            writeln!(s, "{ret_ty} wt_ci{ci_id}({}) {{\n  switch ((uint32_t)idx) {{", c_ci_params(module, ci_id, true)?).unwrap();
+            writeln!(
+                s,
+                "{ret_ty} wt_ci{ci_id}({}) {{\n  switch ((uint32_t)idx) {{",
+                c_ci_params(module, ci_id, true)?
+            )
+            .unwrap();
             for &(slot, f) in targets {
                 let mut a = vec!["ctx".to_string(), "mb".to_string()];
                 if f >= module.imports.len() {
@@ -4349,7 +5080,11 @@ fn emit_rt_exports_c(
                 };
                 writeln!(s, "  case {slot}u: return {call};").unwrap();
             }
-            writeln!(s, "  default: return ((uint32_t)idx >= {tlen}u) ? ({oob}) : ({bad});\n  }}\n}}\n").unwrap();
+            writeln!(
+                s,
+                "  default: return ((uint32_t)idx >= {tlen}u) ? ({oob}) : ({bad});\n  }}\n}}\n"
+            )
+            .unwrap();
         }
     }
 
@@ -4361,7 +5096,8 @@ fn emit_rt_exports_c(
             let bytes = &m.bytes[segment.bytes.start..segment.bytes.end];
             let start = data_bytes.len();
             data_bytes.extend_from_slice(bytes);
-            let off_expr = c_constant(offset, module.globals.len(), "ctx->", &module.global_consts)?;
+            let off_expr =
+                c_constant(offset, module.globals.len(), "ctx->", &module.global_consts)?;
             active_segs.push((off_expr, start, bytes.len()));
         }
     }
@@ -4381,7 +5117,8 @@ fn emit_rt_exports_c(
     for elem in &m.elements {
         if let SegmentMode::Active { index, offset } = &elem.mode {
             let tlen = m.tables.get(*index as usize).map_or(0, |t| t.limits.min);
-            let off_expr = c_constant(offset, module.globals.len(), "ctx->", &module.global_consts)?;
+            let off_expr =
+                c_constant(offset, module.globals.len(), "ctx->", &module.global_consts)?;
             writeln!(
                 s,
                 "  {{ uint64_t o = (uint64_t)(uint32_t)({off_expr}); if (o + {}ULL > {tlen}ULL) return TRAP_TABLE_OOB; }}",
@@ -4403,8 +5140,15 @@ fn emit_rt_exports_c(
         let call = top_c_call(module, f, &[]);
         let abi = multi.lookup(&module.types[f].results);
         match abi {
-            CRetAbi::Void => writeln!(s, "  {{ uint8_t tr = {call}; if (tr) return tr; }}").unwrap(),
-            _ => writeln!(s, "  {{ {} cr = {call}; if (cr.trap) return (uint8_t)cr.trap; }}", c_ret_type(&abi)).unwrap(),
+            CRetAbi::Void => {
+                writeln!(s, "  {{ uint8_t tr = {call}; if (tr) return tr; }}").unwrap()
+            }
+            _ => writeln!(
+                s,
+                "  {{ {} cr = {call}; if (cr.trap) return (uint8_t)cr.trap; }}",
+                c_ret_type(&abi)
+            )
+            .unwrap(),
         }
     }
     s.push_str("  return 0;\n}\n\n");
@@ -4446,7 +5190,12 @@ fn emit_rt_exports_c(
          }\n\n",
     );
 
-    writeln!(s, "static const char *const WT_IMP_MOD[{}] = {{", module.imports.len().max(1)).unwrap();
+    writeln!(
+        s,
+        "static const char *const WT_IMP_MOD[{}] = {{",
+        module.imports.len().max(1)
+    )
+    .unwrap();
     if module.imports.is_empty() {
         s.push_str("  \"\"\n");
     } else {
@@ -4455,12 +5204,45 @@ fn emit_rt_exports_c(
         }
     }
     s.push_str("};\n");
-    writeln!(s, "static const char *const WT_IMP_NAME[{}] = {{", module.imports.len().max(1)).unwrap();
+    writeln!(
+        s,
+        "static const size_t WT_IMP_MOD_LEN[{}] = {{",
+        module.imports.len().max(1)
+    )
+    .unwrap();
+    if module.imports.is_empty() {
+        s.push_str("  0u\n");
+    } else {
+        for (mm, _) in &module.imports {
+            writeln!(s, "  {}u,", mm.len()).unwrap();
+        }
+    }
+    s.push_str("};\n");
+    writeln!(
+        s,
+        "static const char *const WT_IMP_NAME[{}] = {{",
+        module.imports.len().max(1)
+    )
+    .unwrap();
     if module.imports.is_empty() {
         s.push_str("  \"\"\n");
     } else {
         for (_, nn) in &module.imports {
             writeln!(s, "  {},", c_escape_str(nn)).unwrap();
+        }
+    }
+    s.push_str("};\n");
+    writeln!(
+        s,
+        "static const size_t WT_IMP_NAME_LEN[{}] = {{",
+        module.imports.len().max(1)
+    )
+    .unwrap();
+    if module.imports.is_empty() {
+        s.push_str("  0u\n");
+    } else {
+        for (_, nn) in &module.imports {
+            writeln!(s, "  {}u,", nn.len()).unwrap();
         }
     }
     writeln!(
@@ -4469,9 +5251,9 @@ fn emit_rt_exports_c(
          WT_EXPORT int32_t blot_aot_import_name(uint32_t idx, const uint8_t **mp, size_t *ml, const uint8_t **np, size_t *nl) {{\n\
          \x20 if (idx >= {}u) return 1;\n\
          \x20 if (mp) *mp = (const uint8_t *)WT_IMP_MOD[idx];\n\
-         \x20 if (ml) *ml = strlen(WT_IMP_MOD[idx]);\n\
+         \x20 if (ml) *ml = WT_IMP_MOD_LEN[idx];\n\
          \x20 if (np) *np = (const uint8_t *)WT_IMP_NAME[idx];\n\
-         \x20 if (nl) *nl = strlen(WT_IMP_NAME[idx]);\n\
+         \x20 if (nl) *nl = WT_IMP_NAME_LEN[idx];\n\
          \x20 return 0;\n\
          }}\n",
         module.imports.len(),
@@ -4494,7 +5276,7 @@ fn emit_rt_exports_c(
          \x20 if ({mem_min}ULL > max_p) {{ if (trap_out) *trap_out = TRAP_MEM_TOO_LARGE; return NULL; }}\n\
          \x20 BlotHandle *h = (BlotHandle *)calloc(1, sizeof(BlotHandle));\n\
          \x20 if (!h) {{ if (trap_out) *trap_out = TRAP_ALLOC_FAILED; return NULL; }}\n\
-         \x20 size_t alloc_sz = WT_CAP32 ? (size_t)WT_CAP32 : 1;\n\
+         \x20 size_t alloc_sz = max_p ? (size_t)(max_p * WT_PAGE) : 1;\n\
          \x20 h->mem = (uint8_t *)calloc(alloc_sz, 1);\n\
          \x20 if (!h->mem) {{ free(h); if (trap_out) *trap_out = TRAP_ALLOC_FAILED; return NULL; }}\n\
          \x20 h->ctx.stack_floor = wt_stack_floor();\n\
@@ -4512,38 +5294,83 @@ fn emit_rt_exports_c(
         }
     }
     s.push_str(
-        "  uint8_t tr = wt_initialize(&h->ctx, h->mem);\n\
+        "  uint32_t saved_mxcsr = wt_get_mxcsr();\n\
+         \x20 h->ctx.host_mxcsr = saved_mxcsr;\n\
+         \x20 h->ctx.in_call = 1;\n\
+         \x20 wt_set_mxcsr(0x1f80u);\n\
+         \x20 uint8_t tr = wt_initialize(&h->ctx, h->mem);\n\
+         \x20 wt_set_mxcsr(saved_mxcsr);\n\
+         \x20 h->ctx.in_call = 0;\n\
          \x20 if (tr) { if (trap_out) *trap_out = tr; free(h->mem); free(h); return NULL; }\n\
          \x20 return h;\n\
          }\n\n\
          WT_EXPORT void blot_aot_drop(BlotHandle *h) {\n\
-         \x20 if (h) { free(h->mem); free(h); }\n\
+         \x20 if (!h || h->ctx.in_call) return;\n\
+         \x20 free(h->mem);\n\
+         \x20 free(h);\n\
          }\n\n",
     );
 
     let export_idx = |name: &str| {
-        m.exports.iter().find(|e| e.name == name && e.kind == ExternalKind::Func).map(|e| e.index as usize)
+        m.exports
+            .iter()
+            .find(|e| e.name == name && e.kind == ExternalKind::Func)
+            .map(|e| e.index as usize)
     };
     let emit_fast_i32_i32 = |s: &mut String, fn_name: &str, export_name: &str, active: bool| {
-        let param = if active { "ActiveCall *ac" } else { "BlotHandle *h" };
+        let param = if active {
+            "ActiveCall *ac"
+        } else {
+            "BlotHandle *h"
+        };
         writeln!(s, "WT_EXPORT int32_t {fn_name}({param}, int32_t arg, int32_t *res_out, uint8_t *trap_out) {{").unwrap();
         if let Some(f) = export_idx(export_name)
             && module.types[f].params.as_slice() == [ValType::I32]
             && module.types[f].results.as_slice() == [ValType::I32]
         {
-            if active {
-                s.push_str("  Ctx *ctx = ac->ctx; uint8_t *mb = ac->mem;\n  { uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) { if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; } }\n");
-            } else {
-                s.push_str("  Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n  ctx->stack_floor = wt_stack_floor();\n  { uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) { if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; } }\n");
-            }
             let call = top_c_call(module, f, &["arg".into()]);
+            if active {
+                writeln!(
+                    s,
+                    "  if (!ac || !ac->ctx || !ac->mem) {{ if (trap_out) *trap_out = TRAP_HOST; return 2; }}\n\
+                       Ctx *ctx = ac->ctx; uint8_t *mb = ac->mem;\n\
+                       {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} }}\n\
+                       uint32_t saved_mxcsr = wt_get_mxcsr();\n\
+                       wt_set_mxcsr(0x1f80u);\n\
+                       R_i32 r = {call};\n\
+                       wt_set_mxcsr(saved_mxcsr);\n\
+                       if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n\
+                       if (res_out) *res_out = r.v;\n\
+                       return 0;\n}}\n"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    s,
+                    "  if (!h || h->ctx.in_call) {{ if (trap_out) *trap_out = TRAP_HOST; return 2; }}\n\
+                       Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n\
+                       ctx->stack_floor = wt_stack_floor();\n\
+                       {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} }}\n\
+                       uint32_t saved_mxcsr = wt_get_mxcsr();\n\
+                       ctx->host_mxcsr = saved_mxcsr;\n\
+                       ctx->in_call = 1;\n\
+                       wt_set_mxcsr(0x1f80u);\n\
+                       R_i32 r = {call};\n\
+                       wt_set_mxcsr(saved_mxcsr);\n\
+                       ctx->in_call = 0;\n\
+                       if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n\
+                       if (res_out) *res_out = r.v;\n\
+                       return 0;\n}}\n"
+                )
+                .unwrap();
+            }
+        } else {
+            let pname = if active { "ac" } else { "h" };
             writeln!(
                 s,
-                "  R_i32 r = {call};\n  if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n  if (res_out) *res_out = r.v;\n  return 0;\n}}\n"
+                "  (void){pname}; (void)arg; (void)res_out; (void)trap_out; return 3;\n}}\n"
             )
             .unwrap();
-        } else {
-            s.push_str("  (void)arg; (void)res_out; (void)trap_out; return 3;\n}\n\n");
         }
     };
     emit_fast_i32_i32(&mut s, "blot_aot_call_allocate", "blot:allocate", false);
@@ -4559,7 +5386,20 @@ fn emit_rt_exports_c(
         let call = top_c_call(module, f, &[]);
         writeln!(
             s,
-            "  Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n  ctx->stack_floor = wt_stack_floor();\n  {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} }}\n  R_i32 r = {call};\n  if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n  if (res_out) *res_out = r.v;\n  return 0;\n}}\n"
+            "  if (!h || h->ctx.in_call) {{ if (trap_out) *trap_out = TRAP_HOST; return 2; }}\n\
+               Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n\
+               ctx->stack_floor = wt_stack_floor();\n\
+               {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} }}\n\
+               uint32_t saved_mxcsr = wt_get_mxcsr();\n\
+               ctx->host_mxcsr = saved_mxcsr;\n\
+               ctx->in_call = 1;\n\
+               wt_set_mxcsr(0x1f80u);\n\
+               R_i32 r = {call};\n\
+               wt_set_mxcsr(saved_mxcsr);\n\
+               ctx->in_call = 0;\n\
+               if (WT_UNLIKELY(r.trap)) {{ if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; }}\n\
+               if (res_out) *res_out = r.v;\n\
+               return 0;\n}}\n"
         )
         .unwrap();
     } else {
@@ -4568,6 +5408,8 @@ fn emit_rt_exports_c(
 
     s.push_str(
         "WT_EXPORT int32_t blot_aot_call_export(BlotHandle *h, const uint8_t *name_ptr, size_t name_len, uint64_t arg_bits, uint64_t *res_out, uint8_t *trap_out) {\n\
+         \x20 if (!h) return 3;\n\
+         \x20 if (h->ctx.in_call) { if (trap_out) *trap_out = TRAP_HOST; return 2; }\n\
          \x20 Ctx *ctx = &h->ctx; uint8_t *mb = h->mem;\n\
          \x20 ctx->stack_floor = wt_stack_floor();\n",
     );
@@ -4587,12 +5429,24 @@ fn emit_rt_exports_c(
             _ => None,
         };
         let ret_body = match ty.results.as_slice() {
-            [] => Some("uint8_t tr = {call}; if (tr) { if (trap_out) *trap_out = tr; return tr == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = 0; return 0;"),
-            [ValType::I32] => Some("R_i32 r = {call}; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)(uint32_t)r.v; return 0;"),
-            [ValType::I64] => Some("R_i64 r = {call}; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)r.v; return 0;"),
-            [ValType::F32] => Some("R_f32 r = {call}; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)wt_f32_to_bits(r.v); return 0;"),
-            [ValType::F64] => Some("R_f64 r = {call}; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = wt_f64_to_bits(r.v); return 0;"),
-            [ValType::Ref(_)] => Some("R_u64 r = {call}; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = r.v; return 0;"),
+            [] => Some(
+                "uint8_t tr = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (tr) { if (trap_out) *trap_out = tr; return tr == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = 0; return 0;",
+            ),
+            [ValType::I32] => Some(
+                "R_i32 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)(uint32_t)r.v; return 0;",
+            ),
+            [ValType::I64] => Some(
+                "R_i64 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)r.v; return 0;",
+            ),
+            [ValType::F32] => Some(
+                "R_f32 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = (uint64_t)wt_f32_to_bits(r.v); return 0;",
+            ),
+            [ValType::F64] => Some(
+                "R_f64 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = wt_f64_to_bits(r.v); return 0;",
+            ),
+            [ValType::Ref(_)] => Some(
+                "R_u64 r = {call}; wt_set_mxcsr(saved_mxcsr); ctx->in_call = 0; if (r.trap) { if (trap_out) *trap_out = (uint8_t)r.trap; return r.trap == TRAP_HOST ? 2 : 1; } if (res_out) *res_out = r.v; return 0;",
+            ),
             _ => None,
         };
         if let (Some(args), Some(body_tmpl)) = (arg_expr, ret_body) {
@@ -4600,7 +5454,7 @@ fn emit_rt_exports_c(
             let body = body_tmpl.replace("{call}", &call);
             writeln!(
                 s,
-                "  if ({}) {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} {body} }}",
+                "  if ({}) {{ uint8_t wt_sp; if (WT_UNLIKELY((uintptr_t)&wt_sp <= ctx->stack_floor)) {{ if (trap_out) *trap_out = TRAP_CALL_STACK; return 1; }} uint32_t saved_mxcsr = wt_get_mxcsr(); ctx->host_mxcsr = saved_mxcsr; ctx->in_call = 1; wt_set_mxcsr(0x1f80u); {body} }}",
                 c_name_match_cond(&exp.name)
             )
             .unwrap();
@@ -4610,21 +5464,26 @@ fn emit_rt_exports_c(
 
     s.push_str(
         "WT_EXPORT void blot_aot_mem_data(BlotHandle *h, uint8_t **ptr_out, size_t *len_out) {\n\
+         \x20 if (!h) { if (ptr_out) *ptr_out = NULL; if (len_out) *len_out = 0; return; }\n\
          \x20 if (ptr_out) *ptr_out = h->mem;\n\
          \x20 if (len_out) *len_out = h->ctx.mem.len;\n\
          }\n\
          WT_EXPORT void blot_aot_active_mem_data(ActiveCall *ac, uint8_t **ptr_out, size_t *len_out) {\n\
+         \x20 if (!ac || !ac->ctx) { if (ptr_out) *ptr_out = NULL; if (len_out) *len_out = 0; return; }\n\
          \x20 if (ptr_out) *ptr_out = ac->mem;\n\
          \x20 if (len_out) *len_out = ac->ctx->mem.len;\n\
          }\n\
          WT_EXPORT int64_t blot_aot_mem_grow(BlotHandle *h, uint64_t delta) {\n\
+         \x20 if (!h || h->ctx.in_call) return -1;\n\
          \x20 return wt_mem_grow(&h->ctx.mem, delta);\n\
          }\n\n\
          static int32_t wt_read_global(const Ctx *ctx, const uint8_t *name_ptr, size_t name_len, uint64_t *val_out, uint8_t *kind_out) {\n",
     );
     for (name, gi, vt, _) in &module.exported_globals {
         let (kind, expr) = match (vt, module.global_consts[*gi]) {
-            (ValType::I32, Some(ConstVal::I32(v))) => (0u8, format!("(uint64_t)(uint32_t){}", c_i32_lit(v))),
+            (ValType::I32, Some(ConstVal::I32(v))) => {
+                (0u8, format!("(uint64_t)(uint32_t){}", c_i32_lit(v)))
+            }
             (ValType::I64, Some(ConstVal::I64(v))) => (1u8, format!("(uint64_t){}", c_i64_lit(v))),
             (ValType::F32, Some(ConstVal::F32(bits))) => (2u8, format!("{bits}ULL")),
             (ValType::F64, Some(ConstVal::F64(bits))) => (3u8, format!("{bits}ULL")),
@@ -4645,12 +5504,15 @@ fn emit_rt_exports_c(
     s.push_str(
         "  return 1;\n}\n\n\
          WT_EXPORT int32_t blot_aot_get_global(BlotHandle *h, const uint8_t *np, size_t nl, uint64_t *vo, uint8_t *ko) {\n\
+         \x20 if (!h) return 1;\n\
          \x20 return wt_read_global(&h->ctx, np, nl, vo, ko);\n\
          }\n\
          WT_EXPORT int32_t blot_aot_active_get_global(ActiveCall *ac, const uint8_t *np, size_t nl, uint64_t *vo, uint8_t *ko) {\n\
+         \x20 if (!ac || !ac->ctx) return 1;\n\
          \x20 return wt_read_global(ac->ctx, np, nl, vo, ko);\n\
          }\n\
          WT_EXPORT int32_t blot_aot_set_global(BlotHandle *h, const uint8_t *name_ptr, size_t name_len, uint64_t val) {\n\
+         \x20 if (!h || h->ctx.in_call) return 1;\n\
          \x20 Ctx *ctx = &h->ctx;\n",
     );
     for (name, gi, vt, mutable) in &module.exported_globals {
@@ -4665,7 +5527,12 @@ fn emit_rt_exports_c(
             ValType::Ref(_) => format!("ctx->g{gi} = val;"),
             _ => continue,
         };
-        writeln!(s, "  if ({}) {{ {assign} return 0; }}", c_name_match_cond(name)).unwrap();
+        writeln!(
+            s,
+            "  if ({}) {{ {assign} return 0; }}",
+            c_name_match_cond(name)
+        )
+        .unwrap();
     }
     s.push_str("  return 1;\n}\n");
     Ok(s)
@@ -4702,11 +5569,28 @@ fn top_c_call(module: &Module, f: usize, extra_args: &[String]) -> String {
 }
 
 /// Emits the C99 project into `out` (for inspection or external builds).
+#[allow(dead_code)]
 pub fn generate_c(wasm: &[u8], out: &Path, opt: COpt) -> Res<()> {
+    generate_c_with_deadline(wasm, out, opt, None)
+}
+
+/// Emits the C99 project into `out` while cooperatively polling `deadline`.
+pub fn generate_c_with_deadline(
+    wasm: &[u8],
+    out: &Path,
+    opt: COpt,
+    deadline: Option<Instant>,
+) -> Res<()> {
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
-    let generated = generate_c_sources(wasm, opt, timings, None)?;
+    let generated = generate_c_sources(wasm, opt, timings, deadline)?;
+    if let Some(dl) = deadline
+        && Instant::now() >= dl
+    {
+        return Err("cgen write: exceeded build time limit".into());
+    }
     fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    fs::write(out.join("wtime_aot_rt.h"), &generated.rt_h).map_err(|e| format!("wtime_aot_rt.h: {e}"))?;
+    fs::write(out.join("wtime_aot_rt.h"), &generated.rt_h)
+        .map_err(|e| format!("wtime_aot_rt.h: {e}"))?;
     fs::write(out.join("types.h"), &generated.types_h).map_err(|e| format!("types.h: {e}"))?;
     for (name, src) in &generated.extra_headers {
         fs::write(out.join(name), src).map_err(|e| format!("{name}: {e}"))?;
@@ -4749,7 +5633,9 @@ fn file_stamp(canon: &Path) -> Res<FileStamp> {
 }
 
 fn is_executable_file(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else { return false };
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
     if !meta.is_file() {
         return false;
     }
@@ -4765,7 +5651,11 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn is_bare_prog_name(s: &str) -> bool {
-    !s.is_empty() && !s.contains(std::path::MAIN_SEPARATOR) && !s.contains('/') && s != "." && s != ".."
+    !s.is_empty()
+        && !s.contains(std::path::MAIN_SEPARATOR)
+        && !s.contains('/')
+        && s != "."
+        && s != ".."
 }
 
 pub(crate) fn find_in_path(name: &str) -> Option<PathBuf> {
@@ -4808,7 +5698,10 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
     const GNU_PROPERTY_X86_FEATURE_1_SHSTK: u32 = 1 << 1;
     let align_up = |v: usize, a: usize| v.checked_add(a - 1).map(|x| x & !(a - 1));
     for i in 0..e_phnum {
-        let Some(off) = i.checked_mul(e_phentsize).and_then(|d| e_phoff.checked_add(d)) else {
+        let Some(off) = i
+            .checked_mul(e_phentsize)
+            .and_then(|d| e_phoff.checked_add(d))
+        else {
             break;
         };
         let Some(ph_end) = off.checked_add(56) else {
@@ -4821,26 +5714,40 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
         if p_type != PT_NOTE && p_type != PT_GNU_PROPERTY {
             continue;
         }
-        let Ok(p_offset) = usize::try_from(u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap())) else {
+        let Ok(p_offset) = usize::try_from(u64::from_le_bytes(
+            elf[off + 8..off + 16].try_into().unwrap(),
+        )) else {
             continue;
         };
-        let Ok(p_filesz) = usize::try_from(u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap())) else {
+        let Ok(p_filesz) = usize::try_from(u64::from_le_bytes(
+            elf[off + 32..off + 40].try_into().unwrap(),
+        )) else {
             continue;
         };
-        let Ok(p_align) = usize::try_from(u64::from_le_bytes(elf[off + 48..off + 56].try_into().unwrap())) else {
+        let Ok(p_align) = usize::try_from(u64::from_le_bytes(
+            elf[off + 48..off + 56].try_into().unwrap(),
+        )) else {
             continue;
         };
-        let note_align = if p_type == PT_GNU_PROPERTY || p_align >= 8 { 8 } else { 4 };
+        let note_align = if p_type == PT_GNU_PROPERTY || p_align >= 8 {
+            8
+        } else {
+            4
+        };
         let mut cur = p_offset;
         let end = p_offset.saturating_add(p_filesz).min(elf.len());
         while let Some(name_start) = cur.checked_add(12) {
             if name_start > end {
                 break;
             }
-            let Ok(namesz) = usize::try_from(u32::from_le_bytes(elf[cur..cur + 4].try_into().unwrap())) else {
+            let Ok(namesz) =
+                usize::try_from(u32::from_le_bytes(elf[cur..cur + 4].try_into().unwrap()))
+            else {
                 break;
             };
-            let Ok(descsz) = usize::try_from(u32::from_le_bytes(elf[cur + 4..cur + 8].try_into().unwrap())) else {
+            let Ok(descsz) = usize::try_from(u32::from_le_bytes(
+                elf[cur + 4..cur + 8].try_into().unwrap(),
+            )) else {
                 break;
             };
             let ntype = u32::from_le_bytes(elf[cur + 8..cur + 12].try_into().unwrap());
@@ -4863,7 +5770,8 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
                         break;
                     }
                     let pr_type = u32::from_le_bytes(elf[p..p + 4].try_into().unwrap());
-                    let Ok(pr_datasz) = usize::try_from(u32::from_le_bytes(elf[p + 4..p + 8].try_into().unwrap()))
+                    let Ok(pr_datasz) =
+                        usize::try_from(u32::from_le_bytes(elf[p + 4..p + 8].try_into().unwrap()))
                     else {
                         break;
                     };
@@ -4874,7 +5782,8 @@ pub(crate) fn elf64_has_x86_shstk_property(elf: &[u8]) -> bool {
                         break;
                     }
                     if pr_type == GNU_PROPERTY_X86_FEATURE_1_AND && pr_datasz == 4 {
-                        let bits = u32::from_le_bytes(elf[data_start..data_start + 4].try_into().unwrap());
+                        let bits =
+                            u32::from_le_bytes(elf[data_start..data_start + 4].try_into().unwrap());
                         if (bits & GNU_PROPERTY_X86_FEATURE_1_SHSTK) != 0 {
                             return true;
                         }
@@ -4994,7 +5903,10 @@ fn resolve_driver_prog(
     }
     let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let candidate = if printed.is_empty() {
-        return Err(format!("{} -print-prog-name={prog} returned empty output", cc_path.display()));
+        return Err(format!(
+            "{} -print-prog-name={prog} returned empty output",
+            cc_path.display()
+        ));
     } else if is_bare_prog_name(&printed) {
         if allow_path_fallback {
             find_in_path(&printed).or_else(|| find_in_path(prog))
@@ -5011,18 +5923,29 @@ fn resolve_driver_prog(
         }
         Some(p)
     };
-    let Some(cand) = candidate else { return Ok(None) };
-    let canon = fs::canonicalize(&cand).map_err(|e| format!("canonicalizing {prog} {}: {e}", cand.display()))?;
+    let Some(cand) = candidate else {
+        return Ok(None);
+    };
+    let canon = fs::canonicalize(&cand)
+        .map_err(|e| format!("canonicalizing {prog} {}: {e}", cand.display()))?;
     let stamp = file_stamp(&canon)?;
     Ok(Some((cand, canon, stamp)))
 }
 
 /// Resolves the actual linker binary invoked by the C compiler driver (`ld.lld` when `-fuse-ld=lld`
 /// is used, otherwise `ld` via `cc -print-prog-name=<linker>` with `PATH` fallback).
-fn resolve_driver_linker(cc_path: &Path, has_lld: bool, deadline: Option<Instant>) -> Res<WatchedFile> {
+fn resolve_driver_linker(
+    cc_path: &Path,
+    has_lld: bool,
+    deadline: Option<Instant>,
+) -> Res<WatchedFile> {
     let prog = if has_lld { "ld.lld" } else { "ld" };
-    resolve_driver_prog(cc_path, prog, true, deadline)?
-        .ok_or_else(|| format!("could not resolve driver linker {prog} for C compiler {}", cc_path.display()))
+    resolve_driver_prog(cc_path, prog, true, deadline)?.ok_or_else(|| {
+        format!(
+            "could not resolve driver linker {prog} for C compiler {}",
+            cc_path.display()
+        )
+    })
 }
 
 /// Inspects `elf_path` on Linux using checked seek-based ELF64 program-header parsing (zero fixed
@@ -5030,23 +5953,32 @@ fn resolve_driver_linker(cc_path: &Path, has_lld: bool, deadline: Option<Instant
 /// dynamic ELF binaries (`Ok(Some(interp_path))`), and malformed/unreadable/unsupported dynamic ELFs (`Err`).
 #[cfg(target_os = "linux")]
 fn elf64_pt_interp(elf_path: &Path) -> Res<Option<PathBuf>> {
-    let mut f = fs::File::open(elf_path).map_err(|e| format!("opening {}: {e}", elf_path.display()))?;
-    let file_len = f.metadata().map_err(|e| format!("stat {}: {e}", elf_path.display()))?.len();
+    let mut f =
+        fs::File::open(elf_path).map_err(|e| format!("opening {}: {e}", elf_path.display()))?;
+    let file_len = f
+        .metadata()
+        .map_err(|e| format!("stat {}: {e}", elf_path.display()))?
+        .len();
     if file_len < 4 {
         return Ok(None);
     }
     let mut magic = [0u8; 4];
-    std::io::Read::read_exact(&mut f, &mut magic).map_err(|e| format!("reading {}: {e}", elf_path.display()))?;
+    std::io::Read::read_exact(&mut f, &mut magic)
+        .map_err(|e| format!("reading {}: {e}", elf_path.display()))?;
     if &magic != b"\x7fELF" {
         return Ok(None);
     }
     if file_len < 64 {
-        return Err(format!("{}: truncated ELF header ({file_len} bytes)", elf_path.display()));
+        return Err(format!(
+            "{}: truncated ELF header ({file_len} bytes)",
+            elf_path.display()
+        ));
     }
     std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(0))
         .map_err(|e| format!("seeking {}: {e}", elf_path.display()))?;
     let mut ehdr = [0u8; 64];
-    std::io::Read::read_exact(&mut f, &mut ehdr).map_err(|e| format!("reading ELF header {}: {e}", elf_path.display()))?;
+    std::io::Read::read_exact(&mut f, &mut ehdr)
+        .map_err(|e| format!("reading ELF header {}: {e}", elf_path.display()))?;
     if ehdr[4] != 2 || ehdr[5] != 1 {
         return Err(format!(
             "{}: unsupported ELF class/endianness ({}, {}) for shared-library tracking",
@@ -5074,7 +6006,10 @@ fn elf64_pt_interp(elf_path: &Path) -> Res<Option<PathBuf>> {
         .checked_add(ph_table_bytes)
         .ok_or_else(|| format!("{}: ELF program header offset overflow", elf_path.display()))?;
     if ph_end > file_len {
-        return Err(format!("{}: ELF program headers exceed file size", elf_path.display()));
+        return Err(format!(
+            "{}: ELF program headers exceed file size",
+            elf_path.display()
+        ));
     }
     std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(e_phoff))
         .map_err(|e| format!("seeking phdrs in {}: {e}", elf_path.display()))?;
@@ -5099,12 +6034,21 @@ fn elf64_pt_interp(elf_path: &Path) -> Res<Option<PathBuf>> {
     }
     let Some((p_offset, p_filesz)) = interp_span else {
         if has_dynamic {
-            return Err(format!("{}: dynamic ELF has PT_DYNAMIC but no PT_INTERP", elf_path.display()));
+            return Err(format!(
+                "{}: dynamic ELF has PT_DYNAMIC but no PT_INTERP",
+                elf_path.display()
+            ));
         }
         return Ok(None);
     };
-    if p_filesz == 0 || p_filesz > 4096 || p_offset.checked_add(p_filesz).is_none_or(|e| e > file_len) {
-        return Err(format!("{}: invalid PT_INTERP span ({p_offset}, {p_filesz})", elf_path.display()));
+    if p_filesz == 0
+        || p_filesz > 4096
+        || p_offset.checked_add(p_filesz).is_none_or(|e| e > file_len)
+    {
+        return Err(format!(
+            "{}: invalid PT_INTERP span ({p_offset}, {p_filesz})",
+            elf_path.display()
+        ));
     }
     std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(p_offset))
         .map_err(|e| format!("seeking PT_INTERP in {}: {e}", elf_path.display()))?;
@@ -5116,7 +6060,10 @@ fn elf64_pt_interp(elf_path: &Path) -> Res<Option<PathBuf>> {
         .map_err(|_| format!("{}: non-UTF-8 PT_INTERP path", elf_path.display()))?;
     let p = PathBuf::from(s);
     if !p.is_absolute() || !is_executable_file(&p) {
-        return Err(format!("{}: PT_INTERP {s:?} is not an absolute executable", elf_path.display()));
+        return Err(format!(
+            "{}: PT_INTERP {s:?} is not an absolute executable",
+            elf_path.display()
+        ));
     }
     Ok(Some(p))
 }
@@ -5176,7 +6123,10 @@ fn probe_dynamic_shared_libs(elf_path: &Path, deadline: Option<Instant>) -> Res<
             };
             let p = Path::new(path_part);
             if path_part == "not found" || !p.is_absolute() || !p.is_file() {
-                return Err(format!("unresolved or non-absolute shared library for {}: {line}", elf_path.display()));
+                return Err(format!(
+                    "unresolved or non-absolute shared library for {}: {line}",
+                    elf_path.display()
+                ));
             }
             let canon = fs::canonicalize(p)
                 .map_err(|e| format!("canonicalizing shared library {}: {e}", p.display()))?;
@@ -5195,7 +6145,10 @@ fn hash_shared_lib_sample(h: &mut Sha256, canon: &Path, stamp: FileStamp) -> Res
     h.update(path_bytes);
     hash_stamp(h, stamp);
     let mut f = fs::File::open(canon).map_err(|e| format!("opening {}: {e}", canon.display()))?;
-    let total_len = f.metadata().map_err(|e| format!("stat {}: {e}", canon.display()))?.len();
+    let total_len = f
+        .metadata()
+        .map_err(|e| format!("stat {}: {e}", canon.display()))?
+        .len();
     if total_len != stamp_len(stamp) {
         return Err(format!(
             "shared library {} changed size during fingerprint ({} -> {total_len})",
@@ -5225,7 +6178,10 @@ fn hash_shared_lib_sample(h: &mut Sha256, canon: &Path, stamp: FileStamp) -> Res
 fn hash_shared_lib_set(h: &mut Sha256, libs: &[WatchedFile]) -> Res<()> {
     let mut unique: Vec<(&Path, FileStamp)> = Vec::new();
     for (_, canon, stamp) in libs {
-        if unique.last().is_none_or(|(prev, _)| *prev != canon.as_path()) {
+        if unique
+            .last()
+            .is_none_or(|(prev, _)| *prev != canon.as_path())
+        {
             unique.push((canon.as_path(), *stamp));
         }
     }
@@ -5245,10 +6201,13 @@ fn hash_compiler_binaries(
 ) -> Res<String> {
     let mut h = Sha256::new();
     h.update(b"cc-bin-v2\0");
-    let argv0 = cc_path.file_name().map_or(&[][..], |n| n.as_encoded_bytes());
+    let argv0 = cc_path
+        .file_name()
+        .map_or(&[][..], |n| n.as_encoded_bytes());
     h.update(&(argv0.len() as u64).to_le_bytes());
     h.update(argv0);
-    let cc_bytes = fs::read(canon_cc).map_err(|e| format!("reading {}: {e}", canon_cc.display()))?;
+    let cc_bytes =
+        fs::read(canon_cc).map_err(|e| format!("reading {}: {e}", canon_cc.display()))?;
     h.update(&(cc_bytes.len() as u64).to_le_bytes());
     h.update(&cc_bytes);
     for opt_bin in [canon_cc1, canon_as] {
@@ -5273,10 +6232,13 @@ fn hash_linker_binaries(
 ) -> Res<String> {
     let mut h = Sha256::new();
     h.update(b"ld-bin-v2\0");
-    let argv0 = linker_path.file_name().map_or(&[][..], |n| n.as_encoded_bytes());
+    let argv0 = linker_path
+        .file_name()
+        .map_or(&[][..], |n| n.as_encoded_bytes());
     h.update(&(argv0.len() as u64).to_le_bytes());
     h.update(argv0);
-    let ld_bytes = fs::read(canon_linker).map_err(|e| format!("reading {}: {e}", canon_linker.display()))?;
+    let ld_bytes =
+        fs::read(canon_linker).map_err(|e| format!("reading {}: {e}", canon_linker.display()))?;
     h.update(&(ld_bytes.len() as u64).to_le_bytes());
     h.update(&ld_bytes);
     if let Some(p) = canon_collect2 {
@@ -5350,7 +6312,8 @@ fn hash_watched_files(domain: &[u8], files: &mut Vec<WatchedFile>) -> Res<String
 
 fn verify_watched_files(watched: &[WatchedFile]) -> bool {
     watched.iter().all(|(orig, canon, stamp)| {
-        fs::canonicalize(orig).ok().as_ref() == Some(canon) && file_stamp(canon).is_ok_and(|s| s == *stamp)
+        fs::canonicalize(orig).ok().as_ref() == Some(canon)
+            && file_stamp(canon).is_ok_and(|s| s == *stamp)
     })
 }
 
@@ -5391,7 +6354,8 @@ fn probe_sys_headers(
     std::io::Write::write_all(&mut hdr_file, SYS_HEADER_PROBE_C)
         .map_err(|e| format!("{}: {e}", hdr_path.display()))?;
     drop(hdr_file);
-    let canon_src = fs::canonicalize(&hdr_path).map_err(|e| format!("{}: {e}", hdr_path.display()))?;
+    let canon_src =
+        fs::canonicalize(&hdr_path).map_err(|e| format!("{}: {e}", hdr_path.display()))?;
     let mut watched = Vec::new();
     let mut record_header = |path_str: &str, opt_flag: &str| -> Res<()> {
         let dep = PathBuf::from(path_str);
@@ -5412,8 +6376,16 @@ fn probe_sys_headers(
     };
     for opt_flag in ["-O2", "-O0"] {
         let mut cmd = clean_cc_command(cc_path);
-        cmd.args([opt_flag, "-fPIC", &format!("-march={target_cpu}"), "-H", "-E", "-x", "c"])
-            .arg(&hdr_path);
+        cmd.args([
+            opt_flag,
+            "-fPIC",
+            &format!("-march={target_cpu}"),
+            "-H",
+            "-E",
+            "-x",
+            "c",
+        ])
+        .arg(&hdr_path);
         let out = crate::build::run_cmd_capture_with_deadline(
             cmd,
             &format!("{} {opt_flag} -H -E system headers", cc_path.display()),
@@ -5445,7 +6417,10 @@ fn probe_sys_headers(
     }
     #[cfg(unix)]
     if watched.is_empty() {
-        return Err(format!("{} -H -E returned no system headers", cc_path.display()));
+        return Err(format!(
+            "{} -H -E returned no system headers",
+            cc_path.display()
+        ));
     }
     let digest = hash_watched_files(b"sys-headers-v3\0", &mut watched)?;
     Ok((digest, watched))
@@ -5476,7 +6451,8 @@ fn probe_link_env_and_cet(
         let (o_file, o_path) = crate::build::create_private_temp_file(probe_dir, "cet", ".o")?;
         drop(o_file);
         let _rm_o = crate::build::RemoveFileOnDrop(o_path.clone());
-        let canon_o = fs::canonicalize(&o_path).map_err(|e| format!("{}: {e}", o_path.display()))?;
+        let canon_o =
+            fs::canonicalize(&o_path).map_err(|e| format!("{}: {e}", o_path.display()))?;
         let mut c_cmd = clean_cc_command(cc_path);
         c_cmd.args(["-c", "-O0", "-fPIC"]);
         if with_cet {
@@ -5548,12 +6524,18 @@ fn probe_link_env_and_cet(
             .ok_or_else(|| format!("{} -shared probe link failed", cc_path.display()))?;
         (false, out)
     };
-    let LinkProbeOut { stdout, stderr, canon_obj: canon_o, .. } = probe_out;
+    let LinkProbeOut {
+        stdout,
+        stderr,
+        canon_obj: canon_o,
+        ..
+    } = probe_out;
 
     let canon_probe_dir = probe_dir.and_then(|d| fs::canonicalize(d).ok());
     let mut watched = Vec::new();
     for path in parse_ld_trace_files(&stdout, &stderr) {
-        let canon = fs::canonicalize(&path).map_err(|e| format!("canonicalizing link input {}: {e}", path.display()))?;
+        let canon = fs::canonicalize(&path)
+            .map_err(|e| format!("canonicalizing link input {}: {e}", path.display()))?;
         if canon == canon_o {
             continue;
         }
@@ -5567,7 +6549,10 @@ fn probe_link_env_and_cet(
     }
     #[cfg(target_os = "linux")]
     if watched.is_empty() {
-        return Err(format!("{} -Wl,-t returned no link inputs", cc_path.display()));
+        return Err(format!(
+            "{} -Wl,-t returned no link inputs",
+            cc_path.display()
+        ));
     }
     let digest = hash_watched_files(b"link-env-v3\0", &mut watched)?;
     Ok((has_cet_return, digest, watched))
@@ -5612,8 +6597,11 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
         if let Some(higher) = find_in_path(cand) {
             let mut ver_cmd = clean_cc_command(&higher);
             ver_cmd.arg("--version");
-            let higher_out =
-                crate::build::run_cmd_capture_with_deadline(ver_cmd, &format!("{cand} --version"), deadline)?;
+            let higher_out = crate::build::run_cmd_capture_with_deadline(
+                ver_cmd,
+                &format!("{cand} --version"),
+                deadline,
+            )?;
             if higher_out.status.success() {
                 return Err(format!(
                     "higher-precedence C compiler {cand} ({}) appeared on PATH during build (previously selected {}); refusing to publish stale provenance",
@@ -5623,9 +6611,14 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
             }
         }
     }
-    let found = find_in_path(info.cc_name)
-        .ok_or_else(|| format!("C compiler {} disappeared from PATH during build", info.cc_name))?;
-    let post_canon = fs::canonicalize(&found).map_err(|e| format!("canonicalizing {}: {e}", found.display()))?;
+    let found = find_in_path(info.cc_name).ok_or_else(|| {
+        format!(
+            "C compiler {} disappeared from PATH during build",
+            info.cc_name
+        )
+    })?;
+    let post_canon =
+        fs::canonicalize(&found).map_err(|e| format!("canonicalizing {}: {e}", found.display()))?;
     let post_stamp = file_stamp(&post_canon)?;
     let post_cc1 = resolve_driver_prog(&found, "cc1", false, deadline)?;
     let post_as = resolve_driver_prog(&found, "as", true, deadline)?;
@@ -5663,7 +6656,10 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
         .and_then(|p| fs::canonicalize(&p).ok().map(|c| (p, c)))
         .and_then(|(p, c)| file_stamp(&c).ok().map(|s| (p, c, s)));
     if post_lld_key != info.lld_key {
-        return Err("linker ld.lld changed on PATH during build; refusing to publish stale provenance".into());
+        return Err(
+            "linker ld.lld changed on PATH during build; refusing to publish stale provenance"
+                .into(),
+        );
     }
     let (post_linker_path, post_canon_linker, post_linker_stamp) =
         resolve_driver_linker(&found, info.has_lld, deadline)?;
@@ -5763,9 +6759,15 @@ pub fn detect_cc_with_deadline(
     };
     let probe_dir = private_probe_dir.as_deref();
     for cc in ["clang", "cc", "gcc"] {
-        let Some(found) = find_in_path(cc) else { continue };
-        let Ok(canon_cc) = fs::canonicalize(&found) else { continue };
-        let Ok(stamp) = file_stamp(&canon_cc) else { continue };
+        let Some(found) = find_in_path(cc) else {
+            continue;
+        };
+        let Ok(canon_cc) = fs::canonicalize(&found) else {
+            continue;
+        };
+        let Ok(stamp) = file_stamp(&canon_cc) else {
+            continue;
+        };
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         let key = (
             cc,
@@ -5777,7 +6779,11 @@ pub fn detect_cc_with_deadline(
             as_key.clone(),
             target_cpu.to_string(),
         );
-        if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned()
+        if let Some(hit) = cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .cloned()
             && fs::canonicalize(&hit.linker_path).ok().as_ref() == Some(&hit.canon_linker)
             && file_stamp(&hit.canon_linker).is_ok_and(|s| s == hit.linker_stamp)
             && verify_watched_files(&hit.watched_files)
@@ -5788,11 +6794,20 @@ pub fn detect_cc_with_deadline(
         // and hashing `canon_cc` (+ `cc1`, `as`, and dynamic shared libs).
         let mut ver_cmd = clean_cc_command(&found);
         ver_cmd.arg("--version");
-        let out = crate::build::run_cmd_capture_with_deadline(ver_cmd, &format!("{cc} --version"), deadline)?;
+        let out = crate::build::run_cmd_capture_with_deadline(
+            ver_cmd,
+            &format!("{cc} --version"),
+            deadline,
+        )?;
         if !out.status.success() {
             continue;
         }
-        let version = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(cc).trim().to_string();
+        let version = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or(cc)
+            .trim()
+            .to_string();
         let has_lld = if let Some((ref lld_prog, _, _)) = lld_key {
             let mut lld_cmd = clean_cc_command(lld_prog);
             lld_cmd.arg("--version");
@@ -5801,7 +6816,8 @@ pub fn detect_cc_with_deadline(
         } else {
             false
         };
-        let (linker_path, canon_linker, linker_stamp) = resolve_driver_linker(&found, has_lld, deadline)?;
+        let (linker_path, canon_linker, linker_stamp) =
+            resolve_driver_linker(&found, has_lld, deadline)?;
         let cc1_file = resolve_driver_prog(&found, "cc1", false, deadline)?;
         let as_file = resolve_driver_prog(&found, "as", true, deadline)?;
         let collect2_file = resolve_driver_prog(&found, "collect2", false, deadline)?;
@@ -5822,7 +6838,8 @@ pub fn detect_cc_with_deadline(
         ld_libs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         ld_libs.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
-        let (sys_headers_sha256, header_files) = probe_sys_headers(&found, target_cpu, probe_dir, deadline)?;
+        let (sys_headers_sha256, header_files) =
+            probe_sys_headers(&found, target_cpu, probe_dir, deadline)?;
         let (has_cet_return, link_env_sha256, link_files) =
             probe_link_env_and_cet(&found, has_lld, probe_dir, deadline)?;
         if let Some(dl) = deadline
@@ -5845,7 +6862,15 @@ pub fn detect_cc_with_deadline(
         )?;
         let has_stack_clash = {
             let mut sc_cmd = clean_cc_command(&found);
-            sc_cmd.args(["-x", "c", "-c", "-fstack-clash-protection", "-o", "/dev/null", "-"]);
+            sc_cmd.args([
+                "-x",
+                "c",
+                "-c",
+                "-fstack-clash-protection",
+                "-o",
+                "/dev/null",
+                "-",
+            ]);
             crate::build::run_cmd_capture_with_deadline(
                 sc_cmd,
                 &format!("{cc} -fstack-clash-protection"),
@@ -5900,7 +6925,10 @@ pub fn detect_cc_with_deadline(
             has_cet_return,
             has_stack_clash,
         };
-        cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, info.clone());
+        cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, info.clone());
         return Ok(info);
     }
     Err("no C compiler found (install clang or gcc)".into())
@@ -5924,7 +6952,12 @@ pub fn cc_target_fingerprint_with_deadline(
         info.cc_sha256.clone(),
         target_cpu.to_string(),
     );
-    if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
+    if let Some(hit) = cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .cloned()
+    {
         return Ok(hit);
     }
     let mut cmd = clean_cc_command(&info.cc_path);
@@ -5936,7 +6969,10 @@ pub fn cc_target_fingerprint_with_deadline(
     )?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("{} -march={target_cpu} probe failed: {stderr}", info.cc_path.display()));
+        return Err(format!(
+            "{} -march={target_cpu} probe failed: {stderr}",
+            info.cc_path.display()
+        ));
     }
     let mut lines: Vec<&str> = std::str::from_utf8(&out.stdout)
         .unwrap_or("")
@@ -5952,7 +6988,10 @@ pub fn cc_target_fingerprint_with_deadline(
         h.update(b"\n");
     }
     let digest = h.hex();
-    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, digest.clone());
+    cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, digest.clone());
     Ok(digest)
 }
 
@@ -5968,13 +7007,14 @@ fn run_cmd_with_deadline(mut cmd: Command, label: &str, deadline: Option<Instant
     {
         return Err(format!("{label}: exceeded build time limit"));
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
     #[cfg(unix)]
     if !crate::build::inherit_pgid() {
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     }
     let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
-    let pid = child.id();
     let overflowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let Some(stderr_pipe) = child.stderr.take() else {
         crate::build::terminate_child_tree(&mut child);
@@ -5994,7 +7034,9 @@ fn run_cmd_with_deadline(mut cmd: Command, label: &str, deadline: Option<Instant
     let status = loop {
         if overflowed.load(Ordering::Acquire) {
             crate::build::terminate_child_tree(&mut child);
-            return Err(format!("{label}: exceeded subprocess stderr cap ({MAX_STDERR_CAPTURE_BYTES} bytes)"));
+            return Err(format!(
+                "{label}: exceeded subprocess stderr cap ({MAX_STDERR_CAPTURE_BYTES} bytes)"
+            ));
         }
         match child.try_wait() {
             Ok(Some(st)) => break st,
@@ -6013,11 +7055,13 @@ fn run_cmd_with_deadline(mut cmd: Command, label: &str, deadline: Option<Instant
             }
         }
     };
-    crate::build::reap_child_group_after_exit(pid);
     if overflowed.load(Ordering::Acquire) {
-        return Err(format!("{label}: exceeded subprocess stderr cap ({MAX_STDERR_CAPTURE_BYTES} bytes)"));
+        return Err(format!(
+            "{label}: exceeded subprocess stderr cap ({MAX_STDERR_CAPTURE_BYTES} bytes)"
+        ));
     }
-    let err_buf = crate::build::recv_bounded_pipe(rx_err, deadline, label, MAX_STDERR_CAPTURE_BYTES)?;
+    let err_buf =
+        crate::build::recv_bounded_pipe(rx_err, deadline, label, MAX_STDERR_CAPTURE_BYTES)?;
     if let Some(dl) = deadline
         && Instant::now() >= dl
     {
@@ -6046,7 +7090,9 @@ pub fn build_c_blot_cdylib(
     let cache = crate::build::ensure_private_dir(cache)?;
     let cc_info = detect_cc_with_deadline(target_cpu, Some(&cache), deadline)?;
     let cc_target = cc_target_fingerprint_with_deadline(&cc_info, target_cpu, deadline)?;
-    build_c_blot_cdylib_with_info(wasm, &cache, target_cpu, jobs, opt, &cc_info, &cc_target, deadline, out_so)
+    build_c_blot_cdylib_with_info(
+        wasm, &cache, target_cpu, jobs, opt, &cc_info, &cc_target, deadline, out_so,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6085,7 +7131,8 @@ pub fn build_c_blot_cdylib_with_info(
     let work = crate::build::ensure_private_dir(&work_raw)?;
 
     let write_res = (|| -> Res<()> {
-        fs::write(work.join("wtime_aot_rt.h"), &generated.rt_h).map_err(|e| format!("wtime_aot_rt.h: {e}"))?;
+        fs::write(work.join("wtime_aot_rt.h"), &generated.rt_h)
+            .map_err(|e| format!("wtime_aot_rt.h: {e}"))?;
         fs::write(work.join("types.h"), &generated.types_h).map_err(|e| format!("types.h: {e}"))?;
         for (name, src) in &generated.extra_headers {
             fs::write(work.join(name), src).map_err(|e| format!("{name}: {e}"))?;
@@ -6095,11 +7142,23 @@ pub fn build_c_blot_cdylib_with_info(
         hash_field(&mut base_hash, "wtime-aot-c-obj-v15", &[]);
         hash_field(&mut base_hash, "cc_ver", cc_info.version.as_bytes());
         hash_field(&mut base_hash, "cc_sha256", cc_info.cc_sha256.as_bytes());
-        hash_field(&mut base_hash, "sys_headers_sha256", cc_info.sys_headers_sha256.as_bytes());
+        hash_field(
+            &mut base_hash,
+            "sys_headers_sha256",
+            cc_info.sys_headers_sha256.as_bytes(),
+        );
         hash_field(&mut base_hash, "target_cpu", target_cpu.as_bytes());
         hash_field(&mut base_hash, "cc_target", cc_target.as_bytes());
-        hash_field(&mut base_hash, "cet_return", &[cc_info.has_cet_return as u8]);
-        hash_field(&mut base_hash, "stack_clash", &[cc_info.has_stack_clash as u8]);
+        hash_field(
+            &mut base_hash,
+            "cet_return",
+            &[cc_info.has_cet_return as u8],
+        );
+        hash_field(
+            &mut base_hash,
+            "stack_clash",
+            &[cc_info.has_stack_clash as u8],
+        );
         hash_field(&mut base_hash, "opt", opt.tag().as_bytes());
         hash_field(&mut base_hash, "rt_h", generated.rt_h.as_bytes());
         hash_field(&mut base_hash, "types_h", generated.types_h.as_bytes());
@@ -6112,14 +7171,20 @@ pub fn build_c_blot_cdylib_with_info(
         let mut to_compile: Vec<ShardJob> = Vec::new();
         let mut cache_hits = 0usize;
         {
-            let _read_lock =
-                crate::build::lock_file_shared_with_deadline(&obj_cache.join(".publish.lock"), deadline)?;
+            let _read_lock = crate::build::lock_file_shared_with_deadline(
+                &obj_cache.join(".publish.lock"),
+                deadline,
+            )?;
             for (idx, (name, src, opt_flag, hdr_idx)) in generated.shards.iter().enumerate() {
                 check_dl("cgen cache verify")?;
                 let mut h = base_hash.clone();
                 hash_field(&mut h, "opt_flag", opt_flag.as_bytes());
                 if let Some(hi) = hdr_idx {
-                    hash_field(&mut h, "extra_hdr", generated.extra_headers[*hi].1.as_bytes());
+                    hash_field(
+                        &mut h,
+                        "extra_hdr",
+                        generated.extra_headers[*hi].1.as_bytes(),
+                    );
                 } else {
                     hash_field(&mut h, "no_extra_hdr", &[]);
                 }
@@ -6129,12 +7194,16 @@ pub fn build_c_blot_cdylib_with_info(
                 let cached_sha = obj_cache.join(format!("{key}.o.sha256"));
                 let local_obj = work.join(format!("obj_{idx}.o"));
                 link_objs.push(local_obj.clone());
-                if let Some(verified_bytes) = crate::build::verified_cached_artifact_bytes(&cached_obj, &cached_sha) {
-                    fs::write(&local_obj, &verified_bytes).map_err(|e| format!("{}: {e}", local_obj.display()))?;
+                if let Some(verified_bytes) =
+                    crate::build::verified_cached_artifact_bytes(&cached_obj, &cached_sha)
+                {
+                    fs::write(&local_obj, &verified_bytes)
+                        .map_err(|e| format!("{}: {e}", local_obj.display()))?;
                     cache_hits += 1;
                 } else {
                     let src_path = work.join(name);
-                    fs::write(&src_path, src).map_err(|e| format!("{}: {e}", src_path.display()))?;
+                    fs::write(&src_path, src)
+                        .map_err(|e| format!("{}: {e}", src_path.display()))?;
                     to_compile.push(ShardJob {
                         src_path,
                         local_obj,
@@ -6152,7 +7221,10 @@ pub fn build_c_blot_cdylib_with_info(
         let is_clang = cc_info.version.contains("clang");
         let t_comp = Instant::now();
         let n_workers = match jobs {
-            Some(0) | None => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(64),
+            Some(0) | None => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(64),
             Some(j) => (j as usize).min(64),
         }
         .clamp(1, to_compile.len().max(1));
@@ -6218,13 +7290,21 @@ pub fn build_c_blot_cdylib_with_info(
                             .arg(&job.src_path)
                             .arg("-o")
                             .arg(&job.local_obj);
-                        let label = format!("{} on {}", cc_path_ref.display(), job.src_path.display());
+                        let label =
+                            format!("{} on {}", cc_path_ref.display(), job.src_path.display());
                         match run_cmd_with_deadline(cmd, &label, deadline) {
                             Ok(()) => {
                                 let dt = t_one.elapsed().as_secs_f64();
                                 let mut sl = slow_slot.lock().unwrap();
                                 if dt > sl.0 {
-                                    *sl = (dt, job.src_path.file_name().unwrap().to_string_lossy().into_owned());
+                                    *sl = (
+                                        dt,
+                                        job.src_path
+                                            .file_name()
+                                            .unwrap()
+                                            .to_string_lossy()
+                                            .into_owned(),
+                                    );
                                 }
                             }
                             Err(msg) => {
@@ -6257,7 +7337,11 @@ pub fn build_c_blot_cdylib_with_info(
         link.arg("-pthread");
         #[cfg(unix)]
         link.arg("-lm");
-        run_cmd_with_deadline(link, &format!("{} link", cc_info.cc_path.display()), deadline)?;
+        run_cmd_with_deadline(
+            link,
+            &format!("{} link", cc_info.cc_path.display()),
+            deadline,
+        )?;
         verify_cc_unchanged(cc_info, deadline)?;
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if cc_info.has_cet_return {
@@ -6271,13 +7355,16 @@ pub fn build_c_blot_cdylib_with_info(
         }
         if !to_compile.is_empty() {
             check_dl("cgen publish")?;
-            let _pub_lock = crate::build::lock_file_with_deadline(&obj_cache.join(".publish.lock"), deadline)?;
+            let _pub_lock =
+                crate::build::lock_file_with_deadline(&obj_cache.join(".publish.lock"), deadline)?;
             for job in &to_compile {
                 check_dl("cgen publish")?;
-                let obj_bytes = fs::read(&job.local_obj).map_err(|e| format!("{}: {e}", job.local_obj.display()))?;
+                let obj_bytes = fs::read(&job.local_obj)
+                    .map_err(|e| format!("{}: {e}", job.local_obj.display()))?;
                 let obj_sha = crate::sha256::hex(&obj_bytes);
                 let obj_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
-                let tmp_obj = obj_cache.join(format!("{}.o.{}.{obj_seq}", job.key, std::process::id()));
+                let tmp_obj =
+                    obj_cache.join(format!("{}.o.{}.{obj_seq}", job.key, std::process::id()));
                 let mut tmp_opts = fs::OpenOptions::new();
                 tmp_opts.write(true).create_new(true);
                 #[cfg(unix)]
@@ -6294,7 +7381,13 @@ pub fn build_c_blot_cdylib_with_info(
                     return Err(e);
                 }
                 if let Err(e) = fs::rename(&tmp_obj, &job.cached_obj)
-                    .map_err(|e| format!("publishing object {} -> {}: {e}", tmp_obj.display(), job.cached_obj.display()))
+                    .map_err(|e| {
+                        format!(
+                            "publishing object {} -> {}: {e}",
+                            tmp_obj.display(),
+                            job.cached_obj.display()
+                        )
+                    })
                     .and_then(|()| {
                         crate::build::publish_digest_sidecar(
                             &obj_cache,
@@ -6388,8 +7481,7 @@ mod tests {
         wasm.extend(section(
             1,
             &[
-                3,
-                0x60, 0, 1, 0x7f, // t0
+                3, 0x60, 0, 1, 0x7f, // t0
                 0x60, 1, 0x7f, 1, 0x7f, // t1
                 0x60, 1, 0x7f, 2, 0x7f, 0x7f, // t2
             ],
@@ -6459,10 +7551,11 @@ mod tests {
             0x41, 0, 0x41, 0xe4, 0x00, 0x36, 2, 0, // [0] = 100
             0x41, 4, 0x41, 0xc8, 0x01, 0x36, 2, 0, // [4] = 200
             0x41, 0, 0x28, 2, 0, // load [0] -> sv_i32_0 = 100
-            0x41, 4, 0x28, 2, 0, // load [4] -> sv_i32_1 = 200
+            0x41, 4, 0x28, 2, 0,    // load [4] -> sv_i32_1 = 200
             0x6a, // slot 0 = pending (sv_i32_0 + sv_i32_1)
             0x20, 0, // slot 1 = pending l0
-            0x41, 7, 0x21, 0, // l0 = 7 (materializes slot 1 -> sv_i32_1 = old l0; must save slot 0 first!)
+            0x41, 7, 0x21,
+            0,    // l0 = 7 (materializes slot 1 -> sv_i32_1 = old l0; must save slot 0 first!)
             0x6a, // slot 0 + slot 1 = 300 + old l0
             0x0b,
         ];
@@ -6498,7 +7591,10 @@ mod tests {
             leb_u32(&mut f3, k * 4);
             f3.extend_from_slice(&[0x21, (k + 1) as u8]);
         }
-        f3.extend_from_slice(&[0x20, 1, 0x20, 2, 0x6a, 0x20, 3, 0x6a, 0x20, 4, 0x6a, 0x20, 5, 0x6a, 0x20, 6, 0x6a, 0x0b]);
+        f3.extend_from_slice(&[
+            0x20, 1, 0x20, 2, 0x6a, 0x20, 3, 0x6a, 0x20, 4, 0x6a, 0x20, 5, 0x6a, 0x20, 6, 0x6a,
+            0x0b,
+        ]);
 
         // f4: ci_sum(idx) -> call_indirect t2 (10, idx) -> a + b
         let f4 = vec![0u8, 0x41, 10, 0x20, 0, 0x11, 2, 0, 0x6a, 0x0b];
@@ -6541,7 +7637,7 @@ mod tests {
         let f11: Vec<u8> = vec![
             0, // 0 extra locals
             0x20, 0, 0x45, 0x04, 0x7f, // if local.get 0 == 0 -> i32
-            0x41, 0, // 0
+            0x41, 0,    // 0
             0x05, // else
             0x20, 0, 0x41, 1, 0x6b, 0x10, 11, 0x41, 1, 0x6a, // recurse(n - 1) + 1
             0x0b, 0x0b,
@@ -6595,6 +7691,11 @@ mod tests {
         crate::build::assert_inside_test_root(root, &src_dir);
         crate::build::assert_inside_test_root(root, &so_path);
         let Ok(cc_info) = detect_cc_with_deadline("native", Some(&cache), None) else {
+            if std::env::var_os("WTIME_AOT_REQUIRE_NATIVE_TESTS").is_some_and(|v| v == "1") {
+                panic!(
+                    "WTIME_AOT_REQUIRE_NATIVE_TESTS=1 is set, but no host C compiler was detected"
+                );
+            }
             return;
         };
         assert_eq!(cc_info.cc_sha256.len(), 64);
@@ -6603,19 +7704,36 @@ mod tests {
         assert_eq!(cc_info.link_env_sha256.len(), 64);
         assert!(!cc_info.watched_files.is_empty());
         if let Some(lld_prog) = find_in_path("ld.lld")
-            && Command::new(&lld_prog).arg("--version").status().is_ok_and(|s| s.success())
+            && Command::new(&lld_prog)
+                .arg("--version")
+                .status()
+                .is_ok_and(|s| s.success())
         {
-            assert!(cc_info.has_lld, "expected ld.lld probe to preserve argv[0] for multicall lld");
+            assert!(
+                cc_info.has_lld,
+                "expected ld.lld probe to preserve argv[0] for multicall lld"
+            );
         }
         let wasm = sample_c_backend_wasm();
 
         // Verify source generation triggers structured outlining on `f10` and coalescing on `f2`/`f3`.
         generate_c(&wasm, &src_dir, COpt::Auto).unwrap();
-        assert!(src_dir.join("f10_st.h").is_file(), "expected f10 to be outlined");
+        assert!(
+            src_dir.join("f10_st.h").is_file(),
+            "expected f10 to be outlined"
+        );
 
         // Compile to shared library and execute via a tiny C test driver.
-        build_c_blot_cdylib(&wasm, &cache, "native", Some(2), COpt::Auto, Some(Duration::from_secs(120)), &so_path)
-            .unwrap();
+        build_c_blot_cdylib(
+            &wasm,
+            &cache,
+            "native",
+            Some(2),
+            COpt::Auto,
+            Some(Duration::from_secs(120)),
+            &so_path,
+        )
+        .unwrap();
         assert!(so_path.is_file());
         verify_cc_unchanged(&cc_info, None).unwrap();
 

@@ -1,4 +1,8 @@
-#![cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64"))]
+#![cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -115,7 +119,16 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
     );
     assert!(direct_so.is_file());
     let timings_stderr = String::from_utf8_lossy(&direct.stderr);
-    for phase in ["validate=", "admit=", "ssa_opt=", "regalloc=", "emit=", "link=", "write=", "total="] {
+    for phase in [
+        "validate=",
+        "admit=",
+        "ssa_opt=",
+        "regalloc=",
+        "emit=",
+        "link=",
+        "write=",
+        "total=",
+    ] {
         assert!(
             timings_stderr.contains(phase),
             "missing timing phase `{phase}` in stderr: {timings_stderr}"
@@ -146,7 +159,10 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
     );
     let so_path = Path::new(String::from_utf8_lossy(&cold.stdout).trim()).to_path_buf();
     let sha_path = so_path.with_extension("so.sha256");
-    assert!(so_path.starts_with(&cache), "so_path escaped cache: {so_path:?}");
+    assert!(
+        so_path.starts_with(&cache),
+        "so_path escaped cache: {so_path:?}"
+    );
     let so_meta = fs::symlink_metadata(&so_path).unwrap();
     assert!(so_meta.file_type().is_file());
     assert_eq!(so_meta.permissions().mode() & 0o777, 0o555);

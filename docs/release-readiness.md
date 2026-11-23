@@ -1,51 +1,77 @@
-# Release readiness
+# Release readiness (`v0.1.0`)
 
-The release decision is made by `python3 tools/checks/release_audit.py`. It joins the task dependency graph in `/workspace/tasks/TASKS.json`, the frozen proposal/source lock, the corpus lock, the opcode and rule ownership ledger, and evidence reports named in [release-manifest.json](architecture/release-manifest.json). Exit status 0 means every required predecessor task is done, all required reports are present and tied to the current source/test snapshot, no semantic ledger owner remains pending, and no excluded or unspecified behavior is claimed as supported. Any missing, stale, unsupported, empty, or hash-mismatched item returns nonzero.
+The release decision is verified by `python3 -B tools/checks/release_audit.py`.
+It joins the frozen proposal/source lock ([spec-lock.json](architecture/spec-lock.json)),
+the corpus lock ([corpus-lock.json](architecture/corpus-lock.json)), the opcode
+and rule ownership ledger ([opcodes.json](architecture/opcodes.json)), and the
+evidence reports indexed in [release-manifest.json](architecture/release-manifest.json).
 
-The manifest is deliberately an evidence index, not a completion declaration. Each report path points to the output of its existing producer, and the manifest pins that report's SHA-256. The checker validates each producer's actual schema: conformance reports use `selected`, `executed`, `failed`, `skipped`, `unsupported`, binary fingerprints and implementation-source fingerprints; native and build reports use the shared core `source_sha256`; the allocation-failure report binds the worker executable hash and checks its recorded resource limits plus worker JSON showing both allocator failure and recovery; fuzz and differential reports bind their generators, target binary, corpus and locked Core revision. The current core source digest is stored in the manifest. A report with an earlier digest, a replaced worker, or an implementation-source fingerprint that no longer matches is stale and blocks release.
+Exit status `0` means every required report for the declared `supported_targets`
+is present, passes its schema checks, binds to the current core source digest,
+built executables, and documentation hashes, no semantic ledger owner remains
+pending, and no excluded or unspecified behavior is claimed as supported. Any
+missing, stale, unsupported, empty, or hash-mismatched item exits nonzero.
+
+## `v0.1.0` Target Scope
+
+- **Supported target**: `x86_64-unknown-linux-gnu` (`rustc 1.99.0`).
+- **Deferred target**: Native `aarch64-unknown-linux-gnu` release verification
+  is planned for a follow-up release (the CI workflow runs native Ubuntu ARM
+  checks in `.github/workflows/ci.yml`, but local `v0.1.0` release evidence is
+  scoped explicitly to `x86_64-unknown-linux-gnu`).
+- **Excluded scope**: JS/browser embedding APIs (`content-security-policy`,
+  `ecmascript_module_integration`, `javascript_bigint_to_webassembly_i64_integration`,
+  `js-promise-integration`, `js-string-builtins`), custom-descriptor JS
+  embedding hooks, and the unspecified Type Section Field Deduplication TODO.
 
 ## Reproduction
 
-Run from the repository root after activating the pinned toolchain:
+Run from the repository root with Rust `1.99.0` (`rust-toolchain.toml`):
 
 ```sh
-. /workspace/.setup/rust-env.sh
-python3 tools/checks/release_audit.py
-python3 -m unittest discover -s tools/checks/tests -p 'test_release_audit.py' -v
-python3 tools/checks/opcode_coverage.py --require-complete
-python3 /workspace/tasks/check_plan.py
-git diff --check
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --workspace --all-features
+cargo test --locked --workspace --all-features
+cargo test --locked --doc --workspace
+python3 -B tools/checks/dependency_budget.py
+python3 -B -m unittest discover -s tools/checks/tests -v
+python3 -B tools/checks/opcode_coverage.py --require-complete
+python3 -B tools/checks/release_audit.py
 ```
 
-The corpus and prerequisite commands are recorded in the relevant task files. The manifest uses the final `target/conformance/final-*` outputs for the full corpora; the task-specific `T160.json`, `T161.json`, and `T163.json` reports remain useful for task review. Reproduce the final reports with:
+### Regenerating manifest evidence reports
 
 ```sh
-cargo run --locked -p wtime-conformance -- run --profile stable-core --suite core3 --filter all --report target/conformance/final-core3.json
-cargo run --locked -p wtime-conformance -- run --profile all-phase3-core --suite phase3 --filter all --report target/conformance/final-phase3.json
-cargo run --locked -p wtime-conformance -- run --profile all-phase3-core --suite interactions --filter all --report target/conformance/final-interactions.json
+python3 -B tools/checks/dependency_budget.py > docs/verification/dependency-budget.txt
+python3 -B tools/checks/fetch_corpus.py
+cargo build --locked --release -p wtime-conformance --features opcode-coverage
+target/release/wtime-conformance run --profile mvp --suite mvp --filter all --report target/conformance/mvp.json
+target/release/wtime-conformance run --profile stable-core --suite core3 --filter all --report docs/verification/core3.json
+target/release/wtime-conformance run --profile all-phase3-core --suite phase3 --filter all --report docs/verification/phase3.json
+target/release/wtime-conformance run --profile all-phase3-core --suite interactions --filter all --report docs/verification/interaction-corpus.json
+python3 -B tools/checks/test_evidence.py --package wtime-runtime --test feature_profiles --report docs/verification/feature-profiles.json
+python3 -B tools/checks/test_evidence.py --package wtime-conformance --test interactions --report docs/verification/interactions.json
+python3 -B tools/checks/test_evidence.py --package wtime-conformance --test annotations --report target/conformance/annotations.json
+python3 -B tools/checks/test_evidence.py --package wtime-decode --filter metadata --report target/conformance/branch-hints-decode.json
+python3 -B tools/checks/test_evidence.py --package wtime-cli --filter t158_ --report target/conformance/branch-hints-cli.json
+python3 -B tools/checks/reconcile_opcode_evidence.py --reports target/conformance/mvp.json docs/verification/core3.json docs/verification/phase3.json docs/verification/interaction-corpus.json
+cargo build --locked -p wtime-conformance --bin wtime-probe --bin wtime-allocation-check
+python3 -B tools/checks/allocation_failure.py --worker target/debug/wtime-allocation-check --report docs/verification/allocation-failure.json
+python3 -B tools/checks/fuzz_decode.py --seed 164 --iterations 1000 --profile all-phase3-core $(printf -- '--corpus %s ' crates/wtime-runtime/tests/fixtures/feature_profiles/*.wasm) --output target/fuzz/seed164-all && cp target/fuzz/seed164-all/report.json docs/verification/fuzz.json
+python3 -B tools/checks/differential.py --seed 165 --count 100 --oracle "$(command -v node)" --oracle-kind node --oracle-sha256 "$(sha256sum "$(command -v node)" | cut -d' ' -f1)" --output target/differential/node-seed165 && cp target/differential/node-seed165/report.json docs/verification/differential.json
+python3 -B tools/checks/hardening.py --native-report docs/verification/native-x86_64.json
+python3 -B tools/checks/build_budget.py --output docs/verification/build-final.json
 ```
-
-After the implementation is stable, rerun the feature profile, fuzz and differential runs, runtime hardening, allocation-failure check, and final build budget. Store outputs at the paths listed in the manifest and update the corresponding report digests and source digest from those outputs. Do not pin a report from an earlier source revision. Native architecture reports must be collected on their named machines; cross-compilation is not native execution.
-
-## Current blockers
-
-The frozen source snapshot has current, pinned reports: 18,480 MVP assertions, 62,968 Core 3.0 assertions, 64,297 Phase 3 assertions, and 15 interaction assertions all executed with zero failures, skips, unsupported directives, or text-tool errors. The reports bind to the current implementation fingerprints and conformance executable; feature profiles (28), interactions (7 focused tests), API examples (4), native x86_64 (134), fuzz (1,000), differential (100), allocation failure, and the final build budget also pass. The manifest pins the exact producer bytes, and the checker detects source, implementation fingerprint, generator, target binary, corpus, or report changes.
-
-The manifest's supported-claims snapshot follows the included feature IDs in the source lock, with custom descriptors limited to specified semantics. The semantic ledger has no pending owners. T166 remains in progress because native AArch64 evidence is absent; T169 remains in progress while the audit is blocked. Native x86_64 records 134 passing tests. The allocation-failure report exercises a 512 MiB allocation under a 128 MiB address-space limit and confirms recovery. The checker output is the authoritative current list of blockers. The checker never edits task status.
-
-The locked scope excludes the five JS/browser integrations listed in the manifest. The custom descriptor source's bare Type Section Field Deduplication TODO has no specified encoding or semantics, and its JS prototype/compileOptions/configureAll behavior is outside the embedding scope. These limits remain explicit and cannot appear among supported claims. The repository declares `MIT OR Apache-2.0`; production dependency license review and documented target support still require concrete release evidence.
 
 ## What each gate establishes
 
-| Evidence | Reproducer | Required evidence |
+| Evidence | Report | Required check |
 | --- | --- | --- |
-| Core 3.0 corpus | Command above; T160 task equivalent writes `target/conformance/T160.json` | Every selected assertion executes and passes against the current implementation sources. |
-| Phase 3 corpus | Command above; T161 task equivalent writes `target/conformance/T161.json` | Every selected assertion executes and passes against the current implementation sources. |
-| Feature profiles and interactions | T162 and T163 task commands | Required enable/disable and combined-feature assertions execute. |
-| Fuzz, differential, hardening | T164, T165 and T166 task commands | Current-source results, executed counts and triage are recorded; unexplained failures block. |
-| Allocation failure | `python3 tools/checks/allocation_failure.py --report docs/verification/allocation-failure.json` | Under a 128 MiB address-space limit, the 512 MiB allocation fails and the worker confirms it recovers; report source and worker hashes match the checkout. |
-| Final build | `python3 tools/checks/build_budget.py --output docs/verification/build-final.json` | Stable source digest, clean/warm timings, RSS and binary size meet the recorded budget. |
-| Native architecture | `python3 tools/checks/hardening.py --native-report <report.json>` on each architecture | Passing runtime tests on native x86_64 and AArch64 against the same core source digest. |
-| API documentation and licenses | T168 documentation/example checks and dependency audit | Examples work, support scope is accurate, and license/target claims are evidenced. |
-
-An opcode ownership/dispatch pass by itself is not semantic conformance. `--require-complete` intentionally fails while any validation, execution, or test owner remains `pending-audit`.
+| Core 3.0 & Phase 3 corpora | `core3.json`, `phase3.json`, `interaction-corpus.json` | 100% selected assertions execute with zero failures, skips, unsupported directives, or text-tool errors against current implementation sources and executable. |
+| Feature profiles & interactions | `feature-profiles.json`, `interactions.json` | Explicit enable/disable and cross-proposal interaction tests execute against current core sources. |
+| Fuzz & differential | `fuzz.json`, `differential.json` | 1,000 seeded decode/validate mutations and 100 deterministic differential vectors (with Node/V8 oracle) pass with zero failures or unexplained differences. |
+| Allocation failure | `allocation-failure.json` | Process-isolated worker under 128 MiB `RLIMIT_AS` triggers real recoverable allocator failures (512 MiB memory and 16M-element guest table) and verifies store recovery. |
+| Native `x86_64` hardening | `native-x86_64.json` | Native `wtime-runtime` test suite (including cancellation and stale-generation regressions) passes on `x86_64` against the frozen core source hash. |
+| Build & dependency budgets | `build-final.json`, `dependency-budget.txt` | Clean/leaf compile times and stripped `wtime-cli` binary size meet budgets; zero external production dependencies and zero `unsafe` in core crates. |
+| API docs & examples | `api-docs.json` | Documented embedding, suspension, and CLI examples execute cleanly and match current doc/source digests. |

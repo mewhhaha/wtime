@@ -29,7 +29,7 @@ fn load(name: &str) -> (Store, Instance) {
         }
         _ => panic!("unknown fixture"),
     };
-    let m = e.compile(&bytes).unwrap();
+    let m = e.compile(bytes).unwrap();
     let mut s = Store::new(&e);
     let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
     drop(m);
@@ -146,7 +146,10 @@ fn p024_restored_try_table_normal_path_keeps_result() {
         let counters = store.performance_counters();
         assert!(counters.branch_result_allocations > 0);
         assert!(counters.instruction_clone_bytes > 0);
-        assert_eq!(counters.source_dispatches, counters.instruction_clone_events);
+        assert_eq!(
+            counters.source_dispatches,
+            counters.instruction_clone_events
+        );
     }
 }
 #[cfg(feature = "execution-reference")]
@@ -209,7 +212,7 @@ fn p024_deep_captured_handlers_keep_order_and_release_bytes() {
             5 => include_bytes!("../fixtures/performance/branch/try_table_depth_5.wasm").as_slice(),
             _ => unreachable!(),
         };
-        let module = engine.compile(&bytes).unwrap();
+        let module = engine.compile(bytes).unwrap();
         let mut store = Store::new(&engine);
         let i = Linker::new(&engine)
             .instantiate(&mut store, &module)

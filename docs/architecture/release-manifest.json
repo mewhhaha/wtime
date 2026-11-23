@@ -3,7 +3,6 @@
   "snapshot": "Wasm Core 3.0 plus the active Phase 3\u20135 core entries selected by the pinned task/source locks",
   "spec_revision": "7e9fb78c63d65018cc111422f657947b3df80d7b",
   "corpus_revision": "7e9fb78c63d65018cc111422f657947b3df80d7b",
-  "source_test_sha256": "",
   "supported_claims": [
     "core-3.0",
     "threads",
@@ -54,54 +53,50 @@
   "evidence": {
     "core3": {
       "path": "docs/verification/core3.json",
-      "sha256": "2d1b1e665cf253f58ab3ffe305e6f77d60f2776283db2d9cb7bd0509d6bb1a4c"
+      "sha256": "0c4246baada37a0a5617902455a2bf1547db9a7bed245a743d9494870180012a"
     },
     "phase3": {
       "path": "docs/verification/phase3.json",
-      "sha256": "6a675490cd218d3ec0c5e4917d26074221da49aa59df3b6b4ecefdd313b4ac21"
+      "sha256": "fc76914c782f37975502db194af88b4807e15eb9ad286f80d686d9d451642f8b"
     },
     "feature_profiles": {
       "path": "docs/verification/feature-profiles.json",
-      "sha256": "f221fad68c96a637d5abde783d552d1880c980240231fef82e33a6cefc5d53e8"
+      "sha256": "7f9ef541fc53cd6df3dcaea182eb5b074475cbec7aa55adbb5ccfdf40e194ee2"
     },
     "interactions": {
       "path": "docs/verification/interactions.json",
-      "sha256": "64350d8ba233b562d164e72be7ab5b27e575a0e9986657cd7e6118881391babb",
+      "sha256": "4ffc5b7e77c6573ed694542a5e94b607b32b13de52afc926dbb09dfbb69acbd7",
       "corpus_report": "docs/verification/interaction-corpus.json",
-      "corpus_sha256": "7b5dbeb1fc0a0c502eece8d9e5e975574f410ae53c4d1d735d986449c1547119"
+      "corpus_sha256": "052fde54e302d773daf849ade7ea9e54e41f9df0e941b517499b3b0a8f41647a"
     },
     "fuzz": {
       "path": "docs/verification/fuzz.json",
-      "sha256": "41134573bb682f707fe305113d60d6f3996387989c2bbfba25f8a8b9910dd562"
+      "sha256": "658dc9e37ea0f1b9d10b9011644291ae2982094a4c8e140367851a336660e347"
     },
     "differential": {
       "path": "docs/verification/differential.json",
-      "sha256": "e11c92419fd017f9e96ec3ebd8c02f605be33b2866d9efe2f6c6c1afff515566"
+      "sha256": "9eb04b00bb5000a6d544f6bc775c02a47223dc6ac458d38e371e97903dff1805"
     },
     "hardening": {
       "path": "docs/verification/native-x86_64.json",
-      "sha256": "8c834781e9fa173fb6d289c1328065d2eab6db4c04a7813ed9c2098a4ba02b4d"
+      "sha256": "79d970ca5f7003aa21f30a1a2bfacf1965ed6c3c18673b0ce43ffac543106b44"
     },
     "build_final": {
       "path": "docs/verification/build-final.json",
-      "sha256": "75ca00ffe625229d325da4369c167bca4b2ce5b0c68ac8d86de9b093bd6035d0"
+      "sha256": "6e3c5daf61442affb0e69da60a9c39ae2f67b41145ebc07b0e2b9f1012e0518d"
     },
     "api_docs": {
       "path": "docs/verification/api-docs.json",
-      "sha256": "b9aaccab2e3afe617f01c4fc330904507e5ee006b1f287f5a852b230c26c60f4"
+      "sha256": "0c4ebd0f55d9dd65d08fef0c0e107a409e89eb8f2c38f6217a8a2858b0764210"
     },
     "native_x86_64": {
       "path": "docs/verification/native-x86_64.json",
-      "sha256": "8c834781e9fa173fb6d289c1328065d2eab6db4c04a7813ed9c2098a4ba02b4d"
-    },
-    "native_aarch64": {
-      "path": "docs/verification/native-aarch64.json",
-      "sha256": ""
+      "sha256": "79d970ca5f7003aa21f30a1a2bfacf1965ed6c3c18673b0ce43ffac543106b44"
     },
     "allocation_failure": {
       "path": "docs/verification/allocation-failure.json",
-      "sha256": "2535eac8917e2639e8f79b9dfe2616e1a1dd2be5233b45493c215264c60a64d1"
+      "sha256": "9d968a55136ee313f12faabfb111f53422c2031c151f2c3e5d38b1f78ee9bc92"
     }
   },
-  "source_sha256": "e5a3a4eeba54a547ec8102acb6d03bb823de92643b7b34fc435817fcf0a3c75f"
+  "source_sha256": "ee70778a269bc3fdc28567bcb7d13f434368394de2ad799a1d9ebacb64e810dc"
 }

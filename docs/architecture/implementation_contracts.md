@@ -1,4 +1,4 @@
-# Contracts for implementation with Sol 6.1 Low
+# Core implementation contracts
 
 This file fixes the initial choices that later tasks must consume. It is a plan, not existing code. T002 writes these contracts into repository documentation; T003 creates the package/module skeletons. If a precise signature must change for correctness, change the contract task and its consumers together rather than building a parallel API.
 

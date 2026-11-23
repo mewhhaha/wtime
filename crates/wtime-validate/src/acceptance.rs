@@ -451,8 +451,14 @@ fn t107_declared_array_const_covariance_and_mutable_invariance() {
 /// Validates `m` with function bodies on one thread and on four.
 fn on_threads(m: &[u8], features: &FeatureSet, limits: &ResourceLimits) -> [String; 2] {
     [1, 4].map(|threads| {
-        let limits = ResourceLimits { compile_threads: threads, ..limits.clone() };
-        format!("{:?}", validate(m, features, &limits).map(|v| v.function_bounds().to_vec()))
+        let limits = ResourceLimits {
+            compile_threads: threads,
+            ..limits.clone()
+        };
+        format!(
+            "{:?}",
+            validate(m, features, &limits).map(|v| v.function_bounds().to_vec())
+        )
     })
 }
 
@@ -526,7 +532,10 @@ fn parallel_bodies_spend_the_type_work_budget_in_body_order() {
     assert_eq!(one, four);
     let mut exhausted = 0;
     for budget in (50..4 * N + 100).step_by(7) {
-        let limits = ResourceLimits { max_type_work: budget, ..ResourceLimits::default() };
+        let limits = ResourceLimits {
+            max_type_work: budget,
+            ..ResourceLimits::default()
+        };
         let [one, four] = on_threads(&m, &features, &limits);
         assert_eq!(one, four, "budget {budget}");
         exhausted += usize::from(one.contains("budget"));

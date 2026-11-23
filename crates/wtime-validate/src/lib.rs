@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
+//! Bounded, safe-Rust WebAssembly module validation under an explicit feature and resource policy.
 mod atomics;
 mod continuations;
 mod exceptions;
@@ -10,6 +12,16 @@ use types::value_subtype;
 use std::collections::HashSet;
 pub use wtime_decode::*;
 use wtime_types::*;
+/// Bounds observed by the existing validation pass, relative to one body.
+/// Unreachable code uses the validator's polymorphic stack; these are allocation
+/// hints, not certificates for removing runtime checks across calls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FunctionBounds {
+    /// Peak operand stack height observed while validating the function body.
+    pub stack_peak: usize,
+    /// Maximum control-block nesting depth observed while validating the function body.
+    pub maximum_nesting: usize,
+}
 /// An immutable module certified under a retained feature and resource policy.
 ///
 /// The policy cannot be relabeled after validation.
@@ -33,14 +45,6 @@ use wtime_types::*;
 /// let decoded = decode(b"\0asm\x01\0\0\0", &features, &limits).unwrap();
 /// let unchecked = ValidatedModule { decoded, features, limits };
 /// ```
-/// Bounds observed by the existing validation pass, relative to one body.
-/// Unreachable code uses the validator's polymorphic stack; these are allocation
-/// hints, not certificates for removing runtime checks across calls.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FunctionBounds {
-    pub stack_peak: usize,
-    pub maximum_nesting: usize,
-}
 #[derive(Clone, Debug)]
 pub struct ValidatedModule {
     decoded: DecodedModule,
@@ -49,18 +53,23 @@ pub struct ValidatedModule {
     limits: ResourceLimits,
 }
 impl ValidatedModule {
+    /// Returns the heap capacity in bytes retained by per-function validation bounds.
     pub fn function_bounds_bytes(&self) -> usize {
         self.function_bounds.capacity() * std::mem::size_of::<FunctionBounds>()
     }
+    /// Returns the observed validation bounds for each defined function body.
     pub fn function_bounds(&self) -> &[FunctionBounds] {
         &self.function_bounds
     }
+    /// Returns the validated [`DecodedModule`] payload.
     pub fn decoded(&self) -> &DecodedModule {
         &self.decoded
     }
+    /// Returns the [`FeatureSet`] under which this module was validated.
     pub fn features(&self) -> &FeatureSet {
         &self.features
     }
+    /// Returns the [`ResourceLimits`] under which this module was validated.
     pub fn limits(&self) -> &ResourceLimits {
         &self.limits
     }
@@ -99,18 +108,23 @@ fn fast_instruction(
     memories: &[MemoryType],
     i: &Instruction,
 ) -> bool {
-    let Some(c) = s.controls.last() else { return false };
+    let Some(c) = s.controls.last() else {
+        return false;
+    };
     if c.unreachable || !s.unknown.is_empty() {
         return false;
     }
     let floor = c.height;
     let n = s.values.len();
     // Two operands of type `t` above the control frame's floor.
-    let two = |s: &Stack, t: ValType| n >= floor + 2 && s.values[n - 1] == t && s.values[n - 2] == t;
+    let two =
+        |s: &Stack, t: ValType| n >= floor + 2 && s.values[n - 1] == t && s.values[n - 2] == t;
     match (i.opcode, &i.immediate) {
         (0x20..=0x22, Immediate::Index(x)) => {
             let x = *x as usize;
-            let (Some(&t), Some(true)) = (locals.get(x), s.initialized.get(x)) else { return false };
+            let (Some(&t), Some(true)) = (locals.get(x), s.initialized.get(x)) else {
+                return false;
+            };
             match i.opcode {
                 0x20 => s.values.push(t),
                 0x21 if n > floor && s.values[n - 1] == t => s.values.truncate(n - 1),
@@ -141,20 +155,33 @@ fn fast_instruction(
             true
         }
         (0x23, Immediate::Index(x)) => {
-            let Some(t) = globals.get(*x as usize) else { return false };
+            let Some(t) = globals.get(*x as usize) else {
+                return false;
+            };
             s.values.push(t.value);
             true
         }
         (0x24, Immediate::Index(x)) => {
-            let Some(t) = globals.get(*x as usize) else { return false };
+            let Some(t) = globals.get(*x as usize) else {
+                return false;
+            };
             if !(t.mutable && n > floor && s.values[n - 1] == t.value) {
                 return false;
             }
             s.values.truncate(n - 1);
             true
         }
-        (0x28..=0x3e, &Immediate::MemArg { align, memory, offset }) => {
-            let Some(m) = memories.get(memory as usize) else { return false };
+        (
+            0x28..=0x3e,
+            &Immediate::MemArg {
+                align,
+                memory,
+                offset,
+            },
+        ) => {
+            let Some(m) = memories.get(memory as usize) else {
+                return false;
+            };
             let (t, size) = match i.opcode {
                 0x28 | 0x36 => (ValType::I32, 2),
                 0x29 | 0x37 => (ValType::I64, 3),
@@ -246,7 +273,9 @@ impl BlockSig {
     #[inline]
     fn params<'a>(self, types: &'a [FuncType]) -> ValSlice<'a> {
         match self {
-            BlockSig::Empty | BlockSig::Single(_) | BlockSig::FuncResultsOnly(_) => ValSlice::Slice(&[]),
+            BlockSig::Empty | BlockSig::Single(_) | BlockSig::FuncResultsOnly(_) => {
+                ValSlice::Slice(&[])
+            }
             BlockSig::Func(idx) => ValSlice::Slice(&types[idx].params),
         }
     }
@@ -256,7 +285,9 @@ impl BlockSig {
         match self {
             BlockSig::Empty => ValSlice::Slice(&[]),
             BlockSig::Single(v) => ValSlice::One(v),
-            BlockSig::Func(idx) | BlockSig::FuncResultsOnly(idx) => ValSlice::Slice(&types[idx].results),
+            BlockSig::Func(idx) | BlockSig::FuncResultsOnly(idx) => {
+                ValSlice::Slice(&types[idx].results)
+            }
         }
     }
 }
@@ -438,6 +469,7 @@ impl Stack {
         })
     }
 }
+/// Decodes and validates a WebAssembly binary module under `features` and `limits`.
 pub fn validate(
     bytes: &[u8],
     features: &FeatureSet,
@@ -702,7 +734,8 @@ pub fn validate(
         // the type work budget runs out, and an error is reported, exactly
         // where validating the bodies in order would.
         let threads = limits.body_threads(m.code.iter().map(|b| b.span.end - b.span.start).sum());
-        let pairs: Vec<(u32, &FunctionBody)> = m.functions.iter().map(|t| t.0).zip(&m.code).collect();
+        let pairs: Vec<(u32, &FunctionBody)> =
+            m.functions.iter().map(|t| t.0).zip(&m.code).collect();
         if threads == 1 {
             for &(t, b) in &pairs {
                 let ti = t as usize;
@@ -949,10 +982,12 @@ impl Context<'_> {
         for (n, i) in b.instructions.iter().enumerate() {
             // Absolute module offset for error reports; a body built without
             // offsets reports its own start.
-            let at = b.offsets.get(n).map_or(b.span.start, |&offset| offset as usize);
+            let at = b
+                .offsets
+                .get(n)
+                .map_or(b.span.start, |&offset| offset as usize);
             if !fast_instruction(&mut s, &locals, &self.globals, &self.memories, i) {
-                self.instruction(&mut s, &locals, i)
-                    .map_err(|e| e.at(at))?;
+                self.instruction(&mut s, &locals, i).map_err(|e| e.at(at))?;
             }
             bounds.stack_peak = bounds.stack_peak.max(s.values.len());
             bounds.maximum_nesting = bounds.maximum_nesting.max(s.controls.len());
@@ -1078,7 +1113,10 @@ impl Context<'_> {
                 let params = c.sig.params(&self.m.types);
                 let results = c.sig.results(&self.m.types);
                 if c.kind == 4 && !c.has_else {
-                    check(params.as_slice() == results.as_slice(), "if without else type mismatch")?
+                    check(
+                        params.as_slice() == results.as_slice(),
+                        "if without else type mismatch",
+                    )?
                 }
                 s.pop_all(results.as_slice())?;
                 check(s.values.len() == c.height, "extra operands at end")?;
@@ -1107,7 +1145,10 @@ impl Context<'_> {
                             continue;
                         }
                         let target = s.label(n as usize, &self.m.types)?;
-                        check(target.as_slice().len() == ts.as_slice().len(), "branch table arity mismatch")?;
+                        check(
+                            target.as_slice().len() == ts.as_slice().len(),
+                            "branch table arity mismatch",
+                        )?;
                         s.check_pop_all(target.as_slice())?;
                     }
                     s.pop_all(ts.as_slice())?;

@@ -1,6 +1,6 @@
-use wtime_runtime::{Config, Engine, ExecutionPolicy};
 #[cfg(not(feature = "register-executor"))]
 use wtime_runtime::ErrorKind;
+use wtime_runtime::{Config, Engine, ExecutionPolicy};
 #[test]
 fn p057_register_policy_stays_unavailable_until_execution_lands() {
     assert_eq!(

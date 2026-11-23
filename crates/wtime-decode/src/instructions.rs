@@ -4,62 +4,105 @@ use wtime_types::*;
 /// source position is kept beside it, in `FunctionBody::offsets`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instruction {
+    /// Decoded opcode key: single-byte opcodes occupy `0x00..=0xff`, while prefixed
+    /// opcodes pack their prefix and sub-opcode (`0xfb..` GC, `0xfc..` misc/bulk,
+    /// `0xfd..`/`0xfa..` SIMD, `0xfe..` atomics).
     pub opcode: u16,
+    /// Decoded instruction immediate operand, if any.
     pub immediate: Immediate,
 }
 /// The immediate of `try_table`, boxed: it is rare and large.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TryTableImmediate {
+    /// Block signature immediate (`Immediate::Block` or `Immediate::BlockType`).
     pub block: Immediate,
+    /// Catch clauses attached to the `try_table` block in source order.
     pub catches: Vec<Catch>,
 }
 /// The immediate of `resume`, `resume_throw` and `switch`, boxed: it is rare
 /// and large.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResumeImmediate {
+    /// Continuation type index.
     pub ty: u32,
+    /// Exception tag index for `resume_throw`, or `None` for `resume` / `switch`.
     pub tag: Option<u32>,
+    /// On-clauses as `(tag_index, Some(label))` for handler branches or `(tag_index, None)` for `switch`.
     pub handlers: Vec<(u32, Option<u32>)>,
 }
+/// A single catch clause inside a [`TryTableImmediate`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Catch {
+    /// Wire catch kind: `0` (`catch`), `1` (`catch_ref`), `2` (`catch_all`), or `3` (`catch_all_ref`).
     pub kind: u8,
+    /// Matched tag index for `catch`/`catch_ref`, or `None` for `catch_all`/`catch_all_ref`.
     pub tag: Option<u32>,
+    /// Target relative branch label depth.
     pub label: u32,
 }
+/// Decoded immediate operand carried by an [`Instruction`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Immediate {
+    /// Boxed `try_table` block type and catch clauses.
     TryTable(Box<TryTableImmediate>),
+    /// Boxed continuation `resume` / `resume_throw` / `switch` immediate.
     Resume(Box<ResumeImmediate>),
+    /// Branch-on-cast immediate (`br_on_cast` / `br_on_cast_fail`).
     Cast {
+        /// Nullability bitflags (bit 0: source nullable, bit 1: target nullable).
         flags: u8,
+        /// Target relative branch label depth.
         label: u32,
+        /// Source heap type.
         from: HeapType,
+        /// Target heap type.
         to: HeapType,
     },
+    /// Instruction takes no immediate operand.
     None,
+    /// Single `u32` index or lane immediate.
     Index(u32),
+    /// Pair of `u32` indices (such as type/table, struct/field, or segment/memory).
     Pair(u32, u32),
+    /// Signed 33-bit block type (`-64` for empty, negative value-type code, or type index).
     Block(i64),
+    /// Explicit reference-type block result (`0x63` / `0x64` prefix).
     BlockType(ValType),
+    /// `br_table` target label slice and default label depth.
     BrTable(Box<[u32]>, u32),
+    /// Memory argument paired with a SIMD lane index (`v128.load*_lane` / `v128.store*_lane`).
     MemLane {
+        /// Base-2 logarithm of the declared alignment hint.
         align: u32,
+        /// Constant byte offset added to the dynamic address.
         offset: u64,
+        /// Target linear memory index.
         memory: u32,
+        /// SIMD lane index.
         lane: u8,
     },
+    /// Memory load/store or atomic memory immediate.
     MemArg {
+        /// Base-2 logarithm of the declared alignment hint.
         align: u32,
+        /// Constant byte offset added to the dynamic address.
         offset: u64,
+        /// Target linear memory index.
         memory: u32,
     },
+    /// 32-bit integer constant (`i32.const`).
     I32(i32),
+    /// 64-bit integer constant (`i64.const`).
     I64(i64),
+    /// Raw IEEE 754 bit pattern of an `f32.const`.
     F32(u32),
+    /// Raw IEEE 754 bit pattern of an `f64.const`.
     F64(u64),
+    /// Explicit value-type list (`select` typed form).
     Types(Box<[ValType]>),
+    /// Heap type immediate (`ref.null`, `ref.test`, `ref.cast`, etc.).
     Heap(HeapType),
+    /// Raw 16-byte immediate (`v128.const` or `i8x16.shuffle` lane indices).
     Bytes(Box<[u8]>),
 }
 pub(crate) fn val(r: &mut Reader) -> Result<ValType> {
@@ -169,7 +212,14 @@ pub(crate) fn expression_bounded(
         };
         let mut imm_over = false;
         let mut step_imm = 0usize;
-        let insn = read_instruction(r, &mut depth, keep, Some(&mut imm_budget), &mut step_imm, &mut imm_over)?;
+        let insn = read_instruction(
+            r,
+            &mut depth,
+            keep,
+            Some(&mut imm_budget),
+            &mut step_imm,
+            &mut imm_over,
+        )?;
         *expr_insns = expr_insns.saturating_add(1);
         if imm_over || *expr_insns > max_insns {
             exceeded = true;
@@ -183,7 +233,11 @@ pub(crate) fn expression_bounded(
     }
     Ok((out, exceeded))
 }
-pub(crate) fn reserve_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, want: usize) -> usize {
+pub(crate) fn reserve_budget(
+    shared: &std::sync::atomic::AtomicUsize,
+    max_total: usize,
+    want: usize,
+) -> usize {
     use std::sync::atomic::Ordering;
     let mut cur = shared.load(Ordering::Relaxed);
     loop {
@@ -197,7 +251,11 @@ pub(crate) fn reserve_budget(shared: &std::sync::atomic::AtomicUsize, max_total:
         }
     }
 }
-pub(crate) fn try_reserve_exact_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, want: usize) -> bool {
+pub(crate) fn try_reserve_exact_budget(
+    shared: &std::sync::atomic::AtomicUsize,
+    max_total: usize,
+    want: usize,
+) -> bool {
     use std::sync::atomic::Ordering;
     if want == 0 {
         return true;
@@ -300,8 +358,12 @@ pub(crate) fn body_expression_bounded(
     let mut body_imm_elems = 0usize;
     let mut saw_data_count_op = false;
     while depth > 0 {
-        let offset = u32::try_from(r.offset())
-            .map_err(|_| Error::new(ErrorKind::ResourceLimit, "module too large for u32 instruction offsets"))?;
+        let offset = u32::try_from(r.offset()).map_err(|_| {
+            Error::new(
+                ErrorKind::ResourceLimit,
+                "module too large for u32 instruction offsets",
+            )
+        })?;
         if keep {
             if count >= max_insns {
                 quota.release();
@@ -330,14 +392,28 @@ pub(crate) fn body_expression_bounded(
                     used: shared_imm,
                     max: max_insns,
                 };
-                read_instruction(r, &mut depth, keep, Some(&mut budget), &mut step_imm, &mut imm_over)?
+                read_instruction(
+                    r,
+                    &mut depth,
+                    keep,
+                    Some(&mut budget),
+                    &mut step_imm,
+                    &mut imm_over,
+                )?
             }
             None => {
                 let mut budget = ImmBudget::Local {
                     used: &mut local_imm_elems,
                     max: max_insns,
                 };
-                read_instruction(r, &mut depth, keep, Some(&mut budget), &mut step_imm, &mut imm_over)?
+                read_instruction(
+                    r,
+                    &mut depth,
+                    keep,
+                    Some(&mut budget),
+                    &mut step_imm,
+                    &mut imm_over,
+                )?
             }
         };
         if matches!(insn.opcode, 0xfc08 | 0xfc09) {
@@ -386,7 +462,14 @@ fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instr
     let mut imm_over = false;
     let mut step_imm = 0usize;
     while depth > 0 {
-        out.push(read_instruction(r, &mut depth, true, None, &mut step_imm, &mut imm_over)?);
+        out.push(read_instruction(
+            r,
+            &mut depth,
+            true,
+            None,
+            &mut step_imm,
+            &mut imm_over,
+        )?);
     }
     Ok(out)
 }

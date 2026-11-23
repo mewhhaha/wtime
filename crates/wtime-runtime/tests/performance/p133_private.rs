@@ -27,15 +27,15 @@ fn p133_cold_threshold_and_single_publish() {
         builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         prepare_function(module, body, budget, work)
     };
-    assert!(cache.enter_with(&module, 0, &builder).is_none());
-    assert!(cache.enter_with(&module, 0, &builder).is_none());
+    assert!(cache.enter_with(&module, 0, builder).is_none());
+    assert!(cache.enter_with(&module, 0, builder).is_none());
     assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 0);
-    let artifact = cache.enter_with(&module, 0, &builder).unwrap();
+    let artifact = cache.enter_with(&module, 0, builder).unwrap();
     assert!(artifact.function.matches(&module, 0));
     assert!(!artifact.function.matches(&module, 1));
     let costs = p133_ledger(&cache);
     for _ in 0..20 {
-        let same = cache.enter_with(&module, 0, &builder).unwrap();
+        let same = cache.enter_with(&module, 0, builder).unwrap();
         assert!(Arc::ptr_eq(&artifact, &same));
     }
     assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);

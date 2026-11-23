@@ -46,5 +46,5 @@ alone is insufficient. Descriptors participate in canonical identity while
 object descriptor identity remains a separate runtime relation.
 
 The detailed semantic invariants are in [implementation_contracts.md](implementation_contracts.md)
-and [hard_task_contracts.md](hard_task_contracts.md). Completion is tracked in
-`/workspace/tasks/TASKS.json`; the presence of an interface is not a conformance claim.
+and [hard_task_contracts.md](hard_task_contracts.md). Release verification evidence is indexed in
+[release-manifest.json](release-manifest.json).

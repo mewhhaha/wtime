@@ -5,7 +5,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use wtime_types::{FeatureSet, FuncType, HeapType, ResourceLimits, ValType};
-use wtime_validate::{DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode, validate};
+use wtime_validate::{
+    DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode, validate,
+};
 
 type Res<T> = Result<T, String>;
 
@@ -93,15 +95,21 @@ pub(crate) fn validate_module(bytes: &[u8]) -> Res<wtime_validate::ValidatedModu
         max_functions: 1 << 24,
         ..ResourceLimits::default()
     };
-    validate(bytes, &FeatureSet::all_phase3_core(), &limits).map_err(|e| format!("invalid module: {e}"))
+    validate(bytes, &FeatureSet::all_phase3_core(), &limits)
+        .map_err(|e| format!("invalid module: {e}"))
 }
 
 /// The declared maximum of the module's 64-bit memory in pages (the index
 /// type's limit where it declares none), if it has one: what a flat memory
 /// would allocate.
 pub fn memory64_max(bytes: &[u8]) -> Res<Option<u64>> {
-    let limits = ResourceLimits { max_module_bytes: 256 << 20, max_instructions: 100_000_000, ..ResourceLimits::default() };
-    let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits).map_err(|e| format!("invalid module: {e}"))?;
+    let limits = ResourceLimits {
+        max_module_bytes: 256 << 20,
+        max_instructions: 100_000_000,
+        ..ResourceLimits::default()
+    };
+    let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits)
+        .map_err(|e| format!("invalid module: {e}"))?;
     Ok(validated
         .decoded()
         .memories
@@ -113,11 +121,19 @@ pub fn memory64_max(bytes: &[u8]) -> Res<Option<u64>> {
 /// `flat64`: a 64-bit memory is allocated whole at its maximum
 /// (`Memory::new_flat`) and accessed by `m64`'s flat accesses.
 #[cfg(test)]
-pub fn generate(bytes: &[u8], out: &Path, name: &str, rt: &Path, module_path: &str, flat64: bool) -> Res<()> {
+pub fn generate(
+    bytes: &[u8],
+    out: &Path,
+    name: &str,
+    rt: &Path,
+    module_path: &str,
+    flat64: bool,
+) -> Res<()> {
     generate_target(bytes, out, name, rt, module_path, flat64, Target::GooseBin)
 }
 
 /// Generates a crate for `target` (Goose CLI binary or Blot ABI 8 cdylib).
+#[allow(dead_code)]
 pub fn generate_target(
     bytes: &[u8],
     out: &Path,
@@ -127,6 +143,30 @@ pub fn generate_target(
     flat64: bool,
     target: Target,
 ) -> Res<()> {
+    generate_target_with_deadline(bytes, out, name, rt, module_path, flat64, target, None)
+}
+
+/// Generates a crate for `target` while cooperatively polling `deadline`.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_target_with_deadline(
+    bytes: &[u8],
+    out: &Path,
+    name: &str,
+    rt: &Path,
+    module_path: &str,
+    flat64: bool,
+    target: Target,
+    deadline: Option<std::time::Instant>,
+) -> Res<()> {
+    let check_dl = |phase: &str| -> Res<()> {
+        if let Some(dl) = deadline
+            && std::time::Instant::now() >= dl
+        {
+            return Err(format!("{phase}: exceeded build time limit"));
+        }
+        Ok(())
+    };
+    check_dl("rust codegen init")?;
     // Room for programs several times the size of the 64-bit Goose compiler
     // (9 MB, about 5 million instructions), and no more.
     let limits = ResourceLimits {
@@ -137,9 +177,12 @@ pub fn generate_target(
         max_functions: 1 << 24,
         ..ResourceLimits::default()
     };
-    let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits).map_err(|e| format!("invalid module: {e}"))?;
+    let validated = validate(bytes, &FeatureSet::all_phase3_core(), &limits)
+        .map_err(|e| format!("invalid module: {e}"))?;
+    check_dl("rust codegen validate")?;
     let m = validated.decoded();
     let module = Module::new(m, flat64, target)?;
+    check_dl("rust codegen analyze")?;
     let write = |path: &Path, text: &str| {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -153,7 +196,8 @@ pub fn generate_target(
     // Generate all defined functions, then balance them across part crates
     // with Longest-Processing-Time-first bin-packing so no single part crate
     // accumulates all of the largest functions and stalls parallel builds.
-    let all_fns = module.functions(m)?;
+    let all_fns = module.functions(m, deadline)?;
+    check_dl("rust codegen functions")?;
     let total_fn_bytes: usize = all_fns.iter().map(|(_, t)| t.len()).sum();
     let n_parts = if total_fn_bytes <= SINGLE_CGU_BYTES {
         1
@@ -191,7 +235,11 @@ pub fn generate_target(
         write!(members, ", \"p{j}\"").unwrap();
         writeln!(dependencies, "{part} = {{ path = \"p{j}\" }}").unwrap();
     }
-    let cgu = if total_fn_bytes <= SINGLE_CGU_BYTES { 1 } else { 16 };
+    let cgu = if total_fn_bytes <= SINGLE_CGU_BYTES {
+        1
+    } else {
+        16
+    };
     let lib_section = if target == Target::BlotCdylib {
         "\n[lib]\ncrate-type = [\"cdylib\"]\n"
     } else {
@@ -209,11 +257,23 @@ pub fn generate_target(
                  [profile.release]\nopt-level = 3\ncodegen-units = {cgu}\nlto = \"thin\"\npanic = \"abort\"\ndebug = 0\n"
             )),
     )?;
-    write(&out.join("core/Cargo.toml"), &package(&core, &format!("wtime-aot-rt = {{ path = {rt:?} }}\n")))?;
+    write(
+        &out.join("core/Cargo.toml"),
+        &package(&core, &format!("wtime-aot-rt = {{ path = {rt:?} }}\n")),
+    )?;
     write(&out.join("core/src/lib.rs"), &module.core(m)?)?;
-    let file_head = format!("// Generated by wtime-aot. Do not edit.\nuse {}::*;\n\n", ident(&core));
+    let file_head = format!(
+        "// Generated by wtime-aot. Do not edit.\nuse {}::*;\n\n",
+        ident(&core)
+    );
     for (j, part) in parts.iter().enumerate() {
-        write(&out.join(format!("p{j}/Cargo.toml")), &package(&part_names[j], &format!("{core} = {{ path = \"../core\" }}\n")))?;
+        write(
+            &out.join(format!("p{j}/Cargo.toml")),
+            &package(
+                &part_names[j],
+                &format!("{core} = {{ path = \"../core\" }}\n"),
+            ),
+        )?;
         let mut lib = String::from(
             "// Generated by wtime-aot. Do not edit.\n#![forbid(unsafe_code)]\n#![allow(unused, non_snake_case, unreachable_code, unused_parens, unused_mut, unused_assignments, clippy::all)]\n\n",
         );
@@ -231,7 +291,9 @@ pub fn generate_target(
         write(&out.join(format!("p{j}/src/lib.rs")), &lib)?;
     }
     let mut data = Vec::new();
-    let paths: Vec<String> = (0..module.types.len()).map(|f| format!("{}::f{f}", ident(&part_names[part_of[f]]))).collect();
+    let paths: Vec<String> = (0..module.types.len())
+        .map(|f| format!("{}::f{f}", ident(&part_names[part_of[f]])))
+        .collect();
     match target {
         Target::GooseBin => {
             let main = module.main(m, &mut data, module_path, &ident(&core), &paths)?;
@@ -273,7 +335,13 @@ fn result_type(results: &[ValType]) -> Res<String> {
     Ok(match results {
         [] => "()".into(),
         [t] => rust_type(*t)?.into(),
-        ts => format!("({})", ts.iter().map(|t| rust_type(*t)).collect::<Res<Vec<_>>>()?.join(", ")),
+        ts => format!(
+            "({})",
+            ts.iter()
+                .map(|t| rust_type(*t))
+                .collect::<Res<Vec<_>>>()?
+                .join(", ")
+        ),
     })
 }
 
@@ -307,7 +375,10 @@ fn ret_abi(results: &[ValType]) -> RetAbi {
         // use `ScalarPair` (`XMM0`/`RAX` + `DL`), and 2x32-bit pairs use `Pair32`
         // (`RAX` + `DL`) to avoid `Result<(i32, i32), Trap>`'s `sret` stack spill.
         [t @ (ValType::I64 | ValType::F32 | ValType::F64 | ValType::Ref(_))] => RetAbi::Scalar(*t),
-        [a @ (ValType::I32 | ValType::F32), b @ (ValType::I32 | ValType::F32)] => RetAbi::Pair32(*a, *b),
+        [
+            a @ (ValType::I32 | ValType::F32),
+            b @ (ValType::I32 | ValType::F32),
+        ] => RetAbi::Pair32(*a, *b),
         _ => RetAbi::Result,
     }
 }
@@ -373,11 +444,16 @@ fn ok_return_expr(abi: RetAbi, values: &[String]) -> String {
 fn result_to_ret_abi(results: &[ValType], expr: &str) -> Res<String> {
     Ok(match ret_abi(results) {
         RetAbi::Void => format!("match {expr} {{ Ok(()) => None, Err(t) => cold_trap(t) }}"),
-        RetAbi::Scalar(t) => format!("match {expr} {{ Ok(v) => (v, None), Err(t) => ({}, cold_trap(t)) }}", zero(t)?),
+        RetAbi::Scalar(t) => format!(
+            "match {expr} {{ Ok(v) => (v, None), Err(t) => ({}, cold_trap(t)) }}",
+            zero(t)?
+        ),
         RetAbi::Pair32(a, b) => {
             let lo = pack_u32_lane(a, "v0");
             let hi = pack_u32_lane(b, "v1");
-            format!("match {expr} {{ Ok((v0, v1)) => ((({lo}) | (({hi}) << 32)), None), Err(t) => (0u64, cold_trap(t)) }}")
+            format!(
+                "match {expr} {{ Ok((v0, v1)) => ((({lo}) | (({hi}) << 32)), None), Err(t) => (0u64, cold_trap(t)) }}"
+            )
         }
         RetAbi::Result => expr.to_string(),
     })
@@ -391,7 +467,9 @@ pub(crate) struct BitSet {
 
 impl BitSet {
     pub(crate) fn new(bits: usize) -> BitSet {
-        BitSet { words: vec![0; bits.div_ceil(64)] }
+        BitSet {
+            words: vec![0; bits.div_ceil(64)],
+        }
     }
     pub(crate) fn insert(&mut self, bit: u32) {
         let idx = (bit as usize) / 64;
@@ -401,7 +479,9 @@ impl BitSet {
         self.words[idx] |= 1u64 << (bit % 64);
     }
     pub(crate) fn contains(&self, bit: u32) -> bool {
-        self.words.get((bit as usize) / 64).is_some_and(|w| (w & (1u64 << (bit % 64))) != 0)
+        self.words
+            .get((bit as usize) / 64)
+            .is_some_and(|w| (w & (1u64 << (bit % 64))) != 0)
     }
     pub(crate) fn remove(&mut self, bit: u32) {
         if let Some(w) = self.words.get_mut((bit as usize) / 64) {
@@ -465,7 +545,10 @@ impl ConstVal {
 }
 
 /// Evaluates a Wasm constant expression if all referenced globals are known constants.
-pub(crate) fn eval_constant(expression: &[Instruction], consts: &[Option<ConstVal>]) -> Option<ConstVal> {
+pub(crate) fn eval_constant(
+    expression: &[Instruction],
+    consts: &[Option<ConstVal>],
+) -> Option<ConstVal> {
     let mut stack: Vec<ConstVal> = Vec::new();
     for i in expression {
         let value = match (i.opcode, &i.immediate) {
@@ -476,7 +559,8 @@ pub(crate) fn eval_constant(expression: &[Instruction], consts: &[Option<ConstVa
             (0x44, Immediate::F64(v)) => ConstVal::F64(*v),
             (0x23, Immediate::Index(g)) => (*consts.get(*g as usize)?)?,
             (op @ (0x6a..=0x6c), _) => {
-                let (Some(ConstVal::I32(b)), Some(ConstVal::I32(a))) = (stack.pop(), stack.pop()) else {
+                let (Some(ConstVal::I32(b)), Some(ConstVal::I32(a))) = (stack.pop(), stack.pop())
+                else {
                     return None;
                 };
                 ConstVal::I32(match op {
@@ -486,7 +570,8 @@ pub(crate) fn eval_constant(expression: &[Instruction], consts: &[Option<ConstVa
                 })
             }
             (op @ (0x7c..=0x7e), _) => {
-                let (Some(ConstVal::I64(b)), Some(ConstVal::I64(a))) = (stack.pop(), stack.pop()) else {
+                let (Some(ConstVal::I64(b)), Some(ConstVal::I64(a))) = (stack.pop(), stack.pop())
+                else {
                     return None;
                 };
                 ConstVal::I64(match op {
@@ -670,7 +755,11 @@ fn function_writes_only_same_global(
                 Immediate::Block(-5..=-1 | -16 | -17) | Immediate::BlockType(_) => Some(1),
                 Immediate::Block(n) if *n >= 0 => {
                     let ft = module_types.get(*n as usize)?;
-                    if ft.params.is_empty() { Some(ft.results.len()) } else { None }
+                    if ft.params.is_empty() {
+                        Some(ft.results.len())
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             }
@@ -679,7 +768,9 @@ fn function_writes_only_same_global(
             0x00 => frames.last_mut().unwrap().unreachable = true,
             0x01 => {}
             0x02 | 0x03 => {
-                let Some(results) = block_results(&i.immediate) else { return false };
+                let Some(results) = block_results(&i.immediate) else {
+                    return false;
+                };
                 if op == 0x03
                     && let Some(mods) = loop_mod_locals.get(&pc)
                 {
@@ -701,7 +792,9 @@ fn function_writes_only_same_global(
                 });
             }
             0x04 => {
-                let Some(results) = block_results(&i.immediate) else { return false };
+                let Some(results) = block_results(&i.immediate) else {
+                    return false;
+                };
                 if stack.pop().is_none() {
                     return false;
                 }
@@ -717,7 +810,9 @@ fn function_writes_only_same_global(
                 });
             }
             0x05 => {
-                let Some(frame) = frames.last_mut() else { return false };
+                let Some(frame) = frames.last_mut() else {
+                    return false;
+                };
                 if !frame.unreachable {
                     merge(frame, &locals);
                 }
@@ -728,7 +823,9 @@ fn function_writes_only_same_global(
                 dead = 0;
             }
             0x0b => {
-                let Some(mut frame) = frames.pop() else { return false };
+                let Some(mut frame) = frames.pop() else {
+                    return false;
+                };
                 if frame.kind == Kind::Function {
                     return true;
                 }
@@ -748,30 +845,42 @@ fn function_writes_only_same_global(
                 }
             }
             0x0c => {
-                let Immediate::Index(d) = i.immediate else { return false };
-                let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                let Immediate::Index(d) = i.immediate else {
+                    return false;
+                };
+                let Some(at) = frames.len().checked_sub(d as usize + 1) else {
+                    return false;
+                };
                 if matches!(frames[at].kind, Kind::Block | Kind::If) {
                     merge(&mut frames[at], &locals);
                 }
                 frames.last_mut().unwrap().unreachable = true;
             }
             0x0d => {
-                let Immediate::Index(d) = i.immediate else { return false };
+                let Immediate::Index(d) = i.immediate else {
+                    return false;
+                };
                 if stack.pop().is_none() {
                     return false;
                 }
-                let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                let Some(at) = frames.len().checked_sub(d as usize + 1) else {
+                    return false;
+                };
                 if matches!(frames[at].kind, Kind::Block | Kind::If) {
                     merge(&mut frames[at], &locals);
                 }
             }
             0x0e => {
-                let Immediate::BrTable(ref targets, default) = i.immediate else { return false };
+                let Immediate::BrTable(ref targets, default) = i.immediate else {
+                    return false;
+                };
                 if stack.pop().is_none() {
                     return false;
                 }
                 for &d in targets.iter().chain(std::iter::once(&default)) {
-                    let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                    let Some(at) = frames.len().checked_sub(d as usize + 1) else {
+                        return false;
+                    };
                     if matches!(frames[at].kind, Kind::Block | Kind::If) {
                         merge(&mut frames[at], &locals);
                     }
@@ -780,8 +889,12 @@ fn function_writes_only_same_global(
             }
             0x0f => frames.last_mut().unwrap().unreachable = true,
             0x10 => {
-                let Immediate::Index(f) = i.immediate else { return false };
-                let Some(ty) = types.get(f as usize) else { return false };
+                let Immediate::Index(f) = i.immediate else {
+                    return false;
+                };
+                let Some(ty) = types.get(f as usize) else {
+                    return false;
+                };
                 if stack.len() < ty.params.len() {
                     return false;
                 }
@@ -793,8 +906,12 @@ fn function_writes_only_same_global(
                 }
             }
             0x11 => {
-                let Immediate::Pair(ti, _) = i.immediate else { return false };
-                let Some(ty) = module_types.get(ti as usize) else { return false };
+                let Immediate::Pair(ti, _) = i.immediate else {
+                    return false;
+                };
+                let Some(ty) = module_types.get(ti as usize) else {
+                    return false;
+                };
                 if stack.len() < ty.params.len() + 1 {
                     return false;
                 }
@@ -816,28 +933,44 @@ fn function_writes_only_same_global(
                 stack.push(a && b);
             }
             0x20 => {
-                let Immediate::Index(x) = i.immediate else { return false };
-                let Some(&v) = locals.get(x as usize) else { return false };
+                let Immediate::Index(x) = i.immediate else {
+                    return false;
+                };
+                let Some(&v) = locals.get(x as usize) else {
+                    return false;
+                };
                 stack.push(v);
             }
             0x21 => {
-                let Immediate::Index(x) = i.immediate else { return false };
+                let Immediate::Index(x) = i.immediate else {
+                    return false;
+                };
                 let Some(v) = stack.pop() else { return false };
-                let Some(slot) = locals.get_mut(x as usize) else { return false };
+                let Some(slot) = locals.get_mut(x as usize) else {
+                    return false;
+                };
                 *slot = v;
             }
             0x22 => {
-                let Immediate::Index(x) = i.immediate else { return false };
+                let Immediate::Index(x) = i.immediate else {
+                    return false;
+                };
                 let Some(&v) = stack.last() else { return false };
-                let Some(slot) = locals.get_mut(x as usize) else { return false };
+                let Some(slot) = locals.get_mut(x as usize) else {
+                    return false;
+                };
                 *slot = v;
             }
             0x23 => {
-                let Immediate::Index(x) = i.immediate else { return false };
+                let Immediate::Index(x) = i.immediate else {
+                    return false;
+                };
                 stack.push(x == g);
             }
             0x24 => {
-                let Immediate::Index(x) = i.immediate else { return false };
+                let Immediate::Index(x) = i.immediate else {
+                    return false;
+                };
                 let Some(v) = stack.pop() else { return false };
                 if x == g && !v {
                     return false;
@@ -1297,10 +1430,10 @@ fn function_preserves_global_with_loops(
                 touches_g = true;
                 return;
             };
-            if ci_targets[ci_id]
-                .iter()
-                .any(|&(_, f)| !noreturn.get(f).copied().unwrap_or(false) && !callee_preserves.get(f).copied().unwrap_or(false))
-            {
+            if ci_targets[ci_id].iter().any(|&(_, f)| {
+                !noreturn.get(f).copied().unwrap_or(false)
+                    && !callee_preserves.get(f).copied().unwrap_or(false)
+            }) {
                 touches_g = true;
             }
         }
@@ -1382,7 +1515,11 @@ fn function_preserves_global_with_loops(
                     Immediate::Block(-5..=-1 | -16 | -17) | Immediate::BlockType(_) => Some(1),
                     Immediate::Block(n) if *n >= 0 => {
                         let ft = module_types.get(*n as usize)?;
-                        if ft.params.is_empty() { Some(ft.results.len()) } else { None }
+                        if ft.params.is_empty() {
+                            Some(ft.results.len())
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
                 }
@@ -1391,7 +1528,9 @@ fn function_preserves_global_with_loops(
                 0x00 => frames.last_mut().unwrap().unreachable = true,
                 0x01 => {}
                 0x02 | 0x03 => {
-                    let Some(results) = block_results(&i.immediate) else { return false };
+                    let Some(results) = block_results(&i.immediate) else {
+                        return false;
+                    };
                     if op == 0x03 {
                         if loop_not_invariant[pc] {
                             g_entry = false;
@@ -1418,7 +1557,9 @@ fn function_preserves_global_with_loops(
                     });
                 }
                 0x04 => {
-                    let Some(results) = block_results(&i.immediate) else { return false };
+                    let Some(results) = block_results(&i.immediate) else {
+                        return false;
+                    };
                     if stack.pop().is_none() {
                         return false;
                     }
@@ -1438,7 +1579,9 @@ fn function_preserves_global_with_loops(
                     });
                 }
                 0x05 => {
-                    let Some(frame) = frames.last_mut() else { return false };
+                    let Some(frame) = frames.last_mut() else {
+                        return false;
+                    };
                     if !frame.unreachable {
                         merge(frame, g_entry, &locals);
                     }
@@ -1450,7 +1593,9 @@ fn function_preserves_global_with_loops(
                     dead = 0;
                 }
                 0x0b => {
-                    let Some(mut frame) = frames.pop() else { return false };
+                    let Some(mut frame) = frames.pop() else {
+                        return false;
+                    };
                     if frame.kind == Kind::Function {
                         if !frame.unreachable && !g_entry {
                             return false;
@@ -1475,8 +1620,12 @@ fn function_preserves_global_with_loops(
                     }
                 }
                 0x0c => {
-                    let Immediate::Index(d) = i.immediate else { return false };
-                    let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                    let Immediate::Index(d) = i.immediate else {
+                        return false;
+                    };
+                    let Some(at) = frames.len().checked_sub(d as usize + 1) else {
+                        return false;
+                    };
                     match frames[at].kind {
                         Kind::Function => {
                             if !g_entry {
@@ -1485,7 +1634,8 @@ fn function_preserves_global_with_loops(
                         }
                         Kind::Block | Kind::If => merge(&mut frames[at], g_entry, &locals),
                         Kind::Loop => {
-                            if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc] {
+                            if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc]
+                            {
                                 loop_not_invariant[frames[at].pc] = true;
                                 retry = true;
                             }
@@ -1494,11 +1644,15 @@ fn function_preserves_global_with_loops(
                     frames.last_mut().unwrap().unreachable = true;
                 }
                 0x0d => {
-                    let Immediate::Index(d) = i.immediate else { return false };
+                    let Immediate::Index(d) = i.immediate else {
+                        return false;
+                    };
                     if stack.pop().is_none() {
                         return false;
                     }
-                    let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                    let Some(at) = frames.len().checked_sub(d as usize + 1) else {
+                        return false;
+                    };
                     match frames[at].kind {
                         Kind::Function => {
                             if !g_entry {
@@ -1507,7 +1661,8 @@ fn function_preserves_global_with_loops(
                         }
                         Kind::Block | Kind::If => merge(&mut frames[at], g_entry, &locals),
                         Kind::Loop => {
-                            if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc] {
+                            if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc]
+                            {
                                 loop_not_invariant[frames[at].pc] = true;
                                 retry = true;
                             }
@@ -1515,12 +1670,16 @@ fn function_preserves_global_with_loops(
                     }
                 }
                 0x0e => {
-                    let Immediate::BrTable(ref targets, default) = i.immediate else { return false };
+                    let Immediate::BrTable(ref targets, default) = i.immediate else {
+                        return false;
+                    };
                     if stack.pop().is_none() {
                         return false;
                     }
                     for &d in targets.iter().chain(std::iter::once(&default)) {
-                        let Some(at) = frames.len().checked_sub(d as usize + 1) else { return false };
+                        let Some(at) = frames.len().checked_sub(d as usize + 1) else {
+                            return false;
+                        };
                         match frames[at].kind {
                             Kind::Function => {
                                 if !g_entry {
@@ -1529,7 +1688,10 @@ fn function_preserves_global_with_loops(
                             }
                             Kind::Block | Kind::If => merge(&mut frames[at], g_entry, &locals),
                             Kind::Loop => {
-                                if frames[at].header_g && !g_entry && !loop_not_invariant[frames[at].pc] {
+                                if frames[at].header_g
+                                    && !g_entry
+                                    && !loop_not_invariant[frames[at].pc]
+                                {
                                     loop_not_invariant[frames[at].pc] = true;
                                     retry = true;
                                 }
@@ -1545,8 +1707,12 @@ fn function_preserves_global_with_loops(
                     frames.last_mut().unwrap().unreachable = true;
                 }
                 0x10 => {
-                    let Immediate::Index(f) = i.immediate else { return false };
-                    let Some(ty) = types.get(f as usize) else { return false };
+                    let Immediate::Index(f) = i.immediate else {
+                        return false;
+                    };
+                    let Some(ty) = types.get(f as usize) else {
+                        return false;
+                    };
                     if stack.len() < ty.params.len() {
                         return false;
                     }
@@ -1561,15 +1727,22 @@ fn function_preserves_global_with_loops(
                     }
                 }
                 0x11 => {
-                    let Immediate::Pair(ti, tbl) = i.immediate else { return false };
-                    let Some(ty) = module_types.get(ti as usize) else { return false };
-                    let Some(&ci_id) = ci_index.get(&(tbl, ti)) else { return false };
+                    let Immediate::Pair(ti, tbl) = i.immediate else {
+                        return false;
+                    };
+                    let Some(ty) = module_types.get(ti as usize) else {
+                        return false;
+                    };
+                    let Some(&ci_id) = ci_index.get(&(tbl, ti)) else {
+                        return false;
+                    };
                     if stack.len() < ty.params.len() + 1 {
                         return false;
                     }
                     stack.truncate(stack.len() - (ty.params.len() + 1));
                     if ci_targets[ci_id].iter().any(|&(_, f)| {
-                        !noreturn.get(f).copied().unwrap_or(false) && !callee_preserves.get(f).copied().unwrap_or(false)
+                        !noreturn.get(f).copied().unwrap_or(false)
+                            && !callee_preserves.get(f).copied().unwrap_or(false)
                     }) {
                         g_entry = false;
                     }
@@ -1590,14 +1763,18 @@ fn function_preserves_global_with_loops(
                     stack.push(a && b);
                 }
                 0x20 => {
-                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Immediate::Index(x) = i.immediate else {
+                        return false;
+                    };
                     if (x as usize) >= n_locals {
                         return false;
                     }
                     stack.push(locals.contains(x));
                 }
                 0x21 => {
-                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Immediate::Index(x) = i.immediate else {
+                        return false;
+                    };
                     let Some(v) = stack.pop() else { return false };
                     if (x as usize) >= n_locals {
                         return false;
@@ -1605,7 +1782,9 @@ fn function_preserves_global_with_loops(
                     locals.set(x, v);
                 }
                 0x22 => {
-                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Immediate::Index(x) = i.immediate else {
+                        return false;
+                    };
                     let Some(&v) = stack.last() else { return false };
                     if (x as usize) >= n_locals {
                         return false;
@@ -1613,11 +1792,15 @@ fn function_preserves_global_with_loops(
                     locals.set(x, v);
                 }
                 0x23 => {
-                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Immediate::Index(x) = i.immediate else {
+                        return false;
+                    };
                     stack.push(x == g && g_entry);
                 }
                 0x24 => {
-                    let Immediate::Index(x) = i.immediate else { return false };
+                    let Immediate::Index(x) = i.immediate else {
+                        return false;
+                    };
                     let Some(v) = stack.pop() else { return false };
                     if x == g {
                         g_entry = v;
@@ -1851,7 +2034,12 @@ impl Module {
                     types.push(m.types[t.0 as usize].clone());
                     imports.push((import.module.clone(), import.name.clone()));
                 }
-                _ => return Err(format!("import {:?}.{:?} is not a function", import.module, import.name)),
+                _ => {
+                    return Err(format!(
+                        "import {:?}.{:?} is not a function",
+                        import.module, import.name
+                    ));
+                }
             }
         }
         for t in &m.functions {
@@ -1865,11 +2053,17 @@ impl Module {
         if m.memories.len() > 1 {
             return Err("more than one memory is not supported".into());
         }
-        let memory64 = m.memories.first().is_some_and(|mt| mt.index_type == wtime_types::IndexType::I64);
+        let memory64 = m
+            .memories
+            .first()
+            .is_some_and(|mt| mt.index_type == wtime_types::IndexType::I64);
         if target == Target::BlotCdylib && memory64 {
             return Err("Blot cdylib target does not support memory64".into());
         }
-        if m.memories.first().is_some_and(|mt| mt.page_size_log2 != 16 || mt.shared) {
+        if m.memories
+            .first()
+            .is_some_and(|mt| mt.page_size_log2 != 16 || mt.shared)
+        {
             return Err("custom page sizes and shared memories are not supported".into());
         }
         let flat64 = flat64_req && memory64;
@@ -1886,7 +2080,9 @@ impl Module {
         let cap64 = if flat64 {
             m.memories.first().and_then(|mt| {
                 let max_pages = mt.limits.max.unwrap_or(1 << 20).min(1 << 20);
-                max_pages.checked_mul(65536).and_then(|b| usize::try_from(b).ok())
+                max_pages
+                    .checked_mul(65536)
+                    .and_then(|b| usize::try_from(b).ok())
             })
         } else {
             None
@@ -1947,39 +2143,43 @@ impl Module {
 
         // Scan live instructions for global writes, table ops, and call_indirect sites.
         let mut global_written = vec![false; n_globals];
-        let mut direct_global_reads: Vec<BitSet> = (0..m.code.len()).map(|_| BitSet::new(n_globals)).collect();
-        let mut direct_global_writes: Vec<BitSet> = (0..m.code.len()).map(|_| BitSet::new(n_globals)).collect();
+        let mut direct_global_reads: Vec<BitSet> =
+            (0..m.code.len()).map(|_| BitSet::new(n_globals)).collect();
+        let mut direct_global_writes: Vec<BitSet> =
+            (0..m.code.len()).map(|_| BitSet::new(n_globals)).collect();
         let mut mutated_tables = BTreeSet::new();
         let mut read_tables = BTreeSet::new();
         let mut ci_set = BTreeSet::new();
         for (fi, body) in m.code.iter().enumerate() {
-            visit_live(&body.instructions, &noreturn_imports, |i| match (i.opcode, &i.immediate) {
-                (0x23, Immediate::Index(x)) => {
-                    if (*x as usize) < n_globals {
-                        direct_global_reads[fi].insert(*x);
+            visit_live(&body.instructions, &noreturn_imports, |i| {
+                match (i.opcode, &i.immediate) {
+                    (0x23, Immediate::Index(x)) => {
+                        if (*x as usize) < n_globals {
+                            direct_global_reads[fi].insert(*x);
+                        }
                     }
-                }
-                (0x24, Immediate::Index(x)) => {
-                    if let Some(w) = global_written.get_mut(*x as usize) {
-                        *w = true;
-                        direct_global_writes[fi].insert(*x);
+                    (0x24, Immediate::Index(x)) => {
+                        if let Some(w) = global_written.get_mut(*x as usize) {
+                            *w = true;
+                            direct_global_writes[fi].insert(*x);
+                        }
                     }
+                    (0x11, Immediate::Pair(ti, tbl)) => {
+                        ci_set.insert((*tbl, *ti));
+                    }
+                    (0x25, Immediate::Index(tbl)) => {
+                        read_tables.insert(*tbl);
+                    }
+                    (0x26, Immediate::Index(tbl)) => {
+                        mutated_tables.insert(*tbl);
+                    }
+                    (0xfc0c, Immediate::Pair(_, tbl))
+                    | (0xfc0e, Immediate::Pair(tbl, _))
+                    | (0xfc0f | 0xfc11, Immediate::Index(tbl)) => {
+                        mutated_tables.insert(*tbl);
+                    }
+                    _ => {}
                 }
-                (0x11, Immediate::Pair(ti, tbl)) => {
-                    ci_set.insert((*tbl, *ti));
-                }
-                (0x25, Immediate::Index(tbl)) => {
-                    read_tables.insert(*tbl);
-                }
-                (0x26, Immediate::Index(tbl)) => {
-                    mutated_tables.insert(*tbl);
-                }
-                (0xfc0c, Immediate::Pair(_, tbl))
-                | (0xfc0e, Immediate::Pair(tbl, _))
-                | (0xfc0f | 0xfc11, Immediate::Index(tbl)) => {
-                    mutated_tables.insert(*tbl);
-                }
-                _ => {}
             });
         }
 
@@ -2023,7 +2223,8 @@ impl Module {
         let mut globals = Vec::new();
         let mut globals_mutable = Vec::new();
         for (k, g) in m.globals.iter().enumerate() {
-            let init = constant(&g.init, k, "", &global_consts).map_err(|e| format!("global {k}: {e}"))?;
+            let init =
+                constant(&g.init, k, "", &global_consts).map_err(|e| format!("global {k}: {e}"))?;
             globals.push((g.ty.value, init));
             globals_mutable.push(g.ty.mutable && global_consts[k].is_none());
             rust_type(g.ty.value)?;
@@ -2044,14 +2245,19 @@ impl Module {
                 return Err(format!("table {ti}: 64-bit tables are not supported"));
             }
             match tbl.element.heap {
-                HeapType::Func if !mutated_tables.contains(&ti_u32) && !read_tables.contains(&ti_u32) => {
-                    let len = usize::try_from(tbl.limits.min).map_err(|_| format!("table {ti} too large"))?;
+                HeapType::Func
+                    if !mutated_tables.contains(&ti_u32) && !read_tables.contains(&ti_u32) =>
+                {
+                    let len = usize::try_from(tbl.limits.min)
+                        .map_err(|_| format!("table {ti} too large"))?;
                     static_func_tables.insert(ti_u32, len);
                     static_func_slots.insert(ti_u32, vec![None; len]);
                 }
                 HeapType::Extern | HeapType::NoExtern if !used_by_ci => {
                     if tbl.limits.max != Some(tbl.limits.min) || tbl.limits.min > 4096 {
-                        return Err(format!("table {ti}: only fixed-size externref tables up to 4096 entries are supported"));
+                        return Err(format!(
+                            "table {ti}: only fixed-size externref tables up to 4096 entries are supported"
+                        ));
                     }
                     mut_extern_tables.insert(ti_u32, tbl.limits.min as usize);
                 }
@@ -2063,10 +2269,15 @@ impl Module {
                 && let Some(slots) = static_func_slots.get_mut(index)
             {
                 let Some(ConstVal::I32(off)) = eval_constant(offset, &global_consts) else {
-                    return Err(format!("element segment for table {index} has non-constant offset"));
+                    return Err(format!(
+                        "element segment for table {index} has non-constant offset"
+                    ));
                 };
                 let off = off as u32 as usize;
-                if off.checked_add(elem.init.len()).is_none_or(|end| end > slots.len()) {
+                if off
+                    .checked_add(elem.init.len())
+                    .is_none_or(|end| end > slots.len())
+                {
                     // Runtime check in `initialize` will trap with TableOutOfBounds; skip static fill.
                     continue;
                 }
@@ -2080,7 +2291,11 @@ impl Module {
                         [i, end] if i.opcode == 0xd0 && end.opcode == 0x0b => {
                             slots[off + k] = None;
                         }
-                        _ => return Err(format!("element segment for table {index} has unsupported item")),
+                        _ => {
+                            return Err(format!(
+                                "element segment for table {index} has unsupported item"
+                            ));
+                        }
                     }
                 }
             }
@@ -2092,7 +2307,9 @@ impl Module {
             let slots = static_func_slots
                 .get(&tbl)
                 .ok_or_else(|| format!("call_indirect on unsupported table {tbl}"))?;
-            let want = module_types.get(ti as usize).ok_or_else(|| format!("call_indirect bad type {ti}"))?;
+            let want = module_types
+                .get(ti as usize)
+                .ok_or_else(|| format!("call_indirect bad type {ti}"))?;
             let id = ci_sigs.len();
             ci_sigs.push((tbl, ti));
             ci_index.insert((tbl, ti), id);
@@ -2108,7 +2325,10 @@ impl Module {
         }
 
         let export = |name: &str| {
-            m.exports.iter().find(|e| e.name == name && e.kind == ExternalKind::Func).map(|e| e.index)
+            m.exports
+                .iter()
+                .find(|e| e.name == name && e.kind == ExternalKind::Func)
+                .map(|e| e.index)
         };
         let start = m.start.map(|f| f.0);
         let entry = export("_start");
@@ -2155,46 +2375,52 @@ impl Module {
         for (k, body) in m.code.iter().enumerate() {
             let f = n_imports + k;
             let mut seen_g = BitSet::new(n_globals);
-            visit_live(&body.instructions, &noreturn_imports, |i| match (i.opcode, &i.immediate) {
-                (0x03, _) => {
-                    fn_has_loops[f] = true;
-                }
-                (0x10, Immediate::Index(callee)) => {
-                    let c = *callee as usize;
-                    if c < n_funcs && !noreturn_imports[c] {
-                        fn_has_calls[f] = true;
-                        fn_callers[c] += 1;
-                        fn_direct_callers[c] += 1;
-                        if !edges[f].contains(&c) {
-                            edges[f].push(c);
+            visit_live(&body.instructions, &noreturn_imports, |i| {
+                match (i.opcode, &i.immediate) {
+                    (0x03, _) => {
+                        fn_has_loops[f] = true;
+                    }
+                    (0x10, Immediate::Index(callee)) => {
+                        let c = *callee as usize;
+                        if c < n_funcs && !noreturn_imports[c] {
+                            fn_has_calls[f] = true;
+                            fn_callers[c] += 1;
+                            fn_direct_callers[c] += 1;
+                            if !edges[f].contains(&c) {
+                                edges[f].push(c);
+                            }
                         }
                     }
-                }
-                (0x11, Immediate::Pair(ti, tbl)) => {
-                    fn_has_calls[f] = true;
-                    if let Some(&ci_id) = ci_index.get(&(*tbl, *ti)) {
-                        for &(_, c) in &ci_targets[ci_id] {
-                            if c < n_funcs && !noreturn_imports[c] {
-                                fn_callers[c] += 2;
-                                if !edges[f].contains(&c) {
-                                    edges[f].push(c);
+                    (0x11, Immediate::Pair(ti, tbl)) => {
+                        fn_has_calls[f] = true;
+                        if let Some(&ci_id) = ci_index.get(&(*tbl, *ti)) {
+                            for &(_, c) in &ci_targets[ci_id] {
+                                if c < n_funcs && !noreturn_imports[c] {
+                                    fn_callers[c] += 2;
+                                    if !edges[f].contains(&c) {
+                                        edges[f].push(c);
+                                    }
                                 }
                             }
                         }
                     }
+                    (0x23, Immediate::Index(x))
+                        if (*x as usize) < n_globals && global_consts[*x as usize].is_none() =>
+                    {
+                        fn_reads[f].insert(*x);
+                        seen_g.insert(*x);
+                    }
+                    (0x24, Immediate::Index(x))
+                        if (*x as usize) < n_globals && global_consts[*x as usize].is_none() =>
+                    {
+                        fn_writes[f].insert(*x);
+                        seen_g.insert(*x);
+                    }
+                    (0x40, _) if !fixed_mem => {
+                        fn_may_grow[f] = true;
+                    }
+                    _ => {}
                 }
-                (0x23, Immediate::Index(x)) if (*x as usize) < n_globals && global_consts[*x as usize].is_none() => {
-                    fn_reads[f].insert(*x);
-                    seen_g.insert(*x);
-                }
-                (0x24, Immediate::Index(x)) if (*x as usize) < n_globals && global_consts[*x as usize].is_none() => {
-                    fn_writes[f].insert(*x);
-                    seen_g.insert(*x);
-                }
-                (0x40, _) if !fixed_mem => {
-                    fn_may_grow[f] = true;
-                }
-                _ => {}
             });
             for (g, count) in global_use_fns.iter_mut().enumerate() {
                 if seen_g.contains(g as u32) {
@@ -2284,7 +2510,11 @@ impl Module {
             let total_l = own_locals.saturating_add(max_l);
             let total_i = own_insns.saturating_add(max_i);
             let total_d = 1usize.saturating_add(max_d);
-            if ok && total_l <= LEAF_LOCALS && total_i <= LEAF_INSTRUCTIONS && total_d <= LEAF_CHAIN_DEPTH {
+            if ok
+                && total_l <= LEAF_LOCALS
+                && total_i <= LEAF_INSTRUCTIONS
+                && total_d <= LEAF_CHAIN_DEPTH
+            {
                 fn_no_stack_check[u] = true;
                 chain_locals[u] = total_l;
                 chain_insns[u] = total_i;
@@ -2348,7 +2578,13 @@ impl Module {
                     let body = &m.code[fi];
                     if !writes_here {
                         let exit_callees = normal_exit_cache[fi].get_or_insert_with(|| {
-                            compute_normal_exit_callees(&body.instructions, n_funcs, &ci_index, &ci_targets, &noreturn_imports)
+                            compute_normal_exit_callees(
+                                &body.instructions,
+                                n_funcs,
+                                &ci_index,
+                                &ci_targets,
+                                &noreturn_imports,
+                            )
                         });
                         if exit_callees.iter().any(|&v| !preserves[v]) {
                             preserves[f] = false;
@@ -2356,7 +2592,8 @@ impl Module {
                         }
                         continue;
                     }
-                    let loop_mods = loop_mod_cache[fi].get_or_insert_with(|| compute_loop_mod_locals(&body.instructions));
+                    let loop_mods = loop_mod_cache[fi]
+                        .get_or_insert_with(|| compute_loop_mod_locals(&body.instructions));
                     let n_locals = types[f].params.len() + body.locals.len();
                     if !function_preserves_global_with_loops(
                         &body.instructions,
@@ -2456,7 +2693,10 @@ impl Module {
             exported_funcs,
             exported_globals,
             // The host uses the memory exported as `memory`, as wtime-goose does.
-            memory_exported: m.exports.iter().any(|e| e.kind == ExternalKind::Memory && e.name == "memory"),
+            memory_exported: m
+                .exports
+                .iter()
+                .any(|e| e.kind == ExternalKind::Memory && e.name == "memory"),
             flat64,
             fixed32,
             fixed64,
@@ -2505,7 +2745,11 @@ impl Module {
         for (i, t) in ty.params.iter().enumerate() {
             params.push(format!("p{i}: {}", rust_type(*t)?));
         }
-        Ok(format!("({}) -> {}", params.join(", "), fn_return_type(&ty.results)?))
+        Ok(format!(
+            "({}) -> {}",
+            params.join(", "),
+            fn_return_type(&ty.results)?
+        ))
     }
 
     /// Preserved register-passed globals needed by defined function `f`.
@@ -2531,7 +2775,11 @@ impl Module {
         for (i, t) in ty.params.iter().enumerate() {
             params.push(format!("p{i}: {}", rust_type(*t)?));
         }
-        Ok(format!("({}) -> {}", params.join(", "), fn_return_type(&ty.results)?))
+        Ok(format!(
+            "({}) -> {}",
+            params.join(", "),
+            fn_return_type(&ty.results)?
+        ))
     }
 
     /// The signature of host import `k` on `Ctx`.
@@ -2544,7 +2792,11 @@ impl Module {
         if self.noreturn_imports[k] {
             Ok(format!("({}) -> Trap", params.join(", ")))
         } else {
-            Ok(format!("({}) -> R<{}>", params.join(", "), result_type(&ty.results)?))
+            Ok(format!(
+                "({}) -> R<{}>",
+                params.join(", "),
+                result_type(&ty.results)?
+            ))
         }
     }
 
@@ -2580,13 +2832,19 @@ impl Module {
         }
         if self.target == Target::BlotCdylib {
             s.push_str("    pub host_ctx: usize,\n");
+            s.push_str("    pub in_call: bool,\n");
+            s.push_str("    pub host_mxcsr: u32,\n");
             writeln!(
                 s,
                 "    pub host_call: fn(&mut Ctx, {}, u32, u64, u64) -> R<u64>,\n}}\n",
                 self.mb_type()
             )
             .unwrap();
-            writeln!(s, "pub struct Instance {{\n    pub ctx: Ctx,\n    pub mem: Box<[u8; CAP32]>,\n}}\n").unwrap();
+            writeln!(
+                s,
+                "pub struct Instance {{\n    pub ctx: Ctx,\n    pub mem: Box<[u8; CAP32]>,\n}}\n"
+            )
+            .unwrap();
             s.push_str("impl Ctx {\n");
             for (k, (module, name)) in self.imports.iter().enumerate() {
                 let ty = &self.types[k];
@@ -2595,12 +2853,24 @@ impl Module {
                     [ValType::Ref(_)] => ("p0".to_string(), "0u64".to_string()),
                     [ValType::I32] => ("0u64".to_string(), "(p0 as u32 as u64)".to_string()),
                     [ValType::F32] => ("0u64".to_string(), "(p0.to_bits() as u64)".to_string()),
-                    [ValType::Ref(_), ValType::I32] => ("p0".to_string(), "(p1 as u32 as u64)".to_string()),
-                    [ValType::Ref(_), ValType::F32] => ("p0".to_string(), "(p1.to_bits() as u64)".to_string()),
-                    [ValType::Ref(_), ValType::I64] => ("p0".to_string(), "(p1 as u64)".to_string()),
-                    [ValType::Ref(_), ValType::F64] => ("p0".to_string(), "p1.to_bits()".to_string()),
+                    [ValType::Ref(_), ValType::I32] => {
+                        ("p0".to_string(), "(p1 as u32 as u64)".to_string())
+                    }
+                    [ValType::Ref(_), ValType::F32] => {
+                        ("p0".to_string(), "(p1.to_bits() as u64)".to_string())
+                    }
+                    [ValType::Ref(_), ValType::I64] => {
+                        ("p0".to_string(), "(p1 as u64)".to_string())
+                    }
+                    [ValType::Ref(_), ValType::F64] => {
+                        ("p0".to_string(), "p1.to_bits()".to_string())
+                    }
                     [ValType::Ref(_), ValType::Ref(_)] => ("p0".to_string(), "p1".to_string()),
-                    _ => return Err(format!("Blot import {module:?}.{name:?} has unsupported params")),
+                    _ => {
+                        return Err(format!(
+                            "Blot import {module:?}.{name:?} has unsupported params"
+                        ));
+                    }
                 };
                 let ret_expr = match ty.results.as_slice() {
                     [] => "let _ = res; Ok(())".to_string(),
@@ -2609,7 +2879,11 @@ impl Module {
                     [ValType::F32] => "Ok(f32::from_bits(res as u32))".to_string(),
                     [ValType::F64] => "Ok(f64::from_bits(res))".to_string(),
                     [ValType::Ref(_)] => "Ok(res)".to_string(),
-                    _ => return Err(format!("Blot import {module:?}.{name:?} has unsupported results")),
+                    _ => {
+                        return Err(format!(
+                            "Blot import {module:?}.{name:?} has unsupported results"
+                        ));
+                    }
                 };
                 writeln!(
                     s,
@@ -2628,7 +2902,12 @@ impl Module {
                 self.mb_type()
             )
             .unwrap();
-            writeln!(s, "    pub imports: [goose::Handler; {}],", self.imports.len()).unwrap();
+            writeln!(
+                s,
+                "    pub imports: [goose::Handler; {}],",
+                self.imports.len()
+            )
+            .unwrap();
             s.push_str("    pub state: goose::State,\n}\n\n");
 
             // Top-level Instance owning both Ctx and the disjoint memory buffer.
@@ -2715,7 +2994,11 @@ impl Module {
                             ValType::I64 => format!("Val::I64(p{i})"),
                             ValType::F32 => format!("Val::F32(p{i})"),
                             ValType::F64 => format!("Val::F64(p{i})"),
-                            _ => return Err(format!("import {module:?}.{name:?} takes an unsupported type")),
+                            _ => {
+                                return Err(format!(
+                                    "import {module:?}.{name:?} takes an unsupported type"
+                                ));
+                            }
                         })
                     })
                     .collect::<Res<_>>()?;
@@ -2725,9 +3008,17 @@ impl Module {
                     [ValType::I64] => "i64",
                     [ValType::F32] => "f32",
                     [ValType::F64] => "f64",
-                    _ => return Err(format!("import {module:?}.{name:?} has unsupported results")),
+                    _ => {
+                        return Err(format!(
+                            "import {module:?}.{name:?} has unsupported results"
+                        ));
+                    }
                 };
-                let cold = if self.noreturn_imports[k] { "    #[cold]\n" } else { "" };
+                let cold = if self.noreturn_imports[k] {
+                    "    #[cold]\n"
+                } else {
+                    ""
+                };
                 let (mk_view, restore) = if !self.memory64 {
                     (
                         "let mut view = HostView { mem: Mem32Host { bytes: mb, meta: self.mem }, ctx: self };",
@@ -2800,7 +3091,10 @@ impl Module {
             let ty = &self.module_types[ti as usize];
             let ret_ty = fn_return_type(&ty.results)?;
             let mut fn_param_tys = vec!["&mut Ctx".to_string(), self.mb_type().to_string()];
-            let mut fn_params_named = vec!["ctx: &mut Ctx".to_string(), format!("mb: {}", self.mb_type())];
+            let mut fn_params_named = vec![
+                "ctx: &mut Ctx".to_string(),
+                format!("mb: {}", self.mb_type()),
+            ];
             for &g in &self.ci_reg_globals[ci_id] {
                 let rt = rust_type(self.globals[g as usize].0)?;
                 fn_param_tys.push(rt.to_string());
@@ -2811,11 +3105,18 @@ impl Module {
                 fn_param_tys.push(rt.to_string());
                 fn_params_named.push(format!("p{i}: {rt}"));
             }
-            writeln!(s, "type Ci{ci_id}Fn = fn({}) -> {ret_ty};", fn_param_tys.join(", ")).unwrap();
+            writeln!(
+                s,
+                "type Ci{ci_id}Fn = fn({}) -> {ret_ty};",
+                fn_param_tys.join(", ")
+            )
+            .unwrap();
             let mut entries: Vec<(usize, String)> = Vec::with_capacity(targets.len());
             let mut emitted_wrappers: BTreeMap<usize, String> = BTreeMap::new();
             for &(slot, f) in targets {
-                let fn_expr = if f >= self.imports.len() && self.fn_reg_globals(f) == self.ci_reg_globals[ci_id] {
+                let fn_expr = if f >= self.imports.len()
+                    && self.fn_reg_globals(f) == self.ci_reg_globals[ci_id]
+                {
                     format!("{}::<Marker>", paths[f])
                 } else if let Some(w) = emitted_wrappers.get(&f) {
                     w.clone()
@@ -2827,9 +3128,15 @@ impl Module {
                             a.push(format!("p{i}"));
                         }
                         if self.noreturn_imports[f] {
-                            ret_err_expr(ret_abi(&ty.results), &format!("ctx.import{f}({})", a.join(", ")))?
+                            ret_err_expr(
+                                ret_abi(&ty.results),
+                                &format!("ctx.import{f}({})", a.join(", ")),
+                            )?
                         } else {
-                            result_to_ret_abi(&ty.results, &format!("ctx.import{f}({})", a.join(", ")))?
+                            result_to_ret_abi(
+                                &ty.results,
+                                &format!("ctx.import{f}({})", a.join(", ")),
+                            )?
                         }
                     } else {
                         let mut a = vec!["ctx".to_string(), "mb".to_string()];
@@ -2841,14 +3148,27 @@ impl Module {
                         }
                         format!("{}::<Marker>({})", paths[f], a.join(", "))
                     };
-                    writeln!(s, "fn {wname}({}) -> {ret_ty} {{ {call_body} }}", fn_params_named.join(", ")).unwrap();
+                    writeln!(
+                        s,
+                        "fn {wname}({}) -> {ret_ty} {{ {call_body} }}",
+                        fn_params_named.join(", ")
+                    )
+                    .unwrap();
                     emitted_wrappers.insert(f, wname.clone());
                     wname
                 };
                 entries.push((slot as usize - min_slot, fn_expr));
             }
-            writeln!(s, "static CI{ci_id}_TBL: [Option<Ci{ci_id}Fn>; {span}] = {{").unwrap();
-            writeln!(s, "    let mut t: [Option<Ci{ci_id}Fn>; {span}] = [None; {span}];").unwrap();
+            writeln!(
+                s,
+                "static CI{ci_id}_TBL: [Option<Ci{ci_id}Fn>; {span}] = {{"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "    let mut t: [Option<Ci{ci_id}Fn>; {span}] = [None; {span}];"
+            )
+            .unwrap();
             for (rel_slot, fn_expr) in entries {
                 writeln!(s, "    t[{rel_slot}] = Some({fn_expr});").unwrap();
             }
@@ -2864,8 +3184,18 @@ impl Module {
             for i in 0..self.types[f].params.len() {
                 all.push(format!("p{i}"));
             }
-            let attr = if self.fn_inline_always(f) { "#[inline(always)]" } else { "#[inline]" };
-            writeln!(s, "    {attr}\n    fn f{f}{} {{ {path}::<Marker>({}) }}", self.fn_signature(f, "&mut self")?, all.join(", ")).unwrap();
+            let attr = if self.fn_inline_always(f) {
+                "#[inline(always)]"
+            } else {
+                "#[inline]"
+            };
+            writeln!(
+                s,
+                "    {attr}\n    fn f{f}{} {{ {path}::<Marker>({}) }}",
+                self.fn_signature(f, "&mut self")?,
+                all.join(", ")
+            )
+            .unwrap();
         }
         for ci_id in 0..self.ci_sigs.len() {
             let (tbl, ti) = self.ci_sigs[ci_id];
@@ -2898,7 +3228,11 @@ impl Module {
                 .unwrap();
                 continue;
             }
-            let attr = if targets.len() <= 2 { "#[inline(always)]\n    " } else { "#[inline]\n    " };
+            let attr = if targets.len() <= 2 {
+                "#[inline(always)]\n    "
+            } else {
+                "#[inline]\n    "
+            };
             writeln!(s, "    {attr}fn ci{ci_id}{} {{", self.ci_signature(ci_id)?).unwrap();
             if targets.is_empty() {
                 writeln!(s, "        if (idx as u32 as usize) >= {tlen} {{ {oob_err} }} else {{ {bad_sig_err} }}\n    }}").unwrap();
@@ -2913,7 +3247,10 @@ impl Module {
                         if self.noreturn_imports[f] {
                             ret_err_expr(abi, &format!("self.import{f}({})", a.join(", ")))?
                         } else {
-                            result_to_ret_abi(&ty.results, &format!("self.import{f}({})", a.join(", ")))?
+                            result_to_ret_abi(
+                                &ty.results,
+                                &format!("self.import{f}({})", a.join(", ")),
+                            )?
                         }
                     } else {
                         let mut a = vec!["self".to_string(), "mb".to_string()];
@@ -2958,11 +3295,15 @@ impl Module {
             let raw = format!("ctx.f{f}({})", a.join(", "));
             match ret_abi(&self.types[f].results) {
                 RetAbi::Void => format!("match {raw} {{ None => Ok(()), Some(t) => Err(t) }}"),
-                RetAbi::Scalar(_) => format!("match {raw} {{ (v, None) => Ok(v), (_, Some(t)) => Err(t) }}"),
+                RetAbi::Scalar(_) => {
+                    format!("match {raw} {{ (v, None) => Ok(v), (_, Some(t)) => Err(t) }}")
+                }
                 RetAbi::Pair32(t0, t1) => {
                     let v0 = unpack_u32_lane(t0, "p as u32");
                     let v1 = unpack_u32_lane(t1, "(p >> 32) as u32");
-                    format!("match {raw} {{ (p, None) => Ok(({v0}, {v1})), (_, Some(t)) => Err(t) }}")
+                    format!(
+                        "match {raw} {{ (p, None) => Ok(({v0}, {v1})), (_, Some(t)) => Err(t) }}"
+                    )
                 }
                 RetAbi::Result => raw,
             }
@@ -2971,10 +3312,18 @@ impl Module {
 
     /// Emits `fn initialize(ctx, mb) -> R<()>` (active elements, active data, start).
     fn emit_initialize(&self, m: &DecodedModule, s: &mut String, data: &mut Vec<u8>) -> Res<()> {
-        writeln!(s, "fn initialize(ctx: &mut Ctx, mb: {}) -> R<()> {{", self.mb_type()).unwrap();
+        writeln!(
+            s,
+            "fn initialize(ctx: &mut Ctx, mb: {}) -> R<()> {{",
+            self.mb_type()
+        )
+        .unwrap();
         for element in &m.elements {
             if let SegmentMode::Active { index, offset } = &element.mode {
-                let table = m.tables.get(*index as usize).ok_or("element segment for an imported table")?;
+                let table = m
+                    .tables
+                    .get(*index as usize)
+                    .ok_or("element segment for an imported table")?;
                 let offset = constant(offset, self.globals.len(), "ctx.", &self.global_consts)?;
                 let offset = if table.index_type == wtime_types::IndexType::I64 {
                     format!("({offset}) as u64")
@@ -2997,11 +3346,21 @@ impl Module {
             match &segment.mode {
                 SegmentMode::Active { index: 0, offset } => {
                     let offset = constant(offset, self.globals.len(), "ctx.", &self.global_consts)?;
-                    let address = if self.memory64 { format!("({offset}) as u64") } else { format!("({offset}) as u32 as u64") };
+                    let address = if self.memory64 {
+                        format!("({offset}) as u64")
+                    } else {
+                        format!("({offset}) as u32 as u64")
+                    };
                     if self.memory64 {
                         writeln!(s, "    init_parts(mb, &mut ctx.outer, {address}, &DATA[{at}..{}], 0, {})?;", at + bytes.len(), bytes.len()).unwrap();
                     } else {
-                        writeln!(s, "    ctx.mem.init(mb, {address}, &DATA[{at}..{}], 0, {})?;", at + bytes.len(), bytes.len()).unwrap();
+                        writeln!(
+                            s,
+                            "    ctx.mem.init(mb, {address}, &DATA[{at}..{}], 0, {})?;",
+                            at + bytes.len(),
+                            bytes.len()
+                        )
+                        .unwrap();
                     }
                 }
                 SegmentMode::Passive => {}
@@ -3017,7 +3376,14 @@ impl Module {
 
     /// The program crate's main.rs: `Fns` for its marker, instantiation and
     /// `main`. `paths[f]` is the path of defined function `f`.
-    fn main(&self, m: &DecodedModule, data: &mut Vec<u8>, module_path: &str, core: &str, paths: &[String]) -> Res<String> {
+    fn main(
+        &self,
+        m: &DecodedModule,
+        data: &mut Vec<u8>,
+        module_path: &str,
+        core: &str,
+        paths: &[String],
+    ) -> Res<String> {
         let mut s = String::new();
         s.push_str("// Generated by wtime-aot. Do not edit.\n#![forbid(unsafe_code)]\n#![allow(unused, non_snake_case, unreachable_code, unused_parens, clippy::all)]\n\n");
         writeln!(s, "use {core}::*;\n").unwrap();
@@ -3028,14 +3394,29 @@ impl Module {
         s.push_str("fn instantiate(state: &mut goose::State) -> R<Instance> {\n");
         match m.memories.first() {
             Some(mt) if self.memory64 && self.cap64.is_some() => {
-                writeln!(s, "    let outer = Outer::new_flat_meta({}, {:?}, CAP64)?;", mt.limits.min, mt.limits.max).unwrap();
+                writeln!(
+                    s,
+                    "    let outer = Outer::new_flat_meta({}, {:?}, CAP64)?;",
+                    mt.limits.min, mt.limits.max
+                )
+                .unwrap();
                 s.push_str("    let mem = alloc64::<CAP64>()?;\n");
             }
             Some(mt) if self.memory64 => {
-                writeln!(s, "    let (mem, outer) = Memory::new_parts({}, {:?}, true, {})?;", mt.limits.min, mt.limits.max, self.flat64).unwrap();
+                writeln!(
+                    s,
+                    "    let (mem, outer) = Memory::new_parts({}, {:?}, true, {})?;",
+                    mt.limits.min, mt.limits.max, self.flat64
+                )
+                .unwrap();
             }
             Some(mt) => {
-                writeln!(s, "    let mem_meta = Mem32Meta::new({}, {:?})?;", mt.limits.min, mt.limits.max).unwrap();
+                writeln!(
+                    s,
+                    "    let mem_meta = Mem32Meta::new({}, {:?})?;",
+                    mt.limits.min, mt.limits.max
+                )
+                .unwrap();
                 s.push_str("    let mem = alloc32::<CAP32>()?;\n");
             }
             None => {
@@ -3062,7 +3443,11 @@ impl Module {
         writeln!(
             s,
             "    let ctx = Ctx {{\n        stack_floor: goose::stack_floor(),\n        {},",
-            if self.memory64 { "outer" } else { "mem: mem_meta" }
+            if self.memory64 {
+                "outer"
+            } else {
+                "mem: mem_meta"
+            }
         )
         .unwrap();
         for k in 0..self.globals.len() {
@@ -3116,21 +3501,33 @@ impl Module {
                     match r {
                         ValType::I32 => ".map(|v| v as i64)",
                         ValType::I64 => "",
-                        _ => return Err("goose.reserve is not (address, address) -> address".into()),
+                        _ => {
+                            return Err("goose.reserve is not (address, address) -> address".into());
+                        }
                     },
                 ),
                 _ => return Err("goose.reserve is not (address, address) -> address".into()),
             };
             writeln!(s, "fn reserve(ctx: &mut Ctx, mb: {mb_ty}, control: i64, count: i64) -> R<i64> {{ {call}{fit} }}\n").unwrap();
         }
-        writeln!(s, "fn main() {{\n    goose::main({module_path:?}, {STACK_BYTES}, instantiate);\n}}").unwrap();
+        writeln!(
+            s,
+            "fn main() {{\n    goose::main({module_path:?}, {STACK_BYTES}, instantiate);\n}}"
+        )
+        .unwrap();
         Ok(s)
     }
 
     /// Generates `src/lib.rs` for a Blot ABI 8 `cdylib` loaded by `pen/blot-host`.
     /// All generated Wasm code (`core` and `p0..pN`) stays 100% `#![forbid(unsafe_code)]`;
     /// only this thin C-ABI boundary exposes opaque instance & active-call pointers.
-    fn blot_lib(&self, m: &DecodedModule, data: &mut Vec<u8>, core: &str, paths: &[String]) -> Res<String> {
+    fn blot_lib(
+        &self,
+        m: &DecodedModule,
+        data: &mut Vec<u8>,
+        core: &str,
+        paths: &[String],
+    ) -> Res<String> {
         let mut s = String::new();
         s.push_str("// Generated by wtime-aot (--blot-cdylib). Do not edit.\n#![allow(unused, non_snake_case, unreachable_code, unused_parens, clippy::all)]\n\n");
         s.push_str("use std::ffi::c_void;\n");
@@ -3139,7 +3536,7 @@ impl Module {
         self.emit_fns_impl(&mut s, paths)?;
         self.emit_initialize(m, &mut s, data)?;
 
-        // Host trampoline & opaque C-ABI handle structs.
+        // Host trampoline, MXCSR/stack-floor isolation, & opaque C-ABI handle structs.
         s.push_str(
             "pub type HostFn = unsafe extern \"C\" fn(*mut c_void, *mut ActiveCall, u32, u64, u64, *mut u64) -> i32;\n\n\
              #[repr(C)]\n\
@@ -3153,10 +3550,106 @@ impl Module {
              }\n\n\
              pub struct BlotHandle {\n\
                  instance: Instance,\n\
-                 _bridge: Box<HostBridge>,\n\
+                 bridge: *mut HostBridge,\n\
              }\n\n\
+             impl Drop for BlotHandle {\n\
+                 fn drop(&mut self) {\n\
+                     if !self.bridge.is_null() {\n\
+                         unsafe { drop(Box::from_raw(self.bridge)); }\n\
+                         self.bridge = std::ptr::null_mut();\n\
+                     }\n\
+                 }\n\
+             }\n\n\
+             #[inline(always)]\n\
              fn write_trap(out: *mut u8, t: Trap) {\n\
                  if !out.is_null() { unsafe { *out = t.to_code(); } }\n\
+             }\n\n\
+             fn read_ffi_name<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {\n\
+                 if len == 0 { return Some(\"\"); }\n\
+                 if ptr.is_null() { return None; }\n\
+                 let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };\n\
+                 std::str::from_utf8(bytes).ok()\n\
+             }\n\n\
+             #[cfg(target_arch = \"x86_64\")]\n\
+             #[inline(never)]\n\
+             fn get_mxcsr() -> u32 {\n\
+                 let mut val: u32 = 0;\n\
+                 unsafe { std::arch::asm!(\"stmxcsr [{}]\", in(reg) &mut val, options(nostack, preserves_flags)); }\n\
+                 val\n\
+             }\n\n\
+             #[cfg(target_arch = \"x86_64\")]\n\
+             #[inline(never)]\n\
+             fn set_mxcsr(val: u32) {\n\
+                 unsafe { std::arch::asm!(\"ldmxcsr [{}]\", in(reg) &val, options(nostack, preserves_flags)); }\n\
+             }\n\n\
+             #[cfg(not(target_arch = \"x86_64\"))]\n\
+             #[inline(never)]\n\
+             fn get_mxcsr() -> u32 { 0x1f80 }\n\n\
+             #[cfg(not(target_arch = \"x86_64\"))]\n\
+             #[inline(never)]\n\
+             fn set_mxcsr(_val: u32) {}\n\n\
+             #[inline(never)]\n\
+             fn run_with_wasm_mxcsr<A, O>(ctx: &mut Ctx, mb: &mut [u8; CAP32], arg: A, f: fn(&mut Ctx, &mut [u8; CAP32], A) -> O, save_host_mxcsr: bool) -> O {\n\
+                 let saved = get_mxcsr();\n\
+                 if save_host_mxcsr {\n\
+                     ctx.host_mxcsr = saved;\n\
+                 }\n\
+                 set_mxcsr(0x1f80);\n\
+                 let callee = std::hint::black_box(f);\n\
+                 let out = callee(ctx, mb, arg);\n\
+                 set_mxcsr(saved);\n\
+                 out\n\
+             }\n\n\
+             #[inline(never)]\n\
+             fn sp_here() -> usize {\n\
+                 let probe = 0u8;\n\
+                 (&probe as *const u8) as usize\n\
+             }\n\n\
+             #[cfg(target_os = \"linux\")]\n\
+             #[inline(never)]\n\
+             fn blot_stack_floor() -> usize {\n\
+                 use std::cell::Cell;\n\
+                 #[repr(C, align(8))]\n\
+                 struct PthreadAttr([u8; 128]);\n\
+                 unsafe extern \"C\" {\n\
+                     fn pthread_self() -> usize;\n\
+                     fn pthread_getattr_np(thread: usize, attr: *mut PthreadAttr) -> i32;\n\
+                     fn pthread_attr_getstack(attr: *const PthreadAttr, stackaddr: *mut *mut c_void, stacksize: *mut usize) -> i32;\n\
+                     fn pthread_attr_destroy(attr: *mut PthreadAttr) -> i32;\n\
+                 }\n\
+                 thread_local! {\n\
+                     static TLS_STACK: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };\n\
+                 }\n\
+                 let probe = 0u8;\n\
+                 let sp = (&probe as *const u8) as usize;\n\
+                 let budget_floor = sp.saturating_sub(7 << 20);\n\
+                 let cached = TLS_STACK.with(|c| c.get());\n\
+                 if sp >= cached.0 && sp < cached.1 {\n\
+                     return cached.2.max(budget_floor);\n\
+                 }\n\
+                 let mut attr = PthreadAttr([0u8; 128]);\n\
+                 if unsafe { pthread_getattr_np(pthread_self(), &mut attr) } == 0 {\n\
+                     let mut addr: *mut c_void = std::ptr::null_mut();\n\
+                     let mut size: usize = 0;\n\
+                     let ok = unsafe { pthread_attr_getstack(&attr, &mut addr, &mut size) };\n\
+                     unsafe { pthread_attr_destroy(&mut attr); }\n\
+                     if ok == 0 && !addr.is_null() && size > 0 {\n\
+                         let low = addr as usize;\n\
+                         let high = low.saturating_add(size);\n\
+                         if high > low && sp >= low && sp < high {\n\
+                             let headroom = if size >= (256 << 10) { 128 << 10 } else { size / 2 };\n\
+                             let real_floor = low.saturating_add(headroom);\n\
+                             TLS_STACK.with(|c| c.set((low, high, real_floor)));\n\
+                             return real_floor.max(budget_floor);\n\
+                         }\n\
+                     }\n\
+                 }\n\
+                 usize::MAX\n\
+             }\n\n\
+             #[cfg(not(target_os = \"linux\"))]\n\
+             #[inline(never)]\n\
+             fn blot_stack_floor() -> usize {\n\
+                 stack_floor_for(7 << 20)\n\
              }\n\n\
              fn host_trampoline(ctx: &mut Ctx, mb: &mut [u8; CAP32], import_idx: u32, token: u64, arg_bits: u64) -> R<u64> {\n\
                  if ctx.host_ctx == 0 { return trap(Trap::Host); }\n\
@@ -3167,7 +3660,10 @@ impl Module {
                  let Some(host_fn) = host_fn else { return trap(Trap::Host); };\n\
                  let mut active = ActiveCall { ctx: ctx as *mut Ctx, mem: mb as *mut [u8; CAP32] };\n\
                  let mut res: u64 = 0;\n\
+                 let saved_host_mxcsr = ctx.host_mxcsr;\n\
+                 set_mxcsr(saved_host_mxcsr);\n\
                  let status = unsafe { host_fn(user_ctx, &mut active as *mut ActiveCall, import_idx, token, arg_bits, &mut res as *mut u64) };\n\
+                 set_mxcsr(0x1f80);\n\
                  if status == 0 { Ok(res) } else { trap(Trap::Host) }\n\
              }\n\n\
              #[unsafe(no_mangle)]\n\
@@ -3228,8 +3724,13 @@ impl Module {
                      Ok(m) => m,\n\
                      Err(t) => {{ write_trap(trap_out, t); return std::ptr::null_mut(); }}\n\
                  }};\n\
-                 let bridge = Box::new(HostBridge {{ user_ctx, host_fn }});\n\
-                 let host_ctx = (&*bridge as *const HostBridge) as usize;"
+                 let stack_floor = blot_stack_floor();\n\
+                 if sp_here() <= stack_floor {{\n\
+                     write_trap(trap_out, Trap::CallStackExhausted);\n\
+                     return std::ptr::null_mut();\n\
+                 }}\n\
+                 let bridge = Box::into_raw(Box::new(HostBridge {{ user_ctx, host_fn }}));\n\
+                 let host_ctx = bridge as usize;"
         )
         .unwrap();
         for (k, (t, init)) in self.globals.iter().enumerate() {
@@ -3237,7 +3738,7 @@ impl Module {
                 writeln!(s, "    let g{k}: {} = {init};", rust_type(*t)?).unwrap();
             }
         }
-        s.push_str("    let ctx = Ctx {\n        stack_floor: stack_floor_for(7 << 20),\n        mem: mem_meta,\n");
+        s.push_str("    let ctx = Ctx {\n        stack_floor,\n        mem: mem_meta,\n");
         for k in 0..self.globals.len() {
             if self.global_consts[k].is_none() {
                 writeln!(s, "        g{k},").unwrap();
@@ -3248,49 +3749,88 @@ impl Module {
         }
         s.push_str(
             "        host_ctx,\n\
+                 in_call: true,\n\
+                 host_mxcsr: 0x1f80,\n\
                  host_call: host_trampoline,\n\
              };\n\
              let mut instance = Instance { ctx, mem };\n\
-             if let Err(t) = initialize(&mut instance.ctx, &mut instance.mem) {\n\
+             let init_res = run_with_wasm_mxcsr::<(), R<()>>(&mut instance.ctx, &mut instance.mem, (), |ctx, mb, ()| initialize(ctx, mb), true);\n\
+             instance.ctx.in_call = false;\n\
+             if let Err(t) = init_res {\n\
+                 unsafe { drop(Box::from_raw(bridge)); }\n\
                  write_trap(trap_out, t);\n\
                  return std::ptr::null_mut();\n\
              }\n\
-             Box::into_raw(Box::new(BlotHandle { instance, _bridge: bridge }))\n\
+             Box::into_raw(Box::new(BlotHandle { instance, bridge }))\n\
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_drop(handle: *mut BlotHandle) {\n\
-                 if !handle.is_null() { unsafe { drop(Box::from_raw(handle)); } }\n\
+                 if handle.is_null() { return; }\n\
+                 if unsafe { (*handle).instance.ctx.in_call } { return; }\n\
+                 unsafe { drop(Box::from_raw(handle)); }\n\
              }\n\n",
         );
 
         // Helper for calling a single-param/single-result Blot export.
         let export_idx = |name: &str| {
-            m.exports.iter().find(|e| e.name == name && e.kind == ExternalKind::Func).map(|e| e.index as usize)
+            m.exports
+                .iter()
+                .find(|e| e.name == name && e.kind == ExternalKind::Func)
+                .map(|e| e.index as usize)
         };
         let emit_fast_i32_i32 = |s: &mut String, fn_name: &str, export_name: &str, active: bool| {
-            let param_str = if active { "active: *mut ActiveCall" } else { "handle: *mut BlotHandle" };
+            let param_str = if active {
+                "active: *mut ActiveCall"
+            } else {
+                "handle: *mut BlotHandle"
+            };
             writeln!(s, "#[unsafe(no_mangle)]\npub extern \"C\" fn {fn_name}({param_str}, arg: i32, res_out: *mut i32, trap_out: *mut u8) -> i32 {{").unwrap();
             if let Some(f) = export_idx(export_name)
                 && self.types[f].params.as_slice() == [ValType::I32]
                 && self.types[f].results.as_slice() == [ValType::I32]
             {
-                if active {
-                    s.push_str("    let (ctx, mb) = unsafe { (&mut *(*active).ctx, &mut *(*active).mem) };\n");
-                } else {
-                    s.push_str("    let inst = unsafe { &mut (*handle).instance };\n    inst.ctx.stack_floor = stack_floor_for(7 << 20);\n    let (ctx, mb) = (&mut inst.ctx, &mut *inst.mem);\n");
-                }
                 let call = self.top_call(f, &["arg".to_string()]);
+                if active {
+                    writeln!(
+                        s,
+                        "    if active.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                             let (ctx_ptr, mem_ptr) = unsafe {{ ((*active).ctx, (*active).mem) }};\n\
+                             if ctx_ptr.is_null() || mem_ptr.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                             let (ctx, mb) = unsafe {{ (&mut *ctx_ptr, &mut *mem_ptr) }};\n\
+                             if sp_here() <= ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
+                             match run_with_wasm_mxcsr::<i32, R<i32>>(ctx, mb, arg, |ctx, mb, arg| {call}, false) {{\n\
+                                 Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
+                                 Err(Trap::Host) => {{ write_trap(trap_out, Trap::Host); 2 }}\n\
+                                 Err(t) => {{ write_trap(trap_out, t); 1 }}\n\
+                             }}\n}}\n"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        s,
+                        "    if handle.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                             let inst = unsafe {{ &mut (*handle).instance }};\n\
+                             if inst.ctx.in_call {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                             inst.ctx.stack_floor = blot_stack_floor();\n\
+                             if sp_here() <= inst.ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
+                             inst.ctx.in_call = true;\n\
+                             let res = run_with_wasm_mxcsr::<i32, R<i32>>(&mut inst.ctx, &mut *inst.mem, arg, |ctx, mb, arg| {call}, true);\n\
+                             inst.ctx.in_call = false;\n\
+                             match res {{\n\
+                                 Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
+                                 Err(Trap::Host) => {{ write_trap(trap_out, Trap::Host); 2 }}\n\
+                                 Err(t) => {{ write_trap(trap_out, t); 1 }}\n\
+                             }}\n}}\n"
+                    )
+                    .unwrap();
+                }
+            } else {
+                let param_name = if active { "active" } else { "handle" };
                 writeln!(
                     s,
-                    "    match {call} {{\n\
-                         Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
-                         Err(Trap::Host) => {{ write_trap(trap_out, Trap::Host); 2 }}\n\
-                         Err(t) => {{ write_trap(trap_out, t); 1 }}\n\
-                     }}\n}}\n"
+                    "    let _ = ({param_name}, arg, res_out, trap_out); 3\n}}\n"
                 )
                 .unwrap();
-            } else {
-                s.push_str("    let _ = (arg, res_out, trap_out); 3\n}\n\n");
             }
         };
         emit_fast_i32_i32(&mut s, "blot_aot_call_allocate", "blot:allocate", false);
@@ -3307,10 +3847,15 @@ impl Module {
             let call = self.top_call(f, &[]);
             writeln!(
                 s,
-                "    let inst = unsafe {{ &mut (*handle).instance }};\n\
-                     inst.ctx.stack_floor = stack_floor_for(7 << 20);\n\
-                     let (ctx, mb) = (&mut inst.ctx, &mut *inst.mem);\n\
-                     match {call} {{\n\
+                "    if handle.is_null() {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                     let inst = unsafe {{ &mut (*handle).instance }};\n\
+                     if inst.ctx.in_call {{ write_trap(trap_out, Trap::Host); return 2; }}\n\
+                     inst.ctx.stack_floor = blot_stack_floor();\n\
+                     if sp_here() <= inst.ctx.stack_floor {{ write_trap(trap_out, Trap::CallStackExhausted); return 1; }}\n\
+                     inst.ctx.in_call = true;\n\
+                     let res = run_with_wasm_mxcsr::<(), R<i32>>(&mut inst.ctx, &mut *inst.mem, (), |ctx, mb, ()| {call}, true);\n\
+                     inst.ctx.in_call = false;\n\
+                     match res {{\n\
                          Ok(v) => {{ if !res_out.is_null() {{ unsafe {{ *res_out = v; }} }} 0 }}\n\
                          Err(Trap::Host) => {{ write_trap(trap_out, Trap::Host); 2 }}\n\
                          Err(t) => {{ write_trap(trap_out, t); 1 }}\n\
@@ -3325,10 +3870,11 @@ impl Module {
         s.push_str(
             "#[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_call_export(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, arg_bits: u64, res_out: *mut u64, trap_out: *mut u8) -> i32 {\n\
-                 let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len)) };\n\
+                 if handle.is_null() { return 3; }\n\
                  let inst = unsafe { &mut (*handle).instance };\n\
-                 inst.ctx.stack_floor = stack_floor_for(7 << 20);\n\
-                 let (ctx, mb) = (&mut inst.ctx, &mut *inst.mem);\n\
+                 if inst.ctx.in_call { write_trap(trap_out, Trap::Host); return 2; }\n\
+                 let Some(name) = read_ffi_name(name_ptr, name_len) else { return 3; };\n\
+                 inst.ctx.stack_floor = blot_stack_floor();\n\
                  let res: R<u64> = match name {\n",
         );
         for exp in &m.exports {
@@ -3357,7 +3903,12 @@ impl Module {
             };
             if let (Some(args), Some(rmap)) = (arg_expr, ret_map) {
                 let call = self.top_call(f, &args);
-                writeln!(s, "        {:?} => {call}{rmap},", exp.name).unwrap();
+                writeln!(
+                    s,
+                    "        {:?} => {{\n            if sp_here() <= inst.ctx.stack_floor {{ Err(Trap::CallStackExhausted) }} else {{\n                inst.ctx.in_call = true;\n                let out = run_with_wasm_mxcsr::<u64, R<u64>>(&mut inst.ctx, &mut *inst.mem, arg_bits, |ctx, mb, arg_bits| {{ let _ = arg_bits; {call}{rmap} }}, true);\n                inst.ctx.in_call = false;\n                out\n            }}\n        }},",
+                    exp.name
+                )
+                .unwrap();
             }
         }
         s.push_str(
@@ -3375,6 +3926,13 @@ impl Module {
         s.push_str(
             "#[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_mem_data(handle: *mut BlotHandle, ptr_out: *mut *mut u8, len_out: *mut usize) {\n\
+                 if handle.is_null() {\n\
+                     unsafe {\n\
+                         if !ptr_out.is_null() { *ptr_out = std::ptr::null_mut(); }\n\
+                         if !len_out.is_null() { *len_out = 0; }\n\
+                     }\n\
+                     return;\n\
+                 }\n\
                  let inst = unsafe { &mut (*handle).instance };\n\
                  unsafe {\n\
                      if !ptr_out.is_null() { *ptr_out = inst.mem.as_mut_ptr(); }\n\
@@ -3383,7 +3941,22 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_active_mem_data(active: *mut ActiveCall, ptr_out: *mut *mut u8, len_out: *mut usize) {\n\
-                 let (ctx, mb) = unsafe { (&*(*active).ctx, &mut *(*active).mem) };\n\
+                 if active.is_null() {\n\
+                     unsafe {\n\
+                         if !ptr_out.is_null() { *ptr_out = std::ptr::null_mut(); }\n\
+                         if !len_out.is_null() { *len_out = 0; }\n\
+                     }\n\
+                     return;\n\
+                 }\n\
+                 let (ctx_ptr, mem_ptr) = unsafe { ((*active).ctx, (*active).mem) };\n\
+                 if ctx_ptr.is_null() || mem_ptr.is_null() {\n\
+                     unsafe {\n\
+                         if !ptr_out.is_null() { *ptr_out = std::ptr::null_mut(); }\n\
+                         if !len_out.is_null() { *len_out = 0; }\n\
+                     }\n\
+                     return;\n\
+                 }\n\
+                 let (ctx, mb) = unsafe { (&*ctx_ptr, &mut *mem_ptr) };\n\
                  unsafe {\n\
                      if !ptr_out.is_null() { *ptr_out = mb.as_mut_ptr(); }\n\
                      if !len_out.is_null() { *len_out = ctx.mem.len; }\n\
@@ -3391,13 +3964,17 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_mem_grow(handle: *mut BlotHandle, delta_pages: u64) -> i64 {\n\
+                 if handle.is_null() { return -1; }\n\
                  let inst = unsafe { &mut (*handle).instance };\n\
+                 if inst.ctx.in_call { return -1; }\n\
                  inst.ctx.mem.grow(delta_pages)\n\
              }\n\n",
         );
 
         // Exported globals read/write.
-        s.push_str("fn read_global(ctx: &Ctx, name: &str) -> Option<(u64, u8)> {\n    match name {\n");
+        s.push_str(
+            "fn read_global(ctx: &Ctx, name: &str) -> Option<(u64, u8)> {\n    match name {\n",
+        );
         for (name, gi, vt, _) in &self.exported_globals {
             let (kind, expr) = match (vt, self.global_consts[*gi]) {
                 (ValType::I32, Some(ConstVal::I32(v))) => (0u8, format!("({v}i32 as u32 as u64)")),
@@ -3419,7 +3996,8 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_get_global(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, val_out: *mut u64, kind_out: *mut u8) -> i32 {\n\
-                 let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len)) };\n\
+                 if handle.is_null() { return 1; }\n\
+                 let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
                  let inst = unsafe { &(*handle).instance };\n\
                  let Some((v, k)) = read_global(&inst.ctx, name) else { return 1; };\n\
                  unsafe {\n\
@@ -3430,8 +4008,11 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_active_get_global(active: *mut ActiveCall, name_ptr: *const u8, name_len: usize, val_out: *mut u64, kind_out: *mut u8) -> i32 {\n\
-                 let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len)) };\n\
-                 let ctx = unsafe { &*(*active).ctx };\n\
+                 if active.is_null() { return 1; }\n\
+                 let ctx_ptr = unsafe { (*active).ctx };\n\
+                 if ctx_ptr.is_null() { return 1; }\n\
+                 let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
+                 let ctx = unsafe { &*ctx_ptr };\n\
                  let Some((v, k)) = read_global(ctx, name) else { return 1; };\n\
                  unsafe {\n\
                      if !val_out.is_null() { *val_out = v; }\n\
@@ -3441,8 +4022,10 @@ impl Module {
              }\n\n\
              #[unsafe(no_mangle)]\n\
              pub extern \"C\" fn blot_aot_set_global(handle: *mut BlotHandle, name_ptr: *const u8, name_len: usize, val: u64) -> i32 {\n\
-                 let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len)) };\n\
+                 if handle.is_null() { return 1; }\n\
                  let ctx = unsafe { &mut (*handle).instance.ctx };\n\
+                 if ctx.in_call { return 1; }\n\
+                 let Some(name) = read_ffi_name(name_ptr, name_len) else { return 1; };\n\
                  match name {\n",
         );
         for (name, gi, vt, mutable) in &self.exported_globals {
@@ -3464,22 +4047,37 @@ impl Module {
     }
 
     /// The defined functions: (index, source).
-    fn functions(&self, m: &DecodedModule) -> Res<Vec<(usize, String)>> {
+    fn functions(
+        &self,
+        m: &DecodedModule,
+        deadline: Option<std::time::Instant>,
+    ) -> Res<Vec<(usize, String)>> {
         let base = self.imports.len();
         let mut functions = Vec::new();
         let locals: usize = m.code.iter().map(|body| body.locals.len()).sum();
         if locals > MAX_LOCALS {
-            return Err(format!("the module declares {locals} locals, more than {MAX_LOCALS}"));
+            return Err(format!(
+                "the module declares {locals} locals, more than {MAX_LOCALS}"
+            ));
         }
         let mut total = 0;
         for (k, body) in m.code.iter().enumerate() {
+            if let Some(dl) = deadline
+                && (k & 63) == 0
+                && std::time::Instant::now() >= dl
+            {
+                return Err("rust codegen function emission: exceeded build time limit".into());
+            }
             let index = base + k;
             let mut s = String::new();
             let f = Function::new(self, index, &body.locals)?;
-            f.emit(&body.instructions, &mut s, MAX_SOURCE_BYTES - total).map_err(|e| format!("function {index}: {e}"))?;
+            f.emit(&body.instructions, &mut s, MAX_SOURCE_BYTES - total)
+                .map_err(|e| format!("function {index}: {e}"))?;
             total += s.len();
             if total > MAX_SOURCE_BYTES {
-                return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                return Err(format!(
+                    "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                ));
             }
             functions.push((index, s));
         }
@@ -3507,7 +4105,9 @@ fn bare_operands(line: &str) -> String {
         match c {
             b'(' => open.push(i),
             b')' => {
-                let Some(o) = open.pop() else { return line.to_string() };
+                let Some(o) = open.pop() else {
+                    return line.to_string();
+                };
                 close[o] = i;
             }
             b',' => {
@@ -3532,24 +4132,39 @@ fn bare_operands(line: &str) -> String {
         let before = &line[..o];
         let after = &line[c + 1..];
         // An assignment's `=`, not a comparison's.
-        let assigned = before.ends_with("= ") && !before[..before.len() - 2].ends_with(['=', '!', '<', '>']);
-        let condition = before.ends_with("if ") && !before[..before.len() - 3].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        let assigned =
+            before.ends_with("= ") && !before[..before.len() - 2].ends_with(['=', '!', '<', '>']);
+        let condition = before.ends_with("if ")
+            && !before[..before.len() - 3]
+                .ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
         let alone_before = assigned || before.ends_with('(') || before.ends_with(", ") || condition;
-        let alone_after = after.starts_with(';') || after.starts_with(')') || after.starts_with(',') || after.starts_with(" {");
+        let alone_after = after.starts_with(';')
+            || after.starts_with(')')
+            || after.starts_with(',')
+            || after.starts_with(" {");
         // `= (a)` before ` {` would be a block, not a condition.
         if alone_before && alone_after && (condition || !after.starts_with(" {")) {
             drop[o] = true;
             drop[c] = true;
         }
     }
-    line.bytes().enumerate().filter(|(i, _)| !drop[*i]).map(|(_, c)| c as char).collect()
+    line.bytes()
+        .enumerate()
+        .filter(|(i, _)| !drop[*i])
+        .map(|(_, c)| c as char)
+        .collect()
 }
 
 /// A constant expression as Rust: numeric constants, global.get and the
 /// extended constant operators (wrapping integer add, sub and mul).
 /// Earlier globals are referred to by name (`{prefix}g{k}`), or by their
 /// evaluated constant literal when effectively immutable.
-fn constant(expression: &[Instruction], globals: usize, prefix: &str, consts: &[Option<ConstVal>]) -> Res<String> {
+fn constant(
+    expression: &[Instruction],
+    globals: usize,
+    prefix: &str,
+    consts: &[Option<ConstVal>],
+) -> Res<String> {
     let mut stack: Vec<String> = Vec::new();
     for i in expression {
         let value = match (i.opcode, &i.immediate) {
@@ -3677,10 +4292,18 @@ struct Dep {
 
 impl Dep {
     fn local(x: u32) -> Dep {
-        Dep { locals: vec![x], globals: false, pending: true }
+        Dep {
+            locals: vec![x],
+            globals: false,
+            pending: true,
+        }
     }
     fn global() -> Dep {
-        Dep { locals: vec![], globals: true, pending: true }
+        Dep {
+            locals: vec![],
+            globals: true,
+            pending: true,
+        }
     }
     fn union(mut self, other: &Dep) -> Dep {
         for x in &other.locals {
@@ -3712,7 +4335,9 @@ impl Emitter {
     /// reads or writes, marking them clean once flushed.
     fn store_globals_for_call(&mut self, module: &Module, callee: usize) {
         for x in self.globals_set.clone() {
-            if self.dirty_globals.contains(x) && (module.fn_reads[callee].contains(x) || module.fn_writes[callee].contains(x)) {
+            if self.dirty_globals.contains(x)
+                && (module.fn_reads[callee].contains(x) || module.fn_writes[callee].contains(x))
+            {
                 self.line(&format!("ctx.g{x} = gv{x};"));
                 self.dirty_globals.remove(x);
             }
@@ -3742,12 +4367,17 @@ impl Emitter {
     /// Stores dirty cached globals that any target of `ci_id` may read or write.
     fn store_globals_for_ci(&mut self, module: &Module, ci_id: usize) {
         for x in self.globals_set.clone() {
-            if self.dirty_globals.contains(x) && (module.ci_reads[ci_id].contains(x) || module.ci_writes[ci_id].contains(x)) {
+            if self.dirty_globals.contains(x)
+                && (module.ci_reads[ci_id].contains(x) || module.ci_writes[ci_id].contains(x))
+            {
                 self.line(&format!("ctx.g{x} = gv{x};"));
                 self.dirty_globals.remove(x);
             }
         }
-        if module.ci_targets[ci_id].iter().any(|&(_, f)| module.reserve_imports[f]) {
+        if module.ci_targets[ci_id]
+            .iter()
+            .any(|&(_, f)| module.reserve_imports[f])
+        {
             for g in self.reg_globals.clone() {
                 if module.ci_reads[ci_id].contains(g) || module.ci_writes[ci_id].contains(g) {
                     self.line(&format!("ctx.g{g} = gv{g};"));
@@ -3787,12 +4417,16 @@ impl Emitter {
                     self.line(&format!("if ml > mb.len() {{ return {oob}; }}"));
                 } else if module.cap64.is_some() {
                     if module.min_bytes > 0 {
-                        self.line(&format!("if ml < MIN_BYTES || ml > CAP64 {{ return {oob}; }}"));
+                        self.line(&format!(
+                            "if ml < MIN_BYTES || ml > CAP64 {{ return {oob}; }}"
+                        ));
                     } else {
                         self.line(&format!("if ml > CAP64 {{ return {oob}; }}"));
                     }
                 } else if module.min_bytes > 0 {
-                    self.line(&format!("if ml < MIN_BYTES || ml > mb.len() {{ return {oob}; }}"));
+                    self.line(&format!(
+                        "if ml < MIN_BYTES || ml > mb.len() {{ return {oob}; }}"
+                    ));
                 } else {
                     self.line(&format!("if ml > mb.len() {{ return {oob}; }}"));
                 }
@@ -3800,7 +4434,9 @@ impl Emitter {
         } else if module.fixed32.is_none() {
             self.line("ml = ctx.mem.len;");
             if module.min_bytes > 0 {
-                self.line(&format!("if ml < MIN_BYTES || ml > CAP32 {{ return {oob}; }}"));
+                self.line(&format!(
+                    "if ml < MIN_BYTES || ml > CAP32 {{ return {oob}; }}"
+                ));
             } else {
                 self.line(&format!("if ml > CAP32 {{ return {oob}; }}"));
             }
@@ -3828,7 +4464,10 @@ impl Emitter {
     }
 
     fn pop_dep(&mut self) -> Res<(String, ValType, Dep)> {
-        let (v, t) = self.stack.pop().ok_or_else(|| "operand stack underflow".to_string())?;
+        let (v, t) = self
+            .stack
+            .pop()
+            .ok_or_else(|| "operand stack underflow".to_string())?;
         let dep = self.deps.pop().unwrap_or_default();
         Ok((v, t, dep))
     }
@@ -3870,7 +4509,10 @@ impl Emitter {
         }
         self.stack.push((format!("({expr})"), t));
         self.pending.push(at);
-        self.deps.push(Dep { pending: true, ..dep });
+        self.deps.push(Dep {
+            pending: true,
+            ..dep
+        });
         Ok(())
     }
 
@@ -3905,7 +4547,10 @@ impl Emitter {
         if self.stack.len() < n {
             return Err("operand stack underflow".into());
         }
-        Ok(self.stack[self.stack.len() - n..].iter().map(|(v, _)| v.clone()).collect())
+        Ok(self.stack[self.stack.len() - n..]
+            .iter()
+            .map(|(v, _)| v.clone())
+            .collect())
     }
 
     /// Assigns `values` to `vars`, all at once.
@@ -3925,13 +4570,20 @@ impl Emitter {
     /// A branch to the frame `depth` levels out, taking its values from
     /// the top of the stack.
     fn branch(&mut self, depth: usize) -> Res<()> {
-        let at = self.frames.len().checked_sub(depth + 1).ok_or("branch depth")?;
+        let at = self
+            .frames
+            .len()
+            .checked_sub(depth + 1)
+            .ok_or("branch depth")?;
         let (kind, label) = (self.frames[at].kind, self.frames[at].label);
         match kind {
             Kind::Function => {
                 let values = self.top(self.frames[at].results.len())?;
                 self.store_globals_return();
-                self.line(&format!("return {};", ok_return_expr(self.ret_abi, &values)));
+                self.line(&format!(
+                    "return {};",
+                    ok_return_expr(self.ret_abi, &values)
+                ));
             }
             Kind::Loop => {
                 let vars = self.frames[at].loop_vars.clone();
@@ -3963,7 +4615,12 @@ impl<'a> Function<'a> {
         let ty = &module.types[index];
         let mut locals = ty.params.clone();
         locals.extend_from_slice(declared);
-        Ok(Function { module, index, locals, n_params: ty.params.len() })
+        Ok(Function {
+            module,
+            index,
+            locals,
+            n_params: ty.params.len(),
+        })
     }
 
     fn block_type(&self, immediate: &Immediate) -> Res<(Vec<ValType>, Vec<ValType>)> {
@@ -3986,7 +4643,10 @@ impl<'a> Function<'a> {
     }
 
     fn module_type(&self, n: usize) -> Res<&FuncType> {
-        self.module.module_types.get(n).ok_or_else(|| "block type index out of range".into())
+        self.module
+            .module_types
+            .get(n)
+            .ok_or_else(|| "block type index out of range".into())
     }
 
     /// The length a memory access checks against: the constant of a fixed
@@ -4006,7 +4666,11 @@ impl<'a> Function<'a> {
     }
 
     fn address(&self, v: &str) -> String {
-        if self.module.memory64 { format!("({v} as u64)") } else { format!("({v} as u32 as u64)") }
+        if self.module.memory64 {
+            format!("({v} as u64)")
+        } else {
+            format!("({v} as u32 as u64)")
+        }
     }
 
     fn emit(&self, code: &[Instruction], out: &mut String, budget: usize) -> Res<()> {
@@ -4019,53 +4683,68 @@ impl<'a> Function<'a> {
         // Collect non-constant, non-register-passed globals used in live code,
         // per-global spill/reload call-site counts (for ROI filtering), and
         // globals touched by any reachable non-noreturn callee.
-        let mut uses: std::collections::BTreeMap<u32, (usize, usize)> = std::collections::BTreeMap::new();
+        let mut uses: std::collections::BTreeMap<u32, (usize, usize)> =
+            std::collections::BTreeMap::new();
         let mut callee_touches = BitSet::new(n_globals);
         let mut call_targets: Vec<usize> = Vec::new();
         let mut ci_calls: Vec<usize> = Vec::new();
         let mut sites = 1usize;
         let mut uses_ml = false;
-        let is_fixed = if self.module.memory64 { self.module.fixed64.is_some() } else { self.module.fixed32.is_some() };
-        visit_live(code, &self.module.noreturn_imports, |i| match (i.opcode, &i.immediate) {
-            (0x23 | 0x24, Immediate::Index(x))
-                if (*x as usize) < n_globals
-                    && self.module.global_consts[*x as usize].is_none()
-                    && !reg_set.contains(x) =>
-            {
-                let entry = uses.entry(*x).or_default();
-                if i.opcode == 0x23 {
-                    entry.0 += 1;
-                } else {
-                    entry.1 += 1;
+        let is_fixed = if self.module.memory64 {
+            self.module.fixed64.is_some()
+        } else {
+            self.module.fixed32.is_some()
+        };
+        visit_live(code, &self.module.noreturn_imports, |i| {
+            match (i.opcode, &i.immediate) {
+                (0x23 | 0x24, Immediate::Index(x))
+                    if (*x as usize) < n_globals
+                        && self.module.global_consts[*x as usize].is_none()
+                        && !reg_set.contains(x) =>
+                {
+                    let entry = uses.entry(*x).or_default();
+                    if i.opcode == 0x23 {
+                        entry.0 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
                 }
-            }
-            (0x0c..=0x0f, _) => sites += 1,
-            (0x10, Immediate::Index(c)) if !self.module.noreturn_imports.get(*c as usize).copied().unwrap_or(false) => {
-                sites += 1;
-                let c = *c as usize;
-                call_targets.push(c);
-                if let Some(r) = self.module.fn_reads.get(c) {
-                    callee_touches.union_with(r);
+                (0x0c..=0x0f, _) => sites += 1,
+                (0x10, Immediate::Index(c))
+                    if !self
+                        .module
+                        .noreturn_imports
+                        .get(*c as usize)
+                        .copied()
+                        .unwrap_or(false) =>
+                {
+                    sites += 1;
+                    let c = *c as usize;
+                    call_targets.push(c);
+                    if let Some(r) = self.module.fn_reads.get(c) {
+                        callee_touches.union_with(r);
+                    }
+                    if let Some(w) = self.module.fn_writes.get(c) {
+                        callee_touches.union_with(w);
+                    }
                 }
-                if let Some(w) = self.module.fn_writes.get(c) {
-                    callee_touches.union_with(w);
+                (0x11, Immediate::Pair(ti, tbl)) => {
+                    sites += 1;
+                    if let Some(&ci_id) = self.module.ci_index.get(&(*tbl, *ti)) {
+                        ci_calls.push(ci_id);
+                        callee_touches.union_with(&self.module.ci_reads[ci_id]);
+                        callee_touches.union_with(&self.module.ci_writes[ci_id]);
+                    }
                 }
-            }
-            (0x11, Immediate::Pair(ti, tbl)) => {
-                sites += 1;
-                if let Some(&ci_id) = self.module.ci_index.get(&(*tbl, *ti)) {
-                    ci_calls.push(ci_id);
-                    callee_touches.union_with(&self.module.ci_reads[ci_id]);
-                    callee_touches.union_with(&self.module.ci_writes[ci_id]);
+                (0x12..=0x15, _) => sites += 1,
+                (0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b, _) if !is_fixed => {
+                    uses_ml = true;
                 }
+                _ => {}
             }
-            (0x12..=0x15, _) => sites += 1,
-            (0x28..=0x3e | 0x3f | 0x40 | 0xfc0a | 0xfc0b | 0xfd00 | 0xfd0b, _) if !is_fixed => {
-                uses_ml = true;
-            }
-            _ => {}
         });
-        let mut ranked: Vec<(u32, usize, usize)> = uses.into_iter().map(|(x, (r, w))| (x, r, w)).collect();
+        let mut ranked: Vec<(u32, usize, usize)> =
+            uses.into_iter().map(|(x, (r, w))| (x, r, w)).collect();
         ranked.sort_by_key(|&(x, r, w)| (std::cmp::Reverse(r + w), x));
         let allowance = GLOBAL_LINES_PER_INSTRUCTION * code.len() + 64;
         let mut cost = 0;
@@ -4081,7 +4760,10 @@ impl<'a> Function<'a> {
                 let mut spill_sites = 0usize;
                 let mut reload_sites = 0usize;
                 for &c in &call_targets {
-                    if is_set && (self.module.fn_reads[c].contains(x) || self.module.fn_writes[c].contains(x)) {
+                    if is_set
+                        && (self.module.fn_reads[c].contains(x)
+                            || self.module.fn_writes[c].contains(x))
+                    {
                         spill_sites += 1;
                     }
                     if self.module.fn_net_writes[c].contains(x) {
@@ -4089,7 +4771,10 @@ impl<'a> Function<'a> {
                     }
                 }
                 for &ci_id in &ci_calls {
-                    if is_set && (self.module.ci_reads[ci_id].contains(x) || self.module.ci_writes[ci_id].contains(x)) {
+                    if is_set
+                        && (self.module.ci_reads[ci_id].contains(x)
+                            || self.module.ci_writes[ci_id].contains(x))
+                    {
                         spill_sites += 1;
                     }
                     if self.module.ci_net_writes[ci_id].contains(x) {
@@ -4102,7 +4787,10 @@ impl<'a> Function<'a> {
                 if !is_set && reads <= reload_sites + 1 {
                     continue;
                 }
-                if is_set && spill_sites + reload_sites > total_uses * 2 && spill_sites + reload_sites > 2 {
+                if is_set
+                    && spill_sites + reload_sites > total_uses * 2
+                    && spill_sites + reload_sites > 2
+                {
                     continue;
                 }
             }
@@ -4117,7 +4805,9 @@ impl<'a> Function<'a> {
                 set.push(x);
                 // Skip storing `ctx.g{x} = gv{x}` on return when this function
                 // preserves `x` and never lets any call observe or modify `ctx.g{x}`.
-                if !(self.module.fn_preserves[self.index].contains(x) && !callee_touches.contains(x)) {
+                if !(self.module.fn_preserves[self.index].contains(x)
+                    && !callee_touches.contains(x))
+                {
                     return_store.push(x);
                 }
             }
@@ -4186,9 +4876,15 @@ impl<'a> Function<'a> {
             budget,
             over: false,
         };
-        let mut all = vec!["ctx: &mut Ctx".to_string(), format!("mb: {}", self.module.mb_type())];
+        let mut all = vec![
+            "ctx: &mut Ctx".to_string(),
+            format!("mb: {}", self.module.mb_type()),
+        ];
         for &g in &fn_reg_globals {
-            all.push(format!("mut gv{g}: {}", rust_type(self.module.globals[g as usize].0)?));
+            all.push(format!(
+                "mut gv{g}: {}",
+                rust_type(self.module.globals[g as usize].0)?
+            ));
         }
         for (i, t) in ty.params.iter().enumerate() {
             all.push(format!("mut l{i}: {}", rust_type(*t)?));
@@ -4196,14 +4892,17 @@ impl<'a> Function<'a> {
         let is_root = self.module.start == Some(self.index as u32)
             || self.module.entry == Some(self.index as u32)
             || self.module.reserve == Some(self.index as u32)
-            || (self.module.target == Target::BlotCdylib && self.module.exported_funcs.contains(&self.index));
+            || (self.module.target == Target::BlotCdylib
+                && self.module.exported_funcs.contains(&self.index));
         let inline_always = self.module.fn_inline_always(self.index);
         let should_inline = !self.module.fn_in_cycle[self.index]
             && (code.len() <= INLINE_INSTRUCTIONS
                 || (!self.module.fn_has_calls[self.index]
                     && code.len() <= INLINE_LEAF_INSTRUCTIONS
                     && self.module.fn_callers[self.index] <= INLINE_LEAF_MAX_CALLERS)
-                || (!is_root && self.module.fn_callers[self.index] == 1 && code.len() <= INLINE_SINGLE_CALLER_INSTRUCTIONS));
+                || (!is_root
+                    && self.module.fn_callers[self.index] == 1
+                    && code.len() <= INLINE_SINGLE_CALLER_INSTRUCTIONS));
         if inline_always {
             writeln!(out, "#[inline(always)]").unwrap();
         } else if should_inline {
@@ -4237,19 +4936,31 @@ impl<'a> Function<'a> {
                     writeln!(out, "    if ml > mb.len() {{ return {oob}; }}").unwrap();
                 } else if self.module.cap64.is_some() {
                     if self.module.min_bytes > 0 {
-                        writeln!(out, "    if ml < MIN_BYTES || ml > CAP64 {{ return {oob}; }}").unwrap();
+                        writeln!(
+                            out,
+                            "    if ml < MIN_BYTES || ml > CAP64 {{ return {oob}; }}"
+                        )
+                        .unwrap();
                     } else {
                         writeln!(out, "    if ml > CAP64 {{ return {oob}; }}").unwrap();
                     }
                 } else if self.module.min_bytes > 0 {
-                    writeln!(out, "    if ml < MIN_BYTES || ml > mb.len() {{ return {oob}; }}").unwrap();
+                    writeln!(
+                        out,
+                        "    if ml < MIN_BYTES || ml > mb.len() {{ return {oob}; }}"
+                    )
+                    .unwrap();
                 } else {
                     writeln!(out, "    if ml > mb.len() {{ return {oob}; }}").unwrap();
                 }
             } else {
                 writeln!(out, "    let mut ml: usize = ctx.mem.len;").unwrap();
                 if self.module.min_bytes > 0 {
-                    writeln!(out, "    if ml < MIN_BYTES || ml > CAP32 {{ return {oob}; }}").unwrap();
+                    writeln!(
+                        out,
+                        "    if ml < MIN_BYTES || ml > CAP32 {{ return {oob}; }}"
+                    )
+                    .unwrap();
                 } else {
                     writeln!(out, "    if ml > CAP32 {{ return {oob}; }}").unwrap();
                 }
@@ -4287,7 +4998,12 @@ impl<'a> Function<'a> {
                     0x10 => {
                         if let Immediate::Index(c) = i.immediate {
                             let c = c as usize;
-                            if !self.module.noreturn_imports.get(c).copied().unwrap_or(false)
+                            if !self
+                                .module
+                                .noreturn_imports
+                                .get(c)
+                                .copied()
+                                .unwrap_or(false)
                                 && self.module.fn_may_grow.get(c).copied().unwrap_or(false)
                             {
                                 for &s in &open {
@@ -4298,7 +5014,11 @@ impl<'a> Function<'a> {
                     }
                     0x11 => {
                         if let Immediate::Pair(ti, tbl) = i.immediate
-                            && self.module.ci_index.get(&(tbl, ti)).is_none_or(|&id| self.module.ci_may_grow[id])
+                            && self
+                                .module
+                                .ci_index
+                                .get(&(tbl, ti))
+                                .is_none_or(|&id| self.module.ci_may_grow[id])
                         {
                             for &s in &open {
                                 region_may_grow[s] = true;
@@ -4339,7 +5059,12 @@ impl<'a> Function<'a> {
                 && region_end[pc] > pc
                 && region_end[pc] - pc < FLAT_REGION_MAX_INSTRUCTIONS
                 && !region_may_grow[pc]
-                && region_mem_ops[pc] >= if i.opcode == 0x03 { FLAT_LOOP_MIN_MEM_OPS } else { FLAT_BLOCK_MIN_MEM_OPS };
+                && region_mem_ops[pc]
+                    >= if i.opcode == 0x03 {
+                        FLAT_LOOP_MIN_MEM_OPS
+                    } else {
+                        FLAT_BLOCK_MIN_MEM_OPS
+                    };
             if can_specialize {
                 let end_pc = region_end[pc];
                 e.materialize(|_| true, None)?;
@@ -4352,12 +5077,18 @@ impl<'a> Function<'a> {
                 e.in_flat_region = true;
                 for (sub_pc, sub_i) in code.iter().enumerate().take(end_pc + 1).skip(pc) {
                     self.instruction(&mut e, sub_pc, sub_i, &loop_written_globals)
-                        .map_err(|err| format!("instruction {sub_pc} ({:#x}): {err}", sub_i.opcode))?;
+                        .map_err(|err| {
+                            format!("instruction {sub_pc} ({:#x}): {err}", sub_i.opcode)
+                        })?;
                     if e.over {
-                        return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                        return Err(format!(
+                            "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                        ));
                     }
                     if e.frames.len() > MAX_NESTING {
-                        return Err(format!("instruction {sub_pc}: blocks nested deeper than {MAX_NESTING}"));
+                        return Err(format!(
+                            "instruction {sub_pc}: blocks nested deeper than {MAX_NESTING}"
+                        ));
                     }
                 }
                 let then_unreach = e.frames.last().unwrap().unreachable;
@@ -4371,12 +5102,18 @@ impl<'a> Function<'a> {
                 e.line("} else {");
                 for (sub_pc, sub_i) in code.iter().enumerate().take(end_pc + 1).skip(pc) {
                     self.instruction(&mut e, sub_pc, sub_i, &loop_written_globals)
-                        .map_err(|err| format!("instruction {sub_pc} ({:#x}): {err}", sub_i.opcode))?;
+                        .map_err(|err| {
+                            format!("instruction {sub_pc} ({:#x}): {err}", sub_i.opcode)
+                        })?;
                     if e.over {
-                        return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                        return Err(format!(
+                            "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                        ));
                     }
                     if e.frames.len() > MAX_NESTING {
-                        return Err(format!("instruction {sub_pc}: blocks nested deeper than {MAX_NESTING}"));
+                        return Err(format!(
+                            "instruction {sub_pc}: blocks nested deeper than {MAX_NESTING}"
+                        ));
                     }
                 }
                 let else_unreach = e.frames.last().unwrap().unreachable;
@@ -4389,10 +5126,14 @@ impl<'a> Function<'a> {
             self.instruction(&mut e, pc, i, &loop_written_globals)
                 .map_err(|err| format!("instruction {pc} ({:#x}): {err}", i.opcode))?;
             if e.over {
-                return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
+                return Err(format!(
+                    "the generated source exceeds {MAX_SOURCE_BYTES} bytes"
+                ));
             }
             if e.frames.len() > MAX_NESTING {
-                return Err(format!("instruction {pc}: blocks nested deeper than {MAX_NESTING}"));
+                return Err(format!(
+                    "instruction {pc}: blocks nested deeper than {MAX_NESTING}"
+                ));
             }
             if e.frames.is_empty() {
                 break;
@@ -4406,7 +5147,13 @@ impl<'a> Function<'a> {
         Ok(())
     }
 
-    fn instruction(&self, e: &mut Emitter, pc: usize, i: &Instruction, loop_written_globals: &[Vec<u32>]) -> Res<()> {
+    fn instruction(
+        &self,
+        e: &mut Emitter,
+        pc: usize,
+        i: &Instruction,
+        loop_written_globals: &[Vec<u32>],
+    ) -> Res<()> {
         let op = i.opcode;
         // Dead code after an unconditional branch: skipped to its else or end.
         if e.frames.last().is_some_and(|f| f.unreachable) {
@@ -4418,7 +5165,9 @@ impl<'a> Function<'a> {
                 // Exception handling opens and closes blocks of its own: it
                 // is refused here as it is in live code, so that skipping
                 // cannot misread where the dead code ends.
-                0x06..=0x0a | 0x18 | 0x19 | 0x1f => return Err(format!("unsupported instruction {op:#x}")),
+                0x06..=0x0a | 0x18 | 0x19 | 0x1f => {
+                    return Err(format!("unsupported instruction {op:#x}"));
+                }
                 0x05 if e.dead > 0 => return Ok(()),
                 0x0b if e.dead > 0 => {
                     e.dead -= 1;
@@ -4469,7 +5218,10 @@ impl<'a> Function<'a> {
                     }
                 }
                 let height = e.stack.len() - params.len();
-                e.line(&format!("'L{label}: {}", if op == 0x03 { "loop {" } else { "{" }));
+                e.line(&format!(
+                    "'L{label}: {}",
+                    if op == 0x03 { "loop {" } else { "{" }
+                ));
                 e.frames.push(Frame {
                     kind: if op == 0x03 { Kind::Loop } else { Kind::Block },
                     label,
@@ -4527,7 +5279,11 @@ impl<'a> Function<'a> {
                 }
                 frame.has_else = true;
                 frame.unreachable = false;
-                let (height, params, restored_dirty) = (frame.height, frame.if_params.clone(), frame.if_entry_dirty.clone());
+                let (height, params, restored_dirty) = (
+                    frame.height,
+                    frame.if_params.clone(),
+                    frame.if_entry_dirty.clone(),
+                );
                 e.dirty_globals = restored_dirty;
                 e.stack.truncate(height);
                 e.deps.truncate(height);
@@ -4564,7 +5320,8 @@ impl<'a> Function<'a> {
                 if kind == Kind::If && !frame.has_else {
                     // The implicit else passes the params through as results.
                     e.line("} else {");
-                    let values: Vec<String> = frame.if_params.iter().map(|(v, _)| v.clone()).collect();
+                    let values: Vec<String> =
+                        frame.if_params.iter().map(|(v, _)| v.clone()).collect();
                     e.assign(&frame.result_vars, &values);
                 }
                 match kind {
@@ -4640,7 +5397,8 @@ impl<'a> Function<'a> {
                     // returns `Trap` directly, so no globals need storing or reloading.
                     let mut all = vec!["mb".to_string()];
                     all.extend(args);
-                    let err = ret_err_expr(e.ret_abi, &format!("ctx.import{f}({})", all.join(", ")))?;
+                    let err =
+                        ret_err_expr(e.ret_abi, &format!("ctx.import{f}({})", all.join(", ")))?;
                     e.line(&format!("return {err};"));
                     e.set_unreachable();
                 } else {
@@ -4681,8 +5439,16 @@ impl<'a> Function<'a> {
                 let Immediate::Pair(ti, tbl) = i.immediate else {
                     return Err("call_indirect immediate".into());
                 };
-                let &ci_id = self.module.ci_index.get(&(tbl, ti)).ok_or("call_indirect not registered")?;
-                let ty = self.module.module_types.get(ti as usize).ok_or("call_indirect type")?;
+                let &ci_id = self
+                    .module
+                    .ci_index
+                    .get(&(tbl, ti))
+                    .ok_or("call_indirect not registered")?;
+                let ty = self
+                    .module
+                    .module_types
+                    .get(ti as usize)
+                    .ok_or("call_indirect type")?;
                 let (idx, _) = e.pop()?;
                 let n = ty.params.len();
                 if e.stack.len() < n {
@@ -4715,7 +5481,11 @@ impl<'a> Function<'a> {
                 let (c, _, dc) = e.pop_dep()?;
                 let (b, _, db) = e.pop_dep()?;
                 let (a, t, da) = e.pop_dep()?;
-                e.push_pure(t, &format!("if {c} != 0 {{ {a} }} else {{ {b} }}"), da.union(&db).union(&dc))?;
+                e.push_pure(
+                    t,
+                    &format!("if {c} != 0 {{ {a} }} else {{ {b} }}"),
+                    da.union(&db).union(&dc),
+                )?;
             }
             0x20 => {
                 let x = index()? as usize;
@@ -4743,14 +5513,24 @@ impl<'a> Function<'a> {
                 if let Some(c) = self.module.global_consts[x] {
                     e.push_plain(*t, c.rust_literal());
                 } else {
-                    let place = if e.globals_cached.contains(&(x as u32)) { format!("gv{x}") } else { format!("ctx.g{x}") };
+                    let place = if e.globals_cached.contains(&(x as u32)) {
+                        format!("gv{x}")
+                    } else {
+                        format!("ctx.g{x}")
+                    };
                     e.push_pure(*t, &place, Dep::global())?;
                 }
             }
             0x24 => {
                 let x = index()?;
                 let (v, _) = e.pop()?;
-                if self.module.global_consts.get(x as usize).and_then(|c| *c).is_some() {
+                if self
+                    .module
+                    .global_consts
+                    .get(x as usize)
+                    .and_then(|c| *c)
+                    .is_some()
+                {
                     // Proven constant-init global: every write stores the same constant.
                 } else {
                     e.materialize(|d| d.globals, None)?;
@@ -4812,14 +5592,20 @@ impl<'a> Function<'a> {
                 let (n, _) = e.pop()?;
                 if !self.module.memory64 {
                     if let Some(bytes) = self.module.fixed32 {
-                        e.push(ValType::I32, &format!("if ({n}) == 0 {{ {}i32 }} else {{ -1i32 }}", bytes >> 16))?;
+                        e.push(
+                            ValType::I32,
+                            &format!("if ({n}) == 0 {{ {}i32 }} else {{ -1i32 }}", bytes >> 16),
+                        )?;
                     } else {
                         let delta = self.address(&n);
                         e.push(ValType::I32, &format!("ctx.mem.grow({delta}) as i32"))?;
                         e.refresh_ml(self.module)?;
                     }
                 } else if let Some(bytes) = self.module.fixed64 {
-                    e.push(ValType::I64, &format!("if ({n}) == 0 {{ {}i64 }} else {{ -1i64 }}", bytes >> 16))?;
+                    e.push(
+                        ValType::I64,
+                        &format!("if ({n}) == 0 {{ {}i64 }} else {{ -1i64 }}", bytes >> 16),
+                    )?;
                 } else {
                     let delta = self.address(&n);
                     e.push(ValType::I64, &format!("ctx.outer.grow({delta})"))?;
@@ -4827,19 +5613,27 @@ impl<'a> Function<'a> {
                 }
             }
             0x41 => {
-                let Immediate::I32(v) = i.immediate else { return Err("i32.const".into()) };
+                let Immediate::I32(v) = i.immediate else {
+                    return Err("i32.const".into());
+                };
                 e.push_plain(ValType::I32, format!("({v}i32)"));
             }
             0x42 => {
-                let Immediate::I64(v) = i.immediate else { return Err("i64.const".into()) };
+                let Immediate::I64(v) = i.immediate else {
+                    return Err("i64.const".into());
+                };
                 e.push_plain(ValType::I64, format!("({v}i64)"));
             }
             0x43 => {
-                let Immediate::F32(v) = i.immediate else { return Err("f32.const".into()) };
+                let Immediate::F32(v) = i.immediate else {
+                    return Err("f32.const".into());
+                };
                 e.push_plain(ValType::F32, format!("f32::from_bits({v:#x})"));
             }
             0x44 => {
-                let Immediate::F64(v) = i.immediate else { return Err("f64.const".into()) };
+                let Immediate::F64(v) = i.immediate else {
+                    return Err("f64.const".into());
+                };
                 e.push_plain(ValType::F64, format!("f64::from_bits({v:#x})"));
             }
             0xfc0a => {
@@ -4847,7 +5641,10 @@ impl<'a> Function<'a> {
                 let (src, _) = e.pop()?;
                 let (dst, _) = e.pop()?;
                 let literal = n.trim_matches(['(', ')']);
-                let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
+                let constant = literal
+                    .strip_suffix("i32")
+                    .or(literal.strip_suffix("i64"))
+                    .and_then(|k| k.parse::<usize>().ok());
                 let ml = self.ml();
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
@@ -4876,7 +5673,10 @@ impl<'a> Function<'a> {
                 let (value, _) = e.pop()?;
                 let (dst, _) = e.pop()?;
                 let literal = n.trim_matches(['(', ')']);
-                let constant = literal.strip_suffix("i32").or(literal.strip_suffix("i64")).and_then(|k| k.parse::<usize>().ok());
+                let constant = literal
+                    .strip_suffix("i32")
+                    .or(literal.strip_suffix("i64"))
+                    .and_then(|k| k.parse::<usize>().ok());
                 let ml = self.ml();
                 match constant {
                     Some(k @ 1..=COPY_INLINE) if !self.module.memory64 => {
@@ -4901,7 +5701,9 @@ impl<'a> Function<'a> {
                 }
             }
             0xfd0c => {
-                let Immediate::Bytes(ref b) = i.immediate else { return Err("v128.const".into()) };
+                let Immediate::Bytes(ref b) = i.immediate else {
+                    return Err("v128.const".into());
+                };
                 let bytes: [u8; 16] = b.as_ref().try_into().map_err(|_| "v128.const")?;
                 e.push_plain(ValType::V128, format!("{}u128", u128::from_le_bytes(bytes)));
             }
@@ -4914,16 +5716,25 @@ impl<'a> Function<'a> {
                     0xfd10 => ("u16", 0x0001_0001_0001_0001_0001_0001_0001_0001u128),
                     _ => ("u32", 0x0000_0001_0000_0001_0000_0001_0000_0001u128),
                 };
-                e.push(ValType::V128, &format!("(({a} as {lane} as u128).wrapping_mul({ones}u128))"))?;
+                e.push(
+                    ValType::V128,
+                    &format!("(({a} as {lane} as u128).wrapping_mul({ones}u128))"),
+                )?;
             }
             0xfd12 => {
                 let (a, _) = e.pop()?;
-                e.push(ValType::V128, &format!("(({a} as u64 as u128) | (({a} as u64 as u128) << 64))"))?;
+                e.push(
+                    ValType::V128,
+                    &format!("(({a} as u64 as u128) | (({a} as u64 as u128) << 64))"),
+                )?;
             }
             0xfd1d => {
                 let lane = index()?;
                 let (v, _) = e.pop()?;
-                e.push(ValType::I64, &format!("({v} >> {}) as u64 as i64", 64 * lane))?;
+                e.push(
+                    ValType::I64,
+                    &format!("({v} >> {}) as u64 as i64", 64 * lane),
+                )?;
             }
             0xfd1e => {
                 let lane = index()?;
@@ -4959,7 +5770,13 @@ impl<'a> Function<'a> {
         Ok(())
     }
 
-    fn emit_wasm_call_results(&self, e: &mut Emitter, results: &[ValType], raw: &str, suf: &str) -> Res<()> {
+    fn emit_wasm_call_results(
+        &self,
+        e: &mut Emitter,
+        results: &[ValType],
+        raw: &str,
+        suf: &str,
+    ) -> Res<()> {
         match ret_abi(results) {
             RetAbi::Void => {
                 e.line(&format!("tv!({raw}{suf});"));
@@ -4972,8 +5789,16 @@ impl<'a> Function<'a> {
                 e.line(&format!("let {p}: u64 = tc!({raw}{suf});"));
                 let v0 = e.fresh("v");
                 let v1 = e.fresh("v");
-                e.line(&format!("let {v0}: {} = {};", rust_type(a)?, unpack_u32_lane(a, &format!("{p} as u32"))));
-                e.line(&format!("let {v1}: {} = {};", rust_type(b)?, unpack_u32_lane(b, &format!("({p} >> 32) as u32"))));
+                e.line(&format!(
+                    "let {v0}: {} = {};",
+                    rust_type(a)?,
+                    unpack_u32_lane(a, &format!("{p} as u32"))
+                ));
+                e.line(&format!(
+                    "let {v1}: {} = {};",
+                    rust_type(b)?,
+                    unpack_u32_lane(b, &format!("({p} >> 32) as u32"))
+                ));
                 e.push_plain(a, v0);
                 e.push_plain(b, v1);
             }
@@ -4997,7 +5822,9 @@ impl<'a> Function<'a> {
 
     fn memarg(&self, i: &Instruction) -> Res<u64> {
         match i.immediate {
-            Immediate::MemArg { memory: 0, offset, .. } => Ok(offset),
+            Immediate::MemArg {
+                memory: 0, offset, ..
+            } => Ok(offset),
             _ => Err("memory instruction on another memory".into()),
         }
     }
@@ -5029,11 +5856,23 @@ impl<'a> Function<'a> {
         let loaded = if !self.module.memory64 {
             format!("t!(m32::l{}(mb, {ml}, {a} as u32, {offset}){suf})", n * 8)
         } else if self.module.cap64.is_some() {
-            format!("t!(m64f::l{}::<CAP64>(mb, {ml}, {}, {offset}){suf})", n * 8, self.address(&a))
+            format!(
+                "t!(m64f::l{}::<CAP64>(mb, {ml}, {}, {offset}){suf})",
+                n * 8,
+                self.address(&a)
+            )
         } else if self.module.flat64 || e.in_flat_region {
-            format!("t!(m64::fl{}(mb, {ml}, {}, {offset}){suf})", n * 8, self.address(&a))
+            format!(
+                "t!(m64::fl{}(mb, {ml}, {}, {offset}){suf})",
+                n * 8,
+                self.address(&a)
+            )
         } else {
-            format!("t!(m64::l{}(mb, {ml}, &ctx.outer, {}, {offset}){suf})", n * 8, self.address(&a))
+            format!(
+                "t!(m64::l{}(mb, {ml}, &ctx.outer, {}, {offset}){suf})",
+                n * 8,
+                self.address(&a)
+            )
         };
         e.push(t, &conversion.replace("{}", &loaded))
     }
@@ -5057,13 +5896,28 @@ impl<'a> Function<'a> {
             op => return Err(format!("store {op:#x}")),
         };
         let store = if !self.module.memory64 {
-            format!("t!(m32::s{}(mb, {ml}, {a} as u32, {offset}, {value}){suf});", n * 8)
+            format!(
+                "t!(m32::s{}(mb, {ml}, {a} as u32, {offset}, {value}){suf});",
+                n * 8
+            )
         } else if self.module.cap64.is_some() {
-            format!("t!(m64f::s{}::<CAP64>(mb, {ml}, {}, {offset}, {value}){suf});", n * 8, self.address(&a))
+            format!(
+                "t!(m64f::s{}::<CAP64>(mb, {ml}, {}, {offset}, {value}){suf});",
+                n * 8,
+                self.address(&a)
+            )
         } else if self.module.flat64 || e.in_flat_region {
-            format!("t!(m64::fs{}(mb, {ml}, {}, {offset}, {value}){suf});", n * 8, self.address(&a))
+            format!(
+                "t!(m64::fs{}(mb, {ml}, {}, {offset}, {value}){suf});",
+                n * 8,
+                self.address(&a)
+            )
         } else {
-            format!("t!(m64::s{}(mb, {ml}, &mut ctx.outer, {}, {offset}, {value}){suf});", n * 8, self.address(&a))
+            format!(
+                "t!(m64::s{}(mb, {ml}, &mut ctx.outer, {}, {offset}, {value}){suf});",
+                n * 8,
+                self.address(&a)
+            )
         };
         e.line(&store);
         Ok(())
@@ -5149,7 +6003,7 @@ fn numeric(op: u16) -> Option<(usize, ValType, &'static str)> {
         0x92 => (2, F32, "{a} + {b}"),
         0x93 => (2, F32, "{a} - {b}"),
         0x94 => (2, F32, "{a} * {b}"),
-        0x95 => (2, F32, "{a} / {b}"),
+        0x95 => (2, F32, "f32_div({a}, {b})"),
         0x96 => (2, F32, "f32_min({a}, {b})"),
         0x97 => (2, F32, "f32_max({a}, {b})"),
         0x98 => (2, F32, "{a}.copysign({b})"),
@@ -5163,7 +6017,7 @@ fn numeric(op: u16) -> Option<(usize, ValType, &'static str)> {
         0xa0 => (2, F64, "{a} + {b}"),
         0xa1 => (2, F64, "{a} - {b}"),
         0xa2 => (2, F64, "{a} * {b}"),
-        0xa3 => (2, F64, "{a} / {b}"),
+        0xa3 => (2, F64, "f64_div({a}, {b})"),
         0xa4 => (2, F64, "f64_min({a}, {b})"),
         0xa5 => (2, F64, "f64_max({a}, {b})"),
         0xa6 => (2, F64, "{a}.copysign({b})"),
@@ -5212,8 +6066,8 @@ fn numeric(op: u16) -> Option<(usize, ValType, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConstVal, Target, bare_operands, eval_constant, function_preserves_global, function_writes_only_same_global,
-        generate, generate_target, tarjan_scc,
+        ConstVal, Target, bare_operands, eval_constant, function_preserves_global,
+        function_writes_only_same_global, generate, generate_target, tarjan_scc,
     };
     use wtime_types::{FuncType, ValType};
     use wtime_validate::{Immediate, Instruction};
@@ -5223,19 +6077,31 @@ mod tests {
     }
 
     fn void_fn() -> FuncType {
-        FuncType { params: vec![], results: vec![] }
+        FuncType {
+            params: vec![],
+            results: vec![],
+        }
     }
 
     #[test]
     fn whole_values_lose_their_parentheses() {
         let cases = [
             ("l15 = (self.g0);", "l15 = self.g0;"),
-            ("l16 = ((l15).wrapping_add((176i32)));", "l16 = (l15).wrapping_add(176i32);"),
-            ("self.f7((3872i32), (26i32), ((l1) + (l2)))?;", "self.f7(3872i32, 26i32, (l1) + (l2))?;"),
+            (
+                "l16 = ((l15).wrapping_add((176i32)));",
+                "l16 = (l15).wrapping_add(176i32);",
+            ),
+            (
+                "self.f7((3872i32), (26i32), ((l1) + (l2)))?;",
+                "self.f7(3872i32, 26i32, (l1) + (l2))?;",
+            ),
             ("if ((l1) != 0) {", "if (l1) != 0 {"),
             ("if (l1) != 0 {", "if (l1) != 0 {"),
             ("(r1, r2) = ((l1), (l2));", "(r1, r2) = (l1, l2);"),
-            ("let v: i32 = ((l1) == ((l2) == (l3)));", "let v: i32 = (l1) == ((l2) == (l3));"),
+            (
+                "let v: i32 = ((l1) == ((l2) == (l3)));",
+                "let v: i32 = (l1) == ((l2) == (l3));",
+            ),
             ("x = (a) <= (b);", "x = (a) <= (b);"),
             ("diff (a) {", "diff (a) {"),
             ("f(());", "f(());"),
@@ -5290,7 +6156,14 @@ mod tests {
             insn(0x0b, Immediate::None),
             insn(0x0b, Immediate::None),
         ];
-        assert!(function_writes_only_same_global(&save_restore, 1, &types, &types, &noreturn, 0));
+        assert!(function_writes_only_same_global(
+            &save_restore,
+            1,
+            &types,
+            &types,
+            &noreturn,
+            0
+        ));
 
         // Writing a computed value rejects constant-init elimination.
         let mutated = [
@@ -5300,7 +6173,9 @@ mod tests {
             insn(0x24, Immediate::Index(0)),
             insn(0x0b, Immediate::None),
         ];
-        assert!(!function_writes_only_same_global(&mutated, 1, &types, &types, &noreturn, 0));
+        assert!(!function_writes_only_same_global(
+            &mutated, 1, &types, &types, &noreturn, 0
+        ));
 
         // Modifying saved local inside a loop must invalidate it at loop header.
         let loop_clobber = [
@@ -5315,7 +6190,14 @@ mod tests {
             insn(0x0b, Immediate::None),
             insn(0x0b, Immediate::None),
         ];
-        assert!(!function_writes_only_same_global(&loop_clobber, 1, &types, &types, &noreturn, 0));
+        assert!(!function_writes_only_same_global(
+            &loop_clobber,
+            1,
+            &types,
+            &types,
+            &noreturn,
+            0
+        ));
     }
 
     #[test]
@@ -5348,7 +6230,17 @@ mod tests {
             insn(0x0b, Immediate::None),
             insn(0x0b, Immediate::None),
         ];
-        assert!(function_preserves_global(&ok_loop, 1, &types, &types, &ci_index, &ci_targets, &noreturn, &preserves, 0));
+        assert!(function_preserves_global(
+            &ok_loop,
+            1,
+            &types,
+            &types,
+            &ci_index,
+            &ci_targets,
+            &noreturn,
+            &preserves,
+            0
+        ));
 
         // Early return before restoring g0 must be rejected.
         let bad_early_ret = [
@@ -5364,7 +6256,17 @@ mod tests {
             insn(0x24, Immediate::Index(0)),
             insn(0x0b, Immediate::None),
         ];
-        assert!(!function_preserves_global(&bad_early_ret, 1, &types, &types, &ci_index, &ci_targets, &noreturn, &preserves, 0));
+        assert!(!function_preserves_global(
+            &bad_early_ret,
+            1,
+            &types,
+            &types,
+            &ci_index,
+            &ci_targets,
+            &noreturn,
+            &preserves,
+            0
+        ));
 
         // Loop backedge taken while g0 is modified breaks header invariant on retry.
         let bad_loop_backedge = [
@@ -5380,11 +6282,31 @@ mod tests {
             insn(0x0b, Immediate::None),
             insn(0x0b, Immediate::None),
         ];
-        assert!(!function_preserves_global(&bad_loop_backedge, 1, &types, &types, &ci_index, &ci_targets, &noreturn, &preserves, 0));
+        assert!(!function_preserves_global(
+            &bad_loop_backedge,
+            1,
+            &types,
+            &types,
+            &ci_index,
+            &ci_targets,
+            &noreturn,
+            &preserves,
+            0
+        ));
 
         // Calling non-preserving f2 fails unless g0 is restored from saved local afterwards.
         let bad_call = [insn(0x10, Immediate::Index(2)), insn(0x0b, Immediate::None)];
-        assert!(!function_preserves_global(&bad_call, 1, &types, &types, &ci_index, &ci_targets, &noreturn, &preserves, 0));
+        assert!(!function_preserves_global(
+            &bad_call,
+            1,
+            &types,
+            &types,
+            &ci_index,
+            &ci_targets,
+            &noreturn,
+            &preserves,
+            0
+        ));
         let ok_call_restored = [
             insn(0x23, Immediate::Index(0)),
             insn(0x21, Immediate::Index(0)),
@@ -5393,7 +6315,17 @@ mod tests {
             insn(0x24, Immediate::Index(0)),
             insn(0x0b, Immediate::None),
         ];
-        assert!(function_preserves_global(&ok_call_restored, 1, &types, &types, &ci_index, &ci_targets, &noreturn, &preserves, 0));
+        assert!(function_preserves_global(
+            &ok_call_restored,
+            1,
+            &types,
+            &types,
+            &ci_index,
+            &ci_targets,
+            &noreturn,
+            &preserves,
+            0
+        ));
     }
 
     #[test]
@@ -5446,7 +6378,10 @@ mod tests {
         // Memory section: 1 memory64, flags=5 (memory64 + max), min=1, max=4
         wasm.extend(section(5, &[1, 0x05, 1, 4]));
         // Global section: g0 = mut i64 0, g1 = mut i32 7
-        wasm.extend(section(6, &[2, 0x7e, 1, 0x42, 0, 0x0b, 0x7f, 1, 0x41, 7, 0x0b]));
+        wasm.extend(section(
+            6,
+            &[2, 0x7e, 1, 0x42, 0, 0x0b, 0x7f, 1, 0x41, 7, 0x0b],
+        ));
         // Export section: "_start" -> func 0, "memory" -> mem 0
         let mut exp = vec![2];
         exp.push(6);
@@ -5494,7 +6429,8 @@ mod tests {
     fn generate_emits_cap64_chunked_regions_and_global_analyses() {
         let wasm = sample_mem64_wasm();
         let rt = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
-        let root = std::env::temp_dir().join(format!("wtime-aot-codegen-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("wtime-aot-codegen-test-{}", std::process::id()));
         let flat_dir = root.join("flat");
         let chunk_dir = root.join("chunked");
         let _ = std::fs::remove_dir_all(&root);
@@ -5568,8 +6504,7 @@ mod tests {
         wasm.extend(section(
             1,
             &[
-                4,
-                0x60, 1, 0x6f, 0, // t0
+                4, 0x60, 1, 0x6f, 0, // t0
                 0x60, 1, 0x7f, 2, 0x7f, 0x7f, // t1
                 0x60, 1, 0x7f, 1, 0x7f, // t2
                 0x60, 2, 0x6f, 0x7f, 1, 0x7f, // t3
@@ -5590,7 +6525,10 @@ mod tests {
         // Memory section: 1 fixed 32-bit memory min=1 max=1
         wasm.extend(section(5, &[1, 0x01, 1, 1]));
         // Global section: g0 = mut i32 0 (mutated by f2..f6), g1 = mut i32 0 (rarely read in f1)
-        wasm.extend(section(6, &[2, 0x7f, 1, 0x41, 0, 0x0b, 0x7f, 1, 0x41, 0, 0x0b]));
+        wasm.extend(section(
+            6,
+            &[2, 0x7f, 1, 0x41, 0, 0x0b, 0x7f, 1, 0x41, 0, 0x0b],
+        ));
         // Export section: "main" -> f1, "blot:allocate" -> f7, "blot:memory" -> mem 0
         let mut exp = vec![3];
         exp.push(4);
@@ -5615,7 +6553,7 @@ mod tests {
             0xd0, 0x6f, 0xd1, 0x1a, // drop (ref.is_null (ref.null extern))
             0x23, 1, 0x10, 7, 0x1a, // drop (call f7 (global.get 1))
             0x02, 0x40, // block
-            0x41, 0, 0x0e, 1, 0, 0, // br_table [0] 0
+            0x41, 0, 0x0e, 1, 0, 0,    // br_table [0] 0
             0x0b, // end
             0x41, 1, 0x41, 1, 0x11, 1, 0, 0x1a, 0x1a, // call_indirect t1 tbl 0
             0x41, 2, 0x41, 2, 0x11, 1, 0, 0x1a, 0x1a, // call_indirect t1 tbl 0
@@ -5625,8 +6563,7 @@ mod tests {
         // f2..f6: bump g0 and g1, return (p0, g0)
         let target_body = |k: u8| -> Vec<u8> {
             vec![
-                0,
-                0x23, 0, 0x41, k, 0x6a, 0x24, 0, // g0 += k
+                0, 0x23, 0, 0x41, k, 0x6a, 0x24, 0, // g0 += k
                 0x23, 1, 0x41, 1, 0x6a, 0x24, 1, // g1 += 1
                 0x20, 0, 0x23, 0, // return (p0, g0)
                 0x0b,
@@ -5634,7 +6571,15 @@ mod tests {
         };
         // f7 (blot:allocate): return p0
         let f7: Vec<u8> = vec![0, 0x20, 0, 0x0b];
-        let bodies = [f1, target_body(1), target_body(2), target_body(3), target_body(4), target_body(5), f7];
+        let bodies = [
+            f1,
+            target_body(1),
+            target_body(2),
+            target_body(3),
+            target_body(4),
+            target_body(5),
+            f7,
+        ];
         let mut code = vec![bodies.len() as u8];
         for b in &bodies {
             leb_u32(&mut code, b.len() as u32);
@@ -5645,7 +6590,16 @@ mod tests {
         let rt = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
         let root = std::env::temp_dir().join(format!("wtime-aot-blot-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        generate_target(&wasm, &root, "test-blot", &rt, "test.wasm", false, Target::BlotCdylib).unwrap();
+        generate_target(
+            &wasm,
+            &root,
+            "test-blot",
+            &rt,
+            "test.wasm",
+            false,
+            Target::BlotCdylib,
+        )
+        .unwrap();
 
         let lib_src = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
         let core_src = std::fs::read_to_string(root.join("core/src/lib.rs")).unwrap();

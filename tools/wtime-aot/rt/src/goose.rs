@@ -7,9 +7,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::float::{f32_text, f64_text};
@@ -62,7 +62,11 @@ pub struct Policy {
 impl Default for Policy {
     /// Nothing granted.
     fn default() -> Policy {
-        Policy { directories: Vec::new(), variables: Some(Vec::new()), output_limit: OUTPUT_LIMIT }
+        Policy {
+            directories: Vec::new(),
+            variables: Some(Vec::new()),
+            output_limit: OUTPUT_LIMIT,
+        }
     }
 }
 
@@ -88,12 +92,26 @@ impl Policy {
         // First by its text alone, so that nothing outside the granted
         // directories is even looked at: no `..`, and the path made absolute
         // against the working directory lies under a granted directory.
-        if path.components().any(|component| component == Component::ParentDir) {
+        if path
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
             return None;
         }
-        let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().ok()?.join(path) };
-        let lexical: PathBuf = absolute.components().filter(|component| *component != Component::CurDir).collect();
-        if !self.directories.iter().any(|granted| lexical.starts_with(granted)) {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
+        let lexical: PathBuf = absolute
+            .components()
+            .filter(|component| *component != Component::CurDir)
+            .collect();
+        if !self
+            .directories
+            .iter()
+            .any(|granted| lexical.starts_with(granted))
+        {
             return None;
         }
         // A trailing `/` (or `/.`) names a directory, which must exist.
@@ -111,11 +129,17 @@ impl Policy {
                     Component::Normal(name) => name,
                     _ => return None,
                 };
-                let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                let parent = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
                 parent.canonicalize().ok()?.join(name)
             }
         };
-        self.directories.iter().any(|directory| resolved.starts_with(directory)).then_some(resolved)
+        self.directories
+            .iter()
+            .any(|directory| resolved.starts_with(directory))
+            .then_some(resolved)
     }
 
     fn variable(&self, name: &[u8]) -> bool {
@@ -158,7 +182,10 @@ impl State {
             return Err(Trap::StopIteration);
         };
         let start = self.token_at + start;
-        let end = self.input[start..].iter().position(space).map_or(self.input.len(), |length| start + length);
+        let end = self.input[start..]
+            .iter()
+            .position(space)
+            .map_or(self.input.len(), |length| start + length);
         self.token_at = end;
         Ok(&self.input[start..end])
     }
@@ -242,7 +269,10 @@ fn read(guest: &mut dyn Guest, pointer: i128, length: i128) -> R<Vec<u8>> {
         return Err(fail(guest, "negative host address"));
     }
     let Some(memory) = guest.memory() else {
-        return Err(fail(guest, "host memory is unavailable during module initialization"));
+        return Err(fail(
+            guest,
+            "host memory is unavailable during module initialization",
+        ));
     };
     let (Ok(pointer), Ok(length)) = (u64::try_from(pointer), u64::try_from(length)) else {
         return Err(fail(guest, "host write is outside exported memory"));
@@ -258,7 +288,10 @@ fn write(guest: &mut dyn Guest, pointer: i128, bytes: &[u8]) -> R<()> {
         return Err(fail(guest, "negative host address"));
     }
     let Some(memory) = guest.memory() else {
-        return Err(fail(guest, "host memory is unavailable during module initialization"));
+        return Err(fail(
+            guest,
+            "host memory is unavailable during module initialization",
+        ));
     };
     let Ok(pointer) = u64::try_from(pointer) else {
         return Err(fail(guest, "host write is outside exported memory"));
@@ -271,7 +304,10 @@ fn write(guest: &mut dyn Guest, pointer: i128, bytes: &[u8]) -> R<()> {
 
 fn write64(guest: &mut dyn Guest, pointer: i64, value: i128) -> R<()> {
     let Ok(value) = u64::try_from(value) else {
-        return Err(fail(guest, "'Q' format requires 0 <= number <= 18446744073709551615"));
+        return Err(fail(
+            guest,
+            "'Q' format requires 0 <= number <= 18446744073709551615",
+        ));
     };
     write(guest, pointer.into(), &value.to_le_bytes())
 }
@@ -286,7 +322,11 @@ fn print(guest: &mut dyn Guest, text: &[u8]) -> R<Out> {
 /// against the output limit, before they are read from the module.
 fn charge(guest: &mut dyn Guest, n: u64) -> R<()> {
     let state = guest.state();
-    match state.written.checked_add(n).filter(|&total| total <= state.policy.output_limit) {
+    match state
+        .written
+        .checked_add(n)
+        .filter(|&total| total <= state.policy.output_limit)
+    {
         Some(total) => {
             state.written = total;
             Ok(())
@@ -339,9 +379,19 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
         },
         ("goose", "newline") => |g, _| print(g, b"\n"),
         ("goose", "abort") => |g, values| {
-            let (pointer, length, line) = (integer(g, values, 0)?, integer(g, values, 1)?, integer(g, values, 2)?);
+            let (pointer, length, line) = (
+                integer(g, values, 0)?,
+                integer(g, values, 1)?,
+                integer(g, values, 2)?,
+            );
             let message = read(g, address(pointer), address(length))?;
-            Err(fail(g, format!("goose runtime error: {} (line {line})", String::from_utf8_lossy(&message))))
+            Err(fail(
+                g,
+                format!(
+                    "goose runtime error: {} (line {line})",
+                    String::from_utf8_lossy(&message)
+                ),
+            ))
         },
         ("goose", "exit") | ("wasi_snapshot_preview1", "proc_exit") => exit,
         ("env", "bench_input") => |g, _| {
@@ -352,14 +402,16 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
             let parsed = g.state().token().map(parse_float)?;
             parsed.map(Out::Float).map_err(|text| fail(g, text))
         },
-        ("env", "bench_clock") | ("env", "gs_os_clock_ns") => |g, _| Ok(Out::Integer(monotonic_ns(g))),
+        ("env", "bench_clock") | ("env", "gs_os_clock_ns") => {
+            |g, _| Ok(Out::Integer(monotonic_ns(g)))
+        }
         ("env", "bench_barrier") => |g, values| match values.first() {
             Some(Val::F32(_) | Val::F64(_)) => Ok(Out::Float(float(g, values, 0)?)),
             _ => Ok(Out::Integer(integer(g, values, 0)?)),
         },
-        ("env", "bench_sink") | ("env", "emscripten_notify_memory_growth") | ("env", "gs_os_flush_stdout") => {
-            |_, _| Ok(Out::Nothing)
-        }
+        ("env", "bench_sink")
+        | ("env", "emscripten_notify_memory_growth")
+        | ("env", "gs_os_flush_stdout") => |_, _| Ok(Out::Nothing),
         ("env", "gs_os_read_file") => os_read_file,
         ("env", "gs_os_write_file") => |g, values| os_write_file(g, values, false),
         ("env", "gs_os_append_file") => |g, values| os_write_file(g, values, true),
@@ -406,12 +458,20 @@ pub fn handler(module: &str, name: &str) -> Option<Handler> {
         },
         ("wasi_snapshot_preview1", "fd_write") => fd_write,
         ("wasi_snapshot_preview1", "fd_read") => fd_read,
-        ("wasi_snapshot_preview1", "fd_close") => {
-            |g, values| Ok(Out::Integer(if (0..=2).contains(&integer(g, values, 0)?) { 0 } else { 8 }))
-        }
-        ("wasi_snapshot_preview1", "fd_seek") => {
-            |g, values| Ok(Out::Integer(if (0..=2).contains(&integer(g, values, 0)?) { 70 } else { 8 }))
-        }
+        ("wasi_snapshot_preview1", "fd_close") => |g, values| {
+            Ok(Out::Integer(if (0..=2).contains(&integer(g, values, 0)?) {
+                0
+            } else {
+                8
+            }))
+        },
+        ("wasi_snapshot_preview1", "fd_seek") => |g, values| {
+            Ok(Out::Integer(if (0..=2).contains(&integer(g, values, 0)?) {
+                70
+            } else {
+                8
+            }))
+        },
         _ => return None,
     };
     Some(handler)
@@ -423,7 +483,10 @@ fn integer(guest: &mut dyn Guest, values: &[Val], index: usize) -> R<i64> {
     match values.get(index) {
         Some(Val::I32(value)) => Ok(i64::from(*value)),
         Some(Val::I64(value)) => Ok(*value),
-        Some(_) => Err(fail(guest, "host import declared with a parameter that is not an integer")),
+        Some(_) => Err(fail(
+            guest,
+            "host import declared with a parameter that is not an integer",
+        )),
         None => Err(fail(guest, "host import declared with too few parameters")),
     }
 }
@@ -432,7 +495,10 @@ fn float(guest: &mut dyn Guest, values: &[Val], index: usize) -> R<f64> {
     match values.get(index) {
         Some(Val::F32(value)) => Ok(f64::from(*value)),
         Some(Val::F64(value)) => Ok(*value),
-        Some(_) => Err(fail(guest, "host import declared with a parameter that is not a float")),
+        Some(_) => Err(fail(
+            guest,
+            "host import declared with a parameter that is not a float",
+        )),
         None => Err(fail(guest, "host import declared with too few parameters")),
     }
 }
@@ -455,7 +521,11 @@ struct Arguments<'v> {
 
 impl<'v> Arguments<'v> {
     fn new(values: &'v [Val], kinds: usize) -> Arguments<'v> {
-        Arguments { values, at: 0, wide: values.len() > kinds }
+        Arguments {
+            values,
+            at: 0,
+            wide: values.len() > kinds,
+        }
     }
 
     fn integer(&mut self, guest: &mut dyn Guest) -> R<i64> {
@@ -474,7 +544,11 @@ impl<'v> Arguments<'v> {
 }
 
 fn address(value: i64) -> i128 {
-    if value < 0 { (value & 0xffff_ffff).into() } else { value.into() }
+    if value < 0 {
+        (value & 0xffff_ffff).into()
+    } else {
+        value.into()
+    }
 }
 
 // The goose module.
@@ -503,15 +577,22 @@ fn os_read_file(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     if guest.state().reserving {
         return Err(fail(guest, "goose.reserve called back into the host"));
     }
-    let Some(file) = guest.state().policy.file(&normalized_path(&path)) else { return Ok(Out::Integer(0)) };
+    let Some(file) = guest.state().policy.file(&normalized_path(&path)) else {
+        return Ok(Out::Integer(0));
+    };
     // At most the output limit: a larger file is reported unreadable.
     let limit = guest.state().policy.output_limit;
     let read = fs::File::open(file).and_then(|file| {
         let mut contents = Vec::new();
-        file.take(limit.saturating_add(1)).read_to_end(&mut contents)?;
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut contents)?;
         Ok(contents)
     });
-    match read.ok().filter(|contents| contents.len() as u64 <= limit).ok_or(()) {
+    match read
+        .ok()
+        .filter(|contents| contents.len() as u64 <= limit)
+        .ok_or(())
+    {
         Ok(contents) => {
             append_bytes(guest, control, &contents)?;
             Ok(Out::Integer(1))
@@ -536,11 +617,15 @@ fn os_write_file(guest: &mut dyn Guest, values: &[Val], append: bool) -> R<Out> 
     } else {
         options.write(true).create(true).truncate(true);
     }
-    let Some(file) = guest.state().policy.file(&path) else { return Ok(Out::Integer(0)) };
+    let Some(file) = guest.state().policy.file(&path) else {
+        return Ok(Out::Integer(0));
+    };
     // The checked path is opened without following a link in its last
     // component, should one appear there after the check.
     no_follow(&mut options);
-    let written = options.open(file).and_then(|mut file| file.write_all(&contents));
+    let written = options
+        .open(file)
+        .and_then(|mut file| file.write_all(&contents));
     Ok(Out::Integer(written.is_ok().into()))
 }
 
@@ -559,8 +644,12 @@ fn no_follow(options: &mut fs::OpenOptions) {
 fn os_stat(guest: &mut dyn Guest, values: &[Val], is: fn(&fs::Metadata) -> bool) -> R<Out> {
     let (pointer, length) = Arguments::new(values, 1).slice(guest)?;
     let path = read(guest, pointer, length)?;
-    let Some(file) = guest.state().policy.file(&path) else { return Ok(Out::Integer(0)) };
-    Ok(Out::Integer(fs::metadata(file).is_ok_and(|kind| is(&kind)).into()))
+    let Some(file) = guest.state().policy.file(&path) else {
+        return Ok(Out::Integer(0));
+    };
+    Ok(Out::Integer(
+        fs::metadata(file).is_ok_and(|kind| is(&kind)).into(),
+    ))
 }
 
 fn os_write(guest: &mut dyn Guest, values: &[Val], error: bool) -> R<Out> {
@@ -568,13 +657,20 @@ fn os_write(guest: &mut dyn Guest, values: &[Val], error: bool) -> R<Out> {
     charge(guest, u64::try_from(length).unwrap_or(u64::MAX))?;
     let text = read(guest, pointer, length)?;
     let state = guest.state();
-    if error { &mut state.err } else { &mut state.out }.extend_from_slice(&text);
+    if error {
+        &mut state.err
+    } else {
+        &mut state.out
+    }
+    .extend_from_slice(&text);
     Ok(Out::Nothing)
 }
 
 fn os_arg(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     let (index, control) = (integer(guest, values, 0)?, integer(guest, values, 1)?);
-    let argument = usize::try_from(index).ok().and_then(|index| guest.state().arguments.get(index).cloned());
+    let argument = usize::try_from(index)
+        .ok()
+        .and_then(|index| guest.state().arguments.get(index).cloned());
     if let Some(argument) = argument {
         append_bytes(guest, control, &argument)?;
     }
@@ -637,7 +733,10 @@ fn find_any(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
     let (members_ptr, members_len) = check_range(guest, members, 256)?;
     let found = {
         let Some(memory) = guest.memory() else {
-            return Err(fail(guest, "host memory is unavailable during module initialization"));
+            return Err(fail(
+                guest,
+                "host memory is unavailable during module initialization",
+            ));
         };
         let Ok(text) = memory.slice(pointer, length) else {
             return Err(fail(guest, "host write is outside exported memory"));
@@ -645,7 +744,8 @@ fn find_any(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
         let Ok(members) = memory.slice(members_ptr, members_len) else {
             return Err(fail(guest, "host write is outside exported memory"));
         };
-        text.iter().position(|&byte| members[usize::from(byte)] != 0)
+        text.iter()
+            .position(|&byte| members[usize::from(byte)] != 0)
     };
     Ok(Out::Integer(found.map_or(-1, |index| index as i64)))
 }
@@ -664,11 +764,17 @@ fn find_pair(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
         let _ = read(guest, pointer.into(), length.into())?;
         let _ = read(guest, first_ptr.into(), first_len.into())?;
         let _ = read(guest, second_ptr.into(), second_len.into())?;
-        return Err(fail(guest, "negative gs_find_pair distance is not supported by this host"));
+        return Err(fail(
+            guest,
+            "negative gs_find_pair distance is not supported by this host",
+        ));
     };
     let found = {
         let Some(memory) = guest.memory() else {
-            return Err(fail(guest, "host memory is unavailable during module initialization"));
+            return Err(fail(
+                guest,
+                "host memory is unavailable during module initialization",
+            ));
         };
         let Ok(text) = memory.slice(pointer, length) else {
             return Err(fail(guest, "host write is outside exported memory"));
@@ -679,8 +785,9 @@ fn find_pair(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
         let Ok(second) = memory.slice(second_ptr, second_len) else {
             return Err(fail(guest, "host write is outside exported memory"));
         };
-        (0..text.len().saturating_sub(distance))
-            .find(|&index| first[usize::from(text[index])] != 0 && second[usize::from(text[index + distance])] != 0)
+        (0..text.len().saturating_sub(distance)).find(|&index| {
+            first[usize::from(text[index])] != 0 && second[usize::from(text[index + distance])] != 0
+        })
     };
     Ok(Out::Integer(found.map_or(-1, |index| index as i64)))
 }
@@ -690,12 +797,21 @@ fn find_pair(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
 fn iovecs(guest: &mut dyn Guest, pointer: i64, count: i64) -> R<Vec<(u64, u64)>> {
     let data = read(guest, pointer.into(), i128::from(count) * 16)?;
     let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().unwrap_or([0; 8]));
-    Ok(data.chunks_exact(16).map(|pair| (word(&pair[..8]), word(&pair[8..]))).collect())
+    Ok(data
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|pair| (word(&pair[..8]), word(&pair[8..])))
+        .collect())
 }
 
 fn fd_write(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
-    let (fd, pointer, count, written) =
-        (integer(guest, values, 0)?, integer(guest, values, 1)?, integer(guest, values, 2)?, integer(guest, values, 3)?);
+    let (fd, pointer, count, written) = (
+        integer(guest, values, 0)?,
+        integer(guest, values, 1)?,
+        integer(guest, values, 2)?,
+        integer(guest, values, 3)?,
+    );
     if fd != 1 && fd != 2 {
         return Ok(Out::Integer(8));
     }
@@ -704,7 +820,12 @@ fn fd_write(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
         charge(guest, size)?;
         let text = read(guest, start.into(), size.into())?;
         let state = guest.state();
-        if fd == 1 { &mut state.out } else { &mut state.err }.extend_from_slice(&text);
+        if fd == 1 {
+            &mut state.out
+        } else {
+            &mut state.err
+        }
+        .extend_from_slice(&text);
         total += i128::from(size);
     }
     write64(guest, written, total)?;
@@ -712,8 +833,12 @@ fn fd_write(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
 }
 
 fn fd_read(guest: &mut dyn Guest, values: &[Val]) -> R<Out> {
-    let (fd, pointer, count, read_at) =
-        (integer(guest, values, 0)?, integer(guest, values, 1)?, integer(guest, values, 2)?, integer(guest, values, 3)?);
+    let (fd, pointer, count, read_at) = (
+        integer(guest, values, 0)?,
+        integer(guest, values, 1)?,
+        integer(guest, values, 2)?,
+        integer(guest, values, 3)?,
+    );
     if fd != 0 {
         return Ok(Out::Integer(8));
     }
@@ -745,7 +870,9 @@ fn monotonic_ns(guest: &mut dyn Guest) -> i64 {
 }
 
 fn wall_ns() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos() as i64)
 }
 
 // The driver.
@@ -761,8 +888,15 @@ const USAGE: &str = "usage: <program> [--timing-json path] [--allow-files DIR]..
 /// `instantiate` instantiates the module: memory, globals, segments and
 /// start function. The instance takes the state; if instantiation fails,
 /// the state holds what the module wrote and the host's failure.
-pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiate: Instantiate<G>) -> ! {
-    let mut own: Vec<Vec<u8>> = std::env::args_os().skip(1).map(std::ffi::OsString::into_vec).collect();
+pub fn main<G: Guest + 'static>(
+    module: &str,
+    mut stack_bytes: usize,
+    instantiate: Instantiate<G>,
+) -> ! {
+    let mut own: Vec<Vec<u8>> = std::env::args_os()
+        .skip(1)
+        .map(std::ffi::OsString::into_vec)
+        .collect();
     let arguments = own.iter().position(|argument| argument == b"--").map(|at| {
         let rest = own.split_off(at + 1);
         own.pop();
@@ -777,17 +911,25 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
     };
     let mut own = own.into_iter().map(OsString::from_vec);
     while let Some(argument) = own.next() {
-        let mut value = |name: &str| own.next().unwrap_or_else(|| usage(&format!("{name} needs a value")));
+        let mut value = |name: &str| {
+            own.next()
+                .unwrap_or_else(|| usage(&format!("{name} needs a value")))
+        };
         match argument.to_string_lossy().as_ref() {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0)
             }
-            "--timing-json" => timing_json = Some(value("--timing-json").to_string_lossy().into_owned()),
+            "--timing-json" => {
+                timing_json = Some(value("--timing-json").to_string_lossy().into_owned())
+            }
             "--allow-files" => {
                 let directory = value("--allow-files");
                 if let Err(error) = policy.allow_directory(Path::new(&directory)) {
-                    usage(&format!("--allow-files {}: {error}", directory.to_string_lossy()))
+                    usage(&format!(
+                        "--allow-files {}: {error}",
+                        directory.to_string_lossy()
+                    ))
                 }
             }
             "--allow-env" => match value("--allow-env") {
@@ -799,7 +941,11 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
                 }
             },
             "--time-limit" => {
-                let seconds = value("--time-limit").to_string_lossy().parse::<f64>().ok().filter(|s| *s > 0.0);
+                let seconds = value("--time-limit")
+                    .to_string_lossy()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| *s > 0.0);
                 match seconds.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok()) {
                     Some(limit) => time_limit = Some(limit),
                     None => usage("--time-limit takes a positive number of seconds"),
@@ -809,19 +955,23 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
                 Ok(bytes) => policy.output_limit = bytes,
                 Err(_) => usage("--output-limit takes a number of bytes"),
             },
-            "--stack-limit-mib" => match value("--stack-limit-mib").to_string_lossy().parse::<usize>() {
+            "--stack-limit-mib" => match value("--stack-limit-mib")
+                .to_string_lossy()
+                .parse::<usize>()
+            {
                 Ok(mib @ 16..=65536) => stack_bytes = mib << 20,
                 _ => usage("--stack-limit-mib takes a number of MiB from 16 to 65536"),
             },
-            "--memory-limit-pages" => match value("--memory-limit-pages").to_string_lossy().parse::<u64>() {
+            "--memory-limit-pages" => match value("--memory-limit-pages")
+                .to_string_lossy()
+                .parse::<u64>()
+            {
                 Ok(pages) => crate::set_memory_limit_pages(pages),
                 Err(_) => usage("--memory-limit-pages takes a number of 64 KiB pages"),
             },
             other => usage(&format!("unrecognized argument {other}")),
         }
     }
-    let mut input = Vec::new();
-    let _ = std::io::stdin().lock().read_to_end(&mut input);
     let program = match arguments {
         None => vec![b"program".to_vec()],
         Some(arguments) => {
@@ -830,25 +980,33 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
             program
         }
     };
-    // The program runs on a thread of its own, which sends its outcome back;
-    // past the time limit the process ends without it.
+    // The program runs on a thread of its own, which also reads stdin so
+    // `--time-limit` bounds stalled stdin as well as guest execution;
+    // past the time limit the process ends without waiting for it.
     let (send, receive) = std::sync::mpsc::channel();
-    let worker = std::thread::Builder::new().stack_size(stack_bytes).spawn(move || {
-        // Guest calls trap before they come within the margin of the stack's
-        // end: large frames cannot overflow it while calls stay below the
-        // depth limit.
-        let top = 0u8;
-        let here = &top as *const u8 as usize;
-        let margin = (stack_bytes / 8).max(4 << 20);
-        STACK_FLOOR.with(|floor| floor.set(here.saturating_sub(stack_bytes).saturating_add(margin)));
-        let _ = send.send(run(input, program, instantiate, policy));
-    });
+    let worker = std::thread::Builder::new()
+        .stack_size(stack_bytes)
+        .spawn(move || {
+            // Guest calls trap before they come within the margin of the stack's
+            // end: large frames cannot overflow it while calls stay below the
+            // depth limit.
+            let top = 0u8;
+            let here = &top as *const u8 as usize;
+            let margin = (stack_bytes / 8).max(4 << 20);
+            STACK_FLOOR
+                .with(|floor| floor.set(here.saturating_sub(stack_bytes).saturating_add(margin)));
+            let mut input = Vec::new();
+            let _ = std::io::stdin().lock().read_to_end(&mut input);
+            let _ = send.send(run(input, program, instantiate, policy));
+        });
     if worker.is_err() {
         eprintln!("wtime-aot Goose host: the program's thread failed");
         std::process::exit(1)
     }
     let received = match time_limit {
-        Some(limit) => receive.recv_timeout(limit).map_err(|error| error == std::sync::mpsc::RecvTimeoutError::Timeout),
+        Some(limit) => receive
+            .recv_timeout(limit)
+            .map_err(|error| error == std::sync::mpsc::RecvTimeoutError::Timeout),
         None => receive.recv().map_err(|_| false),
     };
     let outcome = match received {
@@ -863,14 +1021,20 @@ pub fn main<G: Guest + 'static>(module: &str, mut stack_bytes: usize, instantiat
         }
     };
     let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(&outcome.stdout).and_then(|()| stdout.flush());
+    let _ = stdout
+        .write_all(&outcome.stdout)
+        .and_then(|()| stdout.flush());
     if !outcome.stderr.is_empty() {
-        let _ = std::io::stderr().lock().write_all((outcome.stderr.clone() + "\n").as_bytes());
+        let _ = std::io::stderr()
+            .lock()
+            .write_all((outcome.stderr.clone() + "\n").as_bytes());
     }
     if let Some(path) = timing_json {
         let json = format!(
             "{{\n  \"engine\": \"wtime-aot\",\n  \"compile_instantiate_ns\": {},\n  \"compile_ns\": 0,\n  \"start_function_ns\": {},\n  \"engine_total_ns\": {}\n}}\n",
-            outcome.instantiate_ns, outcome.start_ns, outcome.instantiate_ns + outcome.start_ns
+            outcome.instantiate_ns,
+            outcome.start_ns,
+            outcome.instantiate_ns + outcome.start_ns
         );
         if let Err(error) = fs::write(&path, json) {
             eprintln!("{path}: {error}");
@@ -887,7 +1051,12 @@ struct Outcome {
     start_ns: u128,
 }
 
-fn run<G: Guest>(input: Vec<u8>, program: Vec<Vec<u8>>, instantiate: Instantiate<G>, policy: Policy) -> Outcome {
+fn run<G: Guest>(
+    input: Vec<u8>,
+    program: Vec<Vec<u8>>,
+    instantiate: Instantiate<G>,
+    policy: Policy,
+) -> Outcome {
     let started = Instant::now();
     let mut instantiated = started;
     let mut guest = None;
@@ -937,15 +1106,41 @@ mod tests {
         std::os::unix::fs::symlink(&outside, jail.join("to_outside")).unwrap();
         let mut policy = Policy::default();
         let at = |p: &Path| p.as_os_str().as_encoded_bytes().to_vec();
-        assert_eq!(policy.file(&at(&jail.join("in.txt"))), None, "nothing granted");
+        assert_eq!(
+            policy.file(&at(&jail.join("in.txt"))),
+            None,
+            "nothing granted"
+        );
         policy.allow_directory(&jail).unwrap();
         let jail = jail.canonicalize().unwrap();
-        assert_eq!(policy.file(&at(&jail.join("in.txt"))), Some(jail.join("in.txt")));
-        assert_eq!(policy.file(&at(&jail.join("new.txt"))), Some(jail.join("new.txt")), "a new file inside");
-        assert_eq!(policy.file(&at(&jail.join("sub/../in.txt"))), None, "no `..`, even inside");
+        assert_eq!(
+            policy.file(&at(&jail.join("in.txt"))),
+            Some(jail.join("in.txt"))
+        );
+        assert_eq!(
+            policy.file(&at(&jail.join("new.txt"))),
+            Some(jail.join("new.txt")),
+            "a new file inside"
+        );
+        assert_eq!(
+            policy.file(&at(&jail.join("sub/../in.txt"))),
+            None,
+            "no `..`, even inside"
+        );
         assert_eq!(policy.file(&at(&jail.join("sub/./../sub"))), None);
-        assert_eq!(policy.file(&at(&jail.join("./sub/."))), Some(jail.join("sub")));
-        for escape in ["../outside/secret.txt", "sub/../../outside/secret.txt", "to_secret", "dangling", "to_outside/secret.txt", "to_outside/new.txt", ".."] {
+        assert_eq!(
+            policy.file(&at(&jail.join("./sub/."))),
+            Some(jail.join("sub"))
+        );
+        for escape in [
+            "../outside/secret.txt",
+            "sub/../../outside/secret.txt",
+            "to_secret",
+            "dangling",
+            "to_outside/secret.txt",
+            "to_outside/new.txt",
+            "..",
+        ] {
             assert_eq!(policy.file(&at(&jail.join(escape))), None, "{escape}");
         }
         assert_eq!(policy.file(b"/etc/passwd"), None);
@@ -993,7 +1188,10 @@ mod tests {
             }
         }
 
-        let mut g = DummyGuest { mem: Memory::new(1, Some(1), false).unwrap(), state: State::new(vec![], vec![]) };
+        let mut g = DummyGuest {
+            mem: Memory::new(1, Some(1), false).unwrap(),
+            state: State::new(vec![], vec![]),
+        };
         g.mem.write(0, b"hello, world!").unwrap();
         // Set 1 at 1024: contains b'w' and b'!'
         g.mem.write(1024 + b'w' as u64, &[1]).unwrap();
@@ -1001,37 +1199,87 @@ mod tests {
         // Set 2 at 1536: contains b'o'
         g.mem.write(1536 + b'o' as u64, &[1]).unwrap();
 
-        let res = find_any(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024)]).unwrap().i64().unwrap();
+        let res = find_any(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024)])
+            .unwrap()
+            .i64()
+            .unwrap();
         assert_eq!(res, 7); // 'w' at index 7
-        let miss = find_any(&mut g, &[Val::I32(0), Val::I32(5), Val::I32(1024)]).unwrap().i64().unwrap();
+        let miss = find_any(&mut g, &[Val::I32(0), Val::I32(5), Val::I32(1024)])
+            .unwrap()
+            .i64()
+            .unwrap();
         assert_eq!(miss, -1);
 
         // find_pair: 'w' followed at distance 1 by 'o' -> index 7
-        let pair = find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024), Val::I32(1), Val::I32(1536)])
-            .unwrap()
-            .i64()
-            .unwrap();
+        let pair = find_pair(
+            &mut g,
+            &[
+                Val::I32(0),
+                Val::I32(13),
+                Val::I32(1024),
+                Val::I32(1),
+                Val::I32(1536),
+            ],
+        )
+        .unwrap()
+        .i64()
+        .unwrap();
         assert_eq!(pair, 7);
-        let pair_miss = find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024), Val::I32(2), Val::I32(1536)])
-            .unwrap()
-            .i64()
-            .unwrap();
+        let pair_miss = find_pair(
+            &mut g,
+            &[
+                Val::I32(0),
+                Val::I32(13),
+                Val::I32(1024),
+                Val::I32(2),
+                Val::I32(1536),
+            ],
+        )
+        .unwrap()
+        .i64()
+        .unwrap();
         assert_eq!(pair_miss, -1);
 
         // Out-of-bounds table checks take priority over negative distance.
         g.state.failure = None;
         assert_eq!(
-            find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(65500), Val::I32(-1), Val::I32(1536)]).err(),
+            find_pair(
+                &mut g,
+                &[
+                    Val::I32(0),
+                    Val::I32(13),
+                    Val::I32(65500),
+                    Val::I32(-1),
+                    Val::I32(1536)
+                ]
+            )
+            .err(),
             Some(Trap::Host)
         );
-        assert_eq!(g.state.failure.as_deref(), Some("host write is outside exported memory"));
+        assert_eq!(
+            g.state.failure.as_deref(),
+            Some("host write is outside exported memory")
+        );
 
         // Negative distance with valid ranges reports negative distance error.
         g.state.failure = None;
         assert_eq!(
-            find_pair(&mut g, &[Val::I32(0), Val::I32(13), Val::I32(1024), Val::I32(-1), Val::I32(1536)]).err(),
+            find_pair(
+                &mut g,
+                &[
+                    Val::I32(0),
+                    Val::I32(13),
+                    Val::I32(1024),
+                    Val::I32(-1),
+                    Val::I32(1536)
+                ]
+            )
+            .err(),
             Some(Trap::Host)
         );
-        assert_eq!(g.state.failure.as_deref(), Some("negative gs_find_pair distance is not supported by this host"));
+        assert_eq!(
+            g.state.failure.as_deref(),
+            Some("negative gs_find_pair distance is not supported by this host")
+        );
     }
 }

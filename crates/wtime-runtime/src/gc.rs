@@ -6,6 +6,7 @@ use super::*;
 use crate::canonical::CanonicalTypeId;
 use std::sync::{Mutex, Weak};
 
+/// Store-bound, generation-checked handle to a guest GC struct, array, or continuation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GcRef {
     store: u64,
@@ -56,13 +57,17 @@ impl Drop for Registration {
     }
 }
 impl RootToken {
+    /// Returns the rooted [`GcRef`] handle kept alive by this token.
     pub fn reference(&self) -> GcRef {
         self.registration.value
     }
 }
+/// Object counts reported after a [`Store::collect`] cycle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CollectionStats {
+    /// Number of GC objects remaining live after collection.
     pub live: usize,
+    /// Number of unreachable GC objects reclaimed by the collection.
     pub reclaimed: usize,
 }
 pub(crate) struct GcArena {

@@ -105,10 +105,14 @@ impl ElfLayout {
 
         cur = checked_align_up(cur, 16)?;
         let rodata_vaddr = cur;
-        let seg0_end = rodata_vaddr.checked_add(rodata_len).ok_or("rodata size overflow")?;
+        let seg0_end = rodata_vaddr
+            .checked_add(rodata_len)
+            .ok_or("rodata size overflow")?;
         let text_vaddr = checked_align_up(seg0_end, PAGE)?;
         if text_vaddr >= i32::MAX as usize {
-            return Err(format!("ELF rodata + headers ({text_vaddr} B) exceed rel32 addressable 2 GiB range"));
+            return Err(format!(
+                "ELF rodata + headers ({text_vaddr} B) exceed rel32 addressable 2 GiB range"
+            ));
         }
 
         Ok(Self {
@@ -130,7 +134,12 @@ impl ElfLayout {
 
     /// Emits the complete ELF64 `.so` image with conforming section headers.
     /// Every `ExportDef` must match `plan`'s export names and have a non-empty extent within `.text`.
-    pub fn emit(mut self, rodata: &[u8], text: &[u8], exports: &[ExportDef<'_>]) -> Result<Vec<u8>, String> {
+    pub fn emit(
+        mut self,
+        rodata: &[u8],
+        text: &[u8],
+        exports: &[ExportDef<'_>],
+    ) -> Result<Vec<u8>, String> {
         if rodata.len() != self.planned_rodata_len {
             return Err(format!(
                 "ELF rodata length changed after plan: planned {} vs emitted {}",
@@ -150,21 +159,39 @@ impl ElfLayout {
         }
         for (expected, def) in self.export_names.iter().zip(exports) {
             if expected != def.name {
-                return Err(format!("ELF export name/order mismatch: expected {expected:?}, got {:?}", def.name));
+                return Err(format!(
+                    "ELF export name/order mismatch: expected {expected:?}, got {:?}",
+                    def.name
+                ));
             }
             if def.size == 0 {
                 return Err(format!("ELF export {:?} has empty extent", def.name));
             }
-            let end = def.text_off.checked_add(def.size).ok_or_else(|| format!("export {:?} overflow", def.name))?;
+            let end = def
+                .text_off
+                .checked_add(def.size)
+                .ok_or_else(|| format!("export {:?} overflow", def.name))?;
             if end > text.len() as u64 {
-                return Err(format!("export {:?} extent ({end}) exceeds .text ({})", def.name, text.len()));
+                return Err(format!(
+                    "export {:?} extent ({end}) exceeds .text ({})",
+                    def.name,
+                    text.len()
+                ));
             }
         }
 
-        let seg0_end = self.rodata_vaddr.checked_add(rodata.len()).ok_or("rodata size overflow")?;
-        let seg1_end = self.text_vaddr.checked_add(text.len()).ok_or("text size overflow")?;
+        let seg0_end = self
+            .rodata_vaddr
+            .checked_add(rodata.len())
+            .ok_or("rodata size overflow")?;
+        let seg1_end = self
+            .text_vaddr
+            .checked_add(text.len())
+            .ok_or("text size overflow")?;
         if seg1_end > i32::MAX as usize {
-            return Err(format!("ELF image ({seg1_end} B) exceeds rel32 addressable 2 GiB range"));
+            return Err(format!(
+                "ELF image ({seg1_end} B) exceeds rel32 addressable 2 GiB range"
+            ));
         }
         let dyn_vaddr = checked_align_up(seg1_end, PAGE)?;
         self.dyn_vaddr = dyn_vaddr;
@@ -183,7 +210,16 @@ impl ElfLayout {
         //   6: .dynamic
         //   7: .shstrtab
         const SHNDX_TEXT: u16 = 5;
-        let sh_names = ["", ".dynsym", ".hash", ".dynstr", ".rodata", ".text", ".dynamic", ".shstrtab"];
+        let sh_names = [
+            "",
+            ".dynsym",
+            ".hash",
+            ".dynstr",
+            ".rodata",
+            ".text",
+            ".dynamic",
+            ".shstrtab",
+        ];
         let mut shstrtab = Vec::new();
         let mut sh_name_offs = [0u32; 8];
         for (i, name) in sh_names.iter().enumerate() {
@@ -191,12 +227,18 @@ impl ElfLayout {
             shstrtab.extend_from_slice(name.as_bytes());
             shstrtab.push(0);
         }
-        let shstrtab_off = dyn_vaddr.checked_add(dyn_size).ok_or("ELF section table overflow")?;
+        let shstrtab_off = dyn_vaddr
+            .checked_add(dyn_size)
+            .ok_or("ELF section table overflow")?;
         let shoff = checked_align_up(
-            shstrtab_off.checked_add(shstrtab.len()).ok_or("ELF section table overflow")?,
+            shstrtab_off
+                .checked_add(shstrtab.len())
+                .ok_or("ELF section table overflow")?,
             8,
         )?;
-        let total_size = shoff.checked_add(8 * 64).ok_or("ELF total image overflow")?;
+        let total_size = shoff
+            .checked_add(8 * 64)
+            .ok_or("ELF total image overflow")?;
         let mut img = vec![0u8; total_size];
 
         // ---- ELF64 Header (64 bytes) ----
@@ -220,7 +262,14 @@ impl ElfLayout {
         put_u16(&mut img, 62, 7); // e_shstrndx (.shstrtab)
 
         // ---- Program Headers (5 * 56 bytes at offset 64) ----
-        let ph = |img: &mut [u8], idx: usize, p_type: u32, p_flags: u32, off: usize, vaddr: usize, sz: usize, align: usize| {
+        let ph = |img: &mut [u8],
+                  idx: usize,
+                  p_type: u32,
+                  p_flags: u32,
+                  off: usize,
+                  vaddr: usize,
+                  sz: usize,
+                  align: usize| {
             let base = 64 + idx * 56;
             put_u32(img, base, p_type);
             put_u32(img, base + 4, p_flags);
@@ -239,9 +288,36 @@ impl ElfLayout {
         const PF_R: u32 = 4;
 
         ph(&mut img, 0, PT_LOAD, PF_R, 0, 0, seg0_end, PAGE);
-        ph(&mut img, 1, PT_LOAD, PF_R | PF_X, self.text_vaddr, self.text_vaddr, text.len(), PAGE);
-        ph(&mut img, 2, PT_LOAD, PF_R | PF_W, dyn_vaddr, dyn_vaddr, dyn_size, PAGE);
-        ph(&mut img, 3, PT_DYNAMIC, PF_R | PF_W, dyn_vaddr, dyn_vaddr, dyn_size, 8);
+        ph(
+            &mut img,
+            1,
+            PT_LOAD,
+            PF_R | PF_X,
+            self.text_vaddr,
+            self.text_vaddr,
+            text.len(),
+            PAGE,
+        );
+        ph(
+            &mut img,
+            2,
+            PT_LOAD,
+            PF_R | PF_W,
+            dyn_vaddr,
+            dyn_vaddr,
+            dyn_size,
+            PAGE,
+        );
+        ph(
+            &mut img,
+            3,
+            PT_DYNAMIC,
+            PF_R | PF_W,
+            dyn_vaddr,
+            dyn_vaddr,
+            dyn_size,
+            8,
+        );
         ph(&mut img, 4, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 16);
 
         // ---- .dynsym ----
@@ -336,13 +412,97 @@ impl ElfLayout {
         const SHF_ALLOC: u64 = 2;
         const SHF_EXECINSTR: u64 = 4;
 
-        sh(&mut img, 1, SHT_DYNSYM, SHF_ALLOC, self.dynsym_off, self.dynsym_off, self.dynsym_len, 3, 1, 8, 24);
-        sh(&mut img, 2, SHT_HASH, SHF_ALLOC, self.hash_off, self.hash_off, self.hash_len, 1, 0, 4, 4);
-        sh(&mut img, 3, SHT_STRTAB, SHF_ALLOC, self.dynstr_off, self.dynstr_off, self.dynstr.len(), 0, 0, 1, 0);
-        sh(&mut img, 4, SHT_PROGBITS, SHF_ALLOC, self.rodata_vaddr, self.rodata_vaddr, rodata.len(), 0, 0, 16, 0);
-        sh(&mut img, 5, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, self.text_vaddr, self.text_vaddr, text.len(), 0, 0, 16, 0);
-        sh(&mut img, 6, SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, dyn_vaddr, dyn_vaddr, dyn_size, 3, 0, 8, 16);
-        sh(&mut img, 7, SHT_STRTAB, 0, 0, shstrtab_off, shstrtab.len(), 0, 0, 1, 0);
+        sh(
+            &mut img,
+            1,
+            SHT_DYNSYM,
+            SHF_ALLOC,
+            self.dynsym_off,
+            self.dynsym_off,
+            self.dynsym_len,
+            3,
+            1,
+            8,
+            24,
+        );
+        sh(
+            &mut img,
+            2,
+            SHT_HASH,
+            SHF_ALLOC,
+            self.hash_off,
+            self.hash_off,
+            self.hash_len,
+            1,
+            0,
+            4,
+            4,
+        );
+        sh(
+            &mut img,
+            3,
+            SHT_STRTAB,
+            SHF_ALLOC,
+            self.dynstr_off,
+            self.dynstr_off,
+            self.dynstr.len(),
+            0,
+            0,
+            1,
+            0,
+        );
+        sh(
+            &mut img,
+            4,
+            SHT_PROGBITS,
+            SHF_ALLOC,
+            self.rodata_vaddr,
+            self.rodata_vaddr,
+            rodata.len(),
+            0,
+            0,
+            16,
+            0,
+        );
+        sh(
+            &mut img,
+            5,
+            SHT_PROGBITS,
+            SHF_ALLOC | SHF_EXECINSTR,
+            self.text_vaddr,
+            self.text_vaddr,
+            text.len(),
+            0,
+            0,
+            16,
+            0,
+        );
+        sh(
+            &mut img,
+            6,
+            SHT_DYNAMIC,
+            SHF_ALLOC | SHF_WRITE,
+            dyn_vaddr,
+            dyn_vaddr,
+            dyn_size,
+            3,
+            0,
+            8,
+            16,
+        );
+        sh(
+            &mut img,
+            7,
+            SHT_STRTAB,
+            0,
+            0,
+            shstrtab_off,
+            shstrtab.len(),
+            0,
+            0,
+            1,
+            0,
+        );
 
         Ok(img)
     }

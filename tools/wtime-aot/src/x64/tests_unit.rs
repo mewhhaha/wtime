@@ -244,15 +244,27 @@ fn elf_handles_sysv_hash_collision_and_validates_invariants() {
     let rodata = vec![0u8; 16];
     let text = vec![0xc3u8; 32];
     let defs = [
-        ExportDef { name: "sym_a", text_off: 0, size: 16 },
-        ExportDef { name: "sym_c", text_off: 16, size: 16 },
+        ExportDef {
+            name: "sym_a",
+            text_off: 0,
+            size: 16,
+        },
+        ExportDef {
+            name: "sym_c",
+            text_off: 16,
+            size: 16,
+        },
     ];
     let img = layout.emit(&rodata, &text, &defs).unwrap();
     assert_eq!(&img[0..4], b"\x7fELF");
     // Locate DT_HASH table and verify chain links symbol 2 -> symbol 1 -> 0.
     // Find .hash section header (index 2).
     let shoff = u64::from_le_bytes(img[40..48].try_into().unwrap()) as usize;
-    let hash_off = u64::from_le_bytes(img[shoff + 2 * 64 + 24..shoff + 2 * 64 + 32].try_into().unwrap()) as usize;
+    let hash_off = u64::from_le_bytes(
+        img[shoff + 2 * 64 + 24..shoff + 2 * 64 + 32]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     let nbucket = u32::from_le_bytes(img[hash_off..hash_off + 4].try_into().unwrap());
     let nchain = u32::from_le_bytes(img[hash_off + 4..hash_off + 8].try_into().unwrap());
     assert_eq!(nbucket, 2);
@@ -272,7 +284,19 @@ fn elf_handles_sysv_hash_collision_and_validates_invariants() {
     assert!(ElfLayout::plan(&[""], 0).is_err());
     // Mismatched rodata length after plan rejected.
     let layout2 = ElfLayout::plan(&["f"], 16).unwrap();
-    assert!(layout2.emit(&[0u8; 32], &[0xc3], &[ExportDef { name: "f", text_off: 0, size: 1 }]).is_err());
+    assert!(
+        layout2
+            .emit(
+                &[0u8; 32],
+                &[0xc3],
+                &[ExportDef {
+                    name: "f",
+                    text_off: 0,
+                    size: 1
+                }]
+            )
+            .is_err()
+    );
 }
 
 // ---- 3. `CtxLayout` 16 MiB cap unit test (§4.3.2) ----
@@ -291,7 +315,11 @@ fn ctx_layout_enforces_16_mib_cap() {
         exported_funcs: Vec::new(),
         ci_index: Default::default(),
         ci_sigs: Vec::new(),
-        mut_extern_tables: if extern_len > 0 { [(0, extern_len)].into_iter().collect() } else { Default::default() },
+        mut_extern_tables: if extern_len > 0 {
+            [(0, extern_len)].into_iter().collect()
+        } else {
+            Default::default()
+        },
         memory: None,
         fixed32: None,
         active_elem_checks: Vec::new(),
@@ -310,7 +338,10 @@ fn ctx_layout_enforces_16_mib_cap() {
 
     // Also test overflow via externref table slots.
     let err_tbl = CtxLayout::compute(&make_mod(max_v128, 1), Vec::new());
-    assert!(err_tbl.is_err(), "expected CtxLayout extern table overflow > 16 MiB to fail cleanly");
+    assert!(
+        err_tbl.is_err(),
+        "expected CtxLayout extern table overflow > 16 MiB to fail cleanly"
+    );
 }
 
 // ---- 4. `CompileBudget` liveness scheduler contention tests (§4.3.3) ----
@@ -318,7 +349,9 @@ fn ctx_layout_enforces_16_mib_cap() {
 #[test]
 fn liveness_scheduler_unblocks_waiting_worker_and_times_out_cleanly() {
     // (a) Waiting worker unblocks once competing guards drop.
-    let budget = Arc::new(CompileBudget::new(Some(Instant::now() + Duration::from_secs(5))));
+    let budget = Arc::new(CompileBudget::new(Some(
+        Instant::now() + Duration::from_secs(5),
+    )));
     let n_fill = super::module::MAX_CONCURRENT_LIVENESS_BYTES / MAX_LIVENESS_BYTES;
     let mut held = Vec::with_capacity(n_fill);
     for _ in 0..n_fill {
@@ -337,17 +370,25 @@ fn liveness_scheduler_unblocks_waiting_worker_and_times_out_cleanly() {
     std::thread::sleep(Duration::from_millis(25));
     // Release one slot -> waiting worker MUST wake up and succeed.
     held.pop();
-    handle.join().unwrap().expect("waiting worker should succeed after capacity released");
+    handle
+        .join()
+        .unwrap()
+        .expect("waiting worker should succeed after capacity released");
     drop(held);
 
     // (b) Waiting worker times out cleanly when deadline expires while capacity is held.
-    let tight = Arc::new(CompileBudget::new(Some(Instant::now() + Duration::from_millis(60))));
+    let tight = Arc::new(CompileBudget::new(Some(
+        Instant::now() + Duration::from_millis(60),
+    )));
     let mut held2 = Vec::with_capacity(n_fill);
     for _ in 0..n_fill {
         held2.push(tight.reserve_liveness(MAX_LIVENESS_BYTES).unwrap());
     }
     let err = tight.reserve_liveness(MAX_LIVENESS_BYTES);
-    assert!(err.is_err(), "expected timeout while waiting for liveness capacity");
+    assert!(
+        err.is_err(),
+        "expected timeout while waiting for liveness capacity"
+    );
     assert!(err.err().unwrap().contains("time limit"));
     drop(held2);
 }
@@ -395,7 +436,10 @@ fn verifiers_catch_invalid_ir_and_alloc() {
     let empty_mod = X64Module {
         imports: Vec::new(),
         func_type_idx: vec![0],
-        module_types: vec![FuncType { params: vec![ValType::I32], results: vec![ValType::I32] }],
+        module_types: vec![FuncType {
+            params: vec![ValType::I32],
+            results: vec![ValType::I32],
+        }],
         globals: Vec::new(),
         global_inits: Vec::new(),
         global_consts: Vec::new(),
@@ -420,8 +464,13 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         val_tys: vec![Ty::I32, Ty::I32],
         blocks: vec![Block {
             params: vec![Val(0)],
-            insts: vec![Inst { res: Some(Val(1)), op: Op::I32Bin(IntBinOp::Add, Val(0), Val(0)) }],
-            term: Term::Return { vals: ValRange { start: 0, len: 1 } },
+            insts: vec![Inst {
+                res: Some(Val(1)),
+                op: Op::I32Bin(IntBinOp::Add, Val(0), Val(0)),
+            }],
+            term: Term::Return {
+                vals: ValRange { start: 0, len: 1 },
+            },
             is_loop_header: false,
             preds: 0,
         }],
@@ -443,8 +492,13 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         val_tys: vec![Ty::I32, Ty::I32],
         blocks: vec![Block {
             params: vec![Val(0)],
-            insts: vec![Inst { res: Some(Val(1)), op: Op::I64Eqz(Val(0)) }],
-            term: Term::Return { vals: ValRange { start: 0, len: 1 } },
+            insts: vec![Inst {
+                res: Some(Val(1)),
+                op: Op::I64Eqz(Val(0)),
+            }],
+            term: Term::Return {
+                vals: ValRange { start: 0, len: 1 },
+            },
             is_loop_header: false,
             preds: 0,
         }],
@@ -457,9 +511,10 @@ fn verifiers_catch_invalid_ir_and_alloc() {
     assert!(verify_ir(&bad_ty, &empty_mod).is_err());
 
     // Negative 2: Use-before-def in same block.
-    bad_ty.blocks[0].insts = vec![
-        Inst { res: Some(Val(1)), op: Op::I32Eqz(Val(1)) },
-    ];
+    bad_ty.blocks[0].insts = vec![Inst {
+        res: Some(Val(1)),
+        op: Op::I32Eqz(Val(1)),
+    }];
     assert!(verify_ir(&bad_ty, &empty_mod).is_err());
 
     // Negative 3: Non-dominating cross-block use (bb0 branches to bb1/bb2; bb2 uses val defined in bb1).
@@ -484,15 +539,22 @@ fn verifiers_catch_invalid_ir_and_alloc() {
             },
             Block {
                 params: vec![],
-                insts: vec![Inst { res: Some(Val(1)), op: Op::ConstI32(7) }],
-                term: Term::Return { vals: ValRange { start: 0, len: 1 } },
+                insts: vec![Inst {
+                    res: Some(Val(1)),
+                    op: Op::ConstI32(7),
+                }],
+                term: Term::Return {
+                    vals: ValRange { start: 0, len: 1 },
+                },
                 is_loop_header: false,
                 preds: 1,
             },
             Block {
                 params: vec![],
                 insts: vec![],
-                term: Term::Return { vals: ValRange { start: 0, len: 1 } },
+                term: Term::Return {
+                    vals: ValRange { start: 0, len: 1 },
+                },
                 is_loop_header: false,
                 preds: 1,
             },
@@ -515,10 +577,18 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         blocks: vec![Block {
             params: vec![Val(0)],
             insts: vec![
-                Inst { res: Some(Val(1)), op: Op::ConstI32(10) },
-                Inst { res: Some(Val(2)), op: Op::I32Bin(IntBinOp::Add, Val(0), Val(1)) },
+                Inst {
+                    res: Some(Val(1)),
+                    op: Op::ConstI32(10),
+                },
+                Inst {
+                    res: Some(Val(2)),
+                    op: Op::I32Bin(IntBinOp::Add, Val(0), Val(1)),
+                },
             ],
-            term: Term::Return { vals: ValRange { start: 0, len: 1 } },
+            term: Term::Return {
+                vals: ValRange { start: 0, len: 1 },
+            },
             is_loop_header: false,
             preds: 0,
         }],
@@ -543,13 +613,34 @@ fn verifiers_catch_invalid_ir_and_alloc() {
 #[test]
 fn isa_profile_syntax_matches_pen_contract() {
     assert_eq!(parse_x64_target_cpu_syntax("native").unwrap(), None);
-    assert_eq!(parse_x64_target_cpu_syntax("x86-64-v2").unwrap(), Some("x64-v2"));
-    assert_eq!(parse_x64_target_cpu_syntax("generic").unwrap(), Some("x64-v2"));
-    assert_eq!(parse_x64_target_cpu_syntax("x86-64-v3").unwrap(), Some("x64-v3"));
-    assert_eq!(parse_x64_target_cpu_syntax("x86-64-v4").unwrap(), Some("x64-v3"));
-    assert_eq!(parse_x64_target_cpu_syntax("znver4").unwrap(), Some("x64-v3"));
-    assert_eq!(parse_x64_target_cpu_syntax("haswell").unwrap(), Some("x64-v3"));
-    assert_eq!(parse_x64_target_cpu_syntax("graniterapids").unwrap(), Some("x64-v3"));
+    assert_eq!(
+        parse_x64_target_cpu_syntax("x86-64-v2").unwrap(),
+        Some("x64-v2")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("generic").unwrap(),
+        Some("x64-v2")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("x86-64-v3").unwrap(),
+        Some("x64-v3")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("x86-64-v4").unwrap(),
+        Some("x64-v3")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("znver4").unwrap(),
+        Some("x64-v3")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("haswell").unwrap(),
+        Some("x64-v3")
+    );
+    assert_eq!(
+        parse_x64_target_cpu_syntax("graniterapids").unwrap(),
+        Some("x64-v3")
+    );
     assert!(parse_x64_target_cpu_syntax("znver").is_err());
     assert!(parse_x64_target_cpu_syntax("znver4a").is_err());
     assert!(parse_x64_target_cpu_syntax("pentium4").is_err());
@@ -568,7 +659,9 @@ fn compile_admit_only(wasm: &[u8]) -> Result<Vec<u8>, X64CompileError> {
     compile_wasm_to_x64_so(
         wasm,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: false },
+            isa: TargetIsa {
+                has_abm_bmi1: false,
+            },
             jobs: 1,
             deadline: None,
             opt: true,
@@ -621,7 +714,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         section(9, &elem_p),
         code_sec(&[enc_body(&[], &b1)]),
     ]);
-    assert!(compile_admit_only(&accepted).is_ok(), "Stage 1 accepted module must compile cleanly");
+    assert!(
+        compile_admit_only(&accepted).is_ok(),
+        "Stage 1 accepted module must compile cleanly"
+    );
 
     // 2. Rejected: funcref block type (-16 / 0x70) in LIVE code AND in DEAD (unreachable) code.
     let dead_funcref_block = wasm_module(&[
@@ -629,13 +725,19 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0x02, 0x70, 0x00, 0x0b, 0x1a])]), // unreachable; block funcref; unreachable; end; drop
     ]);
-    assert!(matches!(compile_admit_only(&dead_funcref_block), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&dead_funcref_block),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
     let live_funcref_block = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x02, 0x70, 0xd0, 0x70, 0x0b, 0x1a])]),
     ]);
-    assert!(matches!(compile_admit_only(&live_funcref_block), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&live_funcref_block),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 3. Rejected: ref.null func (0xd0 0x70) in LIVE and DEAD code.
     let dead_ref_null_func = wasm_module(&[
@@ -643,7 +745,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0xd0, 0x70, 0x1a])]),
     ]);
-    assert!(matches!(compile_admit_only(&dead_ref_null_func), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&dead_ref_null_func),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 4. Rejected: explicit table initializer (`0x40 0x00`) rejected at BOTH front-door validate AND admit_x64_module!
     let explicit_tbl_init = wasm_module(&[
@@ -653,7 +758,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         section(4, &[1, 0x40, 0x00, 0x70, 0x00, 1, 0xd0, 0x70, 0x0b]),
         code_sec(&[enc_body(&[], &[])]),
     ]);
-    assert!(matches!(compile_admit_only(&explicit_tbl_init), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&explicit_tbl_init),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
     // Also verify `admit_x64_module` rejects it directly even if decoded with function_references=true!
     let dec_fr = wtime_validate::validate(
         &explicit_tbl_init,
@@ -669,20 +777,24 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[])]),
     ]);
-    assert!(matches!(compile_admit_only(&gc_sub_func), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&gc_sub_func),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 6. Rejected: exported table.
-    let exp_tbl = wasm_module(&[
-        section(4, &[1, 0x70, 0x00, 1]),
-        export_sec(&[("t", 1, 0)]),
-    ]);
-    assert!(matches!(compile_admit_only(&exp_tbl), Err(X64CompileError::AdmissionRejected(_))));
+    let exp_tbl = wasm_module(&[section(4, &[1, 0x70, 0x00, 1]), export_sec(&[("t", 1, 0)])]);
+    assert!(matches!(
+        compile_admit_only(&exp_tbl),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 7. Rejected: unbounded externref table (min != max).
-    let unb_ext = wasm_module(&[
-        section(4, &[1, 0x6f, 0x00, 4]),
-    ]);
-    assert!(matches!(compile_admit_only(&unb_ext), Err(X64CompileError::AdmissionRejected(_))));
+    let unb_ext = wasm_module(&[section(4, &[1, 0x6f, 0x00, 4])]);
+    assert!(matches!(
+        compile_admit_only(&unb_ext),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 8. Rejected: passive data segment.
     let passive_data = wasm_module(&[
@@ -690,7 +802,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         section(12, &[1]),
         section(11, &[1, 0x01, 2, 0xaa, 0xbb]),
     ]);
-    assert!(matches!(compile_admit_only(&passive_data), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&passive_data),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 9. Rejected: unsupported SIMD opcode (e.g. i32x4.add = 0xfd 0xae 0x01) even in unreachable code!
     let dead_simd = wasm_module(&[
@@ -698,19 +813,24 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0xfd, 0xae, 0x01, 0x1a])]),
     ]);
-    assert!(matches!(compile_admit_only(&dead_simd), Err(X64CompileError::AdmissionRejected(_))));
+    assert!(matches!(
+        compile_admit_only(&dead_simd),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 10. Rejected: memory64 (DisabledFeature -> AdmissionRejected exit code 4!).
-    let mem64 = wasm_module(&[
-        section(5, &[1, 0x04, 1]),
-    ]);
-    assert!(matches!(compile_admit_only(&mem64), Err(X64CompileError::AdmissionRejected(_))));
+    let mem64 = wasm_module(&[section(5, &[1, 0x04, 1])]);
+    assert!(matches!(
+        compile_admit_only(&mem64),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 11. Rejected: multi-memory (DisabledFeature -> AdmissionRejected exit code 4!).
-    let multi_mem = wasm_module(&[
-        section(5, &[2, 0x00, 1, 0x00, 1]),
-    ]);
-    assert!(matches!(compile_admit_only(&multi_mem), Err(X64CompileError::AdmissionRejected(_))));
+    let multi_mem = wasm_module(&[section(5, &[2, 0x00, 1, 0x00, 1])]);
+    assert!(matches!(
+        compile_admit_only(&multi_mem),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 12. Rejected: Blot import with unsupported signature (e.g. (i32, i32) -> (i32)).
     let mut bad_imp = vec![1];
@@ -718,24 +838,31 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     enc_str(&mut bad_imp, "bad");
     bad_imp.push(0x00);
     leb_u32(&mut bad_imp, 0);
-    let bad_imp_mod = wasm_module(&[
-        type_sec(&[(&[0x7f, 0x7f], &[0x7f])]),
-        section(2, &bad_imp),
-    ]);
-    assert!(matches!(compile_admit_only(&bad_imp_mod), Err(X64CompileError::AdmissionRejected(_))));
+    let bad_imp_mod = wasm_module(&[type_sec(&[(&[0x7f, 0x7f], &[0x7f])]), section(2, &bad_imp)]);
+    assert!(matches!(
+        compile_admit_only(&bad_imp_mod),
+        Err(X64CompileError::AdmissionRejected(_))
+    ));
 
     // 13. Rejected: malformed Wasm -> Failed (NOT AdmissionRejected, so CLI exits 1 not 4!).
-    assert!(matches!(compile_admit_only(b"not-wasm"), Err(X64CompileError::Failed(_))));
+    assert!(matches!(
+        compile_admit_only(b"not-wasm"),
+        Err(X64CompileError::Failed(_))
+    ));
 
     // 14. Synthetic `DecodedModule` defense-in-depth admission rejections (§4.3.3):
     //     descriptor types, ImportKind::ExactFunc, MAX_TOTAL_SIG_ARITY expansion,
     //     > MAX_EXPORTS, malformed `start` signature, MAX_AGGREGATE_BR_TABLE_ENTRIES,
     //     and MAX_BLOCKS_PER_FN.
     let base_empty = || {
-        wtime_validate::validate(&wasm_module(&[]), &x64_validate_features(), &x64_validate_limits())
-            .unwrap()
-            .decoded()
-            .clone()
+        wtime_validate::validate(
+            &wasm_module(&[]),
+            &x64_validate_features(),
+            &x64_validate_limits(),
+        )
+        .unwrap()
+        .decoded()
+        .clone()
     };
 
     // (a) Descriptor type (`st.descriptor.is_some()` / `st.describes.is_some()`).
@@ -747,20 +874,32 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
             supertype: None,
             descriptor: Some(wtime_types::TypeIdx(0)),
             describes: None,
-            composite: wtime_types::CompositeType::Func(FuncType { params: vec![], results: vec![] }),
+            composite: wtime_types::CompositeType::Func(FuncType {
+                params: vec![],
+                results: vec![],
+            }),
         }],
     });
-    assert!(admit_x64_module(&dm_desc).is_err(), "descriptor type must be rejected");
+    assert!(
+        admit_x64_module(&dm_desc).is_err(),
+        "descriptor type must be rejected"
+    );
 
     // (b) `ImportKind::ExactFunc`.
     let mut dm_exact = base_empty();
-    dm_exact.types.push(FuncType { params: vec![], results: vec![] });
+    dm_exact.types.push(FuncType {
+        params: vec![],
+        results: vec![],
+    });
     dm_exact.imports.push(wtime_validate::Import {
         module: "env".into(),
         name: "exact".into(),
         kind: wtime_validate::ImportKind::ExactFunc(wtime_types::TypeIdx(0)),
     });
-    assert!(admit_x64_module(&dm_exact).is_err(), "ImportKind::ExactFunc must be rejected");
+    assert!(
+        admit_x64_module(&dm_exact).is_err(),
+        "ImportKind::ExactFunc must be rejected"
+    );
 
     // (c) `MAX_TOTAL_SIG_ARITY` via wide-result signature expansion across call sites.
     let mut dm_arity = base_empty();
@@ -772,7 +911,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     dm_arity.code.push(wtime_validate::FunctionBody {
         locals: vec![],
         instructions: vec![
-            wtime_validate::Instruction { opcode: 0x10, immediate: wtime_validate::Immediate::Index(0) };
+            wtime_validate::Instruction {
+                opcode: 0x10,
+                immediate: wtime_validate::Immediate::Index(0)
+            };
             1005
         ],
         offsets: vec![0; 1005],
@@ -785,7 +927,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
 
     // (d) Export count > MAX_EXPORTS.
     let mut dm_exps = base_empty();
-    dm_exps.types.push(FuncType { params: vec![], results: vec![] });
+    dm_exps.types.push(FuncType {
+        params: vec![],
+        results: vec![],
+    });
     dm_exps.functions.push(wtime_types::TypeIdx(0));
     dm_exps.code.push(wtime_validate::FunctionBody {
         locals: vec![],
@@ -800,11 +945,17 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
             index: 0,
         })
         .collect();
-    assert!(admit_x64_module(&dm_exps).is_err(), "> MAX_EXPORTS must be rejected");
+    assert!(
+        admit_x64_module(&dm_exps).is_err(),
+        "> MAX_EXPORTS must be rejected"
+    );
 
     // (e) Malformed `start` function signature (`(i32)->()` instead of `()->()`).
     let mut dm_start = base_empty();
-    dm_start.types.push(FuncType { params: vec![ValType::I32], results: vec![] });
+    dm_start.types.push(FuncType {
+        params: vec![ValType::I32],
+        results: vec![],
+    });
     dm_start.functions.push(wtime_types::TypeIdx(0));
     dm_start.code.push(wtime_validate::FunctionBody {
         locals: vec![],
@@ -813,11 +964,17 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         span: wtime_types::Span { start: 0, end: 0 },
     });
     dm_start.start = Some(wtime_types::FuncIdx(0));
-    assert!(admit_x64_module(&dm_start).is_err(), "malformed start signature must be rejected");
+    assert!(
+        admit_x64_module(&dm_start).is_err(),
+        "malformed start signature must be rejected"
+    );
 
     // (f) Aggregate `br_table` entries > MAX_AGGREGATE_BR_TABLE_ENTRIES.
     let mut dm_brt = base_empty();
-    dm_brt.types.push(FuncType { params: vec![], results: vec![] });
+    dm_brt.types.push(FuncType {
+        params: vec![],
+        results: vec![],
+    });
     dm_brt.functions.push(wtime_types::TypeIdx(0));
     let big_targets: Box<[u32]> = vec![0u32; 1_000_000].into_boxed_slice();
     dm_brt.code.push(wtime_validate::FunctionBody {
@@ -839,7 +996,10 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
 
     // (g) `MAX_BLOCKS_PER_FN` cap enforced by IR lowering.
     let mut dm_blks = base_empty();
-    dm_blks.types.push(FuncType { params: vec![], results: vec![] });
+    dm_blks.types.push(FuncType {
+        params: vec![],
+        results: vec![],
+    });
     dm_blks.functions.push(wtime_types::TypeIdx(0));
     let n_blocks = super::module::MAX_BLOCKS_PER_FN + 2;
     let mut insns = Vec::with_capacity(n_blocks * 2 + 1);
@@ -871,14 +1031,16 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
 }
 
 #[test]
+#[ignore = "requires external gdev game.wasm"]
 fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../gdev/.pen/runtime/game.wasm");
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };
-    let validated = wtime_validate::validate(&bytes, &x64_validate_features(), &x64_validate_limits())
-        .expect("gdev game.wasm should validate under Stage 1 features");
+    let validated =
+        wtime_validate::validate(&bytes, &x64_validate_features(), &x64_validate_limits())
+            .expect("gdev game.wasm should validate under Stage 1 features");
     let decoded = validated.decoded();
     let module = admit_x64_module(decoded).expect("gdev game.wasm should pass Stage 1 admission");
     // Verify a deterministic sample of >600 real gdev functions in BOTH raw unopt AND full Stage 2 opt
@@ -925,7 +1087,10 @@ fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
         },
     )
     .unwrap();
-    assert_eq!(so_j1, so_j8, "x64 parallel compilation must produce 100% deterministic ELF bytes");
+    assert_eq!(
+        so_j1, so_j8,
+        "x64 parallel compilation must produce 100% deterministic ELF bytes"
+    );
 }
 
 // ---- Stage 2 Unit Tests: new asm encodings, Granlund–Montgomery magic div, opt.rs passes ----
@@ -967,13 +1132,57 @@ fn stage2_asm_encodings_and_magic_div_exhaustive() {
 
     // Exhaustive verification of 32-bit and 64-bit unsigned & signed Granlund–Montgomery magic constants.
     let u32_divs: &[u32] = &[
-        3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 19, 25, 31, 63, 100, 127, 255, 1000, 65535,
-        0x3fff_ffff, 0x4000_0001, 0x7fff_ffff, 0x8000_0001, 0xffff_fffe, 0xffff_ffff,
+        3,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        17,
+        19,
+        25,
+        31,
+        63,
+        100,
+        127,
+        255,
+        1000,
+        65535,
+        0x3fff_ffff,
+        0x4000_0001,
+        0x7fff_ffff,
+        0x8000_0001,
+        0xffff_fffe,
+        0xffff_ffff,
     ];
     for &d in u32_divs {
         let (m, sh, add) = super::lower::magic_u(32, u64::from(d));
-        let mut samples = vec![0u32, 1, 2, 3, d - 1, d, d.saturating_add(1), u32::MAX - 1, u32::MAX];
-        samples.extend([7, 10, 99, 1023, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0xdead_beef]);
+        let mut samples = vec![
+            0u32,
+            1,
+            2,
+            3,
+            d - 1,
+            d,
+            d.saturating_add(1),
+            u32::MAX - 1,
+            u32::MAX,
+        ];
+        samples.extend([
+            7,
+            10,
+            99,
+            1023,
+            0x7fff_ffff,
+            0x8000_0000,
+            0x8000_0001,
+            0xdead_beef,
+        ]);
         for n in samples {
             let t = ((u64::from(n) * m) >> 32) as u32;
             let q = if add {
@@ -986,14 +1195,40 @@ fn stage2_asm_encodings_and_magic_div_exhaustive() {
     }
 
     let u64_divs: &[u64] = &[
-        3, 5, 6, 7, 9, 10, 11, 13, 15, 100, 1000, 0x3fff_ffff, 0x7fff_ffff, 0x8000_0001,
-        0xffff_ffff, (1u64 << 63) + 1, u64::MAX - 1, u64::MAX,
+        3,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        13,
+        15,
+        100,
+        1000,
+        0x3fff_ffff,
+        0x7fff_ffff,
+        0x8000_0001,
+        0xffff_ffff,
+        (1u64 << 63) + 1,
+        u64::MAX - 1,
+        u64::MAX,
     ];
     for &d in u64_divs {
         let (m, sh, add) = super::lower::magic_u(64, d);
         let samples = [
-            0u64, 1, 2, d - 1, d, d.saturating_add(1), 0x7fff_ffff_ffff_ffff,
-            0x8000_0000_0000_0000, 0x8000_0000_0000_0001, 0x1234_5678_9abc_def0, u64::MAX - 1, u64::MAX,
+            0u64,
+            1,
+            2,
+            d - 1,
+            d,
+            d.saturating_add(1),
+            0x7fff_ffff_ffff_ffff,
+            0x8000_0000_0000_0000,
+            0x8000_0000_0000_0001,
+            0x1234_5678_9abc_def0,
+            u64::MAX - 1,
+            u64::MAX,
         ];
         for n in samples {
             let t = ((u128::from(n) * u128::from(m)) >> 64) as u64;
@@ -1007,15 +1242,50 @@ fn stage2_asm_encodings_and_magic_div_exhaustive() {
     }
 
     let i32_divs: &[i32] = &[
-        3, -3, 5, -5, 6, -6, 7, -7, 9, -9, 10, -10, 12, -12, 25, -25, 100, -100,
-        0x3fff_ffff, -0x3fff_ffff, i32::MAX, -i32::MAX, i32::MIN + 1,
+        3,
+        -3,
+        5,
+        -5,
+        6,
+        -6,
+        7,
+        -7,
+        9,
+        -9,
+        10,
+        -10,
+        12,
+        -12,
+        25,
+        -25,
+        100,
+        -100,
+        0x3fff_ffff,
+        -0x3fff_ffff,
+        i32::MAX,
+        -i32::MAX,
+        i32::MIN + 1,
     ];
     for &d in i32_divs {
         let (m, sh, add_sub) = super::lower::magic_s(32, i64::from(d));
         let samples = [
-            0i32, 1, -1, 2, -2, d.wrapping_sub(1), d, d.wrapping_add(1),
-            d.wrapping_neg().wrapping_sub(1), d.wrapping_neg(), d.wrapping_neg().wrapping_add(1),
-            12345, -12345, i32::MIN, i32::MIN + 1, i32::MAX - 1, i32::MAX,
+            0i32,
+            1,
+            -1,
+            2,
+            -2,
+            d.wrapping_sub(1),
+            d,
+            d.wrapping_add(1),
+            d.wrapping_neg().wrapping_sub(1),
+            d.wrapping_neg(),
+            d.wrapping_neg().wrapping_add(1),
+            12345,
+            -12345,
+            i32::MIN,
+            i32::MIN + 1,
+            i32::MAX - 1,
+            i32::MAX,
         ];
         for n in samples {
             let mut q = ((i64::from(n) * m) >> 32) as i32;
@@ -1033,14 +1303,42 @@ fn stage2_asm_encodings_and_magic_div_exhaustive() {
     }
 
     let i64_divs: &[i64] = &[
-        3, -3, 5, -5, 7, -7, 10, -10, 100, -100, 1000, -1000,
-        0x7fff_ffff, -0x7fff_ffff, i64::MAX, -i64::MAX, i64::MIN + 1,
+        3,
+        -3,
+        5,
+        -5,
+        7,
+        -7,
+        10,
+        -10,
+        100,
+        -100,
+        1000,
+        -1000,
+        0x7fff_ffff,
+        -0x7fff_ffff,
+        i64::MAX,
+        -i64::MAX,
+        i64::MIN + 1,
     ];
     for &d in i64_divs {
         let (m, sh, add_sub) = super::lower::magic_s(64, d);
         let samples = [
-            0i64, 1, -1, 2, -2, d.wrapping_sub(1), d, d.wrapping_add(1),
-            d.wrapping_neg(), 123456789, -123456789, i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX,
+            0i64,
+            1,
+            -1,
+            2,
+            -2,
+            d.wrapping_sub(1),
+            d,
+            d.wrapping_add(1),
+            d.wrapping_neg(),
+            123456789,
+            -123456789,
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MAX - 1,
+            i64::MAX,
         ];
         for n in samples {
             let mut q = ((i128::from(n) * i128::from(m)) >> 64) as i64;
@@ -1089,31 +1387,26 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
         0x20, 0, 0x24, 1, // g1 = x (makes g1 mutable/unfolded!)
         0x20, 0, 0x10, 0, // call f0
         0x20, 0, 0x10, 1, // call f1
-        0x6a,
-        0x20, 0, 0x41, 5, 0x4a, 0x04, 0x7f, 0x20, 0, 0x41, 1, 0x6a, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x0b,
-        0x6a,
-        0x20, 0, 0x10, 3, 0x6a, // call rec_fn
+        0x6a, 0x20, 0, 0x41, 5, 0x4a, 0x04, 0x7f, 0x20, 0, 0x41, 1, 0x6a, 0x05, 0x20, 0, 0x41, 1,
+        0x6b, 0x0b, 0x6a, 0x20, 0, 0x10, 3, 0x6a, // call rec_fn
         0x20, 0, 0x41, 0, 0x11, 0, 0, 0x6a, // call_indirect tbl_fn
     ];
     let b3 = vec![
-        0x20, 0, 0x41, 0, 0x4c, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 3, 0x41, 1, 0x6a, 0x0b,
+        0x20, 0, 0x41, 0, 0x4c, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x10, 3, 0x41,
+        1, 0x6a, 0x0b,
     ];
     let b4 = vec![0x20, 0, 0x41, 2, 0x6a];
     // f5(n): local i=0, sum=0; loop { br_if(i >=u n); sum += global.get g1 + memory.size; if (i > 0) { sum += load(n) + (100 / n); } i += 1; br loop; }
     let b5 = vec![
-        0x02, 0x40, 0x03, 0x40,
-        0x20, 1, 0x20, 0, 0x4f, 0x0d, 1,
-        0x20, 2, 0x23, 1, 0x3f, 0, 0x6a, 0x6a, 0x21, 2, // sum += g1 + mem.size
-        0x20, 1, 0x41, 0, 0x4a, 0x04, 0x40,
-        0x20, 2, 0x20, 0, 0x28, 2, 0, 0x41, 100, 0x20, 0, 0x6d, 0x6a, 0x6a, 0x21, 2,
-        0x0b,
-        0x20, 1, 0x41, 1, 0x6a, 0x21, 1,
-        0x0c, 0,
-        0x0b, 0x0b,
-        0x20, 2,
+        0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 2, 0x23, 1, 0x3f, 0, 0x6a,
+        0x6a, 0x21, 2, // sum += g1 + mem.size
+        0x20, 1, 0x41, 0, 0x4a, 0x04, 0x40, 0x20, 2, 0x20, 0, 0x28, 2, 0, 0x41, 100, 0x20, 0, 0x6d,
+        0x6a, 0x6a, 0x21, 2, 0x0b, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
     ];
     // f6(p): load(p) + load(p + 8)
-    let b6 = vec![0x20, 0, 0x28, 2, 0, 0x20, 0, 0x41, 8, 0x6a, 0x28, 2, 0, 0x6a];
+    let b6 = vec![
+        0x20, 0, 0x28, 2, 0, 0x20, 0, 0x41, 8, 0x6a, 0x28, 2, 0, 0x6a,
+    ];
 
     let build_mod = |mem_sec: &[u8]| {
         wasm_module(&[
@@ -1122,7 +1415,11 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
             section(4, &[1, 0x70, 0x00, 1]), // funcref table len=1
             section(5, mem_sec),
             section(6, &glob_p),
-            export_sec(&[("entry_caller", 0, 2), ("licm_fn", 0, 5), ("wrap_bce", 0, 6)]),
+            export_sec(&[
+                ("entry_caller", 0, 2),
+                ("licm_fn", 0, 5),
+                ("wrap_bce", 0, 6),
+            ]),
             section(9, &[1, 0x00, 0x41, 0, 0x0b, 1, 4]), // table[0] = f4
             code_sec(&[
                 enc_body(&[], &b0),
@@ -1138,7 +1435,8 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
 
     // Bounded growable 4-page memory (`min=1, max=4` -> 256 KiB < 4 GiB, non-fixed so MemSize is NOT const-folded):
     let wasm_1p = build_mod(&[1, 0x01, 1, 4]);
-    let val = wtime_validate::validate(&wasm_1p, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let val = wtime_validate::validate(&wasm_1p, &x64_validate_features(), &x64_validate_limits())
+        .unwrap();
     let dec = val.decoded();
     let module = admit_x64_module(dec).unwrap();
     let mut irs: Vec<IrFunc> = (0..dec.code.len())
@@ -1161,48 +1459,94 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
         .blocks
         .iter()
         .flat_map(|b| b.insts.iter())
-        .filter_map(|i| if let Op::Call { func, .. } = i.op { Some(func) } else { None })
+        .filter_map(|i| {
+            if let Op::Call { func, .. } = i.op {
+                Some(func)
+            } else {
+                None
+            }
+        })
         .collect();
-    assert!(!f2_calls.contains(&0), "small_leaf f0 must be inlined into f2");
-    assert!(f2_calls.contains(&1), "medium_pure f1 (>48 insts) must remain a direct call");
+    assert!(
+        !f2_calls.contains(&0),
+        "small_leaf f0 must be inlined into f2"
+    );
+    assert!(
+        f2_calls.contains(&1),
+        "medium_pure f1 (>48 insts) must remain a direct call"
+    );
 
     // 2. Diamond if/else in f2 converted to branchless Op::CmpSelect!
     assert!(
-        irs[2].blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i.op, Op::CmpSelect { .. }))),
+        irs[2]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::CmpSelect { .. }))),
         "trivial pure diamond in f2 must lower to Op::CmpSelect"
     );
 
     // 3. Step 8a + 8b invariants:
-    assert!(!irs[0].needs_stack_check && !fn_can_trap[0], "internal pure leaf f0 elides stack + trap check");
-    assert!(!irs[1].needs_stack_check && !fn_can_trap[1], "internal pure medium f1 elides stack + trap check");
-    assert!(irs[2].needs_stack_check && fn_can_trap[2], "exported f2 MUST retain stack check");
-    assert!(irs[2].elided_callee_stack_bytes > 0, "retaining caller f2 MUST reserve elided callee f1 stack bytes");
-    assert!(irs[3].needs_stack_check && fn_can_trap[3], "recursive f3 MUST retain stack check");
-    assert!(irs[4].needs_stack_check && fn_can_trap[4], "call_indirect target f4 MUST retain stack check");
+    assert!(
+        !irs[0].needs_stack_check && !fn_can_trap[0],
+        "internal pure leaf f0 elides stack + trap check"
+    );
+    assert!(
+        !irs[1].needs_stack_check && !fn_can_trap[1],
+        "internal pure medium f1 elides stack + trap check"
+    );
+    assert!(
+        irs[2].needs_stack_check && fn_can_trap[2],
+        "exported f2 MUST retain stack check"
+    );
+    assert!(
+        irs[2].elided_callee_stack_bytes > 0,
+        "retaining caller f2 MUST reserve elided callee f1 stack bytes"
+    );
+    assert!(
+        irs[3].needs_stack_check && fn_can_trap[3],
+        "recursive f3 MUST retain stack check"
+    );
+    assert!(
+        irs[4].needs_stack_check && fn_can_trap[4],
+        "call_indirect target f4 MUST retain stack check"
+    );
 
     // 4. LICM legality in f5: pure GlobalGet(1) & MemSize hoisted into preheader bb0, while trapping Load/Div stay inside loop!
     assert!(
-        irs[5].blocks[0].insts.iter().any(|i| matches!(i.op, Op::GlobalGet(1))),
+        irs[5].blocks[0]
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::GlobalGet(1))),
         "loop-invariant GlobalGet(1) must hoist to preheader bb0"
     );
     assert!(
-        irs[5].blocks[0].insts.iter().any(|i| matches!(i.op, Op::MemSize)),
+        irs[5].blocks[0]
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::MemSize)),
         "loop-invariant MemSize must hoist to preheader bb0"
     );
     assert!(
-        !irs[5].blocks[0].insts.iter().any(|i| matches!(i.op, Op::Load { .. } | Op::I32Bin(IntBinOp::DivS, _, _))),
+        !irs[5].blocks[0]
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::Load { .. } | Op::I32Bin(IntBinOp::DivS, _, _))),
         "trapping Load/Div inside loop must NEVER hoist to preheader bb0!"
     );
 
     // 5. Wrap-safe addressing-mode folding in bounded 1-page memory: f6's second load folds to (p, offset=8)!
     assert!(
-        irs[6].blocks[0].insts.iter().any(|i| matches!(i.op, Op::Load { offset: 8, .. })),
+        irs[6].blocks[0]
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::Load { offset: 8, .. })),
         "bounded 1-page memory must fold load(p + 8) to offset=8"
     );
 
     // 6. Unbounded 4 GiB memory (`min=1, no max`): load(p + 8) MUST NOT fold (can wrap at 0xffff_fff8)!
     let wasm_4g = build_mod(&[1, 0x00, 1]);
-    let val4 = wtime_validate::validate(&wasm_4g, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let val4 = wtime_validate::validate(&wasm_4g, &x64_validate_features(), &x64_validate_limits())
+        .unwrap();
     let dec4 = val4.decoded();
     let mod4 = admit_x64_module(dec4).unwrap();
     let mut irs4: Vec<IrFunc> = (0..dec4.code.len())
@@ -1212,7 +1556,10 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
     opt::optimize_func_stage2(&mut irs4[6], &mod4, &eff4, None).unwrap();
     verify_ir(&irs4[6], &mod4).unwrap();
     assert!(
-        !irs4[6].blocks[0].insts.iter().any(|i| matches!(i.op, Op::Load { offset: 8, .. })),
+        !irs4[6].blocks[0]
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::Load { offset: 8, .. })),
         "unbounded 4 GiB memory MUST NOT wrap-fold load(p + 8)!"
     );
 }
@@ -1233,14 +1580,18 @@ fn stage2_audit_br_table_not_inlined_and_val_pool_cap_atomic() {
         export_sec(&[("caller", 0, 1)]),
         code_sec(&[enc_body(&[], &b0), enc_body(&[], &b1)]),
     ]);
-    let val = wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
     let dec = val.decoded();
     let module = admit_x64_module(dec).unwrap();
     let mut irs: Vec<IrFunc> = (0..dec.code.len())
         .map(|bi| lower_wasm_to_ir(dec, &module, bi).unwrap())
         .collect();
     opt::inline_small_helpers(&mut irs, &module, None).unwrap();
-    assert!(irs[1].br_tables.is_empty(), "callee with br_table must not be inlined");
+    assert!(
+        irs[1].br_tables.is_empty(),
+        "callee with br_table must not be inlined"
+    );
     verify_ir(&irs[1], &module).unwrap();
 
     // Atomic val_pool rejection: pad caller.val_pool near MAX_VAL_POOL_PER_FN and verify
@@ -1253,18 +1604,24 @@ fn stage2_audit_br_table_not_inlined_and_val_pool_cap_atomic() {
         export_sec(&[("call_leaf", 0, 1)]),
         code_sec(&[enc_body(&[], &b_leaf), enc_body(&[], &b_call)]),
     ]);
-    let val2 = wtime_validate::validate(&wasm2, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let val2 =
+        wtime_validate::validate(&wasm2, &x64_validate_features(), &x64_validate_limits()).unwrap();
     let dec2 = val2.decoded();
     let mod2 = admit_x64_module(dec2).unwrap();
     let mut irs2: Vec<IrFunc> = (0..dec2.code.len())
         .map(|bi| lower_wasm_to_ir(dec2, &mod2, bi).unwrap())
         .collect();
     // Fill caller's val_pool to MAX_VAL_POOL_PER_FN so cloning callee's return val_range exceeds cap.
-    irs2[1].val_pool.resize(super::module::MAX_VAL_POOL_PER_FN, super::ir::Val(0));
+    irs2[1]
+        .val_pool
+        .resize(super::module::MAX_VAL_POOL_PER_FN, super::ir::Val(0));
     opt::inline_small_helpers(&mut irs2, &mod2, None).unwrap();
     verify_ir(&irs2[1], &mod2).unwrap();
     assert!(
-        irs2[1].blocks[0].insts.iter().any(|i| matches!(i.op, Op::Call { func: 0, .. })),
+        irs2[1].blocks[0]
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::Call { func: 0, .. })),
         "rejected inline due to val_pool cap must leave original Op::Call untouched"
     );
 }
@@ -1286,7 +1643,10 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
     // Emit a local rodata reloc AFTER a relaxed short jump to prove reloc.at shifts accurately.
     let loff = a.intern_f32(1.5f32.to_bits());
     let loff_dup = a.intern_f32(1.5f32.to_bits());
-    assert_eq!(loff, loff_dup, "intern_f32 must deduplicate identical bit patterns");
+    assert_eq!(
+        loff, loff_dup,
+        "intern_f32 must deduplicate identical bit patterns"
+    );
     a.movss_rip(Xmm::Xmm0, RelocTarget::LocalRodata(loff));
     let jt = a.add_jump_table(&[l_short, l_far]);
     a.lea_rip(Gp::Rax, RelocTarget::LocalRodata(jt));
@@ -1299,13 +1659,28 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
     let pre_len = a.code.len();
     a.finish_labels().unwrap();
     // Relaxing `jmp l_short` (-3 B) + `jne l_short` (-4 B) must shrink code by exactly 7 bytes.
-    assert_eq!(a.code.len(), pre_len - 7, "short-jump relaxation must shrink rel8 branches accurately");
+    assert_eq!(
+        a.code.len(),
+        pre_len - 7,
+        "short-jump relaxation must shrink rel8 branches accurately"
+    );
     assert_eq!(a.code[0], 0xeb, "first jmp must relax to short rel8 (0xeb)");
-    assert_eq!(a.code[2], 0x75, "jcc Cond::Ne must relax to short rel8 (0x75)");
+    assert_eq!(
+        a.code[2], 0x75,
+        "jcc Cond::Ne must relax to short rel8 (0x75)"
+    );
     assert_eq!(a.code[4], 0xe9, "far jmp >127B must stay rel32 (0xe9)");
     assert_eq!(a.relocs.len(), 2);
-    assert_eq!(a.relocs[0].patch_off, 4 + 5 + 4, "movss_rip reloc patch_off must shift cleanly after rel8 relaxation");
-    assert_eq!(a.relocs[0].next_ip_off, 4 + 5 + 8, "movss_rip reloc next_ip_off must shift cleanly after rel8 relaxation");
+    assert_eq!(
+        a.relocs[0].patch_off,
+        4 + 5 + 4,
+        "movss_rip reloc patch_off must shift cleanly after rel8 relaxation"
+    );
+    assert_eq!(
+        a.relocs[0].next_ip_off,
+        4 + 5 + 8,
+        "movss_rip reloc next_ip_off must shift cleanly after rel8 relaxation"
+    );
 
     // 2. Dead loop-carried phi cycle pruning + post-inlining const32 folding:
     // f0: inlineable helper(x): `(x + 15) & -16`
@@ -1321,16 +1696,20 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
     b1.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // br_if done (i >=u n)
     for lx in 2u32..22 {
         // lx = i + lx (overwritten every iter, read inside same iter, never loop-carried!)
-        b1.push(0x20); b1.push(1);
-        b1.push(0x41); leb_i32(&mut b1, lx as i32);
+        b1.push(0x20);
+        b1.push(1);
+        b1.push(0x41);
+        leb_i32(&mut b1, lx as i32);
         b1.push(0x6a);
-        b1.push(0x21); leb_u32(&mut b1, lx);
+        b1.push(0x21);
+        leb_u32(&mut b1, lx);
     }
     // Use l2 once inside loop, leave l3..l21 unused (dead phi cycles across loop if unpruned!)
     b1.extend_from_slice(&[0x20, 2, 0x1a]); // drop(l2)
     b1.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
     // Return f0(136) + i
-    b1.push(0x41); leb_i32(&mut b1, 136);
+    b1.push(0x41);
+    leb_i32(&mut b1, 136);
     b1.extend_from_slice(&[0x10, 0, 0x20, 1, 0x6a]);
 
     let wasm = wasm_module(&[
@@ -1340,7 +1719,8 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
         export_sec(&[("test_fn", 0, 1)]),
         code_sec(&[enc_body(&[], &b0), enc_body(&[(21, 0x7f)], &b1)]),
     ]);
-    let val = wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
     let dec = val.decoded();
     let module = admit_x64_module(dec).unwrap();
     assert_eq!(module.fixed32, Some(65_536), "min==max==1 must set fixed32");
@@ -1359,7 +1739,13 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
     verify_ir(&irs[1], &module).unwrap();
 
     // Every single one of the 20 loop-local temporaries must have been pruned from the loop header!
-    let max_params = irs[1].blocks.iter().skip(1).map(|b| b.params.len()).max().unwrap_or(0);
+    let max_params = irs[1]
+        .blocks
+        .iter()
+        .skip(1)
+        .map(|b| b.params.len())
+        .max()
+        .unwrap_or(0);
     assert!(
         max_params <= 2,
         "dead loop-carried local cycles must be pruned (got {max_params} params on loop/merge block)"
@@ -1369,10 +1755,16 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
         .blocks
         .iter()
         .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::ConstI32(144))));
-    assert!(has_144, "post-inlining const32 folding must fold f0(136) -> ConstI32(144)");
+    assert!(
+        has_144,
+        "post-inlining const32 folding must fold f0(136) -> ConstI32(144)"
+    );
 
     // Dynamic R12 + R13 allocation verifier check:
-    let cfg = AllocConfig { allow_r12: true, allow_r13: true };
+    let cfg = AllocConfig {
+        allow_r12: true,
+        allow_r13: true,
+    };
     let alloc = super::regalloc::allocate_with_config(&irs[1], cfg, None).unwrap();
     super::verify::verify_alloc_with_config(&irs[1], &alloc, cfg).unwrap();
 }

@@ -91,7 +91,7 @@ impl PreparedModule {
         let mut attempted_work = MAX_WORK.checked_sub(count)?;
         for (body, entry) in functions.iter_mut().enumerate() {
             match prepare_function(module, body, &mut budget, &mut attempted_work) {
-                Preparation::Complete(function) => *entry = Some(function),
+                Preparation::Complete(function) => *entry = Some(*function),
                 Preparation::Declined => {}
                 Preparation::Exhausted => break,
                 Preparation::Invalid => return None,
@@ -104,7 +104,7 @@ impl PreparedModule {
 /// One bounded attempt. Failed attempts spend attempted work, while retained
 /// metadata commits only with a complete independently admitted function.
 pub(super) enum Preparation {
-    Complete(PreparedFunction),
+    Complete(Box<PreparedFunction>),
     Declined,
     Exhausted,
     Invalid,
@@ -278,7 +278,10 @@ fn prepare_checked(
     }
     if valid {
         *budget = transaction;
-        return Some(Preparation::Complete(PreparedFunction { lowered, edges }));
+        return Some(Preparation::Complete(Box::new(PreparedFunction {
+            lowered,
+            edges,
+        })));
     }
     Some(Preparation::Declined)
 }
@@ -712,7 +715,10 @@ pub(crate) fn step(frame: &mut Frame, stack: &mut Vec<Value>, store: &mut Store)
         2..=4 => {
             let instruction = instruction.ok_or_else(|| trap("register control source"))?;
             let (params, results) = arity(&instruction.immediate, module);
-            let (end, _) = module.data.control.get(frame.function.body, pc)
+            let (end, _) = module
+                .data
+                .control
+                .get(frame.function.body, pc)
                 .ok_or_else(|| trap("register control metadata"))?;
             let height = frame
                 .base

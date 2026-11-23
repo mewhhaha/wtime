@@ -49,7 +49,7 @@ def main():
             raise SystemExit('corpus integrity error: ' + item['path'])
     if selecting:
         for path in sorted(paths):
-            print(CACHE / path)
+            print((CACHE / path).resolve().relative_to(ROOT).as_posix())
         return
     print(f'verified {len(paths)} pinned files from {len(needed)} repositories')
 

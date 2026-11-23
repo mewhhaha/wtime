@@ -5,12 +5,16 @@
 //! enforces an explicit Stage 1 admission contract before emitting any IR or code.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-use wtime_types::{CompositeType, FeatureSet, FuncType, HeapType, IndexType, ResourceLimits, ValType};
-use wtime_validate::{DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode};
+use wtime_types::{
+    CompositeType, FeatureSet, FuncType, HeapType, IndexType, ResourceLimits, ValType,
+};
+use wtime_validate::{
+    DecodedModule, ExternalKind, Immediate, ImportKind, Instruction, SegmentMode,
+};
 
 pub type Res<T> = Result<T, String>;
 
@@ -85,7 +89,11 @@ pub struct LivenessBudgetGuard<'a> {
 
 impl Drop for LivenessBudgetGuard<'_> {
     fn drop(&mut self) {
-        let mut cur = self.budget.liveness_mu.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cur = self
+            .budget
+            .liveness_mu
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *cur = cur.saturating_sub(self.bytes);
         self.budget.liveness_cv.notify_all();
     }
@@ -122,9 +130,15 @@ impl CompileBudget {
         let mut cur = self.liveness_mu.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             self.check_deadline()?;
-            if cur.checked_add(bytes).is_some_and(|next| next <= MAX_CONCURRENT_LIVENESS_BYTES) {
+            if cur
+                .checked_add(bytes)
+                .is_some_and(|next| next <= MAX_CONCURRENT_LIVENESS_BYTES)
+            {
                 *cur += bytes;
-                return Ok(LivenessBudgetGuard { budget: self, bytes });
+                return Ok(LivenessBudgetGuard {
+                    budget: self,
+                    bytes,
+                });
             }
             cur = match self.deadline {
                 Some(dl) => {
@@ -138,7 +152,10 @@ impl CompileBudget {
                         .unwrap_or_else(|e| e.into_inner());
                     guard
                 }
-                None => self.liveness_cv.wait(cur).unwrap_or_else(|e| e.into_inner()),
+                None => self
+                    .liveness_cv
+                    .wait(cur)
+                    .unwrap_or_else(|e| e.into_inner()),
             };
         }
     }
@@ -150,13 +167,20 @@ impl CompileBudget {
         }
         let mut cur = self.total_code_bytes.load(Ordering::Acquire);
         loop {
-            let next = cur.checked_add(delta).ok_or("x64: aggregate code size overflow")?;
+            let next = cur
+                .checked_add(delta)
+                .ok_or("x64: aggregate code size overflow")?;
             if next > MAX_TOTAL_CODE_BYTES {
                 return Err(format!(
                     "x64: aggregate code size ({next} B) exceeds cap {MAX_TOTAL_CODE_BYTES} B"
                 ));
             }
-            match self.total_code_bytes.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+            match self.total_code_bytes.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return Ok(()),
                 Err(actual) => cur = actual,
             }
@@ -170,13 +194,20 @@ impl CompileBudget {
         }
         let mut cur = self.total_rodata_bytes.load(Ordering::Acquire);
         loop {
-            let next = cur.checked_add(delta).ok_or("x64: aggregate rodata size overflow")?;
+            let next = cur
+                .checked_add(delta)
+                .ok_or("x64: aggregate rodata size overflow")?;
             if next > MAX_TOTAL_RODATA_BYTES {
                 return Err(format!(
                     "x64: aggregate rodata size ({next} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"
                 ));
             }
-            match self.total_rodata_bytes.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+            match self.total_rodata_bytes.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return Ok(()),
                 Err(actual) => cur = actual,
             }
@@ -267,27 +298,34 @@ fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstV
             (0x43, Immediate::F32(b)) => X64ConstVal::F32(*b),
             (0x44, Immediate::F64(b)) => X64ConstVal::F64(*b),
             (0xfd0c, Immediate::Bytes(bytes)) => {
-                let arr: [u8; 16] = bytes.as_ref().try_into().map_err(|_| "invalid v128.const")?;
+                let arr: [u8; 16] = bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| "invalid v128.const")?;
                 X64ConstVal::V128(arr)
             }
             (0xd0, _) => X64ConstVal::RefNull,
-            (0x23, Immediate::Index(g)) => {
-                *prior.get(*g as usize).ok_or("const global.get out of range")?
-            }
+            (0x23, Immediate::Index(g)) => *prior
+                .get(*g as usize)
+                .ok_or("const global.get out of range")?,
             (0x6a..=0x6c, _) => match (stk.pop(), stk.pop()) {
-                (Some(X64ConstVal::I32(b)), Some(X64ConstVal::I32(a))) => X64ConstVal::I32(match i.opcode {
-                    0x6a => a.wrapping_add(b),
-                    0x6b => a.wrapping_sub(b),
-                    _ => a.wrapping_mul(b),
-                }),
+                (Some(X64ConstVal::I32(b)), Some(X64ConstVal::I32(a))) => {
+                    X64ConstVal::I32(match i.opcode {
+                        0x6a => a.wrapping_add(b),
+                        0x6b => a.wrapping_sub(b),
+                        _ => a.wrapping_mul(b),
+                    })
+                }
                 _ => return Err("invalid i32 const expr".into()),
             },
             (0x7c..=0x7e, _) => match (stk.pop(), stk.pop()) {
-                (Some(X64ConstVal::I64(b)), Some(X64ConstVal::I64(a))) => X64ConstVal::I64(match i.opcode {
-                    0x7c => a.wrapping_add(b),
-                    0x7d => a.wrapping_sub(b),
-                    _ => a.wrapping_mul(b),
-                }),
+                (Some(X64ConstVal::I64(b)), Some(X64ConstVal::I64(a))) => {
+                    X64ConstVal::I64(match i.opcode {
+                        0x7c => a.wrapping_add(b),
+                        0x7d => a.wrapping_sub(b),
+                        _ => a.wrapping_mul(b),
+                    })
+                }
                 _ => return Err("invalid i64 const expr".into()),
             },
             (op, _) => return Err(format!("x64: unsupported const expression opcode {op:#x}")),
@@ -317,7 +355,16 @@ fn check_supported_opcode(
     total_sig_arity: &mut usize,
 ) -> Res<()> {
     match op {
-        0x00 | 0x01 | 0x05 | 0x0b..=0x0f | 0x1a | 0x1b | 0x20..=0x26 | 0x41..=0x44 | 0x45..=0xc4 | 0xd1 => Ok(()),
+        0x00
+        | 0x01
+        | 0x05
+        | 0x0b..=0x0f
+        | 0x1a
+        | 0x1b
+        | 0x20..=0x26
+        | 0x41..=0x44
+        | 0x45..=0xc4
+        | 0xd1 => Ok(()),
         0x10 => match imm {
             Immediate::Index(fi) => {
                 let &ti = func_type_idx
@@ -325,7 +372,9 @@ fn check_supported_opcode(
                     .ok_or_else(|| format!("x64: call function index {fi} out of range"))?;
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[ti as usize]);
                 if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
-                    return Err(format!("x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+                    return Err(format!(
+                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                    ));
                 }
                 Ok(())
             }
@@ -335,12 +384,19 @@ fn check_supported_opcode(
             Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17) => Ok(()),
             Immediate::Block(i) if *i >= 0 => {
                 let idx = *i as usize;
-                if !*type_admitted.get(idx).ok_or("x64: block type index out of range")? {
-                    return Err(format!("x64: block type index {idx} uses unsupported value type"));
+                if !*type_admitted
+                    .get(idx)
+                    .ok_or("x64: block type index out of range")?
+                {
+                    return Err(format!(
+                        "x64: block type index {idx} uses unsupported value type"
+                    ));
                 }
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
                 if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
-                    return Err(format!("x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+                    return Err(format!(
+                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                    ));
                 }
                 Ok(())
             }
@@ -350,12 +406,19 @@ fn check_supported_opcode(
         0x11 => match imm {
             Immediate::Pair(ti, _) => {
                 let idx = *ti as usize;
-                if !*type_admitted.get(idx).ok_or("x64: call_indirect type index out of range")? {
-                    return Err(format!("x64: call_indirect type index {idx} uses unsupported value type"));
+                if !*type_admitted
+                    .get(idx)
+                    .ok_or("x64: call_indirect type index out of range")?
+                {
+                    return Err(format!(
+                        "x64: call_indirect type index {idx} uses unsupported value type"
+                    ));
                 }
                 *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
                 if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
-                    return Err(format!("x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+                    return Err(format!(
+                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                    ));
                 }
                 Ok(())
             }
@@ -413,7 +476,9 @@ fn check_blot_import_sig(mod_name: &str, name: &str, ty: &FuncType) -> Res<()> {
         [] | [ValType::I32] | [ValType::I64] | [ValType::F32] | [ValType::F64] | [ValType::Ref(_)]
     );
     if !ok_params || !ok_results {
-        return Err(format!("x64: Blot import {mod_name:?}::{name:?} has unsupported signature {ty:?}"));
+        return Err(format!(
+            "x64: Blot import {mod_name:?}::{name:?} has unsupported signature {ty:?}"
+        ));
     }
     Ok(())
 }
@@ -425,7 +490,10 @@ pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
 }
 
 /// Enforces the Stage 1 admission contract while cooperatively polling `budget`'s deadline.
-pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&CompileBudget>) -> Res<X64Module> {
+pub fn admit_x64_module_with_budget(
+    decoded: &DecodedModule,
+    budget: Option<&CompileBudget>,
+) -> Res<X64Module> {
     if let Some(b) = budget {
         b.check_deadline()?;
     }
@@ -443,12 +511,17 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                 || st.descriptor.is_some()
                 || st.describes.is_some()
             {
-                return Err("x64: GC/subtyping/non-final/descriptor types are not supported".into());
+                return Err(
+                    "x64: GC/subtyping/non-final/descriptor types are not supported".into(),
+                );
             }
         }
     }
     if decoded.memories.len() > 1 {
-        return Err(format!("x64: multi-memory ({}) is not supported", decoded.memories.len()));
+        return Err(format!(
+            "x64: multi-memory ({}) is not supported",
+            decoded.memories.len()
+        ));
     }
     let (memory, fixed32) = if let Some(mt) = decoded.memories.first() {
         if mt.index_type != IndexType::I32 {
@@ -458,17 +531,25 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
             return Err("x64: shared memory is not supported".into());
         }
         if mt.page_size_log2 != 16 {
-            return Err(format!("x64: custom memory page size (2^{}) is not supported", mt.page_size_log2));
+            return Err(format!(
+                "x64: custom memory page size (2^{}) is not supported",
+                mt.page_size_log2
+            ));
         }
         let max_p = match mt.limits.max {
             Some(m) if m > MAX_MEM_PAGES => {
-                return Err(format!("x64: memory max ({m}) exceeds Wasm32 limit ({MAX_MEM_PAGES})"));
+                return Err(format!(
+                    "x64: memory max ({m}) exceeds Wasm32 limit ({MAX_MEM_PAGES})"
+                ));
             }
             Some(m) => m,
             None => MAX_MEM_PAGES,
         };
         if mt.limits.min > max_p {
-            return Err(format!("x64: memory min ({}) exceeds max ({max_p})", mt.limits.min));
+            return Err(format!(
+                "x64: memory min ({}) exceeds max ({max_p})",
+                mt.limits.min
+            ));
         }
         let fixed = (mt.limits.min == max_p).then_some(mt.limits.min * 65_536);
         (Some((mt.limits.min, max_p)), fixed)
@@ -481,7 +562,10 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     // with zero per-function or per-slot `FuncType` cloning/re-scanning. Also bound total
     // declared type arity upfront before cloning `decoded.types` into `X64Module`.
     if decoded.types.len() > MAX_MODULE_TYPES {
-        return Err(format!("x64: module declares {} types (max {MAX_MODULE_TYPES})", decoded.types.len()));
+        return Err(format!(
+            "x64: module declares {} types (max {MAX_MODULE_TYPES})",
+            decoded.types.len()
+        ));
     }
     let mut sig_to_canon: HashMap<&FuncType, u32> = HashMap::with_capacity(decoded.types.len());
     let mut type_canon: Vec<u32> = Vec::with_capacity(decoded.types.len());
@@ -505,7 +589,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         let cid = *sig_to_canon.entry(fty).or_insert(next_id);
         type_canon.push(cid);
         type_arity.push(arity);
-        type_admitted.push(fty.params.iter().chain(&fty.results).all(|&vt| check_val_type(vt).is_ok()));
+        type_admitted.push(
+            fty.params
+                .iter()
+                .chain(&fty.results)
+                .all(|&vt| check_val_type(vt).is_ok()),
+        );
     }
 
     // Charge per-function/total locals AND aggregate signature arity (params + results) BEFORE allocating.
@@ -524,26 +613,41 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         {
             b.check_deadline()?;
         }
-        let ti = decoded.functions.get(bi).ok_or("function/code count mismatch")?.0 as usize;
-        let fty = decoded.types.get(ti).ok_or("function type index out of range")?;
+        let ti = decoded
+            .functions
+            .get(bi)
+            .ok_or("function/code count mismatch")?
+            .0 as usize;
+        let fty = decoded
+            .types
+            .get(ti)
+            .ok_or("function type index out of range")?;
         let n_locals = fty.params.len().saturating_add(body.locals.len());
         if n_locals > MAX_LOCALS_PER_FN {
-            return Err(format!("x64: function body {bi} has {n_locals} locals (cap {MAX_LOCALS_PER_FN})"));
+            return Err(format!(
+                "x64: function body {bi} has {n_locals} locals (cap {MAX_LOCALS_PER_FN})"
+            ));
         }
         precheck_total_locals = precheck_total_locals.saturating_add(n_locals);
         if precheck_total_locals > MAX_TOTAL_LOCALS {
-            return Err(format!("x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"));
+            return Err(format!(
+                "x64: module total locals exceeds cap {MAX_TOTAL_LOCALS}"
+            ));
         }
         total_sig_arity = total_sig_arity.saturating_add(type_arity[ti]);
         if total_sig_arity > MAX_TOTAL_SIG_ARITY {
-            return Err(format!("x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+            return Err(format!(
+                "x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+            ));
         }
     }
 
     // Imports: plain function imports only (zero per-function `FuncType` cloning).
     let mut imports = Vec::new();
-    let mut func_type_idx: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
-    let mut func_canon_sig: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
+    let mut func_type_idx: Vec<u32> =
+        Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
+    let mut func_canon_sig: Vec<u32> =
+        Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
     for (ii, imp) in decoded.imports.iter().enumerate() {
         if let Some(b) = budget
             && (ii & 4095) == 4095
@@ -552,16 +656,29 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         }
         let ti_u32 = match imp.kind {
             ImportKind::Func(t) => t.0,
-            _ => return Err(format!("x64: only plain function imports are supported (got {:?}::{:?})", imp.module, imp.name)),
+            _ => {
+                return Err(format!(
+                    "x64: only plain function imports are supported (got {:?}::{:?})",
+                    imp.module, imp.name
+                ));
+            }
         };
         let ti = ti_u32 as usize;
-        let fty = decoded.types.get(ti).ok_or("import type index out of range")?;
+        let fty = decoded
+            .types
+            .get(ti)
+            .ok_or("import type index out of range")?;
         if !type_admitted[ti] {
-            return Err(format!("x64: import {:?}::{:?} uses unsupported value type", imp.module, imp.name));
+            return Err(format!(
+                "x64: import {:?}::{:?} uses unsupported value type",
+                imp.module, imp.name
+            ));
         }
         total_sig_arity = total_sig_arity.saturating_add(type_arity[ti]);
         if total_sig_arity > MAX_TOTAL_SIG_ARITY {
-            return Err(format!("x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"));
+            return Err(format!(
+                "x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+            ));
         }
         check_blot_import_sig(&imp.module, &imp.name, fty)?;
         imports.push((imp.module.clone(), imp.name.clone()));
@@ -571,8 +688,13 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
 
     for &ti in &decoded.functions {
         let ti_u = ti.0 as usize;
-        if !*type_admitted.get(ti_u).ok_or("function type index out of range")? {
-            return Err(format!("x64: function type index {ti_u} uses unsupported value type"));
+        if !*type_admitted
+            .get(ti_u)
+            .ok_or("function type index out of range")?
+        {
+            return Err(format!(
+                "x64: function type index {ti_u} uses unsupported value type"
+            ));
         }
         func_type_idx.push(ti.0);
         func_canon_sig.push(type_canon[ti_u]);
@@ -588,7 +710,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
         if tt.index_type != IndexType::I32 {
             return Err(format!("x64: table64 (table {ti}) is not supported"));
         }
-        if decoded.table_inits.get(ti).and_then(|o| o.as_ref()).is_some() {
+        if decoded
+            .table_inits
+            .get(ti)
+            .and_then(|o| o.as_ref())
+            .is_some()
+        {
             return Err(format!(
                 "x64: explicit table initializer on table {ti} (function-references) is not supported in Stage 1"
             ));
@@ -623,18 +750,27 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                 }
                 mut_extern_tables.insert(ti_u32, tt.limits.min as u32);
             }
-            other => return Err(format!("x64: unsupported table element type {other:?} on table {ti}")),
+            other => {
+                return Err(format!(
+                    "x64: unsupported table element type {other:?} on table {ti}"
+                ));
+            }
         }
     }
 
     if decoded.globals.len() > MAX_GLOBALS {
-        return Err(format!("x64: module global count ({}) exceeds cap {MAX_GLOBALS}", decoded.globals.len()));
+        return Err(format!(
+            "x64: module global count ({}) exceeds cap {MAX_GLOBALS}",
+            decoded.globals.len()
+        ));
     }
     let worst_ctx_bytes = 128usize
         .saturating_add(decoded.globals.len().saturating_mul(16))
         .saturating_add(total_extern_slots.saturating_mul(8));
     if worst_ctx_bytes > MAX_CTX_BYTES {
-        return Err(format!("x64: Ctx storage ({worst_ctx_bytes} B) exceeds cap {MAX_CTX_BYTES} B"));
+        return Err(format!(
+            "x64: Ctx storage ({worst_ctx_bytes} B) exceeds cap {MAX_CTX_BYTES} B"
+        ));
     }
 
     // Globals: evaluate all initializers; track which globals are written or exported-mutable.
@@ -686,11 +822,17 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
             }
             ExternalKind::Memory => {
                 if exp.index != 0 || memory.is_none() {
-                    return Err(format!("x64: unsupported memory export {:?} (index {})", exp.name, exp.index));
+                    return Err(format!(
+                        "x64: unsupported memory export {:?} (index {})",
+                        exp.name, exp.index
+                    ));
                 }
             }
             ExternalKind::Table | ExternalKind::Tag => {
-                return Err(format!("x64: unsupported export {:?} ({:?})", exp.name, exp.kind));
+                return Err(format!(
+                    "x64: unsupported export {:?} ({:?})",
+                    exp.name, exp.kind
+                ));
             }
         }
     }
@@ -707,7 +849,9 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                     return Err("x64: active element offset must be i32".into());
                 };
                 let Some(slots) = funcref_tables.get_mut(index) else {
-                    return Err(format!("x64: active element segment targets non-funcref table {index}"));
+                    return Err(format!(
+                        "x64: active element segment targets non-funcref table {index}"
+                    ));
                 };
                 let mut entries = Vec::with_capacity(elem.init.len());
                 for expr in &elem.init {
@@ -718,17 +862,27 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                         b.check_deadline()?;
                     }
                     match expr.as_slice() {
-                        [Instruction { opcode: 0xd2, immediate: Immediate::Index(f) }, Instruction { opcode: 0x0b, .. }] => {
+                        [
+                            Instruction {
+                                opcode: 0xd2,
+                                immediate: Immediate::Index(f),
+                            },
+                            Instruction { opcode: 0x0b, .. },
+                        ] => {
                             entries.push(Some(*f));
                         }
-                        [Instruction { opcode: 0xd0, .. }, Instruction { opcode: 0x0b, .. }] => {
+                        [
+                            Instruction { opcode: 0xd0, .. },
+                            Instruction { opcode: 0x0b, .. },
+                        ] => {
                             entries.push(None);
                         }
                         _ => return Err("x64: unsupported active element init expression".into()),
                     }
                 }
                 let base_u32 = off_i32 as u32;
-                let elem_len = u32::try_from(entries.len()).map_err(|_| "active element segment too large")?;
+                let elem_len =
+                    u32::try_from(entries.len()).map_err(|_| "active element segment too large")?;
                 active_elem_checks.push((slots.len() as u32, base_u32, elem_len));
                 let base = base_u32 as usize;
                 if let Some(end) = base.checked_add(entries.len())
@@ -762,7 +916,9 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                 active_data_segs.push((off_i32 as u32, di));
             }
             SegmentMode::Active { index, .. } => {
-                return Err(format!("x64: active data segment on unsupported memory {index}"));
+                return Err(format!(
+                    "x64: active data segment on unsupported memory {index}"
+                ));
             }
             SegmentMode::Passive | SegmentMode::Declarative => {
                 return Err("x64: passive data segments are not supported".into());
@@ -787,7 +943,10 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
             if let Some(f) = entry
                 && let Some(&csig) = func_canon_sig.get(f as usize)
             {
-                funcref_by_sig.entry((tbl, csig)).or_default().push((slot as u32, f));
+                funcref_by_sig
+                    .entry((tbl, csig))
+                    .or_default()
+                    .push((slot as u32, f));
             }
         }
     }
@@ -830,7 +989,8 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
             match insn.opcode {
                 0x0e => {
                     if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
-                        total_br_table_entries = total_br_table_entries.saturating_add(raw_targets.len());
+                        total_br_table_entries =
+                            total_br_table_entries.saturating_add(raw_targets.len());
                         if total_br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
                             return Err(format!(
                                 "x64: aggregate br_table entries ({total_br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
@@ -868,15 +1028,19 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                     if ci_index.contains_key(&(tbl, ti)) {
                         continue;
                     }
-                    let &csig = type_canon.get(ti as usize).ok_or("call_indirect type index")?;
+                    let &csig = type_canon
+                        .get(ti as usize)
+                        .ok_or("call_indirect type index")?;
                     let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
                         existing
                     } else {
-                        let &table_len = funcref_table_lens
-                            .get(&tbl)
-                            .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
+                        let &table_len = funcref_table_lens.get(&tbl).ok_or_else(|| {
+                            format!("x64: call_indirect on unsupported table {tbl}")
+                        })?;
                         let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
-                        let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) = (targets.first(), targets.last()) {
+                        let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) =
+                            (targets.first(), targets.last())
+                        {
                             (first, last - first + 1)
                         } else {
                             (0, 0)
@@ -911,7 +1075,11 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     let mut global_consts = Vec::with_capacity(globals.len());
     for (k, &(_, mutable)) in globals.iter().enumerate() {
         let can_fold = !mutable || (global_writes[k] == 0 && !exported_mut_globals[k]);
-        global_consts.push(if can_fold { Some(global_inits[k]) } else { None });
+        global_consts.push(if can_fold {
+            Some(global_inits[k])
+        } else {
+            None
+        });
     }
 
     // Pin the hottest mutable scalar I32/I64 global in `R12` ONLY when its static access density
@@ -935,7 +1103,10 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
             .and_then(|&ti| decoded.types.get(ti as usize))
             .ok_or_else(|| format!("x64: start function index {} out of range", s.0))?;
         if !fty.params.is_empty() || !fty.results.is_empty() {
-            return Err(format!("x64: start function {} must have signature () -> ()", s.0));
+            return Err(format!(
+                "x64: start function {} must have signature () -> ()",
+                s.0
+            ));
         }
         Some(s.0)
     } else {

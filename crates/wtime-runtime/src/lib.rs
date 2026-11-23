@@ -1,5 +1,33 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 //! Portable, explicitly framed WebAssembly execution.
+//!
+//! # Example
+//!
+//! ```
+//! use wtime_runtime::{Config, Engine, External, Linker, RunOutcome, Store, Value};
+//!
+//! // (module (func (export "add") (param i32 i32) (result i32)
+//! //   local.get 0 local.get 1 i32.add))
+//! let wasm = [
+//!     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic & version
+//!     0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type (i32, i32) -> i32
+//!     0x03, 0x02, 0x01, 0x00, // func 0 -> type 0
+//!     0x07, 0x07, 0x01, 0x03, b'a', b'd', b'd', 0x00, 0x00, // export "add" -> func 0
+//!     0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
+//! ];
+//!
+//! let engine = Engine::new(Config::default())?;
+//! let module = engine.compile(&wasm)?;
+//! let mut store = Store::new(&engine);
+//! let instance = Linker::new(&engine).instantiate(&mut store, &module)?;
+//! let External::Func(add) = instance.export(&store, "add")? else {
+//!     unreachable!();
+//! };
+//! let outcome = store.invoke(add, &[Value::I32(20), Value::I32(22)])?;
+//! assert_eq!(outcome, RunOutcome::Returned(vec![Value::I32(42)]));
+//! # Ok::<(), wtime_runtime::Error>(())
+//! ```
 use std::{
     collections::HashMap,
     sync::{
@@ -8,17 +36,16 @@ use std::{
     },
 };
 pub use wtime_types::*;
-use wtime_validate::{
-    ExternalKind, Immediate, ImportKind, Instruction, SegmentMode, ValidatedModule,
-};
+pub use wtime_validate::ExternalKind;
+use wtime_validate::{Immediate, ImportKind, Instruction, SegmentMode, ValidatedModule};
 #[cfg(feature = "performance-counters")]
 mod perf;
 #[cfg(feature = "performance-counters")]
 pub use perf::CounterSnapshot;
 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
-mod register_cache_diagnostics;
-#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
 mod register_activation_diagnostics;
+#[cfg(all(feature = "register-executor", feature = "execution-reference"))]
+mod register_cache_diagnostics;
 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
 pub use register_activation_diagnostics::RegisterActivationSnapshot;
 #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
@@ -28,9 +55,9 @@ pub use register_cache_diagnostics::{
 };
 mod continuation;
 mod exceptions;
-mod linear;
 mod gc;
 mod gc_exec;
+mod linear;
 mod numeric;
 mod shared_memory;
 mod simd;
@@ -67,24 +94,34 @@ fn trap(s: impl Into<String>) -> Error {
     };
     Error::trap(code, message)
 }
+/// Configuration controlling WebAssembly proposals and resource limits for an [`Engine`].
 #[derive(Clone, Debug, Default)]
 pub struct Config {
+    /// Enabled WebAssembly language proposals.
     pub features: FeatureSet,
+    /// Host resource, memory, work, and fuel budgets.
     pub limits: ResourceLimits,
 }
 /// Explicit execution request. Unimplemented tiers fail during configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExecutionPolicy {
+    /// Default portable interpreter over decoded instructions with adaptive straight-line lowering.
     #[default]
     Decoded,
+    /// Reference source-by-source interpreter (requires the `execution-reference` Cargo feature).
     Reference,
+    /// Experimental compact bytecode executor (requires the `compact-executor` Cargo feature).
     Compact,
+    /// Experimental register-allocated executor (requires the `register-executor` Cargo feature).
     Register,
+    /// Reserved placeholder for future experimental execution tiers.
     Experimental,
+    /// Reserved placeholder for future native compilation tiers.
     Native,
     /// The selected portable tier; currently decoded.
     Portable,
 }
+/// Shared compilation context owning feature policy, resource limits, and canonical type identities.
 #[derive(Clone)]
 pub struct Engine {
     id: u64,
@@ -100,9 +137,11 @@ impl std::fmt::Debug for Engine {
     }
 }
 impl Engine {
+    /// Creates a new engine using the default [`ExecutionPolicy::Decoded`] tier.
     pub fn new(config: Config) -> Result<Self> {
         Self::with_execution_policy(config, ExecutionPolicy::Decoded)
     }
+    /// Creates a new engine with an explicit [`ExecutionPolicy`].
     pub fn with_execution_policy(config: Config, policy: ExecutionPolicy) -> Result<Self> {
         let policy = match policy {
             ExecutionPolicy::Portable => ExecutionPolicy::Decoded,
@@ -137,6 +176,7 @@ impl Engine {
             canonical: Arc::new(std::sync::Mutex::new(canonical)),
         })
     }
+    /// Returns the resolved [`ExecutionPolicy`] active for this engine.
     pub fn execution_policy(&self) -> ExecutionPolicy {
         self.policy
     }
@@ -146,12 +186,16 @@ impl Engine {
     #[cfg(feature = "register-executor")]
     pub fn with_register_entry_threshold(config: Config, threshold: u64) -> Result<Self> {
         if threshold == 0 {
-            return Err(err(ErrorKind::Host, "register entry threshold must be positive"));
+            return Err(err(
+                ErrorKind::Host,
+                "register entry threshold must be positive",
+            ));
         }
         let mut engine = Self::with_execution_policy(config, ExecutionPolicy::Register)?;
         engine.register_entry_threshold = Some(threshold);
         Ok(engine)
     }
+    /// Decodes, validates, interns types for, and prepares a WebAssembly binary into an immutable [`Module`].
     pub fn compile(&self, bytes: &[u8]) -> Result<Module> {
         let validated =
             wtime_validate::validate(bytes, &self.config.features, &self.config.limits)?;
@@ -166,9 +210,13 @@ impl Engine {
         drop(registry);
         let control = lower_control(&validated)?;
         #[cfg(not(feature = "execution-reference"))]
-        let lowered = (0..validated.decoded().code.len()).map(|_| std::sync::OnceLock::new()).collect();
+        let lowered = (0..validated.decoded().code.len())
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
         #[cfg(not(feature = "execution-reference"))]
-        let heat = (0..validated.decoded().code.len()).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+        let heat = (0..validated.decoded().code.len())
+            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .collect();
         // Each body's declared locals as runs of one type, with the type's
         // zero, so that a call zeroes them without inspecting their types.
         let local_runs = validated
@@ -227,10 +275,14 @@ impl Engine {
             if self.policy == ExecutionPolicy::Register {
                 if let Some(threshold) = self.register_entry_threshold {
                     let cache = execution::register::Cache::with_threshold(&module, threshold);
-                    if let Some(data) = Arc::get_mut(&mut module.data) { data.register_cache = cache; }
+                    if let Some(data) = Arc::get_mut(&mut module.data) {
+                        data.register_cache = cache;
+                    }
                 } else {
                     let prepared = execution::register::PreparedModule::prepare(&module);
-                    if let Some(data) = Arc::get_mut(&mut module.data) { data.register = prepared; }
+                    if let Some(data) = Arc::get_mut(&mut module.data) {
+                        data.register = prepared;
+                    }
                 }
             }
             module
@@ -254,7 +306,10 @@ struct ControlEntry {
 }
 impl ControlEntry {
     const NONE: u32 = u32::MAX;
-    const EMPTY: Self = Self { end: Self::NONE, other: Self::NONE };
+    const EMPTY: Self = Self {
+        end: Self::NONE,
+        other: Self::NONE,
+    };
 }
 impl ControlMap {
     /// The end and the else/catch position of the block starting at `pc` of
@@ -262,11 +317,18 @@ impl ControlMap {
     #[inline]
     fn get(&self, body: usize, pc: usize) -> Option<(usize, Option<usize>)> {
         let entry = self.bodies.get(body)?.get(pc)?;
-        (entry.end != ControlEntry::NONE)
-            .then(|| (entry.end as usize, (entry.other != ControlEntry::NONE).then_some(entry.other as usize)))
+        (entry.end != ControlEntry::NONE).then(|| {
+            (
+                entry.end as usize,
+                (entry.other != ControlEntry::NONE).then_some(entry.other as usize),
+            )
+        })
     }
     fn bytes(&self) -> usize {
-        self.bodies.iter().map(|body| std::mem::size_of_val::<[ControlEntry]>(body)).sum()
+        self.bodies
+            .iter()
+            .map(|body| std::mem::size_of_val::<[ControlEntry]>(body))
+            .sum()
     }
     /// Test support: overwrite one entry, to corrupt metadata on purpose.
     #[cfg(test)]
@@ -275,7 +337,9 @@ impl ControlMap {
         self.bodies[body][pc] = match value {
             Some((end, other)) => ControlEntry {
                 end: u32::try_from(end).expect("test control position fits u32"),
-                other: other.map_or(ControlEntry::NONE, |other| u32::try_from(other).expect("test control position fits u32")),
+                other: other.map_or(ControlEntry::NONE, |other| {
+                    u32::try_from(other).expect("test control position fits u32")
+                }),
             },
             None => ControlEntry::EMPTY,
         };
@@ -319,40 +383,64 @@ struct Handle {
     index: usize,
     generation: u64,
 }
+/// Store-bound handle to a guest or host WebAssembly function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Func(Handle);
+/// Store-bound handle to a WebAssembly linear memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Memory(Handle);
+/// Store-bound handle to a WebAssembly table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Table(Handle);
+/// Store-bound handle to a WebAssembly global variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Global(Handle);
+/// Store-bound handle to an instantiated WebAssembly module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Instance(Handle);
+/// Store-bound, generation-checked handle to a host external reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExternRef(Handle);
+/// Runtime representation of a WebAssembly reference value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefValue {
+    /// Null reference carrying its static [`HeapType`].
     Null(HeapType),
+    /// Non-null function reference.
     Func(Func),
+    /// Non-null guest GC heap reference (struct, array, or continuation).
     Gc(GcRef),
+    /// Unboxed 31-bit integer reference (`i31ref`).
     I31(i32),
+    /// Non-null host external reference (`externref`).
     Extern(ExternRef),
+    /// Host `externref` internalized into `anyref` via `any.convert_extern`.
     InternalExtern(ExternRef),
+    /// `i31ref` externalized into `externref` via `extern.convert_any`.
     ExternI31(i32),
+    /// Guest GC reference externalized into `externref` via `extern.convert_any`.
     ExternGc(GcRef),
+    /// Non-null WebAssembly exception reference (`exnref`).
     Exn(ExceptionRef),
 }
+/// Runtime WebAssembly value exchanged across host boundaries and stored in globals, tables, and frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
+    /// 32-bit integer (`i32`).
     I32(i32),
+    /// 64-bit integer (`i64`).
     I64(i64),
+    /// Raw IEEE 754 bit pattern of a 32-bit float (`f32`).
     F32(u32),
+    /// Raw IEEE 754 bit pattern of a 64-bit float (`f64`).
     F64(u64),
+    /// 128-bit SIMD vector (`v128`).
     V128(V128),
+    /// Reference value.
     Ref(RefValue),
 }
 impl Value {
+    /// Returns the abstract [`ValType`] describing this runtime value.
     pub fn ty(self) -> ValType {
         match self {
             Self::I32(_) => ValType::I32,
@@ -384,22 +472,35 @@ impl Value {
         }
     }
 }
+/// Store-bound handle to an importable or exported WebAssembly entity.
 #[derive(Clone, Copy, Debug)]
 pub enum External {
+    /// Exception or stack-switching tag.
     Tag(Tag),
+    /// Function.
     Func(Func),
+    /// Linear memory.
     Memory(Memory),
+    /// Table.
     Table(Table),
+    /// Global variable.
     Global(Global),
 }
+/// Terminal outcome of invoking a WebAssembly or host function.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RunOutcome {
+    /// Execution suspended to an unhandled stack-switching tag.
     Suspended {
+        /// Tag that triggered suspension.
         tag: Tag,
+        /// Payload values passed to the suspension handler.
         payload: Vec<Value>,
+        /// One-shot continuation handle capturing the suspended frames.
         continuation: GcRef,
     },
+    /// Function completed normally with the returned values.
     Returned(Vec<Value>),
+    /// Function terminated with an uncaught WebAssembly exception object.
     Exception(ExceptionRef),
 }
 type HostCallback = Arc<dyn Fn(&mut Store, &[Value]) -> Result<RunOutcome> + Send + Sync>;
@@ -519,11 +620,13 @@ struct Inst {
 #[derive(Clone)]
 pub struct ValueRootToken(Arc<Value>);
 impl ValueRootToken {
+    /// Returns the rooted [`Value`] held alive by this token.
     pub fn value(&self) -> Value {
         *self.0
     }
 }
 
+/// Isolated WebAssembly execution state owning all instances, memories, tables, globals, GC heap objects, and host resources.
 pub struct Store {
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
     register_activation: register_activation_diagnostics::Diagnostics,
@@ -605,48 +708,85 @@ impl Store {
     pub fn reset_register_activation_snapshot(&mut self) -> Result<()> {
         self.register_activation.reset()
     }
+    /// Returns the count of source instructions executed by the Register executor.
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
-    pub fn register_dispatches(&self) -> u64 { self.register_dispatches }
+    pub fn register_dispatches(&self) -> u64 {
+        self.register_dispatches
+    }
+    /// Returns the count of Register-tier exits back to decoded execution.
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
-    pub fn register_exits(&self) -> u64 { self.register_exits }
+    pub fn register_exits(&self) -> u64 {
+        self.register_exits
+    }
+    /// Returns the count of call frames that fell back from Register execution to decoded execution.
     #[cfg(all(feature = "register-executor", feature = "execution-reference"))]
-    pub fn register_fallback_frames(&self) -> u64 { self.register_fallback_frames.get() }
+    pub fn register_fallback_frames(&self) -> u64 {
+        self.register_fallback_frames.get()
+    }
     /// Development-only proof of executed compact source events.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
-    pub fn compact_dispatches(&self) -> u64 { self.compact_dispatches }
+    pub fn compact_dispatches(&self) -> u64 {
+        self.compact_dispatches
+    }
     /// Development-only count of executed, verified arithmetic expansions.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
-    pub fn compact_fused_groups(&self) -> u64 { self.compact_fused_groups }
+    pub fn compact_fused_groups(&self) -> u64 {
+        self.compact_fused_groups
+    }
+    /// Returns the count of leaf calls executed inline by the Compact executor.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
-    pub fn compact_inline_leaf_calls(&self) -> u64 { self.compact_inline_leaf_calls }
+    pub fn compact_inline_leaf_calls(&self) -> u64 {
+        self.compact_inline_leaf_calls
+    }
+    /// Returns the count of leaf-call inline attempts declined by the Compact executor.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
-    pub fn compact_inline_declines(&self) -> u64 { self.compact_inline_declines }
+    pub fn compact_inline_declines(&self) -> u64 {
+        self.compact_inline_declines
+    }
     /// Diagnostic prefix events, GC/EH/continuation/other exits, and last source exit.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
     pub fn compact_prefix_counts(&self) -> (u64, [u64; 4], Option<(usize, u16)>) {
-        (self.compact_prefix_dispatches, self.compact_exits, self.compact_last_exit)
+        (
+            self.compact_prefix_dispatches,
+            self.compact_exits,
+            self.compact_last_exit,
+        )
     }
+    /// Returns the count of direct calls dispatched through Compact pre-bound targets.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
-    pub fn compact_bound_calls(&self) -> u64 { self.compact_bound_calls }
+    pub fn compact_bound_calls(&self) -> u64 {
+        self.compact_bound_calls
+    }
+    /// Returns the count of linear memory accesses executed by the Compact executor.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
-    pub fn compact_memory_accesses(&self) -> u64 { self.compact_memory_accesses }
+    pub fn compact_memory_accesses(&self) -> u64 {
+        self.compact_memory_accesses
+    }
+    /// Returns `(hits, misses, evictions)` for the Compact indirect-call inline cache.
     #[cfg(all(feature = "compact-executor", feature = "execution-reference"))]
     pub fn compact_indirect_cache_counts(&self) -> (u64, u64, u64) {
-        (self.compact_indirect_hits, self.compact_indirect_misses, self.compact_indirect_evictions)
+        (
+            self.compact_indirect_hits,
+            self.compact_indirect_misses,
+            self.compact_indirect_evictions,
+        )
     }
     /// Development-only proof that reference source instructions executed.
     #[cfg(feature = "execution-reference")]
     pub fn reference_dispatches(&self) -> u64 {
         self.reference_dispatches
     }
+    /// Returns a snapshot of Store-local diagnostic performance counters.
     #[cfg(feature = "performance-counters")]
     pub fn performance_counters(&self) -> CounterSnapshot {
         self.perf.snapshot()
     }
+    /// Resets all Store-local diagnostic performance counters to zero.
     #[cfg(feature = "performance-counters")]
     pub fn reset_performance_counters(&self) {
         self.perf.reset();
     }
+    /// Creates a new empty [`Store`] bound to `e`.
     pub fn new(e: &Engine) -> Self {
         {
             let id = IDS.fetch_add(1, Ordering::Relaxed);
@@ -740,6 +880,7 @@ impl Store {
             Ok(h.index)
         }
     }
+    /// Reads the current value of a global owned by this store.
     pub fn get_global(&self, g: Global) -> Result<Value> {
         Ok(self.globals[self.check(g.0, &self.globals)?].value)
     }
@@ -752,6 +893,7 @@ impl Store {
             _ => Err(err(ErrorKind::Host, "foreign or stale handle")),
         }
     }
+    /// Writes a new value to a mutable global owned by this store.
     pub fn set_global(&mut self, g: Global, v: Value) -> Result<()> {
         self.validate_value(v)?;
         let i = self.check(g.0, &self.globals)?;
@@ -768,6 +910,7 @@ impl Store {
         self.globals[i].value = v;
         Ok(())
     }
+    /// Copies `len` bytes starting at `offset` from linear memory `m`.
     pub fn read_memory(&self, m: Memory, offset: u64, len: usize) -> Result<Vec<u8>> {
         #[cfg(feature = "performance-counters")]
         self.perf.record(perf::Event::ReadVec, 1);
@@ -776,6 +919,7 @@ impl Store {
     }
 }
 impl Instance {
+    /// Looks up a single exported entity by `name` in `s`.
     pub fn export(self, s: &Store, name: &str) -> Result<External> {
         let i = s.check(self.0, &s.instances)?;
         s.instances[i]
@@ -784,6 +928,7 @@ impl Instance {
             .copied()
             .ok_or_else(|| err(ErrorKind::Link, "unknown export"))
     }
+    /// Returns all exported `(name, handle)` pairs of this instance in `s`.
     pub fn exports(self, s: &Store) -> Result<Vec<(String, External)>> {
         let i = s.check(self.0, &s.instances)?;
         Ok(s.instances[i]
@@ -793,6 +938,7 @@ impl Instance {
             .collect())
     }
 }
+/// Import registry used to resolve named module imports and instantiate [`Module`]s.
 pub struct Linker {
     engine: u64,
     defs: HashMap<(String, String), External>,
@@ -874,6 +1020,7 @@ pub use execution::cursor::{
 };
 
 impl Store {
+    /// Creates a host function with an abstract [`FuncType`] signature that does not require [`Store`] access.
     pub fn create_host_func(
         &mut self,
         ty: FuncType,
@@ -894,6 +1041,7 @@ impl Store {
         });
         Ok(f)
     }
+    /// Allocates a host global with the given [`GlobalType`] and initial `value`.
     pub fn create_global(&mut self, ty: GlobalType, value: Value) -> Result<Global> {
         if matches!(
             ty.value,
@@ -924,6 +1072,7 @@ impl Store {
         });
         Ok(g)
     }
+    /// Allocates a host linear memory with the given [`MemoryType`], subject to engine feature and resource limits.
     pub fn create_memory(&mut self, ty: MemoryType) -> Result<Memory> {
         self.reserve_objects(1)?;
         let features = self.engine.config.features;
@@ -960,6 +1109,7 @@ impl Store {
         self.mems.push(Mem::new(ty, n)?);
         Ok(m)
     }
+    /// Reads the element at `index` from `table`.
     pub fn read_table(&self, table: Table, index: u64) -> Result<Value> {
         let i = self.check(table.0, &self.tabs)?;
         self.tabs[i]
@@ -968,6 +1118,7 @@ impl Store {
             .copied()
             .ok_or_else(|| trap("table out of bounds"))
     }
+    /// Writes `value` into `table` at `index`, validating handle ownership and element subtyping.
     pub fn write_table(&mut self, table: Table, index: u64, value: Value) -> Result<()> {
         let i = self.check(table.0, &self.tabs)?;
         self.validate_value(value)?;
@@ -986,6 +1137,7 @@ impl Store {
         *slot = value;
         Ok(())
     }
+    /// Allocates a host table initialized to null references of `ty.element`.
     pub fn create_table(&mut self, ty: TableType) -> Result<Table> {
         if matches!(
             ty.element.heap,
@@ -1032,6 +1184,7 @@ impl Store {
         });
         Ok(t)
     }
+    /// Writes `bytes` into linear memory `m` starting at `offset`.
     pub fn write_memory(&mut self, m: Memory, offset: u64, bytes: &[u8]) -> Result<()> {
         let i = self.check(m.0, &self.mems)?;
         let r = range(offset, bytes.len(), self.mems[i].len()?)?;
@@ -1096,7 +1249,10 @@ mod tests {
         );
     }
     fn run_with(bytes: &[u8], args: &[Value], limits: ResourceLimits) -> Result<RunOutcome> {
-        let e = Engine::new(Config { limits, ..Config::default() })?;
+        let e = Engine::new(Config {
+            limits,
+            ..Config::default()
+        })?;
         let m = e.compile(bytes)?;
         let mut s = Store::new(&e);
         let i = Linker::new(&e).instantiate(&mut s, &m)?;
@@ -1121,35 +1277,40 @@ mod tests {
     fn fused_expressions_match(lowered: bool) {
         let fused = include_bytes!("../tests/fixtures/fused-expressions.wasm").as_slice();
         let plain = include_bytes!("../tests/fixtures/fused-expressions-nops.wasm").as_slice();
-        let run = |bytes: &[u8], name: &str, args: &[Value], fuel: Option<u64>, height: Option<usize>| {
-            let mut config = Config::default();
-            config.limits.fuel = fuel;
-            if let Some(height) = height {
-                config.limits.max_stack_height = height;
-            }
-            let e = Engine::new(config).unwrap();
-            let m = match e.compile(bytes) {
-                Ok(m) => m,
-                Err(error) => return (Err(error.message), vec![]),
-            };
-            // Lowered: every body of the fused module, as once warm; otherwise
-            // its bodies stay cold and run from their source instructions.
-            if lowered && bytes == fused {
-                for body in 0..m.data.lowered.len() {
-                    m.data.lowered[body].get_or_init(|| execution::lowered::lower(&m, body));
+        let run =
+            |bytes: &[u8], name: &str, args: &[Value], fuel: Option<u64>, height: Option<usize>| {
+                let mut config = Config::default();
+                config.limits.fuel = fuel;
+                if let Some(height) = height {
+                    config.limits.max_stack_height = height;
                 }
-            }
-            let mut s = Store::new(&e);
-            let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
-            let External::Func(f) = i.export(&s, name).unwrap() else { panic!() };
-            let result = match s.invoke(f, args) {
-                Ok(RunOutcome::Returned(values)) => Ok(values),
-                Ok(other) => panic!("{other:?}"),
-                Err(error) => Err(format!("{:?}: {}", error.kind, error.message)),
+                let e = Engine::new(config).unwrap();
+                let m = match e.compile(bytes) {
+                    Ok(m) => m,
+                    Err(error) => return (Err(error.message), vec![]),
+                };
+                // Lowered: every body of the fused module, as once warm; otherwise
+                // its bodies stay cold and run from their source instructions.
+                if lowered && bytes == fused {
+                    for body in 0..m.data.lowered.len() {
+                        m.data.lowered[body].get_or_init(|| execution::lowered::lower(&m, body));
+                    }
+                }
+                let mut s = Store::new(&e);
+                let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
+                let External::Func(f) = i.export(&s, name).unwrap() else {
+                    panic!()
+                };
+                let result = match s.invoke(f, args) {
+                    Ok(RunOutcome::Returned(values)) => Ok(values),
+                    Ok(other) => panic!("{other:?}"),
+                    Err(error) => Err(format!("{:?}: {}", error.kind, error.message)),
+                };
+                let External::Memory(memory) = i.export(&s, "mem").unwrap() else {
+                    panic!()
+                };
+                (result, s.read_memory(memory, 0, 128).unwrap())
             };
-            let External::Memory(memory) = i.export(&s, "mem").unwrap() else { panic!() };
-            (result, s.read_memory(memory, 0, 128).unwrap())
-        };
         let args = [Value::I32(5), Value::I64(100)];
         // 44 instructions and the function's end.
         let complete = run(fused, "f", &args, Some(45), None);
@@ -1157,18 +1318,42 @@ mod tests {
         assert_eq!(complete, run(plain, "f", &args, Some(89), None));
         for fuel in 0..45 {
             let partial = run(fused, "f", &args, Some(fuel), None);
-            assert!(partial.0.as_ref().unwrap_err().contains("fuel"), "fuel {fuel}: {:?}", partial.0);
-            assert_eq!(partial, run(plain, "f", &args, Some(2 * fuel), None), "fuel {fuel}");
+            assert!(
+                partial.0.as_ref().unwrap_err().contains("fuel"),
+                "fuel {fuel}: {:?}",
+                partial.0
+            );
+            assert_eq!(
+                partial,
+                run(plain, "f", &args, Some(2 * fuel), None),
+                "fuel {fuel}"
+            );
             if fuel > 0 {
-                assert_eq!(partial, run(plain, "f", &args, Some(2 * fuel - 1), None), "fuel {fuel}");
+                assert_eq!(
+                    partial,
+                    run(plain, "f", &args, Some(2 * fuel - 1), None),
+                    "fuel {fuel}"
+                );
             }
         }
         for height in 0..16 {
             let limited = run(fused, "deep", &args, None, Some(height));
-            assert_eq!(limited, run(plain, "deep", &args, None, Some(height)), "height {height}");
+            assert_eq!(
+                limited,
+                run(plain, "deep", &args, None, Some(height)),
+                "height {height}"
+            );
         }
-        assert!(run(fused, "deep", &args, None, Some(6)).0.unwrap_err().contains("stack"));
-        assert_eq!(run(fused, "deep", &args, None, Some(16)).0, Ok(vec![Value::I64(787)]));
+        assert!(
+            run(fused, "deep", &args, None, Some(6))
+                .0
+                .unwrap_err()
+                .contains("stack")
+        );
+        assert_eq!(
+            run(fused, "deep", &args, None, Some(16)).0,
+            Ok(vec![Value::I64(787)])
+        );
         // h's pairs: 31 instructions and the end, each effect stored.
         let complete = run(fused, "h", &[Value::I32(5)], Some(32), None);
         assert_eq!(complete.0, Ok(vec![]));
@@ -1176,8 +1361,16 @@ mod tests {
         assert_eq!(complete, run(plain, "h", &[Value::I32(5)], Some(63), None));
         for fuel in 0..32 {
             let partial = run(fused, "h", &[Value::I32(5)], Some(fuel), None);
-            assert!(partial.0.as_ref().unwrap_err().contains("fuel"), "h fuel {fuel}: {:?}", partial.0);
-            assert_eq!(partial, run(plain, "h", &[Value::I32(5)], Some(2 * fuel), None), "h fuel {fuel}");
+            assert!(
+                partial.0.as_ref().unwrap_err().contains("fuel"),
+                "h fuel {fuel}: {:?}",
+                partial.0
+            );
+            assert_eq!(
+                partial,
+                run(plain, "h", &[Value::I32(5)], Some(2 * fuel), None),
+                "h fuel {fuel}"
+            );
         }
         // g's conditionals: 61 instructions run, the last a br_if out of the
         // function; skipped ends of false ifs are charged as they run.
@@ -1186,17 +1379,39 @@ mod tests {
         assert_eq!(complete.0, run(plain, "g", &args, None, None).0);
         for fuel in 0..61 {
             let partial = run(fused, "g", &args, Some(fuel), None).0;
-            assert!(partial.as_ref().unwrap_err().contains("fuel"), "g fuel {fuel}: {partial:?}");
+            assert!(
+                partial.as_ref().unwrap_err().contains("fuel"),
+                "g fuel {fuel}: {partial:?}"
+            );
         }
         for height in 0..16 {
             let limited = run(fused, "deepg", &args, None, Some(height));
-            assert_eq!(limited, run(plain, "deepg", &args, None, Some(height)), "g height {height}");
+            assert_eq!(
+                limited,
+                run(plain, "deepg", &args, None, Some(height)),
+                "g height {height}"
+            );
         }
-        assert_eq!(run(fused, "deepg", &args, None, Some(16)).0, Ok(vec![Value::I64(30)]));
-        for (name, address) in [("load", 65532), ("load", 65536), ("store", 65534), ("store", -1)] {
+        assert_eq!(
+            run(fused, "deepg", &args, None, Some(16)).0,
+            Ok(vec![Value::I64(30)])
+        );
+        for (name, address) in [
+            ("load", 65532),
+            ("load", 65536),
+            ("store", 65534),
+            ("store", -1),
+        ] {
             let fused = run(fused, name, &[Value::I32(address)], None, None);
-            assert_eq!(fused, run(plain, name, &[Value::I32(address)], None, None), "{name} {address}");
-            assert!(fused.0.is_err() || name == "load" && address == 65532, "{name} {address}");
+            assert_eq!(
+                fused,
+                run(plain, name, &[Value::I32(address)], None, None),
+                "{name} {address}"
+            );
+            assert!(
+                fused.0.is_err() || name == "load" && address == 65532,
+                "{name} {address}"
+            );
         }
     }
     /// A body runs from its source instructions until it has run `WARM`
@@ -1206,23 +1421,34 @@ mod tests {
     #[test]
     fn cold_bodies_are_lowered_once_warm() {
         let code = [
-            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0,
-            0x0b, 0x0b, 0x20, 0, 0x0b,
+            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c,
+            0, 0x0b, 0x0b, 0x20, 0, 0x0b,
         ];
         let bytes = module(&code, &[0x7f], &[0x7f]);
         let e = Engine::new(Config::default()).unwrap();
         let m = e.compile(&bytes).unwrap();
         let mut s = Store::new(&e);
         let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
-        let External::Func(f) = i.export(&s, "f").unwrap() else { panic!() };
+        let External::Func(f) = i.export(&s, "f").unwrap() else {
+            panic!()
+        };
         // 8 * 5 + 7 instructions: still cold.
-        assert_eq!(s.invoke(f, &[Value::I32(5)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert_eq!(
+            s.invoke(f, &[Value::I32(5)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(0)])
+        );
         assert!(m.data.lowered[0].get().is_none());
         assert!(m.data.heat[0].load(std::sync::atomic::Ordering::Relaxed) > 0);
         // A long loop warms it within the call.
-        assert_eq!(s.invoke(f, &[Value::I32(100)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert_eq!(
+            s.invoke(f, &[Value::I32(100)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(0)])
+        );
         assert!(m.data.lowered[0].get().is_some());
-        assert_eq!(s.invoke(f, &[Value::I32(3)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert_eq!(
+            s.invoke(f, &[Value::I32(3)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(0)])
+        );
     }
     /// A 32-bit memory without a declared maximum cannot grow past 2^32
     /// bytes, even when the page limit would allow it.
@@ -1243,8 +1469,13 @@ mod tests {
         let m = e.compile(&bytes).unwrap();
         let mut s = Store::new(&e);
         let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
-        let External::Func(f) = i.export(&s, "f").unwrap() else { panic!() };
-        assert_eq!(s.invoke(f, &[]).unwrap(), RunOutcome::Returned(vec![Value::I32(-1)]));
+        let External::Func(f) = i.export(&s, "f").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            s.invoke(f, &[]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(-1)])
+        );
     }
     /// A cold body longer than the static Slow ops runs its later
     /// instructions in the general loop, which still warms and lowers it.
@@ -1254,21 +1485,32 @@ mod tests {
         let n = execution::lowered::SLOW.len() + 100;
         let mut code = vec![0x01; n];
         code.extend([
-            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0,
-            0x0b, 0x0b, 0x20, 0, 0x0b,
+            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c,
+            0, 0x0b, 0x0b, 0x20, 0, 0x0b,
         ]);
         let bytes = module(&code, &[0x7f], &[0x7f]);
         let e = Engine::new(Config::default()).unwrap();
         let m = e.compile(&bytes).unwrap();
         let mut s = Store::new(&e);
         let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
-        let External::Func(f) = i.export(&s, "f").unwrap() else { panic!() };
-        assert_eq!(s.invoke(f, &[Value::I32(3)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        let External::Func(f) = i.export(&s, "f").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            s.invoke(f, &[Value::I32(3)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(0)])
+        );
         assert!(m.data.lowered[0].get().is_none());
         // Enough iterations past the static ops to reach four times its length.
         let iterations = (4 * code.len() / 8 + 1) as i32;
-        assert_eq!(s.invoke(f, &[Value::I32(iterations)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
-        assert_eq!(s.invoke(f, &[Value::I32(5)]).unwrap(), RunOutcome::Returned(vec![Value::I32(0)]));
+        assert_eq!(
+            s.invoke(f, &[Value::I32(iterations)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(0)])
+        );
+        assert_eq!(
+            s.invoke(f, &[Value::I32(5)]).unwrap(),
+            RunOutcome::Returned(vec![Value::I32(0)])
+        );
         assert!(m.data.lowered[0].get().is_some());
         // Every instruction is counted once, cold or lowered, before or past
         // the static ops: n nops, 8 per iteration and 7 more.
@@ -1277,18 +1519,29 @@ mod tests {
             let m = e.compile(&bytes).unwrap();
             let mut fresh = Store::new(&e);
             let i = Linker::new(&e).instantiate(&mut fresh, &m).unwrap();
-            let External::Func(f) = i.export(&fresh, "f").unwrap() else { panic!() };
+            let External::Func(f) = i.export(&fresh, "f").unwrap() else {
+                panic!()
+            };
             fresh.invoke(f, &[Value::I32(5)]).unwrap();
-            assert_eq!(fresh.performance_counters().source_dispatches, (n + 8 * 5 + 7) as u64);
+            assert_eq!(
+                fresh.performance_counters().source_dispatches,
+                (n + 8 * 5 + 7) as u64
+            );
             fresh.invoke(f, &[Value::I32(iterations)]).unwrap();
             fresh.invoke(f, &[Value::I32(5)]).unwrap();
             assert!(m.data.lowered[0].get().is_some());
             let total = (n + 8 * 5 + 7) as u64 * 2 + (n + 8 * iterations as usize + 7) as u64;
             assert_eq!(fresh.performance_counters().source_dispatches, total);
         }
-        let limits = ResourceLimits { fuel: Some(n as u64 + 8 * 5 + 7), ..ResourceLimits::default() };
+        let limits = ResourceLimits {
+            fuel: Some(n as u64 + 8 * 5 + 7),
+            ..ResourceLimits::default()
+        };
         assert!(run_with(&bytes, &[Value::I32(5)], limits).is_ok());
-        let limits = ResourceLimits { fuel: Some(n as u64 + 8 * 5 + 6), ..ResourceLimits::default() };
+        let limits = ResourceLimits {
+            fuel: Some(n as u64 + 8 * 5 + 6),
+            ..ResourceLimits::default()
+        };
         assert!(run_with(&bytes, &[Value::I32(5)], limits).is_err());
     }
     /// Counting loop: block, loop, then per iteration local.get, i32.eqz,
@@ -1299,18 +1552,25 @@ mod tests {
     #[test]
     fn straight_line_runs_charge_fuel_per_instruction() {
         let code = [
-            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c, 0,
-            0x0b, 0x0b, 0x20, 0, 0x0b,
+            0x02, 0x40, 0x03, 0x40, 0x20, 0, 0x45, 0x0d, 1, 0x20, 0, 0x41, 1, 0x6b, 0x21, 0, 0x0c,
+            0, 0x0b, 0x0b, 0x20, 0, 0x0b,
         ];
         let bytes = module(&code, &[0x7f], &[0x7f]);
         // From n = 8 the body warms up and is lowered within the call.
         for n in [0u64, 1, 5, 8, 9, 20, 200] {
             let needed = 8 * n + 7;
             for fuel in needed.saturating_sub(3)..=needed + 2 {
-                let limits = ResourceLimits { fuel: Some(fuel), ..ResourceLimits::default() };
+                let limits = ResourceLimits {
+                    fuel: Some(fuel),
+                    ..ResourceLimits::default()
+                };
                 let outcome = run_with(&bytes, &[Value::I32(n as i32)], limits);
                 if fuel >= needed {
-                    assert_eq!(outcome.unwrap(), RunOutcome::Returned(vec![Value::I32(0)]), "n={n} fuel={fuel}");
+                    assert_eq!(
+                        outcome.unwrap(),
+                        RunOutcome::Returned(vec![Value::I32(0)]),
+                        "n={n} fuel={fuel}"
+                    );
                 } else {
                     let error = outcome.unwrap_err();
                     assert_eq!(error.kind, ErrorKind::ResourceLimit, "n={n} fuel={fuel}");
@@ -1391,6 +1651,7 @@ mod tests {
 }
 
 impl Store {
+    /// Registers an explicit host root keeping any reference inside `value` alive across GC cycles.
     pub fn root_value(&self, value: Value) -> Result<ValueRootToken> {
         self.validate_value(value)?;
         let mut roots = self
@@ -1408,12 +1669,15 @@ impl Store {
         roots.push(Arc::downgrade(&root));
         Ok(ValueRootToken(root))
     }
+    /// Returns the total bytes currently charged to live guest GC objects in this store.
     pub fn gc_payload_bytes(&self) -> usize {
         self.gc.bytes()
     }
+    /// Registers an explicit host [`RootToken`] keeping `r` alive across GC cycles.
     pub fn root(&self, r: GcRef) -> Result<RootToken> {
         self.gc.root(r)
     }
+    /// Runs a tracing garbage-collection cycle reclaiming unreachable GC objects, exceptions, continuations, and owned external references.
     pub fn collect(&mut self) -> Result<CollectionStats> {
         let mut values = Vec::new();
         let cap = self.engine.config.limits.max_gc_mark_work;
@@ -1491,21 +1755,26 @@ impl Store {
     }
 }
 
+/// Host-callback context granting mutable access to the active [`Store`] during a host function call.
 pub struct Caller<'a> {
     store: &'a mut Store,
 }
 impl Caller<'_> {
+    /// Returns mutable access to the active [`Store`].
     pub fn store(&mut self) -> &mut Store {
         self.store
     }
+    /// Reentrantly invokes another WebAssembly or host function inside the active store.
     pub fn invoke(&mut self, f: Func, args: &[Value]) -> Result<RunOutcome> {
         self.store.invoke(f, args)
     }
+    /// Triggers a garbage-collection cycle while keeping the active call's arguments rooted.
     pub fn collect(&mut self) -> Result<CollectionStats> {
         self.store.collect()
     }
 }
 impl Store {
+    /// Creates a host function that receives a [`Caller`] handle and returns normal result values.
     pub fn create_host_func_with_caller(
         &mut self,
         ty: FuncType,
@@ -1552,6 +1821,7 @@ impl Store {
         self.extern_objects[r.0.index].1 = Some(Arc::new(resource));
         Ok(value)
     }
+    /// Creates or reuses a published `externref` [`Value`] associated with `identity`.
     pub fn create_extern_ref(&mut self, identity: u32) -> Result<Value> {
         let handle = if let Some(r) = self.externs.get(&identity) {
             *r
@@ -1602,6 +1872,7 @@ impl Store {
 }
 
 impl Store {
+    /// Creates a host function that receives a [`Caller`] handle and may return any [`RunOutcome`] (return, exception, or suspension).
     pub fn create_host_func_with_outcome(
         &mut self,
         ty: FuncType,
@@ -1628,8 +1899,11 @@ fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
     let code = &module.decoded().code;
     // Per body, in parallel as decoding and validation are; the first error
     // in body order is reported.
-    let threads = module.limits().body_threads(code.iter().map(|b| b.span.end - b.span.start).sum());
-    let maps = wtime_types::parallel::map_ordered(code, threads, || (), |_, body| body_control(body));
+    let threads = module
+        .limits()
+        .body_threads(code.iter().map(|b| b.span.end - b.span.start).sum());
+    let maps =
+        wtime_types::parallel::map_ordered(code, threads, || (), |_, body| body_control(body));
     let mut bodies = Vec::with_capacity(maps.len());
     for map in maps {
         bodies.push(map?)
@@ -1641,7 +1915,10 @@ fn lower_control(module: &ValidatedModule) -> Result<ControlMap> {
 fn body_control(body: &wtime_validate::FunctionBody) -> Result<Box<[ControlEntry]>> {
     // Positions must fit below the u32 sentinel.
     if body.instructions.len() >= ControlEntry::NONE as usize {
-        return Err(err(ErrorKind::ResourceLimit, "function body too large for control map"));
+        return Err(err(
+            ErrorKind::ResourceLimit,
+            "function body too large for control map",
+        ));
     }
     let mut map = vec![ControlEntry::EMPTY; body.instructions.len()];
     let mut open: Vec<(usize, Option<usize>)> = vec![];
@@ -1698,6 +1975,7 @@ pub struct ShareableMemory {
     backend: shared_memory::SharedMemory,
 }
 impl Store {
+    /// Extracts a thread-safe [`ShareableMemory`] handle from a shared linear memory in this store.
     pub fn share_memory(&self, memory: Memory) -> Result<ShareableMemory> {
         let i = self.check(memory.0, &self.mems)?;
         let m = &self.mems[i];
@@ -1714,6 +1992,7 @@ impl Store {
             backend,
         })
     }
+    /// Imports a [`ShareableMemory`] created under the same [`Engine`] into this store, returning a store-local [`Memory`] handle.
     pub fn import_shared_memory(&mut self, memory: &ShareableMemory) -> Result<Memory> {
         self.reserve_objects(1)?;
         if self.engine.id != memory.engine {
@@ -1836,20 +2115,30 @@ mod host_tests {
         );
     }
 }
+/// Runtime type descriptor for an [`External`] entity handle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternalType {
+    /// Function signature.
     Func(FuncType),
+    /// Linear memory descriptor (with `limits.min` reflecting current live size).
     Memory(MemoryType),
+    /// Table descriptor (with `limits.min` reflecting current live length).
     Table(TableType),
+    /// Global variable descriptor.
     Global(GlobalType),
+    /// Tag signature.
     Tag(FuncType),
 }
 impl Store {
+    /// Inspects the current [`ExternalType`] of an [`External`] handle owned by this store.
     pub fn external_type(&self, item: External) -> Result<ExternalType> {
         Ok(match item {
-            External::Func(f) => {
-                ExternalType::Func(self.funcs[self.check(f.0, &self.funcs)?].ty.as_ref().clone())
-            }
+            External::Func(f) => ExternalType::Func(
+                self.funcs[self.check(f.0, &self.funcs)?]
+                    .ty
+                    .as_ref()
+                    .clone(),
+            ),
             External::Memory(m) => {
                 let m = &self.mems[self.check(m.0, &self.mems)?];
                 let mut ty = m.ty;
@@ -1908,8 +2197,24 @@ impl Module {
         self.data.register_cache.as_ref()?.snapshot(self)
     }
 
+    /// Inspects optional `metadata.code.branch_hint` custom sections in this module.
     pub fn branch_hints(&self) -> wtime_validate::BranchHints {
         wtime_validate::inspect_branch_hints(self.data.inner.decoded())
+    }
+
+    /// The module's declared exports in declaration order: export name, kind,
+    /// and index within its index space.
+    ///
+    /// This inspects validated module metadata without instantiating the module
+    /// or executing any `start` function.
+    pub fn exports(&self) -> Vec<(&str, ExternalKind, u32)> {
+        self.data
+            .inner
+            .decoded()
+            .exports
+            .iter()
+            .map(|export| (export.name.as_str(), export.kind, export.index))
+            .collect()
     }
 
     /// The module's function imports in declaration order: import module,
@@ -1935,6 +2240,7 @@ impl Module {
     }
 }
 impl Instance {
+    /// Returns the function handle at `index` in this instance's function index space.
     pub fn function(self, store: &Store, index: u32) -> Result<Func> {
         let i = store.check(self.0, &store.instances)?;
         store.instances[i]
@@ -2045,17 +2351,21 @@ fn table_range(off: u64, n: usize, len: usize) -> Result<std::ops::Range<usize>>
 #[derive(Clone, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 impl CancellationToken {
+    /// Requests cancellation of any ongoing or future execution on the associated [`Store`].
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release)
     }
+    /// Clears a prior cancellation request so the associated [`Store`] may run again.
     pub fn reset(&self) {
         self.0.store(false, Ordering::Release)
     }
+    /// Returns `true` if cancellation is currently requested.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 }
 impl Store {
+    /// Returns a cloneable [`CancellationToken`] that can interrupt execution in this store from another thread.
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
     }
@@ -2115,6 +2425,7 @@ impl Module {
         self.data.inner.function_bounds_bytes()
             + self.data.plans.as_ref().map_or(0, |p| p.retained_bytes)
     }
+    /// Returns the original WebAssembly binary length in bytes.
     pub fn source_bytes(&self) -> usize {
         self.data.inner.decoded().bytes.len()
     }
@@ -2618,14 +2929,57 @@ mod lowering_and_bulk_acceptance {
 #[cfg(test)]
 mod performance_module_ownership {
     use super::*;
+
+    fn synthetic_large_wasm(func_count: usize) -> Vec<u8> {
+        fn leb(out: &mut Vec<u8>, mut n: usize) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+            out.push(id);
+            leb(out, payload.len());
+            out.extend_from_slice(payload);
+        }
+
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        // Type 0: (i32, i32) -> (i32)
+        section(&mut wasm, 1, &[1, 0x60, 2, 0x7f, 0x7f, 1, 0x7f]);
+        // Function section: `func_count` functions of type 0
+        let mut funcs = Vec::with_capacity(func_count + 4);
+        leb(&mut funcs, func_count);
+        funcs.resize(funcs.len() + func_count, 0);
+        section(&mut wasm, 3, &funcs);
+        // Export function 0 as "run"
+        section(&mut wasm, 7, &[1, 3, b'r', b'u', b'n', 0, 0]);
+        // Code section: each body performs 16 mul/xor operations
+        let mut body = vec![0]; // 0 local groups
+        body.extend_from_slice(&[0x20, 0]); // local.get 0
+        for _ in 0..16 {
+            body.extend_from_slice(&[0x20, 1, 0x6c, 0x20, 0, 0x73]); // local.get 1; i32.mul; local.get 0; i32.xor
+        }
+        body.push(0x0b); // end
+        let mut code = Vec::new();
+        leb(&mut code, func_count);
+        for _ in 0..func_count {
+            leb(&mut code, body.len());
+            code.extend_from_slice(&body);
+        }
+        section(&mut wasm, 10, &code);
+        wasm
+    }
+
     #[test]
     fn p017_large_clone_shares_all_payload_storage() {
         let e = Engine::new(Config::default()).unwrap();
-        let m = e
-            .compile(include_bytes!(
-                "../../../tools/wtime-bench/fixtures/prepare_large.wasm"
-            ))
-            .unwrap();
+        let wasm = synthetic_large_wasm(1_000);
+        let m = e.compile(&wasm).unwrap();
         let clone = m.clone();
         assert!(Arc::ptr_eq(&m.data, &clone.data));
         assert!(std::ptr::eq(

@@ -2,33 +2,60 @@
 //! Byte counters count explicitly copied payloads, not allocator-wide traffic.
 use crate::Immediate;
 use std::cell::Cell;
+/// Point-in-time snapshot of Store-local diagnostic performance counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CounterSnapshot {
+    /// Register-tier bytecode steps executed.
     pub register_steps: u64,
+    /// Frames that fell back from Register execution to decoded execution.
     pub register_fallback_frames: u64,
+    /// Source-level WebAssembly instructions dispatched.
     pub source_dispatches: u64,
+    /// Compact-tier bytecode steps executed.
     pub compact_steps: u64,
+    /// Direct calls executed through Compact pre-bound call targets.
     pub compact_bound_calls: u64,
+    /// Shared linear memory accesses handled by the Compact executor.
     pub compact_shared_memory_accesses: u64,
+    /// Linear memory accesses handled by the Compact executor.
     pub compact_memory_accesses: u64,
+    /// Indirect-call inline cache hits in the Compact executor.
     pub compact_indirect_hits: u64,
+    /// Indirect-call inline cache misses in the Compact executor.
     pub compact_indirect_misses: u64,
+    /// Indirect-call inline cache evictions in the Compact executor.
     pub compact_indirect_evictions: u64,
+    /// Frames that fell back from Compact execution to decoded execution.
     pub compact_fallback_frames: u64,
+    /// Result value moves performed on Compact frame boundaries.
     pub compact_result_moves: u64,
+    /// Deep-copy events of compiled module payloads.
     pub module_deep_copy_events: u64,
+    /// Bytes copied during module deep-copy events.
     pub module_deep_copy_bytes: u64,
+    /// Instruction clone events during execution.
     pub instruction_clone_events: u64,
+    /// Immediate payload bytes copied by instruction clones.
     pub instruction_clone_bytes: u64,
+    /// Allocating linear memory read operations (`Vec<u8>`).
     pub read_vec_operations: u64,
+    /// Fixed-buffer non-allocating linear memory read operations.
     pub read_fixed_operations: u64,
+    /// Guest call frames entered.
     pub frame_entries: u64,
+    /// Heap allocations performed for call argument vectors.
     pub argument_allocations: u64,
+    /// Heap allocations performed when snapshotting active GC roots.
     pub root_snapshot_allocations: u64,
+    /// Runtime subtype checks performed.
     pub subtype_probes: u64,
+    /// Continuation table entries scanned when accounting continuation bytes.
     pub continuation_scan_entries: u64,
+    /// Heap allocations performed for branch result vectors.
     pub branch_result_allocations: u64,
+    /// Chunk snapshots taken during overlapping `table.copy` operations.
     pub table_copy_snapshot_chunks: u64,
+    /// Slice chunks processed during bulk memory operations.
     pub bulk_slice_chunks: u64,
 }
 impl CounterSnapshot {
@@ -179,10 +206,13 @@ pub(super) fn immediate_copy_bytes(i: &Immediate) -> u64 {
                     .saturating_mul(std::mem::size_of::<wtime_validate::Catch>()),
             )
             .saturating_add(immediate_copy_bytes(&table.block) as usize),
-        Immediate::Resume(resume) => std::mem::size_of::<wtime_validate::ResumeImmediate>().saturating_add(resume
-            .handlers
-            .len()
-            .saturating_mul(std::mem::size_of::<(u32, Option<u32>)>())),
+        Immediate::Resume(resume) => std::mem::size_of::<wtime_validate::ResumeImmediate>()
+            .saturating_add(
+                resume
+                    .handlers
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(u32, Option<u32>)>()),
+            ),
         _ => 0,
     };
     u64::try_from(bytes).unwrap_or(u64::MAX)

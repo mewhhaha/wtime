@@ -145,6 +145,52 @@ class ReleaseAuditTests(unittest.TestCase):
             audit._check_conformance(report, 'core3', errors, root, 'abc', 'def')
             self.assertIn('evidence core3: current conformance executable is missing', errors)
 
+    def test_t169_case_10_native_evidence_follows_supported_targets(self):
+        x64_only = audit.required_evidence_keys({
+            'toolchain': {'supported_targets': ['x86_64-unknown-linux-gnu']}
+        })
+        self.assertIn('native_x86_64', x64_only)
+        self.assertNotIn('native_aarch64', x64_only)
+        both = audit.required_evidence_keys({
+            'toolchain': {'supported_targets': ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu']}
+        })
+        self.assertIn('native_x86_64', both)
+        self.assertIn('native_aarch64', both)
+        omitted = audit.required_evidence_keys({})
+        self.assertIn('native_x86_64', omitted)
+        self.assertIn('native_aarch64', omitted)
+
+    def test_t169_case_11_portable_mode_validates_digests_without_local_elfs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            alloc_report = self.allocation_report(root)
+            conf_report = self.conformance_report(root)
+            (root / 'target/debug/wtime-allocation-check').unlink()
+            (root / 'target/release/wtime-conformance').unlink()
+
+            errors = []
+            audit._check_allocation_failure(
+                alloc_report, errors, root, verify_local_binaries=False
+            )
+            self.assertEqual(errors, [])
+
+            conf_errors = []
+            audit._check_conformance(
+                conf_report, 'core3', conf_errors, root, 'abc', 'def',
+                verify_local_binaries=False,
+            )
+            self.assertEqual(conf_errors, [])
+
+            bad_alloc = {**alloc_report, 'worker_sha256': 'not-a-sha'}
+            bad_errors = []
+            audit._check_allocation_failure(
+                bad_alloc, bad_errors, root, verify_local_binaries=False
+            )
+            self.assertIn(
+                'evidence allocation_failure: worker binary fingerprint is missing or malformed',
+                bad_errors,
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

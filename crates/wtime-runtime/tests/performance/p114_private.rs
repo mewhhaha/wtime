@@ -4,7 +4,7 @@ fn admitted(bytes: &[u8]) -> (Module, CallTypes) {
     let calls = CallTypes::prepare(&module, MAX_WORK, MAX_BYTES).unwrap();
     (module, calls)
 }
-const GC_PREFIX: &[u8] = include_bytes!("../../../../tools/wtime-bench/fixtures/integration_p113/integration_gc_prefix.wasm");
+const GC_PREFIX: &[u8] = include_bytes!("../fixtures/performance/bench_wasm/integration_p113/integration_gc_prefix.wasm");
 
 #[test]
 fn p114_exact_prefix_exit_and_entry_decline_are_distinct() {
@@ -14,7 +14,7 @@ fn p114_exact_prefix_exit_and_entry_decline_are_distinct() {
     assert_eq!(prefix.exit.pc, 67);
     assert_eq!(prefix.exit.opcode, 0xfb00);
     assert!(prefix.verify(&module, &calls, MAX_WORK, MAX_BYTES));
-    let (module, calls) = admitted(include_bytes!("../../../../tools/wtime-bench/fixtures/integration_p113/integration_ref_entry_control.wasm"));
+    let (module, calls) = admitted(include_bytes!("../fixtures/performance/bench_wasm/integration_p113/integration_ref_entry_control.wasm"));
     assert!(matches!(Prefix::prepare(&module, 0, &calls, MAX_WORK, MAX_BYTES), Err(Declined::Unsupported)));
 }
 

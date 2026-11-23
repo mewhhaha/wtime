@@ -4,8 +4,10 @@
 mod p037_tests {
     use super::*;
     fn module(bytes: &[u8]) -> Module {
-        let mut config = Config::default();
-        config.features = FeatureSet::all_phase3_core();
+        let config = Config {
+            features: FeatureSet::all_phase3_core(),
+            ..Default::default()
+        };
         Engine::new(config).unwrap().compile(bytes).unwrap()
     }
     // Original small binary generator; normal admission precedes all map checks.

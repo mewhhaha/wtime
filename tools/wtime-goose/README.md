@@ -7,7 +7,7 @@ imports (`goose.*`, `env.gs_os_*`, `env.bench_*`, the WASI subset), program argu
 stdin, output and exit codes, and the same timing JSON boundaries. That makes it possible
 to run identical modules on both engines and compare them.
 
-It is an isolated crate (own `[workspace]`), like `tools/wtime-bench`. `float.rs` and
+It is an isolated crate (own `[workspace]`) outside the core workspace. `float.rs` and
 `pytext.rs` are copied from goose-to-wasm.
 
 ## Results (2026-11-20)
@@ -255,7 +255,7 @@ Verification, run on both the baseline and this change:
 - **Test expectation change:** p027 now expects unshared `memory.copy`/`memory.fill` to take the
   direct slice path (`bulk_slice_chunks`). Table copies keep their previous expectation.
 
-These changes were made directly. They did not go through the `tools/verify.py` task-contract
+These changes were made directly against the Goose benchmark suite rather than through automated microbenchmark gating;
 flow that the repository uses for its performance plan. The `ReadVec` performance counter still
 marks the decoded load path, because existing tests use it to recognize that path, even though
 loads no longer allocate.

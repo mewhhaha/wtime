@@ -83,7 +83,7 @@ fn p022_prefix_effects_and_fuel_match_all_policies() {
     }
 }
 const HOST: &[u8] =
-    include_bytes!("../../../../tools/wtime-bench/fixtures/integration/host_reentry.wasm");
+    include_bytes!("../fixtures/performance/bench_wasm/integration/host_reentry.wasm");
 #[test]
 fn p022_host_reentry_collection_preserves_outer_root_and_state() {
     for policy in policies() {
@@ -136,12 +136,12 @@ fn p022_cross_module_continuation_preserves_context_roots_and_one_shot() {
         let e = engine(policy, None);
         let pm = e
             .compile(include_bytes!(
-                "../../../../tools/wtime-bench/fixtures/integration/cross_module_provider.wasm"
+                "../fixtures/performance/bench_wasm/integration/cross_module_provider.wasm"
             ))
             .unwrap();
         let cm = e
             .compile(include_bytes!(
-                "../../../../tools/wtime-bench/fixtures/integration/cross_module_consumer.wasm"
+                "../fixtures/performance/bench_wasm/integration/cross_module_consumer.wasm"
             ))
             .unwrap();
         let mut s = Store::new(&e);
@@ -231,7 +231,7 @@ fn p022_table_mutations_and_foreign_handles_are_checked() {
         let e = engine(policy, None);
         let m = e
             .compile(include_bytes!(
-                "../../../../tools/wtime-bench/fixtures/integration/table_targets.wasm"
+                "../fixtures/performance/bench_wasm/integration/table_targets.wasm"
             ))
             .unwrap();
         let mut s = Store::new(&e);

@@ -46,15 +46,15 @@ impl PreparationCounts {
         self.add(1);
         #[cfg(feature = "compact-executor")]
         {
-        match module.compact_preparation_counts() {
-            Some((accepted, declined, attempted, retained)) => {
-                self.add_published(accepted, declined, attempted, retained);
+            match module.compact_preparation_counts() {
+                Some((accepted, declined, attempted, retained)) => {
+                    self.add_published(accepted, declined, attempted, retained);
+                }
+                None => {
+                    self.add_field(0, 1);
+                    self.add_field(1, 1);
+                }
             }
-            None => {
-                self.add_field(0, 1);
-                self.add_field(1, 1);
-            }
-        }
         }
         #[cfg(not(feature = "compact-executor"))]
         {
@@ -105,6 +105,7 @@ impl Adapter {
     pub fn new(features: FeatureSet) -> Result<Self> {
         Self::with_policy(features, ExecutionPolicy::Decoded)
     }
+    #[cfg(test)]
     pub fn with_policy(features: FeatureSet, policy: ExecutionPolicy) -> Result<Self> {
         Self::with_policy_and_threshold(features, policy, None)
     }
@@ -141,7 +142,10 @@ impl Adapter {
             Some(value) => Engine::with_register_entry_threshold(config, value)?,
             #[cfg(not(feature = "register-executor"))]
             Some(_) => {
-                return Err(Error::new(ErrorKind::Host, "Register executor is unavailable"));
+                return Err(Error::new(
+                    ErrorKind::Host,
+                    "Register executor is unavailable",
+                ));
             }
             None => Engine::with_execution_policy(config, policy)?,
         };

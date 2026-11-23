@@ -1,5 +1,6 @@
 //! Engine-bound canonical identities. Whole recursion groups are equality keys.
 use super::*;
+/// Engine-bound canonical identity for a structurally interned WebAssembly type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CanonicalTypeId {
     engine: u64,

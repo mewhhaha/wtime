@@ -271,9 +271,14 @@ fn p042_typed_call_ref_null_fuel_prefix_foreign_and_argument_validation_remain_c
             let mut store = Store::new(&limited);
             let instance = load(&limited, &mut store, REFS);
             for name in ["call_null", "tail_null"] {
-                assert_eq!(view(call(&mut store, instance, name, &[Value::I32(7)])),
-                    if fuel < 3 { Err((ErrorKind::ResourceLimit, "fuel exhausted".into())) }
-                    else { Err((ErrorKind::Trap, "null call_ref".into())) });
+                assert_eq!(
+                    view(call(&mut store, instance, name, &[Value::I32(7)])),
+                    if fuel < 3 {
+                        Err((ErrorKind::ResourceLimit, "fuel exhausted".into()))
+                    } else {
+                        Err((ErrorKind::Trap, "null call_ref".into()))
+                    }
+                );
             }
             assert_eq!(store.compact_indirect_cache_counts().0, 0);
         }
@@ -295,7 +300,9 @@ fn p042_cached_host_targets_preserve_gc_roots_reentry_results_and_suspension() {
         let observed = seen.clone();
         let growth_engine = engine.clone();
         let growth_module = engine
-            .compile(include_bytes!("../fixtures/performance/p041/direct-numeric.wasm"))
+            .compile(include_bytes!(
+                "../fixtures/performance/p041/direct-numeric.wasm"
+            ))
             .unwrap();
         let host = store
             .create_host_func_with_caller(

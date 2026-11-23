@@ -3,15 +3,15 @@ use wtime_runtime::*;
 
 const CASES: [(&[u8], &[i32]); 3] = [
     (
-        include_bytes!("../../../../tools/wtime-bench/fixtures/representative/parser_hash.wasm"),
+        include_bytes!("../fixtures/performance/bench_wasm/representative/parser_hash.wasm"),
         &[16, 1024, 257],
     ),
     (
-        include_bytes!("../../../../tools/wtime-bench/fixtures/representative/image_filter.wasm"),
+        include_bytes!("../fixtures/performance/bench_wasm/representative/image_filter.wasm"),
         &[16, 256, 73],
     ),
     (
-        include_bytes!("../../../../tools/wtime-bench/fixtures/representative/graph_bfs.wasm"),
+        include_bytes!("../fixtures/performance/bench_wasm/representative/graph_bfs.wasm"),
         &[12, 64, 23],
     ),
 ];

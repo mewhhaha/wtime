@@ -233,7 +233,8 @@ impl Context<'_> {
                 };
                 let out = Ref(RefType::new(i.opcode % 2 == 1, h));
                 self.valtype(out)?;
-                let is_cont = value_subtype(out, Ref(RefType::new(true, HeapType::Cont)), &self.types);
+                let is_cont =
+                    value_subtype(out, Ref(RefType::new(true, HeapType::Cont)), &self.types);
                 if self.types.exhausted() {
                     return Err(Error::new(
                         ErrorKind::ResourceLimit,
@@ -274,7 +275,8 @@ impl Context<'_> {
                 let b = Ref(RefType::new(flags & 2 != 0, to));
                 self.valtype(a)?;
                 self.valtype(b)?;
-                let is_cont = value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types);
+                let is_cont =
+                    value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types);
                 if self.types.exhausted() {
                     return Err(Error::new(
                         ErrorKind::ResourceLimit,
@@ -462,7 +464,8 @@ impl Context<'_> {
                 let b = Ref(RefType::new(flags & 2 != 0, to));
                 self.valtype(a)?;
                 self.valtype(b)?;
-                let is_cont = value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types);
+                let is_cont =
+                    value_subtype(b, Ref(RefType::new(true, HeapType::Cont)), &self.types);
                 if self.types.exhausted() {
                     return Err(Error::new(
                         ErrorKind::ResourceLimit,

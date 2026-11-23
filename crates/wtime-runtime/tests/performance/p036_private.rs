@@ -1,6 +1,8 @@
 fn p036_module(bytes: &[u8]) -> (Engine, Module) {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     config.limits.max_locals = 70_001;
     let engine = Engine::new(config).unwrap();
     let module = engine.compile(bytes).unwrap();
@@ -268,15 +270,17 @@ fn p036_actual_capacity_boundary_and_resume_payload_remain_transactional() {
 
 #[test]
 fn p036_validated_factory_preserves_cast_branch_metadata() {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     let engine = Engine::new(config).unwrap();
     let bytes = include_bytes!("../fixtures/performance/compact/cast_branch.wasm");
     let module = engine.compile(bytes).unwrap();
     let function = CompactFunction::from_module(&module, 0, 100_000, 1024 * 1024).unwrap();
     assert!(function.verify(&module));
 
-    let source = module.data.inner.decoded().code.get(0).unwrap().instructions.iter()
+    let source = module.data.inner.decoded().code.first().unwrap().instructions.iter()
         .find(|instruction| matches!(instruction.opcode, 0xfb18 | 0xfb19))
         .expect("fixture must contain br_on_cast");
     assert!(matches!(source.immediate, Immediate::Cast { .. }));

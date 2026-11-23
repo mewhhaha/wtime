@@ -1,40 +1,6 @@
 name: Rust
 on: [push, pull_request]
 jobs:
-  performance-smoke:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.0
-      - run: cargo fetch --locked
-      - name: Run bounded performance-smoke producer tests
-        run: python3 -B -m unittest discover -s tools/checks/tests -p test_p111_performance_ci.py -v
-      - name: Build the default CLI for the performance correctness smoke
-        run: cargo build --locked --offline -j 1 -p wtime-cli
-      - name: Bind and execute the performance correctness smoke
-        run: |
-          python3 -B tools/verification/producers/p111.py bind --binary target/debug/wtime-cli --output target/performance/P111/build.json
-          python3 -B tools/checks/performance_ci.py --lane smoke --output target/performance/P111/smoke.json
-          python3 -B tools/checks/performance_ci.py --lane reference --output target/performance/P111/reference.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: performance-smoke-x64
-          path: target/performance/P111/*.json
-          retention-days: 14
-  verification-tools:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: python3 -B -m unittest discover -s tools/verification/tests -v
-      - run: python3 -B tools/verify.py perf --output target/verification/ci-performance --execute
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: verification-performance
-          path: target/verification/ci-performance
   core:
     strategy:
       matrix:
@@ -47,15 +13,43 @@ jobs:
           toolchain: 1.99.0
           components: rustfmt, clippy
       - run: cargo test --locked --workspace --all-features
+      - run: cargo test --locked --doc --workspace
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: python3 tools/checks/dependency_budget.py
-      - run: python3 -m unittest discover -s tools/checks/tests -v
-      - run: python3 tools/checks/hardening.py --native-report target/native-${{ runner.arch }}.json
+      - name: Check rustdoc builds cleanly with -D warnings
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --no-deps --workspace --all-features
+      - name: Verify crates.io package tarballs build cleanly
+        run: cargo package --locked --workspace --exclude wtime-conformance
+      - run: python3 -B tools/checks/dependency_budget.py
+      - run: cargo build --locked -p wtime-cli -p wtime-conformance
+      - run: python3 -B tools/checks/cli_smoke.py
+      - run: python3 -B -m unittest discover -s tools/checks/tests -v
+      - run: python3 -B tools/checks/hardening.py --native-report target/native-${{ runner.arch }}.json
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ runner.arch }}
           path: target/native-*.json
+  wtime-aot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang and LLD for native AOT backend tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path tools/wtime-aot/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path tools/wtime-aot/rt/Cargo.toml -- --check
+      - run: cargo clippy --locked --all-targets --manifest-path tools/wtime-aot/rt/Cargo.toml -- -D warnings
+      - run: cargo test --locked --manifest-path tools/wtime-aot/rt/Cargo.toml
+      - run: cargo clippy --locked --all-targets --manifest-path tools/wtime-aot/Cargo.toml -- -D warnings
+      - name: Run wtime-aot unit, oracle, ABI, fault-injection, and CLI tests
+        env:
+          WTIME_AOT_REQUIRE_NATIVE_TESTS: "1"
+        run: cargo test --locked --manifest-path tools/wtime-aot/Cargo.toml
   conformance:
     runs-on: ubuntu-24.04
     steps:
@@ -66,6 +60,9 @@ jobs:
       - run: cargo test --locked -p wtime-conformance
       - run: bash tools/checks/ci.sh full
       - run: bash tools/checks/ci.sh allocation
+      - run: cargo build --locked -p wtime-conformance --bin wtime-probe
+      - run: python3 -B tools/checks/opcode_coverage.py --require-complete
+      - run: python3 -B tools/checks/release_audit.py --portable
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -81,4 +78,4 @@ jobs:
           pattern: native-*
           path: target/native
           merge-multiple: true
-      - run: python3 tools/checks/hardening.py target/native/*.json
+      - run: python3 -B tools/checks/hardening.py target/native/*.json

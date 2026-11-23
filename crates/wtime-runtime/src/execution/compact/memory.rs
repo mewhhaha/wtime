@@ -182,7 +182,9 @@ pub(super) struct MemoryAccesses {
 }
 impl MemoryAccesses {
     #[cfg(test)]
-    pub(super) fn p045_corrupt(&mut self) { self.entries.clear(); }
+    pub(super) fn p045_corrupt(&mut self) {
+        self.entries.clear();
+    }
     pub(super) fn prepare(
         function: &CompactFunction,
         module: &Module,
@@ -416,8 +418,18 @@ impl MemoryBindings {
             || self.entries.len() != instance.mems.len()
             || self.work > MAX_WORK
             || self.bytes > MAX_BYTES
-            || size::<Binding>(self.entries.capacity(), std::mem::size_of::<Self>()) != Some(self.bytes)
-            || instance.module.data.inner.decoded().imports.len().checked_add(instance.module.data.inner.decoded().memories.len()).and_then(|n| n.checked_add(self.entries.len())) != Some(self.work)
+            || size::<Binding>(self.entries.capacity(), std::mem::size_of::<Self>())
+                != Some(self.bytes)
+            || instance
+                .module
+                .data
+                .inner
+                .decoded()
+                .imports
+                .len()
+                .checked_add(instance.module.data.inner.decoded().memories.len())
+                .and_then(|n| n.checked_add(self.entries.len()))
+                != Some(self.work)
             || access.width as usize != access.kind.width()
         {
             return Err(trap("compact memory binding identity"));
@@ -489,7 +501,9 @@ impl Store {
                 #[cfg(feature = "performance-counters")]
                 self.perf.record(perf::Event::CompactSharedMemoryAccess, 1);
             } else {
-                mem.bytes.write(whole.start, &bits.to_le_bytes()[..width]).map_err(crate::allocation_failed)?;
+                mem.bytes
+                    .write(whole.start, &bits.to_le_bytes()[..width])
+                    .map_err(crate::allocation_failed)?;
             }
         } else {
             let mut bytes = [0u8; 8];

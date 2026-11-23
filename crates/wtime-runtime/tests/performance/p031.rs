@@ -8,13 +8,15 @@ const IMPORT_CONTROL: &[u8] = include_bytes!("../fixtures/performance/frames/imp
 const RECURSION: &[u8] = include_bytes!("../fixtures/performance/frames/recursion.wasm");
 const CAUGHT_GC: &[u8] = include_bytes!("../fixtures/exception_root/caught_ref_to_function.wasm");
 const PROVIDER: &[u8] =
-    include_bytes!("../../../../tools/wtime-bench/fixtures/integration/cross_module_provider.wasm");
+    include_bytes!("../fixtures/performance/bench_wasm/integration/cross_module_provider.wasm");
 const CONSUMER: &[u8] =
-    include_bytes!("../../../../tools/wtime-bench/fixtures/integration/cross_module_consumer.wasm");
+    include_bytes!("../fixtures/performance/bench_wasm/integration/cross_module_consumer.wasm");
 
 fn engine(depth: usize, policy: ExecutionPolicy) -> Engine {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     config.limits.max_call_depth = depth;
     Engine::with_execution_policy(config, policy).unwrap()
 }

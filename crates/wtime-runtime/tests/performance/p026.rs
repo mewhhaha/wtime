@@ -46,7 +46,10 @@ fn vector(s: &mut Store, i: Instance, name: &str, args: &[Value], want: [u8; 16]
             counters.read_fixed_operations, 0,
             "restored allocating path: {name}"
         );
-        assert_eq!(counters.read_vec_operations, 1, "restored allocating path: {name}");
+        assert_eq!(
+            counters.read_vec_operations, 1,
+            "restored allocating path: {name}"
+        );
     }
 }
 fn memory(s: &Store, i: Instance) -> Memory {
@@ -248,7 +251,7 @@ fn p026_lanes_and_oob_prefix() {
 fn p026_shared_vectors() {
     let e = engine();
     let bytes = fixture("shared_vector_loads");
-    let m = e.compile(&bytes).unwrap();
+    let m = e.compile(bytes).unwrap();
     let mut s = Store::new(&e);
     let mem = s
         .create_memory(MemoryType {

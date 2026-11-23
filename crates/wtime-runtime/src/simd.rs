@@ -1632,6 +1632,38 @@ fn relaxed(op: u16, s: &mut Vec<Value>) -> Result<()> {
     Ok(())
 }
 
+// Borrowed compact vector adapter, sharing canonical portable lane semantics.
+// This helper is absent from default builds and creates no immediate Vec.
+#[cfg(feature = "compact-executor")]
+pub(super) fn execute_prepared_vector(
+    opcode: u16,
+    bytes: &[u8; 16],
+    s: &mut Vec<Value>,
+) -> Result<()> {
+    let out = match opcode {
+        0xfd0c => *bytes,
+        0xfd0d => {
+            let b = vector(s)?;
+            let a = vector(s)?;
+            if bytes.iter().any(|index| *index >= 32) {
+                return Err(trap("invalid shuffle lane"));
+            }
+            let mut out = [0; 16];
+            for (destination, index) in out.iter_mut().zip(bytes) {
+                *destination = if *index < 16 {
+                    a[*index as usize]
+                } else {
+                    b[*index as usize - 16]
+                };
+            }
+            out
+        }
+        _ => return Err(trap("unverified prepared vector opcode")),
+    };
+    s.push(Value::V128(V128(out)));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1682,30 +1714,13 @@ mod tests {
     #[test]
     fn t093_shuffle_validates_lanes() {
         let mut s = vec![v([0; 16]), v([1; 16])];
-        assert!(execute(0xfd0d, &Immediate::Bytes(vec![32; 16].into_boxed_slice()), &mut s).is_err());
+        assert!(
+            execute(
+                0xfd0d,
+                &Immediate::Bytes(vec![32; 16].into_boxed_slice()),
+                &mut s
+            )
+            .is_err()
+        );
     }
-}
-
-// Borrowed compact vector adapter, sharing canonical portable lane semantics.
-// This helper is absent from default builds and creates no immediate Vec.
-#[cfg(feature = "compact-executor")]
-pub(super) fn execute_prepared_vector(opcode: u16, bytes: &[u8; 16], s: &mut Vec<Value>) -> Result<()> {
-    let out = match opcode {
-        0xfd0c => *bytes,
-        0xfd0d => {
-            let b = vector(s)?;
-            let a = vector(s)?;
-            if bytes.iter().any(|index| *index >= 32) {
-                return Err(trap("invalid shuffle lane"));
-            }
-            let mut out = [0; 16];
-            for (destination, index) in out.iter_mut().zip(bytes) {
-                *destination = if *index < 16 { a[*index as usize] } else { b[*index as usize - 16] };
-            }
-            out
-        }
-        _ => return Err(trap("unverified prepared vector opcode")),
-    };
-    s.push(Value::V128(V128(out)));
-    Ok(())
 }

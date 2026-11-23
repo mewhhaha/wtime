@@ -7,53 +7,89 @@ use crate::continuation::Prompt;
 const FRAME_LIMIT: usize = 64;
 const VALUE_LIMIT: usize = 64;
 const MEMORY_LIMIT: usize = 8;
+/// Guest instruction position captured at a diagnostic handoff boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionCursor {
+    /// Store-internal instance index owning the executing function.
     pub instance: usize,
+    /// Index of the defined function body within the instance's module.
     pub function_body: usize,
+    /// Source instruction index in the decoded function body.
     pub source_pc: usize,
+    /// Prepared-tier instruction index aligned with `source_pc`.
     pub prepared_pc: usize,
 }
+/// Normalized, store-independent representation of a runtime [`Value`] for diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagnosticValue {
+    /// 32-bit integer value.
     I32(i32),
+    /// 64-bit integer value.
     I64(i64),
+    /// Raw IEEE 754 bit pattern of an `f32` value.
     F32(u32),
+    /// Raw IEEE 754 bit pattern of an `f64` value.
     F64(u64),
+    /// Little-endian 16-byte representation of a `v128` value.
     V128([u8; 16]),
+    /// Normalized reference value avoiding raw store handles.
     Reference {
+        /// Reference category label (`"null"`, `"func"`, `"struct"`, `"array"`, `"continuation"`, `"i31"`, `"exception"`, or `"extern"`).
         category: &'static str,
+        /// Snapshot-local deduplicated identity index for non-null references, or `None` for null.
         identity: Option<usize>,
     },
 }
+/// Diagnostic snapshot of a single active guest call frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticFrame {
+    /// Instruction position within the frame.
     pub cursor: ExecutionCursor,
+    /// Operand-stack base index belonging to this frame.
     pub base: usize,
+    /// Total number of locals in the frame (before any diagnostic truncation).
     pub local_count: usize,
+    /// Normalized prefix of frame local values.
     pub locals: Vec<DiagnosticValue>,
     /// (start, end, height, params, results, loop, catch count).
     pub labels: Vec<(usize, usize, usize, usize, usize, bool, usize)>,
+    /// Total number of open control labels in the frame.
     pub label_count: usize,
     /// Context identity for diagnostics only, never an admission/cache key.
     pub module_fingerprint: u64,
 }
+/// Bounded diagnostic snapshot of execution state captured at a materialization boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticSnapshot {
+    /// Execution cursor of the innermost active frame.
     pub cursor: ExecutionCursor,
+    /// Normalized prefix of active guest call frames.
     pub frames: Vec<DiagnosticFrame>,
+    /// Total number of active guest call frames.
     pub frame_count: usize,
+    /// Normalized prefix of the operand stack.
     pub operands: Vec<DiagnosticValue>,
+    /// Total number of values on the operand stack.
     pub operand_count: usize,
+    /// Prefix of active continuation prompt `(frame_depth, operand_depth)` pairs.
     pub prompt_depths: Vec<(usize, usize)>,
+    /// Total number of active continuation prompts.
     pub prompt_count: usize,
+    /// Remaining instruction fuel at the boundary, if fuel metering is active.
     pub remaining_fuel: Option<u64>,
+    /// Whether accounting for the pending instruction at `cursor` has already been charged.
     pub pending_boundary_charged: bool,
+    /// Leading byte prefixes of the store's linear memories.
     pub memory_prefixes: Vec<Vec<u8>>,
+    /// Total byte lengths of the sampled linear memories.
     pub memory_lengths: Vec<usize>,
+    /// Normalized prefix of the store's global variable values.
     pub globals: Vec<DiagnosticValue>,
+    /// Normalized leading element prefixes of the store's tables.
     pub table_prefixes: Vec<Vec<DiagnosticValue>>,
+    /// Number of active host-call root groups currently pushed on the store.
     pub active_root_groups: usize,
+    /// Number of values currently retained in the store's published-root list.
     pub published_value_count: usize,
     /// Explicit caps: 64 frames/values/labels/prompts/globals, 8 memory/table
     /// prefixes, 64 bytes/elements per prefix. Truncated views are not full digests.
@@ -317,15 +353,20 @@ impl Store {
             return Err(err(ErrorKind::Host, "source cursor out of bounds"));
         }
         if skip_visits > 100_000 {
-            return Err(err(ErrorKind::ResourceLimit, "diagnostic source visit bound exceeded"));
+            return Err(err(
+                ErrorKind::ResourceLimit,
+                "diagnostic source visit bound exceeded",
+            ));
         }
         self.materialization_request = Some((fun.instance, fun.body, source_pc, skip_visits));
         self.execution_snapshot = None;
         Ok(())
     }
+    /// Returns the most recently captured diagnostic execution snapshot, if any.
     pub fn execution_snapshot(&self) -> Option<&DiagnosticSnapshot> {
         self.execution_snapshot.as_ref()
     }
+    /// Returns the total number of completed materialization roundtrips performed on this store.
     pub fn materialization_roundtrips(&self) -> u64 {
         self.materialization_roundtrips
     }

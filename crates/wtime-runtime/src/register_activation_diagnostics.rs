@@ -4,14 +4,22 @@ use crate::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
+/// Snapshot of live and peak Register-tier working-vector capacity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RegisterActivationSnapshot {
+    /// Current working-vector capacity in bytes across active Register frames.
     pub current_bytes: usize,
+    /// Peak working-vector capacity in bytes observed since creation or reset.
     pub peak_bytes: usize,
+    /// Number of currently active Register frames.
     pub current_frames: usize,
+    /// Peak concurrent Register frame count observed since creation or reset.
     pub peak_frames: usize,
+    /// Number of currently open decoded invocation observation scopes.
     pub active_scopes: usize,
+    /// Total number of capacity samples recorded.
     pub capacity_samples: u64,
+    /// Whether any counter or byte accumulation overflowed during observation.
     pub overflowed: bool,
 }
 
@@ -69,7 +77,7 @@ impl Diagnostics {
         let counted = self
             .0
             .active_scopes
-            .fetch_update(Relaxed, Relaxed, |n| n.checked_add(1))
+            .try_update(Relaxed, Relaxed, |n| n.checked_add(1))
             .is_ok();
         if !counted {
             self.0.overflowed.store(true, Relaxed);
@@ -112,7 +120,7 @@ impl Scope {
             .state
             .0
             .capacity_samples
-            .fetch_update(Relaxed, Relaxed, |n| n.checked_add(1))
+            .try_update(Relaxed, Relaxed, |n| n.checked_add(1))
             .is_err()
         {
             self.state.0.overflowed.store(true, Relaxed);

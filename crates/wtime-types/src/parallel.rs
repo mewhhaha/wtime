@@ -33,7 +33,10 @@ where
             if start >= items.len() {
                 break;
             }
-            for (k, item) in items[start..(start + batch).min(items.len())].iter().enumerate() {
+            for (k, item) in items[start..(start + batch).min(items.len())]
+                .iter()
+                .enumerate()
+            {
                 done.push((start + k, f(&mut state, item)));
             }
         }
@@ -58,7 +61,10 @@ where
             slots[index] = Some(result);
         }
     }
-    slots.into_iter().map(|slot| slot.expect("every item is mapped once")).collect()
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("every item is mapped once"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -69,10 +75,15 @@ mod tests {
     fn keeps_order_and_state_per_thread() {
         let items: Vec<u32> = (0..10_000).collect();
         for threads in [1, 2, 3, 8] {
-            let out = map_ordered(&items, threads, || 0u32, |seen, x| {
-                *seen += 1;
-                x * 2
-            });
+            let out = map_ordered(
+                &items,
+                threads,
+                || 0u32,
+                |seen, x| {
+                    *seen += 1;
+                    x * 2
+                },
+            );
             assert_eq!(out, items.iter().map(|x| x * 2).collect::<Vec<_>>());
         }
         assert!(map_ordered(&[] as &[u32], 4, || (), |_, x| *x).is_empty());

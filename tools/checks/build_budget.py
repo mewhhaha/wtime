@@ -71,6 +71,17 @@ def hash_inputs(inputs: dict[str, str]) -> str:
     return digest.hexdigest()
 
 
+def core_source_hash(root: Path | None = None) -> str:
+    """Match hardening.py and release_audit.py core source digest."""
+    base = root or ROOT
+    paths = sorted([base / "Cargo.lock", base / "Cargo.toml",
+                    *base.glob("crates/**/*.rs"), *base.glob("crates/**/Cargo.toml")])
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path.relative_to(base)).encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
 def source_hash() -> str:
     return hash_inputs(source_inputs())
 
@@ -211,6 +222,7 @@ def measure(output: Path, feature_spec: str | None = None) -> dict:
         validate_feature_spec(feature_spec, default_metadata)
     before_inputs = source_inputs(default_metadata)
     before_hash = hash_inputs(before_inputs)
+    before_core_hash = core_source_hash(ROOT)
     default_dependencies_ok, dependency_errors = _default_dependency_result(default_metadata)
     mode = "optional-feature" if feature_spec else "default"
 
@@ -250,6 +262,7 @@ def measure(output: Path, feature_spec: str | None = None) -> dict:
             "budgets": dict(LIMITS),
             "source_inputs": before_inputs,
             "source_sha256": before_hash,
+            "core_source_sha256": before_core_hash,
             "resolved_graph": _resolved_graph(package_feature_metadata),
             "default_dependency_closure_pass": default_dependencies_ok,
             "default_dependency_violations": dependency_errors,
@@ -273,10 +286,15 @@ def measure(output: Path, feature_spec: str | None = None) -> dict:
         isolated_after = _staged_inputs(build_root, before_inputs)
 
     after_inputs = source_inputs(default_metadata)
+    after_core_hash = core_source_hash(ROOT)
     record["isolated_source_inputs_after"] = isolated_after
-    record["source_stable"] = before_inputs == after_inputs == isolated_after
+    record["source_stable"] = (
+        before_inputs == after_inputs == isolated_after
+        and before_core_hash == after_core_hash
+    )
     record["source_inputs_after"] = after_inputs
     record["source_sha256_after"] = hash_inputs(after_inputs)
+    record["core_source_sha256_after"] = after_core_hash
     record["budget_pass"] = check_budget(record)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -285,7 +303,7 @@ def measure(output: Path, feature_spec: str | None = None) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/architecture/build-baseline.json")
+    parser.add_argument("--output", type=Path, default=ROOT / "docs/verification/build-final.json")
     parser.add_argument("--features", metavar="PACKAGE/FEATURE")
     args = parser.parse_args(argv)
     try:

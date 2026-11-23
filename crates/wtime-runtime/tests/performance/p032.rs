@@ -4,18 +4,18 @@ use std::sync::{Arc, Mutex};
 use wtime_runtime::*;
 
 const GUEST_FRAME: &[u8] = include_bytes!("../fixtures/performance/frames/guest_frame.wasm");
-const TAIL_RECURSIVE: &[u8] =
-    include_bytes!("../fixtures/performance/calls/tail-recursive.wasm");
+const TAIL_RECURSIVE: &[u8] = include_bytes!("../fixtures/performance/calls/tail-recursive.wasm");
 const RECURSIVE_MULTIVALUE: &[u8] =
     include_bytes!("../fixtures/performance/calls/direct-recursive-multivalue.wasm");
-const IMPORTED_DIRECT: &[u8] =
-    include_bytes!("../fixtures/performance/calls/imported-direct.wasm");
+const IMPORTED_DIRECT: &[u8] = include_bytes!("../fixtures/performance/calls/imported-direct.wasm");
 const REFERENCE_CONTROL: &[u8] =
     include_bytes!("../fixtures/performance/frames/reference_control.wasm");
 
 fn engine(depth: usize, policy: ExecutionPolicy) -> Engine {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     config.limits.max_call_depth = depth;
     Engine::with_execution_policy(config, policy).unwrap()
 }
@@ -147,8 +147,14 @@ fn p032_public_reference_arguments_keep_nominal_and_store_checks() {
     let value_u = u_values[0];
     assert!(matches!(value_s, Value::Ref(RefValue::Gc(_))));
     assert!(matches!(value_u, Value::Ref(RefValue::Gc(_))));
-    assert_eq!(store.invoke(identity, &[Value::I32(41)]).unwrap_err().kind, ErrorKind::Host);
-    assert_eq!(store.invoke(identity, &[value_u]).unwrap_err().kind, ErrorKind::Host);
+    assert_eq!(
+        store.invoke(identity, &[Value::I32(41)]).unwrap_err().kind,
+        ErrorKind::Host
+    );
+    assert_eq!(
+        store.invoke(identity, &[value_u]).unwrap_err().kind,
+        ErrorKind::Host
+    );
 
     let mut foreign_store = Store::new(&engine);
     let foreign_instance = load(&engine, &mut foreign_store, REFERENCE_CONTROL);

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Compiles a WebAssembly module ahead of time to a safe Rust crate (wtime's validator, rustc's code generator)"
+description = "Ahead-of-time WebAssembly compiler with safe Rust, C99/Clang, and pure-Rust Linux x86-64 backends"
 
 # Isolated from the production workspace, like the other tools.
 [workspace]

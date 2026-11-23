@@ -47,12 +47,12 @@ fn p079_continuation_large_small_matches_owned_capacities_and_reclaims() {
     let engine = Engine::new(Config::default()).unwrap();
     let large = engine
         .compile(include_bytes!(
-            "../../../../tools/wtime-bench/fixtures/continuations/depth_32.wasm"
+            "../fixtures/performance/bench_wasm/continuations/depth_32.wasm"
         ))
         .unwrap();
     let small = engine
         .compile(include_bytes!(
-            "../../../../tools/wtime-bench/fixtures/continuations/depth_0.wasm"
+            "../fixtures/performance/bench_wasm/continuations/depth_0.wasm"
         ))
         .unwrap();
     let mut store = Store::new(&engine);

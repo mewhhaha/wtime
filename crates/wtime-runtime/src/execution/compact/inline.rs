@@ -166,6 +166,7 @@ impl Leaves {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_leaf(
     store: &mut Store,
     fun: Func,
@@ -229,14 +230,14 @@ pub(crate) fn try_leaf(
     for pc in 0..6 {
         #[cfg(test)]
         STOP_AT.with(|slot| {
-            if let Some((at, fuel_stop)) = slot.get() {
-                if at == pc {
-                    slot.set(None);
-                    if fuel_stop {
-                        *fuel = Some(0);
-                    } else {
-                        store.cancellation.cancel();
-                    }
+            if let Some((at, fuel_stop)) = slot.get()
+                && at == pc
+            {
+                slot.set(None);
+                if fuel_stop {
+                    *fuel = Some(0);
+                } else {
+                    store.cancellation.cancel();
                 }
             }
         });

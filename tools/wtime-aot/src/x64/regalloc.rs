@@ -114,8 +114,10 @@ impl AllocConfig {
 
     #[inline]
     pub const fn is_alloc_gp(self, g: Gp) -> bool {
-        matches!(g, Gp::Rax | Gp::Rcx | Gp::Rdx | Gp::Rsi | Gp::Rdi | Gp::R8 | Gp::R9 | Gp::Rbx | Gp::Rbp)
-            || (self.allow_r12 && matches!(g, Gp::R12))
+        matches!(
+            g,
+            Gp::Rax | Gp::Rcx | Gp::Rdx | Gp::Rsi | Gp::Rdi | Gp::R8 | Gp::R9 | Gp::Rbx | Gp::Rbp
+        ) || (self.allow_r12 && matches!(g, Gp::R12))
             || (self.allow_r13 && matches!(g, Gp::R13))
     }
 }
@@ -345,7 +347,10 @@ pub fn allocate(ir: &IrFunc) -> Result<AllocResult, String> {
 
 /// Computes RPO order, exact cross-block liveness, and linear-scan allocation with default register partition.
 #[allow(dead_code)]
-pub fn allocate_with_budget(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<AllocResult, String> {
+pub fn allocate_with_budget(
+    ir: &IrFunc,
+    budget: Option<&CompileBudget>,
+) -> Result<AllocResult, String> {
     allocate_with_config(ir, AllocConfig::default(), budget)
 }
 
@@ -467,7 +472,11 @@ pub fn allocate_with_config(
             });
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
-                    clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_GP_CALLER, xmm_mask: MASK_XMM_CALLER });
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: MASK_GP_CALLER,
+                        xmm_mask: MASK_XMM_CALLER,
+                    });
                     scratch_tys.clear();
                     for &av in ir.pool_slice(args) {
                         scratch_tys.push(ir.val_tys[av.0 as usize]);
@@ -493,31 +502,67 @@ pub fn allocate_with_config(
                 }
                 Op::MemCopy { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemCopy);
-                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask,
+                        xmm_mask,
+                    });
                 }
                 Op::MemFill { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemFill);
-                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask,
+                        xmm_mask,
+                    });
                 }
                 Op::MemGrow(_) => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemGrow);
-                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask,
+                        xmm_mask,
+                    });
                 }
                 Op::Trunc(_, _) => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::Trunc);
-                    clobbers.push(Clobber { pos: pos_use, gp_mask, xmm_mask });
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask,
+                        xmm_mask,
+                    });
                 }
                 Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => match op {
                     IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU => {
-                        clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_RAX_RDX, xmm_mask: 0 });
+                        clobbers.push(Clobber {
+                            pos: pos_use,
+                            gp_mask: MASK_RAX_RDX,
+                            xmm_mask: 0,
+                        });
                     }
-                    IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU | IntBinOp::Rotl | IntBinOp::Rotr => {
-                        clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_RCX, xmm_mask: 0 });
+                    IntBinOp::Shl
+                    | IntBinOp::ShrS
+                    | IntBinOp::ShrU
+                    | IntBinOp::Rotl
+                    | IntBinOp::Rotr => {
+                        clobbers.push(Clobber {
+                            pos: pos_use,
+                            gp_mask: MASK_RCX,
+                            xmm_mask: 0,
+                        });
                     }
                     _ => {}
                 },
-                Op::I64BinImm(IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU, _, _) => {
-                    clobbers.push(Clobber { pos: pos_use, gp_mask: MASK_RAX_RDX, xmm_mask: 0 });
+                Op::I64BinImm(
+                    IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU,
+                    _,
+                    _,
+                ) => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: MASK_RAX_RDX,
+                        xmm_mask: 0,
+                    });
                 }
                 _ => {}
             }
@@ -677,7 +722,8 @@ pub fn allocate_with_config(
                     ));
                 }
                 for w in 0..words {
-                    let nv = live_use[oi * words + w] | (live_out[oi * words + w] & !live_def[oi * words + w]);
+                    let nv = live_use[oi * words + w]
+                        | (live_out[oi * words + w] & !live_def[oi * words + w]);
                     if nv != live_in[oi * words + w] {
                         live_in[oi * words + w] = nv;
                         changed = true;
@@ -784,7 +830,8 @@ pub fn allocate_with_config(
                     for &p in &rpo_preds[cur as usize] {
                         if p > header && loop_seen[p as usize] != stamp {
                             loop_seen[p as usize] = stamp;
-                            loop_depth[p as usize] = loop_depth[p as usize].saturating_add(1).min(4);
+                            loop_depth[p as usize] =
+                                loop_depth[p as usize].saturating_add(1).min(4);
                             worklist.push(p);
                         }
                     }
@@ -817,7 +864,11 @@ pub fn allocate_with_config(
 
     // Hint entry params with their incoming ABI registers.
     if !ir.params.is_empty() {
-        let p_tys: Vec<Ty> = ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]).collect();
+        let p_tys: Vec<Ty> = ir
+            .params
+            .iter()
+            .map(|&pv| ir.val_tys[pv.0 as usize])
+            .collect();
         if let Ok(al) = layout_args(&p_tys) {
             for (&pv, slot) in ir.params.iter().zip(al.slots) {
                 match slot {
@@ -859,7 +910,11 @@ pub fn allocate_with_config(
                         add_peer(&mut hint_peers, r.0, a.0);
                         if matches!(
                             bop,
-                            IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor
+                            IntBinOp::Add
+                                | IntBinOp::Mul
+                                | IntBinOp::And
+                                | IntBinOp::Or
+                                | IntBinOp::Xor
                         ) {
                             add_peer(&mut hint_peers, r.0, b.0);
                         }
@@ -943,8 +998,20 @@ pub fn allocate_with_config(
         };
         match bb.term {
             Term::Jump { target, args } => wire_edge(target.0, args),
-            Term::BranchIf { then_bb, then_args, else_bb, else_args, .. }
-            | Term::CmpBranch { then_bb, then_args, else_bb, else_args, .. } => {
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
                 wire_edge(then_bb.0, then_args);
                 wire_edge(else_bb.0, else_args);
             }
@@ -1003,7 +1070,11 @@ pub fn allocate_with_config(
             // `bb0` `cached_zeros` live ranges and stack spills!), call/clobber-crossing constants, and
             // non-loop constants (`val_weight <= 2`). Hot non-zero loop constants without calls may still
             // occupy a free caller-saved register (never callee-saved, never spilling).
-            let crosses_clobber = if ty.is_fp() { clob_xmm != 0 } else { clob_gp != 0 };
+            let crosses_clobber = if ty.is_fp() {
+                clob_xmm != 0
+            } else {
+                clob_gp != 0
+            };
             if rc.is_zero() || crosses_clobber || val_weight[vi] <= 2 {
                 locs[vi] = Loc::Remat(rc);
                 assigned[vi] = true;
@@ -1089,7 +1160,9 @@ pub fn allocate_with_config(
         let off = *next;
         let after = off.checked_add(8).ok_or("x64: spill stack size overflow")?;
         if after > MAX_FRAME_BYTES {
-            return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
+            return Err(format!(
+                "x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"
+            ));
         }
         *next = after;
         let si = (off / 8) as usize;
@@ -1103,7 +1176,8 @@ pub fn allocate_with_config(
 
     // 5a. Linear scan for GP intervals with dynamic R12/R13, remat, hinting, & spill-slot coalescing.
     // Active entries: `(start, end, reg_idx, val, score, remat)`.
-    let mut active_gp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> = Vec::with_capacity(gp_alloc.len());
+    let mut active_gp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> =
+        Vec::with_capacity(gp_alloc.len());
     const GP_CALLER_COUNT: usize = 7;
 
     for (idx, iv) in gp_intervals.iter().enumerate() {
@@ -1120,12 +1194,17 @@ pub fn allocate_with_config(
         let forbidden = used_regs | iv.clob_gp;
 
         // Rematerializable constants may only take a free caller-saved register (never callee-saved).
-        let search_regs = if iv.remat.is_some() { &gp_alloc[..GP_CALLER_COUNT] } else { gp_alloc };
+        let search_regs = if iv.remat.is_some() {
+            &gp_alloc[..GP_CALLER_COUNT]
+        } else {
+            gp_alloc
+        };
 
         // Try coalescing peer register first, then ABI hint register, then first free in search_regs.
         let mut chosen: Option<(usize, Gp)> = None;
         for &peer in &hint_peers[iv.val as usize] {
-            if peer != u32::MAX && assigned[peer as usize]
+            if peer != u32::MAX
+                && assigned[peer as usize]
                 && let Loc::Gp(g) = locs[peer as usize]
                 && (forbidden & (1 << g.id())) == 0
                 && let Some(ri) = search_regs.iter().position(|&x| x == g)
@@ -1210,7 +1289,8 @@ pub fn allocate_with_config(
 
     // 5b. Linear scan for FP/V128 intervals (caller-saved Xmm0..Xmm7 + callee-saved Xmm8..Xmm13).
     let mut free_spills16: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
-    let mut active_fp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> = Vec::with_capacity(XMM_ALLOC.len());
+    let mut active_fp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> =
+        Vec::with_capacity(XMM_ALLOC.len());
     const XMM_CALLER_COUNT: usize = 8;
 
     let alloc_spill_fp = |val: u32,
@@ -1233,9 +1313,13 @@ pub fn allocate_with_config(
                 Ok(off)
             } else {
                 let off = checked_align_i32(*next, 16)?;
-                let after = off.checked_add(16).ok_or("x64: spill stack size overflow")?;
+                let after = off
+                    .checked_add(16)
+                    .ok_or("x64: spill stack size overflow")?;
                 if after > MAX_FRAME_BYTES {
-                    return Err(format!("x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"));
+                    return Err(format!(
+                        "x64: spill area ({after} B) exceeds frame cap {MAX_FRAME_BYTES} B"
+                    ));
                 }
                 *next = after;
                 free16.push(Reverse((end, off)));
@@ -1258,11 +1342,16 @@ pub fn allocate_with_config(
             used_regs |= 1 << XMM_ALLOC[ri].id();
         }
         let forbidden = used_regs | iv.clob_xmm;
-        let search_regs = if iv.remat.is_some() { &XMM_ALLOC[..XMM_CALLER_COUNT] } else { &XMM_ALLOC[..] };
+        let search_regs = if iv.remat.is_some() {
+            &XMM_ALLOC[..XMM_CALLER_COUNT]
+        } else {
+            &XMM_ALLOC[..]
+        };
 
         let mut chosen: Option<(usize, Xmm)> = None;
         for &peer in &hint_peers[iv.val as usize] {
-            if peer != u32::MAX && assigned[peer as usize]
+            if peer != u32::MAX
+                && assigned[peer as usize]
                 && let Loc::Xmm(x) = locs[peer as usize]
                 && (forbidden & (1 << x.id())) == 0
                 && let Some(ri) = search_regs.iter().position(|&r| r == x)
@@ -1389,26 +1478,41 @@ pub fn allocate_with_config(
     if spill_base > 0 {
         for loc in &mut locs {
             if let Loc::Spill(off) = loc {
-                *off = off.checked_add(spill_base).ok_or("x64: spill offset overflow")?;
+                *off = off
+                    .checked_add(spill_base)
+                    .ok_or("x64: spill offset overflow")?;
             }
         }
     }
-    let mut raw_frame = spill_base.checked_add(next_spill_off).ok_or("x64: stack frame size overflow")?;
+    let mut raw_frame = spill_base
+        .checked_add(next_spill_off)
+        .ok_or("x64: stack frame size overflow")?;
     let saved_xmm_base = if !used_callee_xmm.is_empty() {
         let base = checked_align_i32(raw_frame, 16)?;
         let xmm_bytes = (used_callee_xmm.len() as i32) * 16;
-        raw_frame = base.checked_add(xmm_bytes).ok_or("x64: stack frame size overflow")?;
+        raw_frame = base
+            .checked_add(xmm_bytes)
+            .ok_or("x64: stack frame size overflow")?;
         base
     } else {
         0
     };
     let self_ret_layout = layout_rets(&ir.result_tys)?;
-    let self_param_tys: Vec<Ty> = ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]).collect();
+    let self_param_tys: Vec<Ty> = ir
+        .params
+        .iter()
+        .map(|&pv| ir.val_tys[pv.0 as usize])
+        .collect();
     let self_param_layout = layout_args(&self_param_tys)?;
     let saved_ret_ptr_off = if self_ret_layout.stack_bytes > 0 {
-        raw_frame = raw_frame.checked_add(7).ok_or("x64: stack frame size overflow")? & !7;
+        raw_frame = raw_frame
+            .checked_add(7)
+            .ok_or("x64: stack frame size overflow")?
+            & !7;
         let off = raw_frame;
-        raw_frame = raw_frame.checked_add(8).ok_or("x64: stack frame size overflow")?;
+        raw_frame = raw_frame
+            .checked_add(8)
+            .ok_or("x64: stack frame size overflow")?;
         Some(off)
     } else {
         None
@@ -1438,7 +1542,10 @@ pub fn allocate_with_config(
         .and_then(|v| v.checked_add(self_param_layout.stack_bytes))
         .ok_or("x64: incoming stack parameter offset overflow")?;
     if incoming_stack_base > MAX_FRAME_BYTES.saturating_mul(2) {
-        return Err(format!("x64: function {} incoming stack offset ({incoming_stack_base} B) exceeds cap", ir.func_index));
+        return Err(format!(
+            "x64: function {} incoming stack offset ({incoming_stack_base} B) exceeds cap",
+            ir.func_index
+        ));
     }
 
     Ok(AllocResult {

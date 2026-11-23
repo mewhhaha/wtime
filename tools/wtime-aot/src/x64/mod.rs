@@ -9,13 +9,13 @@ pub mod module;
 pub mod opt;
 pub mod regalloc;
 pub mod runtime;
-pub mod verify;
 #[cfg(test)]
 mod tests_abi_faults;
 #[cfg(test)]
 mod tests_oracle;
 #[cfg(test)]
 mod tests_unit;
+pub mod verify;
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -30,13 +30,13 @@ use elf::{ElfLayout, ExportDef};
 use ir::{IrFunc, lower_wasm_to_ir_with_budget};
 use lower::{TargetIsa, lower_ir_to_x64_with_budget};
 use module::{
-    CompileBudget, MAX_CTX_BYTES, MAX_TOTAL_CODE_BYTES, MAX_TOTAL_RODATA_BYTES, X64ConstVal, X64Module,
-    admit_x64_module_with_budget, x64_validate_features, x64_validate_limits,
+    CompileBudget, MAX_CTX_BYTES, MAX_TOTAL_CODE_BYTES, MAX_TOTAL_RODATA_BYTES, X64ConstVal,
+    X64Module, admit_x64_module_with_budget, x64_validate_features, x64_validate_limits,
 };
 use regalloc::{AllocConfig, AllocResult, allocate_with_config};
 use runtime::{
-    EXPORT_NAMES, RuntimeTables, RuntimeTestHooks, TRAP_MESSAGES, emit_all_exports, emit_all_helpers,
-    emit_import_trampoline, export_val_kind, global_kind_code,
+    EXPORT_NAMES, RuntimeTables, RuntimeTestHooks, TRAP_MESSAGES, emit_all_exports,
+    emit_all_helpers, emit_import_trampoline, export_val_kind, global_kind_code,
 };
 #[cfg(test)]
 pub use verify::verify_alloc;
@@ -143,12 +143,18 @@ impl CtxLayout {
                 global_offs.push(-1);
                 continue;
             }
-            let (align, size) = if vt == ValType::V128 { (16usize, 16usize) } else { (8usize, 8usize) };
+            let (align, size) = if vt == ValType::V128 {
+                (16usize, 16usize)
+            } else {
+                (8usize, 8usize)
+            };
             cur = align_up_checked(cur, align)?;
             let off = i32::try_from(cur).map_err(|_| "x64: Ctx global offset exceeds i32")?;
             cur = cur.checked_add(size).ok_or("x64: Ctx size overflow")?;
             if cur > MAX_CTX_BYTES {
-                return Err(format!("x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"));
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
             }
             global_offs.push(off);
         }
@@ -156,10 +162,14 @@ impl CtxLayout {
         for (&tbl, &len) in &module.mut_extern_tables {
             cur = align_up_checked(cur, 8)?;
             let off = i32::try_from(cur).map_err(|_| "x64: Ctx extern table offset exceeds i32")?;
-            let bytes = (len as usize).checked_mul(8).ok_or("x64: Ctx extern table size overflow")?;
+            let bytes = (len as usize)
+                .checked_mul(8)
+                .ok_or("x64: Ctx extern table size overflow")?;
             cur = cur.checked_add(bytes).ok_or("x64: Ctx size overflow")?;
             if cur > MAX_CTX_BYTES {
-                return Err(format!("x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"));
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
             }
             extern_tables.insert(tbl, (off, len));
         }
@@ -243,11 +253,13 @@ pub struct X64CompileOptions {
 impl Default for X64CompileOptions {
     fn default() -> Self {
         Self {
-            isa: TargetIsa { has_abm_bmi1: false },
+            isa: TargetIsa {
+                has_abm_bmi1: false,
+            },
             jobs: 0,
             deadline: None,
             opt: true,
-            verify: false,
+            verify: true,
             hooks: RuntimeTestHooks::default(),
         }
     }
@@ -259,24 +271,10 @@ pub fn parse_x64_target_cpu_syntax(target_cpu: &str) -> Result<Option<&'static s
     match target_cpu {
         "native" => Ok(None),
         "x86-64-v2" | "generic" => Ok(Some("x64-v2")),
-        "x86-64-v3"
-        | "x86-64-v4"
-        | "haswell"
-        | "broadwell"
-        | "skylake"
-        | "skylake-avx512"
-        | "cascadelake"
-        | "cooperlake"
-        | "cannonlake"
-        | "icelake-client"
-        | "icelake-server"
-        | "tigerlake"
-        | "rocketlake"
-        | "alderlake"
-        | "raptorlake"
-        | "sapphirerapids"
-        | "emeraldrapids"
-        | "graniterapids" => Ok(Some("x64-v3")),
+        "x86-64-v3" | "x86-64-v4" | "haswell" | "broadwell" | "skylake" | "skylake-avx512"
+        | "cascadelake" | "cooperlake" | "cannonlake" | "icelake-client" | "icelake-server"
+        | "tigerlake" | "rocketlake" | "alderlake" | "raptorlake" | "sapphirerapids"
+        | "emeraldrapids" | "graniterapids" => Ok(Some("x64-v3")),
         other
             if other
                 .strip_prefix("znver")
@@ -294,12 +292,20 @@ pub fn parse_x64_target_cpu_syntax(target_cpu: &str) -> Result<Option<&'static s
 /// and `TargetIsa`, enforcing Linux x86-64 LP64 host support after syntax validation.
 pub fn resolve_x64_isa(target_cpu: &str) -> Result<(&'static str, TargetIsa), String> {
     let explicit = parse_x64_target_cpu_syntax(target_cpu)?;
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
     {
         let _ = explicit;
         Err("wtime-aot --backend x64 is only supported on Linux x86_64 LP64 hosts".into())
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64"))]
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
     {
         let tag = match explicit {
             Some(t) => t,
@@ -311,13 +317,20 @@ pub fn resolve_x64_isa(target_cpu: &str) -> Result<(&'static str, TargetIsa), St
                 }
             }
         };
-        Ok((tag, TargetIsa { has_abm_bmi1: tag == "x64-v3" }))
+        Ok((
+            tag,
+            TargetIsa {
+                has_abm_bmi1: tag == "x64-v3",
+            },
+        ))
     }
 }
 
 pub fn resolve_jobs(jobs: usize) -> usize {
     if jobs == 0 {
-        std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 64)
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .clamp(1, 64)
     } else {
         jobs.clamp(1, 64)
     }
@@ -337,13 +350,17 @@ struct RodataBuilder {
 
 impl RodataBuilder {
     fn new() -> Self {
-        Self { buf: Vec::with_capacity(4096) }
+        Self {
+            buf: Vec::with_capacity(4096),
+        }
     }
 
     fn align(&mut self, align: usize) -> Result<u32, String> {
         let next = align_up_checked(self.buf.len(), align)?;
         if next > MAX_TOTAL_RODATA_BYTES {
-            return Err(format!("x64: .rodata ({next} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"));
+            return Err(format!(
+                "x64: .rodata ({next} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"
+            ));
         }
         self.buf.resize(next, 0);
         u32::try_from(self.buf.len()).map_err(|_| "x64: .rodata offset exceeds u32".into())
@@ -357,7 +374,9 @@ impl RodataBuilder {
             .checked_add(bytes.len())
             .ok_or("x64: .rodata size overflow")?;
         if end > MAX_TOTAL_RODATA_BYTES {
-            return Err(format!("x64: .rodata ({end} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"));
+            return Err(format!(
+                "x64: .rodata ({end} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"
+            ));
         }
         self.buf.extend_from_slice(bytes);
         Ok(off)
@@ -365,9 +384,15 @@ impl RodataBuilder {
 
     fn push_zeros(&mut self, align: usize, len: usize) -> Result<u32, String> {
         let off = self.align(align)?;
-        let end = self.buf.len().checked_add(len).ok_or("x64: .rodata size overflow")?;
+        let end = self
+            .buf
+            .len()
+            .checked_add(len)
+            .ok_or("x64: .rodata size overflow")?;
         if end > MAX_TOTAL_RODATA_BYTES {
-            return Err(format!("x64: .rodata ({end} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"));
+            return Err(format!(
+                "x64: .rodata ({end} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"
+            ));
         }
         self.buf.resize(end, 0);
         Ok(off)
@@ -414,8 +439,10 @@ fn build_shared_rodata(
     let mut f64_abs_bytes = [0u8; 16];
     let mut f64_neg_bytes = [0u8; 16];
     for lane in 0..2 {
-        f64_abs_bytes[lane * 8..lane * 8 + 8].copy_from_slice(&0x7fff_ffff_ffff_ffffu64.to_le_bytes());
-        f64_neg_bytes[lane * 8..lane * 8 + 8].copy_from_slice(&0x8000_0000_0000_0000u64.to_le_bytes());
+        f64_abs_bytes[lane * 8..lane * 8 + 8]
+            .copy_from_slice(&0x7fff_ffff_ffff_ffffu64.to_le_bytes());
+        f64_neg_bytes[lane * 8..lane * 8 + 8]
+            .copy_from_slice(&0x8000_0000_0000_0000u64.to_le_bytes());
     }
     let f32_abs = rb.push_bytes(16, &f32_abs_bytes)?;
     let f32_neg = rb.push_bytes(16, &f32_neg_bytes)?;
@@ -510,7 +537,8 @@ fn build_shared_rodata(
         rb.push_bytes(1, &nrel.to_le_bytes())?;
         rb.push_bytes(1, &nlen.to_le_bytes())?;
     }
-    let imp_count = u32::try_from(module.imports.len()).map_err(|_| "x64: import count exceeds u32")?;
+    let imp_count =
+        u32::try_from(module.imports.len()).map_err(|_| "x64: import count exceeds u32")?;
 
     // 4. `blot_aot_call_export` table (16 B entries):
     //    +0: name_rel: i32, +4: name_len: u32, +8: fn_rel: i32 (patched), +12: arg_kind: u8, +13: ret_kind: u8
@@ -519,8 +547,11 @@ fn build_shared_rodata(
         if (i & 4095) == 4095 {
             budget.check_deadline()?;
         }
-        let Some(fty) = module.func_type(*fi) else { continue };
-        let (Some(ak), Some(rk)) = (export_val_kind(&fty.params), export_val_kind(&fty.results)) else {
+        let Some(fty) = module.func_type(*fi) else {
+            continue;
+        };
+        let (Some(ak), Some(rk)) = (export_val_kind(&fty.params), export_val_kind(&fty.results))
+        else {
             continue;
         };
         let (noff, nlen) = push_str(&mut rb, name)?;
@@ -590,8 +621,8 @@ fn build_shared_rodata(
         rb.push_bytes(1, &ctx_off.to_le_bytes())?;
         rb.push_bytes(1, &const_bits.to_le_bytes())?;
     }
-    let get_global_count =
-        u32::try_from(get_global_items.len()).map_err(|_| "x64: global export count exceeds u32")?;
+    let get_global_count = u32::try_from(get_global_items.len())
+        .map_err(|_| "x64: global export count exceeds u32")?;
 
     // 6. `blot_aot_set_global` table (16 B entries):
     //    +0: name_rel: i32, +4: name_len: u32, +8: ctx_off: i32, +12: is64: u8
@@ -604,8 +635,8 @@ fn build_shared_rodata(
         rb.push_bytes(1, &ctx_off.to_le_bytes())?;
         rb.push_bytes(1, &[is64, 0, 0, 0])?;
     }
-    let set_global_count =
-        u32::try_from(set_global_items.len()).map_err(|_| "x64: mutable global export count exceeds u32")?;
+    let set_global_count = u32::try_from(set_global_items.len())
+        .map_err(|_| "x64: mutable global export count exceeds u32")?;
 
     // 7. Non-zero V128 global initializers (16-byte aligned).
     let mut v128_global_inits = Vec::new();
@@ -705,21 +736,26 @@ fn patch_relocs(
                     .func_text_offs
                     .get(fi as usize)
                     .ok_or_else(|| format!("x64: reloc Func({fi}) out of range"))?;
-                ctx.tx_vaddr.checked_add(off).ok_or("x64: Func target vaddr overflow")?
+                ctx.tx_vaddr
+                    .checked_add(off)
+                    .ok_or("x64: Func target vaddr overflow")?
             }
             RelocTarget::Helper(hi) => {
                 let off = *ctx
                     .helper_text_offs
                     .get(hi as usize)
                     .ok_or_else(|| format!("x64: reloc Helper({hi}) out of range"))?;
-                ctx.tx_vaddr.checked_add(off).ok_or("x64: Helper target vaddr overflow")?
+                ctx.tx_vaddr
+                    .checked_add(off)
+                    .ok_or("x64: Helper target vaddr overflow")?
             }
             RelocTarget::Rodata(off) => ctx
                 .ro_vaddr
                 .checked_add(u64::from(off))
                 .ok_or("x64: Rodata target vaddr overflow")?,
             RelocTarget::LocalRodata(off) => {
-                let base = local_rodata_off.ok_or("x64: LocalRodata reloc without local rodata base")?;
+                let base =
+                    local_rodata_off.ok_or("x64: LocalRodata reloc without local rodata base")?;
                 ctx.ro_vaddr
                     .checked_add(base)
                     .and_then(|v| v.checked_add(u64::from(off)))
@@ -730,13 +766,17 @@ fn patch_relocs(
             .checked_add(u64::from(r.next_ip_off))
             .ok_or("x64: reloc next_ip vaddr overflow")?;
         let rel = i128::from(target_vaddr) - i128::from(next_ip_vaddr);
-        let rel32 = i32::try_from(rel).map_err(|_| "x64: rel32 relocation out of 2 GiB range".to_string())?;
+        let rel32 = i32::try_from(rel)
+            .map_err(|_| "x64: rel32 relocation out of 2 GiB range".to_string())?;
         let p = (item_text_off as usize)
             .checked_add(r.patch_off as usize)
             .ok_or("x64: reloc patch offset overflow")?;
         let end = p.checked_add(4).ok_or("x64: reloc patch end overflow")?;
         if end > text.len() {
-            return Err(format!("x64: reloc patch extent {p}..{end} exceeds .text len {}", text.len()));
+            return Err(format!(
+                "x64: reloc patch extent {p}..{end} exceeds .text len {}",
+                text.len()
+            ));
         }
         text[p..end].copy_from_slice(&rel32.to_le_bytes());
     }
@@ -744,7 +784,36 @@ fn patch_relocs(
 }
 
 /// Compiles Wasm module bytes directly into a self-contained Linux x86-64 ELF64 `.so` image.
-pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<Vec<u8>, X64CompileError> {
+///
+/// Catches unexpected internal panics at the compiler boundary and converts them into
+/// `X64CompileError::Failed` so callers always observe a typed error instead of process abort.
+pub fn compile_wasm_to_x64_so(
+    wasm: &[u8],
+    opts: &X64CompileOptions,
+) -> Result<Vec<u8>, X64CompileError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compile_wasm_to_x64_so_inner(wasm, opts)
+    })) {
+        Ok(res) => res,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unexpected compiler panic".to_string()
+            };
+            Err(X64CompileError::Failed(format!(
+                "x64 internal compiler error: {msg}"
+            )))
+        }
+    }
+}
+
+fn compile_wasm_to_x64_so_inner(
+    wasm: &[u8],
+    opts: &X64CompileOptions,
+) -> Result<Vec<u8>, X64CompileError> {
     let t_total = Instant::now();
     let budget = CompileBudget::new(opts.deadline);
     let check_dl = || budget.check_deadline().map_err(X64CompileError::Failed);
@@ -752,14 +821,15 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
 
     // 1. Validate Wasm under Stage 1's strict feature profile and resource limits.
     let t0 = Instant::now();
-    let validated = wtime_validate::validate(wasm, &x64_validate_features(), &x64_validate_limits()).map_err(|e| {
-        match e.kind {
-            ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
-                X64CompileError::AdmissionRejected(format!("x64: {e}"))
-            }
-            _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
-        }
-    })?;
+    let validated =
+        wtime_validate::validate(wasm, &x64_validate_features(), &x64_validate_limits()).map_err(
+            |e| match e.kind {
+                ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
+                    X64CompileError::AdmissionRejected(format!("x64: {e}"))
+                }
+                _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
+            },
+        )?;
     let decoded = validated.decoded();
     let d_validate = t0.elapsed();
     check_dl()?;
@@ -778,17 +848,27 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
 
     // 3. Compute Ctx global/extern-table offsets first, then build shared `.rodata` + `ci_tables`,
     //    then finalize `CtxLayout` with `ci_tables`.
-    let preliminary_layout = CtxLayout::compute(&module, Vec::new())
-        .map_err(X64CompileError::AdmissionRejected)?;
-    let SharedRodata { mut rodata, consts: ro, tables, ci_tables, call_export_patches } =
-        build_shared_rodata(decoded, &module, &preliminary_layout.global_offs, &budget).map_err(|e| {
+    let preliminary_layout =
+        CtxLayout::compute(&module, Vec::new()).map_err(X64CompileError::AdmissionRejected)?;
+    let SharedRodata {
+        mut rodata,
+        consts: ro,
+        tables,
+        ci_tables,
+        call_export_patches,
+    } = build_shared_rodata(decoded, &module, &preliminary_layout.global_offs, &budget).map_err(
+        |e| {
             if budget.check_deadline().is_err() {
                 X64CompileError::Failed(e)
             } else {
                 X64CompileError::AdmissionRejected(e)
             }
-        })?;
-    let layout = CtxLayout { ci_tables, ..preliminary_layout };
+        },
+    )?;
+    let layout = CtxLayout {
+        ci_tables,
+        ..preliminary_layout
+    };
 
     // 4. Emit shared runtime helpers, `wt_import{k}` trampolines, and all 18 C ABI exports.
     let export_asms = emit_all_exports(&module, &layout, &ro, &tables, opts.isa, opts.hooks)
@@ -805,7 +885,9 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         .chain(&import_asms)
         .map(|a| a.code.len())
         .sum();
-    budget.charge_code(runtime_code_bytes).map_err(X64CompileError::Failed)?;
+    budget
+        .charge_code(runtime_code_bytes)
+        .map_err(X64CompileError::Failed)?;
     check_dl()?;
 
     // 5. Compile all defined functions through the Stage 2 multi-phase pipeline (parallel IR lower ->
@@ -838,7 +920,8 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         let next_idx = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
-        let worker_irs: Mutex<Vec<Vec<(usize, IrFunc)>>> = Mutex::new(Vec::with_capacity(n_workers));
+        let worker_irs: Mutex<Vec<Vec<(usize, IrFunc)>>> =
+            Mutex::new(Vec::with_capacity(n_workers));
         std::thread::scope(|s| {
             for _ in 0..n_workers {
                 s.spawn(|| {
@@ -881,7 +964,10 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
                         }
                     }
                     ns_ssa_opt.fetch_add(loc_ssa, Ordering::Relaxed);
-                    worker_irs.lock().unwrap_or_else(|g| g.into_inner()).push(local_out);
+                    worker_irs
+                        .lock()
+                        .unwrap_or_else(|g| g.into_inner())
+                        .push(local_out);
                 });
             }
         });
@@ -897,7 +983,9 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         let mut irs: Vec<IrFunc> = ir_slots
             .into_iter()
             .enumerate()
-            .map(|(bi, o)| o.ok_or_else(|| X64CompileError::Failed(format!("x64: missing IR {bi}"))))
+            .map(|(bi, o)| {
+                o.ok_or_else(|| X64CompileError::Failed(format!("x64: missing IR {bi}")))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         check_dl()?;
 
@@ -905,7 +993,8 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         let effects = if opts.opt {
             let ti = Instant::now();
             opt::inline_small_helpers(&mut irs, &module, Some(&budget)).map_err(map_worker_err)?;
-            let eff = opt::compute_module_effects(&irs, &module, Some(&budget)).map_err(map_worker_err)?;
+            let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
+                .map_err(map_worker_err)?;
             d_inline_effects = ti.elapsed();
             Some(eff)
         } else {
@@ -919,10 +1008,12 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
             allow_r12: layout.pinned_global.is_none(),
             allow_r13: layout.fixed_mem_bytes.is_some(),
         };
-        let work_queue: Mutex<Vec<(usize, IrFunc)>> = Mutex::new(irs.into_iter().enumerate().collect());
+        let work_queue: Mutex<Vec<(usize, IrFunc)>> =
+            Mutex::new(irs.into_iter().enumerate().collect());
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
-        let worker_allocs: Mutex<Vec<Vec<(usize, IrFunc, AllocResult)>>> = Mutex::new(Vec::with_capacity(n_workers));
+        let worker_allocs: Mutex<Vec<Vec<(usize, IrFunc, AllocResult)>>> =
+            Mutex::new(Vec::with_capacity(n_workers));
         std::thread::scope(|s| {
             for _ in 0..n_workers {
                 s.spawn(|| {
@@ -968,7 +1059,10 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
                     }
                     ns_ssa_opt.fetch_add(loc_ssa, Ordering::Relaxed);
                     ns_regalloc.fetch_add(loc_ra, Ordering::Relaxed);
-                    worker_allocs.lock().unwrap_or_else(|g| g.into_inner()).push(local_out);
+                    worker_allocs
+                        .lock()
+                        .unwrap_or_else(|g| g.into_inner())
+                        .push(local_out);
                 });
             }
         });
@@ -977,7 +1071,10 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         }
         let mut ir_slots: Vec<Option<IrFunc>> = (0..n_defs).map(|_| None).collect();
         let mut alloc_slots: Vec<Option<AllocResult>> = (0..n_defs).map(|_| None).collect();
-        for batch in worker_allocs.into_inner().unwrap_or_else(|g| g.into_inner()) {
+        for batch in worker_allocs
+            .into_inner()
+            .unwrap_or_else(|g| g.into_inner())
+        {
             for (bi, ir, alloc) in batch {
                 ir_slots[bi] = Some(ir);
                 alloc_slots[bi] = Some(alloc);
@@ -986,12 +1083,16 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         let mut irs: Vec<IrFunc> = ir_slots
             .into_iter()
             .enumerate()
-            .map(|(bi, o)| o.ok_or_else(|| X64CompileError::Failed(format!("x64: missing opt IR {bi}"))))
+            .map(|(bi, o)| {
+                o.ok_or_else(|| X64CompileError::Failed(format!("x64: missing opt IR {bi}")))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let allocs: Vec<AllocResult> = alloc_slots
             .into_iter()
             .enumerate()
-            .map(|(bi, o)| o.ok_or_else(|| X64CompileError::Failed(format!("x64: missing alloc {bi}"))))
+            .map(|(bi, o)| {
+                o.ok_or_else(|| X64CompileError::Failed(format!("x64: missing alloc {bi}")))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         check_dl()?;
 
@@ -1011,7 +1112,8 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         let next_idx = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
-        let worker_results: Mutex<Vec<Vec<(usize, Asm)>>> = Mutex::new(Vec::with_capacity(n_workers));
+        let worker_results: Mutex<Vec<Vec<(usize, Asm)>>> =
+            Mutex::new(Vec::with_capacity(n_workers));
         let fn_can_trap_ref = fn_can_trap.as_deref();
         std::thread::scope(|s| {
             for _ in 0..n_workers {
@@ -1050,14 +1152,20 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
                         }
                     }
                     ns_emit.fetch_add(loc_em, Ordering::Relaxed);
-                    worker_results.lock().unwrap_or_else(|g| g.into_inner()).push(local_out);
+                    worker_results
+                        .lock()
+                        .unwrap_or_else(|g| g.into_inner())
+                        .push(local_out);
                 });
             }
         });
         if let Some((_, err)) = first_err.into_inner().unwrap_or_else(|g| g.into_inner()) {
             return Err(map_worker_err(err));
         }
-        for batch in worker_results.into_inner().unwrap_or_else(|g| g.into_inner()) {
+        for batch in worker_results
+            .into_inner()
+            .unwrap_or_else(|g| g.into_inner())
+        {
             for (bi, asm) in batch {
                 compiled[bi] = Some(asm);
             }
@@ -1069,7 +1177,8 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
     let t_link = Instant::now();
     let mut def_asms: Vec<Asm> = Vec::with_capacity(n_defs);
     for (bi, item) in compiled.into_iter().enumerate() {
-        let asm = item.ok_or_else(|| X64CompileError::Failed(format!("x64: missing compiled body {bi}")))?;
+        let asm = item
+            .ok_or_else(|| X64CompileError::Failed(format!("x64: missing compiled body {bi}")))?;
         def_asms.push(asm);
     }
 
@@ -1083,10 +1192,11 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         if asm.local_rodata.is_empty() {
             fn_local_rodata_offs.push(0);
         } else {
-            let aligned = align_up_checked(planned_rodata_len, 16).map_err(X64CompileError::Failed)?;
-            let next = aligned
-                .checked_add(asm.local_rodata.len())
-                .ok_or_else(|| X64CompileError::Failed("x64: merged .rodata size overflow".into()))?;
+            let aligned =
+                align_up_checked(planned_rodata_len, 16).map_err(X64CompileError::Failed)?;
+            let next = aligned.checked_add(asm.local_rodata.len()).ok_or_else(|| {
+                X64CompileError::Failed("x64: merged .rodata size overflow".into())
+            })?;
             if next > MAX_TOTAL_RODATA_BYTES {
                 return Err(X64CompileError::Failed(format!(
                     "x64: complete merged .rodata ({next} B) exceeds cap {MAX_TOTAL_RODATA_BYTES} B"
@@ -1099,7 +1209,11 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
 
     // 6b. Merge `.text` (16-byte aligned per item) in deterministic order:
     //     1. 18 C ABI exports, 2. shared helpers, 3. import trampolines, 4. defined functions.
-    let mut text: Vec<u8> = Vec::with_capacity(runtime_code_bytes.saturating_add(n_defs * 128).min(64 << 20));
+    let mut text: Vec<u8> = Vec::with_capacity(
+        runtime_code_bytes
+            .saturating_add(n_defs * 128)
+            .min(64 << 20),
+    );
     let push_text = |text: &mut Vec<u8>, bytes: &[u8]| -> Result<u64, X64CompileError> {
         let aligned = align_up_checked(text.len(), 16).map_err(X64CompileError::Failed)?;
         let next = aligned
@@ -1145,7 +1259,8 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
     }
 
     // 6c. Plan ELF64 layout (verifying `.text` start < i32::MAX).
-    let elf_layout = ElfLayout::plan(&EXPORT_NAMES, planned_rodata_len).map_err(X64CompileError::Failed)?;
+    let elf_layout =
+        ElfLayout::plan(&EXPORT_NAMES, planned_rodata_len).map_err(X64CompileError::Failed)?;
     let ro_vaddr = elf_layout.rodata_vaddr as u64;
     let tx_vaddr = elf_layout.text_vaddr as u64;
 
@@ -1161,7 +1276,9 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
                 .ok_or_else(|| X64CompileError::Failed("x64: fn_vaddr overflow".into()))?;
             let lro_vaddr = ro_vaddr
                 .checked_add(fn_local_rodata_offs[bi])
-                .ok_or_else(|| X64CompileError::Failed("x64: local_rodata vaddr overflow".into()))?;
+                .ok_or_else(|| {
+                    X64CompileError::Failed("x64: local_rodata vaddr overflow".into())
+                })?;
             asm.patch_jump_tables(fn_vaddr, lro_vaddr)
                 .map_err(X64CompileError::Failed)?;
             let target_off = fn_local_rodata_offs[bi] as usize;
@@ -1187,15 +1304,18 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
             let entry_off = (ci_lay.rodata_off as usize)
                 .checked_add((rel_slot as usize) * 4)
                 .ok_or_else(|| X64CompileError::Failed("x64: ci entry offset overflow".into()))?;
-            let target_off = *func_text_offs
-                .get(fi as usize)
-                .ok_or_else(|| X64CompileError::Failed(format!("x64: ci target func {fi} out of range")))?;
+            let target_off = *func_text_offs.get(fi as usize).ok_or_else(|| {
+                X64CompileError::Failed(format!("x64: ci target func {fi} out of range"))
+            })?;
             let target_vaddr = tx_vaddr
                 .checked_add(target_off)
                 .ok_or_else(|| X64CompileError::Failed("x64: ci target vaddr overflow".into()))?;
             let disp = i32::try_from(i128::from(target_vaddr) - i128::from(table_base_vaddr))
                 .map_err(|_| X64CompileError::Failed("x64: ci target rel32 overflow".into()))?;
-            debug_assert_ne!(disp, 0, "call_indirect target disp cannot collide with 0 sentinel");
+            debug_assert_ne!(
+                disp, 0,
+                "call_indirect target disp cannot collide with 0 sentinel"
+            );
             rodata[entry_off..entry_off + 4].copy_from_slice(&disp.to_le_bytes());
         }
     }
@@ -1205,9 +1325,12 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
         let table_base_vaddr = ro_vaddr
             .checked_add(u64::from(p.table_rodata_off))
             .ok_or_else(|| X64CompileError::Failed("x64: export table vaddr overflow".into()))?;
-        let target_off = *func_text_offs
-            .get(p.func_idx)
-            .ok_or_else(|| X64CompileError::Failed(format!("x64: export target func {} out of range", p.func_idx)))?;
+        let target_off = *func_text_offs.get(p.func_idx).ok_or_else(|| {
+            X64CompileError::Failed(format!(
+                "x64: export target func {} out of range",
+                p.func_idx
+            ))
+        })?;
         let target_vaddr = tx_vaddr
             .checked_add(target_off)
             .ok_or_else(|| X64CompileError::Failed("x64: export target vaddr overflow".into()))?;
@@ -1241,8 +1364,14 @@ pub fn compile_wasm_to_x64_so(wasm: &[u8], opts: &X64CompileOptions) -> Result<V
             check_dl()?;
         }
         let lro = (!asm.local_rodata.is_empty()).then_some(fn_local_rodata_offs[bi]);
-        patch_relocs(&mut text, func_text_offs[n_imports + bi], &asm.relocs, lro, &link_ctx)
-            .map_err(X64CompileError::Failed)?;
+        patch_relocs(
+            &mut text,
+            func_text_offs[n_imports + bi],
+            &asm.relocs,
+            lro,
+            &link_ctx,
+        )
+        .map_err(X64CompileError::Failed)?;
     }
     check_dl()?;
 

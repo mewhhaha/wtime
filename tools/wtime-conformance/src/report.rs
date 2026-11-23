@@ -169,10 +169,20 @@ impl Report {
             } else {
                 &self.execution_mode
             }),
-            self.register_entry_threshold.map(|value| value.to_string()).unwrap_or_else(|| "null".into()),
-            quote(if self.register_entry_threshold.is_some() { "adaptive" }
-                  else if self.execution_mode == "register" { "eager" } else { "disabled" }),
-            cfg!(any(feature = "opcode-coverage", feature = "performance-counters")),
+            self.register_entry_threshold
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".into()),
+            quote(if self.register_entry_threshold.is_some() {
+                "adaptive"
+            } else if self.execution_mode == "register" {
+                "eager"
+            } else {
+                "disabled"
+            }),
+            cfg!(any(
+                feature = "opcode-coverage",
+                feature = "performance-counters"
+            )),
             quote(suite),
             quote(hash),
             quote(revision),

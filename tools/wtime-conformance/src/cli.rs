@@ -28,7 +28,8 @@ fn entry_threshold_option(current: &mut Option<u64>, value: &str) -> Result<(), 
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("register entry threshold must be a positive u64".into());
     }
-    let threshold = value.parse::<u64>()
+    let threshold = value
+        .parse::<u64>()
         .map_err(|_| "register entry threshold must be a positive u64")?;
     if threshold == 0 {
         return Err("register entry threshold must be positive".into());
@@ -94,7 +95,9 @@ pub fn run() -> Result<(), String> {
             "--suite" => suite = Some(pair[1].as_str()),
             "--filter" => filter = Some(pair[1].as_str()),
             "--report" => report_path = Some(pair[1].as_str()),
-            "--register-entry-threshold" => entry_threshold_option(&mut register_entry_threshold, &pair[1])?,
+            "--register-entry-threshold" => {
+                entry_threshold_option(&mut register_entry_threshold, &pair[1])?
+            }
             _ => return Err(format!("unknown option {}", pair[0])),
         }
     }
@@ -111,10 +114,13 @@ pub fn run() -> Result<(), String> {
     };
     let suite = suite.ok_or("missing suite")?;
     let report_path = report_path.ok_or("missing report")?;
-    let mut report = Report::default();
-    report.execution_mode = mode.to_owned();
-    report.register_entry_threshold = register_entry_threshold;
-    Adapter::with_policy_and_threshold(features, policy, register_entry_threshold).map_err(|e| e.to_string())?;
+    let mut report = Report {
+        execution_mode: mode.to_owned(),
+        register_entry_threshold,
+        ..Default::default()
+    };
+    Adapter::with_policy_and_threshold(features, policy, register_entry_threshold)
+        .map_err(|e| e.to_string())?;
     let proc_exe = std::path::PathBuf::from(format!("/proc/{}/exe", std::process::id()));
     report.binary_sha256 = corpus::hash(&if proc_exe.exists() {
         proc_exe
@@ -141,8 +147,12 @@ pub fn run() -> Result<(), String> {
                         report.compatibility.push("Historical wg-1.0 corpus enables mutable-global imports/exports; strict mvp policy remains the default for other suites. Historical segment syntax and NaN directives are normalized before encoding. Historical segment-does-not-fit unlinkable assertions use current trapping-instantiation outcomes.".into());
                     }
                 }
-                let mut adapter =
-                    Adapter::with_policy_and_threshold(effective_features, policy, register_entry_threshold).map_err(|e| e.to_string())?;
+                let mut adapter = Adapter::with_policy_and_threshold(
+                    effective_features,
+                    policy,
+                    register_entry_threshold,
+                )
+                .map_err(|e| e.to_string())?;
                 adapter.legacy_syntax = historical;
                 let error_start = report.errors.len();
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

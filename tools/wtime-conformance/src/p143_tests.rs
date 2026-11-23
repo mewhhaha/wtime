@@ -1,5 +1,7 @@
 use super::*;
-use wtime_runtime::{ExecutionPolicy, RunOutcome, Value};
+use wtime_runtime::ExecutionPolicy;
+#[cfg(feature = "register-executor")]
+use wtime_runtime::{RunOutcome, Value};
 
 #[test]
 fn p143_threshold_option_requires_one_positive_u64() {
@@ -38,8 +40,10 @@ fn p143_non_register_threshold_is_rejected_and_default_stays_decoded() {
 
 #[test]
 fn p143_report_identifies_threshold_and_strategy() {
-    let mut report = Report::default();
-    report.execution_mode = "register".into();
+    let mut report = Report {
+        execution_mode: "register".into(),
+        ..Default::default()
+    };
     let eager = report.json("all-phase3-core", "test", "hash", "rev", "replay");
     assert!(eager.contains("\"register_entry_threshold\":null"));
     assert!(eager.contains("\"register_strategy\":\"eager\""));

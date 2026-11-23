@@ -1,6 +1,6 @@
 # Detailed contracts for high-risk tasks
 
-Use these decisions with [IMPLEMENTATION_CONTRACTS.md](IMPLEMENTATION_CONTRACTS.md). They keep implementation tasks small enough for Sol 6.1 Low. Pinned normative semantics still take precedence over an implementation choice; report a concrete conflict instead of silently changing either.
+Use these decisions with [implementation_contracts.md](implementation_contracts.md). Pinned normative semantics still take precedence over an implementation choice; report a concrete conflict instead of silently changing either.
 
 ## T045 — explicit frames
 

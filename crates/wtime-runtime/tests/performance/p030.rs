@@ -11,8 +11,10 @@ const REFERENCE_CONTROL: &[u8] =
     include_bytes!("../fixtures/performance/frames/reference_control.wasm");
 
 fn load_with(bytes: &[u8], depth: usize, policy: ExecutionPolicy) -> (Store, Instance) {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     config.limits.max_call_depth = depth;
     let engine = Engine::with_execution_policy(config, policy).unwrap();
     let module = engine.compile(bytes).unwrap();
@@ -128,8 +130,10 @@ fn p030_ordinary_and_tail_recursion_preserve_depth_contract() {
 
 #[test]
 fn p030_imported_direct_call_stays_at_host_boundary() {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     let engine = Engine::new(config).unwrap();
     let module = engine.compile(IMPORT_CONTROL).unwrap();
     let mut store = Store::new(&engine);

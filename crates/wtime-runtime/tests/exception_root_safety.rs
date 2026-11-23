@@ -19,7 +19,7 @@ fn assert_caught_reference_root(policy: ExecutionPolicy) {
         panic!("caught exception should return from the function");
     };
     assert_eq!(values.len(), 1);
-    let reference = values[0].clone();
+    let reference = values[0];
 
     // Exercise the ownership boundary before another runtime operation can
     // publish this reference as a root.

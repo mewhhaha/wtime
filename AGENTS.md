@@ -1,89 +1,32 @@
 # Agent instructions
 
-## Delegation
+## Architecture and invariants
 
-Use `gpt-6-luna` subagents for exploration and chores: read-only source
-inventories, fixture and license inventories, mechanical tooling, task-index
-maintenance, and review checks. Give each agent a fresh, focused context and
-disjoint owned paths. Do not use Luna for cross-cutting runtime semantics or
-unsafe native-code implementation.
+- The four core libraries (`wtime-types`, `wtime-decode`, `wtime-validate`,
+  `wtime-runtime`) and `wtime-cli` must remain `#![forbid(unsafe_code)]` safe
+  Rust with zero external production dependencies (`tools/checks/dependency_budget.py`).
+- Public items in all four core library crates must remain documented
+  (`#![warn(missing_docs)]`, verified with `RUSTDOCFLAGS="-D warnings" cargo doc`).
+- Experimental interpreter tiers (`compact-executor`, `register-executor`) stay
+  disabled by default and must preserve Wasm semantics, resource limits,
+  source-level fuel, and cancellation contracts.
+- `tools/wtime-aot` is a standalone opt-in AOT compiler excluded from the core
+  workspace dependency graph. Keep `--backend x64`, `--backend c`, and
+  `--backend rust` aligned on the Blot ABI 8 contract documented in
+  `docs/wtime-aot/x64-abi.md`.
 
-Keep one integrator responsible for runtime `lib.rs`, dispatch, shared frame
-and configuration definitions, Cargo features, and performance test
-registration. Integrate overlapping changes serially.
+## Verification
 
-Synthetic tooling tests must create a fresh temporary root and check that every
-resolved output path stays inside it before writing. Never seed or overwrite
-real absolute provenance paths when constructing synthetic inputs. Preserve
-executed helper sources alongside their command logs before running them.
-Disable Python bytecode writes when importing archived sources (`python3 -B`
-or `sys.dont_write_bytecode = True`) so evidence readers preserve exact archive
-membership.
-
-## Performance work
-
-The performance plan lives at `../tasks/performance`. Read its `EXECUTION.md`
-and the task's contracts before implementation. Follow manifest dependencies,
-archive the original baseline before changing runtime sources, and preserve
-historical benchmark evidence. Tasks need executed checks and real evidence;
-do not mark planned work complete or turn semantic failures into rejected
-experiments. Record inconclusive or rejected performance results honestly.
-
-Use `tools/verify.py` and task-owned declarative contracts for new verification
-work; read `tools/verification/README.md`. Preflight before execution, keep
-freeze, correctness/build checks, measurement, analysis, and finalization
-separate, and group tests by their exact feature configuration. Compute paired
-statistics and the gate decision once. Revalidate immutable receipts when
-packaging changes; rerun only phases whose consumed inputs changed. Preserve
-all task-required semantic cases. Publish status through the shared publisher
-after reviewing its concrete completion record.
-
-Run quick Python and protocol checks before expensive builds in a new contract.
-When a selection requires named Cargo tests, make `cargo test` a direct phase
-command so the semantic receipt can see its results. A helper may first prepare
-an isolated Cargo manifest; keep the test command explicit. Nested Cargo output
-inside a Python helper does not satisfy the semantic receipt's named-test set.
-
-Iterate with `tools/verify.py dev` and task-owned `development.groups`; use
-locked incremental tests/checks and exact feature configurations. Development
-receipts cannot satisfy full phases or publish completion. Run `tools/verify.py
-close` when ready to execute/reuse the full contract and finalize. Include the
-transitive compilation sources and fixture inputs in each group's identities.
-The repository's Python groups are in `docs/verification/tooling-development.json`.
-Use `tools/verify.py perf` to check verification latency and work budgets; these
-synthetic measurements are separate from Wasm performance evidence.
-
-Follow `docs/verification/fast-performance.md` for the adopted iteration
-schedule. Freeze task-owned candidate selections against the immediate
-predecessor before runtime edits; retain every semantic case and protected
-control. Use complete portfolios and P001 totals at milestones. Analysis-only
-edits must not retime unchanged workloads. Reuse only source-current immutable
-receipts; preparation aliases share raw pairs and uncertainty, never extra
-independent samples. Development/smoke or synthetic evidence cannot promote.
-
-Keep the entire verification contract unchanged while its `run` or `close`
-operation is active, including declarations for later analysis phases. Draft
-contract changes separately and apply them after the operation finishes. If
-an outer contract-file guard fails after a collector succeeds, preserve the
-failed attempt and its raw reports. Reuse those reports only through an explicit
-source-current validation step that records the original failure; do not retime
-unchanged workloads or rewrite the failed receipt as a pass.
-
-The default core must remain safe Rust with zero external dependencies.
-Experimental tiers stay disabled by default and must preserve Wasm semantics,
-resource limits, source-level fuel, and cancellation contracts.
-
-Validate fixtures before treating their results as runtime evidence. Use
-different source, destination, and page contents for copy and cancellation
-checks so a missing operation cannot pass as an unchanged memory image.
-Count the implicit function-end instruction in source-fuel expectations.
-Retain failed fixture drafts and distinguish baseline checks from tests of an
-integrated optimization.
-
-Activate Rust with `. /workspace/.setup/rust-env.sh`. Run focused checks after
-bounded patches, broader suites at integration gates, and both task-plan
-validators when changing task status or dependencies.
-
-Restore archived source contents with fresh modification times, or explicitly
-refresh timestamps before invoking Cargo. Old timestamps can reuse candidate
-artifacts after rollback; diagnostic path checks must prove the restored build.
+- Pin Rust `1.99.0` per `rust-toolchain.toml`.
+- Keep changes formatted (`cargo fmt --all -- --check`) and lint-clean
+  (`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
+  plus `tools/wtime-aot` and `tools/wtime-aot/rt`).
+- Run `WTIME_AOT_REQUIRE_NATIVE_TESTS=1 cargo test --locked --manifest-path tools/wtime-aot/Cargo.toml`
+  when modifying `tools/wtime-aot` so native oracle/ABI/fault tests cannot
+  silently skip.
+- Run Python verification scripts with `python3 -B` to avoid writing `__pycache__`
+  bytecode into the tree.
+- Validate release-manifest evidence against real executed runs with
+  `python3 -B tools/checks/release_audit.py` and
+  `python3 -B tools/checks/opcode_coverage.py --require-complete`. Never commit
+  stale or fabricated verification reports.

@@ -165,15 +165,32 @@ fn t035_foreign_store_and_argument_types_rejected() {
 /// copied past the memory's length).
 #[test]
 fn grow_then_atomic_access_keeps_contents() {
-    let e = Engine::new(Config { features: FeatureSet::all_phase3_core(), ..Config::default() }).unwrap();
-    let m = e.compile(include_bytes!("fixtures/grow-then-atomic.wasm")).unwrap();
+    let e = Engine::new(Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Config::default()
+    })
+    .unwrap();
+    let m = e
+        .compile(include_bytes!("fixtures/grow-then-atomic.wasm"))
+        .unwrap();
     let mut s = Store::new(&e);
     let i = Linker::new(&e).instantiate(&mut s, &m).unwrap();
-    let External::Memory(memory) = i.export(&s, "m").unwrap() else { panic!() };
+    let External::Memory(memory) = i.export(&s, "m").unwrap() else {
+        panic!()
+    };
     s.write_memory(memory, 0, &[1, 2, 3, 4]).unwrap();
-    assert_eq!(call(&mut s, i, "grow", &[Value::I32(1)]).unwrap(), [Value::I32(4)]);
-    assert_eq!(call(&mut s, i, "load", &[Value::I32(0)]).unwrap(), [Value::I32(0x04030201)]);
-    assert_eq!(call(&mut s, i, "aload", &[Value::I32(0)]).unwrap(), [Value::I32(0x04030201)]);
+    assert_eq!(
+        call(&mut s, i, "grow", &[Value::I32(1)]).unwrap(),
+        [Value::I32(4)]
+    );
+    assert_eq!(
+        call(&mut s, i, "load", &[Value::I32(0)]).unwrap(),
+        [Value::I32(0x04030201)]
+    );
+    assert_eq!(
+        call(&mut s, i, "aload", &[Value::I32(0)]).unwrap(),
+        [Value::I32(0x04030201)]
+    );
     assert_eq!(s.read_memory(memory, 0, 5).unwrap(), [1, 2, 3, 4, 0]);
 }
 

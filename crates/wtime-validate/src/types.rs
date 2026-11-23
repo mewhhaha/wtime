@@ -162,9 +162,10 @@ fn equivalent(a: TypeIdx, b: TypeIdx, ts: &TypeEnvironment) -> bool {
         if !ts.spend() || work > ts.limit {
             return false;
         }
-        let (Some(&(start_a, len_a, pos_a)), Some(&(start_b, len_b, pos_b))) =
-            (ts.data.groups.get(a.0 as usize), ts.data.groups.get(b.0 as usize))
-        else {
+        let (Some(&(start_a, len_a, pos_a)), Some(&(start_b, len_b, pos_b))) = (
+            ts.data.groups.get(a.0 as usize),
+            ts.data.groups.get(b.0 as usize),
+        ) else {
             return false;
         };
         if len_a != len_b || pos_a != pos_b {
@@ -217,7 +218,12 @@ fn equivalent(a: TypeIdx, b: TypeIdx, ts: &TypeEnvironment) -> bool {
                 if ts.exhausted() || work > ts.limit {
                     return false;
                 }
-                for (&va, &vb) in a.params.iter().zip(&b.params).chain(a.results.iter().zip(&b.results)) {
+                for (&va, &vb) in a
+                    .params
+                    .iter()
+                    .zip(&b.params)
+                    .chain(a.results.iter().zip(&b.results))
+                {
                     if !equal_value(va, vb, start_a, start_b, len_a, &mut todo) {
                         return false;
                     }

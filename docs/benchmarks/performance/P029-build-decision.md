@@ -1,9 +1,0 @@
-# P029 predeclared promotion and build rules
-
-This is a proposal, not executed evidence. Use the unchanged 85-row scalar selection and the accompanying P029-contract.json. The primary eight rows are direct and tail guest calls at n=1,32,1024,10000. The remaining 77 rows are protected, including n=0/17, indirect calls, recursive calls, changing tables, typed call_ref, host calls, and scalar arithmetic/control cases. Deep captured continuation metadata is correctness and physical accounting coverage; the scalar selection does not time deep capture. Do not infer its speed from ordinary recursion.
-
-Require supported warm primary-family gains in both independent runs and all existing per-workload protected and cold-stage limits, with the existing confidence intervals. Keep instrumentation disabled in timings. The primary selection and thresholds cannot change after observing results.
-
-Before editing production, archive the immediate predecessor as P029-before and retain the original P001 archive. Collect exactly one quiet predecessor and one quiet candidate build sample using the same build-budget script/toolchain/settings. Every gates.RELATIVE_LIMITS field must have candidate/predecessor ratio <=1.25, alongside hard budgets, stable sources and zero default external dependencies. Report runtime leaf rebuild separately from the six gate fields. No replacement of a failed sample or threshold relaxation.
-
-Retain source/binary/fixture/contract identities, actual focused/default/diagnostic tests, both complete paired runs and build samples. Revert a rejected default optimization using fresh modification times, then execute restored checks. Sharing immutable metadata needs independent lifetime and signature-allocation/path assertions; decoded/reference agreement alone does not prove cloning stopped. Completed command/status claims require actual execution.

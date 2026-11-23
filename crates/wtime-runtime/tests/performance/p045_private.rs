@@ -70,7 +70,7 @@ fn p045_aggregate_whole_and_prefix_certificates_reject_corruption() {
 
 #[test]
 fn p045_lowering_and_verifier_faults_discard_partial_publication() {
-    let bytes = include_bytes!("../../../../tools/wtime-bench/fixtures/integration_p113/integration_numeric_control.wasm");
+    let bytes = include_bytes!("../fixtures/performance/bench_wasm/integration_p113/integration_numeric_control.wasm");
     for fault in [verify::Fault::LowerAllocation, verify::Fault::LowerWork,
         verify::Fault::VerifyAllocation, verify::Fault::VerifyWork] {
         verify::inject(fault);
@@ -87,12 +87,12 @@ fn p045_lowering_and_verifier_faults_discard_partial_publication() {
 
 #[test]
 fn p045_all_declines_and_feature_disabled_input_preserve_validation() {
-    let (_, module) = p045_module(include_bytes!("../../../../tools/wtime-bench/fixtures/integration_p113/integration_ref_entry_control.wasm"));
+    let (_, module) = p045_module(include_bytes!("../fixtures/performance/bench_wasm/integration_p113/integration_ref_entry_control.wasm"));
     let source_count = Arc::strong_count(&module.data.inner.decoded().bytes);
     assert!(PreparedModule::prepare(&module).is_none());
     assert_eq!(Arc::strong_count(&module.data.inner.decoded().bytes), source_count);
     let engine = Engine::with_execution_policy(Config { features: FeatureSet::mvp(), ..Config::default() }, ExecutionPolicy::Compact).unwrap();
-    assert!(engine.compile(include_bytes!("../../../../tools/wtime-bench/fixtures/integration_p113/integration_gc_prefix.wasm")).is_err());
+    assert!(engine.compile(include_bytes!("../fixtures/performance/bench_wasm/integration_p113/integration_gc_prefix.wasm")).is_err());
     assert!(engine.compile(b"\0asm\x01\0\0\0\x0a\x01\xff").is_err());
     let (_, module) = p045_module(include_bytes!("../fixtures/performance/compact/long_metadata.wasm"));
     assert!(module.data.compact.is_none());

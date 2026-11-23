@@ -49,9 +49,10 @@ fn main() {
     let mut target = codegen::Target::GooseBin;
     let mut backend = build::Backend::Rust;
     let mut c_opt = cgen::COpt::Auto;
+    let mut c_opt_explicit = false;
     let mut target_cpu = String::from("native");
     let mut jobs: Option<u32> = None;
-    let mut time_limit: Option<Duration> = None;
+    let mut time_limit = Duration::from_secs(3600);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => out = args.next().map(PathBuf::from),
@@ -70,7 +71,10 @@ fn main() {
                 }
             },
             "--c-opt" => match args.next().as_deref().map(cgen::COpt::parse) {
-                Some(Ok(v)) => c_opt = v,
+                Some(Ok(v)) => {
+                    c_opt = v;
+                    c_opt_explicit = true;
+                }
                 Some(Err(e)) => {
                     eprintln!("{USAGE}\n{e}");
                     exit(2);
@@ -84,7 +88,9 @@ fn main() {
                 Some(cpu)
                     if !cpu.is_empty()
                         && !cpu.starts_with('-')
-                        && cpu.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') =>
+                        && cpu.chars().all(|c| {
+                            c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
+                        }) =>
                 {
                     target_cpu = cpu;
                 }
@@ -107,7 +113,7 @@ fn main() {
                     .filter(|s| *s > 0.0)
                     .and_then(|s| Duration::try_from_secs_f64(s).ok());
                 match parsed {
-                    Some(d) => time_limit = Some(d),
+                    Some(d) => time_limit = d,
                     None => {
                         eprintln!("{USAGE}\n--time-limit takes a positive number of seconds");
                         exit(2);
@@ -129,12 +135,20 @@ fn main() {
         eprintln!("{USAGE}");
         exit(2)
     };
+    if c_opt_explicit && backend != build::Backend::C {
+        eprintln!("wtime-aot: --c-opt is only supported with --backend c");
+        exit(2);
+    }
+    if flat64 && backend != build::Backend::Rust {
+        eprintln!("wtime-aot: --flat-memory64 is only supported with --backend rust");
+        exit(2);
+    }
+    let deadline = start_time + time_limit;
     if backend == build::Backend::X64 {
         if target != codegen::Target::BlotCdylib {
             eprintln!("wtime-aot: --backend x64 currently requires --blot-cdylib");
             exit(2);
         }
-        let deadline = time_limit.map(|d| start_time + d);
         let (_profile, isa) = match x64::resolve_x64_isa(&target_cpu) {
             Ok(v) => v,
             Err(error) => {
@@ -142,7 +156,7 @@ fn main() {
                 exit(1);
             }
         };
-        let bytes = match build::read_bounded_wasm_for_x64(&module) {
+        let bytes = match build::read_bounded_wasm_for_x64(&module, Some(deadline)) {
             Ok(bytes) => bytes,
             Err(build::BuildError::AdmissionRejected(error)) => {
                 eprintln!("wtime-aot: {error}");
@@ -156,7 +170,7 @@ fn main() {
         let opts = x64::X64CompileOptions {
             isa,
             jobs: jobs.unwrap_or(0) as usize,
-            deadline,
+            deadline: Some(deadline),
             ..Default::default()
         };
         let elf_bytes = match x64::compile_wasm_to_x64_so(&bytes, &opts) {
@@ -170,9 +184,7 @@ fn main() {
                 exit(1);
             }
         };
-        if let Some(dl) = deadline
-            && Instant::now() >= dl
-        {
+        if Instant::now() >= deadline {
             eprintln!("wtime-aot: compilation time limit exceeded");
             exit(1);
         }
@@ -190,27 +202,33 @@ fn main() {
         }
         return;
     }
-    let bytes = match build::read_bounded_wasm(&module, build::MAX_WASM_BYTES_C_RUST) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("{error}");
-            exit(1)
-        }
-    };
+    let bytes =
+        match build::read_bounded_wasm(&module, build::MAX_WASM_BYTES_C_RUST, Some(deadline)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("{error}");
+                exit(1)
+            }
+        };
     if backend == build::Backend::C {
         if target != codegen::Target::BlotCdylib {
             eprintln!("wtime-aot: --backend c currently requires --blot-cdylib");
             exit(2);
         }
-        if let Err(error) = cgen::generate_c(&bytes, &out, c_opt) {
+        if let Err(error) = cgen::generate_c_with_deadline(&bytes, &out, c_opt, Some(deadline)) {
             eprintln!("wtime-aot: {error}");
             exit(1);
         }
         return;
     }
     let name = name.unwrap_or_else(|| {
-        let stem = module.file_stem().map_or("module".into(), |s| s.to_string_lossy().into_owned());
-        format!("aot-{}", stem.replace(|c: char| !c.is_ascii_alphanumeric(), "-"))
+        let stem = module
+            .file_stem()
+            .map_or("module".into(), |s| s.to_string_lossy().into_owned());
+        format!(
+            "aot-{}",
+            stem.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+        )
     });
     let rt = rt.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt"));
     // The generated crates sit at different depths: they need the runtime's
@@ -223,7 +241,16 @@ fn main() {
         }
     };
     let module_path = module_path.unwrap_or_else(|| module.to_string_lossy().into_owned());
-    if let Err(error) = codegen::generate_target(&bytes, &out, &name, &rt, &module_path, flat64, target) {
+    if let Err(error) = codegen::generate_target_with_deadline(
+        &bytes,
+        &out,
+        &name,
+        &rt,
+        &module_path,
+        flat64,
+        target,
+        Some(deadline),
+    ) {
         eprintln!("wtime-aot: {error}");
         exit(1)
     }

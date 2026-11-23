@@ -1,10 +1,34 @@
 //! Run under a host address-space limit to test recoverable allocator failure.
 #![forbid(unsafe_code)]
-use wtime_runtime::{Config, Engine, Store};
+use wtime_runtime::{Config, Engine, Linker, Store};
 use wtime_types::{ErrorKind, FeatureSet, IndexType, Limits, MemoryType};
 
+fn guest_table_module(min_elements: u32) -> Vec<u8> {
+    fn leb(out: &mut Vec<u8>, mut n: u32) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    let mut payload = vec![1, 0x70, 0x00]; // 1 funcref table, min only
+    leb(&mut payload, min_elements);
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+    wasm.push(4); // Table section
+    leb(&mut wasm, payload.len() as u32);
+    wasm.extend_from_slice(&payload);
+    wasm
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = Config { features: FeatureSet::all_phase3_core(), ..Config::default() };
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Config::default()
+    };
     // Two objects: the failed constructor must not consume one of them.
     config.limits.max_store_objects = 2;
     config.limits.max_memory_pages = 1 << 30;
@@ -58,12 +82,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(page_error.message, "memory allocation failed");
     assert!(written > 0, "no page could be written");
     for page in [0, written / 2, written - 1] {
-        assert_eq!(store.read_memory(large, page * 65536, 1)?, [(page % 251) as u8 + 1]);
+        assert_eq!(
+            store.read_memory(large, page * 65536, 1)?,
+            [(page % 251) as u8 + 1]
+        );
     }
     assert_eq!(store.read_memory(large, written * 65536, 1)?, [0]);
 
+    // 3. Guest-defined table instantiation. A 16M-element funcref table needs
+    // 512 MiB (32 bytes/Value), exceeding the 128 MiB RLIMIT_AS; instantiation
+    // must fail recoverably and leave the store usable for a small module.
+    let mut tcfg = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Config::default()
+    };
+    tcfg.limits.max_table_elements = 1 << 24;
+    tcfg.limits.max_store_table_elements = 1 << 24;
+    let tengine = Engine::new(tcfg)?;
+    let mut tstore = Store::new(&tengine);
+    let huge_table_mod = tengine.compile(&guest_table_module(1 << 24))?;
+    let table_err = Linker::new(&tengine)
+        .instantiate(&mut tstore, &huge_table_mod)
+        .expect_err("16M-element table must fail under 128 MiB RLIMIT_AS");
+    assert_eq!(table_err.kind, ErrorKind::ResourceLimit);
+    let small_table_mod = tengine.compile(&guest_table_module(4))?;
+    Linker::new(&tengine).instantiate(&mut tstore, &small_table_mod)?;
+
     println!(
-        "{{\"allocator_failed\":true,\"page_allocation_failed\":true,\"pages_written\":{written},\"recovery_passed\":true,\"executed\":1}}"
+        "{{\"allocator_failed\":true,\"page_allocation_failed\":true,\"guest_table_allocation_failed\":true,\"pages_written\":{written},\"recovery_passed\":true,\"executed\":1}}"
     );
     Ok(())
 }

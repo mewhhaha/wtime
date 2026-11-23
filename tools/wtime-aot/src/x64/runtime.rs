@@ -9,13 +9,14 @@ use super::lower::TargetIsa;
 use super::module::{X64ConstVal, X64Module};
 use super::{
     CtxLayout, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES, GUEST_STACK_TOTAL_BYTES,
-    GUEST_STACK_USABLE_BYTES, HELPER_GROW_CORE, HELPER_HOST_CALL, HELPER_INITIALIZE, HELPER_MEM_COPY,
-    HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_READ_GLOBAL, HELPER_TRUNC_BASE, MAX_ACTIVE_REENTRY_DEPTH,
-    OFF_ACTIVE_DEPTH, OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
-    OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE,
-    OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, RodataConsts, TRAP_ALLOC_FAILED,
-    TRAP_CALL_STACK, TRAP_HOST, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE,
-    TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNSUPPORTED_ISA,
+    GUEST_STACK_USABLE_BYTES, HELPER_GROW_CORE, HELPER_HOST_CALL, HELPER_INITIALIZE,
+    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_READ_GLOBAL, HELPER_TRUNC_BASE,
+    MAX_ACTIVE_REENTRY_DEPTH, OFF_ACTIVE_DEPTH, OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS,
+    OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP,
+    OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES,
+    OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, RodataConsts, TRAP_ALLOC_FAILED, TRAP_CALL_STACK,
+    TRAP_HOST, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB,
+    TRAP_TABLE_OOB, TRAP_UNSUPPORTED_ISA,
 };
 
 const SYS_MMAP: u32 = 9;
@@ -95,7 +96,9 @@ pub enum CpuidSource {
 pub enum RdsspSource {
     Real,
     #[cfg(test)]
-    Mock { ssp: u64 },
+    Mock {
+        ssp: u64,
+    },
 }
 
 /// Fault-injection hooks for per-site `mprotect` failure verification in tests.
@@ -211,7 +214,11 @@ fn emit_rdsspq(asm: &mut Asm, dst: Gp, source: RdsspSource) {
     }
 }
 
-fn emit_mprotect_syscall(asm: &mut Asm, hooks: RuntimeTestHooks, #[allow(unused)] site: MprotectSiteMarker) {
+fn emit_mprotect_syscall(
+    asm: &mut Asm,
+    hooks: RuntimeTestHooks,
+    #[allow(unused)] site: MprotectSiteMarker,
+) {
     #[cfg(test)]
     if let SyscallFault::FailMprotectAt(target) = hooks.syscall_fault
         && target == site.0
@@ -225,29 +232,38 @@ fn emit_mprotect_syscall(asm: &mut Asm, hooks: RuntimeTestHooks, #[allow(unused)
 }
 
 #[derive(Clone, Copy)]
-struct MprotectSiteMarker(
-    #[cfg(test)] MprotectSite,
-    #[cfg(not(test))] (),
-);
+struct MprotectSiteMarker(#[cfg(test)] MprotectSite, #[cfg(not(test))] ());
 
 impl MprotectSiteMarker {
     fn guest_stack() -> Self {
         #[cfg(test)]
-        { Self(MprotectSite::GuestStack) }
+        {
+            Self(MprotectSite::GuestStack)
+        }
         #[cfg(not(test))]
-        { Self(()) }
+        {
+            Self(())
+        }
     }
     fn initial_memory() -> Self {
         #[cfg(test)]
-        { Self(MprotectSite::InitialMemory) }
+        {
+            Self(MprotectSite::InitialMemory)
+        }
         #[cfg(not(test))]
-        { Self(()) }
+        {
+            Self(())
+        }
     }
     fn grow_memory() -> Self {
         #[cfg(test)]
-        { Self(MprotectSite::GrowMemory) }
+        {
+            Self(MprotectSite::GrowMemory)
+        }
         #[cfg(not(test))]
-        { Self(()) }
+        {
+            Self(())
+        }
     }
 }
 
@@ -792,7 +808,11 @@ pub fn emit_helper_mem_fill(fixed_mem: bool) -> Result<Asm, String> {
 /// Runs on guest stack (`rsp % 16 == 8`), switches back to `ctx->host_rsp`, restores host `MXCSR`,
 /// invokes `ctx->host_fn(user_ctx, &ac, idx, tok, arg_bits, &res)`, switches back to guest stack,
 /// reloads Wasm `MXCSR`, `R13 = mem_len`, and `R12 = g_pinned`, returning `Rax = res` & `R11d = 0 | TRAP_HOST`.
-pub fn emit_helper_host_call(module: &X64Module, layout: &CtxLayout, ro: &RodataConsts) -> Result<Asm, String> {
+pub fn emit_helper_host_call(
+    module: &X64Module,
+    layout: &CtxLayout,
+    ro: &RodataConsts,
+) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(256);
     let lbl_null_host = a.new_label();
     let lbl_fail_host = a.new_label();
@@ -808,9 +828,16 @@ pub fn emit_helper_host_call(module: &X64Module, layout: &CtxLayout, ro: &Rodata
     //   [rsp + 104]   = prev_host_rsp
     //   [rsp + 112]   = pad
     a.sub_ri(true, Gp::Rsp, 120);
-    for (i, xmm) in [Xmm::Xmm8, Xmm::Xmm9, Xmm::Xmm10, Xmm::Xmm11, Xmm::Xmm12, Xmm::Xmm13]
-        .into_iter()
-        .enumerate()
+    for (i, xmm) in [
+        Xmm::Xmm8,
+        Xmm::Xmm9,
+        Xmm::Xmm10,
+        Xmm::Xmm11,
+        Xmm::Xmm12,
+        Xmm::Xmm13,
+    ]
+    .into_iter()
+    .enumerate()
     {
         a.movdqu_mx(Mem::base_disp(Gp::Rsp, (i as i32) * 16), xmm);
     }
@@ -864,9 +891,16 @@ pub fn emit_helper_host_call(module: &X64Module, layout: &CtxLayout, ro: &Rodata
     emit_pinned_load(&mut a, module, layout);
 
     // Restore saved callee-saved Xmm8..Xmm13, nesting pointers, and pop 120-byte link frame.
-    for (i, xmm) in [Xmm::Xmm8, Xmm::Xmm9, Xmm::Xmm10, Xmm::Xmm11, Xmm::Xmm12, Xmm::Xmm13]
-        .into_iter()
-        .enumerate()
+    for (i, xmm) in [
+        Xmm::Xmm8,
+        Xmm::Xmm9,
+        Xmm::Xmm10,
+        Xmm::Xmm11,
+        Xmm::Xmm12,
+        Xmm::Xmm13,
+    ]
+    .into_iter()
+    .enumerate()
     {
         a.movdqu_xm(xmm, Mem::base_disp(Gp::Rsp, (i as i32) * 16));
     }
@@ -894,7 +928,9 @@ pub fn emit_helper_host_call(module: &X64Module, layout: &CtxLayout, ro: &Rodata
 /// Emits internal Wasm ABI trampoline `wt_import{k}` for import `k`.
 pub fn emit_import_trampoline(module: &X64Module, k: usize) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(64);
-    let ty = module.func_type(k).ok_or("import type index out of range")?;
+    let ty = module
+        .func_type(k)
+        .ok_or("import type index out of range")?;
 
     // Marshal internal Wasm ABI args into (Edi = k, Rsi = tok, Rdx = arg_bits).
     match ty.params.as_slice() {
@@ -933,7 +969,10 @@ pub fn emit_import_trampoline(module: &X64Module, k: usize) -> Result<Asm, Strin
         other => return Err(format!("x64: unsupported import {k} params {other:?}")),
     }
 
-    a.mov_ri32(Gp::Rdi, u32::try_from(k).map_err(|_| "import index overflow")?);
+    a.mov_ri32(
+        Gp::Rdi,
+        u32::try_from(k).map_err(|_| "import index overflow")?,
+    );
     a.sub_ri(true, Gp::Rsp, 8);
     a.call_reloc(RelocTarget::Helper(HELPER_HOST_CALL));
 
@@ -1476,7 +1515,11 @@ fn emit_export_new(
     a.mov_rr(true, Gp::R15, Gp::Rax);
 
     a.mov_ri64(Gp::Rax, layout.total_bytes as u64);
-    a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HANDLE_ALLOC_BYTES), Gp::Rax);
+    a.mov_mr(
+        true,
+        Mem::base_disp(Gp::R15, OFF_HANDLE_ALLOC_BYTES),
+        Gp::Rax,
+    );
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 8));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_USER_CTX), Gp::Rax);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 16));
@@ -1499,19 +1542,30 @@ fn emit_export_new(
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_BASE), Gp::Rbx);
 
     // mprotect(stack_base + 64 KiB, 8 MiB, PROT_RW)
-    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, GUEST_STACK_GUARD_BYTES as i32));
+    a.lea(
+        true,
+        Gp::Rdi,
+        Mem::base_disp(Gp::Rbx, GUEST_STACK_GUARD_BYTES as i32),
+    );
     a.mov_ri64(Gp::Rsi, GUEST_STACK_USABLE_BYTES as u64);
     a.mov_ri32(Gp::Rdx, PROT_RW);
     emit_mprotect_syscall(&mut a, hooks, MprotectSiteMarker::guest_stack());
     a.cmp_ri(true, Gp::Rax, -4095);
     a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
 
-    a.lea(true, Gp::Rax, Mem::base_disp(Gp::Rbx, GUEST_STACK_TOTAL_BYTES as i32));
+    a.lea(
+        true,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rbx, GUEST_STACK_TOTAL_BYTES as i32),
+    );
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_GUEST_STACK_TOP), Gp::Rax);
     a.lea(
         true,
         Gp::Rax,
-        Mem::base_disp(Gp::Rbx, (GUEST_STACK_GUARD_BYTES + GUEST_STACK_FLOOR_HEADROOM) as i32),
+        Mem::base_disp(
+            Gp::Rbx,
+            (GUEST_STACK_GUARD_BYTES + GUEST_STACK_FLOOR_HEADROOM) as i32,
+        ),
     );
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_STACK_FLOOR), Gp::Rax);
 
@@ -1541,7 +1595,11 @@ fn emit_export_new(
 
         a.mov_rr(true, Gp::R14, Gp::Rax);
         a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_BASE), Gp::R14);
-        a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES), Gp::Rbx);
+        a.mov_mr(
+            true,
+            Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+            Gp::Rbx,
+        );
 
         if mem_min > 0 {
             a.mov_ri64(Gp::R13, mem_min << 16);
@@ -1620,7 +1678,11 @@ fn emit_export_new(
     a.syscall();
     a.bind(lbl_no_stack);
 
-    a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::Rsi,
+        Mem::base_disp(Gp::R15, OFF_MEM_RESERVE_BYTES),
+    );
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_no_mem);
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_MEM_BASE));
@@ -1630,7 +1692,11 @@ fn emit_export_new(
 
     // Load handle_alloc_bytes BEFORE final munmap(ctx) so Ctx is never read after unmapping!
     a.mov_rr(true, Gp::Rdi, Gp::R15);
-    a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::R15, OFF_HANDLE_ALLOC_BYTES));
+    a.mov_rm(
+        true,
+        Gp::Rsi,
+        Mem::base_disp(Gp::R15, OFF_HANDLE_ALLOC_BYTES),
+    );
     a.mov_ri32(Gp::Rax, SYS_MUNMAP);
     a.syscall();
 
@@ -1679,7 +1745,11 @@ fn emit_export_drop() -> Result<Asm, String> {
     a.syscall();
     a.bind(lbl_no_stack);
 
-    a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rbx, OFF_MEM_RESERVE_BYTES));
+    a.mov_rm(
+        true,
+        Gp::Rsi,
+        Mem::base_disp(Gp::Rbx, OFF_MEM_RESERVE_BYTES),
+    );
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_no_mem);
     a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, OFF_MEM_BASE));
@@ -1688,7 +1758,11 @@ fn emit_export_drop() -> Result<Asm, String> {
     a.bind(lbl_no_mem);
 
     a.mov_rr(true, Gp::Rdi, Gp::Rbx);
-    a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rbx, OFF_HANDLE_ALLOC_BYTES));
+    a.mov_rm(
+        true,
+        Gp::Rsi,
+        Mem::base_disp(Gp::Rbx, OFF_HANDLE_ALLOC_BYTES),
+    );
     a.mov_ri32(Gp::Rax, SYS_MUNMAP);
     a.syscall();
 
@@ -2147,12 +2221,14 @@ fn emit_export_call_fixed(
 }
 
 fn emit_export_mem_data() -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(48);
+    let mut a = Asm::with_capacity(64);
+    let lbl_null = a.new_label();
+    let lbl_null_s1 = a.new_label();
     let lbl_done = a.new_label();
     let lbl_s1 = a.new_label();
 
     a.test_rr(true, Gp::Rdi, Gp::Rdi);
-    a.jcc(Cond::E, lbl_done);
+    a.jcc(Cond::E, lbl_null);
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_s1);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_MEM_BASE));
@@ -2162,6 +2238,18 @@ fn emit_export_mem_data() -> Result<Asm, String> {
     a.jcc(Cond::E, lbl_done);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rdi, OFF_MEM_LEN));
     a.mov_mr(true, Mem::base(Gp::Rdx), Gp::Rax);
+    a.jmp(lbl_done);
+
+    a.bind(lbl_null);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.test_rr(true, Gp::Rsi, Gp::Rsi);
+    a.jcc(Cond::E, lbl_null_s1);
+    a.mov_mr(true, Mem::base(Gp::Rsi), Gp::Rax);
+    a.bind(lbl_null_s1);
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_done);
+    a.mov_mr(true, Mem::base(Gp::Rdx), Gp::Rax);
+
     a.bind(lbl_done);
     a.ret();
 
@@ -2305,15 +2393,17 @@ fn emit_export_set_global(tables: &RuntimeTables) -> Result<Asm, String> {
 }
 
 fn emit_export_active_mem_data() -> Result<Asm, String> {
-    let mut a = Asm::with_capacity(64);
+    let mut a = Asm::with_capacity(80);
+    let lbl_null = a.new_label();
+    let lbl_null_s1 = a.new_label();
     let lbl_done = a.new_label();
     let lbl_s1 = a.new_label();
 
     a.test_rr(true, Gp::Rdi, Gp::Rdi);
-    a.jcc(Cond::E, lbl_done);
+    a.jcc(Cond::E, lbl_null);
     a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rdi, 0)); // ac->ctx
     a.test_rr(true, Gp::Rcx, Gp::Rcx);
-    a.jcc(Cond::E, lbl_done);
+    a.jcc(Cond::E, lbl_null);
 
     a.test_rr(true, Gp::Rsi, Gp::Rsi);
     a.jcc(Cond::E, lbl_s1);
@@ -2324,6 +2414,17 @@ fn emit_export_active_mem_data() -> Result<Asm, String> {
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
     a.jcc(Cond::E, lbl_done);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rcx, OFF_MEM_LEN));
+    a.mov_mr(true, Mem::base(Gp::Rdx), Gp::Rax);
+    a.jmp(lbl_done);
+
+    a.bind(lbl_null);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.test_rr(true, Gp::Rsi, Gp::Rsi);
+    a.jcc(Cond::E, lbl_null_s1);
+    a.mov_mr(true, Mem::base(Gp::Rsi), Gp::Rax);
+    a.bind(lbl_null_s1);
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_done);
     a.mov_mr(true, Mem::base(Gp::Rdx), Gp::Rax);
 
     a.bind(lbl_done);
@@ -2591,4 +2692,3 @@ pub fn emit_all_helpers(
     debug_assert_eq!(helpers.len(), super::NUM_HELPERS);
     Ok(helpers)
 }
-

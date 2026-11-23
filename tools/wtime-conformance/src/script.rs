@@ -914,8 +914,8 @@ mod p121_counter_tests {
 
     #[test]
     fn p121_repeated_runs_on_one_adapter_merge_only_new_deltas() {
-        let mut adapter = Adapter::with_policy(FeatureSet::default(), ExecutionPolicy::Compact)
-            .unwrap();
+        let mut adapter =
+            Adapter::with_policy(FeatureSet::default(), ExecutionPolicy::Compact).unwrap();
         let source = "(module (func (export \"f\") (result i32) i32.const 7)) \
                       (assert_return (invoke \"f\") (i32.const 7))";
 

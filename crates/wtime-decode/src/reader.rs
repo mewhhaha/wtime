@@ -1,5 +1,7 @@
 use wtime_types::{Error, ErrorKind, FeatureSet};
+/// Convenience `Result` alias for binary reading operations.
 pub type Result<T> = std::result::Result<T, Error>;
+/// Cursor over a WebAssembly byte slice that tracks absolute module offsets and active features.
 #[derive(Clone)]
 pub struct Reader<'a> {
     bytes: &'a [u8],
@@ -9,6 +11,7 @@ pub struct Reader<'a> {
     features: FeatureSet,
 }
 impl<'a> Reader<'a> {
+    /// Creates a new reader starting at offset 0 with all Phase 3 core features enabled.
     pub fn new(bytes: &'a [u8]) -> Self {
         Self {
             bytes,
@@ -18,6 +21,7 @@ impl<'a> Reader<'a> {
             features: FeatureSet::all_phase3_core(),
         }
     }
+    /// Configures the feature policy (including `memory64` offset width) used while decoding.
     pub fn with_features(mut self, features: FeatureSet) -> Self {
         self.memory64 = features.memory64;
         self.features = features;
@@ -36,6 +40,7 @@ impl<'a> Reader<'a> {
             )
         }
     }
+    /// Overrides whether memory offsets and limits accept 64-bit LEB128 integers.
     pub fn with_memory64(mut self, enabled: bool) -> Self {
         self.memory64 = enabled;
         self
@@ -43,15 +48,19 @@ impl<'a> Reader<'a> {
     pub(crate) fn memory_offset(&mut self) -> Result<u64> {
         self.unsigned(if self.memory64 { 64 } else { 32 })
     }
+    /// Returns the current absolute byte offset within the outer module buffer.
     pub fn offset(&self) -> usize {
         self.base + self.pos
     }
+    /// Returns the number of unread bytes remaining in this reader's slice.
     pub fn remaining(&self) -> usize {
         self.bytes.len() - self.pos
     }
+    /// Constructs a [`ErrorKind::Decode`] error annotated with the reader's current absolute offset.
     pub fn error(&self, msg: &str) -> Error {
         Error::new(ErrorKind::Decode, msg).at(self.offset())
     }
+    /// Reads and consumes a single byte.
     pub fn byte(&mut self) -> Result<u8> {
         let b = *self
             .bytes
@@ -60,12 +69,14 @@ impl<'a> Reader<'a> {
         self.pos += 1;
         Ok(b)
     }
+    /// Returns the next byte without advancing the cursor.
     pub fn peek(&self) -> Result<u8> {
         self.bytes
             .get(self.pos)
             .copied()
             .ok_or_else(|| self.error("unexpected end of input"))
     }
+    /// Consumes and returns a slice of exactly `n` bytes.
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self
             .pos
@@ -78,6 +89,7 @@ impl<'a> Reader<'a> {
         self.pos = end;
         Ok(s)
     }
+    /// Consumes `n` bytes and returns a bounded sub-reader retaining the parent's absolute offset base.
     pub fn child(&mut self, n: usize) -> Result<Self> {
         let base = self.offset();
         Ok(Self {
@@ -88,6 +100,7 @@ impl<'a> Reader<'a> {
             features: self.features,
         })
     }
+    /// Verifies that no trailing unread bytes remain in this reader.
     pub fn finish(&self) -> Result<()> {
         if self.remaining() == 0 {
             Ok(())
@@ -95,6 +108,7 @@ impl<'a> Reader<'a> {
             Err(self.error("trailing bytes"))
         }
     }
+    /// Reads an unsigned LEB128 integer constrained to `bits` width (`1..=64`).
     #[inline]
     pub fn unsigned(&mut self, bits: u32) -> Result<u64> {
         // One-byte encodings, the common case.
@@ -127,6 +141,7 @@ impl<'a> Reader<'a> {
         }
         Err(self.error("unterminated LEB"))
     }
+    /// Reads a signed LEB128 integer constrained to `bits` width (`1..=64`).
     #[inline]
     pub fn signed(&mut self, bits: u32) -> Result<i64> {
         if (7..=64).contains(&bits)
@@ -171,9 +186,11 @@ impl<'a> Reader<'a> {
         }
         Err(self.error("unterminated LEB"))
     }
+    /// Reads an unsigned 32-bit LEB128 integer.
     pub fn u32(&mut self) -> Result<u32> {
         Ok(self.unsigned(32)? as u32)
     }
+    /// Reads a length-prefixed UTF-8 WebAssembly name.
     pub fn name(&mut self) -> Result<String> {
         let n = self.u32()? as usize;
         let s = self.take(n)?;

@@ -10,18 +10,48 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-TASKS_ROOT = Path('/workspace/tasks')
+
+
+def default_tasks_root(root: Path = ROOT) -> Path | None:
+    env_root = os.environ.get('WTIME_TASKS_ROOT')
+    if env_root:
+        return Path(env_root)
+    sibling = root.parent / 'tasks'
+    if (sibling / 'TASKS.json').is_file():
+        return sibling
+    return None
+
+
+TASKS_ROOT = default_tasks_root()
 MANIFEST = ROOT / 'docs/architecture/release-manifest.json'
-REQUIRED_EVIDENCE = {
+BASE_REQUIRED_EVIDENCE = {
     'core3', 'phase3', 'feature_profiles', 'interactions', 'fuzz',
     'differential', 'hardening', 'build_final', 'api_docs',
-    'native_x86_64', 'native_aarch64', 'allocation_failure',
+    'allocation_failure',
 }
+REQUIRED_EVIDENCE = BASE_REQUIRED_EVIDENCE | {'native_x86_64', 'native_aarch64'}
+
+
+def required_evidence_keys(manifest: dict) -> set[str]:
+    targets = manifest.get('toolchain', {}).get('supported_targets')
+    if not isinstance(targets, list) or not targets:
+        return set(REQUIRED_EVIDENCE)
+    native: set[str] = set()
+    for target in targets:
+        if not isinstance(target, str) or not target:
+            return set(REQUIRED_EVIDENCE)
+        arch = target.split('-', 1)[0]
+        if arch in ('x86_64', 'aarch64'):
+            native.add(f'native_{arch}')
+        else:
+            native.add(f'native_{arch}')
+    return BASE_REQUIRED_EVIDENCE | (native or {'native_x86_64', 'native_aarch64'})
 
 
 def sha256(path: Path) -> str:
@@ -86,7 +116,8 @@ def _stable_core_report(report: dict, label: str, errors: list[str], root: Path)
         errors.append(f'{label}: core source hash is missing or stale')
 
 
-def _check_allocation_failure(report: dict, errors: list[str], root: Path) -> None:
+def _check_allocation_failure(report: dict, errors: list[str], root: Path, *,
+                              verify_local_binaries: bool = True) -> None:
     """Validate the allocation-failure producer's concrete report schema/provenance."""
     label = 'evidence allocation_failure'
     if report.get('passed') is not True or report.get('source_stable') is not True:
@@ -97,13 +128,21 @@ def _check_allocation_failure(report: dict, errors: list[str], root: Path) -> No
         errors.append(f'{label}: native architecture is missing or unsupported')
     worker = root / 'target/debug/wtime-allocation-check'
     command = report.get('command')
-    if not worker.is_file() or command != [str(worker.resolve())]:
-        errors.append(f'{label}: worker command is missing or does not match the local worker')
     worker_digest = report.get('worker_sha256')
-    if (not worker.is_file() or not isinstance(worker_digest, str)
-            or not re.fullmatch(r'[0-9a-f]{64}', worker_digest)
-            or worker_digest != sha256(worker)):
-        errors.append(f'{label}: worker binary fingerprint is missing or stale')
+    if verify_local_binaries:
+        if not worker.is_file() or command != [str(worker.resolve())]:
+            errors.append(f'{label}: worker command is missing or does not match the local worker')
+        if (not worker.is_file() or not isinstance(worker_digest, str)
+                or not re.fullmatch(r'[0-9a-f]{64}', worker_digest)
+                or worker_digest != sha256(worker)):
+            errors.append(f'{label}: worker binary fingerprint is missing or stale')
+    else:
+        if (not isinstance(command, list) or len(command) != 1
+                or not isinstance(command[0], str)
+                or not command[0].endswith('target/debug/wtime-allocation-check')):
+            errors.append(f'{label}: worker command is missing or malformed')
+        if not isinstance(worker_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', worker_digest):
+            errors.append(f'{label}: worker binary fingerprint is missing or malformed')
     if (report.get('address_space_bytes') != 128 * 1024 * 1024
             or report.get('requested_allocation_bytes') != 512 * 1024 * 1024):
         errors.append(f'{label}: report does not record the constrained failing allocation')
@@ -119,7 +158,8 @@ def _check_allocation_failure(report: dict, errors: list[str], root: Path) -> No
 
 
 def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
-                       spec_revision: str, corpus_revision: str) -> None:
+                       spec_revision: str, corpus_revision: str, *,
+                       verify_local_binaries: bool = True) -> None:
     label = f'evidence {key}'
     selected, executed = report.get('selected', 0), report.get('executed', 0)
     if not isinstance(selected, int) or selected <= 0 or executed != selected:
@@ -138,7 +178,7 @@ def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
         errors.append(f'{label}: engine revision is missing')
     if not re.fullmatch(r'[0-9a-f]{64}', report.get('binary_sha256', '')):
         errors.append(f'{label}: executed binary fingerprint is missing')
-    else:
+    elif verify_local_binaries:
         binaries = [root / 'target/debug/wtime-conformance',
                     root / 'target/release/wtime-conformance']
         available = [binary for binary in binaries if binary.is_file()]
@@ -157,32 +197,35 @@ def _check_conformance(report: dict, key: str, errors: list[str], root: Path,
         errors.append(f'{label}: Core specification revision is stale')
 
 
-def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -> list[str]:
+def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path | None = TASKS_ROOT,
+          verify_local_binaries: bool = True) -> list[str]:
     errors: list[str] = []
     if manifest.get('schema_version') != 1:
         errors.append('manifest schema_version must be 1')
 
-    plan_path = tasks_root / 'TASKS.json'
     lock_path = root / 'docs/architecture/spec-lock.json'
     ledger_path = root / 'docs/architecture/opcodes.json'
-    if not plan_path.is_file():
-        return [f'missing task graph: {plan_path}']
     if not lock_path.is_file() or not ledger_path.is_file():
         return ['missing source lock or opcode ledger']
-    plan, lock, ledger = (json.loads(p.read_text()) for p in (plan_path, lock_path, ledger_path))
-    by_id = {task['id']: task for task in plan.get('tasks', [])}
-    required_tasks = task_closure(plan)
-    if 'T169' not in by_id:
-        errors.append('task graph has no T169 definition')
-    for task_id in sorted(required_tasks):
-        task = by_id.get(task_id)
-        if task is None or task.get('status') != 'done':
-            errors.append(f'{task_id}: required task is missing or not done')
-        elif task.get('path'):
-            task_file = tasks_root / task['path']
-            expected_line = f"Status: **{task['status']}**"
-            if not task_file.is_file() or expected_line not in task_file.read_text():
-                errors.append(f'{task_id}: task file status does not match the task graph')
+    lock, ledger = (json.loads(p.read_text()) for p in (lock_path, ledger_path))
+    if tasks_root is not None:
+        plan_path = tasks_root / 'TASKS.json'
+        if not plan_path.is_file():
+            return [f'missing task graph: {plan_path}']
+        plan = json.loads(plan_path.read_text())
+        by_id = {task['id']: task for task in plan.get('tasks', [])}
+        required_tasks = task_closure(plan)
+        if 'T169' not in by_id:
+            errors.append('task graph has no T169 definition')
+        for task_id in sorted(required_tasks):
+            task = by_id.get(task_id)
+            if task is None or task.get('status') != 'done':
+                errors.append(f'{task_id}: required task is missing or not done')
+            elif task.get('path'):
+                task_file = tasks_root / task['path']
+                expected_line = f"Status: **{task['status']}**"
+                if not task_file.is_file() or expected_line not in task_file.read_text():
+                    errors.append(f'{task_id}: task file status does not match the task graph')
 
     current_source = core_source_hash(root)
     if manifest.get('source_sha256') != current_source:
@@ -227,10 +270,11 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -
         errors.append(f'opcode/rule ledger has {pending_owners} pending semantic owners')
 
     evidence = manifest.get('evidence', {})
-    missing_keys = REQUIRED_EVIDENCE - set(evidence)
+    required_evidence = required_evidence_keys(manifest)
+    missing_keys = required_evidence - set(evidence)
     for key in sorted(missing_keys):
         errors.append(f'missing required evidence block: {key}')
-    for key in sorted(REQUIRED_EVIDENCE & set(evidence)):
+    for key in sorted(required_evidence & set(evidence)):
         entry = evidence[key]
         label = f'evidence {key}'
         path_value = entry.get('path') if isinstance(entry, dict) else None
@@ -258,7 +302,8 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -
                     errors.append(f'{label}: an embedding example failed')
         elif key in ('core3', 'phase3', 'interaction_corpus'):
             _check_conformance(report, key, errors, root, lock['core_spec_commit'],
-                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest())
+                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest(),
+                               verify_local_binaries=verify_local_binaries)
         elif key in ('fuzz', 'differential'):
             if report.get('failed') != 0 or report.get('selected', 0) <= 0 or report.get('executed') != report.get('selected') or report.get('failures'):
                 errors.append(f'{label}: run is empty, incomplete, or has failures')
@@ -267,9 +312,13 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -
             generator = root / ('tools/checks/fuzz_decode.py' if key == 'fuzz' else 'tools/checks/differential.py')
             if report.get('generator_sha256') != sha256(generator):
                 errors.append(f'{label}: generator fingerprint is missing or stale')
-            probe = root / 'target/debug/wtime-probe'
-            if not probe.is_file() or report.get('target_sha256') != sha256(probe):
-                errors.append(f'{label}: target binary fingerprint is missing or stale')
+            target_digest = report.get('target_sha256')
+            if verify_local_binaries:
+                probe = root / 'target/debug/wtime-probe'
+                if not probe.is_file() or target_digest != sha256(probe):
+                    errors.append(f'{label}: target binary fingerprint is missing or stale')
+            elif not isinstance(target_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', target_digest):
+                errors.append(f'{label}: target binary fingerprint is missing or malformed')
             if key == 'fuzz':
                 if report.get('profile') != 'all-phase3-core' or report.get('oracle_unsupported') != 0 or report.get('oracle_differences') != 0:
                     errors.append(f'{label}: required profile or oracle checks are incomplete')
@@ -280,7 +329,8 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -
             elif report.get('oracle_compared', 0) <= 0 or report.get('oracle_not_run') != 0:
                 errors.append(f'{label}: independent oracle comparison is missing')
         elif key == 'build_final':
-            if report.get('source_sha256') != current_source or report.get('source_stable') is not True:
+            measured_core = report.get('core_source_sha256', report.get('source_sha256'))
+            if measured_core != current_source or report.get('source_stable') is not True:
                 errors.append(f'{label}: core source hash is missing/stale or source changed during measurement')
             lock_digest = sha256(root / 'Cargo.lock')
             if report.get('lock_sha256') != lock_digest:
@@ -302,7 +352,7 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -
                     't036_reuse_rejects_stale_generation')):
                 errors.append(f'{label}: cancellation or stale-generation regression was not executed')
         elif key == 'allocation_failure':
-            _check_allocation_failure(report, errors, root)
+            _check_allocation_failure(report, errors, root, verify_local_binaries=verify_local_binaries)
     interaction_entry = evidence.get('interactions', {})
     if interaction_entry.get('corpus_report'):
         related = {**interaction_entry, 'path': interaction_entry['corpus_report'],
@@ -310,7 +360,8 @@ def audit(manifest: dict, *, root: Path = ROOT, tasks_root: Path = TASKS_ROOT) -
         report = _report(root, related, 'interaction_corpus', errors)
         if report is not None:
             _check_conformance(report, 'interaction_corpus', errors, root, lock['core_spec_commit'],
-                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest())
+                               hashlib.sha256(corpus_lock_path.read_bytes()).hexdigest(),
+                               verify_local_binaries=verify_local_binaries)
 
     toolchain = manifest.get('toolchain', {})
     if not toolchain.get('rustc') or not toolchain.get('supported_targets'):
@@ -339,13 +390,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, default=MANIFEST)
     parser.add_argument('--tasks-root', type=Path, default=TASKS_ROOT)
+    parser.add_argument(
+        '--portable',
+        action='store_true',
+        help='verify all source, lock, corpus, generator, fixture, and report digests without requiring local target/ binaries to match the release-machine ELF SHA-256',
+    )
     args = parser.parse_args()
     try:
         manifest = json.loads(args.manifest.read_text())
     except (OSError, json.JSONDecodeError) as error:
         print(f'cannot read release manifest: {error}', file=sys.stderr)
         return 2
-    errors = audit(manifest, tasks_root=args.tasks_root)
+    errors = audit(
+        manifest,
+        tasks_root=args.tasks_root,
+        verify_local_binaries=not args.portable,
+    )
     if errors:
         print('\n'.join(errors), file=sys.stderr)
         print(f'Release audit blocked: {len(errors)} unresolved gate(s)')

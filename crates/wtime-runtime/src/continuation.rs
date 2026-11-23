@@ -114,6 +114,7 @@ fn capture_bytes(frames: &[Frame], operands: usize, prompts: &[Prompt]) -> usize
     bytes
 }
 impl Store {
+    /// Returns the total retained byte size of all live continuations in this store.
     pub fn continuation_bytes(&self) -> usize {
         #[cfg(feature = "performance-counters")]
         self.perf.record(
@@ -1085,7 +1086,11 @@ mod tests {
                 0,
                 &Instruction {
                     opcode: 0xe3,
-                    immediate: Immediate::Resume(Box::new(wtime_validate::ResumeImmediate { ty: 1, tag: None, handlers: vec![] })),
+                    immediate: Immediate::Resume(Box::new(wtime_validate::ResumeImmediate {
+                        ty: 1,
+                        tag: None,
+                        handlers: vec![]
+                    })),
                 },
                 &mut frames,
                 &mut values,
@@ -1222,7 +1227,11 @@ mod tests {
                 instance.0.index,
                 &Instruction {
                     opcode: 0xe5,
-                    immediate: Immediate::Resume(Box::new(wtime_validate::ResumeImmediate { ty: 2, tag: None, handlers: vec![] })),
+                    immediate: Immediate::Resume(Box::new(wtime_validate::ResumeImmediate {
+                        ty: 2,
+                        tag: None,
+                        handlers: vec![],
+                    })),
                 },
                 &mut frames,
                 &mut values,

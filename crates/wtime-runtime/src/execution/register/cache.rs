@@ -51,10 +51,10 @@ impl Drop for Retention {
     fn drop(&mut self) {
         // The ledger contains only numbers, so a token cannot form a cache cycle.
         // Poison preserves the charge and prevents subsequent compilation.
-        if let Ok(mut ledger) = self.ledger.lock() {
-            if let Some(bytes) = ledger.bytes.checked_sub(self.bytes) {
-                ledger.bytes = bytes;
-            }
+        if let Ok(mut ledger) = self.ledger.lock()
+            && let Some(bytes) = ledger.bytes.checked_sub(self.bytes)
+        {
+            ledger.bytes = bytes;
         }
     }
 }
@@ -410,7 +410,7 @@ impl Lease {
                     // takes this same mutex). The new artifact is immutable.
                     drop(ledger);
                     let cached = Arc::new(CachedFunction {
-                        function,
+                        function: *function,
                         _retention: Retention {
                             ledger: self.cache.ledger.clone(),
                             bytes,
@@ -448,11 +448,11 @@ impl Drop for Lease {
         // work, clear the lease, and refuse future attempts for this body.
         if let Ok(mut state) = self.cache.state.lock() {
             if state.active == Some(self.body) {
-                if let Ok(mut ledger) = self.cache.ledger.lock() {
-                    if !self.settle_work(&mut ledger) {
-                        ledger.attempted = 0;
-                        ledger.work = 0;
-                    }
+                if let Ok(mut ledger) = self.cache.ledger.lock()
+                    && !self.settle_work(&mut ledger)
+                {
+                    ledger.attempted = 0;
+                    ledger.work = 0;
                 }
                 if let Some(entry) = state
                     .entries

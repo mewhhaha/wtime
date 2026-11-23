@@ -1,10 +1,10 @@
 # Runtime architecture
 
-Status: design only. Repository: `/workspace/wtime`. Tasks: `/workspace/tasks` (the requested `../tasks` relative to the repository). No runtime code has been created by this plan.
+Status: `v0.1.0` core interpreter architecture.
 
 ## Scope and design choices
 
-Build a portable **interpreter for Core WebAssembly** in Rust. Implement the core portions of every finished proposal and every active proposal at Phase 3 or later in the pinned catalog. The user's clarification excludes JavaScript/browser-only behavior. See [PROPOSALS.md](PROPOSALS.md) for all 29 catalog entries: 24 included entries (including MVP and tooling-only annotations), five excluded JS/browser entries, and the partial core-only scope of custom descriptors.
+Build a portable **interpreter for Core WebAssembly** in Rust. Implement the core portions of every finished proposal and every active proposal at Phase 3 or later in the pinned catalog. Browser and JavaScript embedding APIs are excluded. See [scope.md](scope.md) and [spec-lock.json](spec-lock.json) for the 24 included entries (including MVP and tooling-only annotations), five excluded JS/browser entries, and the partial core-only scope of custom descriptors.
 
 Initial native targets are 64-bit Linux x86_64 and aarch64. Keep byte order, guest widths and reference representation portable; host-address limits are resource limits, not alternate guest semantics. Portable software SIMD and explicit checked accesses avoid native SIMD/JIT prerequisites. A 32-bit-host port, no_std, WASI, component model, JS engine integration, JIT/AOT, optimizing IR, debugger protocol, custom allocator and package ecosystem are outside this goal. WASI is an embedding interface, not implied by core conformance.
 

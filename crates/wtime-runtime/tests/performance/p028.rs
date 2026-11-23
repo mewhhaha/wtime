@@ -3,13 +3,17 @@ use wtime_runtime::*;
 const WASM: &[u8] = include_bytes!("../fixtures/performance/numeric/integer_numeric.wasm");
 
 fn load_with(fuel: Option<u64>, policy: ExecutionPolicy) -> (Store, Instance) {
-    let mut config = Config::default();
-    config.features = FeatureSet::all_phase3_core();
+    let mut config = Config {
+        features: FeatureSet::all_phase3_core(),
+        ..Default::default()
+    };
     config.limits.fuel = fuel;
     let engine = Engine::with_execution_policy(config, policy).unwrap();
     let module = engine.compile(WASM).unwrap();
     let mut store = Store::new(&engine);
-    let instance = Linker::new(&engine).instantiate(&mut store, &module).unwrap();
+    let instance = Linker::new(&engine)
+        .instantiate(&mut store, &module)
+        .unwrap();
     drop(module);
     (store, instance)
 }
@@ -69,7 +73,11 @@ fn p028_wrap() {
     );
     assert_eq!(
         run(&mut store, instance, "wrap64", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I64(i64::MIN), Value::I64(i64::MAX), Value::I64(0)])
+        RunOutcome::Returned(vec![
+            Value::I64(i64::MIN),
+            Value::I64(i64::MAX),
+            Value::I64(0)
+        ])
     );
 }
 
@@ -78,7 +86,11 @@ fn p028_bitwise() {
     let (mut store, instance) = load(None);
     assert_eq!(
         run(&mut store, instance, "bitwise32", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I32(15_732_480), Value::I32(-983_281), Value::I32(-16_715_761)])
+        RunOutcome::Returned(vec![
+            Value::I32(15_732_480),
+            Value::I32(-983_281),
+            Value::I32(-16_715_761)
+        ])
     );
     assert_eq!(
         run(&mut store, instance, "bitwise64", &[]).unwrap(),
@@ -95,20 +107,41 @@ fn p028_shifts() {
     let (mut store, instance) = load(None);
     assert_eq!(
         run(&mut store, instance, "shifts32", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I32(1), Value::I32(2), Value::I32(-8), Value::I32(i32::MIN)])
+        RunOutcome::Returned(vec![
+            Value::I32(1),
+            Value::I32(2),
+            Value::I32(-8),
+            Value::I32(i32::MIN)
+        ])
     );
     assert_eq!(
         run(&mut store, instance, "shifts64", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I64(1), Value::I64(2), Value::I64(-8), Value::I64(i64::MIN)])
+        RunOutcome::Returned(vec![
+            Value::I64(1),
+            Value::I64(2),
+            Value::I64(-8),
+            Value::I64(i64::MIN)
+        ])
     );
 }
 
 #[test]
 fn p028_compare() {
     let (mut store, instance) = load(None);
-    let expected = RunOutcome::Returned(vec![Value::I32(1), Value::I32(0), Value::I32(0), Value::I32(1)]);
-    assert_eq!(run(&mut store, instance, "compare32", &[]).unwrap(), expected);
-    assert_eq!(run(&mut store, instance, "compare64", &[]).unwrap(), expected);
+    let expected = RunOutcome::Returned(vec![
+        Value::I32(1),
+        Value::I32(0),
+        Value::I32(0),
+        Value::I32(1),
+    ]);
+    assert_eq!(
+        run(&mut store, instance, "compare32", &[]).unwrap(),
+        expected
+    );
+    assert_eq!(
+        run(&mut store, instance, "compare64", &[]).unwrap(),
+        expected
+    );
 }
 
 #[test]
@@ -135,15 +168,29 @@ fn p028_reference_matches_numeric_and_fuel_boundaries() {
     let (mut store, instance) = load_with(None, ExecutionPolicy::Reference);
     assert_eq!(
         run(&mut store, instance, "wrap32", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I32(i32::MIN), Value::I32(i32::MAX), Value::I32(0)])
+        RunOutcome::Returned(vec![
+            Value::I32(i32::MIN),
+            Value::I32(i32::MAX),
+            Value::I32(0)
+        ])
     );
     assert_eq!(
         run(&mut store, instance, "compare32", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I32(1), Value::I32(0), Value::I32(0), Value::I32(1)])
+        RunOutcome::Returned(vec![
+            Value::I32(1),
+            Value::I32(0),
+            Value::I32(0),
+            Value::I32(1)
+        ])
     );
     assert_eq!(
         run(&mut store, instance, "compare64", &[]).unwrap(),
-        RunOutcome::Returned(vec![Value::I32(1), Value::I32(0), Value::I32(0), Value::I32(1)])
+        RunOutcome::Returned(vec![
+            Value::I32(1),
+            Value::I32(0),
+            Value::I32(0),
+            Value::I32(1)
+        ])
     );
     assert_fuel_prefix(ExecutionPolicy::Reference);
 }

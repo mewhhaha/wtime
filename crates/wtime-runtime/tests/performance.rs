@@ -1,7 +1,5 @@
 #[path = "performance/p016.rs"]
 mod p016;
-#[path = "performance/p066.rs"]
-mod p066;
 #[path = "performance/p017.rs"]
 mod p017;
 #[path = "performance/p018.rs"]
@@ -10,6 +8,8 @@ mod p018;
 mod p020;
 #[path = "performance/p023.rs"]
 mod p023;
+#[path = "performance/p066.rs"]
+mod p066;
 
 #[path = "performance/p022.rs"]
 mod p022;
@@ -70,6 +70,8 @@ mod p042;
 
 #[path = "performance/p043.rs"]
 mod p043;
+#[path = "performance/p045.rs"]
+mod p045;
 #[path = "performance/p115.rs"]
 mod p115;
 #[path = "performance/p116.rs"]
@@ -82,8 +84,6 @@ mod p118;
 mod p119;
 #[path = "performance/p120.rs"]
 mod p120;
-#[path = "performance/p045.rs"]
-mod p045;
 #[path = "performance/p121.rs"]
 mod p121;
 
@@ -94,26 +94,26 @@ mod p047;
 mod p050;
 #[path = "performance/p057.rs"]
 mod p057;
-#[path = "performance/p129.rs"]
-mod p129;
 #[path = "performance/p058.rs"]
 mod p058;
-#[path = "performance/p130.rs"]
-mod p130;
-#[path = "performance/p061.rs"]
-mod p061;
 #[path = "performance/p060.rs"]
 mod p060;
+#[path = "performance/p061.rs"]
+mod p061;
 #[path = "performance/p062.rs"]
 mod p062;
 #[path = "performance/p063.rs"]
 mod p063;
-#[path = "performance/p131.rs"]
-mod p131;
 #[path = "performance/p064.rs"]
 mod p064;
 #[path = "performance/p065.rs"]
 mod p065;
+#[path = "performance/p129.rs"]
+mod p129;
+#[path = "performance/p130.rs"]
+mod p130;
+#[path = "performance/p131.rs"]
+mod p131;
 #[path = "performance/p132.rs"]
 mod p132;
 #[path = "performance/p134.rs"]

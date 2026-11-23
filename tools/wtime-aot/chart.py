@@ -262,45 +262,50 @@ def render_bar_chart(
     return "\n".join(out) + "\n"
 
 
-def build_all(data: dict, out_dir: Path) -> None:
+def build_all(data: dict, out_dir: Path) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     host = data["host"]
     cpu_short = host["cpu"].replace(" 8-Core Processor", "").replace(" Processor", "")
     host_tag = f"{cpu_short}, {host['logical_cpus']}T"
+    rendered = 0
+    gdev_mib = None
 
     # ------------------------------------------------------------------
-    # 1. Real gdev runtime (separate category image)
+    # 1. Real gdev runtime (separate category image, when present)
     # ------------------------------------------------------------------
-    gd = data["runtime_gdev"]
-    m = gd["metrics"]
-    gdev_rows = [
-        ("frame median", {k: m[k]["guest_median_ms"] for k in ("x64", "c", "wasmtime")}),
-        ("frame p95", {k: m[k]["guest_p95_ms"] for k in ("x64", "c", "wasmtime")}),
-        ("snapshot", {k: m[k]["snapshot_median_ms"] for k in ("x64", "c", "wasmtime")}),
-    ]
+    if "runtime_gdev" in data:
+        gd = data["runtime_gdev"]
+        gdev_mib = f"{gd['wasm_bytes'] / (1024 * 1024):.2f} MiB"
+        m = gd["metrics"]
+        gdev_rows = [
+            ("frame median", {k: m[k]["guest_median_ms"] for k in ("x64", "c", "wasmtime")}),
+            ("frame p95", {k: m[k]["guest_p95_ms"] for k in ("x64", "c", "wasmtime")}),
+            ("snapshot", {k: m[k]["snapshot_median_ms"] for k in ("x64", "c", "wasmtime")}),
+        ]
 
-    def gdev_note(_row: str, k: str, v: float, vals: dict[str, float]) -> str:
-        if k == "x64" and vals.get("wasmtime"):
-            return f"({v / vals['wasmtime']:.2f}× WT)"
-        return ""
+        def gdev_note(_row: str, k: str, v: float, vals: dict[str, float]) -> str:
+            if k == "x64" and vals.get("wasmtime"):
+                return f"({v / vals['wasmtime']:.2f}× WT)"
+            return ""
 
-    (out_dir / "runtime-gdev.svg").write_text(
-        render_bar_chart(
-            title="Blot game runtime: gdev (3.57 MiB, 4,935 functions)",
-            subtitle=f"median ms per frame / snapshot over {gd['rounds']}×{gd['frames']} frames (CPU 0, lower is better; {cpu_short})",
-            series=[
-                ("x64", "wtime-aot x64"),
-                ("c", "wtime-aot c (-O2)"),
-                ("wasmtime", "Wasmtime"),
-            ],
-            groups=[("", gdev_rows)],
-            scale="linear",
-            fmt_val=fmt_ms,
-            fmt_tick=fmt_tick_ms,
-            right_pad=130,
-            note_fn=gdev_note,
+        (out_dir / "runtime-gdev.svg").write_text(
+            render_bar_chart(
+                title=f"Blot game runtime: gdev ({gdev_mib}, {gd['functions']:,} functions)",
+                subtitle=f"median ms per frame / snapshot over {gd['rounds']}×{gd['frames']} frames (CPU 0, lower is better; {cpu_short})",
+                series=[
+                    ("x64", "wtime-aot x64"),
+                    ("c", "wtime-aot c (-O2)"),
+                    ("wasmtime", "Wasmtime"),
+                ],
+                groups=[("", gdev_rows)],
+                scale="linear",
+                fmt_val=fmt_ms,
+                fmt_tick=fmt_tick_ms,
+                right_pad=130,
+                note_fn=gdev_note,
+            )
         )
-    )
+        rendered += 1
 
     # ------------------------------------------------------------------
     # 2. Representative Wasm kernels runtime (separate category image)
@@ -324,31 +329,36 @@ def build_all(data: dict, out_dir: Path) -> None:
             right_pad=78,
         )
     )
+    rendered += 1
 
     # ------------------------------------------------------------------
     # 3. Cold compilation time (separate category image)
     # ------------------------------------------------------------------
     cc = data["compile_cold"]
-    cold_groups = [
-        ("gdev game (3.57 MiB, 4,935 functions)", [("gdev", cc["gdev_ms"])]),
-        ("representative kernels (0.3–1 KiB)", [(name, vals) for name, vals in cc["kernels_ms"].items()]),
-    ]
+    cold_groups = []
+    if "gdev_ms" in cc:
+        gd_tag = f"gdev game ({gdev_mib or '3.50 MiB'}, 4,935 functions)"
+        cold_groups.append((gd_tag, [("gdev", cc["gdev_ms"])]))
+    cold_groups.append(("representative kernels (0.3–1 KiB)", [(name, vals) for name, vals in cc["kernels_ms"].items()]))
 
     def cold_note(row: str, k: str, v: float, vals: dict[str, float]) -> str:
         if row == "gdev" and k == "x64" and vals.get("c") and vals.get("wasmtime"):
             return f"({vals['wasmtime'] / v:.1f}× vs WT, {vals['c'] / v:.0f}× vs c)"
         return ""
 
+    cold_series = [
+        ("x64", "wtime-aot x64"),
+        ("c", "wtime-aot c (-O2)"),
+        ("rust", "wtime-aot rust (-O3)"),
+    ]
+    if "gdev_ms" in cc:
+        cold_series.append(("wasmtime", "Wasmtime (Cranelift)"))
+
     (out_dir / "compile-cold.svg").write_text(
         render_bar_chart(
             title="Cold compilation time (empty cache, multi-core)",
             subtitle=f"median wall time over {cc['rounds']} fresh-cache runs (log scale, lower is better; {host_tag})",
-            series=[
-                ("x64", "wtime-aot x64"),
-                ("c", "wtime-aot c (-O2)"),
-                ("rust", "wtime-aot rust (-O3)"),
-                ("wasmtime", "Wasmtime (Cranelift)"),
-            ],
+            series=cold_series,
             groups=cold_groups,
             scale="log",
             fmt_val=fmt_ms,
@@ -357,6 +367,7 @@ def build_all(data: dict, out_dir: Path) -> None:
             note_fn=cold_note,
         )
     )
+    rendered += 1
 
     # ------------------------------------------------------------------
     # 4. Hot compilation & warm cache-hit time (separate category image)
@@ -368,24 +379,30 @@ def build_all(data: dict, out_dir: Path) -> None:
         if vals:
             kernel_hit_med[b] = sum(vals) / len(vals)
 
-    hot_groups = [
-        ("incremental 1-fn edit (gdev, warm object cache)", [("1-fn rebuild", ch["gdev_1fn_edit_ms"])]),
-        ("warm fresh-process load (gdev: .so vs cached .cwasm)", [("warm load", ch["gdev_warm_pen_load_ms"])]),
-        ("warm build --cache hit (CLI)", [
-            ("gdev (3.57 MiB)", ch["gdev_build_cache_hit_ms"]),
-            ("kernels (mean)", kernel_hit_med),
-        ]),
+    hot_groups = []
+    if "gdev_1fn_edit_ms" in ch:
+        hot_groups.append(("incremental 1-fn edit (gdev, warm object cache)", [("1-fn rebuild", ch["gdev_1fn_edit_ms"])]))
+    if "gdev_warm_pen_load_ms" in ch:
+        hot_groups.append(("warm fresh-process load (pen packets: .so vs .cwasm)", [("warm load", ch["gdev_warm_pen_load_ms"])]))
+    hit_rows = []
+    if "gdev_build_cache_hit_ms" in ch:
+        hit_rows.append((f"gdev ({gdev_mib or '3.50 MiB'})", ch["gdev_build_cache_hit_ms"]))
+    hit_rows.append(("kernels (mean)", kernel_hit_med))
+    hot_groups.append(("warm build --cache hit (CLI)", hit_rows))
+
+    hot_series = [
+        ("x64", "wtime-aot x64"),
+        ("c", "wtime-aot c (-O2)"),
+        ("rust", "wtime-aot rust (-O3)"),
     ]
+    if "gdev_1fn_edit_ms" in ch or "gdev_warm_pen_load_ms" in ch:
+        hot_series.append(("wasmtime", "Wasmtime"))
+
     (out_dir / "compile-hot.svg").write_text(
         render_bar_chart(
             title="Hot compilation, incremental rebuild, & warm load",
             subtitle=f"median wall time with warm caches (log scale, lower is better; {host_tag})",
-            series=[
-                ("x64", "wtime-aot x64"),
-                ("c", "wtime-aot c (-O2)"),
-                ("rust", "wtime-aot rust (-O3)"),
-                ("wasmtime", "Wasmtime"),
-            ],
+            series=hot_series,
             groups=hot_groups,
             scale="log",
             fmt_val=fmt_ms,
@@ -393,6 +410,8 @@ def build_all(data: dict, out_dir: Path) -> None:
             right_pad=88,
         )
     )
+    rendered += 1
+    return rendered
 
 
 def main() -> None:
@@ -401,8 +420,8 @@ def main() -> None:
     parser.add_argument("-o", "--output", type=Path, required=True)
     args = parser.parse_args()
     data = json.loads(args.results.read_text())
-    build_all(data, args.output)
-    print(f"Rendered 4 separate SVG charts in {args.output}")
+    count = build_all(data, args.output)
+    print(f"Rendered {count} separate SVG chart(s) in {args.output}")
 
 
 if __name__ == "__main__":

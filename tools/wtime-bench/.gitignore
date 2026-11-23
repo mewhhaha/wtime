@@ -1,4 +1,0 @@
-/target/
-# Reproduced deterministically by run.py; retain hashes in the report.
-/fixtures/*.wasm
-/fixtures/prepare_large.wat

@@ -15,10 +15,12 @@
 use std::collections::{HashMap, HashSet};
 
 use super::ir::{
-    Block, BlockId, BrTableData, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, Inst, IntBinOp, IrFunc,
-    LoadKind, Op, Term, TruncOp, Val, ValRange, optimize_ir_with_budget,
+    Block, BlockId, BrTableData, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, Inst, IntBinOp,
+    IrFunc, LoadKind, Op, Term, TruncOp, Val, ValRange, optimize_ir_with_budget,
 };
-use super::module::{CompileBudget, MAX_BLOCKS_PER_FN, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64Module};
+use super::module::{
+    CompileBudget, MAX_BLOCKS_PER_FN, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64Module,
+};
 use super::regalloc::AllocResult;
 
 type Res<T> = Result<T, String>;
@@ -163,7 +165,14 @@ impl CfgDom {
                 dom_children[p as usize].push(b);
             }
         }
-        Ok(CfgDom { rpo, rpo_pos, preds, succs, idom, dom_children })
+        Ok(CfgDom {
+            rpo,
+            rpo_pos,
+            preds,
+            succs,
+            idom,
+            dom_children,
+        })
     }
 
     #[inline]
@@ -280,7 +289,9 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::F32Bin(_, a, b)
         | Op::F64Bin(_, a, b)
         | Op::TableSet { idx: a, val: b, .. }
-        | Op::Store { addr: a, val: b, .. }
+        | Op::Store {
+            addr: a, val: b, ..
+        }
         | Op::I64x2ReplaceLane { v: a, x: b, .. }
         | Op::MemCopyConst { dst: a, src: b, .. }
         | Op::MemFillConst { dst: a, val: b, .. } => {
@@ -334,12 +345,24 @@ fn rewrite_term_uses(term: &mut Term, pool: &mut [Val], tables: &[BrTableData], 
     };
     match *term {
         Term::Jump { args, .. } => rw_range(pool, args),
-        Term::BranchIf { ref mut cond, then_args, else_args, .. } => {
+        Term::BranchIf {
+            ref mut cond,
+            then_args,
+            else_args,
+            ..
+        } => {
             *cond = resolve_subst(subst, *cond);
             rw_range(pool, then_args);
             rw_range(pool, else_args);
         }
-        Term::CmpBranch { kind, ref mut a, ref mut b, then_args, else_args, .. } => {
+        Term::CmpBranch {
+            kind,
+            ref mut a,
+            ref mut b,
+            then_args,
+            else_args,
+            ..
+        } => {
             *a = resolve_subst(subst, *a);
             if !matches!(kind, CmpBranchKind::I32Imm(..) | CmpBranchKind::I64Imm(..)) {
                 *b = resolve_subst(subst, *b);
@@ -349,7 +372,10 @@ fn rewrite_term_uses(term: &mut Term, pool: &mut [Val], tables: &[BrTableData], 
             rw_range(pool, then_args);
             rw_range(pool, else_args);
         }
-        Term::BrTable { ref mut idx, table_idx } => {
+        Term::BrTable {
+            ref mut idx,
+            table_idx,
+        } => {
             *idx = resolve_subst(subst, *idx);
             for &(_, a) in &tables[table_idx as usize].unique_edges {
                 rw_range(pool, a);
@@ -403,7 +429,12 @@ pub fn rebuild_cfg_and_prune(ir: &mut IrFunc, budget: Option<&CompileBudget>) ->
                         stack.push(target.0);
                     }
                 }
-                Term::BranchIf { then_bb, else_bb, .. } | Term::CmpBranch { then_bb, else_bb, .. } => {
+                Term::BranchIf {
+                    then_bb, else_bb, ..
+                }
+                | Term::CmpBranch {
+                    then_bb, else_bb, ..
+                } => {
                     for t in [then_bb, else_bb] {
                         edge_in[t.0 as usize] = edge_in[t.0 as usize].saturating_add(1);
                         if !reachable[t.0 as usize] {
@@ -483,13 +514,19 @@ pub fn rebuild_cfg_and_prune(ir: &mut IrFunc, budget: Option<&CompileBudget>) ->
         }
         let map_b = |b: BlockId| BlockId(remap[b.0 as usize]);
         let old_br_tables = std::mem::take(&mut ir.br_tables);
-        let mut old_bt_opt: Vec<Option<BrTableData>> = old_br_tables.into_iter().map(Some).collect();
+        let mut old_bt_opt: Vec<Option<BrTableData>> =
+            old_br_tables.into_iter().map(Some).collect();
         let mut new_br_tables: Vec<BrTableData> = Vec::new();
         let mut bt_remap = vec![u32::MAX; old_bt_opt.len()];
         for bb in &mut new_blocks {
             match &mut bb.term {
                 Term::Jump { target, .. } => *target = map_b(*target),
-                Term::BranchIf { then_bb, else_bb, .. } | Term::CmpBranch { then_bb, else_bb, .. } => {
+                Term::BranchIf {
+                    then_bb, else_bb, ..
+                }
+                | Term::CmpBranch {
+                    then_bb, else_bb, ..
+                } => {
                     *then_bb = map_b(*then_bb);
                     *else_bb = map_b(*else_bb);
                 }
@@ -498,7 +535,9 @@ pub fn rebuild_cfg_and_prune(ir: &mut IrFunc, budget: Option<&CompileBudget>) ->
                     let new_ti = if bt_remap[old_ti] != u32::MAX {
                         bt_remap[old_ti]
                     } else {
-                        let mut td = old_bt_opt[old_ti].take().expect("br_table entry referenced once");
+                        let mut td = old_bt_opt[old_ti]
+                            .take()
+                            .expect("br_table entry referenced once");
                         td.default.0 = map_b(td.default.0);
                         for (t, _) in &mut td.targets {
                             *t = map_b(*t);
@@ -584,8 +623,20 @@ pub fn prune_block_params(
             }
             match bb.term {
                 Term::Jump { target, args } => in_edges[target.0 as usize].push(args),
-                Term::BranchIf { then_bb, then_args, else_bb, else_args, .. }
-                | Term::CmpBranch { then_bb, then_args, else_bb, else_args, .. } => {
+                Term::BranchIf {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                }
+                | Term::CmpBranch {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                } => {
                     in_edges[then_bb.0 as usize].push(then_args);
                     in_edges[else_bb.0 as usize].push(else_args);
                 }
@@ -682,7 +733,11 @@ pub fn prune_block_params(
         }
 
         let mut live_val = vec![false; n_vals];
-        let mut live_inst: Vec<Vec<bool>> = ir.blocks.iter().map(|bb| vec![false; bb.insts.len()]).collect();
+        let mut live_inst: Vec<Vec<bool>> = ir
+            .blocks
+            .iter()
+            .map(|bb| vec![false; bb.insts.len()])
+            .collect();
         let mut worklist: Vec<Val> = Vec::new();
         let mark = |v: Val, live_val: &mut [bool], worklist: &mut Vec<Val>| {
             let vi = v.0 as usize;
@@ -701,7 +756,8 @@ pub fn prune_block_params(
             for (ii, inst) in bb.insts.iter().enumerate() {
                 if inst.op.has_side_effect() {
                     live_inst[bi][ii] = true;
-                    inst.op.for_each_use(&ir.val_pool, |v| mark(v, &mut live_val, &mut worklist));
+                    inst.op
+                        .for_each_use(&ir.val_pool, |v| mark(v, &mut live_val, &mut worklist));
                 }
             }
             match bb.term {
@@ -709,7 +765,10 @@ pub fn prune_block_params(
                 Term::BranchIf { cond, .. } => mark(cond, &mut live_val, &mut worklist),
                 Term::CmpBranch { kind, a, b, .. } => {
                     mark(a, &mut live_val, &mut worklist);
-                    if !matches!(kind, CmpBranchKind::I32Imm(_, _) | CmpBranchKind::I64Imm(_, _)) {
+                    if !matches!(
+                        kind,
+                        CmpBranchKind::I32Imm(_, _) | CmpBranchKind::I64Imm(_, _)
+                    ) {
                         mark(b, &mut live_val, &mut worklist);
                     }
                 }
@@ -802,28 +861,34 @@ pub fn prune_block_params(
                     return ValRange::EMPTY;
                 }
                 let start = new_pool.len() as u32;
-                new_pool.extend_from_slice(&old_pool[r.start as usize..r.start as usize + r.len as usize]);
+                new_pool.extend_from_slice(
+                    &old_pool[r.start as usize..r.start as usize + r.len as usize],
+                );
                 ValRange { start, len: r.len }
             };
-            let push_filtered = |new_pool: &mut Vec<Val>, target: BlockId, r: ValRange| -> ValRange {
-                if r.len == 0 {
-                    return ValRange::EMPTY;
-                }
-                let kp = &keep_param[target.0 as usize];
-                let start = new_pool.len() as u32;
-                let slice = &old_pool[r.start as usize..r.start as usize + r.len as usize];
-                for (&v, &keep) in slice.iter().zip(kp.iter()) {
-                    if keep {
-                        new_pool.push(v);
+            let push_filtered =
+                |new_pool: &mut Vec<Val>, target: BlockId, r: ValRange| -> ValRange {
+                    if r.len == 0 {
+                        return ValRange::EMPTY;
                     }
-                }
-                let new_len = (new_pool.len() as u32) - start;
-                if new_len == 0 {
-                    ValRange::EMPTY
-                } else {
-                    ValRange { start, len: new_len }
-                }
-            };
+                    let kp = &keep_param[target.0 as usize];
+                    let start = new_pool.len() as u32;
+                    let slice = &old_pool[r.start as usize..r.start as usize + r.len as usize];
+                    for (&v, &keep) in slice.iter().zip(kp.iter()) {
+                        if keep {
+                            new_pool.push(v);
+                        }
+                    }
+                    let new_len = (new_pool.len() as u32) - start;
+                    if new_len == 0 {
+                        ValRange::EMPTY
+                    } else {
+                        ValRange {
+                            start,
+                            len: new_len,
+                        }
+                    }
+                };
 
             for bb in &mut ir.blocks {
                 for inst in &mut bb.insts {
@@ -839,8 +904,20 @@ pub fn prune_block_params(
                     Term::Jump { target, args } => {
                         *args = push_filtered(&mut new_pool, *target, *args);
                     }
-                    Term::BranchIf { then_bb, then_args, else_bb, else_args, .. }
-                    | Term::CmpBranch { then_bb, then_args, else_bb, else_args, .. } => {
+                    Term::BranchIf {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    }
+                    | Term::CmpBranch {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    } => {
                         *then_args = push_filtered(&mut new_pool, *then_bb, *then_args);
                         *else_args = push_filtered(&mut new_pool, *else_bb, *else_args);
                     }
@@ -853,7 +930,8 @@ pub fn prune_block_params(
             for td in &mut ir.br_tables {
                 let mut edge_map: HashMap<(BlockId, u32, u32), ValRange> = HashMap::new();
                 let mut seen_new: HashSet<(BlockId, u32, u32)> = HashSet::new();
-                let mut new_unique: Vec<(BlockId, ValRange)> = Vec::with_capacity(td.unique_edges.len());
+                let mut new_unique: Vec<(BlockId, ValRange)> =
+                    Vec::with_capacity(td.unique_edges.len());
                 let mut map_edge = |e: (BlockId, ValRange)| -> (BlockId, ValRange) {
                     let key = (e.0, e.1.start, e.1.len);
                     if let Some(&nr) = edge_map.get(&key) {
@@ -971,7 +1049,8 @@ fn call_graph_sccs(irs: &[IrFunc], n_imports: usize) -> (Vec<bool>, Vec<usize>) 
                             break;
                         }
                     }
-                    let cyclic = scc.len() > 1 || (scc.len() == 1 && edges[scc[0]].contains(&scc[0]));
+                    let cyclic =
+                        scc.len() > 1 || (scc.len() == 1 && edges[scc[0]].contains(&scc[0]));
                     for &node in &scc {
                         if cyclic {
                             in_cycle[node] = true;
@@ -1006,7 +1085,13 @@ fn clone_callee_into_caller(
     if caller.val_tys.len().saturating_add(callee.val_tys.len()) > MAX_IR_VALS_PER_FN {
         return Err("x64: inline val limit".into());
     }
-    if caller.blocks.len().saturating_add(callee.blocks.len()).saturating_add(1) > MAX_BLOCKS_PER_FN {
+    if caller
+        .blocks
+        .len()
+        .saturating_add(callee.blocks.len())
+        .saturating_add(1)
+        > MAX_BLOCKS_PER_FN
+    {
         return Err("x64: inline block limit".into());
     }
     let mut needed_pool = 0usize;
@@ -1019,14 +1104,25 @@ fn clone_callee_into_caller(
         for inst in &cb.insts {
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
-                    needed_pool = needed_pool.saturating_add(args.len as usize).saturating_add(rets.len as usize);
+                    needed_pool = needed_pool
+                        .saturating_add(args.len as usize)
+                        .saturating_add(rets.len as usize);
                 }
                 _ => {}
             }
         }
         match cb.term {
             Term::Jump { args, .. } => needed_pool = needed_pool.saturating_add(args.len as usize),
-            Term::BranchIf { then_args, else_args, .. } | Term::CmpBranch { then_args, else_args, .. } => {
+            Term::BranchIf {
+                then_args,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_args,
+                else_args,
+                ..
+            } => {
                 needed_pool = needed_pool
                     .saturating_add(then_args.len as usize)
                     .saturating_add(else_args.len as usize);
@@ -1071,7 +1167,10 @@ fn clone_callee_into_caller(
         for &v in &src_pool[r.start as usize..r.start as usize + r.len as usize] {
             pool.push(map_v(v));
         }
-        Ok(ValRange { start: start as u32, len: r.len })
+        Ok(ValRange {
+            start: start as u32,
+            len: r.len,
+        })
     };
 
     // Clone br_tables with remapped targets and arg ranges.
@@ -1079,22 +1178,27 @@ fn clone_callee_into_caller(
         let mut targets = Vec::with_capacity(td.targets.len());
         let mut unique_edges = Vec::with_capacity(td.unique_edges.len());
         let mut edge_map: HashMap<(BlockId, u32, u32), (BlockId, ValRange)> = HashMap::new();
-        let mut map_edge = |e: (BlockId, ValRange), pool: &mut Vec<Val>| -> Res<(BlockId, ValRange)> {
-            let key = (e.0, e.1.start, e.1.len);
-            if let Some(&mapped) = edge_map.get(&key) {
-                return Ok(mapped);
-            }
-            let nr = map_range(pool, &callee.val_pool, e.1)?;
-            let res = (map_b(e.0), nr);
-            edge_map.insert(key, res);
-            unique_edges.push(res);
-            Ok(res)
-        };
+        let mut map_edge =
+            |e: (BlockId, ValRange), pool: &mut Vec<Val>| -> Res<(BlockId, ValRange)> {
+                let key = (e.0, e.1.start, e.1.len);
+                if let Some(&mapped) = edge_map.get(&key) {
+                    return Ok(mapped);
+                }
+                let nr = map_range(pool, &callee.val_pool, e.1)?;
+                let res = (map_b(e.0), nr);
+                edge_map.insert(key, res);
+                unique_edges.push(res);
+                Ok(res)
+            };
         for &e in &td.targets {
             targets.push(map_edge(e, &mut caller.val_pool)?);
         }
         let default = map_edge(td.default, &mut caller.val_pool)?;
-        caller.br_tables.push(BrTableData { targets, default, unique_edges });
+        caller.br_tables.push(BrTableData {
+            targets,
+            default,
+            unique_edges,
+        });
     }
 
     // Clone callee blocks, remapping Val, BlockId, v128_consts, br_tables, and replacing Return -> Jump(cont_bb).
@@ -1154,7 +1258,11 @@ fn clone_callee_into_caller(
                 Op::F32ReinterpretI32(a) => Op::F32ReinterpretI32(map_v(a)),
                 Op::F64ReinterpretI64(a) => Op::F64ReinterpretI64(map_v(a)),
                 Op::Trunc(t, a) => Op::Trunc(t, map_v(a)),
-                Op::Select { cond, a, b } => Op::Select { cond: map_v(cond), a: map_v(a), b: map_v(b) },
+                Op::Select { cond, a, b } => Op::Select {
+                    cond: map_v(cond),
+                    a: map_v(a),
+                    b: map_v(b),
+                },
                 Op::CmpSelect { kind, a, b, tv, fv } => Op::CmpSelect {
                     kind,
                     a: map_v(a),
@@ -1164,28 +1272,86 @@ fn clone_callee_into_caller(
                 },
                 Op::GlobalGet(g) => Op::GlobalGet(g),
                 Op::GlobalSet(g, a) => Op::GlobalSet(g, map_v(a)),
-                Op::TableGet { table, idx } => Op::TableGet { table, idx: map_v(idx) },
-                Op::TableSet { table, idx, val } => Op::TableSet { table, idx: map_v(idx), val: map_v(val) },
-                Op::BoundsCheck { addr, end_off } => Op::BoundsCheck { addr: map_v(addr), end_off },
-                Op::Load { kind, addr, offset, checked } => Op::Load { kind, addr: map_v(addr), offset, checked },
-                Op::Store { kind, addr, val, offset, checked } => {
-                    Op::Store { kind, addr: map_v(addr), val: map_v(val), offset, checked }
-                }
+                Op::TableGet { table, idx } => Op::TableGet {
+                    table,
+                    idx: map_v(idx),
+                },
+                Op::TableSet { table, idx, val } => Op::TableSet {
+                    table,
+                    idx: map_v(idx),
+                    val: map_v(val),
+                },
+                Op::BoundsCheck { addr, end_off } => Op::BoundsCheck {
+                    addr: map_v(addr),
+                    end_off,
+                },
+                Op::Load {
+                    kind,
+                    addr,
+                    offset,
+                    checked,
+                } => Op::Load {
+                    kind,
+                    addr: map_v(addr),
+                    offset,
+                    checked,
+                },
+                Op::Store {
+                    kind,
+                    addr,
+                    val,
+                    offset,
+                    checked,
+                } => Op::Store {
+                    kind,
+                    addr: map_v(addr),
+                    val: map_v(val),
+                    offset,
+                    checked,
+                },
                 Op::MemSize => Op::MemSize,
                 Op::MemGrow(a) => Op::MemGrow(map_v(a)),
-                Op::MemCopy { dst, src, len } => Op::MemCopy { dst: map_v(dst), src: map_v(src), len: map_v(len) },
-                Op::MemFill { dst, val, len } => Op::MemFill { dst: map_v(dst), val: map_v(val), len: map_v(len) },
-                Op::MemCopyConst { dst, src, len } => Op::MemCopyConst { dst: map_v(dst), src: map_v(src), len },
-                Op::MemFillConst { dst, val, len } => Op::MemFillConst { dst: map_v(dst), val: map_v(val), len },
-                Op::V128Splat { lane_bytes, val } => Op::V128Splat { lane_bytes, val: map_v(val) },
+                Op::MemCopy { dst, src, len } => Op::MemCopy {
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::MemFill { dst, val, len } => Op::MemFill {
+                    dst: map_v(dst),
+                    val: map_v(val),
+                    len: map_v(len),
+                },
+                Op::MemCopyConst { dst, src, len } => Op::MemCopyConst {
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len,
+                },
+                Op::MemFillConst { dst, val, len } => Op::MemFillConst {
+                    dst: map_v(dst),
+                    val: map_v(val),
+                    len,
+                },
+                Op::V128Splat { lane_bytes, val } => Op::V128Splat {
+                    lane_bytes,
+                    val: map_v(val),
+                },
                 Op::I64x2ExtractLane { v, lane } => Op::I64x2ExtractLane { v: map_v(v), lane },
-                Op::I64x2ReplaceLane { v, x, lane } => Op::I64x2ReplaceLane { v: map_v(v), x: map_v(x), lane },
+                Op::I64x2ReplaceLane { v, x, lane } => Op::I64x2ReplaceLane {
+                    v: map_v(v),
+                    x: map_v(x),
+                    lane,
+                },
                 Op::Call { func, args, rets } => Op::Call {
                     func,
                     args: map_range(&mut caller.val_pool, &callee.val_pool, args)?,
                     rets: map_range(&mut caller.val_pool, &callee.val_pool, rets)?,
                 },
-                Op::CallIndirect { ci_id, idx, args, rets } => Op::CallIndirect {
+                Op::CallIndirect {
+                    ci_id,
+                    idx,
+                    args,
+                    rets,
+                } => Op::CallIndirect {
                     ci_id,
                     idx: map_v(idx),
                     args: map_range(&mut caller.val_pool, &callee.val_pool, args)?,
@@ -1200,14 +1366,28 @@ fn clone_callee_into_caller(
                 target: map_b(target),
                 args: map_range(&mut caller.val_pool, &callee.val_pool, args)?,
             },
-            Term::BranchIf { cond, then_bb, then_args, else_bb, else_args } => Term::BranchIf {
+            Term::BranchIf {
+                cond,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } => Term::BranchIf {
                 cond: map_v(cond),
                 then_bb: map_b(then_bb),
                 then_args: map_range(&mut caller.val_pool, &callee.val_pool, then_args)?,
                 else_bb: map_b(else_bb),
                 else_args: map_range(&mut caller.val_pool, &callee.val_pool, else_args)?,
             },
-            Term::CmpBranch { kind, a, b, then_bb, then_args, else_bb, else_args } => Term::CmpBranch {
+            Term::CmpBranch {
+                kind,
+                a,
+                b,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } => Term::CmpBranch {
                 kind,
                 a: map_v(a),
                 b: map_v(b),
@@ -1216,17 +1396,29 @@ fn clone_callee_into_caller(
                 else_bb: map_b(else_bb),
                 else_args: map_range(&mut caller.val_pool, &callee.val_pool, else_args)?,
             },
-            Term::BrTable { idx, table_idx } => Term::BrTable { idx: map_v(idx), table_idx: base_bt + table_idx },
+            Term::BrTable { idx, table_idx } => Term::BrTable {
+                idx: map_v(idx),
+                table_idx: base_bt + table_idx,
+            },
             Term::Return { vals } => Term::Jump {
                 target: cont_bb,
                 args: map_range(&mut caller.val_pool, &callee.val_pool, vals)?,
             },
             Term::Unreachable => Term::Unreachable,
         };
-        caller.blocks.push(Block { params, insts, term, is_loop_header: false, preds: 0 });
+        caller.blocks.push(Block {
+            params,
+            insts,
+            term,
+            is_loop_header: false,
+            preds: 0,
+        });
     }
 
-    caller.blocks[call_bb].term = Term::Jump { target: BlockId(base_bb), args: call_args };
+    caller.blocks[call_bb].term = Term::Jump {
+        target: BlockId(base_bb),
+        args: call_args,
+    };
     Ok(())
 }
 
@@ -1333,7 +1525,9 @@ pub fn inline_small_helpers(
             inst_counts[caller_bi] = caller_insts;
             // Only compact CFG sequentially if this caller is itself small enough to be inlined upstream;
             // all larger callers compact in parallel inside `optimize_func_stage2`!
-            if caller_insts <= INLINE_MAX_CALLEE_INSTS && irs[caller_bi].blocks.len() > INLINE_MAX_CALLEE_BLOCKS {
+            if caller_insts <= INLINE_MAX_CALLEE_INSTS
+                && irs[caller_bi].blocks.len() > INLINE_MAX_CALLEE_BLOCKS
+            {
                 rebuild_cfg_and_prune(&mut irs[caller_bi], budget)?;
             }
         }
@@ -1563,12 +1757,15 @@ fn is_pure_licm_op(op: &Op) -> bool {
         | Op::V128Splat { .. }
         | Op::I64x2ExtractLane { .. }
         | Op::I64x2ReplaceLane { .. } => true,
-        Op::I32Bin(bop, _, _) | Op::I64Bin(bop, _, _) => {
-            !matches!(bop, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU)
-        }
+        Op::I32Bin(bop, _, _) | Op::I64Bin(bop, _, _) => !matches!(
+            bop,
+            IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
+        ),
         Op::I32BinImm(bop, _, imm) | Op::I64BinImm(bop, _, imm) => {
-            !matches!(bop, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU)
-                || (imm != 0 && !(bop == IntBinOp::DivS && imm == -1))
+            !matches!(
+                bop,
+                IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
+            ) || (imm != 0 && !(bop == IntBinOp::DivS && imm == -1))
         }
         Op::Trunc(t, _) => !t.can_trap(),
         // NEVER hoist Load, Store, BoundsCheck, TableGet, TableSet, Call, CallIndirect, MemGrow, MemCopy*, MemFill*, Trap!
@@ -1726,7 +1923,9 @@ pub fn run_licm(
             progress = false;
             for &b in &body {
                 let mut i = 0;
-                while i < ir.blocks[b as usize].insts.len() && hoisted_count < LICM_MAX_HOIST_PER_LOOP {
+                while i < ir.blocks[b as usize].insts.len()
+                    && hoisted_count < LICM_MAX_HOIST_PER_LOOP
+                {
                     let inst = ir.blocks[b as usize].insts[i];
                     let can_hoist = match inst.op {
                         Op::GlobalGet(g) => {
@@ -1820,7 +2019,11 @@ enum GvnKey {
 
 fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
     let comm_int = |bop: IntBinOp, a: Val, b: Val| -> (Val, Val) {
-        if matches!(bop, IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor) && a.0 > b.0 {
+        if matches!(
+            bop,
+            IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor
+        ) && a.0 > b.0
+        {
             (b, a)
         } else {
             (a, b)
@@ -1854,11 +2057,21 @@ fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
         Op::I64Extend8S(a) => GvnKey::I64Extend8S(a),
         Op::I64Extend16S(a) => GvnKey::I64Extend16S(a),
         Op::I64Extend32S(a) => GvnKey::I64Extend32S(a),
-        Op::I32Bin(bop, a, b) if !matches!(bop, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU) => {
+        Op::I32Bin(bop, a, b)
+            if !matches!(
+                bop,
+                IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
+            ) =>
+        {
             let (x, y) = comm_int(bop, a, b);
             GvnKey::I32Bin(bop, x, y)
         }
-        Op::I64Bin(bop, a, b) if !matches!(bop, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU) => {
+        Op::I64Bin(bop, a, b)
+            if !matches!(
+                bop,
+                IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
+            ) =>
+        {
             let (x, y) = comm_int(bop, a, b);
             GvnKey::I64Bin(bop, x, y)
         }
@@ -2013,18 +2226,42 @@ impl<'a> GvnState<'a> {
     fn rollback(&mut self, mark: usize) {
         while self.undo.len() > mark {
             match self.undo.pop().unwrap() {
-                UndoEntry::Expr(k, Some(v)) => { self.exprs.insert(k, v); }
-                UndoEntry::Expr(k, None) => { self.exprs.remove(&k); }
-                UndoEntry::Const32(k, prev) => { self.const32[k.0 as usize] = prev; }
-                UndoEntry::AddConst(k, prev) => { self.add_const[k.0 as usize] = prev; }
-                UndoEntry::Bound(k, prev) => { self.non_wrap_bound[k.0 as usize] = prev; }
-                UndoEntry::CheckedMax(k, prev) => { self.checked_max[k.0 as usize] = prev; }
-                UndoEntry::Global(k, prev) => { self.globals[k as usize] = prev; }
-                UndoEntry::MemSize(prev) => { self.mem_size = prev; }
-                UndoEntry::Table(k, Some(v)) => { self.tables.insert(k, v); }
-                UndoEntry::Table(k, None) => { self.tables.remove(&k); }
-                UndoEntry::Load(k, Some(v)) => { self.loads.insert(k, v); }
-                UndoEntry::Load(k, None) => { self.loads.remove(&k); }
+                UndoEntry::Expr(k, Some(v)) => {
+                    self.exprs.insert(k, v);
+                }
+                UndoEntry::Expr(k, None) => {
+                    self.exprs.remove(&k);
+                }
+                UndoEntry::Const32(k, prev) => {
+                    self.const32[k.0 as usize] = prev;
+                }
+                UndoEntry::AddConst(k, prev) => {
+                    self.add_const[k.0 as usize] = prev;
+                }
+                UndoEntry::Bound(k, prev) => {
+                    self.non_wrap_bound[k.0 as usize] = prev;
+                }
+                UndoEntry::CheckedMax(k, prev) => {
+                    self.checked_max[k.0 as usize] = prev;
+                }
+                UndoEntry::Global(k, prev) => {
+                    self.globals[k as usize] = prev;
+                }
+                UndoEntry::MemSize(prev) => {
+                    self.mem_size = prev;
+                }
+                UndoEntry::Table(k, Some(v)) => {
+                    self.tables.insert(k, v);
+                }
+                UndoEntry::Table(k, None) => {
+                    self.tables.remove(&k);
+                }
+                UndoEntry::Load(k, Some(v)) => {
+                    self.loads.insert(k, v);
+                }
+                UndoEntry::Load(k, None) => {
+                    self.loads.remove(&k);
+                }
             }
         }
     }
@@ -2038,7 +2275,11 @@ fn fold_i32_bin_const(op: IntBinOp, ca: i32, cb: i32) -> Option<i32> {
         IntBinOp::Mul => Some(ca.wrapping_mul(cb)),
         IntBinOp::DivS if cb != 0 && !(ca == i32::MIN && cb == -1) => Some(ca.wrapping_div(cb)),
         IntBinOp::DivU if cb != 0 => Some(((ca as u32) / (cb as u32)) as i32),
-        IntBinOp::RemS if cb != 0 => Some(if ca == i32::MIN && cb == -1 { 0 } else { ca.wrapping_rem(cb) }),
+        IntBinOp::RemS if cb != 0 => Some(if ca == i32::MIN && cb == -1 {
+            0
+        } else {
+            ca.wrapping_rem(cb)
+        }),
         IntBinOp::RemU if cb != 0 => Some(((ca as u32) % (cb as u32)) as i32),
         IntBinOp::And => Some(ca & cb),
         IntBinOp::Or => Some(ca | cb),
@@ -2083,7 +2324,9 @@ pub fn run_dom_gvn_and_bce(
     let mut folded_any_branch = false;
 
     let fixed_mem = module.fixed32.is_some();
-    let mem_max_bytes = module.memory.map_or(0u64, |(_, max_p)| max_p.saturating_mul(65_536));
+    let mem_max_bytes = module
+        .memory
+        .map_or(0u64, |(_, max_p)| max_p.saturating_mul(65_536));
 
     // Precompute exact function-level write/grow flags (so read-only globals, fixed memories, and
     // non-mutating functions keep facts valid across the ENTIRE dominator tree including joins & loops!).
@@ -2188,7 +2431,10 @@ pub fn run_dom_gvn_and_bce(
     // Iterative DFS over dominator tree: `(block_id, next_child_idx, undo_mark, saved_epochs)`.
     enum DfsAction {
         Enter(u32),
-        Exit { mark: usize, epochs: (u32, u32, u32, u32) },
+        Exit {
+            mark: usize,
+            epochs: (u32, u32, u32, u32),
+        },
     }
     let mut stack: Vec<DfsAction> = vec![DfsAction::Enter(0)];
     let mut steps = 0usize;
@@ -2214,7 +2460,10 @@ pub fn run_dom_gvn_and_bce(
             DfsAction::Enter(bid) => {
                 let mark = st.undo.len();
                 let saved_epochs = (st.grow_epoch, st.mem_epoch, st.glob_epoch, st.tbl_epoch);
-                stack.push(DfsAction::Exit { mark, epochs: saved_epochs });
+                stack.push(DfsAction::Exit {
+                    mark,
+                    epochs: saved_epochs,
+                });
 
                 // At multi-predecessor joins/loops, conservatively bump mutable epochs (read-only facts persist!).
                 if dom.preds[bid as usize].len() > 1 {
@@ -2245,14 +2494,22 @@ pub fn run_dom_gvn_and_bce(
                             if let Some(c) = st.const32[len.0 as usize]
                                 && (c as u32) <= 64
                             {
-                                inst.op = Op::MemCopyConst { dst, src, len: c as u32 };
+                                inst.op = Op::MemCopyConst {
+                                    dst,
+                                    src,
+                                    len: c as u32,
+                                };
                             }
                         }
                         Op::MemFill { dst, val, len } => {
                             if let Some(c) = st.const32[len.0 as usize]
                                 && (c as u32) <= 64
                             {
-                                inst.op = Op::MemFillConst { dst, val, len: c as u32 };
+                                inst.op = Op::MemFillConst {
+                                    dst,
+                                    val,
+                                    len: c as u32,
+                                };
                             }
                         }
                         _ => {}
@@ -2268,7 +2525,12 @@ pub fn run_dom_gvn_and_bce(
                             out_insts.push(inst);
                             continue;
                         }
-                        Op::Load { kind, addr, offset, checked } => {
+                        Op::Load {
+                            kind,
+                            addr,
+                            offset,
+                            checked,
+                        } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
                             *addr = na;
                             *offset = noff;
@@ -2299,7 +2561,13 @@ pub fn run_dom_gvn_and_bce(
                             out_insts.push(inst);
                             continue;
                         }
-                        Op::Store { kind, addr, offset, checked, .. } => {
+                        Op::Store {
+                            kind,
+                            addr,
+                            offset,
+                            checked,
+                            ..
+                        } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
                             *addr = na;
                             *offset = noff;
@@ -2312,7 +2580,10 @@ pub fn run_dom_gvn_and_bce(
                             out_insts.push(inst);
                             continue;
                         }
-                        Op::MemCopy { .. } | Op::MemFill { .. } | Op::MemCopyConst { .. } | Op::MemFillConst { .. } => {
+                        Op::MemCopy { .. }
+                        | Op::MemFill { .. }
+                        | Op::MemCopyConst { .. }
+                        | Op::MemFillConst { .. } => {
                             st.mem_epoch = st.mem_epoch.wrapping_add(1);
                             out_insts.push(inst);
                             continue;
@@ -2346,7 +2617,11 @@ pub fn run_dom_gvn_and_bce(
                             if let Some(res) = inst.res {
                                 let gi = *g as usize;
                                 if gi < st.globals.len() {
-                                    let ep = if st.fn_writes_global(*g) { st.glob_epoch } else { 0 };
+                                    let ep = if st.fn_writes_global(*g) {
+                                        st.glob_epoch
+                                    } else {
+                                        0
+                                    };
                                     if let Some((gep, gv)) = st.globals[gi]
                                         && gep == ep
                                     {
@@ -2364,7 +2639,11 @@ pub fn run_dom_gvn_and_bce(
                         Op::GlobalSet(g, v) => {
                             let gi = *g as usize;
                             if gi < st.globals.len() {
-                                let ep = if st.fn_writes_global(*g) { st.glob_epoch } else { 0 };
+                                let ep = if st.fn_writes_global(*g) {
+                                    st.glob_epoch
+                                } else {
+                                    0
+                                };
                                 let prev = st.globals[gi].replace((ep, *v));
                                 st.undo.push(UndoEntry::Global(*g, prev));
                             }
@@ -2373,7 +2652,11 @@ pub fn run_dom_gvn_and_bce(
                         }
                         Op::TableGet { table, idx } => {
                             if let Some(res) = inst.res {
-                                let ep = if st.fn_writes_table(*table) { st.tbl_epoch } else { 0 };
+                                let ep = if st.fn_writes_table(*table) {
+                                    st.tbl_epoch
+                                } else {
+                                    0
+                                };
                                 let tkey = (*table, *idx);
                                 if let Some(&(tep, tv)) = st.tables.get(&tkey)
                                     && tep == ep
@@ -2403,11 +2686,13 @@ pub fn run_dom_gvn_and_bce(
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
                             }
                             if st.effects.writes_all_globals[f]
-                                || (0..st.effects.global_words).any(|w| st.effects.written_globals[f][w] != 0)
+                                || (0..st.effects.global_words)
+                                    .any(|w| st.effects.written_globals[f][w] != 0)
                             {
                                 st.glob_epoch = st.glob_epoch.wrapping_add(1);
                             }
-                            if st.effects.writes_all_tables[f] || st.effects.written_tables[f] != 0 {
+                            if st.effects.writes_all_tables[f] || st.effects.written_tables[f] != 0
+                            {
                                 st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
                             }
                             out_insts.push(inst);
@@ -2443,7 +2728,8 @@ pub fn run_dom_gvn_and_bce(
                                 }
                             }
                             Op::I32Bin(bop, a, b) => {
-                                if let (Some(ca), Some(cb)) = (st.const32[a.0 as usize], st.const32[b.0 as usize])
+                                if let (Some(ca), Some(cb)) =
+                                    (st.const32[a.0 as usize], st.const32[b.0 as usize])
                                     && let Some(v) = fold_i32_bin_const(bop, ca, cb)
                                 {
                                     inst.op = Op::ConstI32(v);
@@ -2451,12 +2737,16 @@ pub fn run_dom_gvn_and_bce(
                             }
                             Op::I32CmpImm(cop, a, imm) => {
                                 if let Some(ca) = st.const32[a.0 as usize] {
-                                    inst.op = Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, imm)));
+                                    inst.op =
+                                        Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, imm)));
                                 }
                             }
                             Op::I32Cmp(cop, a, b) => {
-                                if let (Some(ca), Some(cb)) = (st.const32[a.0 as usize], st.const32[b.0 as usize]) {
-                                    inst.op = Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, cb)));
+                                if let (Some(ca), Some(cb)) =
+                                    (st.const32[a.0 as usize], st.const32[b.0 as usize])
+                                {
+                                    inst.op =
+                                        Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, cb)));
                                 }
                             }
                             Op::Select { cond, a, b } => {
@@ -2475,9 +2765,8 @@ pub fn run_dom_gvn_and_bce(
                                     CmpBranchKind::I32(cop) => st.const32[a.0 as usize]
                                         .zip(st.const32[b.0 as usize])
                                         .map(|(ca, cb)| fold_i32_cmp_const(cop, ca, cb)),
-                                    CmpBranchKind::I32Imm(cop, imm) => {
-                                        st.const32[a.0 as usize].map(|ca| fold_i32_cmp_const(cop, ca, imm))
-                                    }
+                                    CmpBranchKind::I32Imm(cop, imm) => st.const32[a.0 as usize]
+                                        .map(|ca| fold_i32_cmp_const(cop, ca, imm)),
                                     _ => None,
                                 };
                                 if let Some(take_tv) = known {
@@ -2529,17 +2818,37 @@ pub fn run_dom_gvn_and_bce(
                 }
                 // Constant-fold newly known conditional branches after inlining/GVN.
                 match bb.term {
-                    Term::BranchIf { cond, then_bb, then_args, else_bb, else_args } => {
+                    Term::BranchIf {
+                        cond,
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                    } => {
                         if let Some(c) = st.const32[cond.0 as usize] {
                             bb.term = if c != 0 {
-                                Term::Jump { target: then_bb, args: then_args }
+                                Term::Jump {
+                                    target: then_bb,
+                                    args: then_args,
+                                }
                             } else {
-                                Term::Jump { target: else_bb, args: else_args }
+                                Term::Jump {
+                                    target: else_bb,
+                                    args: else_args,
+                                }
                             };
                             folded_any_branch = true;
                         }
                     }
-                    Term::CmpBranch { kind, a, b, then_bb, then_args, else_bb, else_args } => {
+                    Term::CmpBranch {
+                        kind,
+                        a,
+                        b,
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                    } => {
                         let known = match kind {
                             CmpBranchKind::I32(cop) => st.const32[a.0 as usize]
                                 .zip(st.const32[b.0 as usize])
@@ -2551,9 +2860,15 @@ pub fn run_dom_gvn_and_bce(
                         };
                         if let Some(take_then) = known {
                             bb.term = if take_then {
-                                Term::Jump { target: then_bb, args: then_args }
+                                Term::Jump {
+                                    target: then_bb,
+                                    args: then_args,
+                                }
                             } else {
-                                Term::Jump { target: else_bb, args: else_args }
+                                Term::Jump {
+                                    target: else_bb,
+                                    args: else_args,
+                                }
                             };
                             folded_any_branch = true;
                         }
@@ -2596,22 +2911,50 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                 | Op::I64Extend16S(_)
                 | Op::I64Extend32S(_)
                 | Op::I32BinImm(
-                    IntBinOp::Add | IntBinOp::Sub | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor | IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU,
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
                     _,
                     _
                 )
                 | Op::I64BinImm(
-                    IntBinOp::Add | IntBinOp::Sub | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor | IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU,
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
                     _,
                     _
                 )
                 | Op::I32Bin(
-                    IntBinOp::Add | IntBinOp::Sub | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor | IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU,
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
                     _,
                     _
                 )
                 | Op::I64Bin(
-                    IntBinOp::Add | IntBinOp::Sub | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor | IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU,
+                    IntBinOp::Add
+                        | IntBinOp::Sub
+                        | IntBinOp::And
+                        | IntBinOp::Or
+                        | IntBinOp::Xor
+                        | IntBinOp::Shl
+                        | IntBinOp::ShrS
+                        | IntBinOp::ShrU,
                     _,
                     _
                 )
@@ -2625,7 +2968,12 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
             Term::Jump { target, .. } => {
                 edge_in[target.0 as usize] = edge_in[target.0 as usize].saturating_add(1);
             }
-            Term::BranchIf { then_bb, else_bb, .. } | Term::CmpBranch { then_bb, else_bb, .. } => {
+            Term::BranchIf {
+                then_bb, else_bb, ..
+            }
+            | Term::CmpBranch {
+                then_bb, else_bb, ..
+            } => {
                 edge_in[then_bb.0 as usize] = edge_in[then_bb.0 as usize].saturating_add(1);
                 edge_in[else_bb.0 as usize] = edge_in[else_bb.0 as usize].saturating_add(1);
             }
@@ -2646,12 +2994,22 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
             continue;
         }
         let (cmp_info, then_bb, then_args, else_bb, else_args) = match ir.blocks[bi].term {
-            Term::BranchIf { cond, then_bb, then_args, else_bb, else_args } => {
-                (Err(cond), then_bb, then_args, else_bb, else_args)
-            }
-            Term::CmpBranch { kind, a, b, then_bb, then_args, else_bb, else_args } => {
-                (Ok((kind, a, b)), then_bb, then_args, else_bb, else_args)
-            }
+            Term::BranchIf {
+                cond,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } => (Err(cond), then_bb, then_args, else_bb, else_args),
+            Term::CmpBranch {
+                kind,
+                a,
+                b,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } => (Ok((kind, a, b)), then_bb, then_args, else_bb, else_args),
             _ => continue,
         };
         if then_args.len != 0 || else_args.len != 0 {
@@ -2671,13 +3029,27 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
         if ir.blocks[ti].insts.len() > 2 || ir.blocks[ei].insts.len() > 2 {
             continue;
         }
-        if !ir.blocks[ti].insts.iter().all(|ins| is_trivial_pure(&ins.op))
-            || !ir.blocks[ei].insts.iter().all(|ins| is_trivial_pure(&ins.op))
+        if !ir.blocks[ti]
+            .insts
+            .iter()
+            .all(|ins| is_trivial_pure(&ins.op))
+            || !ir.blocks[ei]
+                .insts
+                .iter()
+                .all(|ins| is_trivial_pure(&ins.op))
         {
             continue;
         }
-        let (Term::Jump { target: tm, args: ta }, Term::Jump { target: em, args: ea }) =
-            (ir.blocks[ti].term, ir.blocks[ei].term)
+        let (
+            Term::Jump {
+                target: tm,
+                args: ta,
+            },
+            Term::Jump {
+                target: em,
+                args: ea,
+            },
+        ) = (ir.blocks[ti].term, ir.blocks[ei].term)
         else {
             continue;
         };
@@ -2692,7 +3064,9 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
         for (&tv, &ev) in t_slice.iter().zip(e_slice.iter()) {
             if tv != ev {
                 diffs += 1;
-                if !ir.val_tys[tv.0 as usize].is_gp() || ir.val_tys[tv.0 as usize] != ir.val_tys[ev.0 as usize] {
+                if !ir.val_tys[tv.0 as usize].is_gp()
+                    || ir.val_tys[tv.0 as usize] != ir.val_tys[ev.0 as usize]
+                {
                     all_gp = false;
                     break;
                 }
@@ -2727,10 +3101,19 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                 let ty = ir.val_tys[tv.0 as usize];
                 let sel_v = ir.push_val(ty);
                 let sel_op = match cmp_info {
-                    Ok((kind, a, b)) => Op::CmpSelect { kind, a, b, tv, fv: ev },
+                    Ok((kind, a, b)) => Op::CmpSelect {
+                        kind,
+                        a,
+                        b,
+                        tv,
+                        fv: ev,
+                    },
                     Err(cond) => Op::Select { cond, a: tv, b: ev },
                 };
-                ir.blocks[bi].insts.push(Inst { res: Some(sel_v), op: sel_op });
+                ir.blocks[bi].insts.push(Inst {
+                    res: Some(sel_v),
+                    op: sel_op,
+                });
                 merged_args.push(sel_v);
             }
         }
@@ -2738,7 +3121,10 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
             Ok(r) => r,
             Err(_) => continue,
         };
-        ir.blocks[bi].term = Term::Jump { target: tm, args: range };
+        ir.blocks[bi].term = Term::Jump {
+            target: tm,
+            args: range,
+        };
         converted_any = true;
     }
     converted_any
@@ -2780,11 +3166,16 @@ pub fn optimize_func_stage2(
 fn op_may_trap_locally(op: &Op) -> bool {
     match *op {
         Op::I32Bin(bop, _, _) | Op::I64Bin(bop, _, _) => {
-            matches!(bop, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU)
+            matches!(
+                bop,
+                IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
+            )
         }
         Op::I32BinImm(bop, _, imm) | Op::I64BinImm(bop, _, imm) => {
-            matches!(bop, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU)
-                && (imm == 0 || (bop == IntBinOp::DivS && imm == -1))
+            matches!(
+                bop,
+                IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU
+            ) && (imm == 0 || (bop == IntBinOp::DivS && imm == -1))
         }
         Op::Trunc(t, _) => t.can_trap(),
         Op::Load { checked: false, .. }
@@ -2946,7 +3337,8 @@ pub fn run_stack_and_trap_elision(
     for bi in 0..n_defs {
         let fi = n_imports + bi;
         // Qualifies only if `!needs_stack_check` AND no local traps AND no imports/indirect calls!
-        fn_can_trap[fi] = irs[bi].needs_stack_check || local_may_trap[bi] || calls_import_or_indirect[bi];
+        fn_can_trap[fi] =
+            irs[bi].needs_stack_check || local_may_trap[bi] || calls_import_or_indirect[bi];
     }
     let mut changed = true;
     let mut fix_steps = 0usize;

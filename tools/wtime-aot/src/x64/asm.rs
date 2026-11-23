@@ -174,8 +174,16 @@ impl Cond {
 /// Memory operand `[base + disp]` or `[base + index*scale + disp]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mem {
-    BaseDisp { base: Gp, disp: i32 },
-    BaseIndexDisp { base: Gp, index: Gp, scale: u8, disp: i32 },
+    BaseDisp {
+        base: Gp,
+        disp: i32,
+    },
+    BaseIndexDisp {
+        base: Gp,
+        index: Gp,
+        scale: u8,
+        disp: i32,
+    },
 }
 
 impl Mem {
@@ -192,8 +200,16 @@ impl Mem {
     #[inline]
     pub const fn indexed(base: Gp, index: Gp, scale: u8, disp: i32) -> Self {
         assert!(matches!(scale, 1 | 2 | 4 | 8), "invalid x86-64 SIB scale");
-        assert!(!matches!(index, Gp::Rsp), "x86-64 SIB cannot use RSP as index register");
-        Mem::BaseIndexDisp { base, index, scale, disp }
+        assert!(
+            !matches!(index, Gp::Rsp),
+            "x86-64 SIB cannot use RSP as index register"
+        );
+        Mem::BaseIndexDisp {
+            base,
+            index,
+            scale,
+            disp,
+        }
     }
 }
 
@@ -326,7 +342,10 @@ impl Asm {
     /// keeping `labels` and `relocs` exact. Must be called before linking.
     pub fn finish_labels(&mut self) -> Result<(), String> {
         if self.code.len() > i32::MAX as usize {
-            return Err(format!("function machine code ({} B) exceeds rel32 range", self.code.len()));
+            return Err(format!(
+                "function machine code ({} B) exceeds rel32 range",
+                self.code.len()
+            ));
         }
         let n_fix = self.fixups.len();
         if n_fix == 0 {
@@ -362,9 +381,14 @@ impl Asm {
                     FixupKind::Jmp => 3u32,
                     FixupKind::Jcc(_) => 4u32,
                 };
-                let t_cur = i64::from(target_orig[i]) - i64::from(shift_of(target_orig[i], &self.fixups, &saved_prefix));
+                let t_cur = i64::from(target_orig[i])
+                    - i64::from(shift_of(target_orig[i], &self.fixups, &saved_prefix));
                 let ip_cur = i64::from(f.inst_off) - i64::from(saved_prefix[i]) + 2;
-                let adj = if target_orig[i] >= f.next_ip_off { i64::from(save) } else { 0 };
+                let adj = if target_orig[i] >= f.next_ip_off {
+                    i64::from(save)
+                } else {
+                    0
+                };
                 let rel = (t_cur - adj) - ip_cur;
                 if i8::try_from(rel).is_ok() {
                     is_short[i] = true;
@@ -391,11 +415,17 @@ impl Asm {
         if !any_short {
             for (i, f) in self.fixups.iter().enumerate() {
                 let rel = i128::from(target_orig[i]) - i128::from(f.next_ip_off);
-                let rel32 = i32::try_from(rel).map_err(|_| "local branch displacement exceeds rel32".to_string())?;
+                let rel32 = i32::try_from(rel)
+                    .map_err(|_| "local branch displacement exceeds rel32".to_string())?;
                 let p = f.patch_off as usize;
-                let end = p.checked_add(4).ok_or("local branch patch offset overflow")?;
+                let end = p
+                    .checked_add(4)
+                    .ok_or("local branch patch offset overflow")?;
                 if end > self.code.len() {
-                    return Err(format!("local branch patch offset {p} exceeds code len {}", self.code.len()));
+                    return Err(format!(
+                        "local branch patch offset {p} exceeds code len {}",
+                        self.code.len()
+                    ));
                 }
                 self.code[p..end].copy_from_slice(&rel32.to_le_bytes());
             }
@@ -428,7 +458,8 @@ impl Asm {
             if is_short[i] {
                 let new_next_ip = new_code.len() as u32 + 2;
                 let rel = i64::from(target_new) - i64::from(new_next_ip);
-                let rel8 = i8::try_from(rel).map_err(|_| "short branch displacement overflow".to_string())?;
+                let rel8 = i8::try_from(rel)
+                    .map_err(|_| "short branch displacement overflow".to_string())?;
                 match f.kind {
                     FixupKind::Jmp => {
                         new_code.push(0xeb);
@@ -443,7 +474,8 @@ impl Asm {
                 let orig_len = (orig_end - inst_start) as u32;
                 let new_next_ip = new_code.len() as u32 + orig_len;
                 let rel = i128::from(target_new) - i128::from(new_next_ip);
-                let rel32 = i32::try_from(rel).map_err(|_| "local branch displacement exceeds rel32".to_string())?;
+                let rel32 = i32::try_from(rel)
+                    .map_err(|_| "local branch displacement exceeds rel32".to_string())?;
                 match f.kind {
                     FixupKind::Jmp => {
                         new_code.push(0xe9);
@@ -466,7 +498,11 @@ impl Asm {
     }
 
     /// Resolves jump-table entries in `local_rodata` once `fn_vaddr` and `local_rodata_vaddr` are known.
-    pub fn patch_jump_tables(&mut self, fn_vaddr: u64, local_rodata_vaddr: u64) -> Result<(), String> {
+    pub fn patch_jump_tables(
+        &mut self,
+        fn_vaddr: u64,
+        local_rodata_vaddr: u64,
+    ) -> Result<(), String> {
         for jt in &self.jt_patches {
             let label_off = self
                 .labels
@@ -480,7 +516,8 @@ impl Asm {
                 .checked_add(u64::from(jt.table_rodata_off))
                 .ok_or("jump table base vaddr overflow")?;
             let rel = i128::from(target_vaddr) - i128::from(base_vaddr);
-            let rel32 = i32::try_from(rel).map_err(|_| "jump table displacement exceeds rel32".to_string())?;
+            let rel32 = i32::try_from(rel)
+                .map_err(|_| "jump table displacement exceeds rel32".to_string())?;
             let p = jt.rodata_off as usize;
             let end = p.checked_add(4).ok_or("jump table patch offset overflow")?;
             if end > self.local_rodata.len() {
@@ -496,7 +533,10 @@ impl Asm {
 
     /// Appends aligned raw bytes to `local_rodata`, returning the starting offset.
     pub fn add_local_rodata(&mut self, align: usize, bytes: &[u8]) -> u32 {
-        assert!(align.is_power_of_two(), "local_rodata alignment must be a non-zero power of two");
+        assert!(
+            align.is_power_of_two(),
+            "local_rodata alignment must be a non-zero power of two"
+        );
         let mask = align - 1;
         while (self.local_rodata.len() & mask) != 0 {
             self.local_rodata.push(0);
@@ -513,9 +553,14 @@ impl Asm {
         }
         let base = u32::try_from(self.local_rodata.len()).expect("local_rodata exceeded u32::MAX");
         for &lbl in targets {
-            let off = u32::try_from(self.local_rodata.len()).expect("local_rodata exceeded u32::MAX");
+            let off =
+                u32::try_from(self.local_rodata.len()).expect("local_rodata exceeded u32::MAX");
             self.local_rodata.extend_from_slice(&0i32.to_le_bytes());
-            self.jt_patches.push(JumpTablePatch { rodata_off: off, table_rodata_off: base, label: lbl });
+            self.jt_patches.push(JumpTablePatch {
+                rodata_off: off,
+                table_rodata_off: base,
+                label: lbl,
+            });
         }
         base
     }
@@ -556,7 +601,9 @@ impl Asm {
     fn rex_mem(&mut self, w: bool, reg_hi: u8, mem: Mem, force: bool) {
         match mem {
             Mem::BaseDisp { base, .. } => self.rex(w, reg_hi, 0, base.hi(), force),
-            Mem::BaseIndexDisp { base, index, .. } => self.rex(w, reg_hi, index.hi(), base.hi(), force),
+            Mem::BaseIndexDisp { base, index, .. } => {
+                self.rex(w, reg_hi, index.hi(), base.hi(), force)
+            }
         }
     }
 
@@ -583,8 +630,16 @@ impl Asm {
                     _ => {}
                 }
             }
-            Mem::BaseIndexDisp { base, index, scale, disp } => {
-                assert!(!matches!(index, Gp::Rsp), "x86-64 SIB cannot use RSP as index register");
+            Mem::BaseIndexDisp {
+                base,
+                index,
+                scale,
+                disp,
+            } => {
+                assert!(
+                    !matches!(index, Gp::Rsp),
+                    "x86-64 SIB cannot use RSP as index register"
+                );
                 let blo = base.lo();
                 let ilo = index.lo();
                 let sbits = match scale {
@@ -664,7 +719,13 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.fixups.push(LocalFixup { inst_off, patch_off, next_ip_off, label, kind: FixupKind::Jmp });
+        self.fixups.push(LocalFixup {
+            inst_off,
+            patch_off,
+            next_ip_off,
+            label,
+            kind: FixupKind::Jmp,
+        });
     }
 
     pub fn jcc(&mut self, cond: Cond, label: Label) {
@@ -674,7 +735,13 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.fixups.push(LocalFixup { inst_off, patch_off, next_ip_off, label, kind: FixupKind::Jcc(cond as u8) });
+        self.fixups.push(LocalFixup {
+            inst_off,
+            patch_off,
+            next_ip_off,
+            label,
+            kind: FixupKind::Jcc(cond as u8),
+        });
     }
 
     pub fn jmp_reg(&mut self, r: Gp) {
@@ -688,7 +755,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn jmp_reloc(&mut self, target: RelocTarget) {
@@ -696,7 +767,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn call_reg(&mut self, r: Gp) {
@@ -720,7 +795,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn movss_rip(&mut self, dst: Xmm, target: RelocTarget) {
@@ -732,7 +811,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn movsd_rip(&mut self, dst: Xmm, target: RelocTarget) {
@@ -744,7 +827,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn movdqu_rip(&mut self, dst: Xmm, target: RelocTarget) {
@@ -756,7 +843,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn xmm_rip_op(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, target: RelocTarget) {
@@ -770,7 +861,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     // ---- GP moves, loads, stores, lea ----
@@ -955,19 +1050,43 @@ impl Asm {
         }
     }
 
-    pub fn add_rr(&mut self, is64: bool, dst: Gp, src: Gp) { self.alu_rr(0x01, is64, dst, src); }
-    pub fn or_rr(&mut self, is64: bool, dst: Gp, src: Gp)  { self.alu_rr(0x09, is64, dst, src); }
-    pub fn and_rr(&mut self, is64: bool, dst: Gp, src: Gp) { self.alu_rr(0x21, is64, dst, src); }
-    pub fn sub_rr(&mut self, is64: bool, dst: Gp, src: Gp) { self.alu_rr(0x29, is64, dst, src); }
-    pub fn xor_rr(&mut self, is64: bool, dst: Gp, src: Gp) { self.alu_rr(0x31, is64, dst, src); }
-    pub fn cmp_rr(&mut self, is64: bool, a: Gp, b: Gp)     { self.alu_rr(0x39, is64, a, b); }
+    pub fn add_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.alu_rr(0x01, is64, dst, src);
+    }
+    pub fn or_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.alu_rr(0x09, is64, dst, src);
+    }
+    pub fn and_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.alu_rr(0x21, is64, dst, src);
+    }
+    pub fn sub_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.alu_rr(0x29, is64, dst, src);
+    }
+    pub fn xor_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.alu_rr(0x31, is64, dst, src);
+    }
+    pub fn cmp_rr(&mut self, is64: bool, a: Gp, b: Gp) {
+        self.alu_rr(0x39, is64, a, b);
+    }
 
-    pub fn add_ri(&mut self, is64: bool, dst: Gp, imm: i32) { self.alu_ri(0, is64, dst, imm); }
-    pub fn or_ri(&mut self, is64: bool, dst: Gp, imm: i32)  { self.alu_ri(1, is64, dst, imm); }
-    pub fn and_ri(&mut self, is64: bool, dst: Gp, imm: i32) { self.alu_ri(4, is64, dst, imm); }
-    pub fn sub_ri(&mut self, is64: bool, dst: Gp, imm: i32) { self.alu_ri(5, is64, dst, imm); }
-    pub fn xor_ri(&mut self, is64: bool, dst: Gp, imm: i32) { self.alu_ri(6, is64, dst, imm); }
-    pub fn cmp_ri(&mut self, is64: bool, a: Gp, imm: i32)   { self.alu_ri(7, is64, a, imm); }
+    pub fn add_ri(&mut self, is64: bool, dst: Gp, imm: i32) {
+        self.alu_ri(0, is64, dst, imm);
+    }
+    pub fn or_ri(&mut self, is64: bool, dst: Gp, imm: i32) {
+        self.alu_ri(1, is64, dst, imm);
+    }
+    pub fn and_ri(&mut self, is64: bool, dst: Gp, imm: i32) {
+        self.alu_ri(4, is64, dst, imm);
+    }
+    pub fn sub_ri(&mut self, is64: bool, dst: Gp, imm: i32) {
+        self.alu_ri(5, is64, dst, imm);
+    }
+    pub fn xor_ri(&mut self, is64: bool, dst: Gp, imm: i32) {
+        self.alu_ri(6, is64, dst, imm);
+    }
+    pub fn cmp_ri(&mut self, is64: bool, a: Gp, imm: i32) {
+        self.alu_ri(7, is64, a, imm);
+    }
 
     fn alu_rm(&mut self, op: u8, is64: bool, dst: Gp, mem: Mem) {
         self.rex_mem(is64, dst.hi(), mem, false);
@@ -975,12 +1094,24 @@ impl Asm {
         self.modrm_mem(dst.lo(), mem);
     }
 
-    pub fn add_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x03, is64, dst, mem); }
-    pub fn or_rm(&mut self, is64: bool, dst: Gp, mem: Mem)  { self.alu_rm(0x0b, is64, dst, mem); }
-    pub fn and_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x23, is64, dst, mem); }
-    pub fn sub_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x2b, is64, dst, mem); }
-    pub fn xor_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x33, is64, dst, mem); }
-    pub fn cmp_rm(&mut self, is64: bool, a: Gp, mem: Mem)   { self.alu_rm(0x3b, is64, a, mem); }
+    pub fn add_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
+        self.alu_rm(0x03, is64, dst, mem);
+    }
+    pub fn or_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
+        self.alu_rm(0x0b, is64, dst, mem);
+    }
+    pub fn and_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
+        self.alu_rm(0x23, is64, dst, mem);
+    }
+    pub fn sub_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
+        self.alu_rm(0x2b, is64, dst, mem);
+    }
+    pub fn xor_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
+        self.alu_rm(0x33, is64, dst, mem);
+    }
+    pub fn cmp_rm(&mut self, is64: bool, a: Gp, mem: Mem) {
+        self.alu_rm(0x3b, is64, a, mem);
+    }
 
     pub fn imul_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
         self.rex_mem(is64, dst.hi(), mem, false);
@@ -1078,17 +1209,37 @@ impl Asm {
         }
     }
 
-    pub fn rol_cl(&mut self, is64: bool, dst: Gp)  { self.shift_cl(0, is64, dst); }
-    pub fn ror_cl(&mut self, is64: bool, dst: Gp)  { self.shift_cl(1, is64, dst); }
-    pub fn shl_cl(&mut self, is64: bool, dst: Gp)  { self.shift_cl(4, is64, dst); }
-    pub fn shr_cl(&mut self, is64: bool, dst: Gp)  { self.shift_cl(5, is64, dst); }
-    pub fn sar_cl(&mut self, is64: bool, dst: Gp)  { self.shift_cl(7, is64, dst); }
+    pub fn rol_cl(&mut self, is64: bool, dst: Gp) {
+        self.shift_cl(0, is64, dst);
+    }
+    pub fn ror_cl(&mut self, is64: bool, dst: Gp) {
+        self.shift_cl(1, is64, dst);
+    }
+    pub fn shl_cl(&mut self, is64: bool, dst: Gp) {
+        self.shift_cl(4, is64, dst);
+    }
+    pub fn shr_cl(&mut self, is64: bool, dst: Gp) {
+        self.shift_cl(5, is64, dst);
+    }
+    pub fn sar_cl(&mut self, is64: bool, dst: Gp) {
+        self.shift_cl(7, is64, dst);
+    }
 
-    pub fn rol_imm(&mut self, is64: bool, dst: Gp, n: u8) { self.shift_imm(0, is64, dst, n); }
-    pub fn ror_imm(&mut self, is64: bool, dst: Gp, n: u8) { self.shift_imm(1, is64, dst, n); }
-    pub fn shl_imm(&mut self, is64: bool, dst: Gp, n: u8) { self.shift_imm(4, is64, dst, n); }
-    pub fn shr_imm(&mut self, is64: bool, dst: Gp, n: u8) { self.shift_imm(5, is64, dst, n); }
-    pub fn sar_imm(&mut self, is64: bool, dst: Gp, n: u8) { self.shift_imm(7, is64, dst, n); }
+    pub fn rol_imm(&mut self, is64: bool, dst: Gp, n: u8) {
+        self.shift_imm(0, is64, dst, n);
+    }
+    pub fn ror_imm(&mut self, is64: bool, dst: Gp, n: u8) {
+        self.shift_imm(1, is64, dst, n);
+    }
+    pub fn shl_imm(&mut self, is64: bool, dst: Gp, n: u8) {
+        self.shift_imm(4, is64, dst, n);
+    }
+    pub fn shr_imm(&mut self, is64: bool, dst: Gp, n: u8) {
+        self.shift_imm(5, is64, dst, n);
+    }
+    pub fn sar_imm(&mut self, is64: bool, dst: Gp, n: u8) {
+        self.shift_imm(7, is64, dst, n);
+    }
 
     pub fn lzcnt(&mut self, is64: bool, dst: Gp, src: Gp) {
         self.emit_u8(0xf3);
@@ -1236,43 +1387,107 @@ impl Asm {
         self.modrm_mem(dst.lo(), mem);
     }
 
-    pub fn addss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x58, d, m); }
-    pub fn subss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x5c, d, m); }
-    pub fn mulss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x59, d, m); }
-    pub fn divss_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf3), 0x5e, d, m); }
-    pub fn ucomiss_xm(&mut self, a: Xmm, m: Mem) { self.sse_xm(None, 0x2e, a, m); }
+    pub fn addss_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf3), 0x58, d, m);
+    }
+    pub fn subss_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf3), 0x5c, d, m);
+    }
+    pub fn mulss_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf3), 0x59, d, m);
+    }
+    pub fn divss_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf3), 0x5e, d, m);
+    }
+    pub fn ucomiss_xm(&mut self, a: Xmm, m: Mem) {
+        self.sse_xm(None, 0x2e, a, m);
+    }
 
-    pub fn addsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x58, d, m); }
-    pub fn subsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x5c, d, m); }
-    pub fn mulsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x59, d, m); }
-    pub fn divsd_xm(&mut self, d: Xmm, m: Mem)   { self.sse_xm(Some(0xf2), 0x5e, d, m); }
-    pub fn ucomisd_xm(&mut self, a: Xmm, m: Mem) { self.sse_xm(Some(0x66), 0x2e, a, m); }
+    pub fn addsd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x58, d, m);
+    }
+    pub fn subsd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x5c, d, m);
+    }
+    pub fn mulsd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x59, d, m);
+    }
+    pub fn divsd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x5e, d, m);
+    }
+    pub fn ucomisd_xm(&mut self, a: Xmm, m: Mem) {
+        self.sse_xm(Some(0x66), 0x2e, a, m);
+    }
 
-    pub fn addss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x58, d, s); }
-    pub fn subss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x5c, d, s); }
-    pub fn mulss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x59, d, s); }
-    pub fn divss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x5e, d, s); }
-    pub fn sqrtss(&mut self, d: Xmm, s: Xmm)  { self.sse_rr(Some(0xf3), 0x51, d, s); }
-    pub fn minss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x5d, d, s); }
-    pub fn maxss(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf3), 0x5f, d, s); }
-    pub fn ucomiss(&mut self, a: Xmm, b: Xmm) { self.sse_rr(None, 0x2e, a, b); }
+    pub fn addss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x58, d, s);
+    }
+    pub fn subss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x5c, d, s);
+    }
+    pub fn mulss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x59, d, s);
+    }
+    pub fn divss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x5e, d, s);
+    }
+    pub fn sqrtss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x51, d, s);
+    }
+    pub fn minss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x5d, d, s);
+    }
+    pub fn maxss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x5f, d, s);
+    }
+    pub fn ucomiss(&mut self, a: Xmm, b: Xmm) {
+        self.sse_rr(None, 0x2e, a, b);
+    }
 
-    pub fn addsd(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf2), 0x58, d, s); }
-    pub fn subsd(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf2), 0x5c, d, s); }
-    pub fn mulsd(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf2), 0x59, d, s); }
-    pub fn divsd(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf2), 0x5e, d, s); }
-    pub fn sqrtsd(&mut self, d: Xmm, s: Xmm)  { self.sse_rr(Some(0xf2), 0x51, d, s); }
-    pub fn minsd(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf2), 0x5d, d, s); }
-    pub fn maxsd(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(Some(0xf2), 0x5f, d, s); }
-    pub fn ucomisd(&mut self, a: Xmm, b: Xmm) { self.sse_rr(Some(0x66), 0x2e, a, b); }
+    pub fn addsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x58, d, s);
+    }
+    pub fn subsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x5c, d, s);
+    }
+    pub fn mulsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x59, d, s);
+    }
+    pub fn divsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x5e, d, s);
+    }
+    pub fn sqrtsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x51, d, s);
+    }
+    pub fn minsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x5d, d, s);
+    }
+    pub fn maxsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x5f, d, s);
+    }
+    pub fn ucomisd(&mut self, a: Xmm, b: Xmm) {
+        self.sse_rr(Some(0x66), 0x2e, a, b);
+    }
 
-    pub fn andps(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(None, 0x54, d, s); }
-    pub fn andnps(&mut self, d: Xmm, s: Xmm)  { self.sse_rr(None, 0x55, d, s); }
-    pub fn orps(&mut self, d: Xmm, s: Xmm)    { self.sse_rr(None, 0x56, d, s); }
-    pub fn xorps(&mut self, d: Xmm, s: Xmm)   { self.sse_rr(None, 0x57, d, s); }
+    pub fn andps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x54, d, s);
+    }
+    pub fn andnps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x55, d, s);
+    }
+    pub fn orps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x56, d, s);
+    }
+    pub fn xorps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x57, d, s);
+    }
 
-    pub fn cvtss2sd(&mut self, d: Xmm, s: Xmm) { self.sse_rr(Some(0xf3), 0x5a, d, s); }
-    pub fn cvtsd2ss(&mut self, d: Xmm, s: Xmm) { self.sse_rr(Some(0xf2), 0x5a, d, s); }
+    pub fn cvtss2sd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x5a, d, s);
+    }
+    pub fn cvtsd2ss(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf2), 0x5a, d, s);
+    }
 
     pub fn cvtsi2ss(&mut self, is64: bool, d: Xmm, s: Gp) {
         self.emit_u8(0xf3);
@@ -1329,10 +1544,18 @@ impl Asm {
     }
 
     // Minimal SIMD helpers for the V128 subset supported by `wtime-aot`.
-    pub fn punpcklbw(&mut self, d: Xmm, s: Xmm) { self.sse_rr(Some(0x66), 0x60, d, s); }
-    pub fn punpcklwd(&mut self, d: Xmm, s: Xmm) { self.sse_rr(Some(0x66), 0x61, d, s); }
-    pub fn punpckldq(&mut self, d: Xmm, s: Xmm) { self.sse_rr(Some(0x66), 0x62, d, s); }
-    pub fn punpcklqdq(&mut self, d: Xmm, s: Xmm) { self.sse_rr(Some(0x66), 0x6c, d, s); }
+    pub fn punpcklbw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x60, d, s);
+    }
+    pub fn punpcklwd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x61, d, s);
+    }
+    pub fn punpckldq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x62, d, s);
+    }
+    pub fn punpcklqdq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x6c, d, s);
+    }
 
     pub fn pextrq(&mut self, dst: Gp, src: Xmm, lane: u8) {
         self.emit_u8(0x66);
@@ -1392,7 +1615,11 @@ impl Asm {
         let patch_off = self.pos();
         self.emit_i32(0);
         let next_ip_off = self.pos();
-        self.relocs.push(Reloc { patch_off, next_ip_off, target });
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
     }
 
     pub fn bsr(&mut self, is64: bool, dst: Gp, src: Gp) {

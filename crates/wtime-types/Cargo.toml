@@ -1,7 +1,14 @@
 [package]
 name = "wtime-types"
+description = "Core WebAssembly types, feature profiles, resource limits, and error definitions for wtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 [dependencies]
