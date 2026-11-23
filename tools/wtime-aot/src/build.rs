@@ -27,10 +27,12 @@
 //! key that includes the profile.
 
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 
 use crate::sha256::Sha256;
 
@@ -292,15 +294,84 @@ pub(crate) fn create_private_temp_file(dir: Option<&Path>, prefix: &str, suffix:
     Err(format!("failed to create unique private temp file under {}", base.display()))
 }
 
-const MAX_CAPTURE_BYTES: u64 = 16 << 20;
+const MAX_CAPTURE_BYTES: usize = 16 << 20;
 
-/// Runs `cmd`, capturing stdout/stderr through private `0o600` temp files (inside `scratch_dir`
-/// when provided, eliminating pipe deadlocks and descendant reader-EOF hangs), enforcing BOTH
-/// `deadline` AND a live `MAX_CAPTURE_BYTES` disk-output ceiling while running and after exit, and
-/// cancelling the child tree immediately on timeout or output overflow.
+pub(crate) enum PipeCaptureErr {
+    Overflow,
+    Io(String),
+}
+
+pub(crate) fn spawn_bounded_pipe_reader<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+    limit: usize,
+    overflowed: Arc<AtomicBool>,
+) -> mpsc::Receiver<Result<Vec<u8>, PipeCaptureErr>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => {
+                    let _ = tx.send(Ok(out));
+                    return;
+                }
+                Ok(n) => {
+                    if out.len().saturating_add(n) > limit {
+                        overflowed.store(true, Ordering::Release);
+                        drop(reader);
+                        let _ = tx.send(Err(PipeCaptureErr::Overflow));
+                        return;
+                    }
+                    out.extend_from_slice(&chunk[..n]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    let _ = tx.send(Err(PipeCaptureErr::Io(e.to_string())));
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+pub(crate) fn recv_bounded_pipe(
+    rx: mpsc::Receiver<Result<Vec<u8>, PipeCaptureErr>>,
+    deadline: Option<std::time::Instant>,
+    label: &str,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    let res = match deadline {
+        Some(dl) => {
+            let rem = dl
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or_else(|| format!("{label}: exceeded build time limit"))?;
+            match rx.recv_timeout(rem) {
+                Ok(r) => r,
+                Err(RecvTimeoutError::Timeout) => return Err(format!("{label}: exceeded build time limit")),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(format!("{label}: subprocess output reader disconnected"));
+                }
+            }
+        }
+        None => rx
+            .recv()
+            .map_err(|_| format!("{label}: subprocess output reader disconnected"))?,
+    };
+    match res {
+        Ok(buf) => Ok(buf),
+        Err(PipeCaptureErr::Overflow) => Err(format!("{label}: exceeded subprocess output cap ({limit} bytes)")),
+        Err(PipeCaptureErr::Io(e)) => Err(format!("{label}: reading subprocess output: {e}")),
+    }
+}
+
+/// Runs `cmd`, capturing stdout/stderr through bounded in-memory pipes (zero disk amplification,
+/// hard `MAX_CAPTURE_BYTES` ceiling with immediate `SIGPIPE` + tree kill on overflow, concurrent
+/// draining preventing pipe deadlocks, and deadline-bounded `recv_timeout` preventing descendant
+/// EOF hangs) while propagating every read failure.
 pub(crate) fn run_cmd_capture_with_deadline(
     mut cmd: Command,
-    scratch_dir: Option<&Path>,
     label: &str,
     deadline: Option<std::time::Instant>,
 ) -> Result<std::process::Output, String> {
@@ -309,24 +380,26 @@ pub(crate) fn run_cmd_capture_with_deadline(
     {
         return Err(format!("{label}: exceeded build time limit"));
     }
-    let (mut out_file, out_path) = create_private_temp_file(scratch_dir, "out", ".log")?;
-    let _rm_out = RemoveFileOnDrop(out_path);
-    let (mut err_file, err_path) = create_private_temp_file(scratch_dir, "err", ".log")?;
-    let _rm_err = RemoveFileOnDrop(err_path);
-    let child_out = out_file.try_clone().map_err(|e| format!("{label}: cloning stdout file: {e}"))?;
-    let child_err = err_file.try_clone().map_err(|e| format!("{label}: cloning stderr file: {e}"))?;
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::from(child_out))
-        .stderr(Stdio::from(child_err));
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     if !inherit_pgid() {
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     }
     let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
     let pid = child.id();
-    let capture_exceeded = |f: &fs::File| f.metadata().is_ok_and(|m| m.len() > MAX_CAPTURE_BYTES);
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let rx_out = spawn_bounded_pipe_reader(
+        child.stdout.take().ok_or_else(|| format!("{label}: missing stdout pipe"))?,
+        MAX_CAPTURE_BYTES,
+        Arc::clone(&overflowed),
+    );
+    let rx_err = spawn_bounded_pipe_reader(
+        child.stderr.take().ok_or_else(|| format!("{label}: missing stderr pipe"))?,
+        MAX_CAPTURE_BYTES,
+        Arc::clone(&overflowed),
+    );
     let status = loop {
-        if capture_exceeded(&out_file) || capture_exceeded(&err_file) {
+        if overflowed.load(Ordering::Acquire) {
             terminate_child_tree(&mut child);
             return Err(format!("{label}: exceeded subprocess output cap ({MAX_CAPTURE_BYTES} bytes)"));
         }
@@ -348,20 +421,11 @@ pub(crate) fn run_cmd_capture_with_deadline(
         }
     };
     reap_child_group_after_exit(pid);
-    if capture_exceeded(&out_file) || capture_exceeded(&err_file) {
+    if overflowed.load(Ordering::Acquire) {
         return Err(format!("{label}: exceeded subprocess output cap ({MAX_CAPTURE_BYTES} bytes)"));
     }
-    if let Some(dl) = deadline
-        && std::time::Instant::now() >= dl
-    {
-        return Err(format!("{label}: exceeded build time limit"));
-    }
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let _ = out_file.seek(SeekFrom::Start(0));
-    let _ = out_file.take(MAX_CAPTURE_BYTES).read_to_end(&mut stdout);
-    let _ = err_file.seek(SeekFrom::Start(0));
-    let _ = err_file.take(MAX_CAPTURE_BYTES).read_to_end(&mut stderr);
+    let stdout = recv_bounded_pipe(rx_out, deadline, label, MAX_CAPTURE_BYTES)?;
+    let stderr = recv_bounded_pipe(rx_err, deadline, label, MAX_CAPTURE_BYTES)?;
     if let Some(dl) = deadline
         && std::time::Instant::now() >= dl
     {
@@ -754,13 +818,12 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     let cache = ensure_private_dir(cache)?;
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
-    let cc_info = crate::cgen::detect_cc_with_deadline(Some(&cache), Some(deadline))?;
-    let cc_target =
-        crate::cgen::cc_target_fingerprint_with_deadline(&cc_info, options.target_cpu, Some(&cache), Some(deadline))?;
+    let cc_info = crate::cgen::detect_cc_with_deadline(options.target_cpu, Some(&cache), Some(deadline))?;
+    let cc_target = crate::cgen::cc_target_fingerprint_with_deadline(&cc_info, options.target_cpu, Some(deadline))?;
     check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 6", &[]);
+    field(&mut key, "wtime-aot build c 7", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
     field(&mut key, "cc", cc_info.version.as_bytes());
@@ -802,10 +865,8 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     match res {
         Ok(()) => {
             check_deadline(deadline, options.time_limit)?;
-            if let Err(e) = crate::cgen::verify_cc_unchanged(&cc_info, Some(&cache), Some(deadline)) {
-                let _ = fs::remove_file(&staged);
-                return Err(e);
-            }
+            // Note: `build_c_blot_cdylib_with_info` already ran `verify_cc_unchanged(&cc_info)`
+            // right after linking and before publishing `c-obj/` shards.
             let so_bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             if cc_info.has_cet_return && !crate::cgen::elf64_has_x86_shstk_property(&so_bytes) {
@@ -953,7 +1014,7 @@ fn prepare(
     for (name, bytes) in runtime_sources(&rt)? {
         field(&mut key, &name, &bytes);
     }
-    let version = rustc_version(options.toolchain, Some(&cache), Some(deadline))?;
+    let version = rustc_version(options.toolchain, Some(deadline))?;
     field(&mut key, "toolchain", version.as_bytes());
     // The CPU and the features it resolves to here: a program built for one
     // machine's CPU is not reused for another's.
@@ -961,7 +1022,7 @@ fn prepare(
     field(
         &mut key,
         "target features",
-        target_features(options.toolchain, options.target_cpu, Some(&cache), Some(deadline))?.as_bytes(),
+        target_features(options.toolchain, options.target_cpu, Some(deadline))?.as_bytes(),
     );
     check_deadline(deadline, options.time_limit)?;
     // A 64-bit memory is flat (allocated whole at its maximum, accessed
@@ -1083,12 +1144,12 @@ fn train_and_merge(
     }
     let mut sysroot_cmd = clean_rustc_command(options.toolchain);
     sysroot_cmd.args(["--print", "sysroot"]);
-    let sysroot = run_cmd_capture_with_deadline(sysroot_cmd, Some(profiles), "rustc --print sysroot", Some(deadline))?;
+    let sysroot = run_cmd_capture_with_deadline(sysroot_cmd, "rustc --print sysroot", Some(deadline))?;
     if !sysroot.status.success() {
         return Err(format!("rustc --print sysroot failed ({})", sysroot.status));
     }
     let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
-    let host = rustc_version(options.toolchain, Some(profiles), Some(deadline))?
+    let host = rustc_version(options.toolchain, Some(deadline))?
         .lines()
         .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
         .ok_or("rustc -vV names no host")?;
@@ -1255,12 +1316,11 @@ fn clean_rustc_command(toolchain: &str) -> Command {
 fn target_features(
     toolchain: &str,
     target_cpu: &str,
-    scratch_dir: Option<&Path>,
     deadline: Option<std::time::Instant>,
 ) -> Result<String, String> {
     let mut cfg_cmd = clean_rustc_command(toolchain);
     cfg_cmd.args(["--print", "cfg", "-C", &format!("target-cpu={target_cpu}")]);
-    let output = run_cmd_capture_with_deadline(cfg_cmd, scratch_dir, "rustc --print cfg", deadline)?;
+    let output = run_cmd_capture_with_deadline(cfg_cmd, "rustc --print cfg", deadline)?;
     if !output.status.success() {
         return Err(format!("target cpu {target_cpu}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
@@ -1269,7 +1329,7 @@ fn target_features(
     // `native` to covers the rest.
     let mut cpus_cmd = clean_rustc_command(toolchain);
     cpus_cmd.args(["--print", "target-cpus", "-C", &format!("target-cpu={target_cpu}")]);
-    let cpus = run_cmd_capture_with_deadline(cpus_cmd, scratch_dir, "rustc --print target-cpus", deadline)?;
+    let cpus = run_cmd_capture_with_deadline(cpus_cmd, "rustc --print target-cpus", deadline)?;
     let listing = String::from_utf8_lossy(&cpus.stdout);
     if let Some(current) = listing.lines().find(|line| line.contains("currently")) {
         features.push_str(current.trim());
@@ -1280,12 +1340,11 @@ fn target_features(
 /// `rustc -vV` of the toolchain.
 fn rustc_version(
     toolchain: &str,
-    scratch_dir: Option<&Path>,
     deadline: Option<std::time::Instant>,
 ) -> Result<String, String> {
     let mut cmd = clean_rustc_command(toolchain);
     cmd.arg("-vV");
-    let output = run_cmd_capture_with_deadline(cmd, scratch_dir, "rustc -vV", deadline)?;
+    let output = run_cmd_capture_with_deadline(cmd, "rustc -vV", deadline)?;
     if !output.status.success() {
         return Err(format!("toolchain {toolchain}: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
