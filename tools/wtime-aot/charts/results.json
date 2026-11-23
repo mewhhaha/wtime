@@ -1,0 +1,172 @@
+{
+  "host": {
+    "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "logical_cpus": 16,
+    "os": "Linux 7.3.5-2-cachyos",
+    "clang": "clang version 23.1.5",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "node": "v26.5.0",
+    "git_rev": "55efe00",
+    "timestamp_utc": "2026-11-23T17:58:00Z"
+  },
+  "runtime_gdev": {
+    "wasm_bytes": 3666280,
+    "functions": 4935,
+    "rounds": 5,
+    "frames": 600,
+    "parity_files": 242,
+    "parity_sha256": "30feb55c0221c97c7d08dd9177c528c6e19004ea5ae8b8269e581fb5cffd6c2a",
+    "artifact_bytes": {
+      "x64": 6787736,
+      "c": 8927216,
+      "wasmtime_cwasm": 14612441
+    },
+    "metrics": {
+      "x64": {
+        "guest_median_ms": 0.0613,
+        "guest_p95_ms": 0.06643900000000001,
+        "snapshot_median_ms": 0.15332900000000002,
+        "bench_load_ms": 6.838514
+      },
+      "c": {
+        "guest_median_ms": 0.055799,
+        "guest_p95_ms": 0.06032,
+        "snapshot_median_ms": 0.141739,
+        "bench_load_ms": 9.187952
+      },
+      "wasmtime": {
+        "guest_median_ms": 0.06227,
+        "guest_p95_ms": 0.06770000000000001,
+        "snapshot_median_ms": 0.15417999999999998,
+        "bench_load_ms": 5042.127417
+      }
+    }
+  },
+  "runtime_kernels": {
+    "rounds": 7,
+    "cases": [
+      {
+        "name": "graph_bfs",
+        "wasm_bytes": 460,
+        "arg": 1024,
+        "iters": 500,
+        "parity_hash": "04aa4f2359a193ae",
+        "median_us": {
+          "x64": 6.446000000000001,
+          "c": 6.469,
+          "rust": 1.106,
+          "v8": 2.59
+        }
+      },
+      {
+        "name": "parser_hash",
+        "wasm_bytes": 290,
+        "arg": 4096,
+        "iters": 2000,
+        "parity_hash": "0501be7dc7425cf0",
+        "median_us": {
+          "x64": 3.8080000000000003,
+          "c": 3.469,
+          "rust": 3.449,
+          "v8": 3.786
+        }
+      },
+      {
+        "name": "image_filter",
+        "wasm_bytes": 399,
+        "arg": 4096,
+        "iters": 500,
+        "parity_hash": "79b786ce0d4a3fc0",
+        "median_us": {
+          "x64": 5.603000000000001,
+          "c": 4.1339999999999995,
+          "rust": 3.6020000000000003,
+          "v8": 4.789
+        }
+      },
+      {
+        "name": "ecs_kernel",
+        "wasm_bytes": 519,
+        "arg": 2048,
+        "iters": 500,
+        "parity_hash": "9f9dd941bb465bbb",
+        "median_us": {
+          "x64": 13.162,
+          "c": 10.229000000000001,
+          "rust": 6.1000000000000005,
+          "v8": 12.859
+        }
+      }
+    ]
+  },
+  "compile_cold": {
+    "rounds": 5,
+    "gdev_ms": {
+      "x64": 220.5056839993631,
+      "c": 7719.210641000245,
+      "wasmtime": 915.7954619999999
+    },
+    "kernels_ms": {
+      "graph_bfs": {
+        "x64": 13.226671999291284,
+        "c": 422.44285700144246,
+        "rust": 1899.0736060004565
+      },
+      "parser_hash": {
+        "x64": 12.559563998365775,
+        "c": 419.3714100001671,
+        "rust": 1849.9530860026425
+      },
+      "image_filter": {
+        "x64": 12.758012999256607,
+        "c": 499.0072630025679,
+        "rust": 1949.6576590026962
+      },
+      "ecs_kernel": {
+        "x64": 13.013591000344604,
+        "c": 428.742116997455,
+        "rust": 2073.301819997141
+      }
+    }
+  },
+  "compile_hot": {
+    "edit_rounds": 5,
+    "hot_rounds": 7,
+    "gdev_1fn_edit_ms": {
+      "x64": 204.68624500063015,
+      "c": 847.8995859986753,
+      "wasmtime": 801.62117
+    },
+    "gdev_warm_pen_load_ms": {
+      "x64": 7.63305,
+      "c": 9.577288999999999,
+      "wasmtime": 16.0
+    },
+    "gdev_build_cache_hit_ms": {
+      "x64": 46.44059600104811,
+      "c": 335.4382079996867
+    },
+    "kernels_build_cache_hit_ms": {
+      "graph_bfs": {
+        "x64": 11.812078999355435,
+        "c": 264.1303620002873,
+        "rust": 46.17141900234856
+      },
+      "parser_hash": {
+        "x64": 12.207306001073448,
+        "c": 263.85418199788546,
+        "rust": 47.66348100019968
+      },
+      "image_filter": {
+        "x64": 11.947628001507837,
+        "c": 272.68183500200394,
+        "rust": 45.64745100287837
+      },
+      "ecs_kernel": {
+        "x64": 11.542429998371517,
+        "c": 274.85989200067706,
+        "rust": 46.26041800293024
+      }
+    }
+  }
+}

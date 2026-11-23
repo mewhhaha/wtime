@@ -16,11 +16,54 @@ The selected portable performance portfolio is complete. See the
 release verification remains outstanding; conditional research branches are
 explicitly deferred.
 
-Modules can also be compiled ahead of time to safe Rust with
-[`tools/wtime-aot`](tools/wtime-aot/README.md). Against Wasmtime and V8 on Goose
-programs and the Goose compiler ([details](tools/wtime-goose/README.md#ahead-of-time-wtime-aot)):
+Modules can also be compiled ahead of time with [`tools/wtime-aot`](tools/wtime-aot/README.md),
+which supports three backends: safe Rust crates (`--backend rust`), sharded C99/Clang
+(`--backend c`, `--blot-cdylib`), and a self-contained pure-Rust Linux x86-64 native
+compiler (`--backend x64`, `--blot-cdylib`, zero external compilers or `libc`).
+
+### Benchmarks
+
+Each category is shown separately below (details in
+[`tools/wtime-goose`](tools/wtime-goose/README.md#ahead-of-time-wtime-aot) and
+[`tools/wtime-aot`](tools/wtime-aot/README.md#backends-and-benchmarks); reproduce the
+`wtime-aot` charts with `python3 -B tools/wtime-aot/bench.py` and `tools/wtime-aot/chart.py`):
+
+#### Standalone programs & Goose compiler — runtime (`--backend rust`)
 
 ![wtime-aot's speed-up over Wasmtime and V8 running each program](tools/wtime-goose/charts/run.svg)
+
+#### Standalone programs & Goose compiler — whole process (`--backend rust`)
+
+![wtime-aot's speed-up over cached Wasmtime and V8 for the whole process](tools/wtime-goose/charts/process.svg)
+
+#### Blot game runtime — `gdev` (`3.57 MiB`, 4,935 functions)
+
+![Blot game runtime on gdev comparing wtime-aot x64, wtime-aot c -O2, and Wasmtime](tools/wtime-aot/charts/runtime-gdev.svg)
+
+#### Representative Wasm kernels — runtime
+
+![Representative Wasm kernels runtime comparing wtime-aot x64, c -O2, rust -O3, and V8](tools/wtime-aot/charts/runtime-kernels.svg)
+
+#### Cold compilation time (empty cache, multi-core)
+
+![Cold compilation time comparing wtime-aot x64, c -O2, rust -O3, and Wasmtime](tools/wtime-aot/charts/compile-cold.svg)
+
+#### Hot compilation, incremental rebuild, & warm cache-hit load
+
+![Hot compilation, incremental 1-function rebuild, and warm load time comparing wtime-aot backends and Wasmtime](tools/wtime-aot/charts/compile-hot.svg)
+
+Summary on real 4,935-function `gdev` (`3.57 MiB` Wasm; AMD Ryzen 7 7800X3D 8C/16T, Linux 7.3.5,
+Clang 23.1.5, Rust 1.99.0; exact 120-frame / 242-file SHA-256 parity across all three engines):
+
+| Metric (`gdev`) | `wtime-aot x64` | `wtime-aot c (-O2)` | Wasmtime |
+| --- | ---: | ---: | ---: |
+| Frame median / p95 (CPU 0) | **0.061 ms / 0.066 ms** | 0.056 ms / 0.060 ms | 0.062 ms / 0.068 ms |
+| Snapshot median (CPU 0) | **0.153 ms** | 0.142 ms | 0.154 ms |
+| Cold compile (16T, empty cache) | **221 ms** | 7.72 s | 916 ms |
+| Hot 1-fn edit rebuild (16T) | **205 ms** | 848 ms *(warm `c-obj/`)* | 802 ms |
+| Warm fresh-process load (`pen`) | **7.63 ms** | 9.58 ms | 16.0 ms *(`.cwasm`)* |
+| Warm `build --cache` CLI hit | **46.4 ms** | 335 ms | — |
+| Compiled artifact size | **6.47 MiB** (`.so`) | 8.51 MiB (`.so`) | 13.94 MiB (`.cwasm`) |
 
 After a fresh clone, restore the plans if the sibling directory is absent:
 

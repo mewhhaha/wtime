@@ -1,16 +1,63 @@
-# wtime-aot: WebAssembly compiled ahead of time to safe Rust
+# wtime-aot: Ahead-of-time WebAssembly compiler (Rust, C99/Clang, and direct x86-64)
 
-`wtime-aot` translates a WebAssembly module into a Rust crate. rustc and LLVM
-then compile it to native code. wtime's own decoder and validator check the
-module first. Nothing is generated or run at run time, and neither the
-generator, the runtime crate nor the generated code uses `unsafe`.
+`wtime-aot` validates a WebAssembly module with wtime's own decoder and validator,
+then compiles it ahead of time through one of three backends:
+
+- **`--backend rust`** (default): translates Wasm into safe Rust crates (`#![forbid(unsafe_code)]`)
+  compiled by `rustc`/LLVM — supports standalone Goose programs and `--blot-cdylib` shared libraries
+  with peak LLVM `-O3` + ThinLTO throughput.
+- **`--backend c`** (`--blot-cdylib`, `--c-opt auto|O2|O1|O0`): emits sharded C99 with a
+  content-addressed per-shard object cache (`c-obj/`) compiled with Clang and linked with `ld.lld`
+  (plus `-fcf-protection=return` CET SHSTK and calling-thread stack checks on Linux x86-64).
+- **`--backend x64`** (`--blot-cdylib`, Linux x86-64 LP64): a self-contained pure-Rust
+  (`#![forbid(unsafe_code)]`) SSA optimizer, register allocator, x86-64 assembler, and ELF64 `.so`
+  linker with zero external compilers, zero subprocesses, and zero `libc`/`DT_NEEDED` runtime
+  dependencies.
+
+Nothing is JIT-compiled at run time.
+
+## Backends and benchmarks
+
+Measured on AMD Ryzen 7 7800X3D (8C/16T), Linux 7.3.5, Clang 23.1.5, Rust 1.99.0, and Node v26.5.0
+with exact output/packet SHA-256 parity verified across every engine. Reproduce the dataset and all
+four category charts with:
+
+```sh
+python3 -B tools/wtime-aot/bench.py --cold-rounds 5 -o tools/wtime-aot/charts/results.json
+python3 -B tools/wtime-aot/chart.py tools/wtime-aot/charts/results.json -o tools/wtime-aot/charts
+```
+
+### Blot game runtime (`gdev`, 3.57 MiB, 4,935 functions)
+
+![Blot game runtime on gdev](charts/runtime-gdev.svg)
+
+### Representative Wasm kernels runtime
+
+![Representative Wasm kernels runtime](charts/runtime-kernels.svg)
+
+### Cold compilation time (empty cache, multi-core)
+
+![Cold compilation time](charts/compile-cold.svg)
+
+### Hot compilation, incremental rebuild, & warm load
+
+![Hot compilation, incremental rebuild, and warm load](charts/compile-hot.svg)
+
+## Usage
 
 For modules from untrusted sources, use `wtime-aot build` (see
 [Uploaded modules](#uploaded-modules)):
 
 ```sh
+# Standalone sandboxed Goose program (--backend rust)
 program=$(target/release/wtime-aot build upload.wasm --cache /srv/aot)
 $program --allow-files /srv/job/42 --time-limit 10 -- program arguments < input
+
+# Blot shared library with the direct pure-Rust x86-64 backend (Linux x86-64 LP64)
+lib=$(target/release/wtime-aot build game.wasm --cache /srv/aot --blot-cdylib --backend x64)
+
+# Blot shared library with the sharded C99/Clang backend
+lib=$(target/release/wtime-aot build game.wasm --cache /srv/aot --blot-cdylib --backend c --c-opt auto)
 ```
 
 To generate a crate by hand:
