@@ -52,7 +52,7 @@ impl Ty {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntBinOp {
     Add,
     Sub,
@@ -71,7 +71,7 @@ pub enum IntBinOp {
     Rotr,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -117,7 +117,7 @@ impl CmpOp {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloatUnOp {
     Abs,
     Neg,
@@ -128,7 +128,7 @@ pub enum FloatUnOp {
     Sqrt,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloatBinOp {
     Add,
     Sub,
@@ -139,7 +139,7 @@ pub enum FloatBinOp {
     Copysign,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TruncOp {
     I32F32S = 0,
@@ -180,7 +180,7 @@ impl TruncOp {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LoadKind {
     I32,
     I64,
@@ -323,6 +323,8 @@ pub enum Op {
     Trunc(TruncOp, Val),
 
     Select { cond: Val, a: Val, b: Val },
+    /// Fused compare + select (`a cmp b ? tv : fv`; `b` unused for `*Imm`).
+    CmpSelect { kind: CmpBranchKind, a: Val, b: Val, tv: Val, fv: Val },
 
     GlobalGet(u32),
     GlobalSet(u32, Val),
@@ -336,6 +338,10 @@ pub enum Op {
     MemGrow(Val),
     MemCopy { dst: Val, src: Val, len: Val },
     MemFill { dst: Val, val: Val, len: Val },
+    /// Inline small constant-length bulk copy (`len <= 64`, zero GP clobbers).
+    MemCopyConst { dst: Val, src: Val, len: u32 },
+    /// Inline small constant-length bulk fill (`len <= 64`, zero GP clobbers).
+    MemFillConst { dst: Val, val: Val, len: u32 },
 
     V128Splat { lane_bytes: u8, val: Val },
     I64x2ExtractLane { v: Val, lane: u8 },
@@ -353,19 +359,22 @@ impl Op {
             Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => {
                 matches!(op, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU)
             }
-            Op::I32BinImm(op, _, _) | Op::I64BinImm(op, _, _) => {
+            Op::I32BinImm(op, _, imm) | Op::I64BinImm(op, _, imm) => {
                 matches!(op, IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU)
+                    && (imm == 0 || (op == IntBinOp::DivS && imm == -1))
             }
             Op::Trunc(t, _) => t.can_trap(),
             Op::GlobalSet(_, _)
             | Op::TableGet { .. }
             | Op::TableSet { .. }
             | Op::BoundsCheck { .. }
-            | Op::Load { .. }
+            | Op::Load { checked: false, .. }
             | Op::Store { .. }
             | Op::MemGrow(_)
             | Op::MemCopy { .. }
             | Op::MemFill { .. }
+            | Op::MemCopyConst { .. }
+            | Op::MemFillConst { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
             | Op::Trap(_) => true,
@@ -446,6 +455,14 @@ impl Op {
                 f(a);
                 f(b);
             }
+            Op::CmpSelect { kind, a, b, tv, fv } => {
+                f(a);
+                if !matches!(kind, CmpBranchKind::I32Imm(..) | CmpBranchKind::I64Imm(..)) {
+                    f(b);
+                }
+                f(tv);
+                f(fv);
+            }
             Op::MemCopy { dst, src, len } => {
                 f(dst);
                 f(src);
@@ -455,6 +472,14 @@ impl Op {
                 f(dst);
                 f(val);
                 f(len);
+            }
+            Op::MemCopyConst { dst, src, .. } => {
+                f(dst);
+                f(src);
+            }
+            Op::MemFillConst { dst, val, .. } => {
+                f(dst);
+                f(val);
             }
             Op::Call { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
@@ -571,6 +596,7 @@ impl Term {
     }
 }
 
+#[derive(Clone)]
 pub struct BrTableData {
     /// Raw dispatch entries in table-index order (used only for jump-table codegen).
     pub targets: Vec<(BlockId, ValRange)>,
@@ -579,6 +605,7 @@ pub struct BrTableData {
     pub unique_edges: Vec<(BlockId, ValRange)>,
 }
 
+#[derive(Clone)]
 pub struct Block {
     pub params: Vec<Val>,
     pub insts: Vec<Inst>,
@@ -599,6 +626,7 @@ impl Block {
     }
 }
 
+#[derive(Clone)]
 pub struct IrFunc {
     pub func_index: usize,
     pub params: Vec<Val>,
@@ -609,6 +637,9 @@ pub struct IrFunc {
     pub v128_consts: Vec<[u8; 16]>,
     pub br_tables: Vec<BrTableData>,
     pub needs_stack_check: bool,
+    /// Extra native stack headroom reserved by a stack-check-retaining caller on behalf of
+    /// direct stack-check-elided callees (Step 8a).
+    pub elided_callee_stack_bytes: i32,
 }
 
 impl IrFunc {
@@ -790,6 +821,7 @@ impl Builder {
             v128_consts: Vec::new(),
             br_tables: Vec::new(),
             needs_stack_check,
+            elided_callee_stack_bytes: 0,
         };
         ir.blocks[0].preds = 1;
         Self { ir, cur_bb: BlockId(0), consts: Vec::new(), const_fold }
@@ -923,13 +955,22 @@ impl Builder {
                     let sh = (cb as u32).trailing_zeros() as i32;
                     return self.emit(Ty::I32, Op::I32BinImm(IntBinOp::Shl, a, sh));
                 }
+                IntBinOp::DivS if cb == 1 => return a,
+                IntBinOp::RemS if cb == 1 || cb == -1 => return self.const_i32(0),
                 IntBinOp::DivU if cb == 1 => return a,
+                IntBinOp::RemU if cb == 1 => return self.const_i32(0),
                 IntBinOp::DivU if (cb as u32).is_power_of_two() => {
                     let sh = (cb as u32).trailing_zeros() as i32;
                     return self.emit(Ty::I32, Op::I32BinImm(IntBinOp::ShrU, a, sh));
                 }
                 IntBinOp::RemU if (cb as u32).is_power_of_two() => {
                     return self.emit(Ty::I32, Op::I32BinImm(IntBinOp::And, a, ((cb as u32) - 1) as i32));
+                }
+                IntBinOp::DivU | IntBinOp::RemU if cb != 0 => {
+                    return self.emit(Ty::I32, Op::I32BinImm(op, a, cb));
+                }
+                IntBinOp::DivS | IntBinOp::RemS if cb != 0 && cb != -1 => {
+                    return self.emit(Ty::I32, Op::I32BinImm(op, a, cb));
                 }
                 IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU | IntBinOp::Rotl | IntBinOp::Rotr => {
                     let sh = (cb as u32) & 31;
@@ -1000,13 +1041,24 @@ impl Builder {
                     let sh = (cb as u64).trailing_zeros() as i32;
                     return self.emit(Ty::I64, Op::I64BinImm(IntBinOp::Shl, a, sh));
                 }
+                IntBinOp::DivS if cb == 1 => return a,
+                IntBinOp::RemS if cb == 1 || cb == -1 => return self.const_i64(0),
                 IntBinOp::DivU if cb == 1 => return a,
+                IntBinOp::RemU if cb == 1 => return self.const_i64(0),
                 IntBinOp::DivU if (cb as u64).is_power_of_two() => {
                     let sh = (cb as u64).trailing_zeros() as i32;
                     return self.emit(Ty::I64, Op::I64BinImm(IntBinOp::ShrU, a, sh));
                 }
                 IntBinOp::RemU if (cb as u64).is_power_of_two() && ((cb as u64) - 1) <= i32::MAX as u64 => {
                     return self.emit(Ty::I64, Op::I64BinImm(IntBinOp::And, a, ((cb as u64) - 1) as i32));
+                }
+                IntBinOp::DivU | IntBinOp::RemU if cb >= 2 && cb <= i32::MAX as i64 => {
+                    return self.emit(Ty::I64, Op::I64BinImm(op, a, cb as i32));
+                }
+                IntBinOp::DivS | IntBinOp::RemS if cb != 0 && cb != -1 => {
+                    if let Ok(imm32) = i32::try_from(cb) {
+                        return self.emit(Ty::I64, Op::I64BinImm(op, a, imm32));
+                    }
                 }
                 IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU | IntBinOp::Rotl | IntBinOp::Rotr => {
                     let sh = (cb as u32) & 63;
@@ -1790,13 +1842,25 @@ pub fn lower_wasm_to_ir_with_budget(
                 let len = stack.pop().ok_or("mcopy len")?;
                 let src = stack.pop().ok_or("mcopy src")?;
                 let dst = stack.pop().ok_or("mcopy dst")?;
-                b.emit_void(Op::MemCopy { dst, src, len });
+                if let Some(c) = b.as_i32(len)
+                    && (c as u32) <= 64
+                {
+                    b.emit_void(Op::MemCopyConst { dst, src, len: c as u32 });
+                } else {
+                    b.emit_void(Op::MemCopy { dst, src, len });
+                }
             }
             0xfc0b => {
                 let len = stack.pop().ok_or("mfill len")?;
                 let val = stack.pop().ok_or("mfill val")?;
                 let dst = stack.pop().ok_or("mfill dst")?;
-                b.emit_void(Op::MemFill { dst, val, len });
+                if let Some(c) = b.as_i32(len)
+                    && (c as u32) <= 64
+                {
+                    b.emit_void(Op::MemFillConst { dst, val, len: c as u32 });
+                } else {
+                    b.emit_void(Op::MemFill { dst, val, len });
+                }
             }
             0xfd0c => {
                 let Immediate::Bytes(ref bytes) = insn.immediate else { return Err("v128.const".into()) };
@@ -2125,7 +2189,18 @@ pub fn optimize_ir(ir: &mut IrFunc) {
 
 /// Runs `optimize_ir` while cooperatively polling `budget`'s deadline across blocks.
 pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) -> Res<()> {
-    // Pass 1: Fuse `BranchIf` with defining `Cmp`/`Eqz`/`ConstI32` in the same block.
+    // Pass 1: Fuse `Select` -> `CmpSelect` and `BranchIf` -> `CmpBranch` (without crossing Call/CallIndirect!).
+    let find_def_no_call = |insts: &[Inst], v: Val| -> Option<Op> {
+        for inst in insts.iter().rev() {
+            if matches!(inst.op, Op::Call { .. } | Op::CallIndirect { .. }) {
+                return None;
+            }
+            if inst.res == Some(v) {
+                return Some(inst.op);
+            }
+        }
+        None
+    };
     let mut dropped_preds: Vec<BlockId> = Vec::new();
     for (bi, bb) in ir.blocks.iter_mut().enumerate() {
         if let Some(bg) = budget
@@ -2133,18 +2208,37 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
         {
             bg.check_deadline()?;
         }
+        // Pass 1a: Fuse `Cmp` + optional `I32Eqz` + `Select` -> `Op::CmpSelect`.
+        for idx in 0..bb.insts.len() {
+            if let Op::Select { mut cond, a: mut tv, b: mut fv } = bb.insts[idx].op {
+                let prefix = &bb.insts[..idx];
+                if let Some(Op::I32Eqz(inner)) = find_def_no_call(prefix, cond) {
+                    cond = inner;
+                    std::mem::swap(&mut tv, &mut fv);
+                }
+                let fused_sel = match find_def_no_call(prefix, cond) {
+                    Some(Op::I32Cmp(op, a, b)) => Some(Op::CmpSelect { kind: CmpBranchKind::I32(op), a, b, tv, fv }),
+                    Some(Op::I32CmpImm(op, a, imm)) => Some(Op::CmpSelect { kind: CmpBranchKind::I32Imm(op, imm), a, b: a, tv, fv }),
+                    Some(Op::I64Cmp(op, a, b)) => Some(Op::CmpSelect { kind: CmpBranchKind::I64(op), a, b, tv, fv }),
+                    Some(Op::I64CmpImm(op, a, imm)) => Some(Op::CmpSelect { kind: CmpBranchKind::I64Imm(op, imm), a, b: a, tv, fv }),
+                    Some(Op::F32Cmp(op, a, b)) => Some(Op::CmpSelect { kind: CmpBranchKind::F32(op), a, b, tv, fv }),
+                    Some(Op::F64Cmp(op, a, b)) => Some(Op::CmpSelect { kind: CmpBranchKind::F64(op), a, b, tv, fv }),
+                    _ => None,
+                };
+                if let Some(new_op) = fused_sel {
+                    bb.insts[idx].op = new_op;
+                }
+            }
+        }
+        // Pass 1b: Fuse `BranchIf` with defining `Cmp`/`Eqz`/`ConstI32` in the same block (not crossing Call/CallIndirect).
         if let Term::BranchIf { mut cond, mut then_bb, mut then_args, mut else_bb, mut else_args } = bb.term {
-            // Walk back up to 2 steps in the same block (`eqz` -> `cmp` or `const`).
             let mut fused: Option<Term> = None;
-            let find_def = |insts: &[Inst], v: Val| -> Option<Op> {
-                insts.iter().rev().find(|i| i.res == Some(v)).map(|i| i.op)
-            };
-            if let Some(Op::I32Eqz(inner)) = find_def(&bb.insts, cond) {
+            if let Some(Op::I32Eqz(inner)) = find_def_no_call(&bb.insts, cond) {
                 cond = inner;
                 std::mem::swap(&mut then_bb, &mut else_bb);
                 std::mem::swap(&mut then_args, &mut else_args);
             }
-            match find_def(&bb.insts, cond) {
+            match find_def_no_call(&bb.insts, cond) {
                 Some(Op::ConstI32(c)) => {
                     fused = Some(if c != 0 {
                         dropped_preds.push(else_bb);
@@ -2207,11 +2301,22 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
             }
             let mut inst = insts[i];
             match &mut inst.op {
+                Op::BoundsCheck { addr, end_off } => {
+                    let e = checked_max.entry(*addr).or_insert(0);
+                    if *end_off > *e {
+                        *e = *end_off;
+                    }
+                    out.push(inst);
+                }
                 Op::Load { kind, addr, offset, checked } => {
                     let a = *addr;
                     let end = (*offset as u64) + kind.bytes();
-                    if checked_max.get(&a).is_some_and(|&m| m >= end) {
+                    if *checked || checked_max.get(&a).is_some_and(|&m| m >= end) {
                         *checked = true;
+                        let e = checked_max.entry(a).or_insert(0);
+                        if end > *e {
+                            *e = end;
+                        }
                         out.push(inst);
                         i += 1;
                         continue;
@@ -2254,10 +2359,12 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                 Op::Store { kind, addr, offset, checked, .. } => {
                     let a = *addr;
                     let end = (*offset as u64) + kind.bytes();
-                    if checked_max.get(&a).is_some_and(|&m| m >= end) {
+                    if *checked || checked_max.get(&a).is_some_and(|&m| m >= end) {
                         *checked = true;
-                    } else {
-                        checked_max.insert(a, end);
+                    }
+                    let e = checked_max.entry(a).or_insert(0);
+                    if end > *e {
+                        *e = end;
                     }
                     out.push(inst);
                 }

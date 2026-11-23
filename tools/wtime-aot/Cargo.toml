@@ -12,3 +12,6 @@ description = "Compiles a WebAssembly module ahead of time to a safe Rust crate 
 [dependencies]
 wtime-validate = { path = "../../crates/wtime-validate" }
 wtime-types = { path = "../../crates/wtime-types" }
+
+[dev-dependencies]
+wtime-runtime = { path = "../../crates/wtime-runtime" }

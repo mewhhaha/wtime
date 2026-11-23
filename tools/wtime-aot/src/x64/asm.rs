@@ -800,10 +800,24 @@ impl Asm {
     pub fn xor_ri(&mut self, is64: bool, dst: Gp, imm: i32) { self.alu_ri(6, is64, dst, imm); }
     pub fn cmp_ri(&mut self, is64: bool, a: Gp, imm: i32)   { self.alu_ri(7, is64, a, imm); }
 
-    pub fn cmp_rm(&mut self, is64: bool, a: Gp, mem: Mem) {
-        self.rex_mem(is64, a.hi(), mem, false);
-        self.emit_u8(0x3b);
-        self.modrm_mem(a.lo(), mem);
+    fn alu_rm(&mut self, op: u8, is64: bool, dst: Gp, mem: Mem) {
+        self.rex_mem(is64, dst.hi(), mem, false);
+        self.emit_u8(op);
+        self.modrm_mem(dst.lo(), mem);
+    }
+
+    pub fn add_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x03, is64, dst, mem); }
+    pub fn or_rm(&mut self, is64: bool, dst: Gp, mem: Mem)  { self.alu_rm(0x0b, is64, dst, mem); }
+    pub fn and_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x23, is64, dst, mem); }
+    pub fn sub_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x2b, is64, dst, mem); }
+    pub fn xor_rm(&mut self, is64: bool, dst: Gp, mem: Mem) { self.alu_rm(0x33, is64, dst, mem); }
+    pub fn cmp_rm(&mut self, is64: bool, a: Gp, mem: Mem)   { self.alu_rm(0x3b, is64, a, mem); }
+
+    pub fn imul_rm(&mut self, is64: bool, dst: Gp, mem: Mem) {
+        self.rex_mem(is64, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xaf);
+        self.modrm_mem(dst.lo(), mem);
     }
 
     pub fn test_rr(&mut self, is64: bool, a: Gp, b: Gp) {
@@ -851,6 +865,18 @@ impl Asm {
     pub fn cqo(&mut self) {
         self.emit_u8(0x48);
         self.emit_u8(0x99);
+    }
+
+    pub fn mul_r(&mut self, is64: bool, factor: Gp) {
+        self.rex(is64, 0, 0, factor.hi(), false);
+        self.emit_u8(0xf7);
+        self.modrm_reg(4, factor.lo());
+    }
+
+    pub fn imul1_r(&mut self, is64: bool, factor: Gp) {
+        self.rex(is64, 0, 0, factor.hi(), false);
+        self.emit_u8(0xf7);
+        self.modrm_reg(5, factor.lo());
     }
 
     pub fn idiv_r(&mut self, is64: bool, divisor: Gp) {

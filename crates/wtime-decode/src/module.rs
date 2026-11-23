@@ -712,8 +712,10 @@ pub fn decode(
                     };
                     let ty = if expr {
                         ty
-                    } else {
+                    } else if s.features().function_references {
                         RefType::new(false, HeapType::Func)
+                    } else {
+                        RefType::FUNCREF
                     };
                     let n_items = count(&mut s)?;
                     let mut init = Vec::new();

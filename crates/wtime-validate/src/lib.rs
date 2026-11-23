@@ -2126,6 +2126,20 @@ mod corpus_validation_regressions {
         let r = validate(b, &FeatureSet::default(), &ResourceLimits::default());
         assert!(r.is_ok(), "{r:?}");
     }
+    // (module (func) (table 1 funcref) (elem (i32.const 0) 0)) with reference_types=true, function_references=false
+    #[test]
+    fn t033_legacy_element_with_reference_types_without_function_references() {
+        let b = &[
+            0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 4, 4, 1, 112, 0, 1, 9, 7,
+            1, 0, 65, 0, 11, 1, 0, 10, 4, 1, 2, 0, 11,
+        ];
+        let feats = FeatureSet {
+            reference_types: true,
+            ..FeatureSet::mvp()
+        };
+        let r = validate(b, &feats, &ResourceLimits::default());
+        assert!(r.is_ok(), "{r:?}");
+    }
     // (module (memory 1) (func i32.const 0 v128.load offset=4294967296 drop))
     #[test]
     fn t097_simd_offset_overflow() {

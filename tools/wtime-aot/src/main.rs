@@ -1,23 +1,9 @@
 //! wtime-aot: compiles a WebAssembly module ahead of time to a safe Rust
-//! crate, which rustc then compiles to native code.
+//! crate (compiled by rustc), C99 shared library (compiled by clang/gcc),
+//! or directly to a Linux x86-64 ELF64 shared library (`--backend x64`).
 //!
-//! The module is decoded and validated by wtime itself. Each function becomes
-//! a Rust method: the operand stack becomes typed local variables, blocks and
-//! loops become labeled Rust blocks and loops, branches become `break` and
-//! `continue` after assigning the target's values, and every trap is an
-//! `Err` returned through the call chain. Memory accesses are bounds checked
-//! (`wtime_aot_rt::m32`, `m64`), calls check the native stack left so that deep recursion
-//! traps instead of overflowing the native stack, and the numeric operators
-//! keep Wasm's semantics (division traps, min/max, trapping and saturating
-//! truncation, NaN-aware comparisons). The generated code, the runtime and
-//! the generator contain no unsafe code.
-//!
-//! Supported: one memory (32- or 64-bit), function imports served by the
-//! Goose host (`wtime_aot_rt::goose`), numeric globals, active data
-//! segments, the MVP instruction set without tables, sign extension,
-//! saturating truncation, memory.copy and memory.fill, and the SIMD subset
-//! that treats v128 as 16 bytes (load, store, const, i64x2 splat and lanes).
-//! Anything else is refused when generating.
+//! The module is decoded and validated by wtime itself. The generated code,
+//! runtime, and compiler contain `#![forbid(unsafe_code)]`.
 //!
 //! Not covered: fuel and cancellation. A compiled program runs unmetered.
 
@@ -27,28 +13,45 @@ mod build;
 mod cgen;
 mod codegen;
 mod sha256;
+mod x64;
 
+use std::fs;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::exit;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o crate-dir [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+static NEXT_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
     if all.first().is_some_and(|first| first == "build") {
         let rt = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rt");
-        if let Err(error) = build::main(all[1..].to_vec(), rt) {
-            eprintln!("wtime-aot build: {error}");
-            exit(1)
+        match build::main(all[1..].to_vec(), rt) {
+            Ok(()) => return,
+            Err(build::BuildError::AdmissionRejected(error)) => {
+                eprintln!("wtime-aot build: {error}");
+                exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
+            }
+            Err(build::BuildError::Failed(error)) => {
+                eprintln!("wtime-aot build: {error}");
+                exit(1);
+            }
         }
-        return;
     }
+    let start_time = Instant::now();
     let mut args = all.into_iter();
     let (mut module, mut out, mut name, mut rt, mut module_path) = (None, None, None, None, None);
     let mut flat64 = false;
     let mut target = codegen::Target::GooseBin;
-    let mut backend_c = false;
+    let mut backend = build::Backend::Rust;
     let mut c_opt = cgen::COpt::Auto;
+    let mut target_cpu = String::from("native");
+    let mut jobs: Option<u32> = None;
+    let mut time_limit: Option<Duration> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => out = args.next().map(PathBuf::from),
@@ -58,8 +61,9 @@ fn main() {
             "--flat-memory64" => flat64 = true,
             "--blot-cdylib" => target = codegen::Target::BlotCdylib,
             "--backend" => match args.next().as_deref() {
-                Some("rust") => backend_c = false,
-                Some("c") => backend_c = true,
+                Some("rust") => backend = build::Backend::Rust,
+                Some("c") => backend = build::Backend::C,
+                Some("x64") => backend = build::Backend::X64,
                 other => {
                     eprintln!("{USAGE}\ninvalid --backend {other:?}");
                     exit(2);
@@ -76,11 +80,45 @@ fn main() {
                     exit(2);
                 }
             },
+            "--target-cpu" => match args.next() {
+                Some(cpu)
+                    if !cpu.is_empty()
+                        && !cpu.starts_with('-')
+                        && cpu.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') =>
+                {
+                    target_cpu = cpu;
+                }
+                _ => {
+                    eprintln!("{USAGE}\n--target-cpu takes a valid CPU name");
+                    exit(2);
+                }
+            },
+            "--jobs" => match args.next().and_then(|v| v.parse::<u32>().ok()) {
+                Some(n) => jobs = Some(n),
+                None => {
+                    eprintln!("{USAGE}\n--jobs takes a number");
+                    exit(2);
+                }
+            },
+            "--time-limit" => {
+                let parsed = args
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|s| *s > 0.0)
+                    .and_then(|s| Duration::try_from_secs_f64(s).ok());
+                match parsed {
+                    Some(d) => time_limit = Some(d),
+                    None => {
+                        eprintln!("{USAGE}\n--time-limit takes a positive number of seconds");
+                        exit(2);
+                    }
+                }
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 exit(0)
             }
-            _ if module.is_none() => module = Some(PathBuf::from(arg)),
+            _ if module.is_none() && !arg.starts_with('-') => module = Some(PathBuf::from(arg)),
             other => {
                 eprintln!("{USAGE}\nunrecognized argument {other}");
                 exit(2)
@@ -91,14 +129,75 @@ fn main() {
         eprintln!("{USAGE}");
         exit(2)
     };
-    let bytes = match std::fs::read(&module) {
+    if backend == build::Backend::X64 {
+        if target != codegen::Target::BlotCdylib {
+            eprintln!("wtime-aot: --backend x64 currently requires --blot-cdylib");
+            exit(2);
+        }
+        let deadline = time_limit.map(|d| start_time + d);
+        let (_profile, isa) = match x64::resolve_x64_isa(&target_cpu) {
+            Ok(v) => v,
+            Err(error) => {
+                eprintln!("wtime-aot: {error}");
+                exit(1);
+            }
+        };
+        let bytes = match build::read_bounded_wasm_for_x64(&module) {
+            Ok(bytes) => bytes,
+            Err(build::BuildError::AdmissionRejected(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
+            }
+            Err(build::BuildError::Failed(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(1);
+            }
+        };
+        let opts = x64::X64CompileOptions {
+            isa,
+            jobs: jobs.unwrap_or(0) as usize,
+            deadline,
+            ..Default::default()
+        };
+        let elf_bytes = match x64::compile_wasm_to_x64_so(&bytes, &opts) {
+            Ok(img) => img,
+            Err(x64::X64CompileError::AdmissionRejected(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
+            }
+            Err(x64::X64CompileError::Failed(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(1);
+            }
+        };
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            eprintln!("wtime-aot: compilation time limit exceeded");
+            exit(1);
+        }
+        let t_write = Instant::now();
+        if let Err(error) = write_output_atomic(&out, &elf_bytes) {
+            eprintln!("wtime-aot: {error}");
+            exit(1);
+        }
+        if std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1") {
+            eprintln!(
+                "wtime-aot x64 write={:.2}ms total_cli={:.2}ms",
+                t_write.elapsed().as_secs_f64() * 1000.0,
+                start_time.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return;
+    }
+    let bytes = match build::read_bounded_wasm(&module, build::MAX_WASM_BYTES_C_RUST) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("{}: {error}", module.display());
+            eprintln!("{error}");
             exit(1)
         }
     };
-    if backend_c {
+    if backend == build::Backend::C {
         if target != codegen::Target::BlotCdylib {
             eprintln!("wtime-aot: --backend c currently requires --blot-cdylib");
             exit(2);
@@ -128,4 +227,39 @@ fn main() {
         eprintln!("wtime-aot: {error}");
         exit(1)
     }
+}
+
+fn write_output_atomic(out: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = match out.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    let fname = out
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output.so");
+    let seq = NEXT_OUT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = parent.join(format!(".{fname}.{}.{seq}.tmp", std::process::id()));
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let write_res = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes))
+        .map_err(|e| format!("{}: {e}", tmp.display()));
+    let publish_res = write_res.and_then(|()| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("{}: {e}", tmp.display()))?;
+        }
+        fs::rename(&tmp, out).map_err(|e| format!("{}: {e}", out.display()))
+    });
+    if let Err(e) = publish_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }

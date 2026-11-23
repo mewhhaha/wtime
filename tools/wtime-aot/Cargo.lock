@@ -6,6 +6,7 @@ version = 4
 name = "wtime-aot"
 version = "0.1.0"
 dependencies = [
+ "wtime-runtime",
  "wtime-types",
  "wtime-validate",
 ]
@@ -15,6 +16,14 @@ name = "wtime-decode"
 version = "0.1.0"
 dependencies = [
  "wtime-types",
+]
+
+[[package]]
+name = "wtime-runtime"
+version = "0.1.0"
+dependencies = [
+ "wtime-types",
+ "wtime-validate",
 ]
 
 [[package]]

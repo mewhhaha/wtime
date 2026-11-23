@@ -198,6 +198,7 @@ pub enum X64ConstVal {
 /// Static `call_indirect` dispatch metadata for one canonical `(table, canonical_sig_id)` pair.
 #[derive(Clone, Debug)]
 pub struct X64CiSig {
+    #[allow(dead_code)]
     pub table: u32,
     pub table_len: u32,
     /// Representative index into `X64Module::module_types` (zero `FuncType` duplication).
@@ -418,6 +419,7 @@ fn check_blot_import_sig(mod_name: &str, name: &str, ty: &FuncType) -> Res<()> {
 }
 
 /// Enforces the Stage 1 admission contract and builds lean `X64Module` metadata.
+#[allow(dead_code)]
 pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
     admit_x64_module_with_budget(decoded, None)
 }

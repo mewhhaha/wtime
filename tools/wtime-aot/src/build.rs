@@ -38,18 +38,39 @@ use crate::sha256::Sha256;
 
 static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
+pub(crate) const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 /// Codegen/compiler backend used by `wtime-aot build`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
     Rust,
     C,
+    X64,
 }
 
-pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
+/// Typed build error distinguishing clean `--backend x64` admission rejections (CLI exit code `4`)
+/// from usage/I/O/timeout/compiler errors (CLI exit code `1`).
+#[derive(Clone, Debug)]
+pub enum BuildError {
+    AdmissionRejected(String),
+    Failed(String),
+}
+
+impl From<String> for BuildError {
+    fn from(s: String) -> Self {
+        BuildError::Failed(s)
+    }
+}
+
+impl From<&str> for BuildError {
+    fn from(s: &str) -> Self {
+        BuildError::Failed(s.to_string())
+    }
+}
+
+pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildError> {
     let mut arguments = arguments.into_iter();
     let (mut module, mut cache, mut toolchain, mut module_path, mut rt, mut jobs) =
         (None, None, String::from("stable"), None, default_rt, None);
@@ -75,7 +96,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
                     || target_cpu.starts_with('-')
                     || !target_cpu.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
                 {
-                    return Err(format!("{USAGE}\n--target-cpu takes a CPU name"));
+                    return Err(format!("{USAGE}\n--target-cpu takes a CPU name").into());
                 }
             }
             "--time-limit" => {
@@ -88,7 +109,8 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
                 backend = match value()?.as_str() {
                     "rust" => Backend::Rust,
                     "c" => Backend::C,
-                    other => return Err(format!("{USAGE}\ninvalid --backend {other:?}")),
+                    "x64" => Backend::X64,
+                    other => return Err(format!("{USAGE}\ninvalid --backend {other:?}").into()),
                 };
             }
             "--c-opt" => c_opt = crate::cgen::COpt::parse(&value()?)?,
@@ -97,19 +119,19 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
                 train = Some(arguments.by_ref().collect::<Vec<_>>());
             }
             _ if module.is_none() && !argument.starts_with('-') => module = Some(PathBuf::from(argument)),
-            other => return Err(format!("{USAGE}\nunrecognized argument {other}")),
+            other => return Err(format!("{USAGE}\nunrecognized argument {other}").into()),
         }
     }
     let (Some(module), Some(cache)) = (module, cache) else { return Err(USAGE.into()) };
-    if backend == Backend::C && target != crate::codegen::Target::BlotCdylib {
-        return Err("--backend c currently requires --blot-cdylib".into());
+    if matches!(backend, Backend::C | Backend::X64) && target != crate::codegen::Target::BlotCdylib {
+        return Err(format!("--backend {:?} currently requires --blot-cdylib", backend).into());
     }
-    if backend == Backend::C && train.is_some() {
-        return Err("--train is not supported with --backend c".into());
+    if matches!(backend, Backend::C | Backend::X64) && train.is_some() {
+        return Err(format!("--train is not supported with --backend {:?}", backend).into());
     }
     let options = Options { toolchain: &toolchain, target_cpu: &target_cpu, jobs, time_limit, target, backend, c_opt };
     let program = match train {
-        None => build(&module, &cache, module_path.as_deref(), &rt, &options)?,
+        None => build_classified(&module, &cache, module_path.as_deref(), &rt, &options)?,
         Some(train) => build_trained(&module, &cache, module_path.as_deref(), &rt, &options, &train)?,
     };
     println!("{}", program.display());
@@ -140,13 +162,29 @@ struct Prepared {
 }
 
 /// Builds (or finds in `cache`) the program for `module`; its path.
+#[allow(dead_code)]
 pub fn build(module: &Path, cache: &Path, module_path: Option<&str>, rt: &Path, options: &Options) -> Result<PathBuf, String> {
+    build_classified(module, cache, module_path, rt, options).map_err(|e| match e {
+        BuildError::AdmissionRejected(s) | BuildError::Failed(s) => s,
+    })
+}
+
+fn build_classified(
+    module: &Path,
+    cache: &Path,
+    module_path: Option<&str>,
+    rt: &Path,
+    options: &Options,
+) -> Result<PathBuf, BuildError> {
     let deadline = std::time::Instant::now() + options.time_limit;
     if options.backend == Backend::C {
-        return build_c(module, cache, options, deadline);
+        return Ok(build_c(module, cache, options, deadline)?);
+    }
+    if options.backend == Backend::X64 {
+        return build_x64(module, cache, options, deadline);
     }
     let prepared = prepare(module, cache, module_path, rt, options, deadline)?;
-    cached(&prepared, prepared.key.clone(), &[], options, "", deadline)
+    Ok(cached(&prepared, prepared.key.clone(), &[], options, "", deadline)?)
 }
 
 fn check_deadline(deadline: std::time::Instant, time_limit: std::time::Duration) -> Result<(), String> {
@@ -179,6 +217,34 @@ pub(crate) fn read_bounded_wasm(path: &Path, max_bytes: usize) -> Result<Vec<u8>
             "{}: input size exceeds maximum module limit ({max_bytes} B)",
             path.display()
         ));
+    }
+    Ok(buf)
+}
+
+/// Reads a Wasm input file under the `--backend x64` 64 MiB cap, classifying oversized modules as
+/// clean `BuildError::AdmissionRejected` (exit code `4`) and I/O errors as `BuildError::Failed`.
+pub(crate) fn read_bounded_wasm_for_x64(path: &Path) -> Result<Vec<u8>, BuildError> {
+    let max_bytes = crate::x64::MAX_WASM_BYTES_X64;
+    let file = fs::File::open(path).map_err(|e| BuildError::Failed(format!("{}: {e}", path.display())))?;
+    if let Ok(meta) = file.metadata()
+        && meta.is_file()
+        && meta.len() > max_bytes as u64
+    {
+        return Err(BuildError::AdmissionRejected(format!(
+            "x64: {}: input size ({} B) exceeds x64 maximum module limit ({max_bytes} B)",
+            path.display(),
+            meta.len()
+        )));
+    }
+    let mut buf = Vec::new();
+    file.take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| BuildError::Failed(format!("{}: {e}", path.display())))?;
+    if buf.len() > max_bytes {
+        return Err(BuildError::AdmissionRejected(format!(
+            "x64: {}: input size exceeds x64 maximum module limit ({max_bytes} B)",
+            path.display()
+        )));
     }
     Ok(buf)
 }
@@ -952,6 +1018,91 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
             Err(e)
         }
     }
+}
+
+/// Pure-Rust Wasm -> Linux x86-64 ELF64 `.so` cached build path (`--backend x64`).
+fn build_x64(
+    module: &Path,
+    cache: &Path,
+    options: &Options,
+    deadline: std::time::Instant,
+) -> Result<PathBuf, BuildError> {
+    use std::io::Write as _;
+    check_deadline(deadline, options.time_limit)?;
+    // Validate CPU syntax and host platform BEFORE cache lookup or file hashing.
+    let (isa_profile, isa) = crate::x64::resolve_x64_isa(options.target_cpu)?;
+    let wasm = read_bounded_wasm_for_x64(module)?;
+    check_deadline(deadline, options.time_limit)?;
+    let cache = ensure_private_dir(cache)?;
+    let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
+    let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
+    check_deadline(deadline, options.time_limit)?;
+
+    // Key strictly by resolved internal ISA profile (`x64-v2` vs `x64-v3`), never raw `"native"`.
+    let mut key = Sha256::new();
+    field(&mut key, "wtime-aot build x64 1", &[]);
+    field(&mut key, "wasm", &wasm);
+    field(&mut key, "generator", &gen_bytes);
+    field(&mut key, "isa profile", isa_profile.as_bytes());
+    let key_hex = key.hex();
+
+    let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
+    check_deadline(deadline, options.time_limit)?;
+    let program = entry.join("library.so");
+    let digest_file = entry.join("library.so.sha256");
+    if verified_cached_artifact(&program, &digest_file) {
+        check_deadline(deadline, options.time_limit)?;
+        return Ok(program);
+    }
+    let _ = fs::remove_file(&program);
+    let _ = fs::remove_file(&digest_file);
+    check_deadline(deadline, options.time_limit)?;
+
+    let compile_opts = crate::x64::X64CompileOptions {
+        isa,
+        jobs: options.jobs.unwrap_or(0) as usize,
+        deadline: Some(deadline),
+        ..Default::default()
+    };
+    let so_bytes = crate::x64::compile_wasm_to_x64_so(&wasm, &compile_opts).map_err(|e| match e {
+        crate::x64::X64CompileError::AdmissionRejected(s) => BuildError::AdmissionRejected(s),
+        crate::x64::X64CompileError::Failed(s) => BuildError::Failed(s),
+    })?;
+    check_deadline(deadline, options.time_limit)?;
+
+    let t_write = std::time::Instant::now();
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let so_sha = crate::sha256::hex(&so_bytes);
+    let publish_res = opts
+        .open(&staged)
+        .and_then(|mut f| f.write_all(&so_bytes))
+        .map_err(|e| format!("{}: {e}", staged.display()))
+        .and_then(|()| mark_artifact_immutable(&staged))
+        .and_then(|()| fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display())))
+        .and_then(|()| publish_digest_sidecar(&entry, "library.so", &so_sha, &digest_file));
+    if let Err(e) = publish_res {
+        let _ = fs::remove_file(&staged);
+        let _ = fs::remove_file(&program);
+        let _ = fs::remove_file(&digest_file);
+        return Err(BuildError::Failed(e));
+    }
+    let _ = fs::write(
+        entry.join("key.txt"),
+        format!(
+            "key {key_hex}\nbackend x64\nisa profile {isa_profile}\ntarget cpu {}\nwasm sha256 {}\nso sha256 {so_sha}\n",
+            options.target_cpu,
+            crate::sha256::hex(&wasm)
+        ),
+    );
+    if std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1") {
+        eprintln!("wtime-aot x64 write={:.2}ms", t_write.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(program)
 }
 
 /// Builds (or finds in `cache`) the program for `module`, optimized with the
