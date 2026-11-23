@@ -295,6 +295,20 @@ pub(crate) fn create_private_temp_file(dir: Option<&Path>, prefix: &str, suffix:
 }
 
 const MAX_CAPTURE_BYTES: usize = 16 << 20;
+const POST_EXIT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Returns an absolute-only, empty-entry-free `PATH` so subprocess execution (`cc`, `ld`, `as`,
+/// `rustc`, `cargo`, `ld.so`) resolves bare names identically to `find_in_path` with zero CWD lookup.
+pub(crate) fn sanitized_path_env() -> Option<std::ffi::OsString> {
+    let raw = std::env::var_os("PATH")?;
+    let dirs: Vec<PathBuf> = std::env::split_paths(&raw)
+        .filter(|d| !d.as_os_str().is_empty() && d.is_absolute())
+        .collect();
+    if dirs.is_empty() {
+        return None;
+    }
+    std::env::join_paths(dirs).ok()
+}
 
 pub(crate) enum PipeCaptureErr {
     Overflow,
@@ -305,35 +319,44 @@ pub(crate) fn spawn_bounded_pipe_reader<R: std::io::Read + Send + 'static>(
     mut reader: R,
     limit: usize,
     overflowed: Arc<AtomicBool>,
-) -> mpsc::Receiver<Result<Vec<u8>, PipeCaptureErr>> {
+) -> Result<mpsc::Receiver<Result<Vec<u8>, PipeCaptureErr>>, String> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => {
-                    let _ = tx.send(Ok(out));
-                    return;
-                }
-                Ok(n) => {
-                    if out.len().saturating_add(n) > limit {
-                        overflowed.store(true, Ordering::Release);
-                        drop(reader);
-                        let _ = tx.send(Err(PipeCaptureErr::Overflow));
+    std::thread::Builder::new()
+        .name("wtime-aot-pipe".into())
+        .spawn(move || {
+            let mut out = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => {
+                        let _ = tx.send(Ok(out));
                         return;
                     }
-                    out.extend_from_slice(&chunk[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    let _ = tx.send(Err(PipeCaptureErr::Io(e.to_string())));
-                    return;
+                    Ok(n) => {
+                        let new_len = out.len().saturating_add(n);
+                        if new_len > limit {
+                            overflowed.store(true, Ordering::Release);
+                            drop(reader);
+                            let _ = tx.send(Err(PipeCaptureErr::Overflow));
+                            return;
+                        }
+                        if new_len > out.capacity() {
+                            // Never overshoot `limit` in allocated capacity.
+                            let target = out.capacity().saturating_mul(2).max(new_len).min(limit);
+                            out.reserve_exact(target - out.len());
+                        }
+                        out.extend_from_slice(&chunk[..n]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        let _ = tx.send(Err(PipeCaptureErr::Io(e.to_string())));
+                        return;
+                    }
                 }
             }
-        }
-    });
-    rx
+        })
+        .map_err(|e| format!("spawning subprocess pipe reader thread: {e}"))?;
+    Ok(rx)
 }
 
 pub(crate) fn recv_bounded_pipe(
@@ -342,22 +365,28 @@ pub(crate) fn recv_bounded_pipe(
     label: &str,
     limit: usize,
 ) -> Result<Vec<u8>, String> {
-    let res = match deadline {
-        Some(dl) => {
-            let rem = dl
-                .checked_duration_since(std::time::Instant::now())
-                .ok_or_else(|| format!("{label}: exceeded build time limit"))?;
-            match rx.recv_timeout(rem) {
-                Ok(r) => r,
-                Err(RecvTimeoutError::Timeout) => return Err(format!("{label}: exceeded build time limit")),
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!("{label}: subprocess output reader disconnected"));
-                }
+    let wait = match deadline {
+        Some(dl) => dl
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| format!("{label}: exceeded build time limit"))?
+            .min(POST_EXIT_DRAIN_GRACE),
+        None => POST_EXIT_DRAIN_GRACE,
+    };
+    let res = match rx.recv_timeout(wait) {
+        Ok(r) => r,
+        Err(RecvTimeoutError::Timeout) => {
+            if let Some(dl) = deadline
+                && std::time::Instant::now() >= dl
+            {
+                return Err(format!("{label}: exceeded build time limit"));
             }
+            return Err(format!(
+                "{label}: subprocess output pipe did not close after exit (orphaned descendant holding pipe open)"
+            ));
         }
-        None => rx
-            .recv()
-            .map_err(|_| format!("{label}: subprocess output reader disconnected"))?,
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(format!("{label}: subprocess output reader disconnected"));
+        }
     };
     match res {
         Ok(buf) => Ok(buf),
@@ -367,9 +396,10 @@ pub(crate) fn recv_bounded_pipe(
 }
 
 /// Runs `cmd`, capturing stdout/stderr through bounded in-memory pipes (zero disk amplification,
-/// hard `MAX_CAPTURE_BYTES` ceiling with immediate `SIGPIPE` + tree kill on overflow, concurrent
-/// draining preventing pipe deadlocks, and deadline-bounded `recv_timeout` preventing descendant
-/// EOF hangs) while propagating every read failure.
+/// hard `MAX_CAPTURE_BYTES` per-stream ceiling with exact `reserve_exact` capacity cap and
+/// immediate `SIGPIPE` + tree kill on overflow, concurrent draining preventing pipe deadlocks,
+/// and bounded post-exit `recv_timeout` preventing descendant EOF hangs) while propagating every
+/// read failure.
 pub(crate) fn run_cmd_capture_with_deadline(
     mut cmd: Command,
     label: &str,
@@ -388,16 +418,28 @@ pub(crate) fn run_cmd_capture_with_deadline(
     let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
     let pid = child.id();
     let overflowed = Arc::new(AtomicBool::new(false));
-    let rx_out = spawn_bounded_pipe_reader(
-        child.stdout.take().ok_or_else(|| format!("{label}: missing stdout pipe"))?,
-        MAX_CAPTURE_BYTES,
-        Arc::clone(&overflowed),
-    );
-    let rx_err = spawn_bounded_pipe_reader(
-        child.stderr.take().ok_or_else(|| format!("{label}: missing stderr pipe"))?,
-        MAX_CAPTURE_BYTES,
-        Arc::clone(&overflowed),
-    );
+    let Some(stdout_pipe) = child.stdout.take() else {
+        terminate_child_tree(&mut child);
+        return Err(format!("{label}: missing stdout pipe"));
+    };
+    let Some(stderr_pipe) = child.stderr.take() else {
+        terminate_child_tree(&mut child);
+        return Err(format!("{label}: missing stderr pipe"));
+    };
+    let rx_out = match spawn_bounded_pipe_reader(stdout_pipe, MAX_CAPTURE_BYTES, Arc::clone(&overflowed)) {
+        Ok(rx) => rx,
+        Err(e) => {
+            terminate_child_tree(&mut child);
+            return Err(format!("{label}: {e}"));
+        }
+    };
+    let rx_err = match spawn_bounded_pipe_reader(stderr_pipe, MAX_CAPTURE_BYTES, Arc::clone(&overflowed)) {
+        Ok(rx) => rx,
+        Err(e) => {
+            terminate_child_tree(&mut child);
+            return Err(format!("{label}: {e}"));
+        }
+    };
     let status = loop {
         if overflowed.load(Ordering::Acquire) {
             terminate_child_tree(&mut child);
@@ -823,7 +865,7 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 7", &[]);
+    field(&mut key, "wtime-aot build c 8", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
     field(&mut key, "cc", cc_info.version.as_bytes());
@@ -1142,7 +1184,7 @@ fn train_and_merge(
     if raw.is_empty() {
         return Err("the training run wrote no profile".into());
     }
-    let mut sysroot_cmd = clean_rustc_command(options.toolchain);
+    let mut sysroot_cmd = clean_rustc_command(options.toolchain)?;
     sysroot_cmd.args(["--print", "sysroot"]);
     let sysroot = run_cmd_capture_with_deadline(sysroot_cmd, "rustc --print sysroot", Some(deadline))?;
     if !sysroot.status.success() {
@@ -1227,9 +1269,14 @@ fn generate_and_compile(
     crate::codegen::generate_target(&prepared.wasm, work, name, &prepared.rt, &prepared.module_path, prepared.flat64, target_kind)?;
     check_deadline(deadline, time_limit)?;
     let target = work.join("target");
-    let mut cargo = Command::new("cargo");
+    let cargo_bin = crate::cgen::find_in_path("cargo")
+        .ok_or_else(|| "no executable `cargo` found in absolute PATH entries".to_string())?;
+    let mut cargo = Command::new(cargo_bin);
     cargo.env_clear().current_dir(work).stdin(Stdio::null());
-    for variable in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME"] {
+    if let Some(path) = sanitized_path_env() {
+        cargo.env("PATH", path);
+    }
+    for variable in ["HOME", "RUSTUP_HOME", "CARGO_HOME"] {
         if let Some(value) = std::env::var_os(variable) {
             cargo.env(variable, value);
         }
@@ -1299,16 +1346,21 @@ fn runtime_sources(rt: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(files)
 }
 
-fn clean_rustc_command(toolchain: &str) -> Command {
-    let mut cmd = Command::new("rustc");
+fn clean_rustc_command(toolchain: &str) -> Result<Command, String> {
+    let rustc_bin = crate::cgen::find_in_path("rustc")
+        .ok_or_else(|| "no executable `rustc` found in absolute PATH entries".to_string())?;
+    let mut cmd = Command::new(rustc_bin);
     cmd.env_clear();
-    for variable in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME"] {
+    if let Some(path) = sanitized_path_env() {
+        cmd.env("PATH", path);
+    }
+    for variable in ["HOME", "RUSTUP_HOME", "CARGO_HOME"] {
         if let Some(value) = std::env::var_os(variable) {
             cmd.env(variable, value);
         }
     }
     cmd.env("RUSTUP_TOOLCHAIN", toolchain);
-    cmd
+    Ok(cmd)
 }
 
 /// The target features `target_cpu` resolves to on this machine
@@ -1318,7 +1370,7 @@ fn target_features(
     target_cpu: &str,
     deadline: Option<std::time::Instant>,
 ) -> Result<String, String> {
-    let mut cfg_cmd = clean_rustc_command(toolchain);
+    let mut cfg_cmd = clean_rustc_command(toolchain)?;
     cfg_cmd.args(["--print", "cfg", "-C", &format!("target-cpu={target_cpu}")]);
     let output = run_cmd_capture_with_deadline(cfg_cmd, "rustc --print cfg", deadline)?;
     if !output.status.success() {
@@ -1327,7 +1379,7 @@ fn target_features(
     let mut features = String::from_utf8_lossy(&output.stdout).into_owned();
     // `--print cfg` lists stable features only: the CPU LLVM resolves
     // `native` to covers the rest.
-    let mut cpus_cmd = clean_rustc_command(toolchain);
+    let mut cpus_cmd = clean_rustc_command(toolchain)?;
     cpus_cmd.args(["--print", "target-cpus", "-C", &format!("target-cpu={target_cpu}")]);
     let cpus = run_cmd_capture_with_deadline(cpus_cmd, "rustc --print target-cpus", deadline)?;
     let listing = String::from_utf8_lossy(&cpus.stdout);
@@ -1342,7 +1394,7 @@ fn rustc_version(
     toolchain: &str,
     deadline: Option<std::time::Instant>,
 ) -> Result<String, String> {
-    let mut cmd = clean_rustc_command(toolchain);
+    let mut cmd = clean_rustc_command(toolchain)?;
     cmd.arg("-vV");
     let output = run_cmd_capture_with_deadline(cmd, "rustc -vV", deadline)?;
     if !output.status.success() {

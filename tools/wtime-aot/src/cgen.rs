@@ -4768,15 +4768,12 @@ fn is_bare_prog_name(s: &str) -> bool {
     !s.is_empty() && !s.contains(std::path::MAIN_SEPARATOR) && !s.contains('/') && s != "." && s != ".."
 }
 
-fn find_in_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_path(name: &str) -> Option<PathBuf> {
     if !is_bare_prog_name(name) {
         return None;
     }
-    let path_var = std::env::var_os("PATH")?;
+    let path_var = crate::build::sanitized_path_env()?;
     for dir in std::env::split_paths(&path_var) {
-        if dir.as_os_str().is_empty() || !dir.is_absolute() {
-            continue;
-        }
         let candidate = dir.join(name);
         if is_executable_file(&candidate) {
             return Some(candidate);
@@ -4914,6 +4911,7 @@ const SYS_HEADER_PROBE_C: &[u8] = b"#if defined(__linux__) && !defined(_GNU_SOUR
 const LINK_PROBE_C: &[u8] = b"#if defined(__linux__) && !defined(_GNU_SOURCE)\n\
 #define _GNU_SOURCE\n\
 #endif\n\
+#include <math.h>\n\
 #include <stdlib.h>\n\
 #include <string.h>\n\
 #if defined(__linux__)\n\
@@ -4925,6 +4923,8 @@ int wt_cet_probe(size_t n) {\n\
     memset(p, 0, 1);\n\
     int r = memcmp(p, p, 1);\n\
     free(p);\n\
+    volatile float x = (float)n + 0.5f;\n\
+    r += (int)truncf(x);\n\
 #if defined(__linux__)\n\
     pthread_attr_t a;\n\
     if (pthread_getattr_np(pthread_self(), &a) == 0) pthread_attr_destroy(&a);\n\
@@ -4936,6 +4936,17 @@ fn hash_field(h: &mut Sha256, tag: &str, bytes: &[u8]) {
     h.update(tag.as_bytes());
     h.update(&(bytes.len() as u64).to_le_bytes());
     h.update(bytes);
+}
+
+fn stamp_len(stamp: FileStamp) -> u64 {
+    #[cfg(unix)]
+    {
+        stamp.2
+    }
+    #[cfg(not(unix))]
+    {
+        stamp.0
+    }
 }
 
 fn hash_stamp(h: &mut Sha256, stamp: FileStamp) {
@@ -4958,7 +4969,8 @@ fn hash_stamp(h: &mut Sha256, stamp: FileStamp) {
 }
 
 /// Resolves an auxiliary toolchain program via `cc -print-prog-name=<prog>` (with `PATH` fallback
-/// when `allow_path_fallback` is true). Never resolves bare or relative names against CWD.
+/// when `allow_path_fallback` is true). Fails closed on non-zero exit or relative non-bare paths;
+/// only returns `Ok(None)` when the driver reports an unfound bare name and `!allow_path_fallback`.
 fn resolve_driver_prog(
     cc_path: &Path,
     prog: &str,
@@ -4972,24 +4984,33 @@ fn resolve_driver_prog(
         &format!("{} -print-prog-name={prog}", cc_path.display()),
         deadline,
     )?;
-    let mut candidate = if out.status.success() {
-        let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !printed.is_empty() {
-            if is_bare_prog_name(&printed) {
-                if allow_path_fallback { find_in_path(&printed) } else { None }
-            } else {
-                let p = PathBuf::from(&printed);
-                (p.is_absolute() && is_executable_file(&p)).then_some(p)
-            }
+    if !out.status.success() {
+        return Err(format!(
+            "{} -print-prog-name={prog} failed ({}): {}",
+            cc_path.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let candidate = if printed.is_empty() {
+        return Err(format!("{} -print-prog-name={prog} returned empty output", cc_path.display()));
+    } else if is_bare_prog_name(&printed) {
+        if allow_path_fallback {
+            find_in_path(&printed).or_else(|| find_in_path(prog))
         } else {
-            None
+            return Ok(None);
         }
     } else {
-        None
+        let p = PathBuf::from(&printed);
+        if !p.is_absolute() || !is_executable_file(&p) {
+            return Err(format!(
+                "{} -print-prog-name={prog} returned non-absolute or non-executable path {printed:?}",
+                cc_path.display()
+            ));
+        }
+        Some(p)
     };
-    if candidate.is_none() && allow_path_fallback {
-        candidate = find_in_path(prog);
-    }
     let Some(cand) = candidate else { return Ok(None) };
     let canon = fs::canonicalize(&cand).map_err(|e| format!("canonicalizing {prog} {}: {e}", cand.display()))?;
     let stamp = file_stamp(&canon)?;
@@ -5004,52 +5025,106 @@ fn resolve_driver_linker(cc_path: &Path, has_lld: bool, deadline: Option<Instant
         .ok_or_else(|| format!("could not resolve driver linker {prog} for C compiler {}", cc_path.display()))
 }
 
-/// Extracts an ELF64 `PT_INTERP` dynamic linker path from the first 64 KiB of `elf_path` on Linux.
+/// Inspects `elf_path` on Linux using checked seek-based ELF64 program-header parsing (zero fixed
+/// prefix cap), distinguishing non-ELF scripts (`Ok(None)`), static ELF binaries (`Ok(None)`),
+/// dynamic ELF binaries (`Ok(Some(interp_path))`), and malformed/unreadable/unsupported dynamic ELFs (`Err`).
 #[cfg(target_os = "linux")]
-fn elf64_pt_interp(elf_path: &Path) -> Option<PathBuf> {
-    let mut f = fs::File::open(elf_path).ok()?;
-    let mut hdr = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(&mut f, 65536), &mut hdr).ok()?;
-    if hdr.len() < 64 || &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
-        return None;
+fn elf64_pt_interp(elf_path: &Path) -> Res<Option<PathBuf>> {
+    let mut f = fs::File::open(elf_path).map_err(|e| format!("opening {}: {e}", elf_path.display()))?;
+    let file_len = f.metadata().map_err(|e| format!("stat {}: {e}", elf_path.display()))?.len();
+    if file_len < 4 {
+        return Ok(None);
     }
-    let e_phoff = usize::try_from(u64::from_le_bytes(hdr[32..40].try_into().ok()?)).ok()?;
-    let e_phentsize = usize::from(u16::from_le_bytes(hdr[54..56].try_into().ok()?));
-    let e_phnum = usize::from(u16::from_le_bytes(hdr[56..58].try_into().ok()?));
-    if e_phentsize < 56 {
-        return None;
+    let mut magic = [0u8; 4];
+    std::io::Read::read_exact(&mut f, &mut magic).map_err(|e| format!("reading {}: {e}", elf_path.display()))?;
+    if &magic != b"\x7fELF" {
+        return Ok(None);
     }
+    if file_len < 64 {
+        return Err(format!("{}: truncated ELF header ({file_len} bytes)", elf_path.display()));
+    }
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("seeking {}: {e}", elf_path.display()))?;
+    let mut ehdr = [0u8; 64];
+    std::io::Read::read_exact(&mut f, &mut ehdr).map_err(|e| format!("reading ELF header {}: {e}", elf_path.display()))?;
+    if ehdr[4] != 2 || ehdr[5] != 1 {
+        return Err(format!(
+            "{}: unsupported ELF class/endianness ({}, {}) for shared-library tracking",
+            elf_path.display(),
+            ehdr[4],
+            ehdr[5]
+        ));
+    }
+    let e_phoff = u64::from_le_bytes(ehdr[32..40].try_into().unwrap());
+    let e_phentsize = u64::from(u16::from_le_bytes(ehdr[54..56].try_into().unwrap()));
+    let e_phnum = u64::from(u16::from_le_bytes(ehdr[56..58].try_into().unwrap()));
+    if e_phnum == 0 {
+        return Ok(None);
+    }
+    if e_phentsize < 56 || e_phnum > 4096 {
+        return Err(format!(
+            "{}: invalid ELF program header table (phentsize={e_phentsize}, phnum={e_phnum})",
+            elf_path.display()
+        ));
+    }
+    let ph_table_bytes = e_phentsize
+        .checked_mul(e_phnum)
+        .ok_or_else(|| format!("{}: ELF program header size overflow", elf_path.display()))?;
+    let ph_end = e_phoff
+        .checked_add(ph_table_bytes)
+        .ok_or_else(|| format!("{}: ELF program header offset overflow", elf_path.display()))?;
+    if ph_end > file_len {
+        return Err(format!("{}: ELF program headers exceed file size", elf_path.display()));
+    }
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(e_phoff))
+        .map_err(|e| format!("seeking phdrs in {}: {e}", elf_path.display()))?;
+    let mut phdrs = vec![0u8; usize::try_from(ph_table_bytes).map_err(|_| "phdr size overflow")?];
+    std::io::Read::read_exact(&mut f, &mut phdrs)
+        .map_err(|e| format!("reading phdrs in {}: {e}", elf_path.display()))?;
+    const PT_DYNAMIC: u32 = 2;
     const PT_INTERP: u32 = 3;
-    for i in 0..e_phnum {
-        let off = i.checked_mul(e_phentsize).and_then(|d| e_phoff.checked_add(d))?;
-        let ph_end = off.checked_add(56)?;
-        if ph_end > hdr.len() {
-            break;
-        }
-        let p_type = u32::from_le_bytes(hdr[off..off + 4].try_into().ok()?);
-        if p_type != PT_INTERP {
-            continue;
-        }
-        let p_offset = usize::try_from(u64::from_le_bytes(hdr[off + 8..off + 16].try_into().ok()?)).ok()?;
-        let p_filesz = usize::try_from(u64::from_le_bytes(hdr[off + 32..off + 40].try_into().ok()?)).ok()?;
-        let end = p_offset.checked_add(p_filesz)?;
-        if end > hdr.len() {
-            return None;
-        }
-        let raw = &hdr[p_offset..end];
-        let trimmed = raw.split(|&b| b == 0).next().unwrap_or(raw);
-        let s = std::str::from_utf8(trimmed).ok()?;
-        let p = PathBuf::from(s);
-        if p.is_absolute() && is_executable_file(&p) {
-            return Some(p);
+    let stride = usize::try_from(e_phentsize).map_err(|_| "phentsize overflow")?;
+    let mut has_dynamic = false;
+    let mut interp_span: Option<(u64, u64)> = None;
+    for i in 0..usize::try_from(e_phnum).map_err(|_| "phnum overflow")? {
+        let off = i * stride;
+        let p_type = u32::from_le_bytes(phdrs[off..off + 4].try_into().unwrap());
+        if p_type == PT_DYNAMIC {
+            has_dynamic = true;
+        } else if p_type == PT_INTERP {
+            let p_offset = u64::from_le_bytes(phdrs[off + 8..off + 16].try_into().unwrap());
+            let p_filesz = u64::from_le_bytes(phdrs[off + 32..off + 40].try_into().unwrap());
+            interp_span = Some((p_offset, p_filesz));
         }
     }
-    None
+    let Some((p_offset, p_filesz)) = interp_span else {
+        if has_dynamic {
+            return Err(format!("{}: dynamic ELF has PT_DYNAMIC but no PT_INTERP", elf_path.display()));
+        }
+        return Ok(None);
+    };
+    if p_filesz == 0 || p_filesz > 4096 || p_offset.checked_add(p_filesz).is_none_or(|e| e > file_len) {
+        return Err(format!("{}: invalid PT_INTERP span ({p_offset}, {p_filesz})", elf_path.display()));
+    }
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(p_offset))
+        .map_err(|e| format!("seeking PT_INTERP in {}: {e}", elf_path.display()))?;
+    let mut raw = vec![0u8; usize::try_from(p_filesz).map_err(|_| "PT_INTERP size overflow")?];
+    std::io::Read::read_exact(&mut f, &mut raw)
+        .map_err(|e| format!("reading PT_INTERP in {}: {e}", elf_path.display()))?;
+    let trimmed = raw.split(|&b| b == 0).next().unwrap_or(&raw);
+    let s = std::str::from_utf8(trimmed)
+        .map_err(|_| format!("{}: non-UTF-8 PT_INTERP path", elf_path.display()))?;
+    let p = PathBuf::from(s);
+    if !p.is_absolute() || !is_executable_file(&p) {
+        return Err(format!("{}: PT_INTERP {s:?} is not an absolute executable", elf_path.display()));
+    }
+    Ok(Some(p))
 }
 
 /// Resolves all transitive dynamic shared libraries of `elf_path` using its own ELF64 `PT_INTERP`
 /// dynamic linker (`<interp> --list <elf>`, which never executes the target binary) under a clean
-/// environment so shared-library-only `libLLVM`/`libclang-cpp`/`liblldELF` upgrades invalidate caches.
+/// sanitized environment, failing closed on any unresolved/non-absolute library line and also
+/// watching `/etc/ld.so.cache` when present.
 fn probe_dynamic_shared_libs(elf_path: &Path, deadline: Option<Instant>) -> Res<Vec<WatchedFile>> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -5058,7 +5133,7 @@ fn probe_dynamic_shared_libs(elf_path: &Path, deadline: Option<Instant>) -> Res<
     }
     #[cfg(target_os = "linux")]
     {
-        let Some(interp) = elf64_pt_interp(elf_path) else {
+        let Some(interp) = elf64_pt_interp(elf_path)? else {
             return Ok(Vec::new());
         };
         let mut cmd = clean_cc_command(&interp);
@@ -5083,7 +5158,11 @@ fn probe_dynamic_shared_libs(elf_path: &Path, deadline: Option<Instant>) -> Res<
         libs.push((interp, interp_canon, interp_stamp));
         for raw_line in String::from_utf8_lossy(&out.stdout).lines() {
             let line = raw_line.trim();
-            if line.is_empty() || line.starts_with("linux-vdso.") || line.starts_with("linux-gate.") {
+            if line.is_empty()
+                || line.starts_with("linux-vdso.")
+                || line.starts_with("linux-gate.")
+                || line == "statically linked"
+            {
                 continue;
             }
             let rhs = if let Some((_, after)) = line.split_once(" => ") {
@@ -5095,16 +5174,14 @@ fn probe_dynamic_shared_libs(elf_path: &Path, deadline: Option<Instant>) -> Res<
                 Some(idx) => rhs[..idx].trim(),
                 None => rhs.trim(),
             };
-            if path_part == "not found" {
-                return Err(format!("unresolved shared library for {}: {line}", elf_path.display()));
-            }
             let p = Path::new(path_part);
-            if p.is_absolute() && p.is_file() {
-                let canon = fs::canonicalize(p)
-                    .map_err(|e| format!("canonicalizing shared library {}: {e}", p.display()))?;
-                let stamp = file_stamp(&canon)?;
-                libs.push((p.to_path_buf(), canon, stamp));
+            if path_part == "not found" || !p.is_absolute() || !p.is_file() {
+                return Err(format!("unresolved or non-absolute shared library for {}: {line}", elf_path.display()));
             }
+            let canon = fs::canonicalize(p)
+                .map_err(|e| format!("canonicalizing shared library {}: {e}", p.display()))?;
+            let stamp = file_stamp(&canon)?;
+            libs.push((p.to_path_buf(), canon, stamp));
         }
         libs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         libs.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
@@ -5119,6 +5196,13 @@ fn hash_shared_lib_sample(h: &mut Sha256, canon: &Path, stamp: FileStamp) -> Res
     hash_stamp(h, stamp);
     let mut f = fs::File::open(canon).map_err(|e| format!("opening {}: {e}", canon.display()))?;
     let total_len = f.metadata().map_err(|e| format!("stat {}: {e}", canon.display()))?.len();
+    if total_len != stamp_len(stamp) {
+        return Err(format!(
+            "shared library {} changed size during fingerprint ({} -> {total_len})",
+            canon.display(),
+            stamp_len(stamp)
+        ));
+    }
     let mut head = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(&mut f, 65536), &mut head)
         .map_err(|e| format!("reading head of {}: {e}", canon.display()))?;
@@ -5270,9 +5354,32 @@ fn verify_watched_files(watched: &[WatchedFile]) -> bool {
     })
 }
 
-/// Probes ALL transitive system headers included by `WTIME_AOT_RT_H` via `cc -H -E` (raw one-path-
-/// per-line output, zero Makefile escaping) across BOTH `-O2` and `-O0` with `-fPIC -march=<target_cpu>`,
-/// failing closed on any unresolvable or non-absolute header path.
+fn extract_linemarker_path(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("# ")?;
+    let (num, after_num) = rest.split_once(' ')?;
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut chars = after_num.strip_prefix('"')?.chars();
+    let mut path = String::new();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            return Some(path);
+        }
+        if c == '\\' {
+            let esc = chars.next()?;
+            path.push(esc);
+        } else {
+            path.push(c);
+        }
+    }
+    None
+}
+
+/// Probes ALL transitive system headers included by `WTIME_AOT_RT_H` via `cc -H -E` (combining
+/// `-H` stderr with `# <num> "/..."` pre-include linemarkers from `-E` stdout so GCC's implicit
+/// `/usr/include/stdc-predef.h` is always covered, zero Makefile escaping) across BOTH `-O2` and
+/// `-O0` with `-fPIC -march=<target_cpu>`, failing closed on any unresolvable or non-absolute header.
 fn probe_sys_headers(
     cc_path: &Path,
     target_cpu: &str,
@@ -5286,19 +5393,35 @@ fn probe_sys_headers(
     drop(hdr_file);
     let canon_src = fs::canonicalize(&hdr_path).map_err(|e| format!("{}: {e}", hdr_path.display()))?;
     let mut watched = Vec::new();
+    let mut record_header = |path_str: &str, opt_flag: &str| -> Res<()> {
+        let dep = PathBuf::from(path_str);
+        if !dep.is_absolute() || !dep.is_file() {
+            return Err(format!(
+                "{} {opt_flag} -H/-E reported non-absolute or missing header: {path_str:?}",
+                cc_path.display()
+            ));
+        }
+        let canon = fs::canonicalize(&dep)
+            .map_err(|e| format!("canonicalizing system header {}: {e}", dep.display()))?;
+        if canon == canon_src {
+            return Ok(());
+        }
+        let stamp = file_stamp(&canon)?;
+        watched.push((dep, canon, stamp));
+        Ok(())
+    };
     for opt_flag in ["-O2", "-O0"] {
         let mut cmd = clean_cc_command(cc_path);
         cmd.args([opt_flag, "-fPIC", &format!("-march={target_cpu}"), "-H", "-E", "-x", "c"])
-            .arg(&hdr_path)
-            .args(["-o", "/dev/null"]);
+            .arg(&hdr_path);
         let out = crate::build::run_cmd_capture_with_deadline(
             cmd,
-            &format!("{} {opt_flag} -H system headers", cc_path.display()),
+            &format!("{} {opt_flag} -H -E system headers", cc_path.display()),
             deadline,
         )?;
         if !out.status.success() {
             return Err(format!(
-                "{} {opt_flag} -H system header probe failed: {}",
+                "{} {opt_flag} -H -E system header probe failed: {}",
                 cc_path.display(),
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
@@ -5309,34 +5432,28 @@ fn probe_sys_headers(
             if rest.len() < trimmed.len()
                 && let Some(path_str) = rest.strip_prefix(' ')
             {
-                let dep = PathBuf::from(path_str);
-                if !dep.is_absolute() || !dep.is_file() {
-                    return Err(format!(
-                        "{} {opt_flag} -H reported non-absolute or missing header: {path_str:?}",
-                        cc_path.display()
-                    ));
-                }
-                let canon = fs::canonicalize(&dep)
-                    .map_err(|e| format!("canonicalizing system header {}: {e}", dep.display()))?;
-                if canon == canon_src {
-                    continue;
-                }
-                let stamp = file_stamp(&canon)?;
-                watched.push((dep, canon, stamp));
+                record_header(path_str, opt_flag)?;
+            }
+        }
+        for raw_line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(path_str) = extract_linemarker_path(raw_line.trim_end_matches('\r'))
+                && path_str.starts_with('/')
+            {
+                record_header(&path_str, opt_flag)?;
             }
         }
     }
     #[cfg(unix)]
     if watched.is_empty() {
-        return Err(format!("{} -H returned no system headers", cc_path.display()));
+        return Err(format!("{} -H -E returned no system headers", cc_path.display()));
     }
-    let digest = hash_watched_files(b"sys-headers-v2\0", &mut watched)?;
+    let digest = hash_watched_files(b"sys-headers-v3\0", &mut watched)?;
     Ok((digest, watched))
 }
 
 /// Probes link-level CET shadow-stack support (`-shared -fPIC -fcf-protection=return` verified on
 /// the emitted ELF64 DSO) AND traces all linker-opened CRT/startup/library inputs via `-Wl,-t`
-/// using a realistic probe referencing `libc`/`pthread` symbols.
+/// using a realistic probe referencing `libc`, `libm` (`truncf`), and `pthread` symbols.
 fn probe_link_env_and_cet(
     cc_path: &Path,
     has_lld: bool,
@@ -5361,7 +5478,7 @@ fn probe_link_env_and_cet(
         let _rm_o = crate::build::RemoveFileOnDrop(o_path.clone());
         let canon_o = fs::canonicalize(&o_path).map_err(|e| format!("{}: {e}", o_path.display()))?;
         let mut c_cmd = clean_cc_command(cc_path);
-        c_cmd.args(["-c", "-fPIC"]);
+        c_cmd.args(["-c", "-O0", "-fPIC"]);
         if with_cet {
             c_cmd.arg("-fcf-protection=return");
         }
@@ -5388,6 +5505,8 @@ fn probe_link_env_and_cet(
         l_cmd.arg(&o_path).arg("-o").arg(&so_path);
         #[cfg(target_os = "linux")]
         l_cmd.arg("-pthread");
+        #[cfg(unix)]
+        l_cmd.arg("-lm");
         let l_out = crate::build::run_cmd_capture_with_deadline(
             l_cmd,
             &format!("{} probe link", cc_path.display()),
@@ -5434,7 +5553,7 @@ fn probe_link_env_and_cet(
     let canon_probe_dir = probe_dir.and_then(|d| fs::canonicalize(d).ok());
     let mut watched = Vec::new();
     for path in parse_ld_trace_files(&stdout, &stderr) {
-        let Ok(canon) = fs::canonicalize(&path) else { continue };
+        let canon = fs::canonicalize(&path).map_err(|e| format!("canonicalizing link input {}: {e}", path.display()))?;
         if canon == canon_o {
             continue;
         }
@@ -5450,7 +5569,7 @@ fn probe_link_env_and_cet(
     if watched.is_empty() {
         return Err(format!("{} -Wl,-t returned no link inputs", cc_path.display()));
     }
-    let digest = hash_watched_files(b"link-env-v2\0", &mut watched)?;
+    let digest = hash_watched_files(b"link-env-v3\0", &mut watched)?;
     Ok((has_cet_return, digest, watched))
 }
 
@@ -5466,7 +5585,7 @@ pub struct CcInfo {
     pub cc1_file: Option<WatchedFile>,
     pub as_file: Option<WatchedFile>,
     pub collect2_file: Option<WatchedFile>,
-    pub lld_key: Option<(PathBuf, FileStamp)>,
+    pub lld_key: Option<WatchedFile>,
     pub linker_path: PathBuf,
     pub canon_linker: PathBuf,
     pub linker_stamp: FileStamp,
@@ -5541,8 +5660,8 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
         ));
     }
     let post_lld_key = find_in_path("ld.lld")
-        .and_then(|p| fs::canonicalize(&p).ok())
-        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+        .and_then(|p| fs::canonicalize(&p).ok().map(|c| (p, c)))
+        .and_then(|(p, c)| file_stamp(&c).ok().map(|s| (p, c, s)));
     if post_lld_key != info.lld_key {
         return Err("linker ld.lld changed on PATH during build; refusing to publish stale provenance".into());
     }
@@ -5582,12 +5701,15 @@ pub fn verify_cc_unchanged(info: &CcInfo, deadline: Option<Instant>) -> Res<()> 
 }
 
 /// Configures a C compiler / linker command with a minimal clean environment (stripping ambient
-/// `CFLAGS`, `CPATH`, `C_INCLUDE_PATH`, `COMPILER_PATH`, `LIBRARY_PATH`, `LD_PRELOAD`, etc.) so
-/// cached `.o` / `.so` outputs depend solely on explicit flags and target fingerprints.
+/// `CFLAGS`, `CPATH`, `C_INCLUDE_PATH`, `COMPILER_PATH`, `LIBRARY_PATH`, `LD_PRELOAD`, etc., and
+/// passing the exact same absolute-only sanitized `PATH` used by `find_in_path`).
 fn clean_cc_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
     cmd.env_clear();
-    for var in ["PATH", "HOME", "TMPDIR"] {
+    if let Some(path) = crate::build::sanitized_path_env() {
+        cmd.env("PATH", path);
+    }
+    for var in ["HOME", "TMPDIR"] {
         if let Some(val) = std::env::var_os(var) {
             cmd.env(var, val);
         }
@@ -5600,12 +5722,12 @@ type CcCacheKey = (
     PathBuf,
     PathBuf,
     FileStamp,
-    Option<(PathBuf, FileStamp)>,
-    Option<(PathBuf, FileStamp)>,
-    Option<(PathBuf, FileStamp)>,
+    Option<WatchedFile>,
+    Option<WatchedFile>,
+    Option<WatchedFile>,
     String,
 );
-type CcTargetKey = (PathBuf, PathBuf, FileStamp, Option<WatchedFile>, String);
+type CcTargetKey = (PathBuf, PathBuf, FileStamp, String, String);
 
 struct ShardJob {
     src_path: PathBuf,
@@ -5618,25 +5740,23 @@ struct ShardJob {
 }
 
 /// Probes the host C compiler (respecting `deadline`) and memoizes by resolved compiler path,
-/// canonical binary + stamp, linker/assembler stamps, target CPU, and watched toolchain/header/CRT
-/// stamps so repeated builds avoid duplicate spawns while detecting live upgrades.
+/// canonical binary + stamp, linker/assembler paths + stamps, target CPU, and watched
+/// toolchain/header/CRT stamps so repeated builds avoid duplicate spawns while detecting live upgrades.
 pub fn detect_cc_with_deadline(
     target_cpu: &str,
     probe_root: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Res<CcInfo> {
     static CACHE: OnceLock<Mutex<HashMap<CcCacheKey, CcInfo>>> = OnceLock::new();
-    let lld_found = find_in_path("ld.lld");
-    let lld_key = lld_found
-        .as_ref()
-        .and_then(|p| fs::canonicalize(p).ok())
-        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+    let lld_key = find_in_path("ld.lld")
+        .and_then(|p| fs::canonicalize(&p).ok().map(|c| (p, c)))
+        .and_then(|(p, c)| file_stamp(&c).ok().map(|s| (p, c, s)));
     let ld_key = find_in_path("ld")
-        .and_then(|p| fs::canonicalize(&p).ok())
-        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+        .and_then(|p| fs::canonicalize(&p).ok().map(|c| (p, c)))
+        .and_then(|(p, c)| file_stamp(&c).ok().map(|s| (p, c, s)));
     let as_key = find_in_path("as")
-        .and_then(|p| fs::canonicalize(&p).ok())
-        .and_then(|c| file_stamp(&c).ok().map(|s| (c, s)));
+        .and_then(|p| fs::canonicalize(&p).ok().map(|c| (p, c)))
+        .and_then(|(p, c)| file_stamp(&c).ok().map(|s| (p, c, s)));
     let private_probe_dir = match probe_root {
         Some(root) => Some(crate::build::ensure_private_dir(&root.join("cc-probe"))?),
         None => None,
@@ -5673,9 +5793,7 @@ pub fn detect_cc_with_deadline(
             continue;
         }
         let version = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(cc).trim().to_string();
-        let has_lld = if lld_key.is_some()
-            && let Some(ref lld_prog) = lld_found
-        {
+        let has_lld = if let Some((ref lld_prog, _, _)) = lld_key {
             let mut lld_cmd = clean_cc_command(lld_prog);
             lld_cmd.arg("--version");
             crate::build::run_cmd_capture_with_deadline(lld_cmd, "ld.lld --version", deadline)
@@ -5739,6 +5857,16 @@ pub fn detect_cc_with_deadline(
         watched_files.extend(link_files);
         watched_files.extend(cc_libs);
         watched_files.extend(ld_libs);
+        #[cfg(target_os = "linux")]
+        {
+            let ld_cache = Path::new("/etc/ld.so.cache");
+            if ld_cache.is_file()
+                && let Ok(canon) = fs::canonicalize(ld_cache)
+                && let Ok(st) = file_stamp(&canon)
+            {
+                watched_files.push((ld_cache.to_path_buf(), canon, st));
+            }
+        }
         if let Some(ref f) = cc1_file {
             watched_files.push(f.clone());
         }
@@ -5779,8 +5907,9 @@ pub fn detect_cc_with_deadline(
 }
 
 /// Returns a deterministic 64-hex SHA-256 fingerprint of the effective C target CPU & ISA feature
-/// macros enabled by `cc -march=<target_cpu>`, memoized by `(cc_path, canon_cc, stamp, cc1_file,
-/// target_cpu)` and bounded by `deadline`.
+/// macros enabled by `cc -march=<target_cpu>`, memoized by `(cc_path, canon_cc, stamp, cc_sha256,
+/// target_cpu)` (invalidating immediately on `cc1` or `libLLVM`/`libclang-cpp` upgrades) and
+/// bounded by `deadline`.
 pub fn cc_target_fingerprint_with_deadline(
     info: &CcInfo,
     target_cpu: &str,
@@ -5792,7 +5921,7 @@ pub fn cc_target_fingerprint_with_deadline(
         info.cc_path.clone(),
         info.canon_cc.clone(),
         info.stamp,
-        info.cc1_file.clone(),
+        info.cc_sha256.clone(),
         target_cpu.to_string(),
     );
     if let Some(hit) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).cloned() {
@@ -5831,8 +5960,8 @@ const MAX_STDERR_CAPTURE_BYTES: usize = 16 << 20;
 
 /// Runs `cmd` (in its own process group unless `WTIME_AOT_INHERIT_PGID=1`), capturing stderr
 /// through a bounded in-memory pipe (zero disk amplification, hard `MAX_STDERR_CAPTURE_BYTES`
-/// ceiling with immediate `SIGPIPE` + tree kill on overflow, deadline-bounded `recv_timeout`
-/// preventing descendant EOF hangs, and full read-error propagation).
+/// ceiling with exact `reserve_exact` capacity cap and immediate `SIGPIPE` + tree kill on
+/// overflow, bounded post-exit `recv_timeout`, and full read-error propagation).
 fn run_cmd_with_deadline(mut cmd: Command, label: &str, deadline: Option<Instant>) -> Res<()> {
     if let Some(dl) = deadline
         && Instant::now() >= dl
@@ -5847,11 +5976,21 @@ fn run_cmd_with_deadline(mut cmd: Command, label: &str, deadline: Option<Instant
     let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
     let pid = child.id();
     let overflowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let rx_err = crate::build::spawn_bounded_pipe_reader(
-        child.stderr.take().ok_or_else(|| format!("{label}: missing stderr pipe"))?,
+    let Some(stderr_pipe) = child.stderr.take() else {
+        crate::build::terminate_child_tree(&mut child);
+        return Err(format!("{label}: missing stderr pipe"));
+    };
+    let rx_err = match crate::build::spawn_bounded_pipe_reader(
+        stderr_pipe,
         MAX_STDERR_CAPTURE_BYTES,
         std::sync::Arc::clone(&overflowed),
-    );
+    ) {
+        Ok(rx) => rx,
+        Err(e) => {
+            crate::build::terminate_child_tree(&mut child);
+            return Err(format!("{label}: {e}"));
+        }
+    };
     let status = loop {
         if overflowed.load(Ordering::Acquire) {
             crate::build::terminate_child_tree(&mut child);
@@ -5953,7 +6092,7 @@ pub fn build_c_blot_cdylib_with_info(
         }
 
         let mut base_hash = Sha256::new();
-        hash_field(&mut base_hash, "wtime-aot-c-obj-v14", &[]);
+        hash_field(&mut base_hash, "wtime-aot-c-obj-v15", &[]);
         hash_field(&mut base_hash, "cc_ver", cc_info.version.as_bytes());
         hash_field(&mut base_hash, "cc_sha256", cc_info.cc_sha256.as_bytes());
         hash_field(&mut base_hash, "sys_headers_sha256", cc_info.sys_headers_sha256.as_bytes());
@@ -6116,6 +6255,8 @@ pub fn build_c_blot_cdylib_with_info(
         link.arg("-o").arg(out_so).args(&link_objs);
         #[cfg(target_os = "linux")]
         link.arg("-pthread");
+        #[cfg(unix)]
+        link.arg("-lm");
         run_cmd_with_deadline(link, &format!("{} link", cc_info.cc_path.display()), deadline)?;
         verify_cc_unchanged(cc_info, deadline)?;
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
