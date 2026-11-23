@@ -205,6 +205,7 @@ fn values_bounded(
     let over = *type_items > max_type_items;
     if keep && !over {
         let mut v = Vec::new();
+        let _ = v.try_reserve_exact(n);
         for _ in 0..n {
             v.push(val(r)?);
         }
@@ -265,6 +266,7 @@ fn subtype_bounded(
             }
             let mut fields = Vec::new();
             if keep && !over {
+                let _ = fields.try_reserve_exact(n);
                 for _ in 0..n {
                     fields.push(field(r)?);
                 }
@@ -352,6 +354,10 @@ pub fn decode(
     let mut expr_insns: usize = 0;
     let mut expr_imm_elems: usize = 0;
     let mut total_elem_items: u64 = 0;
+    let mut decoded_func_count: usize = 0;
+    let mut decoded_code_count: usize = 0;
+    let mut decoded_data_count: usize = 0;
+    let mut saw_data_count_op = false;
     let mut decl_limit_exceeded = false;
     let mut rec_group_limit_exceeded = false;
     let mut expr_limit_exceeded = false;
@@ -533,6 +539,7 @@ pub fn decode(
             }
             3 => {
                 let n = count(&mut s)?;
+                decoded_func_count = n;
                 for i in 0..n {
                     let idx = TypeIdx(s.u32()?);
                     if i < policy.max_functions {
@@ -745,6 +752,7 @@ pub fn decode(
             }
             10 => {
                 let n = count(&mut s)?;
+                decoded_code_count = n;
                 if n > policy.max_functions {
                     // Stream-validate every body without retaining any `Reader`, `Instruction`,
                     // local-group, or immediate buffers so malformed size/syntax still precedes
@@ -752,7 +760,8 @@ pub fn decode(
                     for _ in 0..n {
                         let size = s.u32()?;
                         let b = s.child(size as usize)?;
-                        let _ = parse_function_body(b, policy, None, None, None, false)?;
+                        let parsed = parse_function_body(b, policy, None, None, None, false)?;
+                        saw_data_count_op |= parsed.saw_data_count_op;
                     }
                     decl_limit_exceeded = true;
                 } else {
@@ -800,6 +809,7 @@ pub fn decode(
                     let mut total_decoded_imm_elems: usize = expr_imm_elems;
                     for (idx, body) in decoded.into_iter().enumerate() {
                         let parsed = body?;
+                        saw_data_count_op |= parsed.saw_data_count_op;
                         if parsed.total_locals as usize > policy.max_locals {
                             local_limit_exceeded = true;
                         }
@@ -826,9 +836,16 @@ pub fn decode(
                             && !imm_limit_exceeded
                         {
                             parsed_bodies.push((idx, parsed));
+                        } else if !parsed_bodies.is_empty() {
+                            parsed_bodies.clear();
                         }
                     }
                     sizes?;
+                    // Carry cumulative instruction and immediate-element counts into Section 11
+                    // (`Data`) so data-segment headers and active offset expressions budget against
+                    // the live already-retained code section rather than resetting to pre-code counts.
+                    expr_insns = total_decoded_insns;
+                    expr_imm_elems = total_decoded_imm_elems;
                     if keep_bodies
                         && !local_limit_exceeded
                         && !total_local_limit_exceeded
@@ -861,6 +878,13 @@ pub fn decode(
             }
             11 => {
                 let n = count(&mut s)?;
+                decoded_data_count = n;
+                let data_keep_base = !decl_limit_exceeded
+                    && !rec_group_limit_exceeded
+                    && !local_limit_exceeded
+                    && !total_local_limit_exceeded
+                    && !code_insn_limit_exceeded
+                    && !imm_limit_exceeded;
                 for _ in 0..n {
                     let flags = s.u32()?;
                     s.feature(flags == 0 || s.features().bulk_memory, "bulk data segments")?;
@@ -868,6 +892,7 @@ pub fn decode(
                     if expr_insns > policy.max_instructions {
                         expr_limit_exceeded = true;
                     }
+                    let keep_data = data_keep_base && !expr_limit_exceeded;
                     let mode = match flags {
                         0 => {
                             let (offset, over) = expression_bounded(
@@ -875,7 +900,7 @@ pub fn decode(
                                 &mut expr_insns,
                                 &mut expr_imm_elems,
                                 policy.max_instructions,
-                                !expr_limit_exceeded,
+                                keep_data,
                             )?;
                             if over {
                                 expr_limit_exceeded = true;
@@ -890,7 +915,7 @@ pub fn decode(
                                 &mut expr_insns,
                                 &mut expr_imm_elems,
                                 policy.max_instructions,
-                                !expr_limit_exceeded,
+                                keep_data,
                             )?;
                             if over {
                                 expr_limit_exceeded = true;
@@ -902,7 +927,7 @@ pub fn decode(
                     let len = s.u32()? as usize;
                     let start = s.offset();
                     s.take(len)?;
-                    if !expr_limit_exceeded {
+                    if keep_data && !expr_limit_exceeded {
                         m.data.push(Data {
                             mode,
                             bytes: Span::new(start, s.offset()),
@@ -929,6 +954,18 @@ pub fn decode(
         };
         s.finish()?;
     }
+    // Check cross-section structural `Decode` errors BEFORE policy `ResourceLimit` exits using
+    // the exact scalar counters recorded even on over-limit modules, so malformed syntax always
+    // precedes policy errors.
+    if decoded_func_count != decoded_code_count {
+        return Err(r.error("function/code count mismatch"));
+    }
+    if m.data_count.is_none() && saw_data_count_op {
+        return Err(r.error("data count section required"));
+    }
+    if m.data_count.is_some_and(|n| n as usize != decoded_data_count) {
+        return Err(r.error("data count mismatch"));
+    }
     if rec_group_limit_exceeded {
         return Err(Error::new(
             ErrorKind::ResourceLimit,
@@ -944,7 +981,12 @@ pub fn decode(
             "module total local limit",
         ));
     }
-    if code_insn_limit_exceeded || expr_limit_exceeded || imm_limit_exceeded {
+    if code_insn_limit_exceeded
+        || expr_limit_exceeded
+        || imm_limit_exceeded
+        || expr_insns > policy.max_instructions
+        || expr_imm_elems > policy.max_instructions
+    {
         return Err(Error::new(
             ErrorKind::ResourceLimit,
             "module instruction limit",
@@ -957,28 +999,11 @@ pub fn decode(
         || m.memories.len() > policy.max_memories
         || m.globals.len() > policy.max_globals
         || m.tags.len() > policy.max_tags
-        || expr_insns.saturating_add(m.code.iter().map(|b| b.instructions.len()).sum::<usize>())
-            > policy.max_instructions
     {
         return Err(Error::new(
             ErrorKind::ResourceLimit,
             "module declaration limit",
         ));
-    }
-    if m.functions.len() != m.code.len() {
-        return Err(r.error("function/code count mismatch"));
-    }
-    if m.data_count.is_none()
-        && m.code.iter().any(|b| {
-            b.instructions
-                .iter()
-                .any(|i| matches!(i.opcode, 0xfc08 | 0xfc09))
-        })
-    {
-        return Err(r.error("data count section required"));
-    }
-    if m.data_count.is_some_and(|n| n as usize != m.data.len()) {
-        return Err(r.error("data count mismatch"));
     }
     Ok(m)
 }
@@ -989,6 +1014,7 @@ struct ParsedBody {
     imm_elems: usize,
     dropped: bool,
     imm_limit_exceeded: bool,
+    saw_data_count_op: bool,
     instructions: Vec<Instruction>,
     offsets: Vec<u32>,
     span: Span,
@@ -1059,6 +1085,7 @@ fn parse_function_body(
         imm_elems: parsed_body.imm_elems,
         dropped,
         imm_limit_exceeded: parsed_body.imm_exceeded,
+        saw_data_count_op: parsed_body.saw_data_count_op,
         instructions: parsed_body.instructions,
         offsets: parsed_body.offsets,
         span: Span::new(start, b.offset()),
@@ -1542,6 +1569,106 @@ mod tests {
             decode(&rec_over_then_bad, &FeatureSet::default(), &tight_rec)
                 .unwrap_err()
                 .kind,
+            ErrorKind::Decode
+        );
+
+        // Section 10 -> Section 11 handoff: combined instructions AND combined immediate elements
+        // across Code + Data must enforce `max_instructions` without resetting counters.
+        let code_plus_data_insns = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (10, &[1, 5, 0, 0x01, 0x01, 0x01, 0x0b]), // 4 insns
+            (11, &[3, 1, 0, 1, 0, 1, 0]),              // +3 data headers = 7 > 6
+        ]);
+        assert_eq!(
+            decode(
+                &code_plus_data_insns,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 6,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+        let code_plus_data_imm = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (10, &[1, 7, 0, 0x1c, 3, 0x7f, 0x7f, 0x7f, 0x0b]), // 2 insns, 3 imm_elems
+            (11, &[1, 0, 0x1c, 3, 0x7f, 0x7f, 0x7f, 0x0b, 0]), // +1 header +2 insns (5<=5), +3 imm_elems = 6 > 5
+        ]);
+        assert_eq!(
+            decode(
+                &code_plus_data_imm,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 5,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+
+        // Cross-section structural `Decode` checks ALWAYS precede `ResourceLimit` even when
+        // retention was dropped due to over-limit declarations or instructions:
+        // (a) function/code count mismatch on over-limit function section;
+        let func_code_mismatch_over = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[3, 0, 0, 0]),
+            (10, &[2, 2, 0, 0x0b, 2, 0, 0x0b]),
+        ]);
+        assert_eq!(
+            decode(
+                &func_code_mismatch_over,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_functions: 1,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Decode
+        );
+        // (b) missing data count section for `data.drop` (`0xfc 0x09`) inside an over-limit body;
+        let missing_dc_over = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (10, &[1, 8, 0, 0x01, 0x01, 0x01, 0xfc, 9, 0, 0x0b]),
+        ]);
+        assert_eq!(
+            decode(
+                &missing_dc_over,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 2,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Decode
+        );
+        // (c) data count mismatch on an over-limit data section.
+        let dc_mismatch_over = module(&[
+            (12, &[5]),
+            (11, &[3, 1, 0, 1, 0, 1, 0]),
+        ]);
+        assert_eq!(
+            decode(
+                &dc_mismatch_over,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 1,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::Decode
         );
     }

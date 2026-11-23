@@ -319,30 +319,36 @@ pub(super) fn validate_types(c: &Context<'_>) -> Result<()> {
     for group in &c.m.type_groups {
         group_end += group.types.len();
         c.enabled(!group.explicit || c.features.gc)?;
+        let check_val = |v: ValType| -> Result<()> {
+            if let ValType::Ref(RefType {
+                heap: HeapType::Defined(n) | HeapType::ExactDefined(n),
+                ..
+            }) = v
+            {
+                check(
+                    (n.0 as usize) < group_end,
+                    "type reference beyond recursion group",
+                )?;
+            }
+            Ok(())
+        };
         for t in &group.types {
-            let mut vals = Vec::new();
             match &t.composite {
-                CompositeType::Func(f) => vals.extend(f.params.iter().chain(&f.results).copied()),
-                CompositeType::Struct(s) => {
-                    vals.extend(s.fields.iter().map(|f| f.storage.unpacked()))
+                CompositeType::Func(f) => {
+                    for &v in f.params.iter().chain(&f.results) {
+                        check_val(v)?;
+                    }
                 }
-                CompositeType::Array(a) => vals.push(a.field.storage.unpacked()),
+                CompositeType::Struct(s) => {
+                    for f in &s.fields {
+                        check_val(f.storage.unpacked())?;
+                    }
+                }
+                CompositeType::Array(a) => check_val(a.field.storage.unpacked())?,
                 CompositeType::Cont(t) => check(
                     (t.function.0 as usize) < group_end,
                     "continuation type forward reference",
                 )?,
-            };
-            for v in vals {
-                if let ValType::Ref(RefType {
-                    heap: HeapType::Defined(n) | HeapType::ExactDefined(n),
-                    ..
-                }) = v
-                {
-                    check(
-                        (n.0 as usize) < group_end,
-                        "type reference beyond recursion group",
-                    )?;
-                }
             }
         }
     }

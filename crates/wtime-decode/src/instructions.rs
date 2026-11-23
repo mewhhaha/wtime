@@ -136,6 +136,7 @@ pub(crate) struct BoundedBody {
     pub offsets: Vec<u32>,
     pub count: usize,
     pub imm_elems: usize,
+    pub saw_data_count_op: bool,
     pub dropped: bool,
     pub imm_exceeded: bool,
 }
@@ -297,6 +298,7 @@ pub(crate) fn body_expression_bounded(
     let mut depth = 1usize;
     let mut count = 0usize;
     let mut body_imm_elems = 0usize;
+    let mut saw_data_count_op = false;
     while depth > 0 {
         let offset = u32::try_from(r.offset())
             .map_err(|_| Error::new(ErrorKind::ResourceLimit, "module too large for u32 instruction offsets"))?;
@@ -338,6 +340,9 @@ pub(crate) fn body_expression_bounded(
                 read_instruction(r, &mut depth, keep, Some(&mut budget), &mut step_imm, &mut imm_over)?
             }
         };
+        if matches!(insn.opcode, 0xfc08 | 0xfc09) {
+            saw_data_count_op = true;
+        }
         count = count.saturating_add(1);
         body_imm_elems = body_imm_elems.saturating_add(step_imm);
         if imm_over {
@@ -367,6 +372,7 @@ pub(crate) fn body_expression_bounded(
         offsets,
         count,
         imm_elems: body_imm_elems,
+        saw_data_count_op,
         dropped,
         imm_exceeded,
     })

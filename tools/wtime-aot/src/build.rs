@@ -27,7 +27,7 @@
 //! key that includes the profile.
 
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,7 +69,10 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), String> {
             "--jobs" => jobs = Some(value()?.parse::<u32>().map_err(|_| format!("{USAGE}\n--jobs takes a number"))?),
             "--target-cpu" => {
                 target_cpu = value()?;
-                if !target_cpu.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+                if target_cpu.is_empty()
+                    || target_cpu.starts_with('-')
+                    || !target_cpu.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+                {
                     return Err(format!("{USAGE}\n--target-cpu takes a CPU name"));
                 }
             }
@@ -178,8 +181,122 @@ pub(crate) fn read_bounded_wasm(path: &Path, max_bytes: usize) -> Result<Vec<u8>
     Ok(buf)
 }
 
-/// Runs `cmd` in its own Unix process group, capturing stdout/stderr without pipe deadlocks
-/// and terminating the entire process group if `deadline` expires.
+/// When an outer orchestrator (such as Pen) runs `wtime-aot build` inside a dedicated process
+/// group and sets `WTIME_AOT_INHERIT_PGID=1`, keep compiler/linker children in that same process
+/// group so a single outer process-group kill terminates the entire build tree atomically.
+pub(crate) fn inherit_pgid() -> bool {
+    std::env::var_os("WTIME_AOT_INHERIT_PGID").is_some_and(|v| v == "1")
+}
+
+#[cfg(unix)]
+fn send_sigkill(target: &str) {
+    let kill_bin = if Path::new("/bin/kill").is_file() {
+        "/bin/kill"
+    } else {
+        "/usr/bin/kill"
+    };
+    let _ = Command::new(kill_bin)
+        .env_clear()
+        .args(["-KILL", "--", target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pgid: u32) {
+    send_sigkill(&format!("-{pgid}"));
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn kill_linux_descendants(root_pid: u32) {
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![root_pid];
+    let mut order = Vec::new();
+    while let Some(pid) = stack.pop() {
+        if !visited.insert(pid) || visited.len() > 4096 {
+            continue;
+        }
+        let task_dir = format!("/proc/{pid}/task");
+        let Ok(entries) = fs::read_dir(&task_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let children_path = entry.path().join("children");
+            if let Ok(text) = fs::read_to_string(&children_path) {
+                for tok in text.split_whitespace() {
+                    if let Ok(cpid) = tok.parse::<u32>() {
+                        order.push(cpid);
+                        stack.push(cpid);
+                    }
+                }
+            }
+        }
+    }
+    for cpid in order.into_iter().rev() {
+        send_sigkill(&cpid.to_string());
+    }
+}
+
+/// Terminates `child` and its descendant build tree without killing our own process group when
+/// `WTIME_AOT_INHERIT_PGID=1` is active.
+pub(crate) fn terminate_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        if !inherit_pgid() {
+            kill_process_group(child.id());
+        } else {
+            #[cfg(target_os = "linux")]
+            kill_linux_descendants(child.id());
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Reaps any lingering descendants in `pid`'s dedicated process group after `child` exits.
+pub(crate) fn reap_child_group_after_exit(pid: u32) {
+    #[cfg(unix)]
+    if !inherit_pgid() {
+        kill_process_group(pid);
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+pub(crate) struct RemoveFileOnDrop(pub(crate) PathBuf);
+
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Creates a unique owner-only (`0o600`, `O_CREAT | O_EXCL`) temporary file for capture/probes.
+pub(crate) fn create_private_temp_file(dir: Option<&Path>, prefix: &str, suffix: &str) -> Result<(fs::File, PathBuf), String> {
+    let base = dir.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+    for _ in 0..32 {
+        let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = base.join(format!(".wtime-aot-{prefix}-{}-{seq}{suffix}", std::process::id()));
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        match opts.open(&path) {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err(format!("failed to create unique private temp file under {}", base.display()))
+}
+
+const MAX_CAPTURE_BYTES: u64 = 16 << 20;
+
+/// Runs `cmd`, capturing stdout/stderr through private `0o600` temp files (eliminating pipe
+/// deadlocks and indefinite reader-EOF hangs from lingering descendants) while keeping `deadline`
+/// active through exit and output collection and cancelling the child tree on timeout.
 pub(crate) fn run_cmd_capture_with_deadline(
     mut cmd: Command,
     label: &str,
@@ -190,65 +307,57 @@ pub(crate) fn run_cmd_capture_with_deadline(
     {
         return Err(format!("{label}: exceeded build time limit"));
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let (mut out_file, out_path) = create_private_temp_file(None, "out", ".log")?;
+    let _rm_out = RemoveFileOnDrop(out_path);
+    let (mut err_file, err_path) = create_private_temp_file(None, "err", ".log")?;
+    let _rm_err = RemoveFileOnDrop(err_path);
+    let child_out = out_file.try_clone().map_err(|e| format!("{label}: cloning stdout file: {e}"))?;
+    let child_err = err_file.try_clone().map_err(|e| format!("{label}: cloning stderr file: {e}"))?;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(child_out))
+        .stderr(Stdio::from(child_err));
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    if !inherit_pgid() {
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    }
     let mut child = cmd.spawn().map_err(|e| format!("{label}: {e}"))?;
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    std::thread::scope(|scope| {
-        let out_t = scope.spawn(move || {
-            let mut v = Vec::new();
-            if let Some(ref mut p) = stdout_pipe {
-                let _ = p.read_to_end(&mut v);
-            }
-            v
-        });
-        let err_t = scope.spawn(move || {
-            let mut v = Vec::new();
-            if let Some(ref mut p) = stderr_pipe {
-                let _ = p.read_to_end(&mut v);
-            }
-            v
-        });
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(st)) => break st,
-                Ok(None) => {
-                    if let Some(dl) = deadline
-                        && std::time::Instant::now() >= dl
-                    {
-                        #[cfg(unix)]
-                        {
-                            let group = format!("-{}", child.id());
-                            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
-                        }
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let _ = out_t.join();
-                        let _ = err_t.join();
-                        return Err(format!("{label}: exceeded build time limit"));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+    let pid = child.id();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if let Some(dl) = deadline
+                    && std::time::Instant::now() >= dl
+                {
+                    terminate_child_tree(&mut child);
+                    return Err(format!("{label}: exceeded build time limit"));
                 }
-                Err(e) => {
-                    #[cfg(unix)]
-                    {
-                        let group = format!("-{}", child.id());
-                        let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
-                    }
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = out_t.join();
-                    let _ = err_t.join();
-                    return Err(format!("{label}: {e}"));
-                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-        };
-        let stdout = out_t.join().unwrap_or_default();
-        let stderr = err_t.join().unwrap_or_default();
-        Ok(std::process::Output { status, stdout, stderr })
-    })
+            Err(e) => {
+                terminate_child_tree(&mut child);
+                return Err(format!("{label}: {e}"));
+            }
+        }
+    };
+    reap_child_group_after_exit(pid);
+    if let Some(dl) = deadline
+        && std::time::Instant::now() >= dl
+    {
+        return Err(format!("{label}: exceeded build time limit"));
+    }
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let _ = out_file.seek(SeekFrom::Start(0));
+    let _ = out_file.take(MAX_CAPTURE_BYTES).read_to_end(&mut stdout);
+    let _ = err_file.seek(SeekFrom::Start(0));
+    let _ = err_file.take(MAX_CAPTURE_BYTES).read_to_end(&mut stderr);
+    if let Some(dl) = deadline
+        && std::time::Instant::now() >= dl
+    {
+        return Err(format!("{label}: exceeded build time limit"));
+    }
+    Ok(std::process::Output { status, stdout, stderr })
 }
 
 /// Returns the current effective UID on Unix, failing closed if unavailable.
@@ -589,19 +698,23 @@ pub(crate) fn verified_cached_artifact_bytes(artifact: &Path, digest_file: &Path
     if art_meta.file_type().is_symlink() || !art_meta.file_type().is_file() {
         return None;
     }
+    let sha_meta = fs::symlink_metadata(digest_file).ok()?;
+    if sha_meta.file_type().is_symlink() || !sha_meta.file_type().is_file() {
+        return None;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if art_meta.permissions().mode() & 0o222 != 0 {
             return None;
         }
-        if !current_euid().ok().is_some_and(|euid| art_meta.uid() == euid) {
+        if sha_meta.permissions().mode() & 0o022 != 0 {
             return None;
         }
-    }
-    let sha_meta = fs::symlink_metadata(digest_file).ok()?;
-    if sha_meta.file_type().is_symlink() || !sha_meta.file_type().is_file() {
-        return None;
+        let euid = current_euid().ok()?;
+        if art_meta.uid() != euid || sha_meta.uid() != euid {
+            return None;
+        }
     }
     let expected = fs::read_to_string(digest_file).ok()?;
     let bytes = fs::read(artifact).ok()?;
@@ -626,13 +739,14 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 3", &[]);
+    field(&mut key, "wtime-aot build c 4", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "generator", &gen_bytes);
     field(&mut key, "cc", cc_info.version.as_bytes());
     field(&mut key, "target cpu", options.target_cpu.as_bytes());
     field(&mut key, "cc target fingerprint", cc_target.as_bytes());
     field(&mut key, "cet return", &[cc_info.has_cet_return as u8]);
+    field(&mut key, "stack clash", &[cc_info.has_stack_clash as u8]);
     field(&mut key, "c opt", options.c_opt.tag().as_bytes());
     let key_hex = key.hex();
 
@@ -663,7 +777,19 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
     match res {
         Ok(()) => {
             check_deadline(deadline, options.time_limit)?;
+            if let Err(e) = crate::cgen::verify_cc_unchanged(&cc_info) {
+                let _ = fs::remove_file(&staged);
+                return Err(e);
+            }
             let so_bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            if cc_info.has_cet_return && !crate::cgen::elf64_has_x86_shstk_property(&so_bytes) {
+                let _ = fs::remove_file(&staged);
+                return Err(format!(
+                    "{}: linked DSO is missing required GNU_PROPERTY_X86_FEATURE_1_SHSTK property",
+                    staged.display()
+                ));
+            }
             let so_sha = crate::sha256::hex(&so_bytes);
             if let Err(e) = mark_artifact_immutable(&staged)
                 .and_then(|()| fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display())))
@@ -677,10 +803,11 @@ fn build_c(module: &Path, cache: &Path, options: &Options, deadline: std::time::
             let _ = fs::write(
                 entry.join("key.txt"),
                 format!(
-                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncet return {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
+                    "key {key_hex}\nbackend c\nc opt {}\ncc {}\ncet return {}\nstack clash {}\ntarget cpu {}\ncc target {cc_target}\nwasm sha256 {}\nso sha256 {so_sha}\n",
                     options.c_opt.tag(),
                     cc_info.version,
                     cc_info.has_cet_return,
+                    cc_info.has_stack_clash,
                     options.target_cpu,
                     crate::sha256::hex(&wasm)
                 ),
@@ -911,7 +1038,10 @@ fn train_and_merge(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    std::os::unix::process::CommandExt::process_group(&mut run, 0);
+    #[cfg(unix)]
+    if !inherit_pgid() {
+        std::os::unix::process::CommandExt::process_group(&mut run, 0);
+    }
     wait(run, "the training run", deadline, options.time_limit)?;
     let raw: Vec<PathBuf> = fs::read_dir(profiles)
         .map_err(|e| format!("{}: {e}", profiles.display()))?
@@ -943,15 +1073,17 @@ fn train_and_merge(
     let merged = profiles.join("merged.profdata");
     let mut merge = Command::new(&profdata);
     merge.arg("merge").arg("-o").arg(&merged).args(&raw).stdin(Stdio::null()).stdout(Stdio::null());
-    std::os::unix::process::CommandExt::process_group(&mut merge, 0);
+    #[cfg(unix)]
+    if !inherit_pgid() {
+        std::os::unix::process::CommandExt::process_group(&mut merge, 0);
+    }
     wait(merge, "llvm-profdata", deadline, options.time_limit)?;
     Ok(merged)
 }
 
-/// Runs `command` in a process group of its own, which the time limit ends
-/// whole; an error unless it succeeds, except that a training run may end
-/// with any exit code (a guest's own failure still profiles the code it
-/// ran).
+/// Runs `command` (in its own process group unless `WTIME_AOT_INHERIT_PGID=1`), cancelling its
+/// entire child tree if `deadline` expires; an error unless it succeeds, except that a training
+/// run may end with any exit code (a guest's own failure still profiles the code it ran).
 fn wait(
     mut command: Command,
     what: &str,
@@ -962,18 +1094,24 @@ fn wait(
         return Err(format!("{what} exceeded its time limit of {time_limit:?}"));
     }
     let mut child = command.spawn().map_err(|e| format!("{what}: {e}"))?;
+    let pid = child.id();
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| format!("{what}: {e}"))? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    terminate_child_tree(&mut child);
+                    return Err(format!("{what} exceeded its time limit of {time_limit:?}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => {
+                terminate_child_tree(&mut child);
+                return Err(format!("{what}: {e}"));
+            }
         }
-        if std::time::Instant::now() >= deadline {
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
-            let _ = child.wait();
-            return Err(format!("{what} exceeded its time limit of {time_limit:?}"));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     };
+    reap_child_group_after_exit(pid);
     if status.code().is_none() {
         return Err(format!("{what} ended by a signal ({status})"));
     }
@@ -1016,21 +1154,30 @@ fn generate_and_compile(
     if let Some(jobs) = jobs.filter(|&j| j > 0) {
         cargo.args(["--jobs", &jobs.to_string()]);
     }
-    // A process group of its own, so that the time limit ends rustc too.
-    std::os::unix::process::CommandExt::process_group(&mut cargo, 0);
+    // Run in a dedicated process group unless an outer caller already manages our group.
+    #[cfg(unix)]
+    if !inherit_pgid() {
+        std::os::unix::process::CommandExt::process_group(&mut cargo, 0);
+    }
     let mut child = cargo.spawn().map_err(|e| format!("cargo: {e}"))?;
+    let pid = child.id();
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| format!("cargo: {e}"))? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    terminate_child_tree(&mut child);
+                    return Err(format!("the build exceeded its time limit of {:?}", time_limit));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                terminate_child_tree(&mut child);
+                return Err(format!("cargo: {e}"));
+            }
         }
-        if std::time::Instant::now() >= deadline {
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
-            let _ = child.wait();
-            return Err(format!("the build exceeded its time limit of {:?}", time_limit));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     };
+    reap_child_group_after_exit(pid);
     if !status.success() {
         return Err(format!("cargo build failed ({status})"));
     }

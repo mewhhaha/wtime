@@ -272,7 +272,10 @@ struct Control {
 }
 struct Stack {
     initialization_changes: Vec<usize>,
-    unknown: HashSet<usize>,
+    /// Monotonically increasing stack indices of polymorphic unknown operands,
+    /// enabling O(1) push/pop and O(removed) `dead()` truncation without
+    /// rescanning surviving outer unknown entries.
+    unknown: Vec<usize>,
     initialized: Vec<bool>,
     types: Rc<types::TypeEnvironment>,
     values: Vec<ValType>,
@@ -306,9 +309,11 @@ impl Stack {
             .values
             .pop()
             .ok_or_else(|| invalid("operand stack underflow"))?;
-        // Unknown operands only arise in unreachable code; skip the hash
-        // lookup when there are none.
-        let unknown = !self.unknown.is_empty() && self.unknown.remove(&self.values.len());
+        // Unknown operands are strictly sorted by stack index; O(1) top check.
+        let unknown = self.unknown.last() == Some(&self.values.len());
+        if unknown {
+            self.unknown.pop();
+        }
         check(
             self.values.len() >= c.height && (unknown || value_subtype(v, t, &self.types)),
             "operand type mismatch",
@@ -324,7 +329,8 @@ impl Stack {
         } else {
             check(self.values.len() > c.height, "operand stack underflow")?;
             let v = self.values.pop();
-            if !self.unknown.is_empty() && self.unknown.remove(&self.values.len()) {
+            if self.unknown.last() == Some(&self.values.len()) {
+                self.unknown.pop();
                 Ok(None)
             } else {
                 Ok(v)
@@ -385,13 +391,17 @@ impl Stack {
             .last()
             .ok_or_else(|| invalid("instruction after final end"))?;
         let mut len = self.values.len();
+        let mut unk_pos = self.unknown.len();
         for &t in ts.iter().rev() {
             if len == c.height && c.unreachable {
                 return Ok(());
             }
             check(len > c.height, "operand stack underflow")?;
             len -= 1;
-            let unknown = !self.unknown.is_empty() && self.unknown.contains(&len);
+            while unk_pos > 0 && self.unknown[unk_pos - 1] > len {
+                unk_pos -= 1;
+            }
+            let unknown = unk_pos > 0 && self.unknown[unk_pos - 1] == len;
             check(
                 unknown || value_subtype(self.values[len], t, &self.types),
                 "operand type mismatch",
@@ -406,8 +416,8 @@ impl Stack {
     fn dead(&mut self) {
         let c = self.controls.last_mut().unwrap();
         self.values.truncate(c.height);
-        if !self.unknown.is_empty() {
-            self.unknown.retain(|i| *i < c.height);
+        while self.unknown.last().is_some_and(|&i| i >= c.height) {
+            self.unknown.pop();
         }
         c.unreachable = true;
     }
@@ -840,7 +850,7 @@ impl Context<'_> {
     fn constant(&self, is: &[Instruction], expected: ValType) -> Result<()> {
         let mut s = Stack {
             initialization_changes: vec![],
-            unknown: HashSet::new(),
+            unknown: Vec::new(),
             initialized: vec![],
             types: self.types.clone(),
             values: vec![],
@@ -904,7 +914,7 @@ impl Context<'_> {
         }
         let mut s = Stack {
             initialization_changes: vec![],
-            unknown: HashSet::new(),
+            unknown: Vec::new(),
             initialized: vec![],
             types: self.types.clone(),
             values: vec![],
@@ -1201,7 +1211,7 @@ impl Context<'_> {
                         check(a == b, "invalid select types")?
                     }
                     if a.is_none() && b.is_none() {
-                        s.unknown.insert(s.values.len());
+                        s.unknown.push(s.values.len());
                     }
                     s.values.push(a.or(b).unwrap_or(I32));
                 }
@@ -1369,7 +1379,7 @@ impl Context<'_> {
                     s.push_slice(ts.as_slice())?
                 }
                 if v.is_none() {
-                    s.unknown.insert(s.values.len());
+                    s.unknown.push(s.values.len());
                 }
                 s.values.push(Ref(RefType::new(false, r.heap)))
             }
@@ -1602,6 +1612,43 @@ mod tests {
     #[test]
     fn t033_unknown_opcode() {
         assert!(valid(&module(0x7f, &[0xff])).is_err());
+    }
+    #[test]
+    fn t033_unreachable_nested_unknown_linear() {
+        // Outer unreachable block pushes 2,000 polymorphic unknown operands (`select` in dead code),
+        // then 2,000 inner `block; unreachable; end` frames call `Stack::dead()`. Because
+        // `Stack::unknown` is maintained in stack order, inner `dead()` pops only entries above
+        // each inner frame's floor in O(1) without rescanning outer unknowns.
+        fn push_leb(out: &mut Vec<u8>, mut v: usize) {
+            loop {
+                let mut b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 {
+                    b |= 0x80;
+                }
+                out.push(b);
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        let mut body = vec![0u8]; // 0 locals
+        body.push(0x00); // unreachable (outer frame becomes polymorphic)
+        body.extend(std::iter::repeat_n(0x1b, 2_000)); // polymorphic select pushes Unknown onto outer frame
+        for _ in 0..2_000 {
+            body.extend_from_slice(&[0x02, 0x40, 0x00, 0x0b]); // block; unreachable; end
+        }
+        body.push(0x6a); // i32.add consumes top 2 unknowns -> i32 result
+        body.push(0x0b); // end func
+        let mut sec10 = vec![1u8];
+        push_leb(&mut sec10, body.len());
+        sec10.extend_from_slice(&body);
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        wasm.extend([1, 5, 1, 0x60, 0, 1, 0x7f, 3, 2, 1, 0]);
+        wasm.push(10);
+        push_leb(&mut wasm, sec10.len());
+        wasm.extend_from_slice(&sec10);
+        assert!(valid(&wasm).is_ok());
     }
 }
 

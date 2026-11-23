@@ -330,7 +330,7 @@ impl Context<'_> {
                     )?;
                     if let Ref(r) = v { r.nullable } else { true }
                 } else {
-                    s.unknown.insert(s.values.len());
+                    s.unknown.push(s.values.len());
                     true
                 };
                 s.values.push(Ref(RefType::new(nullable, output)));
