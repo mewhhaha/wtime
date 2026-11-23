@@ -281,6 +281,7 @@ fn current_euid() -> Result<u32, String> {
     #[cfg(not(target_os = "linux"))]
     {
         let out = Command::new("/usr/bin/id")
+            .env_clear()
             .arg("-u")
             .stdin(Stdio::null())
             .output()
@@ -523,8 +524,12 @@ pub(crate) fn publish_digest_sidecar(entry: &Path, artifact_name: &str, sha: &st
     Ok(())
 }
 
-/// Acquires an exclusive advisory lock on `lock_path` within `deadline`.
-pub(crate) fn lock_file_with_deadline(lock_path: &Path, deadline: Option<std::time::Instant>) -> Result<fs::File, String> {
+/// Acquires an advisory lock (`exclusive` or shared) on `lock_path` within `deadline`.
+fn lock_file_mode_with_deadline(
+    lock_path: &Path,
+    exclusive: bool,
+    deadline: Option<std::time::Instant>,
+) -> Result<fs::File, String> {
     let lock_file = fs::File::options()
         .read(true)
         .write(true)
@@ -533,7 +538,12 @@ pub(crate) fn lock_file_with_deadline(lock_path: &Path, deadline: Option<std::ti
         .open(lock_path)
         .map_err(|e| format!("{}: {e}", lock_path.display()))?;
     loop {
-        match lock_file.try_lock() {
+        let res = if exclusive {
+            lock_file.try_lock()
+        } else {
+            lock_file.try_lock_shared()
+        };
+        match res {
             Ok(()) => return Ok(lock_file),
             Err(fs::TryLockError::WouldBlock) => {
                 if let Some(dl) = deadline
@@ -548,6 +558,19 @@ pub(crate) fn lock_file_with_deadline(lock_path: &Path, deadline: Option<std::ti
             }
         }
     }
+}
+
+/// Acquires an exclusive advisory lock on `lock_path` within `deadline`.
+pub(crate) fn lock_file_with_deadline(lock_path: &Path, deadline: Option<std::time::Instant>) -> Result<fs::File, String> {
+    lock_file_mode_with_deadline(lock_path, true, deadline)
+}
+
+/// Acquires a shared advisory lock on `lock_path` within `deadline`.
+pub(crate) fn lock_file_shared_with_deadline(
+    lock_path: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<fs::File, String> {
+    lock_file_mode_with_deadline(lock_path, false, deadline)
 }
 
 /// Acquires an exclusive publication lock on `entry/.publish.lock` within `deadline`, returning

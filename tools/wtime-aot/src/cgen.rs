@@ -3595,14 +3595,25 @@ struct GeneratedC {
     shards: Vec<(String, String, &'static str, Option<usize>)>,
 }
 
-fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool) -> Res<GeneratedC> {
+fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool, deadline: Option<Instant>) -> Res<GeneratedC> {
+    let check_dl = |phase: &str| -> Res<()> {
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            return Err(format!("{phase}: exceeded build time limit"));
+        }
+        Ok(())
+    };
+    check_dl("cgen validate")?;
     let t0 = Instant::now();
     let validated = validate_module(wasm)?;
     let t_val = t0.elapsed();
+    check_dl("cgen module analysis")?;
     let m = validated.decoded();
     let t1 = Instant::now();
     let module = Module::new(m, false, Target::BlotCdylib)?;
     let t_mod = t1.elapsed();
+    check_dl("cgen function emission")?;
 
     let locals_total: usize = m.code.iter().map(|b| b.locals.len()).sum();
     if locals_total > MAX_LOCALS {
@@ -3618,7 +3629,7 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool) -> Res<GeneratedC> 
         multi.abi_for(&module.module_types[ti as usize].results);
     }
 
-    // Emit all defined functions in parallel across threads.
+    // Emit all defined functions in parallel across threads, cooperatively polling `deadline`.
     let base = module.imports.len();
     let n_defs = m.code.len();
     let n_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(n_defs.max(1));
@@ -3632,6 +3643,13 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool) -> Res<GeneratedC> 
             let multi_ref = &multi;
             handles.push(scope.spawn(move || {
                 for (offset, slot) in slice.iter_mut().enumerate() {
+                    if let Some(dl) = deadline
+                        && (offset & 63) == 0
+                        && Instant::now() >= dl
+                    {
+                        *slot = Some(Err("cgen function emission: exceeded build time limit".into()));
+                        break;
+                    }
                     let k = start + offset;
                     let idx = base + k;
                     let body = &m.code[k];
@@ -3656,13 +3674,17 @@ fn generate_c_sources(wasm: &[u8], opt: COpt, timings: bool) -> Res<GeneratedC> 
     let mut emitted = Vec::with_capacity(n_defs);
     let mut total_bytes = 0usize;
     for slot in results {
-        let ef = slot.unwrap()?;
+        let ef = match slot {
+            Some(r) => r?,
+            None => return Err("cgen function emission: exceeded build time limit".into()),
+        };
         total_bytes += ef.source.len();
         if total_bytes > MAX_SOURCE_BYTES {
             return Err(format!("the generated source exceeds {MAX_SOURCE_BYTES} bytes"));
         }
         emitted.push(ef);
     }
+    check_dl("cgen header/wrapper generation")?;
 
     // Build `types.h` (Ctx, ActiveCall, multi-value return structs, and
     // `static inline` table-based `call_indirect` dispatchers for per-callsite
@@ -4567,7 +4589,7 @@ fn top_c_call(module: &Module, f: usize, extra_args: &[String]) -> String {
 /// Emits the C99 project into `out` (for inspection or external builds).
 pub fn generate_c(wasm: &[u8], out: &Path, opt: COpt) -> Res<()> {
     let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some();
-    let generated = generate_c_sources(wasm, opt, timings)?;
+    let generated = generate_c_sources(wasm, opt, timings, None)?;
     fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     fs::write(out.join("wtime_aot_rt.h"), &generated.rt_h).map_err(|e| format!("wtime_aot_rt.h: {e}"))?;
     fs::write(out.join("types.h"), &generated.types_h).map_err(|e| format!("types.h: {e}"))?;
@@ -4852,7 +4874,7 @@ pub fn build_c_blot_cdylib_with_info(
     let obj_cache = crate::build::ensure_private_dir(&cache.join("c-obj"))?;
     let work_root = crate::build::ensure_private_dir(&cache.join("work"))?;
     check_dl("cgen source generation")?;
-    let generated = generate_c_sources(wasm, opt, timings)?;
+    let generated = generate_c_sources(wasm, opt, timings, deadline)?;
     check_dl("cgen source generation")?;
 
     let work_seq = NEXT_WORK_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -4879,37 +4901,43 @@ pub fn build_c_blot_cdylib_with_info(
 
         // Link strictly from verified private `work/obj_{idx}.o` files so cached objects are
         // checked for owner-private immutability + SHA-256 sidecar integrity with zero TOCTOU.
+        // Hold a shared lock on `c-obj/.publish.lock` while scanning cache hits so concurrent
+        // shard publications cannot expose a torn half-renamed `(.o, .o.sha256)` pair.
         let mut link_objs: Vec<PathBuf> = Vec::with_capacity(generated.shards.len());
         let mut to_compile: Vec<ShardJob> = Vec::new();
         let mut cache_hits = 0usize;
-        for (idx, (name, src, opt_flag, hdr_idx)) in generated.shards.iter().enumerate() {
-            check_dl("cgen cache verify")?;
-            let mut h = base_hash.clone();
-            h.update(opt_flag.as_bytes());
-            if let Some(hi) = hdr_idx {
-                h.update(generated.extra_headers[*hi].1.as_bytes());
-            }
-            h.update(src.as_bytes());
-            let key = h.hex();
-            let cached_obj = obj_cache.join(format!("{key}.o"));
-            let cached_sha = obj_cache.join(format!("{key}.o.sha256"));
-            let local_obj = work.join(format!("obj_{idx}.o"));
-            link_objs.push(local_obj.clone());
-            if let Some(verified_bytes) = crate::build::verified_cached_artifact_bytes(&cached_obj, &cached_sha) {
-                fs::write(&local_obj, &verified_bytes).map_err(|e| format!("{}: {e}", local_obj.display()))?;
-                cache_hits += 1;
-            } else {
-                let src_path = work.join(name);
-                fs::write(&src_path, src).map_err(|e| format!("{}: {e}", src_path.display()))?;
-                to_compile.push(ShardJob {
-                    src_path,
-                    local_obj,
-                    cached_obj,
-                    cached_sha,
-                    key,
-                    opt_flag,
-                    src_len: src.len(),
-                });
+        {
+            let _read_lock =
+                crate::build::lock_file_shared_with_deadline(&obj_cache.join(".publish.lock"), deadline)?;
+            for (idx, (name, src, opt_flag, hdr_idx)) in generated.shards.iter().enumerate() {
+                check_dl("cgen cache verify")?;
+                let mut h = base_hash.clone();
+                h.update(opt_flag.as_bytes());
+                if let Some(hi) = hdr_idx {
+                    h.update(generated.extra_headers[*hi].1.as_bytes());
+                }
+                h.update(src.as_bytes());
+                let key = h.hex();
+                let cached_obj = obj_cache.join(format!("{key}.o"));
+                let cached_sha = obj_cache.join(format!("{key}.o.sha256"));
+                let local_obj = work.join(format!("obj_{idx}.o"));
+                link_objs.push(local_obj.clone());
+                if let Some(verified_bytes) = crate::build::verified_cached_artifact_bytes(&cached_obj, &cached_sha) {
+                    fs::write(&local_obj, &verified_bytes).map_err(|e| format!("{}: {e}", local_obj.display()))?;
+                    cache_hits += 1;
+                } else {
+                    let src_path = work.join(name);
+                    fs::write(&src_path, src).map_err(|e| format!("{}: {e}", src_path.display()))?;
+                    to_compile.push(ShardJob {
+                        src_path,
+                        local_obj,
+                        cached_obj,
+                        cached_sha,
+                        key,
+                        opt_flag,
+                        src_len: src.len(),
+                    });
+                }
             }
         }
         to_compile.sort_by_key(|t| std::cmp::Reverse(t.src_len));
@@ -5007,10 +5035,16 @@ pub fn build_c_blot_cdylib_with_info(
                                         let _ = fs::remove_file(&tmp_obj);
                                         return Err(e);
                                     }
-                                    let _pub_lock = crate::build::lock_file_with_deadline(
+                                    let _pub_lock = match crate::build::lock_file_with_deadline(
                                         &obj_cache_ref.join(".publish.lock"),
                                         deadline,
-                                    )?;
+                                    ) {
+                                        Ok(lock) => lock,
+                                        Err(e) => {
+                                            let _ = fs::remove_file(&tmp_obj);
+                                            return Err(e);
+                                        }
+                                    };
                                     if let Err(e) = fs::rename(&tmp_obj, &cached_obj)
                                         .map_err(|e| {
                                             format!(
@@ -5516,6 +5550,9 @@ int main(int argc, char **argv) {
             }
             let p_offset = u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
             let p_filesz = u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+            let p_align = u64::from_le_bytes(elf[off + 48..off + 56].try_into().unwrap()) as usize;
+            let note_align = if p_type == PT_GNU_PROPERTY || p_align >= 8 { 8 } else { 4 };
+            let align_up = |v: usize, a: usize| (v + (a - 1)) & !(a - 1);
             let mut cur = p_offset;
             let end = p_offset.saturating_add(p_filesz).min(elf.len());
             while cur + 12 <= end {
@@ -5524,7 +5561,7 @@ int main(int argc, char **argv) {
                 let ntype = u32::from_le_bytes(elf[cur + 8..cur + 12].try_into().unwrap());
                 let name_start = cur + 12;
                 let name_end = name_start.saturating_add(namesz);
-                let desc_start = (name_end + 3) & !3;
+                let desc_start = align_up(name_end, note_align);
                 let desc_end = desc_start.saturating_add(descsz);
                 if desc_end > end {
                     break;
@@ -5545,10 +5582,10 @@ int main(int argc, char **argv) {
                                 return true;
                             }
                         }
-                        p = (data_end + 7) & !7;
+                        p = align_up(data_end, 8);
                     }
                 }
-                cur = (desc_end + 3) & !3;
+                cur = align_up(desc_end, note_align);
             }
         }
         false

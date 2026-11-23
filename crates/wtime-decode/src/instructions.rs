@@ -135,32 +135,40 @@ pub(crate) struct BoundedBody {
     pub instructions: Vec<Instruction>,
     pub offsets: Vec<u32>,
     pub count: usize,
+    pub imm_elems: usize,
     pub dropped: bool,
     pub imm_exceeded: bool,
 }
 /// Decodes a constant/initializer expression while charging every decoded
-/// instruction against `expr_insns <= max_insns`. When `keep` is false or the
-/// budget is exceeded, syntax validation continues in full with zero heap
-/// allocations for instructions or variable-length immediates.
+/// instruction against `expr_insns <= max_insns` and every variable-length
+/// immediate element against `expr_imm_elems <= max_insns`. When `keep` is false
+/// or either budget is exceeded, syntax validation continues in full with zero
+/// heap allocations for instructions or variable-length immediates.
 pub(crate) fn expression_bounded(
     r: &mut Reader,
     expr_insns: &mut usize,
+    expr_imm_elems: &mut usize,
     max_insns: usize,
     mut keep: bool,
 ) -> Result<(Vec<Instruction>, bool)> {
     let mut out = Vec::new();
-    let mut exceeded = *expr_insns > max_insns;
+    let mut exceeded = *expr_insns > max_insns || *expr_imm_elems > max_insns;
     if exceeded {
         keep = false;
     }
     let mut depth = 1usize;
     while depth > 0 {
-        if keep && *expr_insns >= max_insns {
+        if keep && (*expr_insns >= max_insns || *expr_imm_elems > max_insns) {
             keep = false;
             out = Vec::new();
         }
+        let mut imm_budget = ImmBudget::Local {
+            used: expr_imm_elems,
+            max: max_insns,
+        };
         let mut imm_over = false;
-        let insn = read_instruction(r, &mut depth, keep, max_insns, &mut imm_over)?;
+        let mut step_imm = 0usize;
+        let insn = read_instruction(r, &mut depth, keep, Some(&mut imm_budget), &mut step_imm, &mut imm_over)?;
         *expr_insns = expr_insns.saturating_add(1);
         if imm_over || *expr_insns > max_insns {
             exceeded = true;
@@ -174,7 +182,7 @@ pub(crate) fn expression_bounded(
     }
     Ok((out, exceeded))
 }
-fn reserve_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, want: usize) -> usize {
+pub(crate) fn reserve_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, want: usize) -> usize {
     use std::sync::atomic::Ordering;
     let mut cur = shared.load(Ordering::Relaxed);
     loop {
@@ -185,6 +193,46 @@ fn reserve_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, wan
         match shared.compare_exchange_weak(cur, cur + grant, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return grant,
             Err(actual) => cur = actual,
+        }
+    }
+}
+pub(crate) fn try_reserve_exact_budget(shared: &std::sync::atomic::AtomicUsize, max_total: usize, want: usize) -> bool {
+    use std::sync::atomic::Ordering;
+    if want == 0 {
+        return true;
+    }
+    let mut cur = shared.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = cur.checked_add(want) else {
+            return false;
+        };
+        if next > max_total {
+            return false;
+        }
+        match shared.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+enum ImmBudget<'a> {
+    Local {
+        used: &'a mut usize,
+        max: usize,
+    },
+    Shared {
+        used: &'a std::sync::atomic::AtomicUsize,
+        max: usize,
+    },
+}
+impl ImmBudget<'_> {
+    fn try_reserve(&mut self, n: usize) -> bool {
+        match self {
+            ImmBudget::Local { used, max } => {
+                **used = used.saturating_add(n);
+                **used <= *max
+            }
+            ImmBudget::Shared { used, max } => try_reserve_exact_budget(used, *max, n),
         }
     }
 }
@@ -208,15 +256,15 @@ impl Drop for QuotaGuard<'_> {
     }
 }
 /// A function body's instructions and the absolute offset of each in the
-/// module. Pre-reserves quota from `shared_insns` BEFORE retaining instructions
-/// so aggregate retained instructions across all parallel workers never exceed
-/// `max_insns`. When `keep` is false or quota is exhausted, syntax decoding
-/// continues in full with zero heap allocation (skipping immediate buffers) so
-/// malformed bytecode still reports `ErrorKind::Decode`.
-/// Returns `(instructions, offsets, exact_insn_count, retention_dropped, imm_limit_exceeded)`.
+/// module. Pre-reserves quota from `shared_insns` AND `shared_imm_elems` BEFORE
+/// retaining instructions or variable-length immediates so aggregate retained
+/// memory across all parallel workers never exceeds `max_insns`. When `keep` is
+/// false or quota is exhausted, syntax decoding continues in full with zero
+/// heap allocation so malformed bytecode still reports `ErrorKind::Decode`.
 pub(crate) fn body_expression_bounded(
     r: &mut Reader,
     shared_insns: Option<&std::sync::atomic::AtomicUsize>,
+    shared_imm_elems: Option<&std::sync::atomic::AtomicUsize>,
     max_insns: usize,
     mut keep: bool,
 ) -> Result<BoundedBody> {
@@ -225,6 +273,7 @@ pub(crate) fn body_expression_bounded(
     let mut offsets = Vec::new();
     let mut dropped = !keep;
     let mut imm_exceeded = false;
+    let mut local_imm_elems: usize = 0;
     if keep
         && let Some(c) = shared_insns
         && c.load(Ordering::Relaxed) >= max_insns
@@ -247,6 +296,7 @@ pub(crate) fn body_expression_bounded(
     };
     let mut depth = 1usize;
     let mut count = 0usize;
+    let mut body_imm_elems = 0usize;
     while depth > 0 {
         let offset = u32::try_from(r.offset())
             .map_err(|_| Error::new(ErrorKind::ResourceLimit, "module too large for u32 instruction offsets"))?;
@@ -271,8 +321,25 @@ pub(crate) fn body_expression_bounded(
             }
         }
         let mut imm_over = false;
-        let insn = read_instruction(r, &mut depth, keep, max_insns, &mut imm_over)?;
+        let mut step_imm = 0usize;
+        let insn = match shared_imm_elems {
+            Some(shared_imm) => {
+                let mut budget = ImmBudget::Shared {
+                    used: shared_imm,
+                    max: max_insns,
+                };
+                read_instruction(r, &mut depth, keep, Some(&mut budget), &mut step_imm, &mut imm_over)?
+            }
+            None => {
+                let mut budget = ImmBudget::Local {
+                    used: &mut local_imm_elems,
+                    max: max_insns,
+                };
+                read_instruction(r, &mut depth, keep, Some(&mut budget), &mut step_imm, &mut imm_over)?
+            }
+        };
         count = count.saturating_add(1);
+        body_imm_elems = body_imm_elems.saturating_add(step_imm);
         if imm_over {
             imm_exceeded = true;
             if keep {
@@ -299,6 +366,7 @@ pub(crate) fn body_expression_bounded(
         instructions,
         offsets,
         count,
+        imm_elems: body_imm_elems,
         dropped,
         imm_exceeded,
     })
@@ -310,21 +378,24 @@ fn expression_with_capacity(r: &mut Reader, capacity: usize) -> Result<Vec<Instr
     let _ = out.try_reserve_exact(capacity);
     let mut depth = 1usize;
     let mut imm_over = false;
+    let mut step_imm = 0usize;
     while depth > 0 {
-        out.push(read_instruction(r, &mut depth, true, usize::MAX, &mut imm_over)?);
+        out.push(read_instruction(r, &mut depth, true, None, &mut step_imm, &mut imm_over)?);
     }
     Ok(out)
 }
 /// Decode one instruction and its immediates, without validating control nesting.
 pub fn decode_instruction(r: &mut Reader) -> Result<Instruction> {
     let mut imm_over = false;
-    read_instruction(r, &mut 1, true, usize::MAX, &mut imm_over)
+    let mut step_imm = 0usize;
+    read_instruction(r, &mut 1, true, None, &mut step_imm, &mut imm_over)
 }
 fn read_instruction(
     r: &mut Reader,
     depth: &mut usize,
     keep: bool,
-    max_imm_elems: usize,
+    imm_budget: Option<&mut ImmBudget<'_>>,
+    step_imm: &mut usize,
     imm_over: &mut bool,
 ) -> Result<Instruction> {
     let first = r.byte()?;
@@ -347,13 +418,26 @@ fn read_instruction(
         }
         0x0e => {
             let n = count(r)?;
-            if n > max_imm_elems {
-                *imm_over = true;
-            }
-            if keep && n <= max_imm_elems {
+            *step_imm = n;
+            let allowed = if keep {
+                match imm_budget {
+                    Some(b) => {
+                        let ok = b.try_reserve(n);
+                        if !ok {
+                            *imm_over = true;
+                        }
+                        ok
+                    }
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if allowed {
                 let mut v = Vec::new();
+                let _ = v.try_reserve_exact(n);
                 for _ in 0..n {
-                    v.push(r.u32()?)
+                    v.push(r.u32()?);
                 }
                 Immediate::BrTable(v.into_boxed_slice(), r.u32()?)
             } else {
@@ -367,13 +451,26 @@ fn read_instruction(
         0x11 | 0x13 => Immediate::Pair(r.u32()?, r.u32()?),
         0x1c => {
             let n = count(r)?;
-            if n > max_imm_elems {
-                *imm_over = true;
-            }
-            if keep && n <= max_imm_elems {
+            *step_imm = n;
+            let allowed = if keep {
+                match imm_budget {
+                    Some(b) => {
+                        let ok = b.try_reserve(n);
+                        if !ok {
+                            *imm_over = true;
+                        }
+                        ok
+                    }
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if allowed {
                 let mut v = Vec::new();
+                let _ = v.try_reserve_exact(n);
                 for _ in 0..n {
-                    v.push(val(r)?)
+                    v.push(val(r)?);
                 }
                 Immediate::Types(v.into_boxed_slice())
             } else {
@@ -501,11 +598,24 @@ fn read_instruction(
             let ty = r.u32()?;
             let tag = if first == 0xe4 { Some(r.u32()?) } else { None };
             let n = count(r)?;
-            if n > max_imm_elems {
-                *imm_over = true;
-            }
-            if keep && n <= max_imm_elems {
+            *step_imm = n;
+            let allowed = if keep {
+                match imm_budget {
+                    Some(b) => {
+                        let ok = b.try_reserve(n);
+                        if !ok {
+                            *imm_over = true;
+                        }
+                        ok
+                    }
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if allowed {
                 let mut handlers = Vec::new();
+                let _ = handlers.try_reserve_exact(n);
                 for _ in 0..n {
                     let switch = r.byte()?;
                     if switch > 1 {
@@ -537,11 +647,24 @@ fn read_instruction(
                 Immediate::Block(r.signed(33)?)
             };
             let n = count(r)?;
-            if n > max_imm_elems {
-                *imm_over = true;
-            }
-            if keep && n <= max_imm_elems {
+            *step_imm = n;
+            let allowed = if keep {
+                match imm_budget {
+                    Some(b) => {
+                        let ok = b.try_reserve(n);
+                        if !ok {
+                            *imm_over = true;
+                        }
+                        ok
+                    }
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if allowed {
                 let mut catches = Vec::new();
+                let _ = catches.try_reserve_exact(n);
                 for _ in 0..n {
                     let kind = r.byte()?;
                     if kind > 3 {

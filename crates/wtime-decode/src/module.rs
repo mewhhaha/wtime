@@ -1,6 +1,6 @@
 use crate::{
     Immediate, Instruction, Reader,
-    instructions::{body_expression_bounded, count, expression_bounded, val},
+    instructions::{body_expression_bounded, count, expression_bounded, try_reserve_exact_budget, val},
 };
 #[cfg(test)]
 use crate::instructions::expression;
@@ -350,9 +350,12 @@ pub fn decode(
     let mut last = 0;
     let mut seen = 0u16;
     let mut expr_insns: usize = 0;
+    let mut expr_imm_elems: usize = 0;
     let mut total_elem_items: u64 = 0;
     let mut decl_limit_exceeded = false;
+    let mut rec_group_limit_exceeded = false;
     let mut expr_limit_exceeded = false;
+    let mut local_limit_exceeded = false;
     let mut total_local_limit_exceeded = false;
     let mut code_insn_limit_exceeded = false;
     let mut imm_limit_exceeded = false;
@@ -412,10 +415,8 @@ pub fn decode(
                         1
                     };
                     if n > policy.max_rec_group_size {
-                        return Err(Error::new(
-                            ErrorKind::ResourceLimit,
-                            "recursion group limit",
-                        ));
+                        rec_group_limit_exceeded = true;
+                        type_over = true;
                     }
                     total_groups = total_groups.saturating_add(1);
                     total_types = total_types.saturating_add(n);
@@ -445,7 +446,7 @@ pub fn decode(
                         m.type_groups.push(TypeGroup { explicit, types });
                     }
                 }
-                if type_over {
+                if type_over && !rec_group_limit_exceeded {
                     decl_limit_exceeded = true;
                 }
             }
@@ -555,8 +556,13 @@ pub fn decode(
                     let tt = table(&mut s)?;
                     let keep = i < policy.max_tables && !expr_limit_exceeded;
                     let init = if has_init {
-                        let (expr, over) =
-                            expression_bounded(&mut s, &mut expr_insns, policy.max_instructions, keep)?;
+                        let (expr, over) = expression_bounded(
+                            &mut s,
+                            &mut expr_insns,
+                            &mut expr_imm_elems,
+                            policy.max_instructions,
+                            keep,
+                        )?;
                         if over {
                             expr_limit_exceeded = true;
                         }
@@ -588,8 +594,13 @@ pub fn decode(
                 for i in 0..n {
                     let ty = global(&mut s)?;
                     let keep = i < policy.max_globals && !expr_limit_exceeded;
-                    let (init, over) =
-                        expression_bounded(&mut s, &mut expr_insns, policy.max_instructions, keep)?;
+                    let (init, over) = expression_bounded(
+                        &mut s,
+                        &mut expr_insns,
+                        &mut expr_imm_elems,
+                        policy.max_instructions,
+                        keep,
+                    )?;
                     if over {
                         expr_limit_exceeded = true;
                     }
@@ -640,6 +651,7 @@ pub fn decode(
                             let (offset, over) = expression_bounded(
                                 &mut s,
                                 &mut expr_insns,
+                                &mut expr_imm_elems,
                                 policy.max_instructions,
                                 !expr_limit_exceeded,
                             )?;
@@ -653,6 +665,7 @@ pub fn decode(
                             let (offset, over) = expression_bounded(
                                 &mut s,
                                 &mut expr_insns,
+                                &mut expr_imm_elems,
                                 policy.max_instructions,
                                 !expr_limit_exceeded,
                             )?;
@@ -695,6 +708,7 @@ pub fn decode(
                             let (item, over) = expression_bounded(
                                 &mut s,
                                 &mut expr_insns,
+                                &mut expr_imm_elems,
                                 policy.max_instructions,
                                 !expr_limit_exceeded,
                             )?;
@@ -733,12 +747,12 @@ pub fn decode(
                 let n = count(&mut s)?;
                 if n > policy.max_functions {
                     // Stream-validate every body without retaining any `Reader`, `Instruction`,
-                    // or immediate buffers so malformed size/syntax still precedes `ResourceLimit`
-                    // in O(1) RAM.
+                    // local-group, or immediate buffers so malformed size/syntax still precedes
+                    // `ResourceLimit` in O(1) RAM.
                     for _ in 0..n {
                         let size = s.u32()?;
                         let b = s.child(size as usize)?;
-                        let _ = parse_function_body(b, policy, None, false)?;
+                        let _ = parse_function_body(b, policy, None, None, None, false)?;
                     }
                     decl_limit_exceeded = true;
                 } else {
@@ -757,24 +771,40 @@ pub fn decode(
                         }
                     }
                     let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
-                    let keep_bodies = !decl_limit_exceeded && !expr_limit_exceeded;
-                    // Share a module-wide pre-reserved instruction retention counter across all
-                    // workers (starting at `expr_insns`) so aggregate retained instructions never
-                    // exceed `policy.max_instructions`, while still scanning every body's syntax
-                    // in full so malformed bytecode precedes deferred aggregate limits.
+                    let keep_bodies =
+                        !decl_limit_exceeded && !rec_group_limit_exceeded && !expr_limit_exceeded;
+                    // Share module-wide pre-reserved budgets across all workers for instructions,
+                    // variable-length immediate elements, AND retained local-group entries so
+                    // parallel decoding never retains past `policy` limits while scanning full syntax.
                     let shared_insns = std::sync::atomic::AtomicUsize::new(expr_insns);
+                    let shared_imm_elems = std::sync::atomic::AtomicUsize::new(expr_imm_elems);
+                    let shared_locals = std::sync::atomic::AtomicUsize::new(0);
                     let decoded = wtime_types::parallel::map_ordered(
                         &bodies,
                         threads,
                         || (),
-                        |_, b| parse_function_body(b.clone(), policy, Some(&shared_insns), keep_bodies),
+                        |_, b| {
+                            parse_function_body(
+                                b.clone(),
+                                policy,
+                                Some(&shared_insns),
+                                Some(&shared_imm_elems),
+                                Some(&shared_locals),
+                                keep_bodies,
+                            )
+                        },
                     );
                     let mut parsed_bodies = Vec::with_capacity(decoded.len());
                     let mut total_decoded_locals: usize = 0;
                     let mut total_decoded_insns: usize = expr_insns;
+                    let mut total_decoded_imm_elems: usize = expr_imm_elems;
                     for (idx, body) in decoded.into_iter().enumerate() {
                         let parsed = body?;
-                        total_decoded_locals = total_decoded_locals.saturating_add(parsed.total_locals as usize);
+                        if parsed.total_locals as usize > policy.max_locals {
+                            local_limit_exceeded = true;
+                        }
+                        total_decoded_locals =
+                            total_decoded_locals.saturating_add(parsed.total_locals as usize);
                         if total_decoded_locals > policy.max_total_locals {
                             total_local_limit_exceeded = true;
                         }
@@ -782,10 +812,15 @@ pub fn decode(
                         if total_decoded_insns > policy.max_instructions {
                             code_insn_limit_exceeded = true;
                         }
-                        if parsed.imm_limit_exceeded {
+                        total_decoded_imm_elems =
+                            total_decoded_imm_elems.saturating_add(parsed.imm_elems);
+                        if parsed.imm_limit_exceeded
+                            || total_decoded_imm_elems > policy.max_instructions
+                        {
                             imm_limit_exceeded = true;
                         }
                         if keep_bodies
+                            && !local_limit_exceeded
                             && !total_local_limit_exceeded
                             && !code_insn_limit_exceeded
                             && !imm_limit_exceeded
@@ -795,17 +830,18 @@ pub fn decode(
                     }
                     sizes?;
                     if keep_bodies
+                        && !local_limit_exceeded
                         && !total_local_limit_exceeded
                         && !code_insn_limit_exceeded
                         && !imm_limit_exceeded
                     {
                         m.code.reserve_exact(parsed_bodies.len());
                         for (idx, parsed) in parsed_bodies {
-                            // If a valid module near `max_instructions` transiently dropped one
-                            // body due to sibling threads holding unspent batch reservations,
-                            // re-decode just that body sequentially with exact retention.
-                            let parsed = if parsed.dropped && parsed.insn_count > 0 {
-                                parse_function_body(bodies[idx].clone(), policy, None, true)?
+                            // If a valid module near `max_instructions` or `max_total_locals`
+                            // transiently dropped one body due to sibling threads holding unspent
+                            // reservations, re-decode just that body sequentially with exact retention.
+                            let parsed = if parsed.dropped && (parsed.insn_count > 0 || parsed.total_locals > 0) {
+                                parse_function_body(bodies[idx].clone(), policy, None, None, None, true)?
                             } else {
                                 parsed
                             };
@@ -837,6 +873,7 @@ pub fn decode(
                             let (offset, over) = expression_bounded(
                                 &mut s,
                                 &mut expr_insns,
+                                &mut expr_imm_elems,
                                 policy.max_instructions,
                                 !expr_limit_exceeded,
                             )?;
@@ -851,6 +888,7 @@ pub fn decode(
                             let (offset, over) = expression_bounded(
                                 &mut s,
                                 &mut expr_insns,
+                                &mut expr_imm_elems,
                                 policy.max_instructions,
                                 !expr_limit_exceeded,
                             )?;
@@ -890,6 +928,15 @@ pub fn decode(
             _ => unreachable!(),
         };
         s.finish()?;
+    }
+    if rec_group_limit_exceeded {
+        return Err(Error::new(
+            ErrorKind::ResourceLimit,
+            "recursion group limit",
+        ));
+    }
+    if local_limit_exceeded {
+        return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
     }
     if total_local_limit_exceeded {
         return Err(Error::new(
@@ -939,6 +986,7 @@ struct ParsedBody {
     local_groups: Vec<(u32, ValType)>,
     total_locals: u32,
     insn_count: usize,
+    imm_elems: usize,
     dropped: bool,
     imm_limit_exceeded: bool,
     instructions: Vec<Instruction>,
@@ -947,44 +995,69 @@ struct ParsedBody {
 }
 
 /// One function body of the code section, parsed without expanding `locals`.
-/// Uses `body_expression_bounded` so instruction/offset vectors and immediate
-/// buffers are never retained past the module-wide `policy.max_instructions` cap
-/// while full syntax checking still runs.
+/// Uses `body_expression_bounded` AND `shared_locals` / `shared_imm_elems` so
+/// retained instructions, variable-length immediates, and local-group entries
+/// never exceed module-wide `policy` caps while full syntax checking still runs.
 fn parse_function_body(
     mut b: Reader,
     policy: &ResourceLimits,
     shared_insns: Option<&std::sync::atomic::AtomicUsize>,
+    shared_imm_elems: Option<&std::sync::atomic::AtomicUsize>,
+    shared_locals: Option<&std::sync::atomic::AtomicUsize>,
     keep: bool,
 ) -> Result<ParsedBody> {
     let start = b.offset();
     let groups = count(&mut b)?;
     let mut local_groups = Vec::new();
     let mut total = 0u32;
+    let mut keep_locals = keep;
+    let mut dropped_locals = !keep;
     for _ in 0..groups {
         let n = b.u32()?;
         let ty = val(&mut b)?;
         total = total
             .checked_add(n)
             .ok_or_else(|| b.error("local count overflow"))?;
-        if n > 0 && keep && (total as usize) <= policy.max_locals {
-            local_groups.push((n, ty));
+        if n > 0 && keep_locals {
+            if (total as usize) > policy.max_locals {
+                local_groups.clear();
+                keep_locals = false;
+                dropped_locals = true;
+            } else {
+                let reserved = match shared_locals {
+                    Some(shared) => try_reserve_exact_budget(shared, policy.max_total_locals, n as usize),
+                    None => (total as usize) <= policy.max_total_locals,
+                };
+                if reserved {
+                    local_groups.push((n, ty));
+                } else {
+                    local_groups.clear();
+                    keep_locals = false;
+                    dropped_locals = true;
+                }
+            }
         }
     }
     let keep_body = keep && (total as usize) <= policy.max_locals;
-    let parsed_body = body_expression_bounded(&mut b, shared_insns, policy.max_instructions, keep_body)?;
+    let parsed_body = body_expression_bounded(
+        &mut b,
+        shared_insns,
+        shared_imm_elems,
+        policy.max_instructions,
+        keep_body,
+    )?;
     b.finish()?;
-    if total as usize > policy.max_locals {
-        return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
-    }
+    let dropped = dropped_locals || parsed_body.dropped;
     Ok(ParsedBody {
-        local_groups: if parsed_body.dropped && parsed_body.count > 0 {
+        local_groups: if dropped && (parsed_body.count > 0 || total > 0) {
             Vec::new()
         } else {
             local_groups
         },
         total_locals: total,
         insn_count: parsed_body.count,
-        dropped: parsed_body.dropped,
+        imm_elems: parsed_body.imm_elems,
+        dropped,
         imm_limit_exceeded: parsed_body.imm_exceeded,
         instructions: parsed_body.instructions,
         offsets: parsed_body.offsets,
@@ -1389,5 +1462,87 @@ mod tests {
         .unwrap();
         assert_eq!(m.code.len(), 4);
         assert!(m.code.iter().all(|b| b.instructions.len() == 2));
+
+        // Cumulative variable-length immediate elements across multiple instructions are capped
+        // against `max_instructions` (3x `select [i32, i32, i32]` = 9 > 8), while malformed syntax
+        // in a trailing byte still reports `Decode`.
+        let cum_imm_ok = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (
+                10,
+                &[
+                    1, 17, 0, // 0 locals
+                    0x1c, 3, 0x7f, 0x7f, 0x7f, // 3 types
+                    0x1c, 3, 0x7f, 0x7f, 0x7f, // +3 = 6
+                    0x1c, 3, 0x7f, 0x7f, 0x7f, // +3 = 9 > 8
+                    0x0b,
+                ],
+            ),
+        ]);
+        assert_eq!(
+            decode(
+                &cum_imm_ok,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 8,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::ResourceLimit
+        );
+        let cum_imm_bad = module(&[
+            (1, &[1, 0x60, 0, 0]),
+            (3, &[1, 0]),
+            (
+                10,
+                &[
+                    1, 17, 0,
+                    0x1c, 3, 0x7f, 0x7f, 0x7f,
+                    0x1c, 3, 0x7f, 0x7f, 0x7f,
+                    0x1c, 3, 0x7f, 0x7f, 0x7f,
+                    0xff,
+                ],
+            ),
+        ]);
+        assert_eq!(
+            decode(
+                &cum_imm_bad,
+                &FeatureSet::default(),
+                &ResourceLimits {
+                    max_instructions: 8,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Decode
+        );
+
+        // Over-limit `max_rec_group_size` is deferred so malformed syntax in a later section
+        // still reports `Decode`, while well-formed modules report `ResourceLimit`.
+        let rec_over = module(&[(1, &[1, 0x4e, 3, 0x60, 0, 0, 0x60, 0, 0, 0x60, 0, 0])]);
+        let tight_rec = ResourceLimits {
+            max_rec_group_size: 1,
+            ..ResourceLimits::default()
+        };
+        assert_eq!(
+            decode(&rec_over, &FeatureSet::default(), &tight_rec)
+                .unwrap_err()
+                .kind,
+            ErrorKind::ResourceLimit
+        );
+        let rec_over_then_bad = module(&[
+            (1, &[1, 0x4e, 3, 0x60, 0, 0, 0x60, 0, 0, 0x60, 0, 0]),
+            (5, &[1, 0xff]),
+        ]);
+        assert_eq!(
+            decode(&rec_over_then_bad, &FeatureSet::default(), &tight_rec)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Decode
+        );
     }
 }

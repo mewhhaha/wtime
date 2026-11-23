@@ -480,7 +480,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     let mut type_canon: Vec<u32> = Vec::with_capacity(decoded.types.len());
     let mut type_arity: Vec<usize> = Vec::with_capacity(decoded.types.len());
     let mut type_admitted: Vec<bool> = Vec::with_capacity(decoded.types.len());
-    for fty in &decoded.types {
+    for (ti, fty) in decoded.types.iter().enumerate() {
+        if let Some(b) = budget
+            && (ti & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         let next_id = sig_to_canon.len() as u32;
         let cid = *sig_to_canon.entry(fty).or_insert(next_id);
         type_canon.push(cid);
@@ -499,6 +504,11 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     let mut precheck_total_locals = 0usize;
     let mut total_sig_arity = 0usize;
     for (bi, body) in decoded.code.iter().enumerate() {
+        if let Some(b) = budget
+            && (bi & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         let ti = decoded.functions.get(bi).ok_or("function/code count mismatch")?.0 as usize;
         let fty = decoded.types.get(ti).ok_or("function type index out of range")?;
         let n_locals = fty.params.len().saturating_add(body.locals.len());
@@ -519,7 +529,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     let mut imports = Vec::new();
     let mut func_type_idx: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
     let mut func_canon_sig: Vec<u32> = Vec::with_capacity(decoded.imports.len() + decoded.functions.len());
-    for imp in &decoded.imports {
+    for (ii, imp) in decoded.imports.iter().enumerate() {
+        if let Some(b) = budget
+            && (ii & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         let ti_u32 = match imp.kind {
             ImportKind::Func(t) => t.0,
             _ => return Err(format!("x64: only plain function imports are supported (got {:?}::{:?})", imp.module, imp.name)),
@@ -610,7 +625,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     // Globals: evaluate all initializers; track which globals are written or exported-mutable.
     let mut globals = Vec::with_capacity(decoded.globals.len());
     let mut global_inits = Vec::with_capacity(decoded.globals.len());
-    for g in &decoded.globals {
+    for (gi, g) in decoded.globals.iter().enumerate() {
+        if let Some(b) = budget
+            && (gi & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         check_val_type(g.ty.value)?;
         let init = eval_const_expr(&g.init, &global_inits)?;
         globals.push((g.ty.value, g.ty.mutable));
@@ -663,6 +683,7 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     // Active element segments: validate forms and populate static funcref tables (recording bounds
     // checks so `wt_initialize` reports `TRAP_TABLE_OOB` at instantiation time per Wasm spec).
     let mut active_elem_checks = Vec::new();
+    let mut elem_steps: usize = 0;
     for elem in &decoded.elements {
         match &elem.mode {
             SegmentMode::Active { index, offset } => {
@@ -675,6 +696,12 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
                 };
                 let mut entries = Vec::with_capacity(elem.init.len());
                 for expr in &elem.init {
+                    elem_steps += 1;
+                    if let Some(b) = budget
+                        && (elem_steps & 4095) == 0
+                    {
+                        b.check_deadline()?;
+                    }
                     match expr.as_slice() {
                         [Instruction { opcode: 0xd2, immediate: Immediate::Index(f) }, Instruction { opcode: 0x0b, .. }] => {
                             entries.push(Some(*f));
@@ -704,6 +731,11 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     // Active data segments only (passive segments rejected).
     let mut active_data_segs = Vec::new();
     for (di, seg) in decoded.data.iter().enumerate() {
+        if let Some(b) = budget
+            && (di & 4095) == 4095
+        {
+            b.check_deadline()?;
+        }
         match &seg.mode {
             SegmentMode::Active { index: 0, offset } => {
                 let X64ConstVal::I32(off_i32) = eval_const_expr(offset, &global_inits)? else {
@@ -724,9 +756,16 @@ pub fn admit_x64_module_with_budget(decoded: &DecodedModule, budget: Option<&Com
     // (zero `FuncType` cloning/hashing per slot); `ci_index` uses deterministic `O(log N)` `BTreeMap` lookups.
     let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
     let mut funcref_by_sig: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+    let mut slot_steps: usize = 0;
     for (tbl, slots) in funcref_tables {
         funcref_table_lens.insert(tbl, slots.len() as u32);
         for (slot, entry) in slots.into_iter().enumerate() {
+            slot_steps += 1;
+            if let Some(b) = budget
+                && (slot_steps & 4095) == 0
+            {
+                b.check_deadline()?;
+            }
             if let Some(f) = entry
                 && let Some(&csig) = func_canon_sig.get(f as usize)
             {
