@@ -2619,3 +2619,668 @@ fn oracle_stage5_wave2_rotation_memcopy_forward_and_layout() {
         &[(48, 80), (256, 32), (512, 16), (1024, 32), (65504, 32)],
     );
 }
+
+fn push_simd_op(out: &mut Vec<u8>, op: u16) {
+    assert_eq!(op >> 8, 0xfd);
+    out.push(0xfd);
+    leb_u32(out, u32::from(op & 0xff));
+}
+
+fn push_v128_const(out: &mut Vec<u8>, bytes: [u8; 16]) {
+    out.push(0xfd);
+    leb_u32(out, 12);
+    out.extend_from_slice(&bytes);
+}
+
+#[test]
+fn oracle_hill1_all_236_simd_opcodes() {
+    // Track EVERY valid 0xfd00..=0xfdff opcode we emit and assert total == 236!
+    let covered = std::cell::RefCell::new(std::collections::BTreeSet::<u16>::new());
+    let emit_op = |out: &mut Vec<u8>, op: u16| {
+        covered.borrow_mut().insert(op);
+        push_simd_op(out, op);
+    };
+
+    // Seed linear memory [0..256] with rich edge-case bytes (int boundaries, floats, NaNs, +/-0, +/-Inf).
+    let mut seed = [0u8; 256];
+    // [0..16]: signed/unsigned interesting bytes
+    seed[0..16].copy_from_slice(&[
+        0x00, 0x01, 0x7f, 0x80, 0x81, 0xff, 0x10, 0x20, 0xfe, 0x02, 0x55, 0xaa, 0x0f, 0xf0, 0x33,
+        0xcc,
+    ]);
+    // [16..32]: second byte vector (includes -32768 in i16 lane 0 paired with -32768 at [0..2] -> put -32768 in both!)
+    seed[0..2].copy_from_slice(&(-32768i16).to_le_bytes());
+    seed[16..32].copy_from_slice(&[
+        0x00, 0x80, 0x7f, 0x80, 0xff, 0x01, 0x00, 0x7f, 0x03, 0x11, 0x10, 0x20, 0xff, 0x00, 0x07,
+        0x08,
+    ]);
+    // [32..48]: f32x4 vector A: [-0.0, 3.75, NaN, -2147483904.0]
+    for (i, v) in [
+        (-0.0f32).to_bits(),
+        3.75f32.to_bits(),
+        0x7fc0_1234u32, // non-canonical qNaN
+        (-2147483904.0f32).to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed[32 + i * 4..36 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    // [48..64]: f32x4 vector B: [+0.0, -3.75, 2147483648.0, 4294967296.0]
+    for (i, v) in [
+        0.0f32.to_bits(),
+        (-3.75f32).to_bits(),
+        2147483648.0f32.to_bits(),
+        4294967296.0f32.to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed[48 + i * 4..52 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    // [64..80]: f32x4 vector C: [f32::INFINITY, f32::NEG_INFINITY, 3000000000.0, -0.5]
+    for (i, v) in [
+        f32::INFINITY.to_bits(),
+        f32::NEG_INFINITY.to_bits(),
+        3000000000.0f32.to_bits(),
+        (-0.5f32).to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed[64 + i * 4..68 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    // [80..96]: f64x2 vector A: [-0.0, 3.75]
+    seed[80..88].copy_from_slice(&(-0.0f64).to_bits().to_le_bytes());
+    seed[88..96].copy_from_slice(&3.75f64.to_bits().to_le_bytes());
+    // [96..112]: f64x2 vector B: [+0.0, NaN]
+    seed[96..104].copy_from_slice(&0.0f64.to_bits().to_le_bytes());
+    seed[104..112].copy_from_slice(&0x7ff8_0000_0000_0042u64.to_le_bytes());
+    // [112..128]: f64x2 vector C: [-3e9, 5e9]
+    seed[112..120].copy_from_slice(&(-3_000_000_000.0f64).to_bits().to_le_bytes());
+    seed[120..128].copy_from_slice(&5_000_000_000.0f64.to_bits().to_le_bytes());
+    // [128..144]: f64x2 vector D: [f64::NEG_INFINITY, 3_000_000_000.5]
+    seed[128..136].copy_from_slice(&f64::NEG_INFINITY.to_bits().to_le_bytes());
+    seed[136..144].copy_from_slice(&3_000_000_000.5f64.to_bits().to_le_bytes());
+    // [144..160]: i64x2 extremes
+    seed[144..152].copy_from_slice(&i64::MIN.to_le_bytes());
+    seed[152..160].copy_from_slice(&i64::MAX.to_le_bytes());
+    // [160..176]: i64x2 second
+    seed[160..168].copy_from_slice(&(-1i64).to_le_bytes());
+    seed[168..176].copy_from_slice(&0x0123_4567_89ab_cdefi64.to_le_bytes());
+
+    // Output cursor in memory starts at offset 512 (each result is 16 bytes -> fits easily in 1 page!).
+    let mut out_off: i32 = 512;
+    let store_v128 =
+        |b: &mut Vec<u8>,
+         cursor: &mut i32,
+         cov: &std::cell::RefCell<std::collections::BTreeSet<u16>>| {
+            // Stack has [v128]; save into local 1, then store at cursor!
+            b.extend_from_slice(&[0x21, 1]); // local.set 1
+            b.push(0x41);
+            leb_i32(b, *cursor);
+            b.extend_from_slice(&[0x20, 1]); // local.get 1
+            cov.borrow_mut().insert(0xfd0b);
+            push_simd_op(b, 0xfd0b); // v128.store
+            b.extend_from_slice(&[0, 0]);
+            *cursor += 16;
+        };
+    let load_at =
+        |b: &mut Vec<u8>, off: i32, cov: &std::cell::RefCell<std::collections::BTreeSet<u16>>| {
+            b.push(0x41);
+            leb_i32(b, off);
+            cov.borrow_mut().insert(0xfd00);
+            push_simd_op(b, 0xfd00);
+            b.extend_from_slice(&[0, 0]);
+        };
+
+    // f0: (i32) -> (i32): memory loads, lane loads/stores, shuffle, swizzle, splats, extract/replace, to_i32
+    // locals: param 0 = i32 (shift/selector), local 1 = v128 tmp, local 2 = i32 hash acc
+    let mut b0 = Vec::new();
+    // All 12 SIMD load variants (0xfd00..=0xfd0a, 0xfd5c, 0xfd5d)
+    for op in [
+        0xfd00, 0xfd01, 0xfd02, 0xfd03, 0xfd04, 0xfd05, 0xfd06, 0xfd07, 0xfd08, 0xfd09, 0xfd0a,
+        0xfd5c, 0xfd5d,
+    ] {
+        b0.extend_from_slice(&[0x41, 0]); // addr = 0
+        emit_op(&mut b0, op);
+        b0.extend_from_slice(&[0, 0]); // align=0, offset=0
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    // v128.const (0xfd0c)
+    covered.borrow_mut().insert(0xfd0c);
+    push_v128_const(
+        &mut b0,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    );
+    store_v128(&mut b0, &mut out_off, &covered);
+    // i8x16.shuffle (0xfd0d): both inputs, a-only, b-only
+    for lanes in [
+        [0, 16, 1, 17, 2, 18, 15, 31, 30, 14, 7, 23, 8, 24, 0, 31],
+        [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+        [
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ],
+    ] {
+        load_at(&mut b0, 0, &covered);
+        load_at(&mut b0, 16, &covered);
+        emit_op(&mut b0, 0xfd0d);
+        b0.extend_from_slice(&lanes);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    // i8x16.swizzle (0xfd0e)
+    load_at(&mut b0, 0, &covered);
+    load_at(&mut b0, 16, &covered);
+    emit_op(&mut b0, 0xfd0e);
+    store_v128(&mut b0, &mut out_off, &covered);
+    // Splats (0xfd0f..=0xfd14)
+    for (op, push_arg) in [
+        (0xfd0fu16, vec![0x20, 0]),
+        (0xfd10, vec![0x20, 0]),
+        (0xfd11, vec![0x20, 0]),
+        (0xfd12, vec![0x20, 0, 0xac]), // i64.extend_i32_s
+        (0xfd13, vec![0x20, 0, 0xb2]), // f32.convert_i32_s
+        (0xfd14, vec![0x20, 0, 0xb7]), // f64.convert_i32_s
+    ] {
+        b0.extend_from_slice(&push_arg);
+        emit_op(&mut b0, op);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    // Extract & replace lanes (0xfd15..=0xfd22)
+    let mix_i32 = |b: &mut Vec<u8>| {
+        // stack has [i32]: acc = acc * 31 ^ val
+        b.extend_from_slice(&[0x20, 2, 0x41, 31, 0x6c, 0x73, 0x21, 2]);
+    };
+    for (op, lane, conv) in [
+        (0xfd15u16, 3u8, vec![]),      // i8x16.extract_lane_s
+        (0xfd16, 3, vec![]),           // i8x16.extract_lane_u
+        (0xfd18, 1, vec![]),           // i16x8.extract_lane_s
+        (0xfd19, 1, vec![]),           // i16x8.extract_lane_u
+        (0xfd1b, 2, vec![]),           // i32x4.extract_lane
+        (0xfd1d, 1, vec![0xa7]),       // i64x2.extract_lane -> wrap i32
+        (0xfd1f, 1, vec![0xbc]),       // f32x4.extract_lane -> reinterpret i32
+        (0xfd21, 1, vec![0xbd, 0xa7]), // f64x2.extract_lane -> reinterpret i64 -> wrap
+    ] {
+        load_at(&mut b0, if op >= 0xfd1f { 32 } else { 0 }, &covered);
+        emit_op(&mut b0, op);
+        b0.push(lane);
+        b0.extend_from_slice(&conv);
+        mix_i32(&mut b0);
+    }
+    for (op, lane, val_ops) in [
+        (0xfd17u16, 5u8, vec![0x20, 0]),
+        (0xfd1a, 3, vec![0x20, 0]),
+        (0xfd1c, 2, vec![0x20, 0]),
+        (0xfd1e, 1, vec![0x20, 0, 0xac]),
+        (0xfd20, 2, vec![0x20, 0, 0xb2]),
+        (0xfd22, 1, vec![0x20, 0, 0xb7]),
+    ] {
+        load_at(&mut b0, 0, &covered);
+        b0.extend_from_slice(&val_ops);
+        emit_op(&mut b0, op);
+        b0.push(lane);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    // Load/Store lane (0xfd54..=0xfd5b)
+    for (op, lane) in [(0xfd54u16, 7u8), (0xfd55, 5), (0xfd56, 3), (0xfd57, 1)] {
+        b0.extend_from_slice(&[0x41, 4]); // mem addr = 4
+        load_at(&mut b0, 0, &covered);
+        emit_op(&mut b0, op);
+        b0.extend_from_slice(&[0, 0, lane]);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    for (op, lane) in [(0xfd58u16, 7u8), (0xfd59, 5), (0xfd5a, 3), (0xfd5b, 1)] {
+        b0.push(0x41);
+        leb_i32(&mut b0, out_off);
+        load_at(&mut b0, 0, &covered);
+        emit_op(&mut b0, op);
+        b0.extend_from_slice(&[0, 0, lane]);
+        out_off += 16;
+    }
+    // V128ToI32: any_true, all_true, bitmask (test on both non-zero and containing-zero vectors!)
+    for op in [
+        0xfd53u16, 0xfd63, 0xfd83, 0xfda3, 0xfdc3, 0xfd64, 0xfd84, 0xfda4, 0xfdc4,
+    ] {
+        for off in [0, 16, 144] {
+            load_at(&mut b0, off, &covered);
+            emit_op(&mut b0, op);
+            mix_i32(&mut b0);
+        }
+        // All-ones vector so all_true returns 1!
+        push_v128_const(&mut b0, [0xff; 16]);
+        emit_op(&mut b0, op);
+        mix_i32(&mut b0);
+    }
+    // v128.bitselect (0xfd52)
+    load_at(&mut b0, 0, &covered);
+    load_at(&mut b0, 16, &covered);
+    load_at(&mut b0, 144, &covered);
+    emit_op(&mut b0, 0xfd52);
+    store_v128(&mut b0, &mut out_off, &covered);
+    b0.extend_from_slice(&[0x20, 2]); // return acc
+
+    // f1: (i32) -> (i32): ALL unary V128 -> V128 ops + ALL 12 shift ops!
+    let mut b1 = Vec::new();
+    let unary_ops: &[(u16, &[i32])] = &[
+        (0xfd4d, &[0]),
+        (0xfd5e, &[80, 96, 112]),
+        (0xfd5f, &[32, 48, 64]),
+        (0xfd60, &[0, 16]),
+        (0xfd61, &[0, 16]),
+        (0xfd62, &[0, 16]),
+        (0xfd67, &[32, 48, 64]),
+        (0xfd68, &[32, 48, 64]),
+        (0xfd69, &[32, 48, 64]),
+        (0xfd6a, &[32, 48, 64]),
+        (0xfd74, &[80, 96, 112, 128]),
+        (0xfd75, &[80, 96, 112, 128]),
+        (0xfd7a, &[80, 96, 112, 128]),
+        (0xfd94, &[80, 96, 112, 128]),
+        (0xfd7c, &[0, 16]),
+        (0xfd7d, &[0, 16]),
+        (0xfd7e, &[0, 16]),
+        (0xfd7f, &[0, 16]),
+        (0xfd80, &[0, 16]),
+        (0xfd81, &[0, 16]),
+        (0xfd87, &[0]),
+        (0xfd88, &[0]),
+        (0xfd89, &[0]),
+        (0xfd8a, &[0]),
+        (0xfda0, &[0, 144]),
+        (0xfda1, &[0, 144]),
+        (0xfda7, &[0]),
+        (0xfda8, &[0]),
+        (0xfda9, &[0]),
+        (0xfdaa, &[0]),
+        (0xfdc0, &[144, 160]),
+        (0xfdc1, &[144, 160]),
+        (0xfdc7, &[0, 144]),
+        (0xfdc8, &[0, 144]),
+        (0xfdc9, &[0, 144]),
+        (0xfdca, &[0, 144]),
+        (0xfde0, &[32, 48, 64]),
+        (0xfde1, &[32, 48, 64]),
+        (0xfde3, &[32, 48, 64]),
+        (0xfdec, &[80, 96, 112]),
+        (0xfded, &[80, 96, 112]),
+        (0xfdef, &[80, 96, 112]),
+        (0xfdf8, &[32, 48, 64]),
+        (0xfdf9, &[32, 48, 64]),
+        (0xfdfa, &[0, 144]),
+        (0xfdfb, &[0, 144]),
+        (0xfdfc, &[80, 96, 112, 128]),
+        (0xfdfd, &[80, 96, 112, 128]),
+        (0xfdfe, &[0, 144]),
+        (0xfdff, &[0, 144]),
+    ];
+    for &(op, offs) in unary_ops {
+        for &off in offs {
+            load_at(&mut b1, off, &covered);
+            emit_op(&mut b1, op);
+            store_v128(&mut b1, &mut out_off, &covered);
+        }
+    }
+    // All 12 shifts using parameter 0 (dynamic shift count!)
+    for op in [
+        0xfd6bu16, 0xfd6c, 0xfd6d, 0xfd8b, 0xfd8c, 0xfd8d, 0xfdab, 0xfdac, 0xfdad, 0xfdcb, 0xfdcc,
+        0xfdcd,
+    ] {
+        for off in [0, 144] {
+            load_at(&mut b1, off, &covered);
+            b1.extend_from_slice(&[0x20, 0]);
+            emit_op(&mut b1, op);
+            store_v128(&mut b1, &mut out_off, &covered);
+        }
+    }
+    b1.push(0x41);
+    leb_i32(&mut b1, out_off);
+
+    // f2: (i32) -> (i32): ALL binary (V128, V128) -> V128 ops!
+    let mut b2 = Vec::new();
+    let int_bin_ops: &[u16] = &[
+        // i8x16 cmp
+        0xfd23, 0xfd24, 0xfd25, 0xfd26, 0xfd27, 0xfd28, 0xfd29, 0xfd2a, 0xfd2b, 0xfd2c,
+        // i16x8 cmp
+        0xfd2d, 0xfd2e, 0xfd2f, 0xfd30, 0xfd31, 0xfd32, 0xfd33, 0xfd34, 0xfd35, 0xfd36,
+        // i32x4 cmp
+        0xfd37, 0xfd38, 0xfd39, 0xfd3a, 0xfd3b, 0xfd3c, 0xfd3d, 0xfd3e, 0xfd3f, 0xfd40,
+        // bitwise
+        0xfd4e, 0xfd4f, 0xfd50, 0xfd51, // narrow
+        0xfd65, 0xfd66, 0xfd85, 0xfd86, // i8x16 arith
+        0xfd6e, 0xfd6f, 0xfd70, 0xfd71, 0xfd72, 0xfd73, 0xfd76, 0xfd77, 0xfd78, 0xfd79, 0xfd7b,
+        // i16x8 arith & extmul
+        0xfd82, 0xfd8e, 0xfd8f, 0xfd90, 0xfd91, 0xfd92, 0xfd93, 0xfd95, 0xfd96, 0xfd97, 0xfd98,
+        0xfd99, 0xfd9b, 0xfd9c, 0xfd9d, 0xfd9e, 0xfd9f, // i32x4 arith, dot, extmul
+        0xfdae, 0xfdb1, 0xfdb5, 0xfdb6, 0xfdb7, 0xfdb8, 0xfdb9, 0xfdba, 0xfdbc, 0xfdbd, 0xfdbe,
+        0xfdbf, // i64x2 arith, cmp, extmul
+        0xfdce, 0xfdd1, 0xfdd5, 0xfdd6, 0xfdd7, 0xfdd8, 0xfdd9, 0xfdda, 0xfddb, 0xfddc, 0xfddd,
+        0xfdde, 0xfddf,
+    ];
+    for &op in int_bin_ops {
+        let (a_off, b_off) = if op >= 0xfdce { (144, 160) } else { (0, 16) };
+        load_at(&mut b2, a_off, &covered);
+        load_at(&mut b2, b_off, &covered);
+        emit_op(&mut b2, op);
+        store_v128(&mut b2, &mut out_off, &covered);
+    }
+    // f32x4 cmp & arith
+    for op in [
+        0xfd41u16, 0xfd42, 0xfd43, 0xfd44, 0xfd45, 0xfd46, 0xfde4, 0xfde5, 0xfde6, 0xfde7, 0xfde8,
+        0xfde9, 0xfdea, 0xfdeb,
+    ] {
+        for (a_off, b_off) in [(32, 48), (48, 32), (32, 64)] {
+            load_at(&mut b2, a_off, &covered);
+            load_at(&mut b2, b_off, &covered);
+            emit_op(&mut b2, op);
+            store_v128(&mut b2, &mut out_off, &covered);
+        }
+    }
+    // f64x2 cmp & arith
+    for op in [
+        0xfd47u16, 0xfd48, 0xfd49, 0xfd4a, 0xfd4b, 0xfd4c, 0xfdf0, 0xfdf1, 0xfdf2, 0xfdf3, 0xfdf4,
+        0xfdf5, 0xfdf6, 0xfdf7,
+    ] {
+        for (a_off, b_off) in [(80, 96), (96, 80), (112, 128)] {
+            load_at(&mut b2, a_off, &covered);
+            load_at(&mut b2, b_off, &covered);
+            emit_op(&mut b2, op);
+            store_v128(&mut b2, &mut out_off, &covered);
+        }
+    }
+    b2.push(0x41);
+    leb_i32(&mut b2, out_off);
+
+    // Assert we covered ALL 236 standard Wasm 1.0 fixed-width SIMD opcodes!
+    assert_eq!(
+        covered.borrow().len(),
+        236,
+        "expected all 236 fixed-width Wasm SIMD opcodes covered, got {}",
+        covered.borrow().len()
+    );
+    assert!(
+        out_off < 65_536,
+        "test output exceeded 1 memory page: {out_off}"
+    );
+
+    // f3: (i32) -> (i32): OOB trap test for v128.load32_lane at dynamic addr
+    let mut b3 = vec![0x20, 0];
+    push_v128_const(&mut b3, [0; 16]);
+    push_simd_op(&mut b3, 0xfd56);
+    b3.extend_from_slice(&[0, 0, 0]);
+    push_simd_op(&mut b3, 0xfd1b);
+    b3.push(0);
+
+    let mut data_sec = vec![1, 0x00, 0x41, 0, 0x0b];
+    leb_u32(&mut data_sec, seed.len() as u32);
+    data_sec.extend_from_slice(&seed);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("simd_misc", 0, 0),
+            ("simd_un_shift", 0, 1),
+            ("simd_bin", 0, 2),
+            ("simd_lane_oob", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[(1, 0x7b), (1, 0x7f)], &b0),
+            enc_body(&[(1, 0x7b)], &b1),
+            enc_body(&[(1, 0x7b)], &b2),
+            enc_body(&[], &b3),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    let mut calls = vec![
+        c("simd_misc", ArgSpec::I32(-42)),
+        c("simd_bin", ArgSpec::I32(0)),
+        c("simd_lane_oob", ArgSpec::I32(65_532)), // exact in-bounds
+        c("simd_lane_oob", ArgSpec::I32(65_533)), // OOB trap!
+    ];
+    for shift in [0, 1, 7, 8, 15, 31, 63, 65, -1] {
+        calls.push(c("simd_un_shift", ArgSpec::I32(shift)));
+    }
+    assert_oracle_matrix(
+        "hill1_simd_236",
+        &wasm,
+        &calls,
+        &[],
+        &[(512, (out_off - 512) as usize)],
+    );
+}
+
+#[test]
+fn oracle_hill1_memory64() {
+    // Active data segment with i64.const offset = 16
+    let mut data_sec = vec![1, 0x00, 0x42, 16, 0x0b, 8];
+    data_sec.extend_from_slice(&0x0123_4567_89ab_cdefu64.to_le_bytes());
+
+    // f0: (i64) -> (i64): i64.load align=0 offset=0 at addr
+    let b0 = vec![0x20, 0, 0x29, 0, 0];
+    // f1: (i64) -> (i64): i64.load align=0 offset=0x1_0000_0000 (4 GiB offset -> always OOB on 4-page mem!)
+    let mut b1 = vec![0x20, 0, 0x29, 0];
+    // LEB128 u64 for 0x1_0000_0000 (4294967296): [0x80, 0x80, 0x80, 0x80, 0x10]
+    b1.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+    // f2: (i64) -> (i64): memory.grow(delta) -> returns old pages or -1i64
+    let b2 = vec![0x20, 0, 0x40, 0];
+    // f3: (i64) -> (i64): memory.size
+    let b3 = vec![0x3f, 0];
+    // f4: (i64) -> (i64): memory.fill(dst=addr, val=0x5a, len=32) + memory.copy(dst=addr+16, src=addr, len=32) + i64.load(addr+24)
+    let b4 = vec![
+        0x20, 0, 0x41, 0x5a, 0x42, 32, 0xfc, 11, 0, // memory.fill
+        0x20, 0, 0x42, 16, 0x7c, 0x20, 0, 0x42, 32, 0xfc, 10, 0, 0, // memory.copy
+        0x20, 0, 0x29, 0, 24, // i64.load offset=24
+    ];
+    // f5: (i64) -> (i64): v128.load(addr) -> i64x2.add with v128.const -> v128.store(addr + 32) -> i64.load(addr + 40)
+    let mut b5 = vec![0x20, 0, 0x42, 32, 0x7c, 0x20, 0];
+    push_simd_op(&mut b5, 0xfd00); // v128.load
+    b5.extend_from_slice(&[0, 0]);
+    push_v128_const(&mut b5, [1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+    push_simd_op(&mut b5, 0xfdce); // i64x2.add
+    push_simd_op(&mut b5, 0xfd0b); // v128.store
+    b5.extend_from_slice(&[0, 0]);
+    b5.extend_from_slice(&[0x20, 0, 0x29, 0, 40]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7e], &[0x7e])]),
+        func_sec(&[0, 0, 0, 0, 0, 0]),
+        // memory64 with min=1, max=3 (flags = 0x05)
+        section(5, &[1, 0x05, 1, 3]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("load64", 0, 0),
+            ("load_hi_off", 0, 1),
+            ("grow64", 0, 2),
+            ("size64", 0, 3),
+            ("copyfill64", 0, 4),
+            ("simd64", 0, 5),
+        ]),
+        code_sec(&[
+            enc_body(&[], &b0),
+            enc_body(&[], &b1),
+            enc_body(&[], &b2),
+            enc_body(&[], &b3),
+            enc_body(&[], &b4),
+            enc_body(&[], &b5),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    let calls = vec![
+        c("size64", ArgSpec::I64(0)),
+        c("load64", ArgSpec::I64(16)),
+        c("load64", ArgSpec::I64(65_528)), // exact in-bounds end
+        c("load64", ArgSpec::I64(65_529)), // OOB trap
+        c("load64", ArgSpec::I64(-1)),     // u64::MAX + 8 overflow OOB trap!
+        c("load_hi_off", ArgSpec::I64(0)), // offset 2^32 OOB trap!
+        c("simd64", ArgSpec::I64(16)),
+        c("copyfill64", ArgSpec::I64(128)),
+        c("copyfill64", ArgSpec::I64(-4)), // u64 overflow in memory.fill -> trap!
+        c("grow64", ArgSpec::I64(2)),      // 1 -> 3 (ok, returns 1)
+        c("size64", ArgSpec::I64(0)),      // 3
+        c("load64", ArgSpec::I64(131_072)), // now in bounds on page 2!
+        c("grow64", ArgSpec::I64(1)),      // exceeds max=3 -> returns -1i64!
+        c("grow64", ArgSpec::I64(1 << 40)), // huge delta -> returns -1i64!
+    ];
+    assert_oracle_matrix("hill1_memory64", &wasm, &calls, &[], &[(0, 256)]);
+}
+
+#[test]
+fn oracle_hill3_autovec_psadbw_slp_f64x2_and_boundary_peel() {
+    // 1. Byte-sum reduction (`psadbw` + scalar tail) with non-zero init, non-zero offset,
+    //    exact mod-2^32 wrap, and `do-while` edge cases (`limit = 0, 1, 15, 16, 17, 31, 32, 33, 64`).
+    // 2. Boundary-clamped 1D 3-tap stencil (`i == 0` and `i + 1 >= n` clamps) across `n = 0, 1, 2, 3, 4, 17, 64`.
+    // 3. `f64x2` SLP (paired loads, arithmetic, clamp(-100, 100), loop-carried accumulators, paired stores)
+    //    including NaN, -0.0, +0.0, +/-inf, and an aliasing store test.
+    let mut mem_init = vec![0u8; 512];
+    for (i, b) in mem_init.iter_mut().enumerate() {
+        *b = ((i.wrapping_mul(37).wrapping_add(13)) & 0xff) as u8;
+    }
+    let mut data_sec = vec![1, 0, 0x41, 0, 0x0b];
+    leb_u32(&mut data_sec, mem_init.len() as u32);
+    data_sec.extend_from_slice(&mem_init);
+
+    // f0(n: i32) -> i32: byte sum over [0..n) at offset 16, starting acc = 0xffff_ff00 (tests mod-2^32 wrap!)
+    let mut b0 = vec![
+        0x41, 0, 0x21, 1, // i = 0
+        0x41, 0x80, 0x7e, 0x21, 2, // acc = -256 (0xffff_ff00)
+        0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // if i >=u n break
+        0x20, 2, 0x20, 1, 0x2d, 0, 16, 0x6a, 0x21, 2, // acc += mem.u8[i + 16]
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, // i += 1
+        0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ];
+    let _ = &mut b0;
+
+    // f1(n: i32) -> i32: boundary-clamped 3-tap stencil [0..n) -> out at +256, then byte sum of out[0..n)
+    let b1 = vec![
+        0x41, 0, 0x21, 1, // i = 0
+        0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // if i >=u n break
+        // left = i == 0 ? 0 : i - 1
+        0x41, 0, 0x20, 1, 0x41, 1, 0x6b, 0x20, 1, 0x45, 0x1b, 0x21, 2,
+        // right = i + 1 >=u n ? n - 1 : i + 1
+        0x20, 0, 0x41, 1, 0x6b, 0x20, 1, 0x41, 1, 0x6a, 0x20, 1, 0x41, 1, 0x6a, 0x20, 0, 0x4f, 0x1b,
+        0x21, 3, // out[i + 256] = (in[left] + in[i] + in[right]) /u 3
+        0x20, 1, 0x20, 2, 0x2d, 0, 0, 0x20, 1, 0x2d, 0, 0, 0x6a, 0x20, 3, 0x2d, 0, 0, 0x6a, 0x41,
+        3, 0x6e, 0x3a, 0, 0x80, 0x02, // i32.store8 offset=256
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, // sum out[256..256+n)
+        0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d,
+        1, 0x20, 2, 0x20, 1, 0x2d, 0, 0x80, 0x02, 0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1,
+        0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ];
+
+    // f2(mode: i32) -> i64: writes special IEEE-754 f64 pairs (NaN, -0.0, +0.0, +/-inf, finite)
+    // into memory at +1024, runs an f64x2 SLP-eligible loop with clamp(-100.0, 100.0), paired stores,
+    // and loop-carried accumulators, and returns raw f64 bits as i64!
+    let mut b2: Vec<u8> = Vec::new();
+    let pairs: [(f64, f64, f64, f64); 4] = [
+        (0.0, -0.0, 1.5, -2.5),
+        (f64::NAN, 99.5, 10.0, 5.0),
+        (f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0),
+        (-100.0, 100.0, -0.5, 0.5),
+    ];
+    for (idx, &(x, y, vx, vy)) in pairs.iter().enumerate() {
+        let base = 1024 + (idx as u32) * 32;
+        for (k, val) in [x, y, vx, vy].iter().enumerate() {
+            b2.push(0x41);
+            leb_i32(&mut b2, (base + (k as u32) * 8) as i32);
+            b2.push(0x44);
+            b2.extend_from_slice(&val.to_le_bytes());
+            b2.extend_from_slice(&[0x39, 3, 0]);
+        }
+    }
+    // Loop i = 0..mode (clamped to 4):
+    // locals: 0=n(i32), 1=i(i32), 2=ptr(i32), 3=ax(f64), 4=ay(f64), 5=x(f64), 6=y(f64), 7=vx(f64), 8=vy(f64)
+    b2.extend_from_slice(&[
+        0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 1, 0x41,
+        5, 0x74, 0x41, 0x80, 0x08, 0x6a, 0x22, 2, // ptr = 1024 + (i << 5)
+        0x2b, 3, 0, 0x21, 5, 0x20, 2, 0x2b, 3, 8, 0x21, 6, 0x20, 2, 0x2b, 3, 16, 0x21, 7, 0x20, 2,
+        0x2b, 3, 24, 0x21, 8,
+    ]);
+    // x' = clamp(x + vx * 0.5, -100.0, 100.0)
+    b2.extend_from_slice(&[0x20, 5, 0x20, 7, 0x44]);
+    b2.extend_from_slice(&0.5f64.to_le_bytes());
+    b2.extend_from_slice(&[0xa2, 0xa0, 0x22, 5]);
+    b2.push(0x44);
+    b2.extend_from_slice(&(-100.0f64).to_le_bytes());
+    b2.extend_from_slice(&[0x20, 5, 0x44]);
+    b2.extend_from_slice(&(-100.0f64).to_le_bytes());
+    b2.extend_from_slice(&[0x66, 0x1b, 0x22, 5]);
+    b2.push(0x44);
+    b2.extend_from_slice(&100.0f64.to_le_bytes());
+    b2.extend_from_slice(&[0x20, 5, 0x44]);
+    b2.extend_from_slice(&100.0f64.to_le_bytes());
+    b2.extend_from_slice(&[0x65, 0x1b, 0x21, 5]);
+    // y' = clamp(y + vy * 0.5, -100.0, 100.0)
+    b2.extend_from_slice(&[0x20, 6, 0x20, 8, 0x44]);
+    b2.extend_from_slice(&0.5f64.to_le_bytes());
+    b2.extend_from_slice(&[0xa2, 0xa0, 0x22, 6]);
+    b2.push(0x44);
+    b2.extend_from_slice(&(-100.0f64).to_le_bytes());
+    b2.extend_from_slice(&[0x20, 6, 0x44]);
+    b2.extend_from_slice(&(-100.0f64).to_le_bytes());
+    b2.extend_from_slice(&[0x66, 0x1b, 0x22, 6]);
+    b2.push(0x44);
+    b2.extend_from_slice(&100.0f64.to_le_bytes());
+    b2.extend_from_slice(&[0x20, 6, 0x44]);
+    b2.extend_from_slice(&100.0f64.to_le_bytes());
+    b2.extend_from_slice(&[0x65, 0x1b, 0x21, 6]);
+    // acc_x += x', acc_y += y', store x', y' back
+    b2.extend_from_slice(&[
+        0x20, 3, 0x20, 5, 0xa0, 0x21, 3, 0x20, 4, 0x20, 6, 0xa0, 0x21, 4, 0x20, 2, 0x20, 5, 0x39,
+        3, 0, 0x20, 2, 0x20, 6, 0x39, 3, 8, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+        0x20, 3, 0xbd, 0x20, 4, 0xbd, 0x85, // i64.reinterpret(ax) ^ i64.reinterpret(ay)
+    ]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7f], &[0x7e])]),
+        func_sec(&[0, 0, 1]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("bytesum", 0, 0),
+            ("stencil", 0, 1),
+            ("slp_f64", 0, 2),
+        ]),
+        code_sec(&[
+            enc_body(&[(2, 0x7f)], &b0),
+            enc_body(&[(3, 0x7f)], &b1),
+            enc_body(&[(2, 0x7f), (6, 0x7c)], &b2),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    let calls = vec![
+        c("bytesum", ArgSpec::I32(0)),
+        c("bytesum", ArgSpec::I32(1)),
+        c("bytesum", ArgSpec::I32(15)),
+        c("bytesum", ArgSpec::I32(16)),
+        c("bytesum", ArgSpec::I32(17)),
+        c("bytesum", ArgSpec::I32(31)),
+        c("bytesum", ArgSpec::I32(32)),
+        c("bytesum", ArgSpec::I32(33)),
+        c("bytesum", ArgSpec::I32(64)),
+        c("bytesum", ArgSpec::I32(255)),
+        c("stencil", ArgSpec::I32(0)),
+        c("stencil", ArgSpec::I32(1)),
+        c("stencil", ArgSpec::I32(2)),
+        c("stencil", ArgSpec::I32(3)),
+        c("stencil", ArgSpec::I32(4)),
+        c("stencil", ArgSpec::I32(17)),
+        c("stencil", ArgSpec::I32(64)),
+        c("slp_f64", ArgSpec::I32(0)),
+        c("slp_f64", ArgSpec::I32(1)),
+        c("slp_f64", ArgSpec::I32(2)),
+        c("slp_f64", ArgSpec::I32(3)),
+        c("slp_f64", ArgSpec::I32(4)),
+    ];
+    assert_oracle_matrix(
+        "hill3_autovec",
+        &wasm,
+        &calls,
+        &[],
+        &[(256, 320), (1024, 1152)],
+    );
+}

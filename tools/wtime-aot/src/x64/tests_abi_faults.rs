@@ -776,7 +776,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
         return;
     };
 
-    const OK_ECX1: u32 = (1 << 19) | (1 << 23); // SSE4.1 + POPCNT
+    const OK_ECX1: u32 = (1 << 9) | (1 << 19) | (1 << 20) | (1 << 23); // SSSE3 + SSE4.1 + SSE4.2 + POPCNT
     const OK_EXT_MAX: u32 = 0x8000_0001;
     const OK_EXT_ECX: u32 = 1 << 5; // ABM / LZCNT
     const OK_EBX7: u32 = (1 << 3) | (1 << 8); // BMI1 + BMI2

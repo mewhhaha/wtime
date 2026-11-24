@@ -287,6 +287,35 @@ impl Store {
             }
             #[cfg(feature = "execution-reference")]
             self.materialization_boundary(&mut frames, &mut stack, &mut prompts, &mut fuel)?;
+            #[cfg(all(
+                feature = "register-executor",
+                not(any(
+                    feature = "execution-reference",
+                    feature = "performance-counters",
+                    feature = "opcode-coverage"
+                ))
+            ))]
+            if self.engine.policy == ExecutionPolicy::Register && charge {
+                match register::fast::run(self, &mut frames, &mut stack, &mut fuel)? {
+                    register::fast::FastOutcome::Declined => {}
+                    register::fast::FastOutcome::Bailed => continue,
+                    register::fast::FastOutcome::Returned => {
+                        if let Some(f) = frames.pop() {
+                            self.release_local_slots(f.locals.len());
+                            self.release_labels(f.labels.len());
+                            retire(&mut spare, f);
+                        }
+                        if frames.is_empty() {
+                            for value in &stack {
+                                self.validate_value(*value)?;
+                            }
+                            self.publish_values(&stack);
+                            return Ok(RunOutcome::Returned(stack));
+                        }
+                        continue;
+                    }
+                }
+            }
             #[cfg(feature = "compact-executor")]
             let frame_depth = frames.len();
             let frame = frames.last_mut().unwrap();
@@ -1415,12 +1444,15 @@ impl Store {
         let v = match code {
             0x28 => Value::I32(i32::from_le_bytes(bytes.read_array::<4>(at)?)),
             0x29 => Value::I64(i64::from_le_bytes(bytes.read_array::<8>(at)?)),
-            0x2d => Value::I32(bytes.read_array::<1>(at)?[0] as i32),
-            0x2c => Value::I32(bytes.read_array::<1>(at)?[0] as i8 as i32),
+            0x2a => Value::F32(u32::from_le_bytes(bytes.read_array::<4>(at)?)),
+            0x2b => Value::F64(u64::from_le_bytes(bytes.read_array::<8>(at)?)),
+            0x2d => Value::I32(bytes.read_u8_fast(at)? as i32),
+            0x2c => Value::I32(bytes.read_u8_fast(at)? as i8 as i32),
+            0x2e => Value::I32(i16::from_le_bytes(bytes.read_array::<2>(at)?) as i32),
             0x2f => Value::I32(u16::from_le_bytes(bytes.read_array::<2>(at)?) as i32),
             0x35 => Value::I64(u32::from_le_bytes(bytes.read_array::<4>(at)?) as i64),
             0x34 => Value::I64(i32::from_le_bytes(bytes.read_array::<4>(at)?) as i64),
-            0x31 => Value::I64(bytes.read_array::<1>(at)?[0] as i64),
+            0x31 => Value::I64(bytes.read_u8_fast(at)? as i64),
             _ => return None,
         };
         // The load event the general path records.
@@ -1457,9 +1489,12 @@ impl Store {
         match (code, value) {
             (0x36, Value::I32(x)) => bytes.write_array::<4>(at, x.to_le_bytes()),
             (0x37, Value::I64(x)) => bytes.write_array::<8>(at, x.to_le_bytes()),
+            (0x38, Value::F32(x)) => bytes.write_array::<4>(at, x.to_le_bytes()),
+            (0x39, Value::F64(x)) => bytes.write_array::<8>(at, x.to_le_bytes()),
             (0x3a, Value::I32(x)) => bytes.write_array::<1>(at, [x as u8]),
             (0x3b, Value::I32(x)) => bytes.write_array::<2>(at, (x as u16).to_le_bytes()),
             (0x3c, Value::I64(x)) => bytes.write_array::<1>(at, [x as u8]),
+            (0x3d, Value::I64(x)) => bytes.write_array::<2>(at, (x as u16).to_le_bytes()),
             (0x3e, Value::I64(x)) => bytes.write_array::<4>(at, (x as u32).to_le_bytes()),
             _ => false,
         }

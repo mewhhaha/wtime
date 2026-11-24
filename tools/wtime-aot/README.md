@@ -1,8 +1,8 @@
-# wtime-aot: Ahead-of-time WebAssembly compiler (Rust, C99/Clang, and direct x86-64)
+# wtime-aot: Ahead-of-time WebAssembly compiler (Rust, C99/Clang, direct x86-64, and AArch64)
 
 `wtime-aot` is a standalone opt-in AOT compiler excluded from the core workspace
 dependency graph. It validates each WebAssembly module with `wtime`'s decoder and
-validator and compiles it ahead of time through one of three backends:
+validator and compiles it ahead of time through one of four backends:
 
 - **`--backend rust`** (default): translates admitted Wasm into safe-Rust crates
   (`#![forbid(unsafe_code)]` for all generated Wasm code and `wtime-aot-rt`)
@@ -15,13 +15,18 @@ validator and compiles it ahead of time through one of three backends:
   (`c-obj/`) compiled by Clang/GCC and linked with `ld.lld`/`ld` (with
   `-fcf-protection=return` CET shadow-stack hardening, `-fstack-clash-protection`,
   MXCSR isolation, and calling-thread stack checks on Linux x86-64).
-- **`--backend x64`** (`--blot-cdylib`, Linux x86-64 SysV LP64): a
-  self-contained pure-Rust (`#![forbid(unsafe_code)]`) SSA optimizer, register
-  allocator, independent IR/allocation verifier (enabled by default), x86-64
-  assembler, and ELF64 `.so` linker with zero external compilers, zero
-  subprocesses, and zero `libc`/`DT_NEEDED` runtime dependencies. See
+- **`--backend x64`** (`--blot-cdylib` or standalone static Linux x86-64
+  `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) SSA
+  optimizer, register allocator, independent IR/allocation verifier (enabled by
+  default), x86-64 assembler, and ELF64 linker with zero external compilers,
+  zero subprocesses, and zero `libc`/`DT_NEEDED` runtime dependencies. Supports
+  `memory32`, `memory64`, and all 236 fixed-width 128-bit Wasm SIMD opcodes. See
   [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md) for the exact
   admission, ABI, stack, signal, and CET `rdsspq` contract.
+- **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
+  `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) ARMv8-A
+  backend emitting Linux AArch64 ELF64 shared libraries (Blot ABI 8) and static
+  executables with zero external compilers or cross-toolchains.
 
 Nothing is JIT-compiled at run time.
 
@@ -66,8 +71,12 @@ For untrusted modules, use `wtime-aot build` (see [Uploaded modules](#uploaded-m
 program=$(tools/wtime-aot/target/release/wtime-aot build upload.wasm --cache /srv/aot)
 $program --allow-files /srv/job/42 --time-limit 10 -- program arguments < input
 
-# Blot shared library with the direct pure-Rust x86-64 backend (Linux x86-64 LP64)
+# Blot shared library with the direct pure-Rust x86-64 or AArch64 backend (zero external compiler deps)
 lib=$(tools/wtime-aot/target/release/wtime-aot build game.wasm --cache /srv/aot --blot-cdylib --backend x64)
+lib_arm64=$(tools/wtime-aot/target/release/wtime-aot build game.wasm --cache /srv/aot --blot-cdylib --backend aarch64)
+
+# Standalone static Linux executable with pure-Rust x86-64 or AArch64 backend
+bin=$(tools/wtime-aot/target/release/wtime-aot build prog.wasm --cache /srv/aot --backend x64)
 
 # Blot shared library with the sharded C99/Clang backend
 lib=$(tools/wtime-aot/target/release/wtime-aot build game.wasm --cache /srv/aot --blot-cdylib --backend c --c-opt auto)
@@ -91,14 +100,15 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     (no table instructions or `call_indirect`), sign extension, saturating
     truncations, `memory.copy`/`memory.fill`, and 16-byte `v128` load/store/const
     + `i64x2` splat/extract/replace.
-- **Blot ABI 8 shared libraries (`--blot-cdylib` across `x64`, `c`, `rust`)**:
-  - One non-shared Wasm32 memory (`max <= 65_536` pages), static 32-bit nullable
-    `funcref` tables with `call_indirect`, mutable 32-bit nullable `externref`
-    tables with `table.get`/`table.set`, `br_table`, multi-value blocks/functions,
-    Blot host function imports (including byte-exact embedded NUL names),
-    exported globals (including `externref`), and all 18 Blot ABI 8 C exports
-    with identical MXCSR (`0x1f80`) isolation, `in_call` reentry/drop guards,
-    and null-handle defensive behavior.
+- **Blot ABI 8 shared libraries (`--blot-cdylib` across `x64`, `aarch64`, `c`, `rust`)** and **pure-Rust static Linux executables (`--backend x64` / `--backend aarch64`)**:
+  - One non-shared Wasm32 memory (`max <= 65_536` pages; plus `memory64` and all
+    236 fixed-width 128-bit Wasm SIMD opcodes on `--backend x64`), static 32-bit
+    nullable `funcref` tables with `call_indirect`, mutable 32-bit nullable
+    `externref` tables with `table.get`/`table.set`, `br_table`, multi-value
+    blocks/functions, Blot host function imports (including byte-exact embedded
+    NUL names), exported globals (including `externref`), and all 18 Blot ABI 8
+    C exports with identical MXCSR (`0x1f80`) isolation, `in_call` reentry/drop
+    guards, and null-handle defensive behavior.
 
 Unsupported constructs are rejected before codegen (`--backend x64` uses exit
 code `4` for admission rejections vs. exit code `1` for I/O, timeout, or

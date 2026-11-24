@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod aarch64;
 mod build;
 mod cgen;
 mod codegen;
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 
 static NEXT_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot module.wasm -o out [--name NAME] [--rt PATH] [--module-path PATH] [--flat-memory64] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--c-opt auto|O2|O1|O0] [--target-cpu NAME] [--jobs N] [--time-limit SECONDS]\n       wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -65,6 +66,7 @@ fn main() {
                 Some("rust") => backend = build::Backend::Rust,
                 Some("c") => backend = build::Backend::C,
                 Some("x64") => backend = build::Backend::X64,
+                Some("aarch64") => backend = build::Backend::Aarch64,
                 other => {
                     eprintln!("{USAGE}\ninvalid --backend {other:?}");
                     exit(2);
@@ -145,10 +147,10 @@ fn main() {
     }
     let deadline = start_time + time_limit;
     if backend == build::Backend::X64 {
-        if target != codegen::Target::BlotCdylib {
-            eprintln!("wtime-aot: --backend x64 currently requires --blot-cdylib");
-            exit(2);
-        }
+        let x64_target = match target {
+            codegen::Target::BlotCdylib => x64::module::X64Target::BlotCdylib,
+            codegen::Target::GooseBin => x64::module::X64Target::StandaloneExec,
+        };
         let (_profile, isa) = match x64::resolve_x64_isa(&target_cpu) {
             Ok(v) => v,
             Err(error) => {
@@ -168,6 +170,7 @@ fn main() {
             }
         };
         let opts = x64::X64CompileOptions {
+            target: x64_target,
             isa,
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
@@ -199,6 +202,48 @@ fn main() {
                 t_write.elapsed().as_secs_f64() * 1000.0,
                 start_time.elapsed().as_secs_f64() * 1000.0,
             );
+        }
+        return;
+    }
+    if backend == build::Backend::Aarch64 {
+        let a64_target = match target {
+            codegen::Target::BlotCdylib => x64::module::X64Target::BlotCdylib,
+            codegen::Target::GooseBin => x64::module::X64Target::StandaloneExec,
+        };
+        let bytes = match build::read_bounded_wasm_for_x64(&module, Some(deadline)) {
+            Ok(bytes) => bytes,
+            Err(build::BuildError::AdmissionRejected(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
+            }
+            Err(build::BuildError::Failed(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(1);
+            }
+        };
+        let opts = aarch64::A64CompileOptions {
+            target: a64_target,
+            optimize: true,
+            deadline: Some(deadline),
+        };
+        let elf_bytes = match aarch64::compile_wasm_to_aarch64(&bytes, &opts) {
+            Ok(img) => img,
+            Err(x64::X64CompileError::AdmissionRejected(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(x64::X64_ADMISSION_REJECTED_EXIT_CODE);
+            }
+            Err(x64::X64CompileError::Failed(error)) => {
+                eprintln!("wtime-aot: {error}");
+                exit(1);
+            }
+        };
+        if Instant::now() >= deadline {
+            eprintln!("wtime-aot: compilation time limit exceeded");
+            exit(1);
+        }
+        if let Err(error) = write_output_atomic(&out, &elf_bytes) {
+            eprintln!("wtime-aot: {error}");
+            exit(1);
         }
         return;
     }

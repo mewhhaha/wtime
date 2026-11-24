@@ -217,6 +217,21 @@ impl Engine {
         let heat = (0..validated.decoded().code.len())
             .map(|_| std::sync::atomic::AtomicU64::new(0))
             .collect();
+        #[cfg(all(
+            feature = "register-executor",
+            not(any(
+                feature = "execution-reference",
+                feature = "performance-counters",
+                feature = "opcode-coverage"
+            ))
+        ))]
+        let register_fast: Box<[_]> = if self.policy == ExecutionPolicy::Register {
+            (0..validated.decoded().code.len())
+                .map(|_| std::sync::OnceLock::new())
+                .collect()
+        } else {
+            Vec::new().into_boxed_slice()
+        };
         // Each body's declared locals as runs of one type, with the type's
         // zero, so that a call zeroes them without inspecting their types.
         let local_runs = validated
@@ -246,6 +261,15 @@ impl Engine {
                 register: None,
                 #[cfg(feature = "register-executor")]
                 register_cache: None,
+                #[cfg(all(
+                    feature = "register-executor",
+                    not(any(
+                        feature = "execution-reference",
+                        feature = "performance-counters",
+                        feature = "opcode-coverage"
+                    ))
+                ))]
+                register_fast,
                 control,
                 local_runs,
                 #[cfg(not(feature = "execution-reference"))]
@@ -354,6 +378,15 @@ struct ModuleData {
     register: Option<execution::register::PreparedModule>,
     #[cfg(feature = "register-executor")]
     register_cache: Option<Arc<execution::register::Cache>>,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    register_fast: Box<[std::sync::OnceLock<Option<Arc<execution::register::fast::FastFunction>>>]>,
     control: ControlMap,
     /// Each body's declared locals as (zero value, count) runs of one type.
     local_runs: Box<[LocalRuns]>,

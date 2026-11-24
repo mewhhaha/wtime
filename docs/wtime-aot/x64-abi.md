@@ -2,7 +2,8 @@
 
 This document specifies the target envelope, admission rules, internal ABI,
 runtime stack/memory model, and security/CET guarantees of `tools/wtime-aot`'s
-direct Linux x86-64 backend (`--backend x64 --blot-cdylib`).
+direct Linux x86-64 backend (`--backend x64`, emitting both `--blot-cdylib`
+shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
 
 ## 1. Target Platform & ISA Policy
 
@@ -13,10 +14,12 @@ direct Linux x86-64 backend (`--backend x64 --blot-cdylib`).
   - The compiler crate (`tools/wtime-aot`) is `#![forbid(unsafe_code)]` and
     depends only on in-tree `wtime-types` and `wtime-validate` (zero external
     crates, zero `clang`/`rustc`/`ld.lld` subprocesses).
-  - The emitted ELF64 `.so` has zero `DT_NEEDED`, zero dynamic relocations, and
-    zero `libc` dependency (uses direct Linux x86-64 `mmap`/`mprotect`/`munmap`
-    syscalls).
-- **Required baseline ISA**: SSE2 + SSE4.1 (`roundss`/`roundsd`, `pextrq`/`pinsrq`)
+  - Emitted ELF64 `.so` shared libraries and standalone static ELF64 `ET_EXEC`
+    executables have zero `DT_NEEDED`, zero `PT_INTERP`, zero dynamic
+    relocations, and zero `libc` dependency (direct Linux x86-64 syscalls).
+- **Required baseline ISA**: x86-64-v2 — SSE2 + SSSE3 (`pshufb`, `pabs*`,
+  `pmaddubsw`, `pmulhrsw`) + SSE4.1 (`round*`, `pextr*`/`pinsr*`, `pmovsx*`/
+  `pmovzx*`, `pmulld`, `pmin*`/`pmax*`, `ptest`, `pcmpeqq`) + SSE4.2 (`pcmpgtq`)
   + POPCNT.
 - **Optional ISA (`TargetIsa { has_abm_bmi1, has_bmi2 }`)**:
   - `x64-v3` (`has_abm_bmi1 = true, has_bmi2 = true`): emits `lzcnt`/`tzcnt`
@@ -49,22 +52,29 @@ direct Linux x86-64 backend (`--backend x64 --blot-cdylib`).
 ## 2. Admission Contract & Compiler Caps
 
 All inputs pass bounded file acquisition (`<= 64 MiB` for `--backend x64`,
-deadline-checked in 64 KiB chunks) and `wtime-validate` under Stage 1's feature
-profile (MVP + `mutable_globals`, `saturating_float_to_int`, `sign_extension`,
-`multi_value`, `reference_types`, `bulk_memory`, `simd`, `extended_const`;
-`function_references: false`) with `ResourceLimits::default()`.
+deadline-checked in 64 KiB chunks) and `wtime-validate` under the `--backend x64`
+feature profile (MVP + `mutable_globals`, `saturating_float_to_int`,
+`sign_extension`, `multi_value`, `reference_types`, `bulk_memory`, `simd`,
+`memory64`, `extended_const`; `function_references: false`) with
+`ResourceLimits::default()`.
 
 Admitted constructs:
 - Plain final function types (no GC subtypes or descriptors).
-- `0` or `1` non-shared Wasm32 memory with standard 64 KiB pages (`max <= 65_536`).
+- `0` or `1` non-shared Wasm32 or `memory64` linear memory with standard 64 KiB
+  pages (Wasm32 `max <= 65_536`; `memory64` validated up to `2^48` pages and
+  bounded at runtime by `mem_limit_pages` / 8 GiB default reservation ceiling).
 - Static 32-bit nullable `funcref` tables (`min <= 1_048_576`, aggregate
   `<= 2_097_152` slots) and mutable 32-bit nullable `externref` tables
   (`min == max <= 65_536`).
-- Active memory-0 data segments with constant `i32` offsets.
-- Plain function imports with Blot ABI-compatible signatures and globals of
-  `i32`, `i64`, `f32`, `f64`, `v128`, or nullable `externref`.
+- Active memory-0 data segments with constant `i32` (Wasm32) or `i64`
+  (`memory64`) offsets.
+- Plain function imports with Blot ABI-compatible signatures (for
+  `--blot-cdylib`) or direct-syscall WASI Preview 1 / Goose / `env` imports
+  (for standalone static `ET_EXEC` executables), and globals of `i32`, `i64`,
+  `f32`, `f64`, `v128`, or nullable `externref`.
 - MVP opcodes, saturating float-to-int truncations, `memory.copy`/`memory.fill`,
-  and the 16-byte `v128` load/store/const/splat/extract/replace subset.
+  `memory64` 64-bit addressing, and all 236 standard Wasm 1.0 fixed-width
+  128-bit SIMD opcodes (`0xfd00..=0xfdff`).
 
 Unsupported modules are rejected cleanly before codegen with CLI exit code `4`
 (`X64_ADMISSION_REJECTED_EXIT_CODE`), distinct from exit code `1` for I/O,

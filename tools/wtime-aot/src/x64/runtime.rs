@@ -147,7 +147,7 @@ pub struct RuntimeTables {
     pub set_global_table_off: u32,
     pub set_global_count: u32,
     /// Active data segments `(mem_off, rodata_off, len)` in declaration order.
-    pub data_segs: Vec<(u32, u32, u32)>,
+    pub data_segs: Vec<(u64, u32, u32)>,
     /// V128 non-zero global initializers `(global_index, rodata_off)`.
     pub v128_global_inits: Vec<(usize, u32)>,
 }
@@ -515,26 +515,26 @@ pub fn emit_helper_grow_core(fixed_mem: bool, hooks: RuntimeTestHooks) -> Result
     Ok(a)
 }
 
-/// Wasm `memory.grow(Rdi = u32 delta) -> Rax (u32 zero-extended old_pages | 0xffff_ffff)`.
-pub fn emit_helper_mem_grow() -> Result<Asm, String> {
+/// Wasm `memory.grow(Rdi = delta) -> Rax (old_pages | -1)`.
+pub fn emit_helper_mem_grow(memory64: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(32);
-    a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+    if !memory64 {
+        a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+    }
     a.sub_ri(true, Gp::Rsp, 8);
     a.call_reloc(RelocTarget::Helper(HELPER_GROW_CORE));
     a.add_ri(true, Gp::Rsp, 8);
-    // Preserve I32 zero-extension invariant: failure becomes 0x0000_0000_ffff_ffff.
-    a.mov_rr(false, Gp::Rax, Gp::Rax);
+    if !memory64 {
+        // Preserve I32 zero-extension invariant: failure becomes 0x0000_0000_ffff_ffff.
+        a.mov_rr(false, Gp::Rax, Gp::Rax);
+    }
     a.ret();
     a.finish_labels()?;
     Ok(a)
 }
 
-/// Wasm `memory.copy(Rdi = dst: u32, Rsi = src: u32, Rdx = len: u32) -> R11d = 0 | TRAP_OOB`.
-/// Performs 64-bit unsigned bounds checks FIRST (including `len == 0`), early-returns on `len == 0`
-/// BEFORE touching `R14` (`NULL` for 0-capacity memories), uses branch-light overlap-safe head+tail
-/// loads/stores for `len <= 32` (avoiding `rep movsb` startup penalty on small arena/packet copies),
-/// 16-byte XMM14 backward chunks for large overlapping copies, and `rep movsb` for large forward copies.
-pub fn emit_helper_mem_copy(fixed_mem: bool) -> Result<Asm, String> {
+/// Wasm `memory.copy(Rdi = dst, Rsi = src, Rdx = len) -> R11d = 0 | TRAP_OOB`.
+pub fn emit_helper_mem_copy(fixed_mem: bool, memory64: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(256);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
@@ -548,10 +548,12 @@ pub fn emit_helper_mem_copy(fixed_mem: bool) -> Result<Asm, String> {
     let lbl_bwd1_check = a.new_label();
     let lbl_bwd1 = a.new_label();
 
-    // Defensive 32-bit zero extension.
-    a.mov_rr(false, Gp::Rdi, Gp::Rdi);
-    a.mov_rr(false, Gp::Rsi, Gp::Rsi);
-    a.mov_rr(false, Gp::Rdx, Gp::Rdx);
+    if !memory64 {
+        // Defensive 32-bit zero extension.
+        a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_rr(false, Gp::Rsi, Gp::Rsi);
+        a.mov_rr(false, Gp::Rdx, Gp::Rdx);
+    }
 
     let len_reg = if fixed_mem {
         a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
@@ -561,12 +563,25 @@ pub fn emit_helper_mem_copy(fixed_mem: bool) -> Result<Asm, String> {
     };
 
     // Bounds checks FIRST (even when len == 0!).
-    a.lea(true, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, 0));
-    a.cmp_rr(true, Gp::Rax, len_reg);
-    a.jcc(Cond::A, lbl_oob);
-    a.lea(true, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, 0));
-    a.cmp_rr(true, Gp::Rcx, len_reg);
-    a.jcc(Cond::A, lbl_oob);
+    if memory64 {
+        a.mov_rr(true, Gp::Rax, Gp::Rdi);
+        a.add_rr(true, Gp::Rax, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::Rax, len_reg);
+        a.jcc(Cond::A, lbl_oob);
+        a.mov_rr(true, Gp::Rcx, Gp::Rsi);
+        a.add_rr(true, Gp::Rcx, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::Rcx, len_reg);
+        a.jcc(Cond::A, lbl_oob);
+    } else {
+        a.lea(true, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, 0));
+        a.cmp_rr(true, Gp::Rax, len_reg);
+        a.jcc(Cond::A, lbl_oob);
+        a.lea(true, Gp::Rcx, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, 0));
+        a.cmp_rr(true, Gp::Rcx, len_reg);
+        a.jcc(Cond::A, lbl_oob);
+    }
 
     // Early return on len == 0 or dst == src BEFORE touching R14.
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
@@ -710,8 +725,8 @@ pub fn emit_helper_mem_copy(fixed_mem: bool) -> Result<Asm, String> {
     Ok(a)
 }
 
-/// Wasm `memory.fill(Rdi = dst: u32, Rsi = val: u32, Rdx = len: u32) -> R11d = 0 | TRAP_OOB`.
-pub fn emit_helper_mem_fill(fixed_mem: bool) -> Result<Asm, String> {
+/// Wasm `memory.fill(Rdi = dst, Rsi = val: u32, Rdx = len) -> R11d = 0 | TRAP_OOB`.
+pub fn emit_helper_mem_fill(fixed_mem: bool, memory64: bool) -> Result<Asm, String> {
     let mut a = Asm::with_capacity(192);
     let lbl_oob = a.new_label();
     let lbl_ok = a.new_label();
@@ -721,8 +736,10 @@ pub fn emit_helper_mem_fill(fixed_mem: bool) -> Result<Asm, String> {
     let lbl_le3 = a.new_label();
     let lbl_one = a.new_label();
 
-    a.mov_rr(false, Gp::Rdi, Gp::Rdi);
-    a.mov_rr(false, Gp::Rdx, Gp::Rdx);
+    if !memory64 {
+        a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_rr(false, Gp::Rdx, Gp::Rdx);
+    }
 
     let len_reg = if fixed_mem {
         a.mov_rm(true, Gp::R10, Mem::base_disp(Gp::R15, OFF_MEM_LEN));
@@ -732,9 +749,17 @@ pub fn emit_helper_mem_fill(fixed_mem: bool) -> Result<Asm, String> {
     };
 
     // Bounds check FIRST (even when len == 0!).
-    a.lea(true, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, 0));
-    a.cmp_rr(true, Gp::Rax, len_reg);
-    a.jcc(Cond::A, lbl_oob);
+    if memory64 {
+        a.mov_rr(true, Gp::Rax, Gp::Rdi);
+        a.add_rr(true, Gp::Rax, Gp::Rdx);
+        a.jcc(Cond::B, lbl_oob);
+        a.cmp_rr(true, Gp::Rax, len_reg);
+        a.jcc(Cond::A, lbl_oob);
+    } else {
+        a.lea(true, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rdx, 1, 0));
+        a.cmp_rr(true, Gp::Rax, len_reg);
+        a.jcc(Cond::A, lbl_oob);
+    }
 
     // Early return on len == 0 BEFORE touching R14.
     a.test_rr(true, Gp::Rdx, Gp::Rdx);
@@ -1059,16 +1084,19 @@ pub fn emit_helper_initialize(
     }
 
     // 4. Active data segments in declaration order:
-    //    Check `(off as u64) + (len as u64) > R13` FIRST (even when `len == 0`!),
+    //    Check `mem_off + (len as u64) > R13` FIRST (even when `len == 0`!),
     //    then copy ONLY if `len > 0` so `R14 == NULL` is never dereferenced.
     for &(mem_off, ro_off, seg_len) in &tables.data_segs {
         need_oob = true;
-        let end = u64::from(mem_off) + u64::from(seg_len);
+        let Some(end) = mem_off.checked_add(u64::from(seg_len)) else {
+            a.jmp(lbl_trap_oob);
+            continue;
+        };
         a.mov_ri64(Gp::Rax, end);
         a.cmp_rr(true, Gp::Rax, Gp::R13);
         a.jcc(Cond::A, lbl_trap_oob);
         if seg_len > 0 {
-            a.mov_ri32(Gp::Rdi, mem_off);
+            a.mov_ri64(Gp::Rdi, mem_off);
             a.add_rr(true, Gp::Rdi, Gp::R14);
             a.lea_rip(Gp::Rsi, RelocTarget::Rodata(ro_off));
             a.mov_ri64(Gp::Rcx, u64::from(seg_len));
@@ -1395,7 +1423,7 @@ fn emit_export_new(
         a.jcc(Cond::B, lbl_fail_isa);
     }
 
-    // 2. Leaf 1 -> require SSE4.1 (ECX bit 19) AND POPCNT (ECX bit 23).
+    // 2. Leaf 1 -> require x86-64-v2 baseline: SSSE3 (bit 9), SSE4.1 (bit 19), SSE4.2 (bit 20), POPCNT (bit 23).
     match hooks.cpuid {
         CpuidSource::Real => {
             a.mov_ri32(Gp::Rax, 1);
@@ -1406,7 +1434,7 @@ fn emit_export_new(
             a.mov_ri32(Gp::Rcx, ecx1);
         }
     }
-    let baseline_mask: i32 = (1 << 19) | (1 << 23);
+    let baseline_mask: i32 = (1 << 9) | (1 << 19) | (1 << 20) | (1 << 23);
     a.and_ri(false, Gp::Rcx, baseline_mask);
     a.cmp_ri(false, Gp::Rcx, baseline_mask);
     a.jcc(Cond::Ne, lbl_fail_isa);
@@ -1489,20 +1517,26 @@ fn emit_export_new(
     // ---- Step B: Memory limit validation BEFORE any mmap ----
     if let Some((mem_min, declared_max)) = module.memory {
         let lbl_have_lim = a.new_label();
+        let default_lim = if module.memory64 {
+            mem_min.max(131_072) // 8 GiB default reservation ceiling for memory64
+        } else {
+            65_536
+        };
+        let hard_cap = if module.memory64 { 1u64 << 28 } else { 65_536 };
         a.mov_rm(true, Gp::Rbx, Mem::base_disp(Gp::Rsp, 24)); // mem_limit_pages
         a.test_rr(true, Gp::Rbx, Gp::Rbx);
         a.jcc(Cond::Ne, lbl_have_lim);
-        a.mov_ri32(Gp::Rbx, 65_536);
+        a.mov_ri64(Gp::Rbx, default_lim);
         a.bind(lbl_have_lim);
 
         a.mov_ri64(Gp::Rax, mem_min);
         a.cmp_rr(true, Gp::Rax, Gp::Rbx);
         a.jcc(Cond::A, lbl_fail_mem_limit);
 
-        let clamped_decl = declared_max.min(65_536);
+        let clamped_decl = declared_max.min(hard_cap);
         a.mov_ri64(Gp::Rbp, clamped_decl);
         a.cmp_rr(true, Gp::Rbx, Gp::Rbp);
-        a.cmovcc(Cond::B, true, Gp::Rbp, Gp::Rbx); // rbp = max_p = min(declared_max, limit, 65536)
+        a.cmovcc(Cond::B, true, Gp::Rbp, Gp::Rbx); // rbp = max_p = min(declared_max, limit, hard_cap)
 
         a.cmp_rr(true, Gp::Rax, Gp::Rbp);
         a.jcc(Cond::A, lbl_fail_mem_too_large);
@@ -2690,12 +2724,13 @@ pub fn emit_all_helpers(
         helpers.push(emit_trunc_helper(op, ro)?);
     }
     let fixed_mem = module.fixed32.is_some();
+    let memory64 = module.memory64;
     debug_assert_eq!(helpers.len(), HELPER_MEM_GROW as usize);
-    helpers.push(emit_helper_mem_grow()?);
+    helpers.push(emit_helper_mem_grow(memory64)?);
     debug_assert_eq!(helpers.len(), HELPER_MEM_COPY as usize);
-    helpers.push(emit_helper_mem_copy(fixed_mem)?);
+    helpers.push(emit_helper_mem_copy(fixed_mem, memory64)?);
     debug_assert_eq!(helpers.len(), HELPER_MEM_FILL as usize);
-    helpers.push(emit_helper_mem_fill(fixed_mem)?);
+    helpers.push(emit_helper_mem_fill(fixed_mem, memory64)?);
     debug_assert_eq!(helpers.len(), HELPER_HOST_CALL as usize);
     helpers.push(emit_helper_host_call(module, layout, ro)?);
     debug_assert_eq!(helpers.len(), HELPER_GROW_CORE as usize);

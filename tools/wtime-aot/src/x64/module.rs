@@ -18,8 +18,17 @@ use wtime_validate::{
 
 pub type Res<T> = Result<T, String>;
 
-/// Exact Stage 1 Wasm feature profile enforced right at the front door of `wtime_validate::validate`,
-/// disabling unsupported proposals (exceptions, GC, memory64, multi-memory, threads, tail-call,
+/// Output artifact target for `--backend x64`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum X64Target {
+    /// Blot ABI 8 shared library (`ET_DYN`, `library.so`).
+    BlotCdylib,
+    /// Self-contained static Linux x86-64 executable (`ET_EXEC`).
+    StandaloneExec,
+}
+
+/// Exact Wasm feature profile enforced right at the front door of `wtime_validate::validate`,
+/// disabling unsupported proposals (exceptions, GC, multi-memory, threads, tail-call,
 /// function-references, custom page sizes/descriptors, stack switching) before decoding/validation.
 pub const fn x64_validate_features() -> FeatureSet {
     FeatureSet {
@@ -30,19 +39,25 @@ pub const fn x64_validate_features() -> FeatureSet {
         reference_types: true,
         bulk_memory: true,
         simd: true,
+        memory64: true,
         extended_const: true,
         ..FeatureSet::mvp()
     }
 }
 
-/// Exact Stage 1 resource limits passed to `wtime_validate::validate` (strict `ResourceLimits::default()`,
-/// NOT `codegen::validate_module`'s relaxed 16M-function override).
+/// Resource limits passed to `wtime_validate::validate` (matching `ResourceLimits::default()`
+/// except allowing `memory64` declared page limits up to `2^48`, enforced strictly at admission).
 pub fn x64_validate_limits() -> ResourceLimits {
-    ResourceLimits::default()
+    ResourceLimits {
+        max_memory_pages: 1 << 48,
+        max_memory_bytes: u64::MAX,
+        ..ResourceLimits::default()
+    }
 }
 
 /// Admission & compilation caps preventing OOM, peak-memory spikes, or integer overflow on adversarial modules.
 pub const MAX_MEM_PAGES: u64 = 65_536;
+pub const MAX_MEM64_PAGES: u64 = 1 << 48;
 pub const MAX_FUNCREF_TABLE_SLOTS: u32 = 1_048_576;
 pub const MAX_TOTAL_FUNCREF_SLOTS: usize = 2_097_152;
 pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
@@ -282,12 +297,18 @@ pub struct X64Module {
     pub mut_extern_tables: BTreeMap<u32, u32>,
     /// Memory 0 declared limits: `Some((min_pages, declared_max_pages))` or `None` if 0 memories.
     pub memory: Option<(u64, u64)>,
+    /// `true` iff memory 0 uses 64-bit (`i64`) addressing (`memory64`).
+    pub memory64: bool,
     /// `Some(fixed_bytes)` iff memory 0 exists with `min == max`.
     pub fixed32: Option<u64>,
+    /// Compilation target (`BlotCdylib` vs `StandaloneExec`).
+    pub target: X64Target,
+    /// Exported `_start` function for `StandaloneExec`: `Some((func_idx, returns_i32))`.
+    pub standalone_start: Option<(u32, bool)>,
     /// Active element segment bounds checks `(table_len, base_off, elem_len)` for `wt_initialize`.
     pub active_elem_checks: Vec<(u32, u32, u32)>,
     /// Active data segments `(mem_off, decoded.data index)` for `wt_initialize` (in declaration order).
-    pub active_data_segs: Vec<(u32, usize)>,
+    pub active_data_segs: Vec<(u64, usize)>,
     /// Optional start function index.
     pub start: Option<u32>,
 }
@@ -454,9 +475,18 @@ fn check_supported_opcode(
             Immediate::Heap(HeapType::Extern) => Ok(()),
             other => Err(format!("x64: unsupported ref.null heap type {other:?}")),
         },
-        0x28..=0x3e | 0xfd00 | 0xfd0b => match imm {
+        0x28..=0x3e | 0xfd00..=0xfd0b | 0xfd5c | 0xfd5d => match imm {
             Immediate::MemArg { memory: 0, .. } => Ok(()),
             _ => Err("x64: only memory index 0 is supported".into()),
+        },
+        0xfd54..=0xfd5b => match imm {
+            Immediate::MemLane { memory: 0, .. } => Ok(()),
+            Immediate::Bytes(b)
+                if b.len() == 17 && u32::from_le_bytes(b[12..16].try_into().unwrap()) == 0 =>
+            {
+                Ok(())
+            }
+            _ => Err("x64: SIMD lane load/store only supports memory index 0".into()),
         },
         0xfc00..=0xfc07 => Ok(()),
         0xfc0a => match imm {
@@ -467,7 +497,7 @@ fn check_supported_opcode(
             Immediate::Index(0) | Immediate::None => Ok(()),
             _ => Err("x64: memory.fill only supports memory 0".into()),
         },
-        0xfd0c | 0xfd0f..=0xfd12 | 0xfd1d | 0xfd1e => Ok(()),
+        0xfd0c..=0xfd53 | 0xfd5e..=0xfdff => Ok(()),
         _ => Err(format!("x64: unsupported opcode {op:#x}")),
     }
 }
@@ -496,15 +526,113 @@ fn check_blot_import_sig(mod_name: &str, name: &str, ty: &FuncType) -> Res<()> {
     Ok(())
 }
 
-/// Enforces the Stage 1 admission contract and builds lean `X64Module` metadata.
-#[allow(dead_code)]
-pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
-    admit_x64_module_with_budget(decoded, None)
+/// Checks whether an import is supported natively by the standalone Linux syscall runtime.
+pub fn check_standalone_import_sig(
+    mod_name: &str,
+    name: &str,
+    ty: &FuncType,
+    memory64: bool,
+) -> Res<()> {
+    use ValType::{F32, F64, I32, I64};
+    let is_int = |t: ValType| matches!(t, I32 | I64);
+    let ok = match (mod_name, name) {
+        ("wasi_snapshot_preview1", "proc_exit") => {
+            ty.params.len() == 1 && is_int(ty.params[0]) && ty.results.is_empty()
+        }
+        ("wasi_snapshot_preview1", "fd_write" | "fd_read") => {
+            ty.params.len() == 4
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("wasi_snapshot_preview1", "fd_close") => {
+            ty.params.len() == 1
+                && is_int(ty.params[0])
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("wasi_snapshot_preview1", "fd_seek") => {
+            ty.params.len() == 4
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        (
+            "wasi_snapshot_preview1",
+            "args_sizes_get" | "args_get" | "environ_sizes_get" | "environ_get",
+        ) => {
+            ty.params.len() == 2
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("wasi_snapshot_preview1", "clock_time_get") => {
+            ty.params.len() == 3
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("goose", "write") => {
+            ty.params.len() == 2 && ty.params.iter().all(|&t| is_int(t)) && ty.results.is_empty()
+        }
+        ("goose", "print_i64" | "print_u64" | "print_bool" | "exit") => {
+            ty.params.len() == 1 && is_int(ty.params[0]) && ty.results.is_empty()
+        }
+        ("goose", "newline") => ty.params.is_empty() && ty.results.is_empty(),
+        ("goose", "abort") => {
+            ty.params.len() == 3 && ty.params.iter().all(|&t| is_int(t)) && ty.results.is_empty()
+        }
+        ("env", "gs_os_write_stdout" | "gs_os_write_stderr") => {
+            let expected = if memory64 { 2 } else { 1 };
+            (ty.params.len() == expected || ty.params.len() == 2)
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() <= 1
+                && ty.results.iter().all(|&t| is_int(t))
+        }
+        (
+            "env",
+            "gs_os_clock_ns" | "bench_clock" | "gs_os_time_ns" | "gs_os_arg_count"
+            | "gs_os_resource_dir",
+        ) => ty.params.is_empty() && ty.results.len() == 1 && is_int(ty.results[0]),
+        ("env", "gs_os_flush_stdout" | "bench_sink" | "emscripten_notify_memory_growth") => {
+            ty.params.len() <= 1
+                && ty
+                    .params
+                    .iter()
+                    .all(|&t| matches!(t, I32 | I64 | F32 | F64))
+                && ty.results.is_empty()
+        }
+        ("env", "bench_barrier") => {
+            ty.params.len() == 1
+                && ty.results == ty.params
+                && matches!(ty.params[0], I32 | I64 | F32 | F64)
+        }
+        ("env", "system") => {
+            ty.params.len() <= 2
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        _ => false,
+    };
+    if !ok {
+        return Err(format!(
+            "x64: standalone executable import {mod_name:?}::{name:?} ({ty:?}) is not supported"
+        ));
+    }
+    Ok(())
 }
 
-/// Enforces the Stage 1 admission contract while cooperatively polling `budget`'s deadline.
-pub fn admit_x64_module_with_budget(
+/// Enforces the admission contract and builds lean `X64Module` metadata (Blot cdylib target).
+#[allow(dead_code)]
+pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
+    admit_x64_module_for_target(decoded, X64Target::BlotCdylib, None)
+}
+
+/// Enforces the admission contract for `target` while cooperatively polling `budget`'s deadline.
+pub fn admit_x64_module_for_target(
     decoded: &DecodedModule,
+    target: X64Target,
     budget: Option<&CompileBudget>,
 ) -> Res<X64Module> {
     if let Some(b) = budget {
@@ -536,10 +664,8 @@ pub fn admit_x64_module_with_budget(
             decoded.memories.len()
         ));
     }
-    let (memory, fixed32) = if let Some(mt) = decoded.memories.first() {
-        if mt.index_type != IndexType::I32 {
-            return Err("x64: memory64 is not supported in Stage 1".into());
-        }
+    let (memory, memory64, fixed32) = if let Some(mt) = decoded.memories.first() {
+        let is_mem64 = mt.index_type == IndexType::I64;
         if mt.shared {
             return Err("x64: shared memory is not supported".into());
         }
@@ -549,14 +675,20 @@ pub fn admit_x64_module_with_budget(
                 mt.page_size_log2
             ));
         }
+        let max_limit = if is_mem64 {
+            MAX_MEM64_PAGES
+        } else {
+            MAX_MEM_PAGES
+        };
         let max_p = match mt.limits.max {
-            Some(m) if m > MAX_MEM_PAGES => {
+            Some(m) if m > max_limit => {
                 return Err(format!(
-                    "x64: memory max ({m}) exceeds Wasm32 limit ({MAX_MEM_PAGES})"
+                    "x64: memory max ({m}) exceeds {} limit ({max_limit})",
+                    if is_mem64 { "memory64" } else { "Wasm32" }
                 ));
             }
             Some(m) => m,
-            None => MAX_MEM_PAGES,
+            None => max_limit,
         };
         if mt.limits.min > max_p {
             return Err(format!(
@@ -564,10 +696,14 @@ pub fn admit_x64_module_with_budget(
                 mt.limits.min
             ));
         }
-        let fixed = (mt.limits.min == max_p).then_some(mt.limits.min * 65_536);
-        (Some((mt.limits.min, max_p)), fixed)
+        let fixed = if mt.limits.min == max_p {
+            mt.limits.min.checked_mul(65_536)
+        } else {
+            None
+        };
+        (Some((mt.limits.min, max_p)), is_mem64, fixed)
     } else {
-        (None, None)
+        (None, false, None)
     };
 
     // Pre-validate and intern module types ONCE into canonical `u32` IDs + cached arity/admissibility
@@ -693,7 +829,12 @@ pub fn admit_x64_module_with_budget(
                 "x64: module expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
             ));
         }
-        check_blot_import_sig(&imp.module, &imp.name, fty)?;
+        match target {
+            X64Target::BlotCdylib => check_blot_import_sig(&imp.module, &imp.name, fty)?,
+            X64Target::StandaloneExec => {
+                check_standalone_import_sig(&imp.module, &imp.name, fty, memory64)?;
+            }
+        }
         imports.push((imp.module.clone(), imp.name.clone()));
         func_type_idx.push(ti_u32);
         func_canon_sig.push(type_canon[ti]);
@@ -777,7 +918,7 @@ pub fn admit_x64_module_with_budget(
             decoded.globals.len()
         ));
     }
-    let worst_ctx_bytes = 128usize
+    let worst_ctx_bytes = super::CTX_HEADER_BYTES
         .saturating_add(decoded.globals.len().saturating_mul(16))
         .saturating_add(total_extern_slots.saturating_mul(8));
     if worst_ctx_bytes > MAX_CTX_BYTES {
@@ -923,10 +1064,18 @@ pub fn admit_x64_module_with_budget(
                 if memory.is_none() {
                     return Err("x64: active data segment without linear memory".into());
                 }
-                let X64ConstVal::I32(off_i32) = eval_const_expr(offset, &global_inits)? else {
-                    return Err("x64: active data offset must be i32".into());
+                let off_u64 = if memory64 {
+                    let X64ConstVal::I64(off_i64) = eval_const_expr(offset, &global_inits)? else {
+                        return Err("x64: memory64 active data offset must be i64".into());
+                    };
+                    off_i64 as u64
+                } else {
+                    let X64ConstVal::I32(off_i32) = eval_const_expr(offset, &global_inits)? else {
+                        return Err("x64: active data offset must be i32".into());
+                    };
+                    u64::from(off_i32 as u32)
                 };
-                active_data_segs.push((off_i32 as u32, di));
+                active_data_segs.push((off_u64, di));
             }
             SegmentMode::Active { index, .. } => {
                 return Err(format!(
@@ -1217,6 +1366,35 @@ pub fn admit_x64_module_with_budget(
         None
     };
 
+    let standalone_start = if target == X64Target::StandaloneExec {
+        if let Some((_, fi)) = exported_funcs.iter().find(|(name, _)| name == "_start") {
+            let ti = func_type_idx[*fi] as usize;
+            let fty = &decoded.types[ti];
+            if !fty.params.is_empty() {
+                return Err(format!(
+                    "x64: standalone _start export must take 0 parameters (got {:?})",
+                    fty.params
+                ));
+            }
+            let returns_i32 = match fty.results.as_slice() {
+                [] => false,
+                [ValType::I32] => true,
+                other => {
+                    return Err(format!(
+                        "x64: standalone _start export must return () or (i32) (got {other:?})"
+                    ));
+                }
+            };
+            Some((*fi as u32, returns_i32))
+        } else if start.is_some() {
+            None
+        } else {
+            return Err("x64: standalone executable requires an exported `_start` function or start section".into());
+        }
+    } else {
+        None
+    };
+
     Ok(X64Module {
         imports,
         func_type_idx,
@@ -1231,7 +1409,10 @@ pub fn admit_x64_module_with_budget(
         ci_sigs,
         mut_extern_tables,
         memory,
+        memory64,
         fixed32,
+        target,
+        standalone_start,
         active_elem_checks,
         active_data_segs,
         start,

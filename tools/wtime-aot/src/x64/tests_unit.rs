@@ -321,14 +321,17 @@ fn ctx_layout_enforces_16_mib_cap() {
             Default::default()
         },
         memory: None,
+        memory64: false,
         fixed32: None,
         active_elem_checks: Vec::new(),
         active_data_segs: Vec::new(),
         start: None,
+        target: super::module::X64Target::BlotCdylib,
+        standalone_start: None,
     };
 
-    // Exact boundary: 128 B header + (16 MiB - 128 B) of 16-byte V128 globals = exactly 16 MiB.
-    let max_v128 = (MAX_CTX_BYTES - 128) / 16;
+    // Exact boundary: CTX_HEADER_BYTES header + remaining 16-byte V128 globals = exactly 16 MiB.
+    let max_v128 = (MAX_CTX_BYTES - super::CTX_HEADER_BYTES) / 16;
     let ok = CtxLayout::compute(&make_mod(max_v128, 0), Vec::new()).unwrap();
     assert_eq!(ok.total_bytes, MAX_CTX_BYTES);
 
@@ -450,10 +453,13 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         ci_sigs: Vec::new(),
         mut_extern_tables: Default::default(),
         memory: None,
+        memory64: false,
         fixed32: None,
         active_elem_checks: Vec::new(),
         active_data_segs: Vec::new(),
         start: None,
+        target: super::module::X64Target::BlotCdylib,
+        standalone_start: None,
     };
 
     // Valid simple IR: bb0(v0: I32) -> v1 = v0 + v0 -> Return(v1).
@@ -479,6 +485,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         br_tables: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
+        memory64: false,
     };
     verify_ir(&good_ir, &empty_mod).unwrap();
     let good_alloc = allocate(&good_ir).unwrap();
@@ -507,6 +514,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         br_tables: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
+        memory64: false,
     };
     assert!(verify_ir(&bad_ty, &empty_mod).is_err());
 
@@ -564,6 +572,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         br_tables: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
+        memory64: false,
     };
     assert!(verify_ir(&bad_dom, &empty_mod).is_err());
 
@@ -597,6 +606,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         br_tables: Vec::new(),
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
+        memory64: false,
     };
     verify_ir(&two_live_ir, &empty_mod).unwrap();
     let mut bad_alloc = allocate(&two_live_ir).unwrap();
@@ -807,21 +817,25 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         Err(X64CompileError::AdmissionRejected(_))
     ));
 
-    // 9. Rejected: unsupported SIMD opcode (e.g. i32x4.add = 0xfd 0xae 0x01) even in unreachable code!
-    let dead_simd = wasm_module(&[
+    // 9. Admitted: full 128-bit Wasm SIMD (e.g. i32x4.add = 0xfd 0xae 0x01) and memory64!
+    let simd_mod = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0xfd, 0xae, 0x01, 0x1a])]),
     ]);
-    assert!(matches!(
-        compile_admit_only(&dead_simd),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&simd_mod).is_ok());
 
-    // 10. Rejected: memory64 (DisabledFeature -> AdmissionRejected exit code 4!).
     let mem64 = wasm_module(&[section(5, &[1, 0x04, 1])]);
+    assert!(compile_admit_only(&mem64).is_ok());
+
+    // 10. Rejected: relaxed SIMD opcode (0xfd 0x80 0x02 = i8x16.relaxed_swizzle -> DisabledFeature).
+    let relaxed_simd = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        code_sec(&[enc_body(&[], &[0x00, 0xfd, 0x80, 0x02, 0x1a])]),
+    ]);
     assert!(matches!(
-        compile_admit_only(&mem64),
+        compile_admit_only(&relaxed_simd),
         Err(X64CompileError::AdmissionRejected(_))
     ));
 
@@ -1905,6 +1919,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
         ],
         needs_stack_check: false,
         elided_callee_stack_bytes: 0,
+        memory64: false,
     };
     let alloc = allocate_with_config(&ir, AllocConfig::default(), None).unwrap();
     verify_alloc_with_config(&ir, &alloc, AllocConfig::default()).unwrap();
@@ -2777,6 +2792,7 @@ fn stage3_council_round1_regressions() {
                     br_tables: Vec::new(),
                     needs_stack_check: false,
                     elided_callee_stack_bytes: 0,
+                    memory64: false,
                 };
                 let empty = ValRange { start: 0, len: 0 };
                 let ret_v0 = ValRange { start: 0, len: 1 };
@@ -3240,25 +3256,29 @@ fn stage5_wave2_rotation_alignment_memcopy_forward_and_inc_v6() {
             !has_memcopy,
             "fully register-resident 32B MemCopyConst must be forwarded to direct checked f64 stores"
         );
-        let folded_dest_stores = ir
+        let folded_dest_bytes: usize = ir
             .blocks
             .iter()
             .flat_map(|b| &b.insts)
-            .filter(|ins| {
-                matches!(
-                    ins.op,
-                    Op::Store {
-                        kind: StoreKind::F64,
-                        offset: 4096 | 4104 | 4112 | 4120,
-                        checked: true,
-                        ..
-                    }
-                )
+            .map(|ins| match ins.op {
+                Op::Store {
+                    kind: StoreKind::F64,
+                    offset: 4096 | 4104 | 4112 | 4120,
+                    checked: true,
+                    ..
+                } => 8,
+                Op::Store {
+                    kind: StoreKind::V128,
+                    offset: 4096 | 4112,
+                    checked: true,
+                    ..
+                } => 16,
+                _ => 0,
             })
-            .count();
+            .sum();
         assert!(
-            folded_dest_stores >= 4,
-            "forwarded f64 stores must fold +4096 base offset (got {folded_dest_stores})"
+            folded_dest_bytes >= 32,
+            "forwarded f64/v128 stores must fold +4096 base offset (got {folded_dest_bytes} bytes)"
         );
         let has_bce_free_loop = ir.blocks.iter().any(|b| {
             b.is_loop_header
@@ -3266,7 +3286,7 @@ fn stage5_wave2_rotation_alignment_memcopy_forward_and_inc_v6() {
                     matches!(
                         ins.op,
                         Op::Store {
-                            kind: StoreKind::F64,
+                            kind: StoreKind::F64 | StoreKind::V128,
                             offset: 4096,
                             checked: true,
                             ..
@@ -3280,7 +3300,7 @@ fn stage5_wave2_rotation_alignment_memcopy_forward_and_inc_v6() {
         });
         assert!(
             has_bce_free_loop,
-            "versioned rotated fast loop must have folded f64 stores with zero BoundsChecks"
+            "versioned rotated fast loop must have folded f64/v128 stores with zero BoundsChecks"
         );
     }
 

@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const PARALLEL_INC_MIN_FUNCS: usize = 256;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20; // 128 MiB cap on read
 const PARALLEL_HASH_CHUNK_BYTES: usize = 256 << 10; // 256 KiB chunks for parallel SHA-256 Merkle trailer
@@ -108,28 +108,6 @@ pub fn try_copy_slice<T: Copy>(src: &[T]) -> Option<Vec<T>> {
     Some(v)
 }
 
-pub fn try_clone_fn_own_effects(e: &FnOwnEffects) -> Option<FnOwnEffects> {
-    Some(FnOwnEffects {
-        writes_mem: e.writes_mem,
-        grows_mem: e.grows_mem,
-        writes_all_globals: e.writes_all_globals,
-        written_globals: try_copy_slice(&e.written_globals)?,
-        writes_all_tables: e.writes_all_tables,
-        written_tables: e.written_tables,
-        direct_callees: try_copy_slice(&e.direct_callees)?,
-    })
-}
-
-pub fn try_clone_fn_elide_input(e: &FnElideInput) -> Option<FnElideInput> {
-    Some(FnElideInput {
-        own_stack_bytes: e.own_stack_bytes,
-        local_may_trap: e.local_may_trap,
-        calls_import_or_indirect: e.calls_import_or_indirect,
-        max_helper_bytes: e.max_helper_bytes,
-        direct_def_callees: try_copy_slice(&e.direct_def_callees)?,
-    })
-}
-
 #[derive(Clone)]
 pub struct CachedFn {
     pub raw_body_hash: [u8; 32],
@@ -155,22 +133,6 @@ pub struct CachedFn {
 }
 
 impl CachedFn {
-    pub fn try_to_asm(&self) -> Option<Asm> {
-        let code = try_copy_slice(&self.code)?;
-        let relocs = try_copy_slice(&self.relocs)?;
-        let local_rodata = try_copy_slice(&self.local_rodata)?;
-        let jt_labels = try_copy_slice(&self.jt_labels)?;
-        let jt_patches = try_copy_slice(&self.jt_patches)?;
-        Some(Asm::from_cached_parts(
-            code,
-            self.pre_relax_code_len,
-            relocs,
-            local_rodata,
-            jt_labels,
-            jt_patches,
-        ))
-    }
-
     pub fn into_asm(self) -> Asm {
         Asm::from_cached_parts(
             self.code,
@@ -259,6 +221,11 @@ pub fn compute_abi_hash(
         u8::from(isa.has_bmi2),
         u8::from(opt),
         u8::from(verify),
+        u8::from(module.memory64),
+        match module.target {
+            super::module::X64Target::BlotCdylib => 0,
+            super::module::X64Target::StandaloneExec => 1,
+        },
     ]);
     hash_u32(&mut h, module.imports.len() as u32);
     hash_u32(&mut h, n_defs as u32);
@@ -832,21 +799,9 @@ fn decode_cached_fn(
     ))
 }
 
-/// Loads and integrity-checks (SHA-256 Merkle trailer) the incremental function cache for `abi_hash`.
-/// Uses fallible allocations, offset-table early body-hash filtering, and parallel entry decoding
-/// (up to 16 threads for large modules) so low memory or >50% edited modules cleanly fall back.
-pub fn load_inc_cache(
-    cache_dir: &Path,
-    expected_abi_hash: &[u8; 32],
-    expected_n_imports: usize,
-    expected_n_defs: usize,
-    expected_global_words: usize,
-    expected_rodata_len: usize,
-    expected_body_hashes: &[[u8; 32]],
-) -> Option<IncCacheData> {
-    if expected_body_hashes.len() != expected_n_defs {
-        return None;
-    }
+/// Reads and Merkle-verifies raw incremental cache file bytes (independent of `body_hashes`,
+/// so callers can overlap file read + digest verification with Wasm body hashing).
+pub fn load_inc_cache_raw(cache_dir: &Path, expected_abi_hash: &[u8; 32]) -> Option<Vec<u8>> {
     let inc_dir = cache_dir.join("x64-inc");
     // Do not create `x64-inc/` on a read miss; validate it strictly when present.
     let dir_meta = fs::symlink_metadata(&inc_dir).ok()?;
@@ -861,6 +816,51 @@ pub fn load_inc_cache(
     if trailer != expected_sum {
         return None;
     }
+    Some(bytes)
+}
+
+/// Loads and integrity-checks (SHA-256 Merkle trailer) the incremental function cache for `abi_hash`.
+/// Uses fallible allocations, offset-table early body-hash filtering, and parallel entry decoding
+/// (up to 16 threads for large modules) so low memory or >50% edited modules cleanly fall back.
+#[cfg(test)]
+pub fn load_inc_cache(
+    cache_dir: &Path,
+    expected_abi_hash: &[u8; 32],
+    expected_n_imports: usize,
+    expected_n_defs: usize,
+    expected_global_words: usize,
+    expected_rodata_len: usize,
+    expected_body_hashes: &[[u8; 32]],
+) -> Option<IncCacheData> {
+    if expected_body_hashes.len() != expected_n_defs {
+        return None;
+    }
+    let bytes = load_inc_cache_raw(cache_dir, expected_abi_hash)?;
+    decode_verified_inc_cache(
+        &bytes,
+        expected_abi_hash,
+        expected_n_imports,
+        expected_n_defs,
+        expected_global_words,
+        expected_rodata_len,
+        expected_body_hashes,
+    )
+}
+
+/// Decodes an already Merkle-verified incremental cache buffer from `load_inc_cache_raw`.
+pub fn decode_verified_inc_cache(
+    bytes: &[u8],
+    expected_abi_hash: &[u8; 32],
+    expected_n_imports: usize,
+    expected_n_defs: usize,
+    expected_global_words: usize,
+    expected_rodata_len: usize,
+    expected_body_hashes: &[[u8; 32]],
+) -> Option<IncCacheData> {
+    if expected_body_hashes.len() != expected_n_defs || bytes.len() < 80 {
+        return None;
+    }
+    let (payload, _trailer) = bytes.split_at(bytes.len() - 32);
 
     let mut r = Reader {
         buf: payload,

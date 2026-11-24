@@ -508,6 +508,232 @@ impl ElfLayout {
     }
 }
 
+/// Fixed virtual load base for static Linux x86-64 `ET_EXEC` executables (`4 MiB`).
+pub const EXEC_BASE_VADDR: usize = 0x0040_0000;
+
+/// Metadata layout for a pure-Rust static Linux x86-64 ELF64 executable (`ET_EXEC`).
+///
+/// Produces a zero-`DT_NEEDED`, zero-`PT_INTERP`, zero-relocation static Linux binary
+/// with `PT_LOAD` R (headers + `.rodata`), `PT_LOAD` RX (`.text`), `PT_GNU_STACK` RW,
+/// and conforming section headers (`.rodata`, `.text`, `.shstrtab`).
+pub struct ElfExecLayout {
+    pub rodata_off: usize,
+    pub rodata_vaddr: usize,
+    pub text_off: usize,
+    pub text_vaddr: usize,
+    planned_rodata_len: usize,
+}
+
+impl ElfExecLayout {
+    pub fn plan(rodata_len: usize) -> Result<Self, String> {
+        // 64-byte Ehdr + 3 * 56-byte Phdrs = 232 bytes.
+        let rodata_off = checked_align_up(64 + 3 * 56, 16)?;
+        let seg0_end = rodata_off
+            .checked_add(rodata_len)
+            .ok_or("ELF exec rodata size overflow")?;
+        let text_off = checked_align_up(seg0_end, PAGE)?;
+        let rodata_vaddr = EXEC_BASE_VADDR
+            .checked_add(rodata_off)
+            .ok_or("ELF exec rodata vaddr overflow")?;
+        let text_vaddr = EXEC_BASE_VADDR
+            .checked_add(text_off)
+            .ok_or("ELF exec text vaddr overflow")?;
+        if text_off >= i32::MAX as usize {
+            return Err(format!(
+                "ELF exec rodata + headers ({text_off} B) exceed rel32 addressable 2 GiB range"
+            ));
+        }
+        Ok(Self {
+            rodata_off,
+            rodata_vaddr,
+            text_off,
+            text_vaddr,
+            planned_rodata_len: rodata_len,
+        })
+    }
+
+    /// Emits the complete static Linux x86-64 `ET_EXEC` image with entry point `text_vaddr + entry_off`.
+    pub fn emit(self, rodata: &[u8], text: &[u8], entry_off: u64) -> Result<Vec<u8>, String> {
+        if rodata.len() != self.planned_rodata_len {
+            return Err(format!(
+                "ELF exec rodata length changed after plan: planned {} vs emitted {}",
+                self.planned_rodata_len,
+                rodata.len()
+            ));
+        }
+        if text.is_empty() {
+            return Err("ELF exec .text section must be non-empty".into());
+        }
+        if entry_off >= text.len() as u64 {
+            return Err(format!(
+                "ELF exec entry offset ({entry_off}) exceeds .text ({})",
+                text.len()
+            ));
+        }
+        let seg0_end = self
+            .rodata_off
+            .checked_add(rodata.len())
+            .ok_or("ELF exec rodata overflow")?;
+        let seg1_end = self
+            .text_off
+            .checked_add(text.len())
+            .ok_or("ELF exec text overflow")?;
+        if seg1_end > i32::MAX as usize {
+            return Err(format!(
+                "ELF exec image ({seg1_end} B) exceeds rel32 addressable 2 GiB range"
+            ));
+        }
+        let sh_names = ["", ".rodata", ".text", ".shstrtab"];
+        let mut shstrtab = Vec::new();
+        let mut sh_name_offs = [0u32; 4];
+        for (i, name) in sh_names.iter().enumerate() {
+            sh_name_offs[i] = shstrtab.len() as u32;
+            shstrtab.extend_from_slice(name.as_bytes());
+            shstrtab.push(0);
+        }
+        let shstrtab_off = seg1_end;
+        let shoff = checked_align_up(
+            shstrtab_off
+                .checked_add(shstrtab.len())
+                .ok_or("ELF exec shstrtab overflow")?,
+            8,
+        )?;
+        let total_size = shoff
+            .checked_add(4 * 64)
+            .ok_or("ELF exec total image overflow")?;
+        let mut img = vec![0u8; total_size];
+
+        // ---- ELF64 Header ----
+        img[0..4].copy_from_slice(b"\x7fELF");
+        img[4] = 2; // ELFCLASS64
+        img[5] = 1; // ELFDATA2LSB
+        img[6] = 1; // EV_CURRENT
+        img[7] = 0; // ELFOSABI_NONE
+        put_u16(&mut img, 16, 2); // ET_EXEC
+        put_u16(&mut img, 18, 62); // EM_X86_64
+        put_u32(&mut img, 20, 1); // EV_CURRENT
+        put_u64(&mut img, 24, self.text_vaddr as u64 + entry_off); // e_entry
+        put_u64(&mut img, 32, 64); // e_phoff
+        put_u64(&mut img, 40, shoff as u64); // e_shoff
+        put_u32(&mut img, 48, 0); // e_flags
+        put_u16(&mut img, 52, 64); // e_ehsize
+        put_u16(&mut img, 54, 56); // e_phentsize
+        put_u16(&mut img, 56, 3); // e_phnum
+        put_u16(&mut img, 58, 64); // e_shentsize
+        put_u16(&mut img, 60, 4); // e_shnum
+        put_u16(&mut img, 62, 3); // e_shstrndx (.shstrtab)
+
+        let ph = |img: &mut [u8],
+                  idx: usize,
+                  p_type: u32,
+                  p_flags: u32,
+                  off: usize,
+                  vaddr: usize,
+                  sz: usize,
+                  align: usize| {
+            let base = 64 + idx * 56;
+            put_u32(img, base, p_type);
+            put_u32(img, base + 4, p_flags);
+            put_u64(img, base + 8, off as u64);
+            put_u64(img, base + 16, vaddr as u64);
+            put_u64(img, base + 24, vaddr as u64);
+            put_u64(img, base + 32, sz as u64);
+            put_u64(img, base + 40, sz as u64);
+            put_u64(img, base + 48, align as u64);
+        };
+        const PT_LOAD: u32 = 1;
+        const PT_GNU_STACK: u32 = 0x6474_e551;
+        const PF_X: u32 = 1;
+        const PF_W: u32 = 2;
+        const PF_R: u32 = 4;
+
+        ph(
+            &mut img,
+            0,
+            PT_LOAD,
+            PF_R,
+            0,
+            EXEC_BASE_VADDR,
+            seg0_end,
+            PAGE,
+        );
+        ph(
+            &mut img,
+            1,
+            PT_LOAD,
+            PF_R | PF_X,
+            self.text_off,
+            self.text_vaddr,
+            text.len(),
+            PAGE,
+        );
+        ph(&mut img, 2, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 16);
+
+        img[self.rodata_off..self.rodata_off + rodata.len()].copy_from_slice(rodata);
+        img[self.text_off..self.text_off + text.len()].copy_from_slice(text);
+        img[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(&shstrtab);
+
+        #[allow(clippy::too_many_arguments)]
+        let sh = |img: &mut [u8],
+                  idx: usize,
+                  sh_type: u32,
+                  sh_flags: u64,
+                  sh_addr: usize,
+                  sh_off: usize,
+                  sh_size: usize,
+                  sh_align: u64| {
+            let base = shoff + idx * 64;
+            put_u32(img, base, sh_name_offs[idx]);
+            put_u32(img, base + 4, sh_type);
+            put_u64(img, base + 8, sh_flags);
+            put_u64(img, base + 16, sh_addr as u64);
+            put_u64(img, base + 24, sh_off as u64);
+            put_u64(img, base + 32, sh_size as u64);
+            put_u32(img, base + 40, 0);
+            put_u32(img, base + 44, 0);
+            put_u64(img, base + 48, sh_align);
+            put_u64(img, base + 56, 0);
+        };
+        const SHT_PROGBITS: u32 = 1;
+        const SHT_STRTAB: u32 = 3;
+        const SHF_ALLOC: u64 = 2;
+        const SHF_EXECINSTR: u64 = 4;
+
+        sh(
+            &mut img,
+            1,
+            SHT_PROGBITS,
+            SHF_ALLOC,
+            self.rodata_vaddr,
+            self.rodata_off,
+            rodata.len(),
+            16,
+        );
+        sh(
+            &mut img,
+            2,
+            SHT_PROGBITS,
+            SHF_ALLOC | SHF_EXECINSTR,
+            self.text_vaddr,
+            self.text_off,
+            text.len(),
+            16,
+        );
+        sh(
+            &mut img,
+            3,
+            SHT_STRTAB,
+            0,
+            0,
+            shstrtab_off,
+            shstrtab.len(),
+            1,
+        );
+
+        Ok(img)
+    }
+}
+
 #[inline]
 fn put_u16(buf: &mut [u8], off: usize, v: u16) {
     buf[off..off + 2].copy_from_slice(&v.to_le_bytes());

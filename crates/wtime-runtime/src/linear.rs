@@ -100,6 +100,17 @@ impl LinearBytes {
         true
     }
 
+    /// Single-byte fast load when in bounds; `None` only when out of bounds.
+    #[inline(always)]
+    pub(crate) fn read_u8_fast(&self, at: usize) -> Option<u8> {
+        if at >= self.len {
+            return None;
+        }
+        match self.pages.get(at >> PAGE_BITS)? {
+            Some(page) => page.get(at & MASK).copied(),
+            None => Some(0),
+        }
+    }
     /// The `N` bytes at `at` when the access is in bounds and within one
     /// page; `None` leaves the access to the general path.
     #[inline(always)]

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" class="a" viewBox="0 0 820 268" width="820" height="268" role="img" aria-labelledby="title desc">
 <title id="title">wtime two-layer architecture</title>
-<desc id="desc">WebAssembly modules pass through safe-Rust decode and validate crates, then execute either in the zero-dependency JIT-free core interpreter (wtime-runtime) or via the optional ahead-of-time compiler (wtime-aot) with x64, C, and Rust backends.</desc>
+<desc id="desc">WebAssembly modules pass through safe-Rust decode and validate crates, then execute either in the zero-dependency JIT-free core interpreter (wtime-runtime) or via the optional ahead-of-time compiler (wtime-aot) with x64, aarch64, C, and Rust backends.</desc>
 <style>
 .a {
   --surface:#fcfcfb; --card:#ffffff; --card-tint:#f6f5f0; --border:#e2e0d7;
@@ -79,9 +79,9 @@
 <!-- Backend cards -->
 <rect class="box-blue" x="416" y="164" width="118" height="70" rx="7"/>
 <text class="pill p-blue" x="426" y="180">--backend x64</text>
-<text class="sub" x="426" y="198">Pure Rust · 0 LLVM</text>
-<text class="sub" x="426" y="214">~195 ms cold .so</text>
-<text class="sub" x="426" y="227">~63 ms 1-fn edit</text>
+<text class="sub" x="426" y="198">Pure Rust (+ aarch64)</text>
+<text class="sub" x="426" y="214">~152 ms cold .so</text>
+<text class="sub" x="426" y="227">~61.5 ms 1-fn edit</text>
 
 <rect class="box-orange" x="544" y="164" width="118" height="70" rx="7"/>
 <text class="pill p-orange" x="554" y="180">--backend c</text>

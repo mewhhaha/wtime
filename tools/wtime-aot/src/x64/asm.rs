@@ -806,6 +806,37 @@ impl Asm {
         Ok(())
     }
 
+    /// Patches cached `(rodata_off, table_rodata_off, label_off)` jump-table entries directly into
+    /// a destination `.rodata` slice (zero-copy linking from `Arc<IncCacheData>`).
+    pub fn patch_cached_jump_tables_in_slice(
+        dst_local_rodata: &mut [u8],
+        jt_entries: &[(u32, u32, u32)],
+        fn_vaddr: u64,
+        local_rodata_vaddr: u64,
+    ) -> Result<(), String> {
+        for &(rodata_off, table_rodata_off, label_off) in jt_entries {
+            let target_vaddr = fn_vaddr
+                .checked_add(u64::from(label_off))
+                .ok_or("jump table target vaddr overflow")?;
+            let base_vaddr = local_rodata_vaddr
+                .checked_add(u64::from(table_rodata_off))
+                .ok_or("jump table base vaddr overflow")?;
+            let rel = i128::from(target_vaddr) - i128::from(base_vaddr);
+            let rel32 = i32::try_from(rel)
+                .map_err(|_| "jump table displacement exceeds rel32".to_string())?;
+            let p = rodata_off as usize;
+            let end = p.checked_add(4).ok_or("jump table patch offset overflow")?;
+            if end > dst_local_rodata.len() {
+                return Err(format!(
+                    "jump table patch offset {p} exceeds local_rodata len {}",
+                    dst_local_rodata.len()
+                ));
+            }
+            dst_local_rodata[p..end].copy_from_slice(&rel32.to_le_bytes());
+        }
+        Ok(())
+    }
+
     /// Appends aligned raw bytes to `local_rodata`, returning the starting offset.
     pub fn add_local_rodata(&mut self, align: usize, bytes: &[u8]) -> u32 {
         assert!(
@@ -1864,7 +1895,56 @@ impl Asm {
         self.emit_u8(mode);
     }
 
-    // Minimal SIMD helpers for the V128 subset supported by `wtime-aot`.
+    // ---- Complete SSE2 / SSSE3 / SSE4.1 / SSE4.2 SIMD encoders ----
+
+    fn sse_38_rr(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, src: Xmm) {
+        if let Some(p) = prefix {
+            self.emit_u8(p);
+        }
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x38);
+        self.emit_u8(op);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
+
+    fn sse_38_xm(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, mem: Mem) {
+        if let Some(p) = prefix {
+            self.emit_u8(p);
+        }
+        self.rex_mem(false, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x38);
+        self.emit_u8(op);
+        self.modrm_mem(dst.lo(), mem);
+    }
+
+    fn sse_rri(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, src: Xmm, imm: u8) {
+        self.sse_rr(prefix, op, dst, src);
+        self.emit_u8(imm);
+    }
+
+    fn sse_3a_rri(&mut self, prefix: Option<u8>, op: u8, dst: Xmm, src: Xmm, imm: u8) {
+        if let Some(p) = prefix {
+            self.emit_u8(p);
+        }
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(op);
+        self.modrm_reg(dst.lo(), src.lo());
+        self.emit_u8(imm);
+    }
+
+    fn sse_shift_imm(&mut self, op: u8, ext: u8, dst: Xmm, imm: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, 0, 0, dst.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(op);
+        self.modrm_reg(ext, dst.lo());
+        self.emit_u8(imm);
+    }
+
     pub fn punpcklbw(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x60, d, s);
     }
@@ -1877,7 +1957,502 @@ impl Asm {
     pub fn punpcklqdq(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0x6c, d, s);
     }
+    pub fn punpckhqdq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x6d, d, s);
+    }
+    pub fn unpcklps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x14, d, s);
+    }
+    pub fn unpckhps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x15, d, s);
+    }
+    pub fn unpcklpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x14, d, s);
+    }
+    pub fn unpckhpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x15, d, s);
+    }
+    pub fn movddup_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x12, d, m);
+    }
+    pub fn movhlps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x12, d, s);
+    }
+    pub fn movlhps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x16, d, s);
+    }
+    pub fn shufps(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.sse_rri(None, 0xc6, d, s, imm);
+    }
+    pub fn shufpd(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.sse_rri(Some(0x66), 0xc6, d, s, imm);
+    }
+    pub fn pshufd(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.sse_rri(Some(0x66), 0x70, d, s, imm);
+    }
+    pub fn pshuflw(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.sse_rri(Some(0xf2), 0x70, d, s, imm);
+    }
+    pub fn pshufhw(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.sse_rri(Some(0xf3), 0x70, d, s, imm);
+    }
+    pub fn pshufb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x00, d, s);
+    }
+    pub fn pshufb_rip(&mut self, dst: Xmm, target: RelocTarget) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, 0, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x38);
+        self.emit_u8(0x00);
+        self.emit_u8((dst.lo() << 3) | 5);
+        let patch_off = self.pos();
+        self.emit_i32(0);
+        let next_ip_off = self.pos();
+        self.relocs.push(Reloc {
+            patch_off,
+            next_ip_off,
+            target,
+        });
+    }
 
+    // Bitwise integer SIMD
+    pub fn pand(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xdb, d, s);
+    }
+    pub fn pandn(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xdf, d, s);
+    }
+    pub fn por(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xeb, d, s);
+    }
+    pub fn pxor(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xef, d, s);
+    }
+    pub fn andpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x54, d, s);
+    }
+    pub fn andnpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x55, d, s);
+    }
+    pub fn orpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x56, d, s);
+    }
+    pub fn xorpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x57, d, s);
+    }
+    pub fn ptest(&mut self, a: Xmm, b: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x17, a, b);
+    }
+    pub fn pmovmskb(&mut self, dst: Gp, src: Xmm) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xd7);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
+    pub fn movmskps(&mut self, dst: Gp, src: Xmm) {
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x50);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
+    pub fn movmskpd(&mut self, dst: Gp, src: Xmm) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x50);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
+
+    // Integer comparisons
+    pub fn pcmpeqb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x74, d, s);
+    }
+    pub fn pcmpeqw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x75, d, s);
+    }
+    pub fn pcmpeqd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x76, d, s);
+    }
+    pub fn pcmpeqq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x29, d, s);
+    }
+    pub fn pcmpgtb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x64, d, s);
+    }
+    pub fn pcmpgtw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x65, d, s);
+    }
+    pub fn pcmpgtd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x66, d, s);
+    }
+    pub fn pcmpgtq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x37, d, s);
+    }
+
+    // Integer arithmetic / sat / min / max / abs / avg / mul / dot
+    pub fn paddb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xfc, d, s);
+    }
+    pub fn paddw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xfd, d, s);
+    }
+    pub fn paddd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xfe, d, s);
+    }
+    pub fn paddq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xd4, d, s);
+    }
+    pub fn psubb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xf8, d, s);
+    }
+    pub fn psubw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xf9, d, s);
+    }
+    pub fn psubd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xfa, d, s);
+    }
+    pub fn psubq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xfb, d, s);
+    }
+    pub fn paddsb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xec, d, s);
+    }
+    pub fn paddsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xed, d, s);
+    }
+    pub fn paddusb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xdc, d, s);
+    }
+    pub fn paddusw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xdd, d, s);
+    }
+    pub fn psubsb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xe8, d, s);
+    }
+    pub fn psubsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xe9, d, s);
+    }
+    pub fn psubusb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xd8, d, s);
+    }
+    pub fn psubusw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xd9, d, s);
+    }
+    pub fn pminsb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x38, d, s);
+    }
+    pub fn pminub(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xda, d, s);
+    }
+    pub fn pminsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xea, d, s);
+    }
+    pub fn pminuw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x3a, d, s);
+    }
+    pub fn pminsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x39, d, s);
+    }
+    pub fn pminud(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x3b, d, s);
+    }
+    pub fn pmaxsb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x3c, d, s);
+    }
+    pub fn pmaxub(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xde, d, s);
+    }
+    pub fn pmaxsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xee, d, s);
+    }
+    pub fn pmaxuw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x3e, d, s);
+    }
+    pub fn pmaxsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x3d, d, s);
+    }
+    pub fn pmaxud(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x3f, d, s);
+    }
+    pub fn pabsb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x1c, d, s);
+    }
+    pub fn pabsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x1d, d, s);
+    }
+    pub fn pabsd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x1e, d, s);
+    }
+    pub fn pavgb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xe0, d, s);
+    }
+    pub fn pavgw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xe3, d, s);
+    }
+    pub fn pmullw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xd5, d, s);
+    }
+    pub fn pmulld(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x40, d, s);
+    }
+    pub fn pmuldq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x28, d, s);
+    }
+    pub fn pmuludq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xf4, d, s);
+    }
+    pub fn pmulhrsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x0b, d, s);
+    }
+    pub fn pmaddwd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xf5, d, s);
+    }
+    pub fn pmaddubsw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x04, d, s);
+    }
+    pub fn psadbw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xf6, d, s);
+    }
+
+    // Narrowing / extending
+    pub fn packsswb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x63, d, s);
+    }
+    pub fn packuswb(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x67, d, s);
+    }
+    pub fn packssdw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x6b, d, s);
+    }
+    pub fn packusdw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x2b, d, s);
+    }
+    pub fn pmovsxbw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x20, d, s);
+    }
+    pub fn pmovzxbw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x30, d, s);
+    }
+    pub fn pmovsxwd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x23, d, s);
+    }
+    pub fn pmovzxwd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x33, d, s);
+    }
+    pub fn pmovsxdq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x25, d, s);
+    }
+    pub fn pmovzxdq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_38_rr(Some(0x66), 0x35, d, s);
+    }
+    pub fn pmovsxbw_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_38_xm(Some(0x66), 0x20, d, m);
+    }
+    pub fn pmovzxbw_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_38_xm(Some(0x66), 0x30, d, m);
+    }
+    pub fn pmovsxwd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_38_xm(Some(0x66), 0x23, d, m);
+    }
+    pub fn pmovzxwd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_38_xm(Some(0x66), 0x33, d, m);
+    }
+    pub fn pmovsxdq_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_38_xm(Some(0x66), 0x25, d, m);
+    }
+    pub fn pmovzxdq_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_38_xm(Some(0x66), 0x35, d, m);
+    }
+
+    // Shifts (register count in xmm + immediate count)
+    pub fn psllw(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xf1, d, cnt);
+    }
+    pub fn psrlw(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xd1, d, cnt);
+    }
+    pub fn psraw(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xe1, d, cnt);
+    }
+    pub fn pslld(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xf2, d, cnt);
+    }
+    pub fn psrld(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xd2, d, cnt);
+    }
+    pub fn psrad(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xe2, d, cnt);
+    }
+    pub fn psllq(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xf3, d, cnt);
+    }
+    pub fn psrlq(&mut self, d: Xmm, cnt: Xmm) {
+        self.sse_rr(Some(0x66), 0xd3, d, cnt);
+    }
+    pub fn psllw_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x71, 6, d, imm);
+    }
+    pub fn psrlw_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x71, 2, d, imm);
+    }
+    pub fn psraw_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x71, 4, d, imm);
+    }
+    pub fn pslld_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x72, 6, d, imm);
+    }
+    pub fn psrld_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x72, 2, d, imm);
+    }
+    pub fn psrad_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x72, 4, d, imm);
+    }
+    pub fn psllq_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x73, 6, d, imm);
+    }
+    pub fn psrlq_imm(&mut self, d: Xmm, imm: u8) {
+        self.sse_shift_imm(0x73, 2, d, imm);
+    }
+    pub fn psrldq_imm(&mut self, d: Xmm, imm_bytes: u8) {
+        self.sse_shift_imm(0x73, 3, d, imm_bytes);
+    }
+    pub fn pslldq_imm(&mut self, d: Xmm, imm_bytes: u8) {
+        self.sse_shift_imm(0x73, 7, d, imm_bytes);
+    }
+
+    // Packed float arithmetic / comparisons / rounding / conversions
+    pub fn addps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x58, d, s);
+    }
+    pub fn subps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x5c, d, s);
+    }
+    pub fn mulps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x59, d, s);
+    }
+    pub fn divps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x5e, d, s);
+    }
+    pub fn sqrtps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x51, d, s);
+    }
+    pub fn minps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x5d, d, s);
+    }
+    pub fn maxps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x5f, d, s);
+    }
+    pub fn minps_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(None, 0x5d, d, m);
+    }
+    pub fn maxps_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(None, 0x5f, d, m);
+    }
+    pub fn andps_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(None, 0x54, d, m);
+    }
+    pub fn andnps_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(None, 0x55, d, m);
+    }
+    pub fn orps_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(None, 0x56, d, m);
+    }
+    pub fn cmpps(&mut self, d: Xmm, s: Xmm, pred: u8) {
+        self.sse_rri(None, 0xc2, d, s, pred);
+    }
+    pub fn roundps(&mut self, d: Xmm, s: Xmm, mode: u8) {
+        self.sse_3a_rri(Some(0x66), 0x08, d, s, mode);
+    }
+    pub fn addpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x58, d, s);
+    }
+    pub fn subpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x5c, d, s);
+    }
+    pub fn mulpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x59, d, s);
+    }
+    pub fn divpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x5e, d, s);
+    }
+    pub fn sqrtpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x51, d, s);
+    }
+    pub fn minpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x5d, d, s);
+    }
+    pub fn maxpd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x5f, d, s);
+    }
+    pub fn minpd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0x66), 0x5d, d, m);
+    }
+    pub fn maxpd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0x66), 0x5f, d, m);
+    }
+    pub fn andpd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0x66), 0x54, d, m);
+    }
+    pub fn andnpd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0x66), 0x55, d, m);
+    }
+    pub fn orpd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0x66), 0x56, d, m);
+    }
+    pub fn cmppd(&mut self, d: Xmm, s: Xmm, pred: u8) {
+        self.sse_rri(Some(0x66), 0xc2, d, s, pred);
+    }
+    pub fn roundpd(&mut self, d: Xmm, s: Xmm, mode: u8) {
+        self.sse_3a_rri(Some(0x66), 0x09, d, s, mode);
+    }
+    pub fn cvtdq2ps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x5b, d, s);
+    }
+    pub fn cvttps2dq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0x5b, d, s);
+    }
+    pub fn cvtdq2pd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0xf3), 0xe6, d, s);
+    }
+    pub fn cvttpd2dq(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xe6, d, s);
+    }
+    pub fn cvtps2pd(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(None, 0x5a, d, s);
+    }
+    pub fn cvtpd2ps(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0x5a, d, s);
+    }
+
+    // Lane extract / insert (SSE2/SSE4.1)
+    pub fn pextrb(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, src.hi(), 0, dst.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x14);
+        self.modrm_reg(src.lo(), dst.lo());
+        self.emit_u8(lane & 15);
+    }
+    pub fn pextrw(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xc5);
+        self.modrm_reg(dst.lo(), src.lo());
+        self.emit_u8(lane & 7);
+    }
+    pub fn pextrd(&mut self, dst: Gp, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, src.hi(), 0, dst.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x16);
+        self.modrm_reg(src.lo(), dst.lo());
+        self.emit_u8(lane & 3);
+    }
     pub fn pextrq(&mut self, dst: Gp, src: Xmm, lane: u8) {
         self.emit_u8(0x66);
         self.rex(true, src.hi(), 0, dst.hi(), false);
@@ -1887,7 +2462,32 @@ impl Asm {
         self.modrm_reg(src.lo(), dst.lo());
         self.emit_u8(lane & 1);
     }
-
+    pub fn pinsrb(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x20);
+        self.modrm_reg(dst.lo(), src.lo());
+        self.emit_u8(lane & 15);
+    }
+    pub fn pinsrw(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xc4);
+        self.modrm_reg(dst.lo(), src.lo());
+        self.emit_u8(lane & 7);
+    }
+    pub fn pinsrd(&mut self, dst: Xmm, src: Gp, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex(false, dst.hi(), 0, src.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x22);
+        self.modrm_reg(dst.lo(), src.lo());
+        self.emit_u8(lane & 3);
+    }
     pub fn pinsrq(&mut self, dst: Xmm, src: Gp, lane: u8) {
         self.emit_u8(0x66);
         self.rex(true, dst.hi(), 0, src.hi(), false);
@@ -1896,6 +2496,104 @@ impl Asm {
         self.emit_u8(0x22);
         self.modrm_reg(dst.lo(), src.lo());
         self.emit_u8(lane & 1);
+    }
+
+    // Memory-lane extract/insert (SSE4.1)
+    pub fn pinsrb_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x20);
+        self.modrm_mem(dst.lo(), mem);
+        self.emit_u8(lane & 15);
+    }
+    pub fn pinsrw_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xc4);
+        self.modrm_mem(dst.lo(), mem);
+        self.emit_u8(lane & 7);
+    }
+    pub fn pinsrd_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x22);
+        self.modrm_mem(dst.lo(), mem);
+        self.emit_u8(lane & 3);
+    }
+    pub fn pinsrq_xm(&mut self, dst: Xmm, mem: Mem, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(true, dst.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x22);
+        self.modrm_mem(dst.lo(), mem);
+        self.emit_u8(lane & 1);
+    }
+    pub fn pextrb_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x14);
+        self.modrm_mem(src.lo(), mem);
+        self.emit_u8(lane & 15);
+    }
+    pub fn pextrw_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x15);
+        self.modrm_mem(src.lo(), mem);
+        self.emit_u8(lane & 7);
+    }
+    pub fn pextrd_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(false, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x16);
+        self.modrm_mem(src.lo(), mem);
+        self.emit_u8(lane & 3);
+    }
+    pub fn pextrq_mx(&mut self, mem: Mem, src: Xmm, lane: u8) {
+        self.emit_u8(0x66);
+        self.rex_mem(true, src.hi(), mem, false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0x3a);
+        self.emit_u8(0x16);
+        self.modrm_mem(src.lo(), mem);
+        self.emit_u8(lane & 1);
+    }
+
+    /// 3-byte VEX FMA3 (`x64-v3`): `vfmadd213{ss,sd,ps,pd} dst, vsrc, src` (`dst = dst * vsrc + src`).
+    fn vex3_fma(&mut self, is64: bool, op: u8, dst: Xmm, vsrc: Xmm, src: Xmm) {
+        let r_inv = if dst.hi() != 0 { 0 } else { 1 };
+        let b_inv = if src.hi() != 0 { 0 } else { 1 };
+        let w = u8::from(is64);
+        let vvvv = (!vsrc.id()) & 0x0f;
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | 0x02); // map 0F38
+        self.emit_u8((w << 7) | (vvvv << 3) | 0x01); // L=0 (128-bit), pp=01 (66)
+        self.emit_u8(op);
+        self.modrm_reg(dst.lo(), src.lo());
+    }
+    pub fn vfmadd213ss(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(false, 0xa9, d, a, b);
+    }
+    pub fn vfmadd213sd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(true, 0xa9, d, a, b);
+    }
+    pub fn vfmadd213ps(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(false, 0xa8, d, a, b);
+    }
+    pub fn vfmadd213pd(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_fma(true, 0xa8, d, a, b);
     }
 
     // ---- CPUID, MXCSR, and portable BSR/BSF ----

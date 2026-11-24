@@ -320,6 +320,10 @@ pub struct AllocResult {
     pub ret_buf_bytes: i32,
     /// Frame slot (`[rsp + off]`) saving incoming `[r15 + OFF_RET_SPILL_PTR]` when THIS function has overflow returns.
     pub saved_ret_ptr_off: Option<i32>,
+    /// Per-block (`block_id`-indexed) bitmask of GP registers live-in at block entry (excluding `block.params`).
+    pub block_live_in_gp: Vec<u16>,
+    /// Per-block (`block_id`-indexed) bitmask of XMM registers live-in at block entry (excluding `block.params`).
+    pub block_live_in_xmm: Vec<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -502,13 +506,14 @@ pub fn allocate_with_config(
             match inst.op {
                 Op::Trap(_) | Op::MemGrow(_) => trap = true,
                 Op::Call { .. } | Op::CallIndirect { .. } => call = true,
-                Op::Store { checked, .. } => {
+                Op::Store { checked, .. } | Op::V128StoreLane { checked, .. } => {
                     store = true;
                     if !checked {
                         unchecked_mem = true;
                     }
                 }
                 Op::Load { checked: false, .. }
+                | Op::V128LoadLane { checked: false, .. }
                 | Op::BoundsCheck { .. }
                 | Op::MemCopy { .. }
                 | Op::MemFill { .. }
@@ -827,6 +832,8 @@ pub fn allocate_with_config(
     let mut cb_hull: Vec<(u32, u32)> = Vec::new();
     let mut cb_segs: Vec<Vec<(u32, u32)>> = Vec::new();
     let mut cb_seg_overflow: Vec<bool> = Vec::new();
+    let mut saved_live_in: Vec<u64> = Vec::new();
+    let mut saved_live_words: usize = 0;
     if n_cb > 0 {
         let words = n_cb.div_ceil(64);
         let matrix_bytes = n_ord
@@ -1081,6 +1088,8 @@ pub fn allocate_with_config(
                 }
             }
         }
+        saved_live_in = live_in;
+        saved_live_words = words;
     }
 
     // 4. Build O(log C) segment tree over clobbers and build exact intervals.
@@ -2101,6 +2110,34 @@ pub fn allocate_with_config(
         ));
     }
 
+    let mut block_live_in_gp = vec![0u16; n_blocks];
+    let mut block_live_in_xmm = vec![0u16; n_blocks];
+    if saved_live_words > 0 {
+        for (oi, &bid) in block_order.iter().enumerate() {
+            let mut gp_m = 0u16;
+            let mut xmm_m = 0u16;
+            let base = oi * saved_live_words;
+            for w in 0..saved_live_words {
+                let mut bits = saved_live_in[base + w];
+                while bits != 0 {
+                    let tz = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let c = (w << 6) + tz;
+                    let vi = cb_vals[c] as usize;
+                    if assigned[vi] {
+                        match locs[vi] {
+                            Loc::Gp(g) => gp_m |= 1u16 << g.id(),
+                            Loc::Xmm(x) => xmm_m |= 1u16 << x.id(),
+                            Loc::Spill(_) | Loc::Remat(_) => {}
+                        }
+                    }
+                }
+            }
+            block_live_in_gp[bid as usize] = gp_m;
+            block_live_in_xmm[bid as usize] = xmm_m;
+        }
+    }
+
     Ok(AllocResult {
         locs,
         block_order,
@@ -2112,5 +2149,7 @@ pub fn allocate_with_config(
         ret_buf_off,
         ret_buf_bytes,
         saved_ret_ptr_off,
+        block_live_in_gp,
+        block_live_in_xmm,
     })
 }

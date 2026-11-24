@@ -87,8 +87,8 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
         section(7, &[1, 3, b'i', b'n', b'c', 0, 0]),
         section(10, &[1, 7, 0, 0x20, 0, 0x41, 1, 0x6a, 0x0b]),
     ]);
-    // Admission-rejected module (memory64 -> exit code 4!).
-    let rej_bytes = wasm_module(&[section(5, &[1, 0x04, 1])]);
+    // Admission-rejected module (multi-memory -> exit code 4!).
+    let rej_bytes = wasm_module(&[section(5, &[2, 0x00, 1, 0x00, 1])]);
     fs::write(&ok_wasm, &ok_bytes).unwrap();
     fs::write(&rej_wasm, &rej_bytes).unwrap();
     fs::write(&bad_wasm, b"corrupt-not-wasm").unwrap();
@@ -268,4 +268,482 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
         .output()
         .unwrap();
     assert_eq!(bad_train.status.code(), Some(1));
+}
+
+fn enc_str(out: &mut Vec<u8>, s: &str) {
+    leb_u32(out, s.len() as u32);
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn enc_body(locals: &[(u32, u8)], body: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    leb_u32(&mut b, locals.len() as u32);
+    for &(cnt, ty) in locals {
+        leb_u32(&mut b, cnt);
+        b.push(ty);
+    }
+    b.extend_from_slice(body);
+    b.push(0x0b);
+    let mut out = Vec::new();
+    leb_u32(&mut out, b.len() as u32);
+    out.extend_from_slice(&b);
+    out
+}
+
+fn leb_i64(out: &mut Vec<u8>, mut v: i64) {
+    loop {
+        let mut b = (v & 0x7f) as u8;
+        v >>= 7;
+        let done = (v == 0 && (b & 0x40) == 0) || (v == -1 && (b & 0x40) != 0);
+        if !done {
+            b |= 0x80;
+        }
+        out.push(b);
+        if done {
+            break;
+        }
+    }
+}
+
+fn assert_static_elf64_exec(path: &Path) {
+    let bytes = fs::read(path).unwrap();
+    assert!(bytes.len() > 64);
+    assert_eq!(&bytes[0..4], b"\x7fELF");
+    assert_eq!(bytes[4], 2, "must be ELFCLASS64");
+    let e_type = u16::from_le_bytes([bytes[16], bytes[17]]);
+    assert_eq!(e_type, 2, "must be ET_EXEC (2), got {e_type}");
+    let e_phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let e_phentsize = u16::from_le_bytes([bytes[54], bytes[55]]) as usize;
+    let e_phnum = u16::from_le_bytes([bytes[56], bytes[57]]) as usize;
+    for i in 0..e_phnum {
+        let off = e_phoff + i * e_phentsize;
+        let p_type = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        assert_ne!(p_type, 3, "static ET_EXEC must have no PT_INTERP");
+        assert_ne!(p_type, 2, "static ET_EXEC must have no PT_DYNAMIC");
+    }
+}
+
+#[test]
+fn standalone_x64_static_exec_wasi_goose_simd_memory64_and_traps() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_wtime-aot"));
+    let root = TempRoot::new("wtime-aot-x64-exec");
+    let cache = root.path("cache");
+
+    // 1. WASI standalone executable:
+    //    - multi-iov fd_write to stdout ("hello " + "wasi\n")
+    //    - fd_read from stdin into memory[64..96], echoes back to stdout
+    //    - args_sizes_get + args_get -> echoes arg[0] + "\n" to stdout
+    //    - clock_time_get(monotonic) -> checks returns 0
+    //    - proc_exit(42)
+    let mut imp_wasi = vec![5];
+    // 0: fd_write(i32,i32,i32,i32)->i32 (type 0)
+    // 1: fd_read(i32,i32,i32,i32)->i32 (type 0)
+    // 2: args_sizes_get(i32,i32)->i32 (type 1)
+    // 3: args_get(i32,i32)->i32 (type 1)
+    // 4: proc_exit(i32)->() (type 2)
+    for (name, ty) in [
+        ("fd_write", 0u32),
+        ("fd_read", 0),
+        ("args_sizes_get", 1),
+        ("args_get", 1),
+        ("proc_exit", 2),
+    ] {
+        enc_str(&mut imp_wasi, "wasi_snapshot_preview1");
+        enc_str(&mut imp_wasi, name);
+        imp_wasi.push(0x00);
+        leb_u32(&mut imp_wasi, ty);
+    }
+    // Data at 0: "hello wasi\n" (11 B)
+    let mut data_wasi = vec![1, 0x00, 0x41, 0, 0x0b, 11];
+    data_wasi.extend_from_slice(b"hello wasi\n");
+    let push_i32 = |b: &mut Vec<u8>, v: i32| {
+        b.push(0x41);
+        leb_i64(b, i64::from(v));
+    };
+    let mut wasi_body = Vec::new();
+    // iov[0] at 16 = (0, 6), iov[1] at 24 = (6, 5)
+    for (addr, val) in [(16, 0), (20, 6), (24, 6), (28, 5)] {
+        push_i32(&mut wasi_body, addr);
+        push_i32(&mut wasi_body, val);
+        wasi_body.extend_from_slice(&[0x36, 2, 0]);
+    }
+    // fd_write(1, 16, 2, 32)
+    for v in [1, 16, 2, 32] {
+        push_i32(&mut wasi_body, v);
+    }
+    wasi_body.extend_from_slice(&[0x10, 0, 0x1a]);
+    // Read stdin into 64 (max 32): iov at 40 = (64, 32), nread at 48
+    for (addr, val) in [(40, 64), (44, 32)] {
+        push_i32(&mut wasi_body, addr);
+        push_i32(&mut wasi_body, val);
+        wasi_body.extend_from_slice(&[0x36, 2, 0]);
+    }
+    for v in [0, 40, 1, 48] {
+        push_i32(&mut wasi_body, v);
+    }
+    wasi_body.extend_from_slice(&[0x10, 1, 0x1a]);
+    // Write stdin echo: iov at 40 = (64, mem[48])
+    push_i32(&mut wasi_body, 44);
+    push_i32(&mut wasi_body, 48);
+    wasi_body.extend_from_slice(&[0x28, 2, 0, 0x36, 2, 0]);
+    for v in [1, 40, 1, 52] {
+        push_i32(&mut wasi_body, v);
+    }
+    wasi_body.extend_from_slice(&[0x10, 0, 0x1a]);
+    // args_sizes_get(100, 104), args_get(128, 256)
+    push_i32(&mut wasi_body, 100);
+    push_i32(&mut wasi_body, 104);
+    wasi_body.extend_from_slice(&[0x10, 2, 0x1a]);
+    push_i32(&mut wasi_body, 128);
+    push_i32(&mut wasi_body, 256);
+    wasi_body.extend_from_slice(&[0x10, 3, 0x1a]);
+    // Write first 3 bytes of arg[0] ("foo")
+    push_i32(&mut wasi_body, 40);
+    push_i32(&mut wasi_body, 128);
+    wasi_body.extend_from_slice(&[0x28, 2, 0, 0x36, 2, 0]);
+    push_i32(&mut wasi_body, 44);
+    push_i32(&mut wasi_body, 3);
+    wasi_body.extend_from_slice(&[0x36, 2, 0]);
+    for v in [1, 40, 1, 52] {
+        push_i32(&mut wasi_body, v);
+    }
+    wasi_body.extend_from_slice(&[0x10, 0, 0x1a]);
+    // proc_exit(42)
+    push_i32(&mut wasi_body, 42);
+    wasi_body.extend_from_slice(&[0x10, 4]);
+    let wasi_wasm = wasm_module(&[
+        section(
+            1,
+            &[
+                4, // 4 types
+                0x60, 4, 0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f, // 0
+                0x60, 2, 0x7f, 0x7f, 1, 0x7f, // 1
+                0x60, 1, 0x7f, 0, // 2
+                0x60, 0, 0, // 3: _start
+            ],
+        ),
+        section(2, &imp_wasi),
+        section(3, &[1, 3]),
+        section(5, &[1, 0x01, 1, 1]),
+        section(
+            7,
+            &[
+                2, 6, b'_', b's', b't', b'a', b'r', b't', 0, 5, 6, b'm', b'e', b'm', b'o', b'r',
+                b'y', 2, 0,
+            ],
+        ),
+        section(
+            10,
+            &[1].into_iter()
+                .chain(enc_body(&[], &wasi_body))
+                .collect::<Vec<_>>(),
+        ),
+        section(11, &data_wasi),
+    ]);
+    let wasi_path = root.path("wasi.wasm");
+    let wasi_exe = root.path("wasi_exe");
+    let timing_json = root.path("timing.json");
+    fs::write(&wasi_path, &wasi_wasm).unwrap();
+
+    // Direct compilation: wtime-aot wasi.wasm -o wasi_exe --backend x64
+    let st = Command::new(bin)
+        .arg(&wasi_path)
+        .args(["-o"])
+        .arg(&wasi_exe)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "direct standalone x64 build failed: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    assert_static_elf64_exec(&wasi_exe);
+
+    let mut child = Command::new(&wasi_exe)
+        .args(["--timing-json"])
+        .arg(&timing_json)
+        .args(["--", "foo", "bar"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"PING:").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(42),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello wasi\nPING:foo");
+    let tj = fs::read_to_string(&timing_json).unwrap();
+    assert!(
+        tj.contains("\"engine\": \"wtime-aot\""),
+        "bad timing json: {tj}"
+    );
+    assert!(
+        tj.contains("\"start_function_ns\": "),
+        "bad timing json: {tj}"
+    );
+
+    // 2. Cached build (`wtime-aot build --backend x64` defaults to GooseBin standalone executable!)
+    //    Goose + memory64 + 128-bit SIMD standalone binary!
+    let mut imp_g = vec![5];
+    for (name, ty) in [
+        ("print_i64", 0u32),
+        ("print_u64", 0),
+        ("print_bool", 1),
+        ("newline", 2),
+        ("exit", 1),
+    ] {
+        enc_str(&mut imp_g, "goose");
+        enc_str(&mut imp_g, name);
+        imp_g.push(0x00);
+        leb_u32(&mut imp_g, ty);
+    }
+    let mut g_body = Vec::new();
+    // Store two v128 vectors into memory64 at 0 and 16, add i64x2, extract lane 0 + print_i64!
+    g_body.extend_from_slice(&[0x42, 0, 0xfd, 12]);
+    g_body.extend_from_slice(&(-1000i64).to_le_bytes());
+    g_body.extend_from_slice(&42i64.to_le_bytes());
+    g_body.extend_from_slice(&[0xfd, 11, 0, 0]); // v128.store at 0
+    g_body.extend_from_slice(&[0x42, 0, 0xfd, 0, 0, 0]); // v128.load(0)
+    g_body.extend_from_slice(&[0xfd, 12]);
+    g_body.extend_from_slice(&(-234i64).to_le_bytes());
+    g_body.extend_from_slice(&58i64.to_le_bytes());
+    g_body.extend_from_slice(&[0xfd, 0xce, 0x01]); // i64x2.add -> (-1234, 100)
+    g_body.extend_from_slice(&[0xfd, 0x1d, 0]); // i64x2.extract_lane 0 -> -1234
+    g_body.extend_from_slice(&[0x10, 0, 0x10, 3]); // print_i64(-1234); newline()
+    // print_i64(i64::MIN); newline()
+    g_body.push(0x42);
+    leb_i64(&mut g_body, i64::MIN);
+    g_body.extend_from_slice(&[0x10, 0, 0x10, 3]);
+    // print_u64(u64::MAX); newline()
+    g_body.push(0x42);
+    leb_i64(&mut g_body, -1);
+    g_body.extend_from_slice(&[0x10, 1, 0x10, 3]);
+    // print_bool(1); newline(); exit(7)
+    g_body.extend_from_slice(&[0x41, 1, 0x10, 2, 0x10, 3, 0x41, 7, 0x10, 4]);
+
+    let goose_wasm = wasm_module(&[
+        section(
+            1,
+            &[
+                3, 0x60, 1, 0x7e, 0, // 0: (i64)->()
+                0x60, 1, 0x7f, 0, // 1: (i32)->()
+                0x60, 0, 0, // 2: ()->()
+            ],
+        ),
+        section(2, &imp_g),
+        section(3, &[1, 2]),
+        section(5, &[1, 0x05, 1, 2]), // memory64!
+        section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 5]),
+        section(
+            10,
+            &[1].into_iter()
+                .chain(enc_body(&[], &g_body))
+                .collect::<Vec<_>>(),
+        ),
+    ]);
+    let goose_path = root.path("goose.wasm");
+    fs::write(&goose_path, &goose_wasm).unwrap();
+
+    let built = Command::new(bin)
+        .arg("build")
+        .arg(&goose_path)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "cached standalone build failed: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let prog = PathBuf::from(String::from_utf8_lossy(&built.stdout).trim());
+    assert_static_elf64_exec(&prog);
+    let gout = Command::new(&prog).output().unwrap();
+    assert_eq!(gout.status.code(), Some(7));
+    assert_eq!(
+        String::from_utf8_lossy(&gout.stdout),
+        "-1234\n-9223372036854775808\n18446744073709551615\ntrue\n"
+    );
+
+    // 3. Standalone trap reporting: i32.div_s(1, 0) -> stderr "integer divide by zero\n", exit code 1!
+    let trap_wasm = wasm_module(&[
+        section(1, &[1, 0x60, 0, 0]),
+        section(3, &[1, 0]),
+        section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 0]),
+        section(
+            10,
+            &[1].into_iter()
+                .chain(enc_body(&[], &[0x41, 1, 0x41, 0, 0x6d, 0x1a]))
+                .collect::<Vec<_>>(),
+        ),
+    ]);
+    let trap_path = root.path("trap.wasm");
+    let trap_exe = root.path("trap_exe");
+    fs::write(&trap_path, &trap_wasm).unwrap();
+    let st = Command::new(bin)
+        .arg(&trap_path)
+        .args(["-o"])
+        .arg(&trap_exe)
+        .args(["--backend", "x64"])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let tout = Command::new(&trap_exe).output().unwrap();
+    assert_eq!(tout.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&tout.stderr),
+        "Trap: integer divide by zero\n"
+    );
+
+    // 4. Goose `abort(ptr, len, line)` prints message + line to stderr and exits 1.
+    let mut imp_ab = vec![1];
+    enc_str(&mut imp_ab, "goose");
+    enc_str(&mut imp_ab, "abort");
+    imp_ab.push(0x00);
+    leb_u32(&mut imp_ab, 0);
+    let mut data_ab = vec![1, 0x00, 0x41, 0, 0x0b, 4];
+    data_ab.extend_from_slice(b"boom");
+    let mut ab_body = Vec::new();
+    push_i32(&mut ab_body, 0);
+    push_i32(&mut ab_body, 4);
+    push_i32(&mut ab_body, 99);
+    ab_body.extend_from_slice(&[0x10, 0]);
+    let abort_wasm = wasm_module(&[
+        section(1, &[2, 0x60, 3, 0x7f, 0x7f, 0x7f, 0, 0x60, 0, 0]),
+        section(2, &imp_ab),
+        section(3, &[1, 1]),
+        section(5, &[1, 0x01, 1, 1]),
+        section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 1]),
+        section(
+            10,
+            &[1].into_iter()
+                .chain(enc_body(&[], &ab_body))
+                .collect::<Vec<_>>(),
+        ),
+        section(11, &data_ab),
+    ]);
+    let ab_path = root.path("abort.wasm");
+    let ab_exe = root.path("abort_exe");
+    fs::write(&ab_path, &abort_wasm).unwrap();
+    assert!(
+        Command::new(bin)
+            .arg(&ab_path)
+            .args(["-o"])
+            .arg(&ab_exe)
+            .args(["--backend", "x64"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let aout = Command::new(&ab_exe).output().unwrap();
+    assert_eq!(aout.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&aout.stderr),
+        "goose runtime error: boom (line 99)\n"
+    );
+}
+
+#[test]
+fn cli_and_cached_build_aarch64_cdylib_and_standalone_exec() {
+    let bin = Path::new(env!("CARGO_BIN_EXE_wtime-aot"));
+    let root = TempRoot::new("wtime-aot-a64-cli");
+    let cache = root.path("cache");
+    let ok_wasm = root.path("ok.wasm");
+    let direct_so = root.path("direct_a64.so");
+    let direct_exe = root.path("direct_a64_exe");
+
+    let ok_bytes = wasm_module(&[
+        section(1, &[2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 0, 0]),
+        section(3, &[2, 0, 1]),
+        section(
+            7,
+            &[
+                2, 3, b'i', b'n', b'c', 0, 0, 6, b'_', b's', b't', b'a', b'r', b't', 0, 1,
+            ],
+        ),
+        section(10, &[2, 7, 0, 0x20, 0, 0x41, 1, 0x6a, 0x0b, 2, 0, 0x0b]),
+    ]);
+    fs::write(&ok_wasm, &ok_bytes).unwrap();
+
+    // 1. Direct Blot cdylib (--backend aarch64) -> ELF64 ET_DYN EM_AARCH64 (183)
+    let st = Command::new(bin)
+        .arg(&ok_wasm)
+        .args(["-o"])
+        .arg(&direct_so)
+        .args(["--blot-cdylib", "--backend", "aarch64"])
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "aarch64 cdylib build failed: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let so_bytes = fs::read(&direct_so).unwrap();
+    assert_eq!(&so_bytes[0..4], b"\x7fELF");
+    assert_eq!(u16::from_le_bytes([so_bytes[16], so_bytes[17]]), 3); // ET_DYN
+    assert_eq!(u16::from_le_bytes([so_bytes[18], so_bytes[19]]), 183); // EM_AARCH64
+
+    // 2. Cached build (--backend aarch64 --blot-cdylib) -> immutable 0o555 + .sha256 + warm hit
+    let cold = Command::new(bin)
+        .arg("build")
+        .arg(&ok_wasm)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--blot-cdylib", "--backend", "aarch64"])
+        .output()
+        .unwrap();
+    assert!(
+        cold.status.success(),
+        "aarch64 cached cdylib build failed: {}",
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let cached_so = PathBuf::from(String::from_utf8_lossy(&cold.stdout).trim());
+    assert_eq!(
+        fs::symlink_metadata(&cached_so)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o555
+    );
+    let warm = Command::new(bin)
+        .arg("build")
+        .arg(&ok_wasm)
+        .args(["--cache"])
+        .arg(&cache)
+        .args(["--blot-cdylib", "--backend", "aarch64"])
+        .output()
+        .unwrap();
+    assert!(warm.status.success());
+    assert_eq!(
+        PathBuf::from(String::from_utf8_lossy(&warm.stdout).trim()),
+        cached_so
+    );
+
+    // 3. Direct standalone static executable (--backend aarch64) -> ELF64 ET_EXEC EM_AARCH64
+    let st_exec = Command::new(bin)
+        .arg(&ok_wasm)
+        .args(["-o"])
+        .arg(&direct_exe)
+        .args(["--backend", "aarch64"])
+        .output()
+        .unwrap();
+    assert!(
+        st_exec.status.success(),
+        "aarch64 standalone build failed: {}",
+        String::from_utf8_lossy(&st_exec.stderr)
+    );
+    assert_static_elf64_exec(&direct_exe);
+    let exe_bytes = fs::read(&direct_exe).unwrap();
+    assert_eq!(u16::from_le_bytes([exe_bytes[18], exe_bytes[19]]), 183); // EM_AARCH64
 }

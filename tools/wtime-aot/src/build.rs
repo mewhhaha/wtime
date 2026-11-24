@@ -49,7 +49,7 @@ static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const MAX_WASM_BYTES_C_RUST: usize = 256 << 20;
 
-const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
+const USAGE: &str = "usage: wtime-aot build module.wasm --cache DIR [--toolchain NAME] [--module-path NAME] [--rt PATH] [--jobs N] [--time-limit SECONDS] [--target-cpu NAME] [--blot-cdylib] [--backend rust|c|x64|aarch64] [--c-opt auto|O2|O1|O0] [--train PROGRAM-ARGUMENTS...]";
 
 /// Codegen/compiler backend used by `wtime-aot build`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +57,7 @@ pub enum Backend {
     Rust,
     C,
     X64,
+    Aarch64,
 }
 
 /// Typed build error distinguishing clean `--backend x64` admission rejections (CLI exit code `4`)
@@ -134,6 +135,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
                     "rust" => Backend::Rust,
                     "c" => Backend::C,
                     "x64" => Backend::X64,
+                    "aarch64" => Backend::Aarch64,
                     other => return Err(format!("{USAGE}\ninvalid --backend {other:?}").into()),
                 };
             }
@@ -154,8 +156,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
     let (Some(module), Some(cache)) = (module, cache) else {
         return Err(USAGE.into());
     };
-    if matches!(backend, Backend::C | Backend::X64) && target != crate::codegen::Target::BlotCdylib
-    {
+    if backend == Backend::C && target != crate::codegen::Target::BlotCdylib {
         return Err(format!("--backend {:?} currently requires --blot-cdylib", backend).into());
     }
     if c_opt_explicit && backend != Backend::C {
@@ -165,7 +166,7 @@ pub fn main(arguments: Vec<String>, default_rt: PathBuf) -> Result<(), BuildErro
         )
         .into());
     }
-    if matches!(backend, Backend::C | Backend::X64) && train.is_some() {
+    if matches!(backend, Backend::C | Backend::X64 | Backend::Aarch64) && train.is_some() {
         return Err(format!("--train is not supported with --backend {:?}", backend).into());
     }
     let options = Options {
@@ -243,6 +244,9 @@ fn build_classified(
     if options.backend == Backend::X64 {
         return build_x64(module, cache, options, deadline);
     }
+    if options.backend == Backend::Aarch64 {
+        return build_aarch64(module, cache, options, deadline);
+    }
     let prepared = prepare(module, cache, module_path, rt, options, deadline)?;
     Ok(cached(
         &prepared,
@@ -311,17 +315,20 @@ pub(crate) fn read_bounded_wasm(
         ));
     }
     let mut file = open_regular_file(path)?;
+    let mut prealloc = 0usize;
     if let Ok(meta) = file.metadata()
         && meta.is_file()
-        && meta.len() > max_bytes as u64
     {
-        return Err(format!(
-            "{}: input size ({} B) exceeds maximum module limit ({max_bytes} B)",
-            path.display(),
-            meta.len()
-        ));
+        if meta.len() > max_bytes as u64 {
+            return Err(format!(
+                "{}: input size ({} B) exceeds maximum module limit ({max_bytes} B)",
+                path.display(),
+                meta.len()
+            ));
+        }
+        prealloc = (meta.len() as usize).min(max_bytes);
     }
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(prealloc);
     let mut chunk = [0u8; 65_536];
     loop {
         if let Some(dl) = deadline
@@ -1385,6 +1392,85 @@ fn build_c(
     }
 }
 
+/// Pure-Rust Wasm -> Linux AArch64 ELF64 cached build path (`--backend aarch64`).
+fn build_aarch64(
+    module: &Path,
+    cache: &Path,
+    options: &Options,
+    deadline: std::time::Instant,
+) -> Result<PathBuf, BuildError> {
+    use std::io::Write as _;
+    check_deadline(deadline, options.time_limit)?;
+    let wasm = read_bounded_wasm_for_x64(module, Some(deadline))?;
+    check_deadline(deadline, options.time_limit)?;
+    let cache = ensure_private_dir(cache)?;
+    let gen_sha = generator_fingerprint::GENERATOR_BUILD_SHA256;
+    let wasm_sha = crate::sha256::digest(&wasm);
+    let a64_target = match options.target {
+        crate::codegen::Target::BlotCdylib => crate::x64::module::X64Target::BlotCdylib,
+        crate::codegen::Target::GooseBin => crate::x64::module::X64Target::StandaloneExec,
+    };
+    let artifact_name = match options.target {
+        crate::codegen::Target::BlotCdylib => "library.so",
+        crate::codegen::Target::GooseBin => "program",
+    };
+    let digest_name = match options.target {
+        crate::codegen::Target::BlotCdylib => "library.so.sha256",
+        crate::codegen::Target::GooseBin => "program.sha256",
+    };
+    let mut key = Sha256::new();
+    field(&mut key, "wtime-aot build aarch64 1", &[]);
+    field(&mut key, "target", artifact_name.as_bytes());
+    field(&mut key, "wasm digest", &wasm_sha);
+    field(&mut key, "generator build sha256", &gen_sha);
+    let key_hex = key.hex();
+
+    let (publish_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
+    check_deadline(deadline, options.time_limit)?;
+    let program = entry.join(artifact_name);
+    let digest_file = entry.join(digest_name);
+    if verified_cached_artifact(&program, &digest_file) {
+        sweep_stale_staged_artifacts_bounded(&entry, deadline);
+        publish_lock.release_checked(options.time_limit)?;
+        return Ok(program);
+    }
+    for stale in [&digest_file, &program] {
+        if let Err(e) = fs::remove_file(stale)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(BuildError::Failed(format!("{}: {e}", stale.display())));
+        }
+    }
+    let compile_opts = crate::aarch64::A64CompileOptions {
+        target: a64_target,
+        optimize: true,
+        deadline: Some(deadline),
+    };
+    let elf_bytes =
+        crate::aarch64::compile_wasm_to_aarch64(&wasm, &compile_opts).map_err(|e| match e {
+            crate::x64::X64CompileError::AdmissionRejected(s) => BuildError::AdmissionRejected(s),
+            crate::x64::X64CompileError::Failed(s) => BuildError::Failed(s),
+        })?;
+    check_deadline(deadline, options.time_limit)?;
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staged = entry.join(format!("{artifact_name}.{}.{seq}", std::process::id()));
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(&staged)
+        .and_then(|mut f| f.write_all(&elf_bytes))
+        .map_err(|e| BuildError::Failed(format!("{}: {e}", staged.display())))?;
+    mark_file_immutable(&staged, 0o555).map_err(BuildError::Failed)?;
+    fs::rename(&staged, &program)
+        .map_err(|e| BuildError::Failed(format!("{}: {e}", program.display())))?;
+    let sha_hex = crate::sha256::hex(&elf_bytes);
+    publish_digest_sidecar(&entry, artifact_name, &sha_hex, &digest_file)
+        .map_err(BuildError::Failed)?;
+    publish_lock.release_checked(options.time_limit)?;
+    Ok(program)
+}
+
 /// Pure-Rust Wasm -> Linux x86-64 ELF64 `.so` cached build path (`--backend x64`).
 fn build_x64(
     module: &Path,
@@ -1410,11 +1496,25 @@ fn build_x64(
                 .is_some_and(|s| s == "1" || s.eq_ignore_ascii_case("true"))
         });
 
+    let x64_target = match options.target {
+        crate::codegen::Target::BlotCdylib => crate::x64::module::X64Target::BlotCdylib,
+        crate::codegen::Target::GooseBin => crate::x64::module::X64Target::StandaloneExec,
+    };
+    let artifact_name = match options.target {
+        crate::codegen::Target::BlotCdylib => "library.so",
+        crate::codegen::Target::GooseBin => "program",
+    };
+    let digest_name = match options.target {
+        crate::codegen::Target::BlotCdylib => "library.so.sha256",
+        crate::codegen::Target::GooseBin => "program.sha256",
+    };
+
     // Key strictly by resolved internal ISA profile (`x64-v2` vs `x64-v3`), never raw `"native"`.
     // In release builds, bind explicit `WTIME_AOT_VERIFY=1` into the cache key so an earlier
     // unverified cache hit can never bypass IR/regalloc verification when verification is requested.
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build x64 3", &[]);
+    field(&mut key, "wtime-aot build x64 4", &[]);
+    field(&mut key, "target", artifact_name.as_bytes());
     field(&mut key, "wasm digest", &wasm_sha);
     field(&mut key, "generator build sha256", &gen_sha);
     field(&mut key, "isa profile", isa_profile.as_bytes());
@@ -1425,8 +1525,8 @@ fn build_x64(
 
     let (publish_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
     check_deadline(deadline, options.time_limit)?;
-    let program = entry.join("library.so");
-    let digest_file = entry.join("library.so.sha256");
+    let program = entry.join(artifact_name);
+    let digest_file = entry.join(digest_name);
     if verified_cached_artifact(&program, &digest_file) {
         sweep_stale_staged_artifacts_bounded(&entry, deadline);
         publish_lock.release_checked(options.time_limit)?;
@@ -1443,6 +1543,7 @@ fn build_x64(
     check_deadline(deadline, options.time_limit)?;
 
     let compile_opts = crate::x64::X64CompileOptions {
+        target: x64_target,
         isa,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
@@ -1469,7 +1570,7 @@ fn build_x64(
 
     let t_write = std::time::Instant::now();
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
+    let staged = entry.join(format!("{artifact_name}.{}.{seq}", std::process::id()));
     let key_file = entry.join("key.txt");
     let key_txt_prefix = format!(
         "key {key_hex}\nbackend x64\nisa profile {isa_profile}\ntarget cpu {}\nwasm sha256 {}\nso sha256 ",
@@ -1494,7 +1595,7 @@ fn build_x64(
             sweep_stale_staged_artifacts_inner(entry, true, None);
         };
 
-    let staged_name = format!("library.so.{}.{seq}", std::process::id());
+    let staged_name = format!("{artifact_name}.{}.{seq}", std::process::id());
     let lock_pub = Arc::new(publish_lock.into_inner());
     let lock_weak = Arc::downgrade(&lock_pub);
 
@@ -1559,7 +1660,7 @@ fn build_x64(
                     fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
                 })
                 .and_then(|()| check_active())
-                .and_then(|()| publish_digest_sidecar(&entry, "library.so", &so_sha, &digest_file))
+                .and_then(|()| publish_digest_sidecar(&entry, artifact_name, &so_sha, &digest_file))
                 .and_then(|()| check_active());
 
             let (lk, cv) = &*state_bg;
@@ -1781,6 +1882,8 @@ fn sweep_stale_staged_artifacts_inner(
         let Some(rest) = s
             .strip_prefix("library.so.sha256.")
             .or_else(|| s.strip_prefix("library.so."))
+            .or_else(|| s.strip_prefix("program.sha256."))
+            .or_else(|| s.strip_prefix("program."))
         else {
             continue;
         };

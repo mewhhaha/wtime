@@ -135,6 +135,10 @@ impl Store {
         // A body is lowered once warm (see `warm`). Until then its runs see
         // every instruction as Slow, which runs it from its source.
         let body = frame.function.body;
+        let height_safe = frame
+            .base
+            .checked_add(module.data.inner.function_bounds()[body].stack_peak)
+            .is_some_and(|h| h <= max_height);
         let heat = &module.data.heat[body];
         let lowered: &[lowered::Op] = match module.data.lowered[body].get() {
             Some(lowered) => lowered,
@@ -343,7 +347,7 @@ impl Store {
                         }
                         *n -= 1;
                     }
-                    if stack.len() + $extra > max_height {
+                    if !height_safe && stack.len() + $extra > max_height {
                         return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
                     }
                     #[cfg(feature = "performance-counters")]
@@ -413,6 +417,31 @@ impl Store {
                     }
                 }};
             }
+            // Fast-path coalesced charge for multi-op pure/non-trapping fused groups
+            // when stack height is statically proven safe and enough fuel remains.
+            #[cfg(not(any(feature = "performance-counters", feature = "opcode-coverage")))]
+            macro_rules! try_charge_group {
+                ($extra_ops:literal) => {{
+                    if height_safe
+                        && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                        && (!FUEL || fuel.is_none_or(|n| n >= $extra_ops))
+                    {
+                        if FUEL && let Some(n) = fuel {
+                            *n -= $extra_ops;
+                        }
+                        *pc_ref = pc + $extra_ops + 1;
+                        true
+                    } else {
+                        false
+                    }
+                }};
+            }
+            #[cfg(any(feature = "performance-counters", feature = "opcode-coverage"))]
+            macro_rules! try_charge_group {
+                ($extra_ops:literal) => {
+                    false
+                };
+            }
             match lop {
                 lowered::Op::LocalSetGet { set, get } => {
                     local_set!(set);
@@ -465,8 +494,10 @@ impl Store {
                     opcode,
                 } => {
                     let a = local!(local);
-                    charge_at!(1, 1);
-                    charge_at!(2, 2);
+                    if !try_charge_group!(2) {
+                        charge_at!(1, 1);
+                        charge_at!(2, 2);
+                    }
                     stack.push(const_binop(opcode, a, value)?)
                 }
                 lowered::Op::LocalConstBinSet {
@@ -476,11 +507,16 @@ impl Store {
                     opcode,
                 } => {
                     let a = local!(local);
-                    charge_at!(1, 1);
-                    charge_at!(2, 2);
-                    let result = const_binop(opcode, a, value)?;
-                    charge_at!(3, 1);
-                    set_local!(to, result)
+                    if try_charge_group!(3) {
+                        let result = const_binop(opcode, a, value)?;
+                        set_local!(to, result)
+                    } else {
+                        charge_at!(1, 1);
+                        charge_at!(2, 2);
+                        let result = const_binop(opcode, a, value)?;
+                        charge_at!(3, 1);
+                        set_local!(to, result)
+                    }
                 }
                 lowered::Op::LocalLoad {
                     local,
@@ -511,9 +547,14 @@ impl Store {
                     opcode,
                 } => {
                     let a = local!(addr);
-                    charge_at!(1, 1);
-                    let v = local!(value);
-                    charge_at!(2, 2);
+                    let v = if try_charge_group!(2) {
+                        local!(value)
+                    } else {
+                        charge_at!(1, 1);
+                        let v = local!(value);
+                        charge_at!(2, 2);
+                        v
+                    };
                     let index =
                         *memory0.get_or_insert_with(|| self.instances[inst_id].mems[0].0.index);
                     if !self.store_fast(index, opcode, a, v, u64::from(offset)) {
@@ -573,9 +614,14 @@ impl Store {
                 }
                 lowered::Op::LocalLocalBin { a, b, opcode } => {
                     let x = local!(a);
-                    charge_at!(1, 1);
-                    let y = local!(b);
-                    charge_at!(2, 2);
+                    let y = if try_charge_group!(2) {
+                        local!(b)
+                    } else {
+                        charge_at!(1, 1);
+                        let y = local!(b);
+                        charge_at!(2, 2);
+                        y
+                    };
                     stack.push(int_binop(opcode, x, y)?)
                 }
                 lowered::Op::LocalUnary { local, opcode } => {
@@ -589,11 +635,16 @@ impl Store {
                     opcode,
                 } => {
                     let x = local!(local);
-                    charge_at!(1, 1);
-                    let w = int_unary(0xa7, x)?;
-                    charge_at!(2, 1);
-                    charge_at!(3, 2);
-                    stack.push(const_binop(opcode, w, value)?)
+                    if try_charge_group!(3) {
+                        let w = int_unary(0xa7, x)?;
+                        stack.push(const_binop(opcode, w, value)?)
+                    } else {
+                        charge_at!(1, 1);
+                        let w = int_unary(0xa7, x)?;
+                        charge_at!(2, 1);
+                        charge_at!(3, 2);
+                        stack.push(const_binop(opcode, w, value)?)
+                    }
                 }
                 lowered::Op::Else => {
                     *pc_ref = frame
@@ -714,7 +765,11 @@ impl Store {
                     )),
                     _ => numeric::exec(opcode, stack)?,
                 },
-                lowered::Op::Numeric(opcode) => numeric::exec(opcode, stack)?,
+                lowered::Op::Numeric(opcode) => {
+                    if !exec_float_fast(opcode, stack)? {
+                        numeric::exec(opcode, stack)?;
+                    }
+                }
                 // Run from the source instruction, exactly as before lowering.
                 lowered::Op::Slow => {
                     slow += 1;
@@ -1003,10 +1058,67 @@ impl Store {
                 }
                 *n -= 1;
             }
-            if stack.len() > max_height {
+            if !height_safe && stack.len() > max_height {
                 return Err(err(ErrorKind::ResourceLimit, "operand stack limit"));
             }
         }
+    }
+}
+
+/// Inline fast path for common f32/f64 binary arithmetic and comparisons.
+#[inline(always)]
+fn exec_float_fast(opcode: u16, stack: &mut Vec<Value>) -> Result<bool> {
+    match opcode {
+        0x92..=0x95 => {
+            let b = match stack.pop() {
+                Some(Value::F32(b)) => f32::from_bits(b),
+                Some(_) => return Err(trap("numeric type mismatch")),
+                None => return Err(trap("operand stack underflow")),
+            };
+            let slot = stack
+                .last_mut()
+                .ok_or_else(|| trap("operand stack underflow"))?;
+            let Value::F32(a) = *slot else {
+                return Err(trap("numeric type mismatch"));
+            };
+            let a = f32::from_bits(a);
+            let r = match opcode {
+                0x92 => a + b,
+                0x93 => a - b,
+                0x94 => a * b,
+                _ => a / b,
+            };
+            *slot = Value::F32(r.to_bits());
+            Ok(true)
+        }
+        0xa0..=0xa3 | 0x61..=0x66 => {
+            let b = match stack.pop() {
+                Some(Value::F64(b)) => f64::from_bits(b),
+                Some(_) => return Err(trap("numeric type mismatch")),
+                None => return Err(trap("operand stack underflow")),
+            };
+            let slot = stack
+                .last_mut()
+                .ok_or_else(|| trap("operand stack underflow"))?;
+            let Value::F64(a) = *slot else {
+                return Err(trap("numeric type mismatch"));
+            };
+            let a = f64::from_bits(a);
+            *slot = match opcode {
+                0xa0 => Value::F64((a + b).to_bits()),
+                0xa1 => Value::F64((a - b).to_bits()),
+                0xa2 => Value::F64((a * b).to_bits()),
+                0xa3 => Value::F64((a / b).to_bits()),
+                0x61 => Value::I32((a == b) as i32),
+                0x62 => Value::I32((a != b) as i32),
+                0x63 => Value::I32((a < b) as i32),
+                0x64 => Value::I32((a > b) as i32),
+                0x65 => Value::I32((a <= b) as i32),
+                _ => Value::I32((a >= b) as i32),
+            };
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 

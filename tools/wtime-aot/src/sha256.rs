@@ -108,14 +108,14 @@ impl Sha256 {
         macro_rules! r0 {
             ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $idx:expr) => {{
                 let s1 = $e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25);
-                let ch = ($e & $f) ^ (!$e & $g);
+                let ch = $g ^ ($e & ($f ^ $g));
                 let t1 = $h
                     .wrapping_add(s1)
                     .wrapping_add(ch)
                     .wrapping_add(K[$idx])
                     .wrapping_add(w[$idx]);
                 let s0 = $a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22);
-                let maj = ($a & $b) ^ ($a & $c) ^ ($b & $c);
+                let maj = ($a & $b) | ($c & ($a | $b));
                 $d = $d.wrapping_add(t1);
                 $h = t1.wrapping_add(s0.wrapping_add(maj));
             }};
@@ -136,14 +136,14 @@ impl Sha256 {
                     .wrapping_add(ws1);
                 rx_store!(w[I0] = wt, $store);
                 let s1 = $e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25);
-                let ch = ($e & $f) ^ (!$e & $g);
+                let ch = $g ^ ($e & ($f ^ $g));
                 let t1 = $h
                     .wrapping_add(s1)
                     .wrapping_add(ch)
                     .wrapping_add(K[$idx])
                     .wrapping_add(wt);
                 let s0 = $a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22);
-                let maj = ($a & $b) ^ ($a & $c) ^ ($b & $c);
+                let maj = ($a & $b) | ($c & ($a | $b));
                 $d = $d.wrapping_add(t1);
                 $h = t1.wrapping_add(s0.wrapping_add(maj));
             }};

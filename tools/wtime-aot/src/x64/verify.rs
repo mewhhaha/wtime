@@ -513,8 +513,10 @@ fn verify_inst_types(
     res: Option<Val>,
     op: Op,
 ) -> Result<(), String> {
+    let addr_ty = if ir.memory64 { Ty::I64 } else { Ty::I32 };
     match op {
-        Op::ConstI32(_) | Op::MemSize => expect_res(ir, bi, res, Ty::I32, "i32 const/memsize")?,
+        Op::ConstI32(_) => expect_res(ir, bi, res, Ty::I32, "ConstI32")?,
+        Op::MemSize => expect_res(ir, bi, res, addr_ty, "MemSize")?,
         Op::ConstI64(_) => expect_res(ir, bi, res, Ty::I64, "ConstI64")?,
         Op::ConstF32(_) => expect_res(ir, bi, res, Ty::F32, "ConstF32")?,
         Op::ConstF64(_) => expect_res(ir, bi, res, Ty::F64, "ConstF64")?,
@@ -733,17 +735,17 @@ fn verify_inst_types(
             expect_no_res(ir, bi, res, "TableSet")?;
         }
         Op::BoundsCheck { addr, .. } => {
-            expect_ty(ir, bi, addr, Ty::I32, "BoundsCheck.addr")?;
+            expect_ty(ir, bi, addr, addr_ty, "BoundsCheck.addr")?;
             expect_no_res(ir, bi, res, "BoundsCheck")?;
         }
         Op::Load { kind, addr, .. } => {
-            expect_ty(ir, bi, addr, Ty::I32, "Load.addr")?;
+            expect_ty(ir, bi, addr, addr_ty, "Load.addr")?;
             expect_res(ir, bi, res, kind.ty(), "Load")?;
         }
         Op::Store {
             kind, addr, val, ..
         } => {
-            expect_ty(ir, bi, addr, Ty::I32, "Store.addr")?;
+            expect_ty(ir, bi, addr, addr_ty, "Store.addr")?;
             let vty = match kind {
                 super::ir::StoreKind::I8 | super::ir::StoreKind::I16 => {
                     // May store either I32 or I64 wrapped in IR.
@@ -774,20 +776,54 @@ fn verify_inst_types(
             expect_ty(ir, bi, val, vty, "Store.val")?;
             expect_no_res(ir, bi, res, "Store")?;
         }
+        Op::V128LoadLane {
+            width,
+            addr,
+            vec,
+            lane,
+            ..
+        } => {
+            if !matches!(width, 1 | 2 | 4 | 8) || lane >= 16 / width {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad V128LoadLane width={width} lane={lane}",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, addr, addr_ty, "V128LoadLane.addr")?;
+            expect_ty(ir, bi, vec, Ty::V128, "V128LoadLane.vec")?;
+            expect_res(ir, bi, res, Ty::V128, "V128LoadLane")?;
+        }
+        Op::V128StoreLane {
+            width,
+            addr,
+            vec,
+            lane,
+            ..
+        } => {
+            if !matches!(width, 1 | 2 | 4 | 8) || lane >= 16 / width {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad V128StoreLane width={width} lane={lane}",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, addr, addr_ty, "V128StoreLane.addr")?;
+            expect_ty(ir, bi, vec, Ty::V128, "V128StoreLane.vec")?;
+            expect_no_res(ir, bi, res, "V128StoreLane")?;
+        }
         Op::MemGrow(delta) => {
-            expect_ty(ir, bi, delta, Ty::I32, "MemGrow")?;
-            expect_res(ir, bi, res, Ty::I32, "MemGrow")?;
+            expect_ty(ir, bi, delta, addr_ty, "MemGrow")?;
+            expect_res(ir, bi, res, addr_ty, "MemGrow")?;
         }
         Op::MemCopy { dst, src, len } => {
-            expect_ty(ir, bi, dst, Ty::I32, "MemCopy.dst")?;
-            expect_ty(ir, bi, src, Ty::I32, "MemCopy.src")?;
-            expect_ty(ir, bi, len, Ty::I32, "MemCopy.len")?;
+            expect_ty(ir, bi, dst, addr_ty, "MemCopy.dst")?;
+            expect_ty(ir, bi, src, addr_ty, "MemCopy.src")?;
+            expect_ty(ir, bi, len, addr_ty, "MemCopy.len")?;
             expect_no_res(ir, bi, res, "MemCopy")?;
         }
         Op::MemFill { dst, val, len } => {
-            expect_ty(ir, bi, dst, Ty::I32, "MemFill.dst")?;
+            expect_ty(ir, bi, dst, addr_ty, "MemFill.dst")?;
             expect_ty(ir, bi, val, Ty::I32, "MemFill.val")?;
-            expect_ty(ir, bi, len, Ty::I32, "MemFill.len")?;
+            expect_ty(ir, bi, len, addr_ty, "MemFill.len")?;
             expect_no_res(ir, bi, res, "MemFill")?;
         }
         Op::MemCopyConst { dst, src, len, .. } => {
@@ -797,8 +833,8 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, dst, Ty::I32, "MemCopyConst.dst")?;
-            expect_ty(ir, bi, src, Ty::I32, "MemCopyConst.src")?;
+            expect_ty(ir, bi, dst, addr_ty, "MemCopyConst.dst")?;
+            expect_ty(ir, bi, src, addr_ty, "MemCopyConst.src")?;
             expect_no_res(ir, bi, res, "MemCopyConst")?;
         }
         Op::MemFillConst { dst, val, len, .. } => {
@@ -808,44 +844,69 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, dst, Ty::I32, "MemFillConst.dst")?;
+            expect_ty(ir, bi, dst, addr_ty, "MemFillConst.dst")?;
             expect_ty(ir, bi, val, Ty::I32, "MemFillConst.val")?;
             expect_no_res(ir, bi, res, "MemFillConst")?;
         }
-        Op::V128Splat { lane_bytes, val } => {
-            let expected = match lane_bytes {
-                1 | 2 | 4 => Ty::I32,
-                8 => Ty::I64,
-                other => {
-                    return Err(format!(
-                        "verify_ir fn {} bb{bi}: bad V128Splat lane_bytes {other}",
-                        ir.func_index
-                    ));
-                }
-            };
-            expect_ty(ir, bi, val, expected, "V128Splat")?;
+        Op::V128Splat { kind, val } => {
+            expect_ty(ir, bi, val, kind.scalar_ty(), "V128Splat")?;
             expect_res(ir, bi, res, Ty::V128, "V128Splat")?;
         }
-        Op::I64x2ExtractLane { v, lane } => {
-            if lane > 1 {
+        Op::V128ExtractLane { kind, v, lane } => {
+            if lane >= kind.num_lanes() {
                 return Err(format!(
-                    "verify_ir fn {} bb{bi}: bad I64x2ExtractLane lane {lane}",
+                    "verify_ir fn {} bb{bi}: bad V128ExtractLane lane {lane} for {kind:?}",
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, v, Ty::V128, "I64x2ExtractLane")?;
-            expect_res(ir, bi, res, Ty::I64, "I64x2ExtractLane")?;
+            expect_ty(ir, bi, v, Ty::V128, "V128ExtractLane")?;
+            expect_res(ir, bi, res, kind.scalar_ty(), "V128ExtractLane")?;
         }
-        Op::I64x2ReplaceLane { v, x, lane } => {
-            if lane > 1 {
+        Op::V128ReplaceLane { kind, v, x, lane } => {
+            if lane >= kind.num_lanes() {
                 return Err(format!(
-                    "verify_ir fn {} bb{bi}: bad I64x2ReplaceLane lane {lane}",
+                    "verify_ir fn {} bb{bi}: bad V128ReplaceLane lane {lane} for {kind:?}",
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, v, Ty::V128, "I64x2ReplaceLane.v")?;
-            expect_ty(ir, bi, x, Ty::I64, "I64x2ReplaceLane.x")?;
-            expect_res(ir, bi, res, Ty::V128, "I64x2ReplaceLane")?;
+            expect_ty(ir, bi, v, Ty::V128, "V128ReplaceLane.v")?;
+            expect_ty(ir, bi, x, kind.scalar_ty(), "V128ReplaceLane.x")?;
+            expect_res(ir, bi, res, Ty::V128, "V128ReplaceLane")?;
+        }
+        Op::V128Shuffle { a, b, lanes_idx } => {
+            if (lanes_idx as usize) >= ir.v128_consts.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: V128Shuffle lanes_idx {lanes_idx} out of range",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, a, Ty::V128, "V128Shuffle.a")?;
+            expect_ty(ir, bi, b, Ty::V128, "V128Shuffle.b")?;
+            expect_res(ir, bi, res, Ty::V128, "V128Shuffle")?;
+        }
+        Op::V128Un { a, .. } => {
+            expect_ty(ir, bi, a, Ty::V128, "V128Un.a")?;
+            expect_res(ir, bi, res, Ty::V128, "V128Un")?;
+        }
+        Op::V128Bin { a, b, .. } => {
+            expect_ty(ir, bi, a, Ty::V128, "V128Bin.a")?;
+            expect_ty(ir, bi, b, Ty::V128, "V128Bin.b")?;
+            expect_res(ir, bi, res, Ty::V128, "V128Bin")?;
+        }
+        Op::V128Ternary { a, b, c, .. } => {
+            expect_ty(ir, bi, a, Ty::V128, "V128Ternary.a")?;
+            expect_ty(ir, bi, b, Ty::V128, "V128Ternary.b")?;
+            expect_ty(ir, bi, c, Ty::V128, "V128Ternary.c")?;
+            expect_res(ir, bi, res, Ty::V128, "V128Ternary")?;
+        }
+        Op::V128ToI32 { a, .. } => {
+            expect_ty(ir, bi, a, Ty::V128, "V128ToI32.a")?;
+            expect_res(ir, bi, res, Ty::I32, "V128ToI32")?;
+        }
+        Op::V128Shift { v, shift, .. } => {
+            expect_ty(ir, bi, v, Ty::V128, "V128Shift.v")?;
+            expect_ty(ir, bi, shift, Ty::I32, "V128Shift.shift")?;
+            expect_res(ir, bi, res, Ty::V128, "V128Shift")?;
         }
         Op::Call { func, args, rets } => {
             expect_no_res(ir, bi, res, "Call")?;

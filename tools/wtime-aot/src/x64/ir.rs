@@ -197,6 +197,18 @@ pub enum LoadKind {
     I64Load32S,
     I64Load32U,
     V128,
+    V128Load8x8S,
+    V128Load8x8U,
+    V128Load16x4S,
+    V128Load16x4U,
+    V128Load32x2S,
+    V128Load32x2U,
+    V128Load8Splat,
+    V128Load16Splat,
+    V128Load32Splat,
+    V128Load64Splat,
+    V128Load32Zero,
+    V128Load64Zero,
 }
 
 impl LoadKind {
@@ -205,13 +217,29 @@ impl LoadKind {
             LoadKind::I32Load8S
             | LoadKind::I32Load8U
             | LoadKind::I64Load8S
-            | LoadKind::I64Load8U => 1,
+            | LoadKind::I64Load8U
+            | LoadKind::V128Load8Splat => 1,
             LoadKind::I32Load16S
             | LoadKind::I32Load16U
             | LoadKind::I64Load16S
-            | LoadKind::I64Load16U => 2,
-            LoadKind::I32 | LoadKind::F32 | LoadKind::I64Load32S | LoadKind::I64Load32U => 4,
-            LoadKind::I64 | LoadKind::F64 => 8,
+            | LoadKind::I64Load16U
+            | LoadKind::V128Load16Splat => 2,
+            LoadKind::I32
+            | LoadKind::F32
+            | LoadKind::I64Load32S
+            | LoadKind::I64Load32U
+            | LoadKind::V128Load32Splat
+            | LoadKind::V128Load32Zero => 4,
+            LoadKind::I64
+            | LoadKind::F64
+            | LoadKind::V128Load8x8S
+            | LoadKind::V128Load8x8U
+            | LoadKind::V128Load16x4S
+            | LoadKind::V128Load16x4U
+            | LoadKind::V128Load32x2S
+            | LoadKind::V128Load32x2U
+            | LoadKind::V128Load64Splat
+            | LoadKind::V128Load64Zero => 8,
             LoadKind::V128 => 16,
         }
     }
@@ -232,7 +260,76 @@ impl LoadKind {
             | LoadKind::I64Load32U => Ty::I64,
             LoadKind::F32 => Ty::F32,
             LoadKind::F64 => Ty::F64,
-            LoadKind::V128 => Ty::V128,
+            LoadKind::V128
+            | LoadKind::V128Load8x8S
+            | LoadKind::V128Load8x8U
+            | LoadKind::V128Load16x4S
+            | LoadKind::V128Load16x4U
+            | LoadKind::V128Load32x2S
+            | LoadKind::V128Load32x2U
+            | LoadKind::V128Load8Splat
+            | LoadKind::V128Load16Splat
+            | LoadKind::V128Load32Splat
+            | LoadKind::V128Load64Splat
+            | LoadKind::V128Load32Zero
+            | LoadKind::V128Load64Zero => Ty::V128,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SimdSplatKind {
+    I8x16,
+    I16x8,
+    I32x4,
+    I64x2,
+    F32x4,
+    F64x2,
+}
+
+impl SimdSplatKind {
+    pub fn scalar_ty(self) -> Ty {
+        match self {
+            SimdSplatKind::I8x16 | SimdSplatKind::I16x8 | SimdSplatKind::I32x4 => Ty::I32,
+            SimdSplatKind::I64x2 => Ty::I64,
+            SimdSplatKind::F32x4 => Ty::F32,
+            SimdSplatKind::F64x2 => Ty::F64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SimdLaneKind {
+    I8x16S,
+    I8x16U,
+    I16x8S,
+    I16x8U,
+    I32x4,
+    I64x2,
+    F32x4,
+    F64x2,
+}
+
+impl SimdLaneKind {
+    pub fn scalar_ty(self) -> Ty {
+        match self {
+            SimdLaneKind::I8x16S
+            | SimdLaneKind::I8x16U
+            | SimdLaneKind::I16x8S
+            | SimdLaneKind::I16x8U
+            | SimdLaneKind::I32x4 => Ty::I32,
+            SimdLaneKind::I64x2 => Ty::I64,
+            SimdLaneKind::F32x4 => Ty::F32,
+            SimdLaneKind::F64x2 => Ty::F64,
+        }
+    }
+
+    pub fn num_lanes(self) -> u8 {
+        match self {
+            SimdLaneKind::I8x16S | SimdLaneKind::I8x16U => 16,
+            SimdLaneKind::I16x8S | SimdLaneKind::I16x8U => 8,
+            SimdLaneKind::I32x4 | SimdLaneKind::F32x4 => 4,
+            SimdLaneKind::I64x2 | SimdLaneKind::F64x2 => 2,
         }
     }
 }
@@ -361,14 +458,30 @@ pub enum Op {
     Load {
         kind: LoadKind,
         addr: Val,
-        offset: u32,
+        offset: u64,
         checked: bool,
     },
     Store {
         kind: StoreKind,
         addr: Val,
         val: Val,
-        offset: u32,
+        offset: u64,
+        checked: bool,
+    },
+    V128LoadLane {
+        width: u8,
+        addr: Val,
+        vec: Val,
+        offset: u64,
+        lane: u8,
+        checked: bool,
+    },
+    V128StoreLane {
+        width: u8,
+        addr: Val,
+        vec: Val,
+        offset: u64,
+        lane: u8,
         checked: bool,
     },
     MemSize,
@@ -400,17 +513,48 @@ pub enum Op {
     },
 
     V128Splat {
-        lane_bytes: u8,
+        kind: SimdSplatKind,
         val: Val,
     },
-    I64x2ExtractLane {
+    V128ExtractLane {
+        kind: SimdLaneKind,
         v: Val,
         lane: u8,
     },
-    I64x2ReplaceLane {
+    V128ReplaceLane {
+        kind: SimdLaneKind,
         v: Val,
         x: Val,
         lane: u8,
+    },
+    V128Shuffle {
+        a: Val,
+        b: Val,
+        lanes_idx: u32, // index into IrFunc::v128_consts
+    },
+    V128Un {
+        op: u16, // Wasm 0xfdXX opcode
+        a: Val,
+    },
+    V128Bin {
+        op: u16, // Wasm 0xfdXX opcode
+        a: Val,
+        b: Val,
+    },
+    V128Ternary {
+        op: u16, // Wasm 0xfd52 (bitselect)
+        a: Val,
+        b: Val,
+        c: Val,
+    },
+    V128ToI32 {
+        op: u16, // any_true, all_true, bitmask
+        a: Val,
+    },
+    V128Shift {
+        op: u16, // shl, shr_s, shr_u
+        v: Val,
+        shift: Val,
     },
 
     Call {
@@ -450,6 +594,8 @@ impl Op {
             | Op::BoundsCheck { .. }
             | Op::Load { checked: false, .. }
             | Op::Store { .. }
+            | Op::V128LoadLane { checked: false, .. }
+            | Op::V128StoreLane { .. }
             | Op::MemGrow(_)
             | Op::MemCopy { .. }
             | Op::MemFill { .. }
@@ -515,7 +661,9 @@ impl Op {
             | Op::Load { addr: a, .. }
             | Op::MemGrow(a)
             | Op::V128Splat { val: a, .. }
-            | Op::I64x2ExtractLane { v: a, .. } => f(a),
+            | Op::V128ExtractLane { v: a, .. }
+            | Op::V128Un { a, .. }
+            | Op::V128ToI32 { a, .. } => f(a),
             Op::I32Bin(_, a, b)
             | Op::I64Bin(_, a, b)
             | Op::I32Cmp(_, a, b)
@@ -528,9 +676,23 @@ impl Op {
             | Op::Store {
                 addr: a, val: b, ..
             }
-            | Op::I64x2ReplaceLane { v: a, x: b, .. } => {
+            | Op::V128LoadLane {
+                addr: a, vec: b, ..
+            }
+            | Op::V128StoreLane {
+                addr: a, vec: b, ..
+            }
+            | Op::V128ReplaceLane { v: a, x: b, .. }
+            | Op::V128Shuffle { a, b, .. }
+            | Op::V128Bin { a, b, .. }
+            | Op::V128Shift { v: a, shift: b, .. } => {
                 f(a);
                 f(b);
+            }
+            Op::V128Ternary { a, b, c, .. } => {
+                f(a);
+                f(b);
+                f(c);
             }
             Op::Select { cond, a, b } => {
                 f(cond);
@@ -731,6 +893,7 @@ impl Block {
 #[derive(Clone)]
 pub struct IrFunc {
     pub func_index: usize,
+    pub memory64: bool,
     pub params: Vec<Val>,
     pub result_tys: Vec<Ty>,
     pub val_tys: Vec<Ty>,
@@ -784,6 +947,7 @@ impl IrFunc {
 
         Some(Self {
             func_index: self.func_index,
+            memory64: self.memory64,
             params,
             result_tys,
             val_tys,
@@ -826,9 +990,22 @@ impl IrFunc {
 
 /// Pre-scanned per-frame modified live locals so structured Wasm lowers cleanly in one pass.
 struct FrameScan {
-    /// Indexed by opening instruction PC (`0x02`, `0x03`, `0x04`): locals that must be carried
-    /// as block parameters of that frame's merge block (for `block`/`if`) or loop header (for `loop`).
-    frame_locals: HashMap<usize, Vec<u32>>,
+    /// Dense map `pc -> index in `frame_locals`` (`u32::MAX` if no carried locals at `pc`).
+    pc_to_slot: Vec<u32>,
+    frame_locals: Vec<Vec<u32>>,
+}
+
+impl FrameScan {
+    #[inline]
+    fn take_locals(&mut self, pc: usize) -> Vec<u32> {
+        if let Some(&slot) = self.pc_to_slot.get(pc)
+            && slot != u32::MAX
+        {
+            std::mem::take(&mut self.frame_locals[slot as usize])
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 fn scan_frame_locals(
@@ -836,17 +1013,26 @@ fn scan_frame_locals(
     n_locals: usize,
     budget: Option<&CompileBudget>,
 ) -> Res<FrameScan> {
-    // Pass 1: find matching `end` PC for every `block`/`loop`/`if`.
-    let mut end_pc = vec![0usize; code.len()];
-    let mut open_pcs: Vec<(usize, bool)> = Vec::new(); // (open_pc, is_loop)
-    let mut open_loops: Vec<usize> = Vec::new(); // stack of enclosing loop PCs; first() has max end_pc in O(1)
-    let mut frame_writes: HashMap<usize, Vec<u32>> = HashMap::new();
-    let mut last_read = vec![0usize; n_locals];
-    let mut total_marks = 0usize;
+    // Fast check: count structured control frames (`block`/`loop`/`if`); skip all allocations if none!
+    let mut n_frames = 0usize;
+    for insn in code {
+        if matches!(insn.opcode, 0x02..=0x04) {
+            n_frames += 1;
+        }
+    }
+    if n_frames == 0 {
+        return Ok(FrameScan {
+            pc_to_slot: Vec::new(),
+            frame_locals: Vec::new(),
+        });
+    }
 
-    // First find end_pc of each structured block so loop reads can extend `last_read` to loop end.
+    // Pass 1: assign dense `frame_id` (0..n_frames) and matching `end_pc` for every `block`/`loop`/`if`.
+    let mut pc_to_slot = vec![u32::MAX; code.len()];
+    let mut frame_open_pc = Vec::with_capacity(n_frames);
+    let mut frame_end_pc = vec![0usize; n_frames];
     {
-        let mut stk: Vec<usize> = Vec::new();
+        let mut stk: Vec<u32> = Vec::new();
         for (pc, insn) in code.iter().enumerate() {
             if let Some(bg) = budget
                 && (pc & 4095) == 4095
@@ -854,16 +1040,27 @@ fn scan_frame_locals(
                 bg.check_deadline()?;
             }
             match insn.opcode {
-                0x02..=0x04 => stk.push(pc),
+                0x02..=0x04 => {
+                    let fid = frame_open_pc.len() as u32;
+                    pc_to_slot[pc] = fid;
+                    frame_open_pc.push(pc);
+                    stk.push(fid);
+                }
                 0x0b => {
-                    if let Some(op_pc) = stk.pop() {
-                        end_pc[op_pc] = pc;
+                    if let Some(fid) = stk.pop() {
+                        frame_end_pc[fid as usize] = pc;
                     }
                 }
                 _ => {}
             }
         }
     }
+
+    let mut open_frames: Vec<(u32, bool)> = Vec::new(); // (frame_id, is_loop)
+    let mut open_loops: Vec<u32> = Vec::new();
+    let mut frame_writes: Vec<Vec<u32>> = vec![Vec::new(); n_frames];
+    let mut last_read = vec![0usize; n_locals];
+    let mut total_marks = 0usize;
 
     for (pc, insn) in code.iter().enumerate() {
         if let Some(bg) = budget
@@ -872,13 +1069,14 @@ fn scan_frame_locals(
             bg.check_deadline()?;
         }
         match insn.opcode {
-            0x02 | 0x04 => open_pcs.push((pc, false)),
+            0x02 | 0x04 => open_frames.push((pc_to_slot[pc], false)),
             0x03 => {
-                open_pcs.push((pc, true));
-                open_loops.push(pc);
+                let fid = pc_to_slot[pc];
+                open_frames.push((fid, true));
+                open_loops.push(fid);
             }
             0x0b => {
-                if let Some((_, is_loop)) = open_pcs.pop()
+                if let Some((_, is_loop)) = open_frames.pop()
                     && is_loop
                 {
                     open_loops.pop();
@@ -890,7 +1088,7 @@ fn scan_frame_locals(
                     if xu < n_locals {
                         let eff_end = open_loops
                             .first()
-                            .map_or(pc, |&outer| end_pc[outer].max(pc));
+                            .map_or(pc, |&outer| frame_end_pc[outer as usize].max(pc));
                         if eff_end > last_read[xu] {
                             last_read[xu] = eff_end;
                         }
@@ -899,14 +1097,14 @@ fn scan_frame_locals(
             }
             0x21 | 0x22 => {
                 if let Immediate::Index(x) = insn.immediate {
-                    total_marks = total_marks.saturating_add(open_pcs.len());
+                    total_marks = total_marks.saturating_add(open_frames.len());
                     if total_marks > MAX_FRAME_SCAN_WRITES {
                         return Err(format!(
                             "x64: nested frame local-write scan ({total_marks}) exceeds cap {MAX_FRAME_SCAN_WRITES}"
                         ));
                     }
-                    for &(fpc, _) in &open_pcs {
-                        frame_writes.entry(fpc).or_default().push(x);
+                    for &(fid, _) in &open_frames {
+                        frame_writes[fid as usize].push(x);
                     }
                 }
             }
@@ -914,21 +1112,24 @@ fn scan_frame_locals(
         }
     }
 
-    let mut frame_locals: HashMap<usize, Vec<u32>> = HashMap::new();
-    for (fpc, mut locals) in frame_writes {
+    for (fid, locals) in frame_writes.iter_mut().enumerate() {
+        if locals.is_empty() {
+            continue;
+        }
         locals.sort_unstable();
         locals.dedup();
+        let fpc = frame_open_pc[fid];
         let is_loop = code[fpc].opcode == 0x03;
-        let epc = end_pc[fpc];
+        let epc = frame_end_pc[fid];
         locals.retain(|&x| {
             let lr = last_read[x as usize];
             if is_loop { lr > fpc } else { lr > epc }
         });
-        if !locals.is_empty() {
-            frame_locals.insert(fpc, locals);
-        }
     }
-    Ok(FrameScan { frame_locals })
+    Ok(FrameScan {
+        pc_to_slot,
+        frame_locals: frame_writes,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -972,12 +1173,14 @@ struct Builder {
 impl Builder {
     fn new(
         func_index: usize,
+        memory64: bool,
         result_tys: Vec<Ty>,
         needs_stack_check: bool,
         const_fold: bool,
     ) -> Self {
         let mut ir = IrFunc {
             func_index,
+            memory64,
             params: Vec::new(),
             result_tys,
             val_tys: Vec::new(),
@@ -1423,13 +1626,13 @@ pub fn lower_wasm_to_ir_with_budget(
         local_tys.push(Ty::from_val(vt));
     }
 
-    let scan = scan_frame_locals(&body.instructions, local_tys.len(), budget)?;
+    let mut scan = scan_frame_locals(&body.instructions, local_tys.len(), budget)?;
     let mut local_undo: Vec<(u32, Val)> = Vec::new();
     let mut active_if_then_depth: usize = 0;
     let mut total_if_snapshot_entries: usize = 0;
     // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
     // allocated native frame bytes and call depth.
-    let mut b = Builder::new(func_index, result_tys.clone(), true, opt);
+    let mut b = Builder::new(func_index, module.memory64, result_tys.clone(), true, opt);
 
     // Initialize params and zero locals in entry block (bb0).
     let mut locals: Vec<Val> = Vec::with_capacity(local_tys.len());
@@ -1564,7 +1767,7 @@ pub fn lower_wasm_to_ir_with_budget(
                 let (params, results) = block_type_tys(module, &insn.immediate)?;
                 let height = stack.len() - params.len();
                 let merge_bb = b.new_block(false)?;
-                let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
+                let carried = scan.take_locals(pc);
                 let n_new = results.len().saturating_add(carried.len());
                 if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
                     return Err(format!(
@@ -1596,7 +1799,7 @@ pub fn lower_wasm_to_ir_with_budget(
                 let (params, results) = block_type_tys(module, &insn.immediate)?;
                 let height = stack.len() - params.len();
                 let header_bb = b.new_block(true)?;
-                let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
+                let carried = scan.take_locals(pc);
                 let n_new = params.len().saturating_add(carried.len());
                 if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
                     return Err(format!(
@@ -1656,7 +1859,7 @@ pub fn lower_wasm_to_ir_with_budget(
                 let then_bb = b.new_block(false)?;
                 let else_bb = b.new_block(false)?;
                 let merge_bb = b.new_block(false)?;
-                let carried = scan.frame_locals.get(&pc).cloned().unwrap_or_default();
+                let carried = scan.take_locals(pc);
                 let n_new = results.len().saturating_add(carried.len());
                 if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
                     return Err(format!(
@@ -2102,7 +2305,7 @@ pub fn lower_wasm_to_ir_with_budget(
                 let r = b.emit(Ty::I32, Op::I64Eqz(v));
                 stack.push(r);
             }
-            0x28..=0x35 | 0xfd00 => {
+            0x28..=0x35 | 0xfd00..=0xfd0a | 0xfd5c | 0xfd5d => {
                 let Immediate::MemArg {
                     memory: 0, offset, ..
                 } = insn.immediate
@@ -2110,12 +2313,6 @@ pub fn lower_wasm_to_ir_with_budget(
                     return Err("load on unsupported memory".into());
                 };
                 let addr = stack.pop().ok_or("load addr")?;
-                if offset > u32::MAX as u64 {
-                    b.emit_void(Op::Trap(TRAP_OOB));
-                    b.terminate(Term::Unreachable);
-                    frames.last_mut().unwrap().unreachable = true;
-                    continue;
-                }
                 let kind = match op {
                     0x28 => LoadKind::I32,
                     0x29 => LoadKind::I64,
@@ -2131,14 +2328,34 @@ pub fn lower_wasm_to_ir_with_budget(
                     0x33 => LoadKind::I64Load16U,
                     0x34 => LoadKind::I64Load32S,
                     0x35 => LoadKind::I64Load32U,
-                    _ => LoadKind::V128,
+                    0xfd00 => LoadKind::V128,
+                    0xfd01 => LoadKind::V128Load8x8S,
+                    0xfd02 => LoadKind::V128Load8x8U,
+                    0xfd03 => LoadKind::V128Load16x4S,
+                    0xfd04 => LoadKind::V128Load16x4U,
+                    0xfd05 => LoadKind::V128Load32x2S,
+                    0xfd06 => LoadKind::V128Load32x2U,
+                    0xfd07 => LoadKind::V128Load8Splat,
+                    0xfd08 => LoadKind::V128Load16Splat,
+                    0xfd09 => LoadKind::V128Load32Splat,
+                    0xfd0a => LoadKind::V128Load64Splat,
+                    0xfd5c => LoadKind::V128Load32Zero,
+                    _ => LoadKind::V128Load64Zero,
                 };
+                if (!module.memory64 && offset > u32::MAX as u64)
+                    || offset.checked_add(kind.bytes()).is_none()
+                {
+                    b.emit_void(Op::Trap(TRAP_OOB));
+                    b.terminate(Term::Unreachable);
+                    frames.last_mut().unwrap().unreachable = true;
+                    continue;
+                }
                 let r = b.emit(
                     kind.ty(),
                     Op::Load {
                         kind,
                         addr,
-                        offset: offset as u32,
+                        offset,
                         checked: false,
                     },
                 );
@@ -2153,12 +2370,6 @@ pub fn lower_wasm_to_ir_with_budget(
                 };
                 let val = stack.pop().ok_or("store val")?;
                 let addr = stack.pop().ok_or("store addr")?;
-                if offset > u32::MAX as u64 {
-                    b.emit_void(Op::Trap(TRAP_OOB));
-                    b.terminate(Term::Unreachable);
-                    frames.last_mut().unwrap().unreachable = true;
-                    continue;
-                }
                 let kind = match op {
                     0x36 | 0x3e => StoreKind::I32,
                     0x37 => StoreKind::I64,
@@ -2168,27 +2379,95 @@ pub fn lower_wasm_to_ir_with_budget(
                     0x3b | 0x3d => StoreKind::I16,
                     _ => StoreKind::V128,
                 };
+                if (!module.memory64 && offset > u32::MAX as u64)
+                    || offset.checked_add(kind.bytes()).is_none()
+                {
+                    b.emit_void(Op::Trap(TRAP_OOB));
+                    b.terminate(Term::Unreachable);
+                    frames.last_mut().unwrap().unreachable = true;
+                    continue;
+                }
                 b.emit_void(Op::Store {
                     kind,
                     addr,
                     val,
-                    offset: offset as u32,
+                    offset,
                     checked: false,
                 });
             }
+            0xfd54..=0xfd5b => {
+                let (offset, lane) = match &insn.immediate {
+                    Immediate::MemLane {
+                        memory: 0,
+                        offset,
+                        lane,
+                        ..
+                    } => (*offset, *lane),
+                    Immediate::Bytes(bs) if bs.len() == 17 => {
+                        let off = u64::from_le_bytes(bs[4..12].try_into().unwrap());
+                        (off, bs[16])
+                    }
+                    _ => return Err("simd lane load/store on unsupported memory".into()),
+                };
+                let width: u8 = match (op - 0xfd54) % 4 {
+                    0 => 1,
+                    1 => 2,
+                    2 => 4,
+                    _ => 8,
+                };
+                let vec = stack.pop().ok_or("simd lane vec")?;
+                let addr = stack.pop().ok_or("simd lane addr")?;
+                if (!module.memory64 && offset > u32::MAX as u64)
+                    || offset.checked_add(u64::from(width)).is_none()
+                {
+                    b.emit_void(Op::Trap(TRAP_OOB));
+                    b.terminate(Term::Unreachable);
+                    frames.last_mut().unwrap().unreachable = true;
+                    continue;
+                }
+                if op <= 0xfd57 {
+                    let r = b.emit(
+                        Ty::V128,
+                        Op::V128LoadLane {
+                            width,
+                            addr,
+                            vec,
+                            offset,
+                            lane,
+                            checked: false,
+                        },
+                    );
+                    stack.push(r);
+                } else {
+                    b.emit_void(Op::V128StoreLane {
+                        width,
+                        addr,
+                        vec,
+                        offset,
+                        lane,
+                        checked: false,
+                    });
+                }
+            }
             0x3f => {
+                let addr_ty = if module.memory64 { Ty::I64 } else { Ty::I32 };
                 let v = if b.const_fold
                     && let Some(bytes) = module.fixed32
                 {
-                    b.const_i32((bytes >> 16) as i32)
+                    if module.memory64 {
+                        b.const_i64((bytes >> 16) as i64)
+                    } else {
+                        b.const_i32((bytes >> 16) as i32)
+                    }
                 } else {
-                    b.emit(Ty::I32, Op::MemSize)
+                    b.emit(addr_ty, Op::MemSize)
                 };
                 stack.push(v);
             }
             0x40 => {
+                let addr_ty = if module.memory64 { Ty::I64 } else { Ty::I32 };
                 let delta = stack.pop().ok_or("memory.grow")?;
-                let v = b.emit(Ty::I32, Op::MemGrow(delta));
+                let v = b.emit(addr_ty, Op::MemGrow(delta));
                 stack.push(v);
             }
             0x41 => {
@@ -2223,8 +2502,13 @@ pub fn lower_wasm_to_ir_with_budget(
                 let len = stack.pop().ok_or("mcopy len")?;
                 let src = stack.pop().ok_or("mcopy src")?;
                 let dst = stack.pop().ok_or("mcopy dst")?;
-                if let Some(c) = b.as_i32(len)
-                    && (c as u32) <= 64
+                let const_len = if module.memory64 {
+                    b.as_i64(len).map(|c| c as u64)
+                } else {
+                    b.as_i32(len).map(|c| u64::from(c as u32))
+                };
+                if let Some(c) = const_len
+                    && c <= 64
                 {
                     b.emit_void(Op::MemCopyConst {
                         dst,
@@ -2241,8 +2525,13 @@ pub fn lower_wasm_to_ir_with_budget(
                 let len = stack.pop().ok_or("mfill len")?;
                 let val = stack.pop().ok_or("mfill val")?;
                 let dst = stack.pop().ok_or("mfill dst")?;
-                if let Some(c) = b.as_i32(len)
-                    && (c as u32) <= 64
+                let const_len = if module.memory64 {
+                    b.as_i64(len).map(|c| c as u64)
+                } else {
+                    b.as_i32(len).map(|c| u64::from(c as u32))
+                };
+                if let Some(c) = const_len
+                    && c <= 64
                 {
                     b.emit_void(Op::MemFillConst {
                         dst,
@@ -2264,28 +2553,125 @@ pub fn lower_wasm_to_ir_with_budget(
                 let r = b.emit(Ty::V128, Op::ConstV128(idx));
                 stack.push(r);
             }
-            0xfd0f..=0xfd12 => {
-                let val = stack.pop().ok_or("splat")?;
-                let lane_bytes = match op {
-                    0xfd0f => 1,
-                    0xfd10 => 2,
-                    0xfd11 => 4,
-                    _ => 8,
+            0xfd0d => {
+                let Immediate::Bytes(ref bytes) = insn.immediate else {
+                    return Err("i8x16.shuffle lanes".into());
                 };
-                let r = b.emit(Ty::V128, Op::V128Splat { lane_bytes, val });
+                let arr: [u8; 16] = bytes.as_ref().try_into().map_err(|_| "shuffle lanes len")?;
+                let bv = stack.pop().ok_or("shuffle b")?;
+                let av = stack.pop().ok_or("shuffle a")?;
+                let lanes_idx = b.ir.v128_consts.len() as u32;
+                b.ir.v128_consts.push(arr);
+                let r = b.emit(
+                    Ty::V128,
+                    Op::V128Shuffle {
+                        a: av,
+                        b: bv,
+                        lanes_idx,
+                    },
+                );
                 stack.push(r);
             }
-            0xfd1d => {
+            0xfd0f..=0xfd14 => {
+                let val = stack.pop().ok_or("splat")?;
+                let kind = match op {
+                    0xfd0f => SimdSplatKind::I8x16,
+                    0xfd10 => SimdSplatKind::I16x8,
+                    0xfd11 => SimdSplatKind::I32x4,
+                    0xfd12 => SimdSplatKind::I64x2,
+                    0xfd13 => SimdSplatKind::F32x4,
+                    _ => SimdSplatKind::F64x2,
+                };
+                let r = b.emit(Ty::V128, Op::V128Splat { kind, val });
+                stack.push(r);
+            }
+            0xfd15 | 0xfd16 | 0xfd18 | 0xfd19 | 0xfd1b | 0xfd1d | 0xfd1f | 0xfd21 => {
                 let lane = imm_idx()? as u8;
                 let v = stack.pop().ok_or("extract_lane")?;
-                let r = b.emit(Ty::I64, Op::I64x2ExtractLane { v, lane });
+                let kind = match op {
+                    0xfd15 => SimdLaneKind::I8x16S,
+                    0xfd16 => SimdLaneKind::I8x16U,
+                    0xfd18 => SimdLaneKind::I16x8S,
+                    0xfd19 => SimdLaneKind::I16x8U,
+                    0xfd1b => SimdLaneKind::I32x4,
+                    0xfd1d => SimdLaneKind::I64x2,
+                    0xfd1f => SimdLaneKind::F32x4,
+                    _ => SimdLaneKind::F64x2,
+                };
+                let r = b.emit(kind.scalar_ty(), Op::V128ExtractLane { kind, v, lane });
                 stack.push(r);
             }
-            0xfd1e => {
+            0xfd17 | 0xfd1a | 0xfd1c | 0xfd1e | 0xfd20 | 0xfd22 => {
                 let lane = imm_idx()? as u8;
                 let x = stack.pop().ok_or("replace_lane x")?;
                 let v = stack.pop().ok_or("replace_lane v")?;
-                let r = b.emit(Ty::V128, Op::I64x2ReplaceLane { v, x, lane });
+                let kind = match op {
+                    0xfd17 => SimdLaneKind::I8x16U,
+                    0xfd1a => SimdLaneKind::I16x8U,
+                    0xfd1c => SimdLaneKind::I32x4,
+                    0xfd1e => SimdLaneKind::I64x2,
+                    0xfd20 => SimdLaneKind::F32x4,
+                    _ => SimdLaneKind::F64x2,
+                };
+                let r = b.emit(Ty::V128, Op::V128ReplaceLane { kind, v, x, lane });
+                stack.push(r);
+            }
+            0xfd52 => {
+                let c = stack.pop().ok_or("bitselect c")?;
+                let bv = stack.pop().ok_or("bitselect b")?;
+                let av = stack.pop().ok_or("bitselect a")?;
+                let r = b.emit(
+                    Ty::V128,
+                    Op::V128Ternary {
+                        op,
+                        a: av,
+                        b: bv,
+                        c,
+                    },
+                );
+                stack.push(r);
+            }
+            0xfd53 | 0xfd63 | 0xfd64 | 0xfd83 | 0xfd84 | 0xfda3 | 0xfda4 | 0xfdc3 | 0xfdc4 => {
+                let a = stack.pop().ok_or("simd to_i32")?;
+                let r = b.emit(Ty::I32, Op::V128ToI32 { op, a });
+                stack.push(r);
+            }
+            0xfd6b..=0xfd6d | 0xfd8b..=0xfd8d | 0xfdab..=0xfdad | 0xfdcb..=0xfdcd => {
+                let shift = stack.pop().ok_or("simd shift cnt")?;
+                let v = stack.pop().ok_or("simd shift v")?;
+                let r = b.emit(Ty::V128, Op::V128Shift { op, v, shift });
+                stack.push(r);
+            }
+            0xfd4d
+            | 0xfd5e..=0xfd62
+            | 0xfd67..=0xfd6a
+            | 0xfd74
+            | 0xfd75
+            | 0xfd7a
+            | 0xfd7c..=0xfd81
+            | 0xfd87..=0xfd8a
+            | 0xfd94
+            | 0xfda0
+            | 0xfda1
+            | 0xfda7..=0xfdaa
+            | 0xfdc0
+            | 0xfdc1
+            | 0xfdc7..=0xfdca
+            | 0xfde0
+            | 0xfde1
+            | 0xfde3
+            | 0xfdec
+            | 0xfded
+            | 0xfdef
+            | 0xfdf8..=0xfdff => {
+                let a = stack.pop().ok_or("simd unop")?;
+                let r = b.emit(Ty::V128, Op::V128Un { op, a });
+                stack.push(r);
+            }
+            0xfd0e | 0xfd23..=0xfd4c | 0xfd4e..=0xfd51 | 0xfd65..=0xfdff => {
+                let bv = stack.pop().ok_or("simd binop b")?;
+                let av = stack.pop().ok_or("simd binop a")?;
+                let r = b.emit(Ty::V128, Op::V128Bin { op, a: av, b: bv });
                 stack.push(r);
             }
             // Numeric ops:
@@ -2864,31 +3250,35 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
     }
 
     // Pass 2: Within-block redundant bounds-check elimination + pure load-run check hoisting.
-    let mut checked_max: HashMap<Val, u64> = HashMap::new();
+    // Uses a dense block-stamped array (O(1) indexing, zero SipHash) and in-place mutation when no
+    // hoisted `BoundsCheck` is inserted into the block.
+    let n_vals = ir.val_tys.len();
+    let mut checked_stamp: Vec<(u32, u64)> = vec![(0, 0); n_vals];
+    let mut out_buf: Vec<Inst> = Vec::new();
     for (bi, bb) in ir.blocks.iter_mut().enumerate() {
         if let Some(bg) = budget
             && (bi & 255) == 0
         {
             bg.check_deadline()?;
         }
-        checked_max.clear();
-        let mut out: Vec<Inst> = Vec::with_capacity(bb.insts.len());
-        let insts = &bb.insts;
+        let stamp = (bi as u32) + 1;
+        let mut need_rewrite = false;
         let mut i = 0;
-        while i < insts.len() {
+        while i < bb.insts.len() {
             if let Some(bg) = budget
                 && (i & 4095) == 4095
             {
                 bg.check_deadline()?;
             }
-            let mut inst = insts[i];
-            match &mut inst.op {
+            match bb.insts[i].op {
                 Op::BoundsCheck { addr, end_off } => {
-                    let e = checked_max.entry(*addr).or_insert(0);
-                    if *end_off > *e {
-                        *e = *end_off;
+                    let slot = &mut checked_stamp[addr.0 as usize];
+                    if slot.0 != stamp || end_off > slot.1 {
+                        *slot = (stamp, end_off);
                     }
-                    out.push(inst);
+                    if need_rewrite {
+                        out_buf.push(bb.insts[i]);
+                    }
                 }
                 Op::Load {
                     kind,
@@ -2896,39 +3286,45 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                     offset,
                     checked,
                 } => {
-                    let a = *addr;
-                    let end = (*offset as u64) + kind.bytes();
-                    if *checked || checked_max.get(&a).is_some_and(|&m| m >= end) {
-                        *checked = true;
-                        let e = checked_max.entry(a).or_insert(0);
-                        if end > *e {
-                            *e = end;
+                    let end = offset.saturating_add(kind.bytes());
+                    let slot = &mut checked_stamp[addr.0 as usize];
+                    let prev_max = if slot.0 == stamp { slot.1 } else { 0 };
+                    if checked || (slot.0 == stamp && prev_max >= end) {
+                        if !checked
+                            && let Op::Load {
+                                checked: ref mut c, ..
+                            } = bb.insts[i].op
+                        {
+                            *c = true;
                         }
-                        out.push(inst);
+                        if slot.0 != stamp || end > prev_max {
+                            *slot = (stamp, end);
+                        }
+                        if need_rewrite {
+                            out_buf.push(bb.insts[i]);
+                        }
                         i += 1;
                         continue;
                     }
-                    // Look ahead over pure non-trapping instructions, loads from the SAME `addr`,
-                    // and an optional FIRST unchecked store to the SAME `addr` (stopping immediately
-                    // after that first store or any other side-effecting op so no observable state
-                    // changes can precede an OOB trap and lookahead stays strictly linear).
                     let mut max_end = end;
                     let mut run_ops = 1usize;
                     let mut j = i + 1;
-                    while j < insts.len() {
+                    while j < bb.insts.len() {
                         if let Some(bg) = budget
                             && (j & 4095) == 4095
                         {
                             bg.check_deadline()?;
                         }
-                        match insts[j].op {
+                        match bb.insts[j].op {
                             Op::Load {
                                 kind: lk,
                                 addr: la,
                                 offset: lo,
                                 ..
-                            } if la == a => {
-                                let e = (lo as u64) + lk.bytes();
+                            } if la == addr => {
+                                let Some(e) = lo.checked_add(lk.bytes()) else {
+                                    break;
+                                };
                                 if e > max_end {
                                     max_end = e;
                                 }
@@ -2939,8 +3335,10 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                                 addr: sa,
                                 offset: so,
                                 ..
-                            } if sa == a => {
-                                let e = (so as u64) + sk.bytes();
+                            } if sa == addr => {
+                                let Some(e) = so.checked_add(sk.bytes()) else {
+                                    break;
+                                };
                                 if e > max_end {
                                     max_end = e;
                                 }
@@ -2953,19 +3351,33 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                         j += 1;
                     }
                     if run_ops >= 2 && max_end > end {
-                        out.push(Inst {
+                        if !need_rewrite {
+                            out_buf.clear();
+                            out_buf.reserve(bb.insts.len() + 4);
+                            out_buf.extend_from_slice(&bb.insts[..i]);
+                            need_rewrite = true;
+                        }
+                        out_buf.push(Inst {
                             res: None,
                             op: Op::BoundsCheck {
-                                addr: a,
+                                addr,
                                 end_off: max_end,
                             },
                         });
-                        checked_max.insert(a, max_end);
-                        *checked = true;
-                        out.push(inst);
+                        checked_stamp[addr.0 as usize] = (stamp, max_end);
+                        let mut inst = bb.insts[i];
+                        if let Op::Load {
+                            checked: ref mut c, ..
+                        } = inst.op
+                        {
+                            *c = true;
+                        }
+                        out_buf.push(inst);
                     } else {
-                        checked_max.insert(a, end);
-                        out.push(inst);
+                        checked_stamp[addr.0 as usize] = (stamp, end);
+                        if need_rewrite {
+                            out_buf.push(bb.insts[i]);
+                        }
                     }
                 }
                 Op::Store {
@@ -2975,29 +3387,41 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                     checked,
                     ..
                 } => {
-                    let a = *addr;
-                    let end = (*offset as u64) + kind.bytes();
-                    if *checked || checked_max.get(&a).is_some_and(|&m| m >= end) {
-                        *checked = true;
+                    let end = offset.saturating_add(kind.bytes());
+                    let slot = &mut checked_stamp[addr.0 as usize];
+                    let prev_max = if slot.0 == stamp { slot.1 } else { 0 };
+                    if !checked
+                        && slot.0 == stamp
+                        && prev_max >= end
+                        && let Op::Store {
+                            checked: ref mut c, ..
+                        } = bb.insts[i].op
+                    {
+                        *c = true;
                     }
-                    let e = checked_max.entry(a).or_insert(0);
-                    if end > *e {
-                        *e = end;
+                    if slot.0 != stamp || end > prev_max {
+                        *slot = (stamp, end);
                     }
-                    out.push(inst);
+                    if need_rewrite {
+                        out_buf.push(bb.insts[i]);
+                    }
                 }
-                // Note: Wasm linear memory can only grow, never shrink, so `checked_max`
-                // bounds remain strictly valid across `Call`, `CallIndirect`, and `MemGrow`.
-                _ => out.push(inst),
+                _ => {
+                    if need_rewrite {
+                        out_buf.push(bb.insts[i]);
+                    }
+                }
             }
             i += 1;
         }
-        bb.insts = out;
+        if need_rewrite {
+            bb.insts.clear();
+            bb.insts.extend_from_slice(&out_buf);
+        }
     }
 
-    // Pass 3: Dead-code elimination (single reverse use-count pass with saturating usize counts).
-    let n_vals = ir.val_tys.len();
-    let mut uses = vec![0usize; n_vals];
+    // Pass 3: Dead-code elimination (single reverse use-count pass with saturating u32 counts).
+    let mut uses = vec![0u32; n_vals];
     for (bi, bb) in ir.blocks.iter().enumerate() {
         if let Some(bg) = budget
             && (bi & 255) == 0
@@ -3018,13 +3442,15 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
             uses[v.0 as usize] = uses[v.0 as usize].saturating_add(1);
         });
     }
+    let mut keep: Vec<bool> = Vec::new();
     for (bi, bb) in ir.blocks.iter_mut().rev().enumerate() {
         if let Some(bg) = budget
             && (bi & 255) == 0
         {
             bg.check_deadline()?;
         }
-        let mut keep = vec![true; bb.insts.len()];
+        keep.clear();
+        keep.resize(bb.insts.len(), true);
         let mut any_dropped = false;
         for (step, (idx, inst)) in bb.insts.iter().enumerate().rev().enumerate() {
             if let Some(bg) = budget

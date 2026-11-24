@@ -4,6 +4,12 @@ mod cache;
 mod control;
 mod execute;
 mod exits;
+#[cfg(not(any(
+    feature = "execution-reference",
+    feature = "performance-counters",
+    feature = "opcode-coverage"
+)))]
+pub(crate) mod fast;
 mod float;
 mod integer;
 mod ir;
