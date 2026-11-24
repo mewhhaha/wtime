@@ -408,6 +408,8 @@ def build_all(data: dict, out_dir: Path) -> int:
     cpu_short = host["cpu"].replace(" 8-Core Processor", "").replace(" Processor", "")
     host_tag = f"{cpu_short}, {host['logical_cpus']}T"
     wt_ver = host.get("wasmtime")
+    if isinstance(wt_ver, str) and wt_ver.lower().startswith("wasmtime "):
+        wt_ver = wt_ver.split(None, 1)[1].strip()
     wt_label = f"Wasmtime {wt_ver}" if wt_ver else "Wasmtime"
     rendered = 0
 

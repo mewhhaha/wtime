@@ -6,7 +6,7 @@ All numbers in this document and the root [README](../README.md) come from real 
 
 ## 1. Test Environment (`wtime-aot` vs. Wasmtime & V8)
 
-Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/results.json) at commit `729373b`:
+Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/results.json) (captured `2026-11-24`):
 
 | Component | Version / Spec |
 | --- | --- |
@@ -27,10 +27,10 @@ Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/re
 
 | Kernel | `wtime-aot x64` | `wtime-aot c (-O2)` | `wtime-aot rust (-O3)` | Wasmtime `49.0.3` | V8 (`Node v26.5`) | Parity hash |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `graph_bfs` | **3.37 µs** *(1.9× vs WT)* | 6.80 µs | **1.31 µs** *(5.0× vs WT)* | 6.55 µs | 2.60 µs | `04aa4f2359a193ae` |
-| `parser_hash` | **3.27 µs** | 3.29 µs | 3.30 µs | 3.28 µs | 3.36 µs | `0501be7dc7425cf0` |
-| `image_filter` | 5.43 µs | **3.95 µs** *(1.3× vs WT)* | **3.41 µs** *(1.5× vs WT)* | 5.10 µs | 4.71 µs | `79b786ce0d4a3fc0` |
-| `ecs_kernel` | **12.96 µs** *(1.5× vs WT)* | **10.19 µs** *(1.9× vs WT)* | **6.17 µs** *(3.2× vs WT)* | 19.50 µs | 12.69 µs | `9f9dd941bb465bbb` |
+| `graph_bfs` | **1.66 µs** *(4.0× vs WT)* | 6.52 µs | **1.13 µs** *(5.9× vs WT)* | 6.69 µs | 2.58 µs | `04aa4f2359a193ae` |
+| `parser_hash` | **3.32 µs** | 3.36 µs | 3.46 µs | 3.37 µs | 3.48 µs | `0501be7dc7425cf0` |
+| `image_filter` | **4.83 µs** *(1.0× vs WT)* | **4.11 µs** *(1.2× vs WT)* | **3.44 µs** *(1.4× vs WT)* | 4.83 µs | 4.75 µs | `79b786ce0d4a3fc0` |
+| `ecs_kernel` | **12.56 µs** *(1.8× vs WT)* | **10.93 µs** *(2.1× vs WT)* | **7.25 µs** *(3.2× vs WT)* | 22.99 µs | 15.78 µs | `9f9dd941bb465bbb` |
 
 ---
 
@@ -48,13 +48,13 @@ Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds 
 
 | Metric (`5,036`-fn, `3.75 MiB` app) | `wtime-aot x64` | `wtime-aot c (-O2)` | Wasmtime `49.0.3` |
 | --- | ---: | ---: | ---: |
-| Cold compile (empty cache, 16T) | **207 ms** *(1.4× vs WT, 33× vs c)* | 6.73 s | 284 ms |
-| Incremental 1-fn edit (warm cache, 16T) | **111 ms** *(2.5× vs WT, 7.4× vs c)* | 820 ms | 279 ms |
-| Warm fresh-process load (`.so` vs `.cwasm`) | **0.032 ms** *(67× vs WT)* | **0.191 ms** | 2.13 ms |
-| Warm CLI `wtime-aot build --cache` hit | **35.6 ms** | 311 ms | — |
-| Compiled artifact size | **6.61 MiB** (`.so`) | 9.01 MiB (`.so`) | 7.51 MiB (`.cwasm`) |
+| Cold compile (empty cache, 16T) | **210 ms** *(1.5× vs WT, 39× vs c)* | 8.21 s | 318 ms |
+| Incremental 1-fn edit (warm cache, 16T) | **81.4 ms** *(3.8× vs WT, 12.5× vs c)* | 1.02 s | 312 ms |
+| Warm fresh-process load (`.so` vs `.cwasm`) | **0.039 ms** *(83× vs WT)* | **0.226 ms** | 3.26 ms |
+| Warm CLI `wtime-aot build --cache` hit | **31.7 ms** | 382 ms | — |
+| Compiled artifact size | **6.46 MiB** (`.so`) | 9.01 MiB (`.so`) | 7.51 MiB (`.cwasm`) |
 
-On tiny 0.3–1 KiB kernels, `wtime-aot x64` cold CLI builds take **13.6–14.0 ms** (dominated by SHA-256 self-hashing of the compiler binary for cache-key soundness), compared to **1.5–1.8 ms** for Wasmtime, **417–426 ms** for Clang `-O2`, and **1.76–1.81 s** for Rust `-O3`.
+On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.34–1.76 ms** (warm cache hits **0.80–0.91 ms**), matching or beating Wasmtime (**1.63–5.41 ms**), compared to **447–504 ms** for Clang `-O2` and **1.90–2.21 s** for Rust `-O3`.
 
 ---
 

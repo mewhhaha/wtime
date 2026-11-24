@@ -797,6 +797,31 @@ fn patch_relocs(
     Ok(())
 }
 
+/// Completion handle for a best-effort background incremental cache write started before linking.
+pub(crate) type PendingIncCacheSave = std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>;
+
+/// Best-effort bounded wait for a background incremental cache write.
+pub(crate) fn wait_pending_inc_cache_save(done: PendingIncCacheSave, deadline: Option<Instant>) {
+    let (lk, cv) = &*done;
+    let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
+    if !*guard {
+        match deadline {
+            None => {
+                drop(cv.wait_while(guard, |d| !*d));
+            }
+            Some(dl) => {
+                let rem = dl.saturating_duration_since(Instant::now());
+                let wait = rem
+                    .saturating_sub(std::time::Duration::from_millis(150))
+                    .min(std::time::Duration::from_millis(250));
+                if !wait.is_zero() {
+                    drop(cv.wait_timeout_while(guard, wait, |d| !*d));
+                }
+            }
+        }
+    }
+}
+
 /// Compiles Wasm module bytes directly into a self-contained Linux x86-64 ELF64 `.so` image.
 ///
 /// Catches unexpected internal panics at the compiler boundary and converts them into
@@ -805,6 +830,19 @@ pub fn compile_wasm_to_x64_so(
     wasm: &[u8],
     opts: &X64CompileOptions,
 ) -> Result<Vec<u8>, X64CompileError> {
+    let (img, pending) = compile_wasm_to_x64_so_with_pending_save(wasm, opts)?;
+    if let Some(done) = pending {
+        wait_pending_inc_cache_save(done, opts.deadline);
+    }
+    Ok(img)
+}
+
+/// Same as `compile_wasm_to_x64_so`, returning any in-flight incremental cache save handle so
+/// `build_x64` can overlap final `.so` staging and SHA-256 hashing with incremental cache I/O.
+pub(crate) fn compile_wasm_to_x64_so_with_pending_save(
+    wasm: &[u8],
+    opts: &X64CompileOptions,
+) -> Result<(Vec<u8>, Option<PendingIncCacheSave>), X64CompileError> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compile_wasm_to_x64_so_inner(wasm, opts)
     })) {
@@ -827,7 +865,7 @@ pub fn compile_wasm_to_x64_so(
 fn compile_wasm_to_x64_so_inner(
     wasm: &[u8],
     opts: &X64CompileOptions,
-) -> Result<Vec<u8>, X64CompileError> {
+) -> Result<(Vec<u8>, Option<PendingIncCacheSave>), X64CompileError> {
     let t_total = Instant::now();
     let budget = CompileBudget::new(opts.deadline);
     let check_dl = || budget.check_deadline().map_err(X64CompileError::Failed);
@@ -1672,23 +1710,31 @@ fn compile_wasm_to_x64_so_inner(
             }
         }
 
-        // 6b. Merge `.text` (16-byte aligned per item) in deterministic order:
-        //     1. 18 C ABI exports, 2. shared helpers, 3. import trampolines, 4. defined functions.
-        let mut text: Vec<u8> = Vec::with_capacity(
-            runtime_code_bytes
-                .saturating_add(n_defs * 128)
-                .min(64 << 20),
-        );
-        let push_text = |text: &mut Vec<u8>, bytes: &[u8]| -> Result<u64, X64CompileError> {
-            let aligned = align_up_checked(text.len(), 16).map_err(X64CompileError::Failed)?;
+        // 6b. Precompute exact merged `.text` capacity and merge (16-byte aligned per item)
+        //     in deterministic order: 1. 18 C ABI exports, 2. shared helpers, 3. import trampolines,
+        //     4. defined functions.
+        let mut planned_text_len = 0usize;
+        for asm in export_asms
+            .iter()
+            .chain(&helper_asms)
+            .chain(&import_asms)
+            .chain(&def_asms)
+        {
+            let aligned =
+                align_up_checked(planned_text_len, 16).map_err(X64CompileError::Failed)?;
             let next = aligned
-                .checked_add(bytes.len())
+                .checked_add(asm.code.len())
                 .ok_or_else(|| X64CompileError::Failed("x64: merged .text size overflow".into()))?;
             if next > MAX_TOTAL_CODE_BYTES {
                 return Err(X64CompileError::Failed(format!(
                     "x64: complete merged .text ({next} B) exceeds cap {MAX_TOTAL_CODE_BYTES} B"
                 )));
             }
+            planned_text_len = next;
+        }
+        let mut text: Vec<u8> = Vec::with_capacity(planned_text_len);
+        let push_text = |text: &mut Vec<u8>, bytes: &[u8]| -> Result<u64, X64CompileError> {
+            let aligned = align_up_checked(text.len(), 16).map_err(X64CompileError::Failed)?;
             // Pad inter-function gaps with INT3 (0xcc) for clean trap behavior if misjumped.
             text.resize(aligned, 0xcc);
             text.extend_from_slice(bytes);
@@ -1856,32 +1902,6 @@ fn compile_wasm_to_x64_so_inner(
         Ok((img, text_len, rodata_len))
     })();
 
-    // Best-effort wait for optional incremental cache publication ONLY when linking succeeded:
-    // - Without a deadline, wait cleanly until persisted (deterministic for tests & unbounded builds).
-    // - With a deadline, bound post-link waiting strictly inside remaining budget (leaving headroom
-    //   for caller `.so` staging/hashing) so stalled cache I/O can never block or fail `.so` delivery.
-    if link_res.is_ok()
-        && let Some(done) = save_done
-    {
-        let (lk, cv) = &*done;
-        let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
-        if !*guard {
-            match opts.deadline {
-                None => {
-                    drop(cv.wait_while(guard, |d| !*d));
-                }
-                Some(dl) => {
-                    let rem = dl.saturating_duration_since(Instant::now());
-                    let wait = rem
-                        .saturating_sub(std::time::Duration::from_millis(150))
-                        .min(std::time::Duration::from_millis(250));
-                    if !wait.is_zero() {
-                        drop(cv.wait_timeout_while(guard, wait, |d| !*d));
-                    }
-                }
-            }
-        }
-    }
     let (img, text_len, rodata_len) = link_res?;
     let d_link = t_link.elapsed();
 
@@ -1909,7 +1929,7 @@ fn compile_wasm_to_x64_so_inner(
         );
     }
 
-    Ok(img)
+    Ok((img, save_done))
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -2062,18 +2082,14 @@ fn try_compile_defs_incremental(
     let (
         Some(mut pre_callees),
         Some(mut new_inlinable),
-        Some(mut prev_edges),
         Some(mut cur_edges),
         Some(mut rev_callers),
-        Some(mut prev_call_counts),
         Some(mut cur_call_counts),
     ) = (
         inc_cache::try_vec_with_capacity::<Vec<(u32, u32)>>(n_defs),
         inc_cache::try_vec_with_capacity::<bool>(n_defs),
         inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
         inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
-        inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
-        inc_cache::try_vec_with_capacity::<u32>(n_defs),
         inc_cache::try_vec_with_capacity::<u32>(n_defs),
     )
     else {
@@ -2083,25 +2099,20 @@ fn try_compile_defs_incremental(
     for _ in 0..n_defs {
         rev_callers.push(Vec::new());
     }
-    prev_call_counts.resize(n_defs, 0u32);
     cur_call_counts.resize(n_defs, 0u32);
 
+    let mut any_callees_changed = false;
     for bi in 0..n_defs {
         let prev_cs = &prev_cache.funcs[bi].pre_inline_callees;
-        let Some(mut prev_row) = inc_cache::try_vec_with_capacity(prev_cs.len()) else {
-            return Ok(None);
-        };
-        for &(c, cnt) in prev_cs {
-            prev_row.push(c as usize);
-            prev_call_counts[c as usize] = prev_call_counts[c as usize].saturating_add(cnt);
-        }
-        prev_edges.push(prev_row);
         let cur_cs = if changed[bi] {
             let ir = raw_irs[bi].as_ref().unwrap();
             new_inlinable[bi] = opt::is_inlinable_ir(ir);
             let Some(cs) = opt::try_collect_pre_inline_callees(ir, n_imports, n_defs) else {
                 return Ok(None);
             };
+            if cs != *prev_cs {
+                any_callees_changed = true;
+            }
             cs
         } else {
             new_inlinable[bi] = prev_cache.funcs[bi].was_inlinable;
@@ -2126,10 +2137,7 @@ fn try_compile_defs_incremental(
         pre_callees.push(cur_cs);
     }
 
-    let (Some((prev_in_cycle, _)), Some((in_cycle, topo_bottom_up))) = (
-        opt::try_call_graph_sccs_from_edges(&prev_edges),
-        opt::try_call_graph_sccs_from_edges(&cur_edges),
-    ) else {
+    let Some((in_cycle, topo_bottom_up)) = opt::try_call_graph_sccs_from_edges(&cur_edges) else {
         return Ok(None);
     };
 
@@ -2141,10 +2149,40 @@ fn try_compile_defs_incremental(
         return Ok(None);
     };
     cycle_or_body_changed.resize(n_defs, false);
-    for bi in 0..n_defs {
-        let single_flipped = (prev_call_counts[bi] == 1) != (cur_call_counts[bi] == 1);
-        if changed[bi] || in_cycle[bi] != prev_in_cycle[bi] || single_flipped {
-            cycle_or_body_changed[bi] = true;
+    if any_callees_changed {
+        let (Some(mut prev_edges), Some(mut prev_call_counts)) = (
+            inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
+            inc_cache::try_vec_with_capacity::<u32>(n_defs),
+        ) else {
+            return Ok(None);
+        };
+        prev_call_counts.resize(n_defs, 0u32);
+        for bi in 0..n_defs {
+            let prev_cs = &prev_cache.funcs[bi].pre_inline_callees;
+            let Some(mut prev_row) = inc_cache::try_vec_with_capacity(prev_cs.len()) else {
+                return Ok(None);
+            };
+            for &(c, cnt) in prev_cs {
+                prev_row.push(c as usize);
+                prev_call_counts[c as usize] = prev_call_counts[c as usize].saturating_add(cnt);
+            }
+            prev_edges.push(prev_row);
+        }
+        let Some((prev_in_cycle, _)) = opt::try_call_graph_sccs_from_edges(&prev_edges) else {
+            return Ok(None);
+        };
+        for bi in 0..n_defs {
+            let single_flipped = (prev_call_counts[bi] == 1) != (cur_call_counts[bi] == 1);
+            if changed[bi] || in_cycle[bi] != prev_in_cycle[bi] || single_flipped {
+                cycle_or_body_changed[bi] = true;
+            }
+        }
+    } else {
+        // Pre-inline call graph is 100% identical to cached run: zero cycle or call-count transitions.
+        for bi in 0..n_defs {
+            if changed[bi] {
+                cycle_or_body_changed[bi] = true;
+            }
         }
     }
     let Some(mut queue) = inc_cache::try_vec_with_capacity(n_defs) else {
@@ -2368,23 +2406,30 @@ fn try_compile_defs_incremental(
             }
         }
 
-        // Recompute exact transitive effects over ALL functions and verify clean callers.
+        // Recompute exact transitive effects over ALL functions and verify clean callers
+        // (skipping per-caller SHA-256 verification when every dirty function's own effects match cache).
         let Some(effects) =
             opt::try_compute_module_effects_from_summaries(&own_effects_all, module, Some(budget))
                 .map_err(map_worker_err)?
         else {
             return Ok(None);
         };
-        for (bi, is_dirty) in dirty.iter_mut().enumerate() {
-            if !*is_dirty {
-                let h = inc_cache::hash_callee_effects(
-                    &prev_cache.funcs[bi].own_effects.direct_callees,
-                    &effects,
-                );
-                if h != prev_cache.funcs[bi].callee_effects_hash {
-                    *is_dirty = true;
-                    dirty_count += 1;
-                    promoted = true;
+        let own_effects_changed = dirty
+            .iter()
+            .enumerate()
+            .any(|(bi, &d)| d && own_effects_all[bi] != prev_cache.funcs[bi].own_effects);
+        if own_effects_changed {
+            for (bi, is_dirty) in dirty.iter_mut().enumerate() {
+                if !*is_dirty {
+                    let h = inc_cache::hash_callee_effects(
+                        &prev_cache.funcs[bi].own_effects.direct_callees,
+                        &effects,
+                    );
+                    if h != prev_cache.funcs[bi].callee_effects_hash {
+                        *is_dirty = true;
+                        dirty_count += 1;
+                        promoted = true;
+                    }
                 }
             }
         }
@@ -2500,22 +2545,28 @@ fn try_compile_defs_incremental(
         };
         *d_elide += te.elapsed();
 
+        let elide_inputs_changed = dirty
+            .iter()
+            .enumerate()
+            .any(|(bi, &d)| d && elide_inputs_all[bi] != prev_cache.funcs[bi].elide_input);
         let mut promoted_elide = false;
-        for (bi, is_dirty) in dirty.iter_mut().enumerate() {
-            if !*is_dirty {
-                let c_fn = &prev_cache.funcs[bi];
-                let trap_h = inc_cache::hash_callee_traps(
-                    &c_fn.elide_input.direct_def_callees,
-                    n_imports,
-                    &elide_out.fn_can_trap,
-                );
-                if c_fn.needs_stack_check != elide_out.needs_stack_check[bi]
-                    || c_fn.elided_callee_stack_bytes != elide_out.elided_callee_stack_bytes[bi]
-                    || c_fn.callee_trap_hash != trap_h
-                {
-                    *is_dirty = true;
-                    dirty_count += 1;
-                    promoted_elide = true;
+        if elide_inputs_changed {
+            for (bi, is_dirty) in dirty.iter_mut().enumerate() {
+                if !*is_dirty {
+                    let c_fn = &prev_cache.funcs[bi];
+                    let trap_h = inc_cache::hash_callee_traps(
+                        &c_fn.elide_input.direct_def_callees,
+                        n_imports,
+                        &elide_out.fn_can_trap,
+                    );
+                    if c_fn.needs_stack_check != elide_out.needs_stack_check[bi]
+                        || c_fn.elided_callee_stack_bytes != elide_out.elided_callee_stack_bytes[bi]
+                        || c_fn.callee_trap_hash != trap_h
+                    {
+                        *is_dirty = true;
+                        dirty_count += 1;
+                        promoted_elide = true;
+                    }
                 }
             }
         }

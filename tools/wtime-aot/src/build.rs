@@ -1249,6 +1249,10 @@ fn verified_cached_artifact(artifact: &Path, digest_file: &Path) -> bool {
     verified_cached_artifact_bytes(artifact, digest_file).is_some()
 }
 
+mod generator_fingerprint {
+    include!(concat!(env!("OUT_DIR"), "/generator_fingerprint.rs"));
+}
+
 /// Fast C99 + parallel `clang` + `ld.lld` build path for Blot ABI 8 cdylibs.
 fn build_c(
     module: &Path,
@@ -1260,8 +1264,6 @@ fn build_c(
     let wasm = read_bounded_wasm(module, MAX_WASM_BYTES_C_RUST, Some(deadline))?;
     check_deadline(deadline, options.time_limit)?;
     let cache = ensure_private_dir(cache)?;
-    let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
-    let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
     let cc_info =
         crate::cgen::detect_cc_with_deadline(options.target_cpu, Some(&cache), Some(deadline))?;
     let cc_target = crate::cgen::cc_target_fingerprint_with_deadline(
@@ -1272,9 +1274,13 @@ fn build_c(
     check_deadline(deadline, options.time_limit)?;
 
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build c 8", &[]);
+    field(&mut key, "wtime-aot build c 9", &[]);
     field(&mut key, "wasm", &wasm);
-    field(&mut key, "generator", &gen_bytes);
+    field(
+        &mut key,
+        "generator build sha256",
+        &generator_fingerprint::GENERATOR_BUILD_SHA256,
+    );
     field(&mut key, "cc", cc_info.version.as_bytes());
     field(&mut key, "cc sha256", cc_info.cc_sha256.as_bytes());
     field(
@@ -1393,20 +1399,9 @@ fn build_x64(
     let wasm = read_bounded_wasm_for_x64(module, Some(deadline))?;
     check_deadline(deadline, options.time_limit)?;
     let cache = ensure_private_dir(cache)?;
-    let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
-    let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
-    check_deadline(deadline, options.time_limit)?;
-
-    let (wasm_sha, gen_sha) = std::thread::scope(|s| {
-        let h_gen = std::thread::Builder::new()
-            .spawn_scoped(s, || crate::sha256::digest(&gen_bytes))
-            .ok();
-        let w = crate::sha256::digest(&wasm);
-        let g = h_gen
-            .and_then(|h| h.join().ok())
-            .unwrap_or_else(|| crate::sha256::digest(&gen_bytes));
-        (w, g)
-    });
+    let gen_sha = generator_fingerprint::GENERATOR_BUILD_SHA256;
+    let wasm_sha = crate::x64::inc_cache::parallel_payload_digest(&wasm)
+        .unwrap_or_else(|| crate::sha256::digest(&wasm));
     check_deadline(deadline, options.time_limit)?;
 
     let verify = cfg!(debug_assertions)
@@ -1419,9 +1414,9 @@ fn build_x64(
     // In release builds, bind explicit `WTIME_AOT_VERIFY=1` into the cache key so an earlier
     // unverified cache hit can never bypass IR/regalloc verification when verification is requested.
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build x64 2", &[]);
-    field(&mut key, "wasm sha256", &wasm_sha);
-    field(&mut key, "generator sha256", &gen_sha);
+    field(&mut key, "wtime-aot build x64 3", &[]);
+    field(&mut key, "wasm digest", &wasm_sha);
+    field(&mut key, "generator build sha256", &gen_sha);
     field(&mut key, "isa profile", isa_profile.as_bytes());
     if verify && !cfg!(debug_assertions) {
         field(&mut key, "verify", b"1");
@@ -1456,11 +1451,14 @@ fn build_x64(
         cache_key_salt: Some(gen_sha),
         ..Default::default()
     };
-    let so_bytes =
-        crate::x64::compile_wasm_to_x64_so(&wasm, &compile_opts).map_err(|e| match e {
-            crate::x64::X64CompileError::AdmissionRejected(s) => BuildError::AdmissionRejected(s),
-            crate::x64::X64CompileError::Failed(s) => BuildError::Failed(s),
-        })?;
+    let (so_bytes, pending_inc_save) = crate::x64::compile_wasm_to_x64_so_with_pending_save(
+        &wasm,
+        &compile_opts,
+    )
+    .map_err(|e| match e {
+        crate::x64::X64CompileError::AdmissionRejected(s) => BuildError::AdmissionRejected(s),
+        crate::x64::X64CompileError::Failed(s) => BuildError::Failed(s),
+    })?;
     check_deadline(deadline, options.time_limit)?;
 
     enum PublishPhase {
@@ -1710,6 +1708,9 @@ fn build_x64(
             }
         }
     }
+    if let Some(pending) = pending_inc_save {
+        crate::x64::wait_pending_inc_cache_save(pending, Some(deadline));
+    }
     if std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1") {
         eprintln!(
             "wtime-aot x64 write={:.2}ms",
@@ -1887,7 +1888,6 @@ fn prepare(
     deadline: std::time::Instant,
 ) -> Result<Prepared, String> {
     check_deadline(deadline, options.time_limit)?;
-    let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
     let wasm = read_bounded_wasm(module, MAX_WASM_BYTES_C_RUST, Some(deadline))?;
     check_deadline(deadline, options.time_limit)?;
     // The program reports the module's own name, not where the operator
@@ -1920,11 +1920,15 @@ fn prepare(
     // The key: everything the program depends on (including snapshotted rt sources,
     // cargo version, and any active CARGO_HOME/HOME cargo config).
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build 2", &[]);
+    field(&mut key, "wtime-aot build 3", &[]);
     field(&mut key, "wasm", &wasm);
     field(&mut key, "module path", module_path.as_bytes());
     let generator = std::env::current_exe().map_err(|e| format!("this generator: {e}"))?;
-    field(&mut key, "generator", &read(&generator)?);
+    field(
+        &mut key,
+        "generator build sha256",
+        &generator_fingerprint::GENERATOR_BUILD_SHA256,
+    );
     for (name, bytes) in &rt_files {
         field(&mut key, name, bytes);
     }

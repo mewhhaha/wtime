@@ -85,23 +85,27 @@ impl Sha256 {
 
     #[inline(always)]
     fn compress(&mut self, block: &[u8; 64]) {
-        let mut w = [0u32; 64];
         let words = block.as_chunks::<4>().0;
-        for t in 0..16 {
-            w[t] = u32::from_be_bytes(words[t]);
-        }
-        for t in 16..64 {
-            let wm15 = w[t - 15];
-            let wm2 = w[t - 2];
-            let s0 = wm15.rotate_right(7) ^ wm15.rotate_right(18) ^ (wm15 >> 3);
-            let s1 = wm2.rotate_right(17) ^ wm2.rotate_right(19) ^ (wm2 >> 10);
-            w[t] = w[t - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[t - 7])
-                .wrapping_add(s1);
-        }
+        let mut w = [
+            u32::from_be_bytes(words[0]),
+            u32::from_be_bytes(words[1]),
+            u32::from_be_bytes(words[2]),
+            u32::from_be_bytes(words[3]),
+            u32::from_be_bytes(words[4]),
+            u32::from_be_bytes(words[5]),
+            u32::from_be_bytes(words[6]),
+            u32::from_be_bytes(words[7]),
+            u32::from_be_bytes(words[8]),
+            u32::from_be_bytes(words[9]),
+            u32::from_be_bytes(words[10]),
+            u32::from_be_bytes(words[11]),
+            u32::from_be_bytes(words[12]),
+            u32::from_be_bytes(words[13]),
+            u32::from_be_bytes(words[14]),
+            u32::from_be_bytes(words[15]),
+        ];
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        macro_rules! round {
+        macro_rules! r0 {
             ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $idx:expr) => {{
                 let s1 = $e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25);
                 let ch = ($e & $f) ^ (!$e & $g);
@@ -116,18 +120,114 @@ impl Sha256 {
                 $h = t1.wrapping_add(s0.wrapping_add(maj));
             }};
         }
-        let mut i = 0;
-        while i < 64 {
-            round!(a, b, c, d, e, f, g, h, i);
-            round!(h, a, b, c, d, e, f, g, i + 1);
-            round!(g, h, a, b, c, d, e, f, i + 2);
-            round!(f, g, h, a, b, c, d, e, i + 3);
-            round!(e, f, g, h, a, b, c, d, i + 4);
-            round!(d, e, f, g, h, a, b, c, i + 5);
-            round!(c, d, e, f, g, h, a, b, i + 6);
-            round!(b, c, d, e, f, g, h, a, i + 7);
-            i += 8;
+        macro_rules! rx_step {
+            ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $idx:expr, $store:tt) => {{
+                const I0: usize = $idx & 15;
+                const I1: usize = ($idx + 1) & 15;
+                const I9: usize = ($idx + 9) & 15;
+                const I14: usize = ($idx + 14) & 15;
+                let wm15 = w[I1];
+                let wm2 = w[I14];
+                let ws0 = wm15.rotate_right(7) ^ wm15.rotate_right(18) ^ (wm15 >> 3);
+                let ws1 = wm2.rotate_right(17) ^ wm2.rotate_right(19) ^ (wm2 >> 10);
+                let wt = w[I0]
+                    .wrapping_add(ws0)
+                    .wrapping_add(w[I9])
+                    .wrapping_add(ws1);
+                rx_store!(w[I0] = wt, $store);
+                let s1 = $e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25);
+                let ch = ($e & $f) ^ (!$e & $g);
+                let t1 = $h
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[$idx])
+                    .wrapping_add(wt);
+                let s0 = $a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22);
+                let maj = ($a & $b) ^ ($a & $c) ^ ($b & $c);
+                $d = $d.wrapping_add(t1);
+                $h = t1.wrapping_add(s0.wrapping_add(maj));
+            }};
         }
+        macro_rules! rx_store {
+            ($dst:expr, yes) => {
+                $dst;
+            };
+            ($dst:expr, no) => {};
+        }
+        macro_rules! rx {
+            ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $idx:expr) => {
+                rx_step!($a, $b, $c, $d, $e, $f, $g, $h, $idx, yes)
+            };
+        }
+        macro_rules! rx_end {
+            ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $idx:expr) => {
+                rx_step!($a, $b, $c, $d, $e, $f, $g, $h, $idx, no)
+            };
+        }
+        r0!(a, b, c, d, e, f, g, h, 0);
+        r0!(h, a, b, c, d, e, f, g, 1);
+        r0!(g, h, a, b, c, d, e, f, 2);
+        r0!(f, g, h, a, b, c, d, e, 3);
+        r0!(e, f, g, h, a, b, c, d, 4);
+        r0!(d, e, f, g, h, a, b, c, 5);
+        r0!(c, d, e, f, g, h, a, b, 6);
+        r0!(b, c, d, e, f, g, h, a, 7);
+        r0!(a, b, c, d, e, f, g, h, 8);
+        r0!(h, a, b, c, d, e, f, g, 9);
+        r0!(g, h, a, b, c, d, e, f, 10);
+        r0!(f, g, h, a, b, c, d, e, 11);
+        r0!(e, f, g, h, a, b, c, d, 12);
+        r0!(d, e, f, g, h, a, b, c, 13);
+        r0!(c, d, e, f, g, h, a, b, 14);
+        r0!(b, c, d, e, f, g, h, a, 15);
+        rx!(a, b, c, d, e, f, g, h, 16);
+        rx!(h, a, b, c, d, e, f, g, 17);
+        rx!(g, h, a, b, c, d, e, f, 18);
+        rx!(f, g, h, a, b, c, d, e, 19);
+        rx!(e, f, g, h, a, b, c, d, 20);
+        rx!(d, e, f, g, h, a, b, c, 21);
+        rx!(c, d, e, f, g, h, a, b, 22);
+        rx!(b, c, d, e, f, g, h, a, 23);
+        rx!(a, b, c, d, e, f, g, h, 24);
+        rx!(h, a, b, c, d, e, f, g, 25);
+        rx!(g, h, a, b, c, d, e, f, 26);
+        rx!(f, g, h, a, b, c, d, e, 27);
+        rx!(e, f, g, h, a, b, c, d, 28);
+        rx!(d, e, f, g, h, a, b, c, 29);
+        rx!(c, d, e, f, g, h, a, b, 30);
+        rx!(b, c, d, e, f, g, h, a, 31);
+        rx!(a, b, c, d, e, f, g, h, 32);
+        rx!(h, a, b, c, d, e, f, g, 33);
+        rx!(g, h, a, b, c, d, e, f, 34);
+        rx!(f, g, h, a, b, c, d, e, 35);
+        rx!(e, f, g, h, a, b, c, d, 36);
+        rx!(d, e, f, g, h, a, b, c, 37);
+        rx!(c, d, e, f, g, h, a, b, 38);
+        rx!(b, c, d, e, f, g, h, a, 39);
+        rx!(a, b, c, d, e, f, g, h, 40);
+        rx!(h, a, b, c, d, e, f, g, 41);
+        rx!(g, h, a, b, c, d, e, f, 42);
+        rx!(f, g, h, a, b, c, d, e, 43);
+        rx!(e, f, g, h, a, b, c, d, 44);
+        rx!(d, e, f, g, h, a, b, c, 45);
+        rx!(c, d, e, f, g, h, a, b, 46);
+        rx!(b, c, d, e, f, g, h, a, 47);
+        rx!(a, b, c, d, e, f, g, h, 48);
+        rx!(h, a, b, c, d, e, f, g, 49);
+        rx!(g, h, a, b, c, d, e, f, 50);
+        rx!(f, g, h, a, b, c, d, e, 51);
+        rx!(e, f, g, h, a, b, c, d, 52);
+        rx!(d, e, f, g, h, a, b, c, 53);
+        rx!(c, d, e, f, g, h, a, b, 54);
+        rx!(b, c, d, e, f, g, h, a, 55);
+        rx!(a, b, c, d, e, f, g, h, 56);
+        rx!(h, a, b, c, d, e, f, g, 57);
+        rx!(g, h, a, b, c, d, e, f, 58);
+        rx!(f, g, h, a, b, c, d, e, 59);
+        rx!(e, f, g, h, a, b, c, d, 60);
+        rx!(d, e, f, g, h, a, b, c, 61);
+        rx_end!(c, d, e, f, g, h, a, b, 62);
+        rx_end!(b, c, d, e, f, g, h, a, 63);
         self.state[0] = self.state[0].wrapping_add(a);
         self.state[1] = self.state[1].wrapping_add(b);
         self.state[2] = self.state[2].wrapping_add(c);

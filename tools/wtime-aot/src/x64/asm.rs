@@ -1517,6 +1517,12 @@ impl Asm {
     pub fn divss_xm(&mut self, d: Xmm, m: Mem) {
         self.sse_xm(Some(0xf3), 0x5e, d, m);
     }
+    pub fn minss_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf3), 0x5d, d, m);
+    }
+    pub fn maxss_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf3), 0x5f, d, m);
+    }
     pub fn ucomiss_xm(&mut self, a: Xmm, m: Mem) {
         self.sse_xm(None, 0x2e, a, m);
     }
@@ -1532,6 +1538,12 @@ impl Asm {
     }
     pub fn divsd_xm(&mut self, d: Xmm, m: Mem) {
         self.sse_xm(Some(0xf2), 0x5e, d, m);
+    }
+    pub fn minsd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x5d, d, m);
+    }
+    pub fn maxsd_xm(&mut self, d: Xmm, m: Mem) {
+        self.sse_xm(Some(0xf2), 0x5f, d, m);
     }
     pub fn ucomisd_xm(&mut self, a: Xmm, m: Mem) {
         self.sse_xm(Some(0x66), 0x2e, a, m);

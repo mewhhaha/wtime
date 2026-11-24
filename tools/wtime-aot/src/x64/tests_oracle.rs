@@ -2198,3 +2198,255 @@ fn oracle_stage3_council_round1_regressions() {
     }
     assert_oracle_matrix("stage3_r1_regressions", &wasm, &calls, &[], &[(0, 32)]);
 }
+
+#[test]
+fn oracle_stage4_hills_minmax_short_circuit_and_loop_bce() {
+    // f0(bits_a: i64, bits_b: i64) -> i64: tests bit-exact FP `CmpSelect` lowering across:
+    //  1) strict `f64.lt` / `f64.gt` (SSE2 `minsd`/`maxsd`, including ±0.0 & distinct NaN payloads)
+    //  2) non-strict `f64.ge` / `f64.le` against non-zero constants `-100.0` / `100.0` (SSE2 clamp)
+    //  3) non-strict `f64.ge` / `f64.le` against `+0.0` / `-0.0` (must NOT lose sign of zero!)
+    //  4) `f32` strict & non-strict equivalents (reinterpreted as bits and mixed into return value).
+    // Packed as 1-arg wrapper via memory[0..16] so `assert_oracle_matrix` can drive arbitrary pairs.
+    let mut b_seed = Vec::new(); // f0(idx: i32) -> i64
+    // Read (a: f64 @ [0], b: f64 @ [8]) set by caller via `store_pair`, OR derive directly from `idx`!
+    // Even cleaner: derive 10 edge-case f64/f32 bit patterns from a selector `idx = 0..100` (a_idx = idx / 10, b_idx = idx % 10)
+    // stored into memory[0..80] in `init_fp`.
+    b_seed.extend_from_slice(&[
+        // local 1 = a (f64), local 2 = b (f64), local 3 = acc (i64), local 4 = fa (f32), local 5 = fb (f32)
+        // a = f64.load[(idx / 10) * 8]
+        0x20, 0, 0x41, 10, 0x6e, 0x41, 3, 0x74, 0x2b, 3, 0, 0x21, 1,
+        // b = f64.load[(idx % 10) * 8]
+        0x20, 0, 0x41, 10, 0x70, 0x41, 3, 0x74, 0x2b, 3, 0, 0x21, 2,
+        // fa = f32.load[128 + (idx / 10) * 4]
+        0x20, 0, 0x41, 10, 0x6e, 0x41, 2, 0x74, 0x2a, 2, 0x80, 0x01, 0x21, 4,
+        // fb = f32.load[128 + (idx % 10) * 4]
+        0x20, 0, 0x41, 10, 0x70, 0x41, 2, 0x74, 0x2a, 2, 0x80, 0x01, 0x21, 5,
+    ]);
+    let push_mix_f64 = |v: &mut Vec<u8>| {
+        // acc = rotl(acc, 7) ^ i64.reinterpret_f64(top)
+        v.extend_from_slice(&[0xbd, 0x20, 3, 0x42, 7, 0x89, 0x85, 0x21, 3]);
+    };
+    let push_mix_f32 = |v: &mut Vec<u8>| {
+        // acc = rotl(acc, 5) ^ i64.extend_i32_u(i32.reinterpret_f32(top))
+        v.extend_from_slice(&[0xbc, 0xad, 0x20, 3, 0x42, 5, 0x89, 0x85, 0x21, 3]);
+    };
+    // 1. select(a, b, a < b), select(a, b, b > a), select(a, b, a > b), select(a, b, b < a)
+    for (op, swap_cmp) in [(0x63u8, false), (0x64, true), (0x64, false), (0x63, true)] {
+        b_seed.extend_from_slice(&[0x20, 1, 0x20, 2]);
+        if swap_cmp {
+            b_seed.extend_from_slice(&[0x20, 2, 0x20, 1, op, 0x1b]);
+        } else {
+            b_seed.extend_from_slice(&[0x20, 1, 0x20, 2, op, 0x1b]);
+        }
+        push_mix_f64(&mut b_seed);
+    }
+    // 2. select(a, -100.0, a >= -100.0), select(a, 100.0, a <= 100.0), and swapped operand order
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(-100.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(-100.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x66, 0x1b]); // f64.ge
+    push_mix_f64(&mut b_seed);
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(100.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(100.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x65, 0x1b]); // f64.le
+    push_mix_f64(&mut b_seed);
+    // 3. Non-strict `a >= +0.0` and `a <= -0.0` (must preserve exact `-0.0` vs `+0.0` sign bit!)
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(0.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(0.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x66, 0x1b]); // f64.ge
+    push_mix_f64(&mut b_seed);
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(-0.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x20, 1, 0x44]);
+    b_seed.extend_from_slice(&(-0.0f64).to_le_bytes());
+    b_seed.extend_from_slice(&[0x65, 0x1b]); // f64.le
+    push_mix_f64(&mut b_seed);
+    // 4. Same for f32: strict lt/gt + clamp [-100.0f32, 100.0f32] + non-strict zero
+    for op in [0x5du8, 0x5e] {
+        b_seed.extend_from_slice(&[0x20, 4, 0x20, 5, 0x20, 4, 0x20, 5, op, 0x1b]);
+        push_mix_f32(&mut b_seed);
+    }
+    b_seed.extend_from_slice(&[0x20, 4, 0x43]);
+    b_seed.extend_from_slice(&(-100.0f32).to_le_bytes());
+    b_seed.extend_from_slice(&[0x20, 4, 0x43]);
+    b_seed.extend_from_slice(&(-100.0f32).to_le_bytes());
+    b_seed.extend_from_slice(&[0x60, 0x1b]); // f32.ge
+    push_mix_f32(&mut b_seed);
+    b_seed.extend_from_slice(&[0x20, 4, 0x43]);
+    b_seed.extend_from_slice(&(0.0f32).to_le_bytes());
+    b_seed.extend_from_slice(&[0x20, 4, 0x43]);
+    b_seed.extend_from_slice(&(0.0f32).to_le_bytes());
+    b_seed.extend_from_slice(&[0x60, 0x1b]); // f32.ge against +0.0
+    push_mix_f32(&mut b_seed);
+    b_seed.extend_from_slice(&[0x20, 3]);
+
+    // f1(packed: i32) -> i32: short-circuit `Or`/`And` on pure boolean cmps AND non-bool bitwise `And`
+    // a = packed & 0xf, b = (packed >> 4) & 0xf
+    // acc += ((a == 3 || b == 7) ? 1 : 0) + ((a == 3 && b == 7) ? 2 : 0) + (((a & b) != 0) ? 4 : 0)
+    let mut b_sc = Vec::new();
+    b_sc.extend_from_slice(&[
+        0x20, 0, 0x41, 15, 0x71, 0x21, 1, // a
+        0x20, 0, 0x41, 4, 0x76, 0x41, 15, 0x71, 0x21, 2, // b
+        // if (a == 3 || b == 7) acc += 1
+        0x20, 1, 0x41, 3, 0x46, 0x20, 2, 0x41, 7, 0x46, 0x72, 0x04, 0x40, 0x20, 3, 0x41, 1, 0x6a,
+        0x21, 3, 0x0b, // if (a == 3 && b == 7) acc += 2
+        0x20, 1, 0x41, 3, 0x46, 0x20, 2, 0x41, 7, 0x46, 0x71, 0x04, 0x40, 0x20, 3, 0x41, 2, 0x6a,
+        0x21, 3, 0x0b, // if (a & b) acc += 4  (MUST NOT be mis-split when a=1, b=2!)
+        0x20, 1, 0x20, 2, 0x71, 0x04, 0x40, 0x20, 3, 0x41, 4, 0x6a, 0x21, 3, 0x0b, 0x20, 3,
+    ]);
+
+    // f2(n: i32) -> i32: unsigned counted loop writing `mem[i + 4096] = (i * 3 + 1) & 0xff` and returning sum.
+    // On 1-page (65536 B) memory, `max_safe_limit = 61440`:
+    //   n = 0 -> 0 iters; n = 61440 -> fast path exact boundary; n = 61441 -> slow path writes 0..61440 then traps OOB!
+    let mut b_u32 = Vec::new();
+    b_u32.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b_u32.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // if i >=u n break
+    b_u32.extend_from_slice(&[0x20, 1, 0x41]);
+    leb_i32(&mut b_u32, 4096);
+    b_u32.extend_from_slice(&[
+        0x6a, 0x20, 1, 0x41, 3, 0x6c, 0x41, 1, 0x6a, 0x22, 3, 0x3a, 0, 0,
+    ]);
+    b_u32.extend_from_slice(&[0x20, 2, 0x20, 3, 0x41]);
+    leb_i32(&mut b_u32, 0xff);
+    b_u32.extend_from_slice(&[0x71, 0x6a, 0x21, 2]);
+    b_u32.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // f3(n: i32) -> i32: signed counted loop `for (i = 0; i <s n; i++)` reading `mem[i + 4096]` + writing `mem[i + 512]`.
+    let mut b_s32 = Vec::new();
+    b_s32.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b_s32.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4e, 0x0d, 1]); // if i >=s n break
+    b_s32.extend_from_slice(&[0x20, 1, 0x41]);
+    leb_i32(&mut b_s32, 4096);
+    b_s32.extend_from_slice(&[0x6a, 0x2d, 0, 0, 0x22, 3, 0x20, 2, 0x6a, 0x21, 2]);
+    b_s32.extend_from_slice(&[0x20, 1, 0x41]);
+    leb_i32(&mut b_s32, 512);
+    b_s32.extend_from_slice(&[0x6a, 0x20, 3, 0x3a, 0, 0]);
+    b_s32.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // f4(n: i32) -> i32: 3-tap clamped stencil (`left = i==0?0:i-1`, `right = i+1>=n?n-1:i+1`)
+    // + 32-byte SIB `memory.copy` at `(i << 5) + 32768 <- (i << 5)` (capped at `n <= 1024`).
+    let mut b_sten = Vec::new();
+    b_sten.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b_sten.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]);
+    // left
+    b_sten.extend_from_slice(&[
+        0x20, 1, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 1, 0x41, 1, 0x6b, 0x0b, 0x21, 3,
+    ]);
+    // right
+    b_sten.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x20, 0, 0x4f, 0x04, 0x7f, 0x20, 0, 0x41, 1, 0x6b, 0x05, 0x20, 1,
+        0x41, 1, 0x6a, 0x0b, 0x21, 4,
+    ]);
+    // acc += load8_u[left] + load8_u[i] + load8_u[right]
+    b_sten.extend_from_slice(&[
+        0x20, 2, 0x20, 3, 0x2d, 0, 0, 0x20, 1, 0x2d, 0, 0, 0x6a, 0x20, 4, 0x2d, 0, 0, 0x6a, 0x6a,
+        0x21, 2,
+    ]);
+    // mem.copy dst=(i<<5)+32768, src=(i<<5), len=32
+    b_sten.extend_from_slice(&[0x20, 1, 0x41, 5, 0x74, 0x22, 5, 0x41]);
+    leb_i32(&mut b_sten, 32768);
+    b_sten.extend_from_slice(&[0x6a, 0x20, 5, 0x41, 32, 0xfc, 0x0a, 0, 0]);
+    b_sten.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // Active data segment seeding 10 edge-case f64s at [0..80] and 10 edge-case f32s at [128..168].
+    let f64_vals: [u64; 10] = [
+        0.0f64.to_bits(),
+        (-0.0f64).to_bits(),
+        1.0f64.to_bits(),
+        (-100.0f64).to_bits(),
+        100.0f64.to_bits(),
+        f64::INFINITY.to_bits(),
+        f64::NEG_INFINITY.to_bits(),
+        0x7ff8_0000_0000_0001, // qNaN payload 1
+        0x7ff8_0000_0000_0042, // qNaN payload 0x42
+        0x7ff0_0000_0000_0007, // sNaN payload 7
+    ];
+    let f32_vals: [u32; 10] = [
+        0.0f32.to_bits(),
+        (-0.0f32).to_bits(),
+        1.0f32.to_bits(),
+        (-100.0f32).to_bits(),
+        100.0f32.to_bits(),
+        f32::INFINITY.to_bits(),
+        f32::NEG_INFINITY.to_bits(),
+        0x7fc0_0001, // qNaN payload 1
+        0x7fc0_0042, // qNaN payload 0x42
+        0x7f80_0007, // sNaN payload 7
+    ];
+    let mut d64 = Vec::with_capacity(80);
+    for bits in f64_vals {
+        d64.extend_from_slice(&bits.to_le_bytes());
+    }
+    let mut d32 = Vec::with_capacity(40);
+    for bits in f32_vals {
+        d32.extend_from_slice(&bits.to_le_bytes());
+    }
+    let mut data_sec = vec![2u8]; // 2 active segments
+    data_sec.extend_from_slice(&[0x00, 0x41, 0, 0x0b]);
+    leb_u32(&mut data_sec, d64.len() as u32);
+    data_sec.extend_from_slice(&d64);
+    data_sec.extend_from_slice(&[0x00, 0x41]);
+    leb_i32(&mut data_sec, 128);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, d32.len() as u32);
+    data_sec.extend_from_slice(&d32);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7e]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 1, 1, 1, 1]),
+        section(5, &[1, 0x01, 1, 1]), // fixed 64 KiB memory
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("fp_minmax", 0, 0),
+            ("sc_or_and", 0, 1),
+            ("loop_ver_u32", 0, 2),
+            ("loop_ver_s32", 0, 3),
+            ("loop_ver_stencil", 0, 4),
+        ]),
+        code_sec(&[
+            enc_body(&[(2, 0x7c), (1, 0x7e), (2, 0x7d)], &b_seed),
+            enc_body(&[(3, 0x7f)], &b_sc),
+            enc_body(&[(3, 0x7f)], &b_u32),
+            enc_body(&[(3, 0x7f)], &b_s32),
+            enc_body(&[(5, 0x7f)], &b_sten),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    let mut calls = Vec::new();
+    // Exhaustive 10x10 = 100 FP pairs (including +0/-0, ±100, ±inf, qNaN1, qNaN2, sNaN)!
+    for idx in 0..100 {
+        calls.push(c("fp_minmax", ArgSpec::I32(idx)));
+    }
+    for (a, b) in [(0, 0), (1, 2), (3, 0), (0, 7), (3, 7), (3, 2), (5, 7)] {
+        calls.push(c("sc_or_and", ArgSpec::I32(a | (b << 4))));
+    }
+    for n in [0, 1, 16, 61440, 61441] {
+        calls.push(c("loop_ver_u32", ArgSpec::I32(n)));
+    }
+    for n in [-5, -1, 0, 1, 32, 61440, 61441] {
+        calls.push(c("loop_ver_s32", ArgSpec::I32(n)));
+    }
+    for n in [0, 1, 2, 16, 1024, 1025] {
+        calls.push(c("loop_ver_stencil", ArgSpec::I32(n)));
+    }
+    // Verify exact memory state across both in-bounds fast paths AND post-trap partial writes!
+    assert_oracle_matrix(
+        "stage4_hills",
+        &wasm,
+        &calls,
+        &[],
+        &[(512, 64), (4096, 64), (32768, 128), (65472, 64)],
+    );
+}

@@ -2860,3 +2860,169 @@ fn stage3_council_round1_regressions() {
         }
     }
 }
+
+#[test]
+fn stage4_hills_ir_loop_versioning_short_circuit_and_parallel_admit() {
+    use super::ir::{Op, Term};
+
+    // 1. `image_filter.wasm` fixture: verify `version_checked_counted_loops` emits checked fast
+    //    loops with folded `+4096` offset, and both `verify_ir` and `verify_alloc` pass!
+    let img_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/image_filter.wasm");
+    let img_wasm = std::fs::read(&img_path).expect("read image_filter.wasm");
+    let val = wtime_validate::validate(
+        &img_wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, 1).unwrap();
+    let eff = super::opt::compute_module_effects(&[ir.clone()], &module, None).unwrap();
+    super::opt::optimize_func_stage2(&mut ir, &module, &eff, None).unwrap();
+    super::verify::verify_ir(&ir, &module).unwrap();
+    let alloc = super::regalloc::allocate(&ir).unwrap();
+    super::verify::verify_alloc(&ir, &alloc).unwrap();
+    let has_folded_checked_load = ir.blocks.iter().any(|bb| {
+        bb.insts.iter().any(|ins| {
+            matches!(
+                ins.op,
+                Op::Load {
+                    offset: 4096,
+                    checked: true,
+                    ..
+                }
+            )
+        })
+    });
+    let has_folded_checked_store = ir.blocks.iter().any(|bb| {
+        bb.insts.iter().any(|ins| {
+            matches!(
+                ins.op,
+                Op::Store {
+                    offset: 4096,
+                    checked: true,
+                    ..
+                }
+            )
+        })
+    });
+    assert!(
+        has_folded_checked_load && has_folded_checked_store,
+        "image_filter must version both counted loops with checked=true and folded +4096 offset"
+    );
+
+    // 2. `graph_bfs.wasm` fixture: verify `split_short_circuit_branches` eliminated `Or` before
+    //    `BranchIf` in `run` (after inlining `$edge`) and passes IR/alloc verification.
+    let bfs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/graph_bfs.wasm");
+    let bfs_wasm = std::fs::read(&bfs_path).expect("read graph_bfs.wasm");
+    let val_bfs = wtime_validate::validate(
+        &bfs_wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let mod_bfs = super::module::admit_x64_module(val_bfs.decoded()).unwrap();
+    let mut irs_bfs: Vec<_> = (0..val_bfs.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val_bfs.decoded(), &mod_bfs, bi).unwrap())
+        .collect();
+    super::opt::inline_small_helpers(&mut irs_bfs, &mod_bfs, None).unwrap();
+    let eff_bfs = super::opt::compute_module_effects(&irs_bfs, &mod_bfs, None).unwrap();
+    super::opt::optimize_func_stage2(&mut irs_bfs[2], &mod_bfs, &eff_bfs, None).unwrap();
+    super::verify::verify_ir(&irs_bfs[2], &mod_bfs).unwrap();
+    let alloc_bfs = super::regalloc::allocate(&irs_bfs[2]).unwrap();
+    super::verify::verify_alloc(&irs_bfs[2], &alloc_bfs).unwrap();
+    let has_or_inst = irs_bfs[2].blocks.iter().any(|bb| {
+        bb.insts
+            .iter()
+            .any(|ins| matches!(ins.op, Op::I32Bin(super::ir::IntBinOp::Or, _, _)))
+    });
+    assert!(
+        !has_or_inst,
+        "graph_bfs `Or(eq1, eq2)` branch must be split into short-circuit CmpBranch"
+    );
+    let cmp_branches = irs_bfs[2]
+        .blocks
+        .iter()
+        .filter(|bb| matches!(bb.term, Term::CmpBranch { .. }))
+        .count();
+    assert!(
+        cmp_branches >= 4,
+        "expected short-circuit CmpBranch fusion in graph_bfs (got {cmp_branches})"
+    );
+
+    // 3. Parallel `admit_x64_module_with_budget` (>= 256 functions) + incremental cache parity on
+    //    both unchanged-callees/effects edit AND changed-callees/effects edit.
+    let build_big = |edit_kind: u8| -> Vec<u8> {
+        let n_fns = 300usize;
+        let mut func_types = vec![0u8; n_fns];
+        func_types[0] = 0;
+        let mut bodies = Vec::with_capacity(n_fns);
+        for i in 0..n_fns {
+            let body = if i == 0 {
+                match edit_kind {
+                    0 => vec![0x20, 0, 0x41, 1, 0x6a], // x + 1
+                    1 => vec![0x20, 0, 0x41, 2, 0x6a], // x + 2 (same callees & effects -> fast path!)
+                    _ => vec![0x20, 0, 0x41, 0, 0x20, 0, 0x36, 2, 0, 0x41, 3, 0x6a], // writes mem!
+                }
+            } else if i == 150 {
+                // call_indirect via table 1
+                vec![0x20, 0, 0x20, 0, 0x11, 0, 1]
+            } else if i == 290 {
+                // call_indirect via table 0
+                vec![0x20, 0, 0x20, 0, 0x11, 0, 0]
+            } else {
+                // call f0(x) + i
+                let mut b = vec![0x20, 0, 0x10, 0, 0x41];
+                leb_i32(&mut b, (i & 31) as i32);
+                b.push(0x6a);
+                b
+            };
+            bodies.push(enc_body(&[], &body));
+        }
+        let mut fsec = Vec::new();
+        leb_u32(&mut fsec, n_fns as u32);
+        fsec.extend_from_slice(&func_types);
+        let mut csec = Vec::new();
+        leb_u32(&mut csec, n_fns as u32);
+        for b in bodies {
+            csec.extend_from_slice(&b);
+        }
+        wasm_module(&[
+            type_sec(&[(&[0x7f], &[0x7f])]),
+            section(3, &fsec),
+            section(4, &[2, 0x70, 0x01, 1, 1, 0x70, 0x01, 1, 1]),
+            section(5, &[1, 0x01, 1, 1]),
+            export_sec(&[("f0", 0, 0), ("f150", 0, 150), ("f290", 0, 290)]),
+            section(
+                9,
+                &[
+                    2, 0x00, 0x41, 0, 0x0b, 1, 0, 0x02, 1, 0x41, 0, 0x0b, 0x00, 1, 0,
+                ],
+            ),
+            section(10, &csec),
+        ])
+    };
+    let root = crate::build::create_fresh_test_root("wtime-aot-stage4-big");
+    let opts_inc = X64CompileOptions {
+        jobs: 4,
+        opt: true,
+        verify: true,
+        inc_cache_dir: Some(root.0.clone()),
+        cache_key_salt: Some([0x5au8; 32]),
+        ..Default::default()
+    };
+    let opts_cold = X64CompileOptions {
+        inc_cache_dir: None,
+        ..opts_inc.clone()
+    };
+    for edit_kind in [0u8, 1, 2] {
+        let w = build_big(edit_kind);
+        let so_inc = compile_wasm_to_x64_so(&w, &opts_inc).unwrap();
+        let so_cold = compile_wasm_to_x64_so(&w, &opts_cold).unwrap();
+        assert_eq!(
+            so_inc, so_cold,
+            "300-fn parallel admit + inc cache parity failed on edit_kind={edit_kind}"
+        );
+    }
+}

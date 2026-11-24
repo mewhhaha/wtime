@@ -34,9 +34,9 @@ const FORMAT_VERSION: u32 = 5;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20; // 128 MiB cap on read
 const PARALLEL_HASH_CHUNK_BYTES: usize = 256 << 10; // 256 KiB chunks for parallel SHA-256 Merkle trailer
 
-/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 8 threads.
+/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 16 threads.
 /// Uses fallible allocation and `spawn_scoped` with inline fallback so optional cache hashing never aborts.
-fn parallel_payload_digest(payload: &[u8]) -> Option<[u8; 32]> {
+pub(crate) fn parallel_payload_digest(payload: &[u8]) -> Option<[u8; 32]> {
     if payload.len() <= PARALLEL_HASH_CHUNK_BYTES {
         let mut h = Sha256::new();
         h.update(b"WTX64INC-ROOT-1");
@@ -49,7 +49,7 @@ fn parallel_payload_digest(payload: &[u8]) -> Option<[u8; 32]> {
     leaf_hashes.resize(n_chunks, [0u8; 32]);
     let n_threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
-        .min(8)
+        .min(16)
         .min(n_chunks);
     let per_worker = n_chunks.div_ceil(n_threads);
     let hash_range = |start_idx: usize, slice: &mut [[u8; 32]]| {
@@ -59,7 +59,7 @@ fn parallel_payload_digest(payload: &[u8]) -> Option<[u8; 32]> {
             *slot = crate::sha256::digest(&payload[off..end]);
         }
     };
-    let mut unspawned: [Option<(usize, usize)>; 8] = [None; 8];
+    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
     let mut n_unspawned = 0usize;
     std::thread::scope(|s| {
         let mut rem_leaves = leaf_hashes.as_mut_slice();

@@ -88,14 +88,14 @@
 <circle class="dot-o" cx="240" cy="154" r="6.5"/>
 <rect class="b-o" x="104" y="174" width="204" height="46" rx="6"/>
 <text class="tag-o" x="114" y="191">wtime-aot --backend c (-O2)</text>
-<text class="card-s" x="114" y="208">Sharded Clang + CET · ~820 ms edit</text>
+<text class="card-s" x="114" y="208">Sharded Clang + CET · ~1.0 s edit</text>
 
 <!-- 3. Wasmtime reference (mid-upper: x=456, y=188) -->
 <line class="stem" x1="456" y1="188" x2="456" y2="212"/>
 <circle class="dot-r" cx="456" cy="188" r="6"/>
 <rect class="b-r" x="366" y="212" width="180" height="42" rx="6"/>
 <text class="tag-r" x="376" y="229">Wasmtime (reference)</text>
-<text class="card-s" x="376" y="244">284 ms cold · 279 ms edit</text>
+<text class="card-s" x="376" y="244">318 ms cold · 312 ms edit</text>
 
 <!-- 4. wtime-aot x64 (upper-right, ahead of Wasmtime on both axes: x=540, y=156) -->
 <line class="stem" x1="540" y1="156" x2="562" y2="132"/>
@@ -103,7 +103,7 @@
 <rect class="b-b" x="562" y="92" width="216" height="60" rx="6"/>
 <text class="tag-b" x="572" y="109">wtime-aot --backend x64</text>
 <text class="card-s" x="572" y="126">Pure Rust · 0 LLVM · 0 Clang</text>
-<text class="card-s" x="572" y="142">207 ms cold · 111 ms 1-fn edit</text>
+<text class="card-s" x="572" y="142">210 ms cold · 81 ms 1-fn edit</text>
 
 <!-- 5. wtime-runtime (bottom-right: x=756, y=268) -->
 <line class="stem" x1="756" y1="268" x2="738" y2="246"/>

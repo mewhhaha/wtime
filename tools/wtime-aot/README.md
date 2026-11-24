@@ -28,7 +28,7 @@ Nothing is JIT-compiled at run time.
 ## Backends and benchmarks
 
 Measured on AMD Ryzen 7 7800X3D (8C/16T), Linux 7.3.5, Clang 23.1.5, Rust 1.99.0,
-Wasmtime 49.0.3, and Node v26.5.0 at commit `729373b` with exact output parity
+Wasmtime 49.0.3, and Node v26.5.0 (`2026-11-24`) with exact output parity
 verified across every engine (`tools/wtime-aot/charts/results.json`; full tables
 and methodology in [docs/benchmarks.md](../../docs/benchmarks.md)).
 

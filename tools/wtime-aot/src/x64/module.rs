@@ -4,7 +4,7 @@
 //! (global-preservation fixpoints, callee read/write sets, outline planning) and
 //! enforces an explicit Stage 1 admission contract before emitting any IR or code.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
@@ -964,123 +964,214 @@ pub fn admit_x64_module_with_budget(
         }
     }
 
-    // Single linear scan over ALL function bodies (including unreachable code) to:
-    // 1. Enforce opcode, local-count, value-type, expanded-signature, and br_table aggregate allowlists;
-    // 2. Count global reads/writes to detect constant globals & pick `pinned_global`;
-    // 3. Collect canonical `(table, canon_sig_id)` `call_indirect` signatures.
+    // Linear scan over ALL function bodies (including unreachable code), parallelized across
+    // contiguous chunks on large modules and merged in deterministic body-index order so:
+    // 1. Opcode, local-count, value-type, expanded-signature, and br_table caps match identically;
+    // 2. Global read/write counts & `pinned_global` selection are bit-for-bit identical;
+    // 3. Canonical `(table, canon_sig_id)` `call_indirect` tables are built in identical encounter order.
+    struct ChunkScan {
+        sig_arity: usize,
+        br_table_entries: usize,
+        global_reads: Vec<usize>,
+        global_writes: Vec<usize>,
+        ci_pairs: Vec<(u32, u32)>,
+    }
+
+    let n_globals = globals.len();
+    let scan_chunk = |bodies: &[wtime_validate::FunctionBody]| -> Res<ChunkScan> {
+        let mut sig_arity = 0usize;
+        let mut br_table_entries = 0usize;
+        let mut g_reads = vec![0usize; n_globals];
+        let mut g_writes = vec![0usize; n_globals];
+        let mut ci_seen: HashSet<(u32, u32)> = HashSet::new();
+        let mut ci_pairs: Vec<(u32, u32)> = Vec::new();
+        for (bi, body) in bodies.iter().enumerate() {
+            if let Some(b) = budget
+                && (bi & 63) == 0
+            {
+                b.check_deadline()?;
+            }
+            for &vt in &body.locals {
+                check_val_type(vt)?;
+            }
+            for (ii, insn) in body.instructions.iter().enumerate() {
+                if let Some(b) = budget
+                    && (ii & 4095) == 4095
+                {
+                    b.check_deadline()?;
+                }
+                check_supported_opcode(
+                    insn.opcode,
+                    &insn.immediate,
+                    &func_type_idx,
+                    &type_arity,
+                    &type_admitted,
+                    &mut sig_arity,
+                )?;
+                match insn.opcode {
+                    0x0e => {
+                        if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
+                            br_table_entries = br_table_entries.saturating_add(raw_targets.len());
+                            if br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
+                                return Err(format!(
+                                    "x64: aggregate br_table entries ({br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
+                                ));
+                            }
+                        }
+                    }
+                    0x23 => {
+                        if let Immediate::Index(g) = insn.immediate {
+                            let slot = g_reads
+                                .get_mut(g as usize)
+                                .ok_or_else(|| format!("x64: global.get index {g} out of range"))?;
+                            *slot += 1;
+                        }
+                    }
+                    0x24 => {
+                        if let Immediate::Index(g) = insn.immediate {
+                            let slot = g_writes
+                                .get_mut(g as usize)
+                                .ok_or_else(|| format!("x64: global.set index {g} out of range"))?;
+                            *slot += 1;
+                        }
+                    }
+                    0x25 | 0x26 => {
+                        if let Immediate::Index(t) = insn.immediate
+                            && !mut_extern_tables.contains_key(&t)
+                        {
+                            return Err(format!("x64: table.get/set on unsupported table {t}"));
+                        }
+                    }
+                    0x11 => {
+                        let Immediate::Pair(ti, tbl) = insn.immediate else {
+                            return Err("x64: malformed call_indirect immediate".into());
+                        };
+                        if ci_seen.insert((tbl, ti)) {
+                            ci_pairs.push((tbl, ti));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(ChunkScan {
+            sig_arity,
+            br_table_entries,
+            global_reads: g_reads,
+            global_writes: g_writes,
+            ci_pairs,
+        })
+    };
+
+    let n_bodies = decoded.code.len();
+    let n_chunks = if n_bodies >= 256 {
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(16)
+            .min(n_bodies / 64)
+            .max(1)
+    } else {
+        1
+    };
+    let chunk_results: Vec<Res<ChunkScan>> = if n_chunks <= 1 {
+        vec![scan_chunk(&decoded.code)]
+    } else {
+        let per = n_bodies.div_ceil(n_chunks);
+        let slices: Vec<&[wtime_validate::FunctionBody]> = decoded.code.chunks(per).collect();
+        let mut slots: Vec<Option<Res<ChunkScan>>> = (0..slices.len()).map(|_| None).collect();
+        let mut unspawned: Vec<usize> = Vec::new();
+        std::thread::scope(|s| {
+            let mut rem = slots.as_mut_slice();
+            for (ci, &sl) in slices.iter().enumerate() {
+                let (head, tail) = rem.split_first_mut().unwrap();
+                rem = tail;
+                if ci + 1 == slices.len() {
+                    *head = Some(scan_chunk(sl));
+                } else if std::thread::Builder::new()
+                    .spawn_scoped(s, move || {
+                        *head = Some(scan_chunk(sl));
+                    })
+                    .is_err()
+                {
+                    unspawned.push(ci);
+                }
+            }
+        });
+        for ci in unspawned {
+            slots[ci] = Some(scan_chunk(slices[ci]));
+        }
+        slots.into_iter().map(|o| o.unwrap()).collect()
+    };
+
     let mut total_br_table_entries = 0usize;
-    let mut global_reads = vec![0usize; globals.len()];
-    let mut global_writes = vec![0usize; globals.len()];
+    let mut global_reads = vec![0usize; n_globals];
+    let mut global_writes = vec![0usize; n_globals];
     let mut ci_canon: HashMap<(u32, u32), usize> = HashMap::new();
     let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     let mut ci_sigs: Vec<X64CiSig> = Vec::new();
     let mut total_ci_bytes = 0usize;
 
-    for (bi, body) in decoded.code.iter().enumerate() {
-        if let Some(b) = budget
-            && (bi & 63) == 0
-        {
-            b.check_deadline()?;
+    for chunk_res in chunk_results {
+        let chunk = chunk_res?;
+        total_sig_arity = total_sig_arity.saturating_add(chunk.sig_arity);
+        if total_sig_arity > MAX_TOTAL_SIG_ARITY {
+            return Err(format!(
+                "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+            ));
         }
-        for &vt in &body.locals {
-            check_val_type(vt)?;
+        total_br_table_entries = total_br_table_entries.saturating_add(chunk.br_table_entries);
+        if total_br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
+            return Err(format!(
+                "x64: aggregate br_table entries ({total_br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
+            ));
         }
-        for (ii, insn) in body.instructions.iter().enumerate() {
-            if let Some(b) = budget
-                && (ii & 4095) == 4095
-            {
-                b.check_deadline()?;
+        for (dst, src) in global_reads.iter_mut().zip(&chunk.global_reads) {
+            *dst += *src;
+        }
+        for (dst, src) in global_writes.iter_mut().zip(&chunk.global_writes) {
+            *dst += *src;
+        }
+        for (tbl, ti) in chunk.ci_pairs {
+            if ci_index.contains_key(&(tbl, ti)) {
+                continue;
             }
-            check_supported_opcode(
-                insn.opcode,
-                &insn.immediate,
-                &func_type_idx,
-                &type_arity,
-                &type_admitted,
-                &mut total_sig_arity,
-            )?;
-            match insn.opcode {
-                0x0e => {
-                    if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
-                        total_br_table_entries =
-                            total_br_table_entries.saturating_add(raw_targets.len());
-                        if total_br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
-                            return Err(format!(
-                                "x64: aggregate br_table entries ({total_br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
-                            ));
-                        }
-                    }
+            let &csig = type_canon
+                .get(ti as usize)
+                .ok_or("call_indirect type index")?;
+            let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
+                existing
+            } else {
+                let &table_len = funcref_table_lens
+                    .get(&tbl)
+                    .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
+                let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
+                let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) =
+                    (targets.first(), targets.last())
+                {
+                    (first, last - first + 1)
+                } else {
+                    (0, 0)
+                };
+                let bytes = (span as usize).saturating_mul(4);
+                total_ci_bytes = total_ci_bytes.saturating_add(bytes);
+                if total_ci_bytes > MAX_AGGREGATE_CI_TABLE_BYTES {
+                    return Err(format!(
+                        "x64: aggregate call_indirect dispatch tables ({total_ci_bytes} B) exceed cap {MAX_AGGREGATE_CI_TABLE_BYTES} B"
+                    ));
                 }
-                0x23 => {
-                    if let Immediate::Index(g) = insn.immediate {
-                        let slot = global_reads
-                            .get_mut(g as usize)
-                            .ok_or_else(|| format!("x64: global.get index {g} out of range"))?;
-                        *slot += 1;
-                    }
-                }
-                0x24 => {
-                    if let Immediate::Index(g) = insn.immediate {
-                        let slot = global_writes
-                            .get_mut(g as usize)
-                            .ok_or_else(|| format!("x64: global.set index {g} out of range"))?;
-                        *slot += 1;
-                    }
-                }
-                0x25 | 0x26 => {
-                    if let Immediate::Index(t) = insn.immediate
-                        && !mut_extern_tables.contains_key(&t)
-                    {
-                        return Err(format!("x64: table.get/set on unsupported table {t}"));
-                    }
-                }
-                0x11 => {
-                    let Immediate::Pair(ti, tbl) = insn.immediate else {
-                        return Err("x64: malformed call_indirect immediate".into());
-                    };
-                    if ci_index.contains_key(&(tbl, ti)) {
-                        continue;
-                    }
-                    let &csig = type_canon
-                        .get(ti as usize)
-                        .ok_or("call_indirect type index")?;
-                    let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
-                        existing
-                    } else {
-                        let &table_len = funcref_table_lens.get(&tbl).ok_or_else(|| {
-                            format!("x64: call_indirect on unsupported table {tbl}")
-                        })?;
-                        let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
-                        let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) =
-                            (targets.first(), targets.last())
-                        {
-                            (first, last - first + 1)
-                        } else {
-                            (0, 0)
-                        };
-                        let bytes = (span as usize).saturating_mul(4);
-                        total_ci_bytes = total_ci_bytes.saturating_add(bytes);
-                        if total_ci_bytes > MAX_AGGREGATE_CI_TABLE_BYTES {
-                            return Err(format!(
-                                "x64: aggregate call_indirect dispatch tables ({total_ci_bytes} B) exceed cap {MAX_AGGREGATE_CI_TABLE_BYTES} B"
-                            ));
-                        }
-                        let id = ci_sigs.len();
-                        ci_sigs.push(X64CiSig {
-                            table: tbl,
-                            table_len,
-                            type_idx: ti,
-                            min_slot,
-                            span,
-                            targets,
-                        });
-                        ci_canon.insert((tbl, csig), id);
-                        id
-                    };
-                    ci_index.insert((tbl, ti), ci_id);
-                }
-                _ => {}
-            }
+                let id = ci_sigs.len();
+                ci_sigs.push(X64CiSig {
+                    table: tbl,
+                    table_len,
+                    type_idx: ti,
+                    min_slot,
+                    span,
+                    targets,
+                });
+                ci_canon.insert((tbl, csig), id);
+                id
+            };
+            ci_index.insert((tbl, ti), ci_id);
         }
     }
 
