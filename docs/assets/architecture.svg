@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="a" viewBox="0 0 820 268" width="820" height="268" role="img" aria-labelledby="title desc">
+<title id="title">wtime two-layer architecture</title>
+<desc id="desc">WebAssembly modules pass through safe-Rust decode and validate crates, then execute either in the zero-dependency JIT-free core interpreter (wtime-runtime) or via the optional ahead-of-time compiler (wtime-aot) with x64, C, and Rust backends.</desc>
+<style>
+.a {
+  --surface:#fcfcfb; --card:#ffffff; --card-tint:#f6f5f0; --border:#e2e0d7;
+  --ink:#111110; --ink2:#575652; --muted:#7a7872; --line:#b8b5aa;
+  --blue:#2563eb; --blue-bg:#eff6ff; --blue-bd:#bfdbfe;
+  --green:#16a34a; --green-bg:#f0fdf4; --green-bd:#bbf7d0;
+  --orange:#ea580c; --orange-bg:#fff7ed; --orange-bd:#fed7aa;
+  --violet:#7c3aed; --violet-bg:#f5f3ff; --violet-bd:#ddd6fe;
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  .a {
+    --surface:#161615; --card:#1e1e1c; --card-tint:#242421; --border:#2e2e2a;
+    --ink:#f2f1ed; --ink2:#b8b6ad; --muted:#8c8a82; --line:#575650;
+    --blue:#60a5fa; --blue-bg:#172554; --blue-bd:#1e40af;
+    --green:#4ade80; --green-bg:#052e16; --green-bd:#166534;
+    --orange:#fb923c; --orange-bg:#431407; --orange-bd:#9a3412;
+    --violet:#c4b5fd; --violet-bg:#2e1065; --violet-bd:#5b21b6;
+  }
+}
+.bg { fill:var(--surface); stroke:var(--border); stroke-width:1; }
+.box { fill:var(--card); stroke:var(--border); stroke-width:1.25; }
+.box-tint { fill:var(--card-tint); stroke:var(--border); stroke-width:1.25; }
+.box-green { fill:var(--green-bg); stroke:var(--green-bd); stroke-width:1.25; }
+.box-blue { fill:var(--blue-bg); stroke:var(--blue-bd); stroke-width:1.25; }
+.box-orange { fill:var(--orange-bg); stroke:var(--orange-bd); stroke-width:1.25; }
+.box-violet { fill:var(--violet-bg); stroke:var(--violet-bd); stroke-width:1.25; }
+.h { fill:var(--ink); font-size:13px; font-weight:600; }
+.sub { fill:var(--ink2); font-size:11px; }
+.pill { font-size:10px; font-weight:600; letter-spacing:.04em; }
+.p-green { fill:var(--green); }
+.p-blue { fill:var(--blue); }
+.p-orange { fill:var(--orange); }
+.p-violet { fill:var(--violet); }
+.cap { fill:var(--muted); font-size:10.5px; font-weight:600; letter-spacing:.06em; }
+.conn { fill:none; stroke:var(--line); stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+.arr { fill:var(--line); }
+</style>
+
+<rect class="bg" x="0.5" y="0.5" width="819" height="267" rx="10"/>
+
+<!-- Column 1: Input -->
+<rect class="box-tint" x="22" y="102" width="108" height="64" rx="8"/>
+<text class="h" x="76" y="130" text-anchor="middle">module.wasm</text>
+<text class="sub" x="76" y="148" text-anchor="middle">Core 3.0 + Phase 3–5</text>
+
+<!-- Arrow 1 -> 2 -->
+<line class="conn" x1="130" y1="134" x2="160" y2="134"/>
+<polygon class="arr" points="160,130 168,134 160,138"/>
+
+<!-- Column 2: Safe Frontend -->
+<rect class="box" x="170" y="76" width="174" height="116" rx="9"/>
+<text class="cap" x="184" y="96">SHARED FRONTEND</text>
+<text class="h" x="184" y="118">wtime-decode</text>
+<text class="h" x="184" y="136">wtime-validate</text>
+<text class="sub" x="184" y="158">#![forbid(unsafe_code)]</text>
+<text class="sub" x="184" y="174">0 external dependencies</text>
+
+<!-- Branch arrows 2 -> 3 -->
+<path class="conn" d="M344,116 H370 V68 H392"/>
+<polygon class="arr" points="392,64 400,68 392,72"/>
+<path class="conn" d="M344,152 H370 V188 H392"/>
+<polygon class="arr" points="392,184 400,188 392,192"/>
+
+<!-- Column 3 Top: Core Interpreter -->
+<rect class="box-green" x="402" y="20" width="396" height="96" rx="9"/>
+<text class="pill p-green" x="418" y="40">CORE RUNTIME · ZERO DEPS · NO JIT</text>
+<text class="h" x="418" y="61">wtime-runtime  +  wtime-cli</text>
+<text class="sub" x="418" y="80">Full Core 3.0 + GC, exceptions, threads, memory64, SIMD, continuations</text>
+<text class="sub" x="418" y="98">Deterministic fuel · cooperative cancellation · recoverable OOM limits</text>
+
+<!-- Column 3 Bottom: Opt-in AOT -->
+<rect class="box" x="402" y="132" width="396" height="116" rx="9"/>
+<text class="cap" x="418" y="152">OPT-IN AHEAD-OF-TIME COMPILER  (tools/wtime-aot)</text>
+
+<!-- Backend cards -->
+<rect class="box-blue" x="416" y="164" width="118" height="70" rx="7"/>
+<text class="pill p-blue" x="426" y="180">--backend x64</text>
+<text class="sub" x="426" y="198">Pure Rust · 0 LLVM</text>
+<text class="sub" x="426" y="214">~207 ms cold .so</text>
+<text class="sub" x="426" y="227">~111 ms 1-fn edit</text>
+
+<rect class="box-orange" x="544" y="164" width="118" height="70" rx="7"/>
+<text class="pill p-orange" x="554" y="180">--backend c</text>
+<text class="sub" x="554" y="198">Sharded C99/Clang</text>
+<text class="sub" x="554" y="214">Per-shard cache</text>
+<text class="sub" x="554" y="227">CET shadow stack</text>
+
+<rect class="box-violet" x="672" y="164" width="114" height="70" rx="7"/>
+<text class="pill p-violet" x="682" y="180">--backend rust</text>
+<text class="sub" x="682" y="198">Safe-Rust crate</text>
+<text class="sub" x="682" y="214">Peak LLVM -O3</text>
+<text class="sub" x="682" y="227">Binary or .so</text>
+</svg>

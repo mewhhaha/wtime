@@ -59,6 +59,17 @@ static double now_ns(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "--load") == 0) {
+        double t0 = now_ns();
+        void *dl = dlopen(argv[2], RTLD_NOW);
+        if (!dl) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 3; }
+        fn_new b_new = (fn_new)dlsym(dl, "blot_aot_new");
+        if (!b_new) { fprintf(stderr, "dlsym failed\n"); return 4; }
+        double elapsed_ms = (now_ns() - t0) / 1e6;
+        printf("%.3f\n", elapsed_ms);
+        dlclose(dl);
+        return 0;
+    }
     if (argc < 6) {
         fprintf(stderr, "usage: driver so_path prep_fn run_fn arg iters [warmup]\n");
         return 2;
@@ -319,6 +330,20 @@ def strip_gdev_kernel(src_path: Path, dst_path: Path) -> None:
     dst_path.write_bytes(bytes(out))
 
 
+def count_defined_functions(wasm_path: Path) -> int:
+    b = wasm_path.read_bytes()
+    i = 8
+    while i < len(b):
+        sid = b[i]
+        i += 1
+        slen, i = read_leb(b, i)
+        if sid == 10:
+            cnt, _ = read_leb(b, i)
+            return cnt
+        i += slen
+    return 0
+
+
 def edit_one_func_nop(src_path: Path, dst_path: Path, nop_count: int = 1) -> None:
     """Insert `nop_count` `0x01` (nop) instructions into function body 0 to simulate a 1-fn edit."""
     b = src_path.read_bytes()
@@ -455,6 +480,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--wtime-aot", type=Path, default=WTIME_AOT_BIN)
+    parser.add_argument("--wasmtime-driver", type=Path, default=None, help="Optional Wasmtime driver binary supporting run/compile/load/version")
+    parser.add_argument("--large-wasm", type=Path, default=None, help="Optional large multi-thousand-function .wasm for cold/incremental/load benchmarks")
     parser.add_argument("--pen", type=Path, default=Path(os.environ["PEN_BIN"]) if os.environ.get("PEN_BIN") else None)
     parser.add_argument("--gdev-wasm", type=Path, default=Path(os.environ["GDEV_WASM"]) if os.environ.get("GDEV_WASM") else None)
     parser.add_argument("--gdev-pkg", type=Path, default=Path(os.environ["GDEV_PKG"]) if os.environ.get("GDEV_PKG") else None)
@@ -468,12 +495,19 @@ def main() -> None:
 
     wtime_aot_bin = args.wtime_aot
     assert wtime_aot_bin.is_file(), f"missing wtime-aot binary: {wtime_aot_bin} (build with `cargo build --release --manifest-path tools/wtime-aot/Cargo.toml`)"
-    run_gdev = not args.kernels_only
+    wt_driver = args.wasmtime_driver
+    if wt_driver is not None:
+        assert wt_driver.is_file(), f"missing --wasmtime-driver binary: {wt_driver}"
+    large_wasm_src = args.large_wasm
+    if large_wasm_src is not None:
+        assert large_wasm_src.is_file(), f"missing --large-wasm file: {large_wasm_src}"
+    run_gdev = (not args.kernels_only) and (large_wasm_src is None)
     if run_gdev:
         if args.pen is None or args.gdev_wasm is None or args.gdev_pkg is None:
             raise SystemExit(
                 "External Blot game paths are not configured. Pass --kernels-only to run the self-contained "
-                "kernel benchmarks, or supply --pen, --gdev-wasm, and --gdev-pkg (or PEN_BIN/GDEV_WASM/GDEV_PKG)."
+                "kernel benchmarks, --large-wasm PATH for large-module compile/load benchmarks, or supply "
+                "--pen, --gdev-wasm, and --gdev-pkg."
             )
         assert args.pen.is_file(), f"missing --pen binary: {args.pen}"
         assert args.gdev_wasm.is_file(), f"missing --gdev-wasm: {args.gdev_wasm}"
@@ -483,10 +517,12 @@ def main() -> None:
         "host": host_info(
             wtime_aot_bin,
             args.pen if run_gdev else None,
-            args.gdev_wasm if run_gdev else None,
+            args.gdev_wasm if run_gdev else large_wasm_src,
             args.rust_toolchain,
         )
     }
+    if wt_driver is not None:
+        results["host"]["wasmtime"] = subprocess.check_output([str(wt_driver), "version"], text=True).strip()
     base_env = {k: v for k, v in os.environ.items() if not k.startswith("PEN_WTIME_AOT")}
 
     with tempfile.TemporaryDirectory(prefix="wtime-aot-charts-") as td_s:
@@ -522,10 +558,11 @@ def main() -> None:
             gdev_wasm = gdir / "game.wasm"
             strip_gdev_kernel(args.gdev_wasm, gdev_wasm)
 
+            gdev_fn_count = count_defined_functions(gdev_wasm)
             # ------------------------------------------------------------------
-            # 1. Blot game runtime (real 4,935-fn gdev, CPU 0 pinned, 600 frames)
+            # 1. Blot game runtime (real gdev, CPU 0 pinned, 600 frames)
             # ------------------------------------------------------------------
-            print("=== [1/4] Real gdev runtime (600 frames x %d rounds, CPU 0) ===" % args.gdev_rounds, flush=True)
+            print("=== [1/4] Real gdev runtime (%d fns, 600 frames x %d rounds, CPU 0) ===" % (gdev_fn_count, args.gdev_rounds), flush=True)
             wt_cache = td / "gdev_wt_cache"; wt_cache.mkdir(mode=0o700)
             c_cache = td / "gdev_c_cache"; c_cache.mkdir(mode=0o700)
             x64_cache = td / "gdev_x64_cache"; x64_cache.mkdir(mode=0o700)
@@ -580,7 +617,7 @@ def main() -> None:
 
             results["runtime_gdev"] = {
                 "wasm_bytes": gdev_wasm.stat().st_size,
-                "functions": 4935,
+                "functions": gdev_fn_count,
                 "rounds": args.gdev_rounds,
                 "frames": 600,
                 "parity_files": hashes["x64"][0],
@@ -637,13 +674,24 @@ def main() -> None:
                     dt_ms, _ = time_cmd_ms(cmd_warm)
                     kernel_hot_hit_samples[name][backend].append(dt_ms)
 
-            # Paired runtime measurement across x64, c, rust, v8 (Node TurboFan)
+            if wt_driver is not None:
+                kernel_cold_samples[name]["wasmtime"] = []
+                for cr in range(args.cold_rounds):
+                    cw_out = td / f"cold_{name}_wt_{cr}.cwasm"
+                    dt_ms, _ = time_cmd_ms([str(wt_driver), "compile", str(wpath), str(cw_out)])
+                    kernel_cold_samples[name]["wasmtime"].append(dt_ms)
+
+            # Paired runtime measurement across x64, c, rust, [wasmtime], v8 (Node TurboFan)
             eng_cmds = [
                 ("x64", ["taskset", "-c", "0", str(driver_bin), str(so_paths["x64"]), prep, run_fn, str(arg), str(iters), "20"]),
                 ("c", ["taskset", "-c", "0", str(driver_bin), str(so_paths["c"]), prep, run_fn, str(arg), str(iters), "20"]),
                 ("rust", ["taskset", "-c", "0", str(driver_bin), str(so_paths["rust"]), prep, run_fn, str(arg), str(iters), "20"]),
-                ("v8", ["taskset", "-c", "0", "node", str(driver_js), str(wpath), prep, run_fn, str(arg), str(iters), str(max(2000, iters * 4))]),
             ]
+            if wt_driver is not None:
+                eng_cmds.append(("wasmtime", ["taskset", "-c", "0", str(wt_driver), "run", str(wpath), prep, run_fn, str(arg), str(iters), "20"]))
+            eng_cmds.append(
+                ("v8", ["taskset", "-c", "0", "node", str(driver_js), str(wpath), prep, run_fn, str(arg), str(iters), str(max(2000, iters * 4))])
+            )
             samples = {k: [] for k, _ in eng_cmds}
             seen_hashes = {}
             for r in range(args.kernel_rounds):
@@ -657,8 +705,9 @@ def main() -> None:
             all_h = {h for s in seen_hashes.values() for h in s}
             assert len(all_h) == 1, f"kernel parity mismatch on {name}: {seen_hashes}"
             meds_us = {eng: statistics.median(vals) for eng, vals in samples.items()}
+            wt_part = f"  wt={meds_us['wasmtime']:6.2f}us" if "wasmtime" in meds_us else ""
             print(f"  {name:14s}: x64={meds_us['x64']:6.2f}us  c={meds_us['c']:6.2f}us  "
-                  f"rust={meds_us['rust']:6.2f}us  v8={meds_us['v8']:6.2f}us  parity={next(iter(all_h))}", flush=True)
+                  f"rust={meds_us['rust']:6.2f}us{wt_part}  v8={meds_us['v8']:6.2f}us  parity={next(iter(all_h))}", flush=True)
             kernel_runtime.append({
                 "name": name,
                 "wasm_bytes": wpath.stat().st_size,
@@ -678,24 +727,37 @@ def main() -> None:
             assert wt_cache is not None and env_wt is not None and env_c is not None and env_x64 is not None
 
             # ------------------------------------------------------------------
-            # 3. Cold compilation time on real gdev (multi-core --jobs 0, fresh cache)
+            # 3. Cold compilation time on real gdev (multi-core, identical `pen bench` load_ms boundary)
             # ------------------------------------------------------------------
-            print("\n=== [3/4] Cold compilation on real gdev (multi-core, %d rounds) ===" % args.cold_rounds, flush=True)
+            print("\n=== [3/4] Cold compilation on real gdev (multi-core, identical pen load_ms boundary, %d rounds) ===" % args.cold_rounds, flush=True)
             gdev_cold: dict[str, list[float]] = {"x64": [], "c": [], "wasmtime": []}
+            gdev_cold_cli: dict[str, list[float]] = {"x64": [], "c": []}
             last_gdev_c_cache = None
             last_gdev_x64_cache = None
+            last_gdev_wt_cache = None
             for cr in range(args.cold_rounds):
-                # x64 fresh cache
+                # x64 fresh cache via identical `pen bench` load_ms boundary
                 xc = td / f"gdev_cold_x64_{cr}"; xc.mkdir(mode=0o700)
-                dt_x64, _ = time_cmd_ms([
-                    str(wtime_aot_bin), "build", str(gdev_wasm),
-                    "--cache", str(xc), "--blot-cdylib", "--backend", "x64",
-                    "--target-cpu", "native", "--jobs", "0",
-                ])
-                gdev_cold["x64"].append(dt_x64)
+                d_x64, _ = run_pen_bench(
+                    args.pen,
+                    gdir,
+                    dict(base_env, PEN_WTIME_AOT="1", PEN_WTIME_AOT_BACKEND="x64",
+                         PEN_WTIME_AOT_BIN=str(wtime_aot_bin), PEN_WTIME_AOT_CACHE=str(xc)),
+                    expect_aot=True, frames=125, pin_cpu0=False,
+                )
+                gdev_cold["x64"].append(d_x64["metrics"]["load_ms"])
                 last_gdev_x64_cache = xc
 
-                # Wasmtime cold Cranelift compile (unpinned multi-core via pen bench)
+                # Standalone wtime-aot CLI cold build (fresh cache) for reference
+                xc_cli = td / f"gdev_cold_x64_cli_{cr}"; xc_cli.mkdir(mode=0o700)
+                dt_x64_cli, _ = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(gdev_wasm),
+                    "--cache", str(xc_cli), "--blot-cdylib", "--backend", "x64",
+                    "--target-cpu", "native", "--jobs", "0",
+                ])
+                gdev_cold_cli["x64"].append(dt_x64_cli)
+
+                # Wasmtime cold Cranelift compile (identical `pen bench` load_ms boundary)
                 wc = td / f"gdev_cold_wt_{cr}"; wc.mkdir(mode=0o700)
                 d_wt, _ = run_pen_bench(
                     args.pen,
@@ -704,21 +766,38 @@ def main() -> None:
                     expect_aot=False, frames=125, pin_cpu0=False,
                 )
                 gdev_cold["wasmtime"].append(d_wt["metrics"]["load_ms"])
+                last_gdev_wt_cache = wc
 
-                # Clang -O2 fresh cache (multi-core --jobs 0)
+                # Clang -O2 fresh cache via identical `pen bench` load_ms boundary
                 cc = td / f"gdev_cold_c_{cr}"; cc.mkdir(mode=0o700)
-                dt_c, _ = time_cmd_ms([
+                d_c, _ = run_pen_bench(
+                    args.pen,
+                    gdir,
+                    dict(base_env, PEN_WTIME_AOT="1", PEN_WTIME_AOT_BACKEND="c", PEN_WTIME_AOT_C_OPT="auto",
+                         PEN_WTIME_AOT_BIN=str(wtime_aot_bin), PEN_WTIME_AOT_CACHE=str(cc)),
+                    expect_aot=True, frames=125, pin_cpu0=False,
+                )
+                gdev_cold["c"].append(d_c["metrics"]["load_ms"])
+                last_gdev_c_cache = cc
+
+                # Standalone wtime-aot CLI cold build for C backend (fresh cache)
+                cc_cli = td / f"gdev_cold_c_cli_{cr}"; cc_cli.mkdir(mode=0o700)
+                dt_c_cli, _ = time_cmd_ms([
                     str(wtime_aot_bin), "build", str(gdev_wasm),
-                    "--cache", str(cc), "--blot-cdylib", "--backend", "c",
+                    "--cache", str(cc_cli), "--blot-cdylib", "--backend", "c",
                     "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
                 ])
-                gdev_cold["c"].append(dt_c)
-                last_gdev_c_cache = cc
-                print(f"  round {cr+1}: x64={dt_x64:.1f}ms  wasmtime={d_wt['metrics']['load_ms']:.1f}ms  c={dt_c:.1f}ms", flush=True)
+                gdev_cold_cli["c"].append(dt_c_cli)
+
+                print(f"  round {cr+1}: pen_load x64={d_x64['metrics']['load_ms']:.1f}ms (cli={dt_x64_cli:.1f}ms)  "
+                      f"wasmtime={d_wt['metrics']['load_ms']:.1f}ms  "
+                      f"c={d_c['metrics']['load_ms']:.1f}ms (cli={dt_c_cli:.1f}ms)", flush=True)
 
             results["compile_cold"] = {
                 "rounds": args.cold_rounds,
+                "boundary": "pen bench load_ms (read wasm + compile + write cache + instantiate) for gdev; wtime-aot build CLI for kernels",
                 "gdev_ms": {k: statistics.median(v) for k, v in gdev_cold.items()},
+                "gdev_cli_ms": {k: statistics.median(v) for k, v in gdev_cold_cli.items()},
                 "kernels_ms": {
                     name: {b: statistics.median(vals) for b, vals in bs.items()}
                     for name, bs in kernel_cold_samples.items()
@@ -729,36 +808,71 @@ def main() -> None:
             # 4. Hot compilation & warm cache-hit times
             # ------------------------------------------------------------------
             print("\n=== [4/4] Hot compilation, incremental 1-fn edit, & warm pen load ===", flush=True)
-            # 4a. Incremental 1-function edit on real gdev (warm c-obj/ shard cache for c)
+            # 4a. Incremental 1-function edit on real gdev (identical `pen bench` load_ms boundary;
+            # warm x64-inc-v5 function cache for x64, warm c-obj/ shard cache for c)
             inc_samples: dict[str, list[float]] = {"x64": [], "c": [], "wasmtime": []}
+            inc_cli_samples: dict[str, list[float]] = {"x64": [], "c": []}
+            # Also seed standalone CLI warm caches for standalone 1-fn edit & hit timings
+            x64_cli_warm = td / "gdev_cli_warm_x64"; x64_cli_warm.mkdir(mode=0o700)
+            time_cmd_ms([
+                str(wtime_aot_bin), "build", str(gdev_wasm),
+                "--cache", str(x64_cli_warm), "--blot-cdylib", "--backend", "x64",
+                "--target-cpu", "native", "--jobs", "0",
+            ])
+            c_cli_warm = td / "gdev_cli_warm_c"; c_cli_warm.mkdir(mode=0o700)
+            time_cmd_ms([
+                str(wtime_aot_bin), "build", str(gdev_wasm),
+                "--cache", str(c_cli_warm), "--blot-cdylib", "--backend", "c",
+                "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+            ])
             for ir in range(args.cold_rounds):
                 ed_dir = td / f"gdev_edit_{ir}"
                 stage_pkg_without_game_wasm(args.gdev_pkg, ed_dir)
                 ed_wasm = ed_dir / "game.wasm"
                 edit_one_func_nop(gdev_wasm, ed_wasm, nop_count=ir + 1)
 
-                dt_x64, _ = time_cmd_ms([
+                d_x64, _ = run_pen_bench(
+                    args.pen,
+                    ed_dir,
+                    dict(base_env, PEN_WTIME_AOT="1", PEN_WTIME_AOT_BACKEND="x64",
+                         PEN_WTIME_AOT_BIN=str(wtime_aot_bin), PEN_WTIME_AOT_CACHE=str(last_gdev_x64_cache)),
+                    expect_aot=True, frames=125, pin_cpu0=False,
+                )
+                inc_samples["x64"].append(d_x64["metrics"]["load_ms"])
+
+                dt_x64_cli, _ = time_cmd_ms([
                     str(wtime_aot_bin), "build", str(ed_wasm),
-                    "--cache", str(last_gdev_x64_cache), "--blot-cdylib", "--backend", "x64",
+                    "--cache", str(x64_cli_warm), "--blot-cdylib", "--backend", "x64",
                     "--target-cpu", "native", "--jobs", "0",
                 ])
-                inc_samples["x64"].append(dt_x64)
+                inc_cli_samples["x64"].append(dt_x64_cli)
 
-                dt_c, _ = time_cmd_ms([
+                d_c, _ = run_pen_bench(
+                    args.pen,
+                    ed_dir,
+                    dict(base_env, PEN_WTIME_AOT="1", PEN_WTIME_AOT_BACKEND="c", PEN_WTIME_AOT_C_OPT="auto",
+                         PEN_WTIME_AOT_BIN=str(wtime_aot_bin), PEN_WTIME_AOT_CACHE=str(last_gdev_c_cache)),
+                    expect_aot=True, frames=125, pin_cpu0=False,
+                )
+                inc_samples["c"].append(d_c["metrics"]["load_ms"])
+
+                dt_c_cli, _ = time_cmd_ms([
                     str(wtime_aot_bin), "build", str(ed_wasm),
-                    "--cache", str(last_gdev_c_cache), "--blot-cdylib", "--backend", "c",
+                    "--cache", str(c_cli_warm), "--blot-cdylib", "--backend", "c",
                     "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
                 ])
-                inc_samples["c"].append(dt_c)
+                inc_cli_samples["c"].append(dt_c_cli)
 
                 d_wt, _ = run_pen_bench(
                     args.pen,
                     ed_dir,
-                    dict(base_env, PEN_WTIME_AOT="0", XDG_CACHE_HOME=str(wt_cache)),
+                    dict(base_env, PEN_WTIME_AOT="0", XDG_CACHE_HOME=str(last_gdev_wt_cache)),
                     expect_aot=False, frames=125, pin_cpu0=False,
                 )
                 inc_samples["wasmtime"].append(d_wt["metrics"]["load_ms"])
-                print(f"  1-fn edit r{ir+1}: x64={dt_x64:.1f}ms  c(warm c-obj)={dt_c:.1f}ms  wasmtime={d_wt['metrics']['load_ms']:.1f}ms", flush=True)
+                print(f"  1-fn edit r{ir+1}: pen_load x64={d_x64['metrics']['load_ms']:.1f}ms (cli={dt_x64_cli:.1f}ms)  "
+                      f"c={d_c['metrics']['load_ms']:.1f}ms (cli={dt_c_cli:.1f}ms)  "
+                      f"wasmtime={d_wt['metrics']['load_ms']:.1f}ms", flush=True)
 
             # 4b. Warm fresh-process game module load in pen (gdev) — identical `pen packets` ready-ms
             # boundary for all three engines (x64 .so, c .so, Wasmtime cached .cwasm).
@@ -780,13 +894,13 @@ def main() -> None:
             for _ in range(args.hot_rounds):
                 dt_x64, _ = time_cmd_ms([
                     str(wtime_aot_bin), "build", str(gdev_wasm),
-                    "--cache", str(last_gdev_x64_cache), "--blot-cdylib", "--backend", "x64",
+                    "--cache", str(x64_cli_warm), "--blot-cdylib", "--backend", "x64",
                     "--target-cpu", "native", "--jobs", "0",
                 ])
                 gdev_build_hit["x64"].append(dt_x64)
                 dt_c, _ = time_cmd_ms([
                     str(wtime_aot_bin), "build", str(gdev_wasm),
-                    "--cache", str(last_gdev_c_cache), "--blot-cdylib", "--backend", "c",
+                    "--cache", str(c_cli_warm), "--blot-cdylib", "--backend", "c",
                     "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
                 ])
                 gdev_build_hit["c"].append(dt_c)
@@ -797,8 +911,144 @@ def main() -> None:
                 "edit_rounds": args.cold_rounds,
                 "hot_rounds": args.hot_rounds,
                 "gdev_1fn_edit_ms": {k: statistics.median(v) for k, v in inc_samples.items()},
+                "gdev_1fn_edit_cli_ms": {k: statistics.median(v) for k, v in inc_cli_samples.items()},
                 "gdev_warm_pen_load_ms": {k: statistics.median(v) for k, v in warm_pen_load.items()},
                 "gdev_build_cache_hit_ms": {k: statistics.median(v) for k, v in gdev_build_hit.items()},
+                "kernels_build_cache_hit_ms": {
+                    name: {b: statistics.median(vals) for b, vals in bs.items()}
+                    for name, bs in kernel_hot_hit_samples.items()
+                },
+            }
+        elif large_wasm_src is not None:
+            large_wasm = td / "large_app.wasm"
+            strip_gdev_kernel(large_wasm_src, large_wasm)
+            large_fns = count_defined_functions(large_wasm)
+            print(
+                f"\n=== [3/4] Large module cold compilation ({large_wasm.stat().st_size / 1048576:.2f} MiB, "
+                f"{large_fns:,} fns, {args.cold_rounds} rounds) ===",
+                flush=True,
+            )
+            large_cold: dict[str, list[float]] = {"x64": [], "c": []}
+            if wt_driver is not None:
+                large_cold["wasmtime"] = []
+            last_x64_cache = last_c_cache = None
+            last_x64_so = last_c_so = last_cwasm = None
+            for cr in range(args.cold_rounds):
+                xc = td / f"large_cold_x64_{cr}"; xc.mkdir(mode=0o700)
+                dt_x64, x64_out = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(large_wasm),
+                    "--cache", str(xc), "--blot-cdylib", "--backend", "x64",
+                    "--target-cpu", "native", "--jobs", "0",
+                ])
+                large_cold["x64"].append(dt_x64)
+                last_x64_cache, last_x64_so = xc, Path(x64_out)
+
+                dt_wt_str = ""
+                if wt_driver is not None:
+                    cw = td / f"large_cold_wt_{cr}.cwasm"
+                    dt_wt, _ = time_cmd_ms([str(wt_driver), "compile", str(large_wasm), str(cw)])
+                    large_cold["wasmtime"].append(dt_wt)
+                    last_cwasm = cw
+                    dt_wt_str = f"  wasmtime={dt_wt:.1f}ms"
+
+                cc = td / f"large_cold_c_{cr}"; cc.mkdir(mode=0o700)
+                dt_c, c_out = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(large_wasm),
+                    "--cache", str(cc), "--blot-cdylib", "--backend", "c",
+                    "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+                ])
+                large_cold["c"].append(dt_c)
+                last_c_cache, last_c_so = cc, Path(c_out)
+                print(f"  round {cr+1}: x64={dt_x64:.1f}ms{dt_wt_str}  c={dt_c:.1f}ms", flush=True)
+
+            assert last_x64_cache is not None and last_c_cache is not None
+            assert last_x64_so is not None and last_c_so is not None
+            artifact_bytes = {
+                "x64": last_x64_so.stat().st_size,
+                "c": last_c_so.stat().st_size,
+            }
+            if last_cwasm is not None:
+                artifact_bytes["wasmtime_cwasm"] = last_cwasm.stat().st_size
+            results["large_module"] = {
+                "wasm_bytes": large_wasm.stat().st_size,
+                "functions": large_fns,
+                "artifact_bytes": artifact_bytes,
+            }
+            results["compile_cold"] = {
+                "rounds": args.cold_rounds,
+                "boundary": "fresh-process read .wasm + multi-core compile + write compiled artifact (.so / .cwasm)",
+                "large_ms": {k: statistics.median(v) for k, v in large_cold.items()},
+                "kernels_ms": {
+                    name: {b: statistics.median(vals) for b, vals in bs.items()}
+                    for name, bs in kernel_cold_samples.items()
+                },
+            }
+
+            print("\n=== [4/4] Incremental 1-fn edit, warm artifact load, & warm cache hit ===", flush=True)
+            inc_samples: dict[str, list[float]] = {"x64": [], "c": []}
+            if wt_driver is not None:
+                inc_samples["wasmtime"] = []
+            for ir in range(args.cold_rounds):
+                ed_wasm = td / f"large_edit_{ir}.wasm"
+                edit_one_func_nop(large_wasm, ed_wasm, nop_count=ir + 1)
+                dt_x64, _ = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(ed_wasm),
+                    "--cache", str(last_x64_cache), "--blot-cdylib", "--backend", "x64",
+                    "--target-cpu", "native", "--jobs", "0",
+                ])
+                inc_samples["x64"].append(dt_x64)
+                dt_c, _ = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(ed_wasm),
+                    "--cache", str(last_c_cache), "--blot-cdylib", "--backend", "c",
+                    "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+                ])
+                inc_samples["c"].append(dt_c)
+                dt_wt_str = ""
+                if wt_driver is not None:
+                    cw_ed = td / f"large_edit_{ir}.cwasm"
+                    dt_wt, _ = time_cmd_ms([str(wt_driver), "compile", str(ed_wasm), str(cw_ed)])
+                    inc_samples["wasmtime"].append(dt_wt)
+                    dt_wt_str = f"  wasmtime={dt_wt:.1f}ms"
+                print(f"  1-fn edit r{ir+1}: x64={dt_x64:.1f}ms  c={dt_c:.1f}ms{dt_wt_str}", flush=True)
+
+            warm_load: dict[str, list[float]] = {"x64": [], "c": []}
+            if wt_driver is not None:
+                warm_load["wasmtime"] = []
+            for _ in range(args.hot_rounds):
+                _, x64_lms = time_cmd_ms([str(driver_bin), "--load", str(last_x64_so)])
+                warm_load["x64"].append(float(x64_lms))
+                _, c_lms = time_cmd_ms([str(driver_bin), "--load", str(last_c_so)])
+                warm_load["c"].append(float(c_lms))
+                if wt_driver is not None and last_cwasm is not None:
+                    _, wt_lms = time_cmd_ms([str(wt_driver), "load", str(last_cwasm)])
+                    warm_load["wasmtime"].append(float(wt_lms))
+            wt_l_str = f"  wasmtime(.cwasm)={statistics.median(warm_load['wasmtime']):.2f}ms" if "wasmtime" in warm_load else ""
+            print(f"  warm artifact load: x64(.so)={statistics.median(warm_load['x64']):.2f}ms  "
+                  f"c(.so)={statistics.median(warm_load['c']):.2f}ms{wt_l_str}", flush=True)
+
+            large_hit: dict[str, list[float]] = {"x64": [], "c": []}
+            for _ in range(args.hot_rounds):
+                dt_x64, _ = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(large_wasm),
+                    "--cache", str(last_x64_cache), "--blot-cdylib", "--backend", "x64",
+                    "--target-cpu", "native", "--jobs", "0",
+                ])
+                large_hit["x64"].append(dt_x64)
+                dt_c, _ = time_cmd_ms([
+                    str(wtime_aot_bin), "build", str(large_wasm),
+                    "--cache", str(last_c_cache), "--blot-cdylib", "--backend", "c",
+                    "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+                ])
+                large_hit["c"].append(dt_c)
+            print(f"  warm build --cache hit: x64={statistics.median(large_hit['x64']):.2f}ms  "
+                  f"c={statistics.median(large_hit['c']):.2f}ms", flush=True)
+
+            results["compile_hot"] = {
+                "edit_rounds": args.cold_rounds,
+                "hot_rounds": args.hot_rounds,
+                "large_1fn_edit_ms": {k: statistics.median(v) for k, v in inc_samples.items()},
+                "large_warm_load_ms": {k: statistics.median(v) for k, v in warm_load.items()},
+                "large_build_cache_hit_ms": {k: statistics.median(v) for k, v in large_hit.items()},
                 "kernels_build_cache_hit_ms": {
                     name: {b: statistics.median(vals) for b, vals in bs.items()}
                     for name, bs in kernel_hot_hit_samples.items()

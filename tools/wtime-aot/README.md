@@ -28,8 +28,9 @@ Nothing is JIT-compiled at run time.
 ## Backends and benchmarks
 
 Measured on AMD Ryzen 7 7800X3D (8C/16T), Linux 7.3.5, Clang 23.1.5, Rust 1.99.0,
-and Node v26.5.0 with exact output/packet SHA-256 parity verified across every
-engine (`tools/wtime-aot/charts/results.json`).
+Wasmtime 49.0.3, and Node v26.5.0 at commit `729373b` with exact output parity
+verified across every engine (`tools/wtime-aot/charts/results.json`; full tables
+and methodology in [docs/benchmarks.md](../../docs/benchmarks.md)).
 
 Reproduce the self-contained kernel dataset and charts anywhere with `clang`,
 `rustc`, and `node`:
@@ -40,12 +41,9 @@ python3 -B tools/wtime-aot/bench.py --kernels-only --cold-rounds 5 -o target/aot
 python3 -B tools/wtime-aot/chart.py target/aot-kernels.json -o target/aot-charts
 ```
 
-To include an external Blot game package (such as `gdev`), pass `--pen`,
-`--gdev-wasm`, and `--gdev-pkg` to `bench.py`.
-
-### Blot game runtime (`gdev`, 3.57 MiB)
-
-![Blot game runtime on gdev](charts/runtime-gdev.svg)
+Pass `--wasmtime-driver PATH` and/or `--large-wasm PATH` to include Wasmtime
+and a multi-thousand-function `.wasm` module in the cold, incremental, and warm
+load benchmarks.
 
 ### Representative Wasm kernels runtime
 
@@ -55,9 +53,9 @@ To include an external Blot game package (such as `gdev`), pass `--pen`,
 
 ![Cold compilation time](charts/compile-cold.svg)
 
-### Hot compilation, incremental rebuild, & warm load
+### Incremental rebuild, warm load, & cache hit
 
-![Hot compilation, incremental rebuild, and warm load](charts/compile-hot.svg)
+![Incremental rebuild, warm load, and cache hit](charts/compile-hot.svg)
 
 ## Usage
 

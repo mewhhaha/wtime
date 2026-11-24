@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Render separate per-category SVG charts for wtime-aot from bench.py JSON.
+"""Render clean light/dark SVG charts for wtime-aot from bench.py JSON.
 
     python3 -B tools/wtime-aot/chart.py tools/wtime-aot/charts/results.json -o tools/wtime-aot/charts
 
-Writes four standalone light/dark SVG images matching tools/wtime-goose/chart.py's visual language:
-  - runtime-gdev.svg    : Real 4,935-fn Blot game (gdev) steady-state runtime (ms, linear)
+Writes standalone light/dark SVG images:
   - runtime-kernels.svg : Representative Wasm kernels runtime (us, log scale)
   - compile-cold.svg    : Cold multi-core compilation time (ms/s, log scale)
-  - compile-hot.svg     : Hot compilation, incremental 1-fn rebuild, & warm cache-hit load (ms/s, log scale)
+  - compile-hot.svg     : Incremental 1-fn rebuild, warm load, & warm cache-hit (ms/s, log scale)
+  - runtime-gdev.svg    : (optional, only when `runtime_gdev` is present in JSON)
 """
 
 from __future__ import annotations
@@ -18,43 +18,43 @@ import math
 from pathlib import Path
 
 STYLE = """
-.c { --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7;
-     --x64:#2a78d6; --c:#eb6834; --wt:#2b9348; --rust:#8b5cf6;
-     font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+.c { --surface:#fcfcfb; --border:#e6e4dc; --ink:#111110; --ink2:#575652; --muted:#898781; --grid:#e6e4dc; --axis:#c4c2b8;
+     --x64:#2563eb; --c:#ea580c; --rust:#7c3aed; --wt:#16a34a; --v8:#0d9488;
+     font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
 @media (prefers-color-scheme: dark) {
-  .c { --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835;
-       --x64:#3987e5; --c:#d95926; --wt:#40b362; --rust:#a78bfa; }
+  .c { --surface:#161615; --border:#2b2b28; --ink:#f2f1ed; --ink2:#b8b6ad; --muted:#85837c; --grid:#292926; --axis:#3f3f3a;
+       --x64:#3b82f6; --c:#f97316; --rust:#a78bfa; --wt:#4ade80; --v8:#2dd4bf; }
 }
-.bg { fill:var(--surface); }
-.t { fill:var(--ink); font-size:15px; font-weight:600; }
+.bg { fill:var(--surface); stroke:var(--border); stroke-width:1; }
+.t { fill:var(--ink); font-size:15px; font-weight:600; letter-spacing:-0.01em; }
 .st { fill:var(--ink2); font-size:12px; }
-.lb { fill:var(--ink); font-size:12px; }
-.grp { fill:var(--ink2); font-size:11px; font-weight:600; letter-spacing:.04em; }
+.lb { fill:var(--ink); font-size:12px; font-weight:500; }
+.lg { fill:var(--ink2); font-size:11.5px; }
+.grp { fill:var(--ink2); font-size:10.5px; font-weight:600; letter-spacing:.06em; }
 .v { fill:var(--ink2); font-size:11px; font-variant-numeric:tabular-nums; }
+.v-hi { fill:var(--ink); font-size:11px; font-weight:600; font-variant-numeric:tabular-nums; }
 .tick { fill:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
 .grid { stroke:var(--grid); stroke-width:1; }
 .ax { stroke:var(--axis); stroke-width:1.5; }
 .x64 { fill:var(--x64); }
-.c { fill:var(--c); }
-.wt { fill:var(--wt); }
+.bc { fill:var(--c); }
 .rust { fill:var(--rust); }
+.wt { fill:var(--wt); }
+.v8 { fill:var(--v8); }
 """
-
-# Note: rename `.c` bar class to `.bc` so it does not collide with root `.c` SVG class!
-STYLE = STYLE.replace(".c { fill:var(--c); }", ".bc { fill:var(--c); }")
 
 CLASS_FOR = {
     "x64": "x64",
     "c": "bc",
-    "wasmtime": "wt",
-    "v8": "wt",
     "rust": "rust",
+    "wasmtime": "wt",
+    "v8": "v8",
 }
 
-WIDTH = 780
+WIDTH = 820
 BAR = 11
-GAP = 3
-ROW_GAP = 14
+GAP = 3.5
+ROW_GAP = 16
 
 
 def esc(text: str) -> str:
@@ -87,8 +87,7 @@ def fmt_us(v: float) -> str:
 
 def fmt_tick_ms(t: float) -> str:
     if t >= 1000.0:
-        s = t / 1000.0
-        return f"{s:g} s"
+        return f"{t / 1000.0:g} s"
     return f"{t:g} ms"
 
 
@@ -99,8 +98,8 @@ def fmt_tick_us(t: float) -> str:
 
 
 def hbar(x0: float, x1: float, y: float, cls: str) -> str:
-    x1 = max(x1, x0 + 2.0)
-    r = min(4.0, (x1 - x0) / 2.0, BAR / 2.0)
+    x1 = max(x1, x0 + 2.5)
+    r = min(3.5, (x1 - x0) / 2.0, BAR / 2.0)
     d = (
         f"M{x0:.1f},{y:.1f}H{x1 - r:.1f}"
         f"Q{x1:.1f},{y:.1f} {x1:.1f},{y + r:.1f}"
@@ -120,10 +119,10 @@ def render_bar_chart(
     scale: str,
     fmt_val,
     fmt_tick,
-    right_pad: int = 86,
+    right_pad: int = 104,
     note_fn=None,
 ) -> str:
-    """Generic grouped horizontal bar chart (linear or log10, lower is better)."""
+    """Grouped horizontal bar chart (linear or log10, lower is better)."""
     all_vals = [
         v
         for _, rows in groups
@@ -134,12 +133,11 @@ def render_bar_chart(
     assert all_vals, f"no positive values for {title}"
 
     longest_label = max(len(lbl) for _, rows in groups for lbl, _ in rows)
-    left = max(136, 26 + int(6.7 * longest_label))
+    left = max(136, 30 + int(6.8 * longest_label))
     plot = WIDTH - left - right_pad
 
     if scale == "linear":
         hi_raw = max(all_vals) * 1.15
-        # Nice ceiling step
         mag = 10 ** math.floor(math.log10(hi_raw))
         step = mag
         for m in (0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0):
@@ -161,9 +159,9 @@ def render_bar_chart(
     elif scale == "log":
         lo_val = min(all_vals)
         hi_val = max(all_vals)
-        lo_exp = math.floor(math.log10(lo_val / 1.35))
+        lo_exp = math.floor(math.log10(lo_val / 1.4))
         hi_exp = math.ceil(math.log10(hi_val * 1.45))
-        lo_log = math.log10(max(10 ** lo_exp, lo_val / 1.8))
+        lo_log = math.log10(max(10 ** lo_exp, lo_val / 1.9))
         hi_log = math.log10(hi_val * 1.65)
         ticks = []
         for e in range(lo_exp - 1, hi_exp + 2):
@@ -171,7 +169,6 @@ def render_bar_chart(
                 cand = m * (10 ** e)
                 if lo_log - 1e-9 <= math.log10(cand) <= hi_log + 1e-9:
                     ticks.append(cand)
-        # If dense, keep only powers of 10 (plus 2/5 if sparse)
         if len(ticks) > 9:
             ticks = [t for t in ticks if abs(math.log10(t) - round(math.log10(t))) < 1e-9]
 
@@ -182,16 +179,16 @@ def render_bar_chart(
     else:
         raise ValueError(scale)
 
-    top = 94
+    top = 100
     group_heights = []
     for gname, rows in groups:
-        gh = (22 if gname else 4)
+        gh = 24 if gname else 4
         for _, vals in rows:
             present = sum(1 for k, _ in series if vals.get(k) is not None)
             gh += present * BAR + max(0, present - 1) * GAP + ROW_GAP
         group_heights.append(gh)
     bottom = top + sum(group_heights)
-    height = bottom + 36
+    height = int(math.ceil(bottom + 38))
 
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" class="c" viewBox="0 0 {WIDTH} {height}" '
@@ -199,48 +196,51 @@ def render_bar_chart(
         f'<title id="title">{esc(title)}</title>',
         f'<desc id="desc">{esc(subtitle)}</desc>',
         f"<style>{STYLE}</style>",
-        f'<rect class="bg" width="{WIDTH}" height="{height}" rx="8"/>',
-        f'<text class="t" x="16" y="28">{esc(title)}</text>',
-        f'<text class="st" x="16" y="47">{esc(subtitle)}</text>',
+        f'<rect class="bg" x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="10"/>',
+        f'<text class="t" x="20" y="30">{esc(title)}</text>',
+        f'<text class="st" x="20" y="49">{esc(subtitle)}</text>',
     ]
 
-    # Legend
-    lx = 16
+    # Legend (single crisp row)
+    lx = 20
     for key, text in series:
         cls = CLASS_FOR[key]
-        out.append(f'<rect class="{cls}" x="{lx}" y="62" width="12" height="12" rx="3"/>')
-        out.append(f'<text class="lb" x="{lx + 18}" y="72">{esc(text)}</text>')
-        lx += 30 + int(6.6 * len(text))
+        out.append(f'<rect class="{cls}" x="{lx}" y="64" width="11" height="11" rx="3"/>')
+        out.append(f'<text class="lg" x="{lx + 16}" y="73.5">{esc(text)}</text>')
+        lx += 30 + int(6.5 * len(text))
 
-    # Gridlines & ticks
+    # Gridlines & axis ticks
     for t in ticks:
         tx = x_of(t)
-        is_axis = (scale == "linear" and t == 0)
+        is_axis = scale == "linear" and t == 0
         out.append(
             f'<line class="{"ax" if is_axis else "grid"}" x1="{tx:.1f}" x2="{tx:.1f}" '
-            f'y1="{top - 6}" y2="{bottom}"/>'
+            f'y1="{top - 6}" y2="{bottom:.1f}"/>'
         )
         out.append(
-            f'<text class="tick" x="{tx:.1f}" y="{bottom + 17}" text-anchor="middle">'
-            f'{esc(fmt_tick(t))}</text>'
+            f'<text class="tick" x="{tx:.1f}" y="{bottom + 18:.1f}" text-anchor="middle">'
+            f"{esc(fmt_tick(t))}</text>"
         )
     if scale == "log":
-        out.append(f'<line class="ax" x1="{left:.1f}" x2="{left:.1f}" y1="{top - 6}" y2="{bottom}"/>')
+        out.append(
+            f'<line class="ax" x1="{left:.1f}" x2="{left:.1f}" y1="{top - 6}" y2="{bottom:.1f}"/>'
+        )
 
     # Groups & rows
-    y = top
+    y = float(top)
     for gname, rows in groups:
         if gname:
-            out.append(f'<text class="grp" x="16" y="{y + 11}">{esc(gname.upper())}</text>')
-            y += 22
+            out.append(f'<text class="grp" x="20" y="{y + 11:.1f}">{esc(gname.upper())}</text>')
+            y += 24
         else:
             y += 4
         for rlabel, vals in rows:
             active = [(k, text, vals[k]) for k, text in series if vals.get(k) is not None]
+            best_val = min(v for _, _, v in active)
             row_h = len(active) * BAR + max(0, len(active) - 1) * GAP
             out.append(
-                f'<text class="lb" x="{left - 10}" y="{y + row_h / 2.0 + 4.0:.1f}" text-anchor="end">'
-                f'{esc(rlabel)}</text>'
+                f'<text class="lb" x="{left - 12}" y="{y + row_h / 2.0 + 4.0:.1f}" text-anchor="end">'
+                f"{esc(rlabel)}</text>"
             )
             for idx, (k, text, v) in enumerate(active):
                 by = y + idx * (BAR + GAP)
@@ -250,10 +250,11 @@ def render_bar_chart(
                     extra = note_fn(rlabel, k, v, vals)
                     if extra:
                         val_txt = f"{val_txt} {extra}"
+                vcls = "v-hi" if abs(v - best_val) <= best_val * 0.01 else "v"
                 out.append(f"<g><title>{esc(rlabel)} — {esc(text)}: {esc(val_txt)}</title>")
                 out.append(hbar(x_zero, end, by, CLASS_FOR[k]))
                 out.append(
-                    f'<text class="v" x="{max(end, x_zero + 2.0) + 6:.1f}" y="{by + BAR - 1.5:.1f}" '
+                    f'<text class="{vcls}" x="{max(end, x_zero + 2.5) + 7:.1f}" y="{by + BAR - 1.5:.1f}" '
                     f'text-anchor="start">{esc(val_txt)}</text></g>'
                 )
             y += row_h + ROW_GAP
@@ -267,12 +268,15 @@ def build_all(data: dict, out_dir: Path) -> int:
     host = data["host"]
     cpu_short = host["cpu"].replace(" 8-Core Processor", "").replace(" Processor", "")
     host_tag = f"{cpu_short}, {host['logical_cpus']}T"
+    wt_ver = host.get("wasmtime")
+    wt_label = f"Wasmtime {wt_ver}" if wt_ver else "Wasmtime"
     rendered = 0
-    gdev_mib = None
 
-    # ------------------------------------------------------------------
-    # 1. Real gdev runtime (separate category image, when present)
-    # ------------------------------------------------------------------
+    large_meta = data.get("large_module") or data.get("runtime_gdev")
+    large_mib = f"{large_meta['wasm_bytes'] / (1024 * 1024):.2f} MiB" if large_meta else None
+    large_fns = large_meta["functions"] if large_meta else None
+
+    # Optional: real Blot game runtime chart when present
     if "runtime_gdev" in data:
         gd = data["runtime_gdev"]
         gdev_mib = f"{gd['wasm_bytes'] / (1024 * 1024):.2f} MiB"
@@ -285,7 +289,7 @@ def build_all(data: dict, out_dir: Path) -> int:
 
         def gdev_note(_row: str, k: str, v: float, vals: dict[str, float]) -> str:
             if k == "x64" and vals.get("wasmtime"):
-                return f"({v / vals['wasmtime']:.2f}× WT)"
+                return f"({vals['wasmtime'] / v:.2f}× vs WT)"
             return ""
 
         (out_dir / "runtime-gdev.svg").write_text(
@@ -295,119 +299,161 @@ def build_all(data: dict, out_dir: Path) -> int:
                 series=[
                     ("x64", "wtime-aot x64"),
                     ("c", "wtime-aot c (-O2)"),
-                    ("wasmtime", "Wasmtime"),
+                    ("wasmtime", wt_label),
                 ],
                 groups=[("", gdev_rows)],
                 scale="linear",
                 fmt_val=fmt_ms,
                 fmt_tick=fmt_tick_ms,
-                right_pad=130,
+                right_pad=140,
                 note_fn=gdev_note,
             )
         )
         rendered += 1
 
-    # ------------------------------------------------------------------
-    # 2. Representative Wasm kernels runtime (separate category image)
-    # ------------------------------------------------------------------
+    # 1. Representative Wasm kernels runtime (all 5 engines when Wasmtime is present)
     kr = data["runtime_kernels"]
     kernel_rows = [(c["name"], c["median_us"]) for c in kr["cases"]]
+    has_wt_kernels = any("wasmtime" in c["median_us"] for c in kr["cases"])
+    kernel_series = [
+        ("x64", "wtime-aot x64"),
+        ("c", "wtime-aot c (-O2)"),
+        ("rust", "wtime-aot rust (-O3)"),
+    ]
+    if has_wt_kernels:
+        kernel_series.append(("wasmtime", wt_label))
+    kernel_series.append(("v8", f"V8 (Node {host['node']})"))
+
+    def kernel_note(_row: str, k: str, v: float, vals: dict[str, float]) -> str:
+        wt = vals.get("wasmtime")
+        if not wt:
+            return ""
+        if k in ("x64", "rust") and wt / v >= 1.15:
+            return f"({wt / v:.1f}× vs WT)"
+        return ""
+
     (out_dir / "runtime-kernels.svg").write_text(
         render_bar_chart(
-            title="Wasm kernels runtime: native backends vs V8",
-            subtitle=f"median µs per call over {kr['rounds']} paired rounds (CPU 0, log scale, lower is better; {cpu_short})",
-            series=[
-                ("x64", "wtime-aot x64"),
-                ("c", "wtime-aot c (-O2)"),
-                ("rust", "wtime-aot rust (-O3)"),
-                ("v8", f"V8 ({host['node']})"),
-            ],
+            title="Execution time: Wasm kernels (wtime-aot vs Wasmtime & V8)",
+            subtitle=f"median µs per call over {kr['rounds']} paired rounds on CPU 0 — exact output parity across all engines (log scale, lower is better; {cpu_short})",
+            series=kernel_series,
             groups=[("", kernel_rows)],
             scale="log",
             fmt_val=fmt_us,
             fmt_tick=fmt_tick_us,
-            right_pad=78,
+            right_pad=126 if has_wt_kernels else 88,
+            note_fn=kernel_note,
         )
     )
     rendered += 1
 
-    # ------------------------------------------------------------------
-    # 3. Cold compilation time (separate category image)
-    # ------------------------------------------------------------------
+    # 2. Cold compilation time
     cc = data["compile_cold"]
+    large_cold_vals = cc.get("large_ms") or cc.get("gdev_ms")
     cold_groups = []
-    if "gdev_ms" in cc:
-        gd_tag = f"gdev game ({gdev_mib or '3.50 MiB'}, 4,935 functions)"
-        cold_groups.append((gd_tag, [("gdev", cc["gdev_ms"])]))
-    cold_groups.append(("representative kernels (0.3–1 KiB)", [(name, vals) for name, vals in cc["kernels_ms"].items()]))
+    if large_cold_vals is not None:
+        tag = f"5,000-fn application ({large_mib}, {large_fns:,} functions)" if large_mib and large_fns else "large Wasm application"
+        cold_groups.append((tag, [("5k-fn app", large_cold_vals)]))
+    cold_groups.append(("self-contained kernels (0.3–1 KiB)", [(name, vals) for name, vals in cc["kernels_ms"].items()]))
 
     def cold_note(row: str, k: str, v: float, vals: dict[str, float]) -> str:
-        if row == "gdev" and k == "x64" and vals.get("c") and vals.get("wasmtime"):
-            return f"({vals['wasmtime'] / v:.1f}× vs WT, {vals['c'] / v:.0f}× vs c)"
+        if row == "5k-fn app" and k == "x64":
+            parts = []
+            if vals.get("wasmtime"):
+                parts.append(f"{vals['wasmtime'] / v:.1f}× vs WT")
+            if vals.get("c"):
+                parts.append(f"{vals['c'] / v:.0f}× vs c")
+            return f"({', '.join(parts)})" if parts else ""
         return ""
 
+    has_wt_cold = (large_cold_vals is not None and "wasmtime" in large_cold_vals) or any(
+        "wasmtime" in vals for vals in cc["kernels_ms"].values()
+    )
     cold_series = [
         ("x64", "wtime-aot x64"),
         ("c", "wtime-aot c (-O2)"),
         ("rust", "wtime-aot rust (-O3)"),
     ]
-    if "gdev_ms" in cc:
-        cold_series.append(("wasmtime", "Wasmtime (Cranelift)"))
+    if has_wt_cold:
+        cold_series.append(("wasmtime", f"{wt_label} (Cranelift)"))
 
     (out_dir / "compile-cold.svg").write_text(
         render_bar_chart(
             title="Cold compilation time (empty cache, multi-core)",
-            subtitle=f"median wall time over {cc['rounds']} fresh-cache runs (log scale, lower is better; {host_tag})",
+            subtitle=f"median fresh-process compile + artifact write over {cc['rounds']} runs (log scale, lower is better; {host_tag})",
             series=cold_series,
             groups=cold_groups,
             scale="log",
             fmt_val=fmt_ms,
             fmt_tick=fmt_tick_ms,
-            right_pad=145,
+            right_pad=160,
             note_fn=cold_note,
         )
     )
     rendered += 1
 
-    # ------------------------------------------------------------------
-    # 4. Hot compilation & warm cache-hit time (separate category image)
-    # ------------------------------------------------------------------
+    # 3. Incremental rebuild, warm artifact load, & warm cache hit
     ch = data["compile_hot"]
+    inc_vals = ch.get("large_1fn_edit_ms") or ch.get("gdev_1fn_edit_ms")
+    load_vals = ch.get("large_warm_load_ms") or ch.get("gdev_warm_pen_load_ms")
+    hit_large_vals = ch.get("large_build_cache_hit_ms") or ch.get("gdev_build_cache_hit_ms")
+
     kernel_hit_med = {}
     for b in ("x64", "c", "rust"):
-        vals = [ch["kernels_build_cache_hit_ms"][k][b] for k in ch["kernels_build_cache_hit_ms"] if b in ch["kernels_build_cache_hit_ms"][k]]
+        vals = [
+            ch["kernels_build_cache_hit_ms"][k][b]
+            for k in ch["kernels_build_cache_hit_ms"]
+            if b in ch["kernels_build_cache_hit_ms"][k]
+        ]
         if vals:
             kernel_hit_med[b] = sum(vals) / len(vals)
 
     hot_groups = []
-    if "gdev_1fn_edit_ms" in ch:
-        hot_groups.append(("incremental 1-fn edit (gdev, warm object cache)", [("1-fn rebuild", ch["gdev_1fn_edit_ms"])]))
-    if "gdev_warm_pen_load_ms" in ch:
-        hot_groups.append(("warm fresh-process load (pen packets: .so vs .cwasm)", [("warm load", ch["gdev_warm_pen_load_ms"])]))
+    if inc_vals is not None:
+        hot_groups.append((
+            f"incremental 1-function edit ({large_fns:,} fns, warm function/object cache)" if large_fns else "incremental 1-function edit",
+            [("1-fn rebuild", inc_vals)],
+        ))
+    if load_vals is not None:
+        hot_groups.append((
+            "warm fresh-process artifact load (.so dlopen vs .cwasm deserialize)",
+            [("warm load", load_vals)],
+        ))
     hit_rows = []
-    if "gdev_build_cache_hit_ms" in ch:
-        hit_rows.append((f"gdev ({gdev_mib or '3.50 MiB'})", ch["gdev_build_cache_hit_ms"]))
+    if hit_large_vals is not None:
+        hit_rows.append((f"5k-fn app ({large_mib})" if large_mib else "5k-fn app", hit_large_vals))
     hit_rows.append(("kernels (mean)", kernel_hit_med))
     hot_groups.append(("warm build --cache hit (CLI)", hit_rows))
+
+    def hot_note(row: str, k: str, v: float, vals: dict[str, float]) -> str:
+        if k == "x64":
+            parts = []
+            if vals.get("wasmtime") and vals["wasmtime"] / v >= 1.15:
+                parts.append(f"{vals['wasmtime'] / v:.1f}× vs WT")
+            if row == "1-fn rebuild" and vals.get("c") and vals["c"] / v >= 1.15:
+                parts.append(f"{vals['c'] / v:.1f}× vs c")
+            return f"({', '.join(parts)})" if parts else ""
+        return ""
 
     hot_series = [
         ("x64", "wtime-aot x64"),
         ("c", "wtime-aot c (-O2)"),
         ("rust", "wtime-aot rust (-O3)"),
     ]
-    if "gdev_1fn_edit_ms" in ch or "gdev_warm_pen_load_ms" in ch:
-        hot_series.append(("wasmtime", "Wasmtime"))
+    if (inc_vals and "wasmtime" in inc_vals) or (load_vals and "wasmtime" in load_vals):
+        hot_series.append(("wasmtime", wt_label))
 
     (out_dir / "compile-hot.svg").write_text(
         render_bar_chart(
-            title="Hot compilation, incremental rebuild, & warm load",
+            title="Incremental rebuild, warm load, & cache hit",
             subtitle=f"median wall time with warm caches (log scale, lower is better; {host_tag})",
             series=hot_series,
             groups=hot_groups,
             scale="log",
             fmt_val=fmt_ms,
             fmt_tick=fmt_tick_ms,
-            right_pad=88,
+            right_pad=160,
+            note_fn=hot_note,
         )
     )
     rendered += 1
