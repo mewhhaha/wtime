@@ -790,7 +790,7 @@ fn verify_inst_types(
             expect_ty(ir, bi, len, Ty::I32, "MemFill.len")?;
             expect_no_res(ir, bi, res, "MemFill")?;
         }
-        Op::MemCopyConst { dst, src, len } => {
+        Op::MemCopyConst { dst, src, len, .. } => {
             if len > 64 {
                 return Err(format!(
                     "verify_ir fn {} bb{bi}: MemCopyConst len {len} > 64",
@@ -801,7 +801,7 @@ fn verify_inst_types(
             expect_ty(ir, bi, src, Ty::I32, "MemCopyConst.src")?;
             expect_no_res(ir, bi, res, "MemCopyConst")?;
         }
-        Op::MemFillConst { dst, val, len } => {
+        Op::MemFillConst { dst, val, len, .. } => {
             if len > 64 {
                 return Err(format!(
                     "verify_ir fn {} bb{bi}: MemFillConst len {len} > 64",
@@ -1503,11 +1503,14 @@ pub fn verify_alloc_with_config(
                     IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU => {
                         (MASK_RAX_RDX, 0)
                     }
-                    IntBinOp::Shl
-                    | IntBinOp::ShrS
-                    | IntBinOp::ShrU
-                    | IntBinOp::Rotl
-                    | IntBinOp::Rotr => (MASK_RCX, 0),
+                    IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU => {
+                        if cfg.has_bmi2 {
+                            (0, 0)
+                        } else {
+                            (MASK_RCX, 0)
+                        }
+                    }
+                    IntBinOp::Rotl | IntBinOp::Rotr => (MASK_RCX, 0),
                     _ => (0, 0),
                 },
                 Op::I64BinImm(

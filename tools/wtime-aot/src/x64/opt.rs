@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::ir::{
     Block, BlockId, BrTableData, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, Inst, IntBinOp,
-    IrFunc, LoadKind, Op, Term, TruncOp, Val, ValRange, optimize_ir_with_budget,
+    IrFunc, LoadKind, Op, StoreKind, Term, TruncOp, Ty, Val, ValRange, optimize_ir_with_budget,
 };
 use super::module::{
     CompileBudget, MAX_BLOCKS_PER_FN, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64Module,
@@ -25,15 +25,21 @@ use super::regalloc::AllocResult;
 
 type Res<T> = Result<T, String>;
 
-const INLINE_MAX_CALLEE_INSTS: usize = 48;
-const INLINE_MAX_CALLEE_BLOCKS: usize = 12;
-const INLINE_MAX_CALLEE_VALS: usize = 128;
-const INLINE_MAX_CALLER_INSTS: usize = 4096;
-const INLINE_MAX_CALLER_BLOCKS: usize = 512;
-const INLINE_MAX_CALLER_VALS: usize = 8192;
-const INLINE_MAX_ADDED_PER_CALLER: usize = 768;
-const INLINE_MAX_MODULE_ADDED_INSTS: usize = 250_000;
-const LICM_MAX_HOIST_PER_LOOP: usize = 8;
+const INLINE_MAX_CALLEE_INSTS: usize = 32;
+const INLINE_MAX_CALLEE_BLOCKS: usize = 10;
+const INLINE_MAX_CALLEE_VALS: usize = 96;
+const INLINE_MAX_LOOP_CALLEE_INSTS: usize = 56;
+const INLINE_MAX_LOOP_CALLEE_BLOCKS: usize = 14;
+const INLINE_MAX_LOOP_CALLEE_VALS: usize = 160;
+const INLINE_MAX_SINGLE_CALLEE_INSTS: usize = 64;
+const INLINE_MAX_SINGLE_CALLEE_BLOCKS: usize = 16;
+const INLINE_MAX_SINGLE_CALLEE_VALS: usize = 192;
+const INLINE_MAX_CALLER_INSTS: usize = 1536;
+const INLINE_MAX_CALLER_BLOCKS: usize = 256;
+const INLINE_MAX_CALLER_VALS: usize = 3072;
+const INLINE_MAX_ADDED_PER_CALLER: usize = 256;
+const INLINE_MAX_MODULE_ADDED_INSTS: usize = 4_000_000;
+const LICM_MAX_HOIST_PER_LOOP: usize = 12;
 const ELIDE_MAX_SUBTREE_STACK_BYTES: i32 = 8192;
 const PURE_HELPER_STACK_BYTES: i32 = 64;
 
@@ -177,11 +183,14 @@ impl CfgDom {
 
     #[inline]
     pub fn dominates(&self, a: u32, mut b: u32) -> bool {
-        if a == b {
-            return true;
+        if (a as usize) >= self.rpo_pos.len() || (b as usize) >= self.rpo_pos.len() {
+            return false;
         }
         if self.rpo_pos[a as usize] == u32::MAX || self.rpo_pos[b as usize] == u32::MAX {
             return false;
+        }
+        if a == b {
+            return true;
         }
         while b != 0 && self.rpo_pos[b as usize] > self.rpo_pos[a as usize] {
             b = self.idom[b as usize];
@@ -976,29 +985,91 @@ pub fn prune_early_block_params(ir: &mut IrFunc, budget: Option<&CompileBudget>)
 // 2. Budgeted Small-Leaf Inlining
 // ============================================================================
 
-/// Computes Tarjan SCCs on the defined-function call graph and returns `(in_cycle, topo_bottom_up)`.
-fn call_graph_sccs(irs: &[IrFunc], n_imports: usize) -> (Vec<bool>, Vec<usize>) {
-    let n = irs.len();
-    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut seen_stamp = vec![u32::MAX; n];
-    for (bi, ir) in irs.iter().enumerate() {
-        let stamp = bi as u32;
-        for bb in &ir.blocks {
-            for inst in &bb.insts {
-                if let Op::Call { func, .. } = inst.op {
-                    let f = func as usize;
-                    if f >= n_imports {
-                        let c = f - n_imports;
-                        if c < n && seen_stamp[c] != stamp {
-                            seen_stamp[c] = stamp;
-                            edges[bi].push(c);
+/// Fallibly computes Tarjan SCCs from an adjacency list of defined-function edges,
+/// returning `None` on allocation failure so optional cache preparation can degrade cleanly.
+pub fn try_call_graph_sccs_from_edges(edges: &[Vec<usize>]) -> Option<(Vec<bool>, Vec<usize>)> {
+    let n = edges.len();
+    let mut index = Vec::new();
+    index.try_reserve_exact(n).ok()?;
+    index.resize(n, u32::MAX);
+    let mut lowlink = Vec::new();
+    lowlink.try_reserve_exact(n).ok()?;
+    lowlink.resize(n, 0u32);
+    let mut on_stack = Vec::new();
+    on_stack.try_reserve_exact(n).ok()?;
+    on_stack.resize(n, false);
+    let mut stack: Vec<usize> = Vec::new();
+    stack.try_reserve_exact(n).ok()?;
+    let mut cur_idx = 0u32;
+    let mut in_cycle = Vec::new();
+    in_cycle.try_reserve_exact(n).ok()?;
+    in_cycle.resize(n, false);
+    let mut topo_bottom_up = Vec::new();
+    topo_bottom_up.try_reserve_exact(n).ok()?;
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    frames.try_reserve_exact(n).ok()?;
+    let mut scc: Vec<usize> = Vec::new();
+    scc.try_reserve_exact(n).ok()?;
+
+    // Iterative Tarjan SCC so deep call chains never overflow the host stack.
+    for start in 0..n {
+        if index[start] != u32::MAX {
+            continue;
+        }
+        index[start] = cur_idx;
+        lowlink[start] = cur_idx;
+        cur_idx += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        frames.push((start, 0));
+
+        while let Some((v, ei)) = frames.last_mut() {
+            let v = *v;
+            if *ei < edges[v].len() {
+                let w = edges[v][*ei];
+                *ei += 1;
+                if index[w] == u32::MAX {
+                    index[w] = cur_idx;
+                    lowlink[w] = cur_idx;
+                    cur_idx += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    frames.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                }
+            } else {
+                frames.pop();
+                if let Some(&(parent, _)) = frames.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
+                }
+                if lowlink[v] == index[v] {
+                    scc.clear();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == v {
+                            break;
                         }
+                    }
+                    let cyclic =
+                        scc.len() > 1 || (scc.len() == 1 && edges[scc[0]].contains(&scc[0]));
+                    for &node in &scc {
+                        if cyclic {
+                            in_cycle[node] = true;
+                        }
+                        topo_bottom_up.push(node);
                     }
                 }
             }
         }
     }
+    Some((in_cycle, topo_bottom_up))
+}
 
+/// Computes Tarjan SCCs from an adjacency list of defined-function edges and returns `(in_cycle, topo_bottom_up)`.
+pub fn call_graph_sccs_from_edges(edges: &[Vec<usize>]) -> (Vec<bool>, Vec<usize>) {
+    let n = edges.len();
     let mut index = vec![u32::MAX; n];
     let mut lowlink = vec![0u32; n];
     let mut on_stack = vec![false; n];
@@ -1062,6 +1133,239 @@ fn call_graph_sccs(irs: &[IrFunc], n_imports: usize) -> (Vec<bool>, Vec<usize>) 
         }
     }
     (in_cycle, topo_bottom_up)
+}
+
+/// Collects sorted `(callee_bi, call_count)` pairs for direct defined callees of `ir`.
+pub fn collect_pre_inline_callees(ir: &IrFunc, n_imports: usize, n_defs: usize) -> Vec<(u32, u32)> {
+    let mut raw: Vec<u32> = Vec::new();
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            if let Op::Call { func, .. } = inst.op {
+                let f = func as usize;
+                if f >= n_imports {
+                    let c = f - n_imports;
+                    if c < n_defs {
+                        raw.push(c as u32);
+                    }
+                }
+            }
+        }
+    }
+    raw.sort_unstable();
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for c in raw {
+        if let Some(last) = out.last_mut()
+            && last.0 == c
+        {
+            last.1 = last.1.saturating_add(1);
+        } else {
+            out.push((c, 1));
+        }
+    }
+    out
+}
+
+/// Fallible variant of `collect_pre_inline_callees` for optional incremental cache preparation.
+pub fn try_collect_pre_inline_callees(
+    ir: &IrFunc,
+    n_imports: usize,
+    n_defs: usize,
+) -> Option<Vec<(u32, u32)>> {
+    let mut raw: Vec<u32> = Vec::new();
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            if let Op::Call { func, .. } = inst.op {
+                let f = func as usize;
+                if f >= n_imports {
+                    let c = f - n_imports;
+                    if c < n_defs {
+                        if raw.len() == raw.capacity() {
+                            raw.try_reserve(1).ok()?;
+                        }
+                        raw.push(c as u32);
+                    }
+                }
+            }
+        }
+    }
+    raw.sort_unstable();
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for c in raw {
+        if let Some(last) = out.last_mut()
+            && last.0 == c
+        {
+            last.1 = last.1.saturating_add(1);
+        } else {
+            if out.len() == out.capacity() {
+                out.try_reserve(1).ok()?;
+            }
+            out.push((c, 1));
+        }
+    }
+    Some(out)
+}
+
+/// Conservative check for whether `ir` could qualify as an inline callee under any threshold
+/// (general, inside-loop, or single-call-site).
+pub fn is_inlinable_ir(ir: &IrFunc) -> bool {
+    ir.br_tables.is_empty()
+        && count_insts(ir) <= INLINE_MAX_SINGLE_CALLEE_INSTS
+        && ir.blocks.len() <= INLINE_MAX_SINGLE_CALLEE_BLOCKS
+        && ir.val_tys.len() <= INLINE_MAX_SINGLE_CALLEE_VALS
+}
+
+/// Fallible fast O(B + E) detection of blocks belonging to natural loops (backedges in RPO) in `ir`.
+fn try_compute_in_loop_blocks(ir: &IrFunc) -> Option<Vec<bool>> {
+    let n = ir.blocks.len();
+    let mut in_loop = Vec::new();
+    in_loop.try_reserve_exact(n).ok()?;
+    in_loop.resize(n, false);
+    if n <= 1 {
+        return Some(in_loop);
+    }
+    let mut succs: Vec<Vec<usize>> = Vec::new();
+    succs.try_reserve_exact(n).ok()?;
+    for _ in 0..n {
+        succs.push(Vec::new());
+    }
+    let mut seen = Vec::new();
+    seen.try_reserve_exact(n).ok()?;
+    seen.resize(n, u32::MAX);
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        let stamp = bi as u32;
+        let mut oom = false;
+        bb.term.for_each_succ(&ir.br_tables, |s| {
+            if oom {
+                return;
+            }
+            let sid = s.0 as usize;
+            if sid < n && seen[sid] != stamp {
+                seen[sid] = stamp;
+                let row = &mut succs[bi];
+                if row.len() == row.capacity() && row.try_reserve(1).is_err() {
+                    oom = true;
+                    return;
+                }
+                row.push(sid);
+            }
+        });
+        if oom {
+            return None;
+        }
+    }
+    let mut visited = Vec::new();
+    visited.try_reserve_exact(n).ok()?;
+    visited.resize(n, false);
+    let mut postorder = Vec::new();
+    postorder.try_reserve_exact(n).ok()?;
+    visited[0] = true;
+    let mut dfs = Vec::new();
+    dfs.try_reserve_exact(n).ok()?;
+    dfs.push((0usize, 0usize));
+    while let Some((b, si)) = dfs.last_mut() {
+        let cur = *b;
+        if *si < succs[cur].len() {
+            let nxt = succs[cur][*si];
+            *si += 1;
+            if !visited[nxt] {
+                visited[nxt] = true;
+                dfs.push((nxt, 0));
+            }
+        } else {
+            postorder.push(cur);
+            dfs.pop();
+        }
+    }
+    postorder.reverse();
+    let mut rpo_pos = Vec::new();
+    rpo_pos.try_reserve_exact(n).ok()?;
+    rpo_pos.resize(n, u32::MAX);
+    for (oi, &b) in postorder.iter().enumerate() {
+        rpo_pos[b] = oi as u32;
+    }
+    let mut preds: Vec<Vec<usize>> = Vec::new();
+    preds.try_reserve_exact(n).ok()?;
+    for _ in 0..n {
+        preds.push(Vec::new());
+    }
+    let mut backedges: Vec<(usize, usize)> = Vec::new();
+    for &b in &postorder {
+        let bp = rpo_pos[b];
+        for &s in &succs[b] {
+            let sp = rpo_pos[s];
+            if sp != u32::MAX {
+                let prow = &mut preds[s];
+                if prow.len() == prow.capacity() {
+                    prow.try_reserve(1).ok()?;
+                }
+                prow.push(b);
+                if sp <= bp {
+                    if backedges.len() == backedges.capacity() {
+                        backedges.try_reserve(1).ok()?;
+                    }
+                    backedges.push((b, s));
+                }
+            }
+        }
+    }
+    if backedges.is_empty() {
+        return Some(in_loop);
+    }
+    let mut mark = Vec::new();
+    mark.try_reserve_exact(n).ok()?;
+    mark.resize(n, u32::MAX);
+    let mut wl = Vec::new();
+    wl.try_reserve_exact(n).ok()?;
+    for (li, &(latch, hdr)) in backedges.iter().take(512).enumerate() {
+        let stamp = li as u32;
+        let hp = rpo_pos[hdr];
+        in_loop[hdr] = true;
+        mark[hdr] = stamp;
+        if latch != hdr {
+            in_loop[latch] = true;
+            mark[latch] = stamp;
+            wl.clear();
+            wl.push(latch);
+            while let Some(cur) = wl.pop() {
+                for &p in &preds[cur] {
+                    if rpo_pos[p] > hp && mark[p] != stamp {
+                        mark[p] = stamp;
+                        in_loop[p] = true;
+                        wl.push(p);
+                    }
+                }
+            }
+        }
+    }
+    Some(in_loop)
+}
+
+/// Fallibly computes which defined functions have external references (exported, `start`, or in `call_indirect`).
+fn try_compute_externally_referenced(module: &X64Module, n_defs: usize) -> Option<Vec<bool>> {
+    let n_imports = module.imports.len();
+    let mut ext = Vec::new();
+    ext.try_reserve_exact(n_defs).ok()?;
+    ext.resize(n_defs, false);
+    for &(_, f) in &module.exported_funcs {
+        if f >= n_imports && f - n_imports < n_defs {
+            ext[f - n_imports] = true;
+        }
+    }
+    if let Some(st) = module.start {
+        let f = st as usize;
+        if f >= n_imports && f - n_imports < n_defs {
+            ext[f - n_imports] = true;
+        }
+    }
+    for ci in &module.ci_sigs {
+        for &(_, fi) in &ci.targets {
+            let f = fi as usize;
+            if f >= n_imports && f - n_imports < n_defs {
+                ext[f - n_imports] = true;
+            }
+        }
+    }
+    Some(ext)
 }
 
 fn count_insts(ir: &IrFunc) -> usize {
@@ -1321,15 +1625,29 @@ fn clone_callee_into_caller(
                     val: map_v(val),
                     len: map_v(len),
                 },
-                Op::MemCopyConst { dst, src, len } => Op::MemCopyConst {
+                Op::MemCopyConst {
+                    dst,
+                    src,
+                    len,
+                    dst_checked,
+                    src_checked,
+                } => Op::MemCopyConst {
                     dst: map_v(dst),
                     src: map_v(src),
                     len,
+                    dst_checked,
+                    src_checked,
                 },
-                Op::MemFillConst { dst, val, len } => Op::MemFillConst {
+                Op::MemFillConst {
+                    dst,
+                    val,
+                    len,
+                    checked,
+                } => Op::MemFillConst {
                     dst: map_v(dst),
                     val: map_v(val),
                     len,
+                    checked,
                 },
                 Op::V128Splat { lane_bytes, val } => Op::V128Splat {
                     lane_bytes,
@@ -1422,21 +1740,117 @@ fn clone_callee_into_caller(
     Ok(())
 }
 
-/// Budgeted bottom-up small-helper inlining across the module (keeping originals intact for
-/// indirect/exported callers). Runs first so all downstream passes optimize inlined bodies.
-pub fn inline_small_helpers(
-    irs: &mut [IrFunc],
+/// Execution mode for `inline_small_helpers_subset`, distinguishing cold non-cache builds,
+/// cold builds capturing optional incremental cache metadata (where core inlining must run
+/// exactly once and never retry on partially mutated IR), and speculative warm builds on
+/// disposable IR clones (where any OOM cleanly aborts speculation via `Ok(None)`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InlineMode {
+    ColdNoCache,
+    ColdCaptureCache,
+    WarmSpeculative,
+}
+
+/// Per-function tracking produced by `inline_small_helpers_subset` for incremental caching.
+pub struct InlineTrack {
+    pub inlined_callees: Vec<Vec<u32>>,
+    pub added_insts: Vec<u32>,
+    pub was_inlinable: Vec<bool>,
+    pub hit_module_cap: bool,
+    /// `false` if optional cache-tracking metadata could not be allocated under memory pressure.
+    pub tracking_complete: bool,
+}
+
+/// Budgeted bottom-up helper inlining across the module (or a dirty/cone subset when `irs[bi]`
+/// is `Some` only for active functions), supporting general, loop-call-site, and single-call-site
+/// thresholds and returning exact per-function inline tracking.
+/// - `InlineMode::WarmSpeculative`: any OOM returns `Ok(None)` so the caller discards its
+///   disposable `work_irs` and retries cold.
+/// - `InlineMode::ColdCaptureCache`: tracking-only OOM disables tracking (`tracking_complete = false`)
+///   and completes the exact single deterministic inlining pass without mutating and retrying;
+///   core inlining OOM returns `Err(...)`.
+/// - `InlineMode::ColdNoCache`: no tracking allocations; core inlining OOM returns `Err(...)`.
+#[allow(clippy::too_many_arguments)]
+pub fn inline_small_helpers_subset(
+    irs: &mut [Option<IrFunc>],
+    in_cycle: &[bool],
+    topo_bottom_up: &[usize],
+    total_call_counts: &[u32],
     module: &X64Module,
+    initial_added_insts: usize,
+    mode: InlineMode,
     budget: Option<&CompileBudget>,
-) -> Res<()> {
+) -> Res<Option<InlineTrack>> {
     let n_imports = module.imports.len();
     let n_defs = irs.len();
-    if n_defs <= 1 {
-        return Ok(());
+    let warm = mode == InlineMode::WarmSpeculative;
+    let mut track_ok = mode != InlineMode::ColdNoCache;
+    let mut inlined_callees: Vec<Vec<u32>> = Vec::new();
+    let mut added_insts: Vec<u32> = Vec::new();
+    let mut was_inlinable: Vec<bool> = Vec::new();
+    if track_ok {
+        let init_ok = (|| -> Option<()> {
+            inlined_callees.try_reserve_exact(n_defs).ok()?;
+            for _ in 0..n_defs {
+                inlined_callees.push(Vec::new());
+            }
+            added_insts.try_reserve_exact(n_defs).ok()?;
+            added_insts.resize(n_defs, 0);
+            was_inlinable.try_reserve_exact(n_defs).ok()?;
+            was_inlinable.resize(n_defs, false);
+            Some(())
+        })()
+        .is_some();
+        if !init_ok {
+            if warm {
+                return Ok(None);
+            }
+            // Cold capture: drop optional tracking metadata and continue the single exact inlining pass.
+            track_ok = false;
+            inlined_callees = Vec::new();
+            added_insts = Vec::new();
+            was_inlinable = Vec::new();
+        }
     }
-    let (in_cycle, topo_bottom_up) = call_graph_sccs(irs, n_imports);
-    let mut inst_counts: Vec<usize> = irs.iter().map(count_insts).collect();
-    let mut total_added_insts = 0usize;
+    if n_defs <= 1 {
+        return Ok(Some(InlineTrack {
+            inlined_callees,
+            added_insts,
+            was_inlinable,
+            hit_module_cap: false,
+            tracking_complete: track_ok,
+        }));
+    }
+    let Some(ext_ref) = try_compute_externally_referenced(module, n_defs) else {
+        if warm {
+            return Ok(None);
+        }
+        return Err("x64: out of memory allocating externally-referenced table".into());
+    };
+    let mut inst_counts: Vec<usize> = {
+        let mut counts = Vec::new();
+        if counts.try_reserve_exact(n_defs).is_err() {
+            if warm {
+                return Ok(None);
+            }
+            return Err("x64: out of memory allocating inline instruction counts".into());
+        }
+        for o in irs.iter() {
+            counts.push(o.as_ref().map_or(0, count_insts));
+        }
+        counts
+    };
+    if track_ok {
+        for (bi, o) in irs.iter().enumerate() {
+            if let Some(ir) = o {
+                // Purely structural inlinability (independent of `in_cycle`) so incremental
+                // builds always invalidate callers when an edit breaks an SCC cycle.
+                was_inlinable[bi] = is_inlinable_ir(ir);
+            }
+        }
+    }
+    let mut total_added_insts = initial_added_insts;
+    let mut hit_module_cap = total_added_insts >= INLINE_MAX_MODULE_ADDED_INSTS;
 
     // Bottom-up topological order naturally handles chained small helpers (`a -> b -> c`) in one pass!
     let mut inline_steps = 0usize;
@@ -1446,34 +1860,51 @@ pub fn inline_small_helpers(
         {
             bg.check_deadline()?;
         }
+        if irs[caller_bi].is_none() {
+            continue;
+        }
         if total_added_insts >= INLINE_MAX_MODULE_ADDED_INSTS {
+            hit_module_cap = true;
             break;
         }
         let mut caller_insts = inst_counts[caller_bi];
         if caller_insts >= INLINE_MAX_CALLER_INSTS {
             continue;
         }
+        let Some(mut caller_in_loop) = try_compute_in_loop_blocks(irs[caller_bi].as_ref().unwrap())
+        else {
+            if warm {
+                return Ok(None);
+            }
+            return Err("x64: out of memory computing loop blocks during inlining".into());
+        };
         let mut caller_added = 0usize;
         let mut did_inline = false;
 
-        // Scan blocks dynamically (splitting pushes new blocks at the end).
+        // Scan blocks dynamically (splitting pushes new blocks at the end; cont_bb inherits loop status).
         let mut bi = 0usize;
-        while bi < irs[caller_bi].blocks.len() {
+        while bi < irs[caller_bi].as_ref().unwrap().blocks.len() {
+            let block_in_loop = caller_in_loop.get(bi).copied().unwrap_or(false);
             let mut ii = 0usize;
-            while ii < irs[caller_bi].blocks[bi].insts.len() {
+            while ii < irs[caller_bi].as_ref().unwrap().blocks[bi].insts.len() {
                 inline_steps += 1;
                 if let Some(bg) = budget
                     && (inline_steps & 4095) == 0
                 {
                     bg.check_deadline()?;
                 }
+                if total_added_insts >= INLINE_MAX_MODULE_ADDED_INSTS {
+                    hit_module_cap = true;
+                    break;
+                }
                 if caller_added >= INLINE_MAX_ADDED_PER_CALLER
-                    || total_added_insts >= INLINE_MAX_MODULE_ADDED_INSTS
                     || caller_insts >= INLINE_MAX_CALLER_INSTS
                 {
                     break;
                 }
-                let Op::Call { func, args, rets } = irs[caller_bi].blocks[bi].insts[ii].op else {
+                let Op::Call { func, args, rets } =
+                    irs[caller_bi].as_ref().unwrap().blocks[bi].insts[ii].op
+                else {
                     ii += 1;
                     continue;
                 };
@@ -1487,33 +1918,116 @@ pub fn inline_small_helpers(
                     ii += 1;
                     continue;
                 }
+                let Some(callee_ir) = irs[callee_bi].as_ref() else {
+                    ii += 1;
+                    continue;
+                };
                 let c_insts = inst_counts[callee_bi];
-                let c_blocks = irs[callee_bi].blocks.len();
-                let c_vals = irs[callee_bi].val_tys.len();
-                if !irs[callee_bi].br_tables.is_empty()
-                    || c_insts > INLINE_MAX_CALLEE_INSTS
-                    || c_blocks > INLINE_MAX_CALLEE_BLOCKS
-                    || c_vals > INLINE_MAX_CALLEE_VALS
-                    || irs[caller_bi].blocks.len() + c_blocks + 1 > INLINE_MAX_CALLER_BLOCKS
-                    || irs[caller_bi].val_tys.len() + c_vals > INLINE_MAX_CALLER_VALS
+                let c_blocks = callee_ir.blocks.len();
+                let c_vals = callee_ir.val_tys.len();
+                let is_single_site = !ext_ref[callee_bi]
+                    && total_call_counts.get(callee_bi).copied().unwrap_or(0) == 1;
+                let (max_insts, max_blocks, max_vals) = if is_single_site {
+                    (
+                        INLINE_MAX_SINGLE_CALLEE_INSTS,
+                        INLINE_MAX_SINGLE_CALLEE_BLOCKS,
+                        INLINE_MAX_SINGLE_CALLEE_VALS,
+                    )
+                } else if block_in_loop {
+                    (
+                        INLINE_MAX_LOOP_CALLEE_INSTS,
+                        INLINE_MAX_LOOP_CALLEE_BLOCKS,
+                        INLINE_MAX_LOOP_CALLEE_VALS,
+                    )
+                } else {
+                    (
+                        INLINE_MAX_CALLEE_INSTS,
+                        INLINE_MAX_CALLEE_BLOCKS,
+                        INLINE_MAX_CALLEE_VALS,
+                    )
+                };
+                let caller_ir = irs[caller_bi].as_ref().unwrap();
+                if !callee_ir.br_tables.is_empty()
+                    || c_insts > max_insts
+                    || c_blocks > max_blocks
+                    || c_vals > max_vals
+                    || caller_ir.blocks.len() + c_blocks + 1 > INLINE_MAX_CALLER_BLOCKS
+                    || caller_ir.val_tys.len() + c_vals > INLINE_MAX_CALLER_VALS
                 {
                     ii += 1;
                     continue;
                 }
+                // Reserve `caller_in_loop` capacity BEFORE mutating the caller IR so an OOM
+                // cannot leave a caller partially inlined.
+                let needed_blocks = caller_ir.blocks.len() + c_blocks + 1;
+                let extra_loop_slots = needed_blocks.saturating_sub(caller_in_loop.len());
+                if caller_in_loop.try_reserve(extra_loop_slots).is_err() {
+                    if warm {
+                        return Ok(None);
+                    }
+                    return Err("x64: out of memory extending loop blocks during inlining".into());
+                }
                 // Borrow disjoint `caller` (&mut) and `callee` (&) directly via `split_at_mut` (zero cloning!).
                 let ok = if caller_bi < callee_bi {
                     let (lo, hi) = irs.split_at_mut(callee_bi);
-                    clone_callee_into_caller(&mut lo[caller_bi], &hi[0], bi, ii, args, rets).is_ok()
+                    clone_callee_into_caller(
+                        lo[caller_bi].as_mut().unwrap(),
+                        hi[0].as_ref().unwrap(),
+                        bi,
+                        ii,
+                        args,
+                        rets,
+                    )
+                    .is_ok()
                 } else {
                     let (lo, hi) = irs.split_at_mut(caller_bi);
-                    clone_callee_into_caller(&mut hi[0], &lo[callee_bi], bi, ii, args, rets).is_ok()
+                    clone_callee_into_caller(
+                        hi[0].as_mut().unwrap(),
+                        lo[callee_bi].as_ref().unwrap(),
+                        bi,
+                        ii,
+                        args,
+                        rets,
+                    )
+                    .is_ok()
                 };
                 if ok {
+                    let new_blocks_len = irs[caller_bi].as_ref().unwrap().blocks.len();
+                    caller_in_loop.resize(new_blocks_len, block_in_loop);
                     let cost = c_insts.max(1);
                     caller_insts += cost;
                     caller_added += cost;
                     total_added_insts += cost;
                     did_inline = true;
+                    if track_ok {
+                        let ok_track = if caller_bi < callee_bi {
+                            let (lo, hi) = inlined_callees.split_at_mut(callee_bi);
+                            let dst = &mut lo[caller_bi];
+                            let src = &hi[0];
+                            if dst.try_reserve(1 + src.len()).is_ok() {
+                                dst.push(callee_bi as u32);
+                                dst.extend_from_slice(src);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            let (lo, hi) = inlined_callees.split_at_mut(caller_bi);
+                            let dst = &mut hi[0];
+                            let src = &lo[callee_bi];
+                            if dst.try_reserve(1 + src.len()).is_ok() {
+                                dst.push(callee_bi as u32);
+                                dst.extend_from_slice(src);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if !ok_track {
+                            track_ok = false;
+                            inlined_callees.clear();
+                        }
+                    }
                     // `bi` now ends with `Jump(callee_entry)`; tail moved to `cont_bb` (visited later in `while bi`).
                     break;
                 }
@@ -1523,21 +2037,179 @@ pub fn inline_small_helpers(
         }
         if did_inline {
             inst_counts[caller_bi] = caller_insts;
+            if track_ok {
+                added_insts[caller_bi] = caller_added as u32;
+                inlined_callees[caller_bi].sort_unstable();
+                inlined_callees[caller_bi].dedup();
+            }
             // Only compact CFG sequentially if this caller is itself small enough to be inlined upstream;
             // all larger callers compact in parallel inside `optimize_func_stage2`!
-            if caller_insts <= INLINE_MAX_CALLEE_INSTS
-                && irs[caller_bi].blocks.len() > INLINE_MAX_CALLEE_BLOCKS
+            if caller_insts <= INLINE_MAX_SINGLE_CALLEE_INSTS
+                && irs[caller_bi].as_ref().unwrap().blocks.len() > INLINE_MAX_SINGLE_CALLEE_BLOCKS
             {
-                rebuild_cfg_and_prune(&mut irs[caller_bi], budget)?;
+                rebuild_cfg_and_prune(irs[caller_bi].as_mut().unwrap(), budget)?;
+            }
+            if track_ok && is_inlinable_ir(irs[caller_bi].as_ref().unwrap()) {
+                was_inlinable[caller_bi] = true;
             }
         }
     }
-    Ok(())
+    Ok(Some(InlineTrack {
+        inlined_callees,
+        added_insts,
+        was_inlinable,
+        hit_module_cap,
+        tracking_complete: track_ok,
+    }))
+}
+
+/// Budgeted bottom-up small-helper inlining across the module (keeping originals intact for
+/// indirect/exported callers). Runs first so all downstream passes optimize inlined bodies.
+pub fn inline_small_helpers(
+    irs: &mut [IrFunc],
+    module: &X64Module,
+    budget: Option<&CompileBudget>,
+) -> Res<()> {
+    let n_imports = module.imports.len();
+    let n_defs = irs.len();
+    if n_defs <= 1 {
+        return Ok(());
+    }
+    let pre: Vec<Vec<(u32, u32)>> = irs
+        .iter()
+        .map(|ir| collect_pre_inline_callees(ir, n_imports, n_defs))
+        .collect();
+    let mut total_call_counts = vec![0u32; n_defs];
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
+    for cs in &pre {
+        edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
+        for &(c, cnt) in cs {
+            total_call_counts[c as usize] = total_call_counts[c as usize].saturating_add(cnt);
+        }
+    }
+    let (in_cycle, topo_bottom_up) = call_graph_sccs_from_edges(&edges);
+    let mut opt_irs: Vec<Option<IrFunc>> = irs
+        .iter_mut()
+        .map(|ir| {
+            Some(std::mem::replace(
+                ir,
+                IrFunc {
+                    func_index: 0,
+                    params: Vec::new(),
+                    result_tys: Vec::new(),
+                    val_tys: Vec::new(),
+                    blocks: Vec::new(),
+                    val_pool: Vec::new(),
+                    v128_consts: Vec::new(),
+                    br_tables: Vec::new(),
+                    needs_stack_check: true,
+                    elided_callee_stack_bytes: 0,
+                },
+            ))
+        })
+        .collect();
+    let res = inline_small_helpers_subset(
+        &mut opt_irs,
+        &in_cycle,
+        &topo_bottom_up,
+        &total_call_counts,
+        module,
+        0,
+        InlineMode::ColdNoCache,
+        budget,
+    );
+    for (dst, src) in irs.iter_mut().zip(opt_irs) {
+        *dst = src.unwrap();
+    }
+    res.map(|_| ())
 }
 
 // ============================================================================
 // 3. Interprocedural Effect Analysis
 // ============================================================================
+
+/// Non-transitive own side-effect summary of one defined function (post-inlining, pre-Stage-2 opt).
+#[derive(Clone)]
+pub struct FnOwnEffects {
+    pub writes_mem: bool,
+    pub grows_mem: bool,
+    pub writes_all_globals: bool,
+    pub written_globals: Vec<u64>,
+    pub writes_all_tables: bool,
+    pub written_tables: u64,
+    /// Unique sorted direct callee Wasm function indices (imports + defined).
+    pub direct_callees: Vec<u32>,
+}
+
+pub fn try_compute_fn_own_effects(
+    ir: &IrFunc,
+    module: &X64Module,
+    n_total: usize,
+) -> Option<FnOwnEffects> {
+    let global_words = module.globals.len().div_ceil(64);
+    let fixed_mem = module.fixed32.is_some();
+    let mut writes_mem = false;
+    let mut grows_mem = false;
+    let mut writes_all_globals = false;
+    let mut written_globals = Vec::new();
+    written_globals.try_reserve_exact(global_words).ok()?;
+    written_globals.resize(global_words, 0u64);
+    let mut writes_all_tables = false;
+    let mut written_tables = 0u64;
+    let mut direct_callees: Vec<u32> = Vec::new();
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            match inst.op {
+                Op::Store { .. }
+                | Op::MemCopy { .. }
+                | Op::MemFill { .. }
+                | Op::MemCopyConst { .. }
+                | Op::MemFillConst { .. } => writes_mem = true,
+                Op::MemGrow(_) => {
+                    writes_mem = true;
+                    grows_mem = !fixed_mem;
+                }
+                Op::GlobalSet(g, _) => {
+                    let gi = g as usize;
+                    if (gi >> 6) < global_words {
+                        written_globals[gi >> 6] |= 1u64 << (gi & 63);
+                    }
+                }
+                Op::TableSet { table, .. } => {
+                    if table < 64 {
+                        written_tables |= 1u64 << table;
+                    } else {
+                        writes_all_tables = true;
+                    }
+                }
+                Op::CallIndirect { .. } => {
+                    writes_mem = true;
+                    grows_mem = !fixed_mem;
+                    writes_all_globals = true;
+                    writes_all_tables = true;
+                }
+                Op::Call { func, .. } if (func as usize) < n_total => {
+                    if direct_callees.len() == direct_callees.capacity() {
+                        direct_callees.try_reserve(1).ok()?;
+                    }
+                    direct_callees.push(func);
+                }
+                _ => {}
+            }
+        }
+    }
+    direct_callees.sort_unstable();
+    direct_callees.dedup();
+    Some(FnOwnEffects {
+        writes_mem,
+        grows_mem,
+        writes_all_globals,
+        written_globals,
+        writes_all_tables,
+        written_tables,
+        direct_callees,
+    })
+}
 
 pub struct ModuleEffects {
     pub writes_mem: Vec<bool>,
@@ -1549,99 +2221,96 @@ pub struct ModuleEffects {
     pub written_tables: Vec<u64>,
 }
 
-pub fn compute_module_effects(
-    irs: &[IrFunc],
+/// Fallibly computes transitive `ModuleEffects` directly from per-function `FnOwnEffects`
+/// summaries, returning `Ok(None)` on allocation failure so optional cache work can fall back cleanly.
+pub fn try_compute_module_effects_from_summaries(
+    summaries: &[FnOwnEffects],
     module: &X64Module,
     budget: Option<&CompileBudget>,
-) -> Res<ModuleEffects> {
+) -> Res<Option<ModuleEffects>> {
     if let Some(bg) = budget {
         bg.check_deadline()?;
     }
     let n_imports = module.imports.len();
-    let n_total = n_imports + irs.len();
+    let n_total = n_imports + summaries.len();
     let global_words = module.globals.len().div_ceil(64);
     let fixed_mem = module.fixed32.is_some();
 
-    let mut writes_mem = vec![false; n_total];
-    let mut grows_mem = vec![false; n_total];
-    let mut writes_all_globals = vec![false; n_total];
-    let mut written_globals = vec![vec![0u64; global_words]; n_total];
-    let mut writes_all_tables = vec![false; n_total];
-    let mut written_tables = vec![0u64; n_total];
+    let alloc_res = (|| -> Option<_> {
+        let mut writes_mem = Vec::new();
+        writes_mem.try_reserve_exact(n_total).ok()?;
+        writes_mem.resize(n_total, false);
+        let mut grows_mem = Vec::new();
+        grows_mem.try_reserve_exact(n_total).ok()?;
+        grows_mem.resize(n_total, false);
+        let mut writes_all_globals = Vec::new();
+        writes_all_globals.try_reserve_exact(n_total).ok()?;
+        writes_all_globals.resize(n_total, false);
+        let mut written_globals = Vec::new();
+        written_globals.try_reserve_exact(n_total).ok()?;
+        for _ in 0..n_total {
+            let mut row = Vec::new();
+            row.try_reserve_exact(global_words).ok()?;
+            row.resize(global_words, 0u64);
+            written_globals.push(row);
+        }
+        let mut writes_all_tables = Vec::new();
+        writes_all_tables.try_reserve_exact(n_total).ok()?;
+        writes_all_tables.resize(n_total, false);
+        let mut written_tables = Vec::new();
+        written_tables.try_reserve_exact(n_total).ok()?;
+        written_tables.resize(n_total, 0u64);
+        Some((
+            writes_mem,
+            grows_mem,
+            writes_all_globals,
+            written_globals,
+            writes_all_tables,
+            written_tables,
+        ))
+    })();
+    let Some((
+        mut writes_mem,
+        mut grows_mem,
+        mut writes_all_globals,
+        mut written_globals,
+        mut writes_all_tables,
+        mut written_tables,
+    )) = alloc_res
+    else {
+        return Ok(None);
+    };
 
-    // Imports may invoke arbitrary host callbacks (`active_allocate`, `set_global`, memory grow).
     for fi in 0..n_imports {
         writes_mem[fi] = true;
         grows_mem[fi] = !fixed_mem;
         writes_all_globals[fi] = true;
         writes_all_tables[fi] = true;
     }
-
-    let mut direct_callees: Vec<Vec<usize>> = vec![Vec::new(); irs.len()];
-    let mut seen_callee = vec![u32::MAX; n_total];
-    let mut scan_steps = 0usize;
-    for (bi, ir) in irs.iter().enumerate() {
+    for (bi, s) in summaries.iter().enumerate() {
         let fi = n_imports + bi;
-        let stamp = bi as u32;
-        for bb in &ir.blocks {
-            for inst in &bb.insts {
-                scan_steps += 1;
-                if let Some(bg) = budget
-                    && (scan_steps & 4095) == 0
-                {
-                    bg.check_deadline()?;
-                }
-                match inst.op {
-                    Op::Store { .. }
-                    | Op::MemCopy { .. }
-                    | Op::MemFill { .. }
-                    | Op::MemCopyConst { .. }
-                    | Op::MemFillConst { .. } => {
-                        writes_mem[fi] = true;
-                    }
-                    Op::MemGrow(_) => {
-                        writes_mem[fi] = true;
-                        grows_mem[fi] = !fixed_mem;
-                    }
-                    Op::GlobalSet(g, _) => {
-                        let gi = g as usize;
-                        if (gi >> 6) < global_words {
-                            written_globals[fi][gi >> 6] |= 1u64 << (gi & 63);
-                        }
-                    }
-                    Op::TableSet { table, .. } => {
-                        if table < 64 {
-                            written_tables[fi] |= 1u64 << table;
-                        } else {
-                            writes_all_tables[fi] = true;
-                        }
-                    }
-                    Op::CallIndirect { .. } => {
-                        writes_mem[fi] = true;
-                        grows_mem[fi] = !fixed_mem;
-                        writes_all_globals[fi] = true;
-                        writes_all_tables[fi] = true;
-                    }
-                    Op::Call { func, .. } => {
-                        let callee = func as usize;
-                        if callee < n_total && seen_callee[callee] != stamp {
-                            seen_callee[callee] = stamp;
-                            direct_callees[bi].push(callee);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        writes_mem[fi] = s.writes_mem;
+        grows_mem[fi] = s.grows_mem;
+        writes_all_globals[fi] = s.writes_all_globals;
+        for (w, dst) in written_globals[fi]
+            .iter_mut()
+            .enumerate()
+            .take(global_words)
+        {
+            *dst = s.written_globals.get(w).copied().unwrap_or(0);
         }
+        writes_all_tables[fi] = s.writes_all_tables;
+        written_tables[fi] = s.written_tables;
     }
 
     let mut changed = true;
     let mut fix_steps = 0usize;
     while changed {
         changed = false;
-        for (bi, callees) in direct_callees.iter().enumerate() {
+        for (bi, s) in summaries.iter().enumerate() {
             let fi = n_imports + bi;
-            for &c in callees {
+            for &c_u32 in &s.direct_callees {
+                let c = c_u32 as usize;
                 fix_steps = fix_steps.saturating_add(global_words.max(1));
                 if let Some(bg) = budget
                     && fix_steps >= 4096
@@ -1691,7 +2360,7 @@ pub fn compute_module_effects(
         }
     }
 
-    Ok(ModuleEffects {
+    Ok(Some(ModuleEffects {
         writes_mem,
         grows_mem,
         writes_all_globals,
@@ -1699,7 +2368,35 @@ pub fn compute_module_effects(
         global_words,
         writes_all_tables,
         written_tables,
-    })
+    }))
+}
+
+/// Computes transitive `ModuleEffects` directly from per-function `FnOwnEffects` summaries.
+pub fn compute_module_effects_from_summaries(
+    summaries: &[FnOwnEffects],
+    module: &X64Module,
+    budget: Option<&CompileBudget>,
+) -> Res<ModuleEffects> {
+    try_compute_module_effects_from_summaries(summaries, module, budget)?
+        .ok_or_else(|| "x64: out of memory allocating module effects".to_string())
+}
+
+pub fn compute_module_effects(
+    irs: &[IrFunc],
+    module: &X64Module,
+    budget: Option<&CompileBudget>,
+) -> Res<ModuleEffects> {
+    let n_total = module.imports.len() + irs.len();
+    let mut summaries = Vec::new();
+    summaries
+        .try_reserve_exact(irs.len())
+        .map_err(|_| "x64: out of memory allocating function effect summaries".to_string())?;
+    for ir in irs {
+        let s = try_compute_fn_own_effects(ir, module, n_total)
+            .ok_or_else(|| "x64: out of memory allocating function effect summary".to_string())?;
+        summaries.push(s);
+    }
+    compute_module_effects_from_summaries(&summaries, module, budget)
 }
 
 // ============================================================================
@@ -1774,17 +2471,19 @@ fn is_pure_licm_op(op: &Op) -> bool {
 }
 
 /// Conservative LICM: hoists strictly non-trapping loop-invariant pure ops, uninvalidated
-/// `GlobalGet(g)`, and uninvalidated `MemSize` out of natural loops into a single preheader.
+/// `GlobalGet(g)`, uninvalidated `MemSize`, and (via guarded preheaders when a header check
+/// proves `divisor != 0`) loop-invariant unsigned `DivU`/`RemU` out of natural loops.
+/// Returns `true` if a new guarded preheader block was created (requiring CFG/dom rebuild).
 pub fn run_licm(
     ir: &mut IrFunc,
     dom: &CfgDom,
     module: &X64Module,
     effects: &ModuleEffects,
     budget: Option<&CompileBudget>,
-) -> Res<()> {
+) -> Res<bool> {
     let n = ir.blocks.len();
     if n <= 1 {
-        return Ok(());
+        return Ok(false);
     }
 
     // Group natural loops by header (`header -> union of body blocks for all backedges latch -> header`).
@@ -1808,7 +2507,7 @@ pub fn run_licm(
         }
     }
     if loops_by_hdr.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     // Sort loops innermost-first (smallest body first), skip header == 0 (entry block has no preheader).
@@ -1821,7 +2520,9 @@ pub fn run_licm(
             (h, v)
         })
         .collect();
-    loops.sort_by_key(|(_, body)| body.len());
+    // Sort loops innermost-first with a deterministic header-id tie-breaker so `HashMap`
+    // iteration order can never alter guarded-LICM selection or block/value numbering.
+    loops.sort_by_key(|(h, body)| (body.len(), *h));
 
     // Map every Val -> defining block.
     let mut def_block = vec![u32::MAX; ir.val_tys.len()];
@@ -1845,6 +2546,7 @@ pub fn run_licm(
     }
 
     let fixed_mem = module.fixed32.is_some();
+    let mut guarded_candidates: Vec<(u32, u32, Vec<u32>)> = Vec::new();
     for (li, (hdr, body)) in loops.into_iter().enumerate() {
         if let Some(bg) = budget
             && (li & 15) == 0
@@ -1957,8 +2659,386 @@ pub fn run_licm(
                 }
             }
         }
+        guarded_candidates.push((hdr, pre, body));
     }
-    Ok(())
+
+    // Second pass: guarded preheader hoisting for loop-invariant unsigned `DivU`/`RemU` when
+    // an empty loop header proves `divisor != 0` on loop entry (e.g. `i <u n` implies `n >= 1`).
+    // Tracks touched blocks so nested/adjacent loops never rewrite an already-rewritten block.
+    let mut created_guard = false;
+    let mut touched_blocks: HashSet<u32> = HashSet::new();
+    let mut guard_steps: usize = 0;
+    for (gi, (hdr, pre, body)) in guarded_candidates.into_iter().enumerate() {
+        if let Some(bg) = budget
+            && (gi & 7) == 0
+        {
+            bg.check_deadline()?;
+        }
+        if touched_blocks.contains(&hdr) || touched_blocks.contains(&pre) {
+            continue;
+        }
+        if ir.blocks.len() + 1 > MAX_BLOCKS_PER_FN {
+            break;
+        }
+        if !ir.blocks[hdr as usize].insts.is_empty() {
+            continue;
+        }
+        let Term::Jump {
+            target: pre_tgt,
+            args: entry_args,
+        } = ir.blocks[pre as usize].term
+        else {
+            continue;
+        };
+        if pre_tgt.0 != hdr {
+            continue;
+        }
+        let Term::CmpBranch {
+            kind: CmpBranchKind::I32(cop),
+            a,
+            b,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } = ir.blocks[hdr as usize].term
+        else {
+            continue;
+        };
+        let body_set: HashSet<u32> = body.iter().copied().collect();
+        let then_in = body_set.contains(&then_bb.0);
+        let else_in = body_set.contains(&else_bb.0);
+        if then_in == else_in {
+            continue;
+        }
+        // Determine which operand is proven strictly > 0 (`!= 0`) when entering the loop body.
+        let body_on_then = then_in;
+        let (exit_bb, exit_args) = if body_on_then {
+            (else_bb, else_args)
+        } else {
+            (then_bb, then_args)
+        };
+        if touched_blocks.contains(&exit_bb.0) {
+            continue;
+        }
+        let _ = (then_args, else_args);
+        let eff_cop = if body_on_then { cop } else { cop.invert_int() };
+        let nz_val = match eff_cop {
+            CmpOp::LtU => b, // `a <u b` => `b >= 1`
+            CmpOp::GtU => a, // `a >u b` => `a >= 1`
+            _ => continue,
+        };
+        let nz_db = def_block[nz_val.0 as usize];
+        if nz_db == u32::MAX || body_set.contains(&nz_db) || !dom.dominates(nz_db, pre) {
+            continue;
+        }
+        // Check that `a`, `b`, and every arg in `exit_args` can be mapped cleanly at `pre`
+        // (either a header param -> `entry_args[k]`, or already dominating `pre`).
+        let hdr_params = &ir.blocks[hdr as usize].params;
+        let entry_slice = ir.pool_slice(entry_args);
+        if hdr_params.len() != entry_slice.len() {
+            continue;
+        }
+        let map_at_pre = |v: Val| -> Option<Val> {
+            if let Some(pos) = hdr_params.iter().position(|&p| p == v) {
+                return Some(entry_slice[pos]);
+            }
+            let db = def_block[v.0 as usize];
+            if db != u32::MAX && !body_set.contains(&db) && dom.dominates(db, pre) {
+                Some(v)
+            } else {
+                None
+            }
+        };
+        let (Some(a_pre), Some(b_pre)) = (map_at_pre(a), map_at_pre(b)) else {
+            continue;
+        };
+        let mut exit_args_pre = Vec::with_capacity(exit_args.len as usize);
+        let mut exit_ok = true;
+        for &ev in ir.pool_slice(exit_args) {
+            if let Some(mv) = map_at_pre(ev) {
+                exit_args_pre.push(mv);
+            } else {
+                exit_ok = false;
+                break;
+            }
+        }
+        if !exit_ok {
+            continue;
+        }
+
+        // Scan body for loop-invariant unsigned `DivU`/`RemU` with divisor == `nz_val` (100% trap-free
+        // inside `guarded_pre` because `nz_val >= 1` is proven by the entry guard!).
+        let mut to_hoist: Vec<(u32, usize)> = Vec::new();
+        for &bb_id in &body {
+            guard_steps += 1;
+            if let Some(bg) = budget
+                && guard_steps >= 4096
+            {
+                guard_steps = 0;
+                bg.check_deadline()?;
+            }
+            for (ii, inst) in ir.blocks[bb_id as usize].insts.iter().enumerate() {
+                if to_hoist.len() >= 8 {
+                    break;
+                }
+                guard_steps += 1;
+                if let Some(bg) = budget
+                    && guard_steps >= 4096
+                {
+                    guard_steps = 0;
+                    bg.check_deadline()?;
+                }
+                if let Op::I32Bin(IntBinOp::DivU | IntBinOp::RemU, num, div) = inst.op
+                    && div == nz_val
+                    && inst.res.is_some()
+                {
+                    let ndb = def_block[num.0 as usize];
+                    if ndb != u32::MAX && !body_set.contains(&ndb) && dom.dominates(ndb, pre) {
+                        to_hoist.push((bb_id, ii));
+                    }
+                }
+            }
+        }
+        if to_hoist.is_empty() {
+            continue;
+        }
+
+        // Adding the bypass edge `pre -> exit_bb` removes `hdr` as a dominator of `exit_bb`
+        // (and blocks dominated by `exit_bb`). Verify whether any block outside `body_set`
+        // directly uses a value defined inside `body_set`:
+        // - If none do, adding `pre -> exit_bb` preserves SSA dominance unconditionally.
+        // - If only `hdr.params` escape, `exit_bb`'s sole predecessor is `hdr`, and every
+        //   outside use lies in `exit_bb`'s dominator subtree, promote those escaping `hdr.params`
+        //   into fresh `exit_bb` block params and rewrite the outside uses.
+        // - Otherwise, skip guarded hoisting for this loop.
+        let exit_sole_hdr_pred = exit_bb.0 != 0
+            && (exit_bb.0 as usize) < dom.preds.len()
+            && dom.preds[exit_bb.0 as usize].len() == 1
+            && dom.preds[exit_bb.0 as usize][0] == hdr;
+        let mut promoted_hdr_params: Vec<Val> = Vec::new();
+        let mut rewrite_blocks: Vec<usize> = Vec::new();
+        let mut outside_ok = true;
+        for b_idx in 0..ir.blocks.len() {
+            guard_steps += 1;
+            if let Some(bg) = budget
+                && guard_steps >= 4096
+            {
+                guard_steps = 0;
+                bg.check_deadline()?;
+            }
+            if body_set.contains(&(b_idx as u32)) {
+                continue;
+            }
+            let mut block_uses_body = false;
+            let check_one = |v: Val,
+                             outside_ok: &mut bool,
+                             block_uses_body: &mut bool,
+                             promoted: &mut Vec<Val>| {
+                if !*outside_ok {
+                    return;
+                }
+                let db = def_block[v.0 as usize];
+                if db != u32::MAX && body_set.contains(&db) {
+                    if !exit_sole_hdr_pred
+                        || !dom.dominates(exit_bb.0, b_idx as u32)
+                        || !hdr_params.contains(&v)
+                        || map_at_pre(v).is_none()
+                    {
+                        *outside_ok = false;
+                        return;
+                    }
+                    *block_uses_body = true;
+                    if !promoted.contains(&v) {
+                        promoted.push(v);
+                    }
+                }
+            };
+            for inst in &ir.blocks[b_idx].insts {
+                guard_steps += 1;
+                if let Some(bg) = budget
+                    && guard_steps >= 4096
+                {
+                    guard_steps = 0;
+                    bg.check_deadline()?;
+                }
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    check_one(
+                        v,
+                        &mut outside_ok,
+                        &mut block_uses_body,
+                        &mut promoted_hdr_params,
+                    );
+                });
+                if !outside_ok {
+                    break;
+                }
+            }
+            if outside_ok {
+                ir.blocks[b_idx]
+                    .term
+                    .for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        check_one(
+                            v,
+                            &mut outside_ok,
+                            &mut block_uses_body,
+                            &mut promoted_hdr_params,
+                        );
+                    });
+            }
+            if !outside_ok {
+                break;
+            }
+            if block_uses_body {
+                rewrite_blocks.push(b_idx);
+            }
+        }
+        if !outside_ok {
+            continue;
+        }
+
+        // Pre-check all IR caps and push new edge argument slices BEFORE mutating any block.
+        let hdr_exit_args_new: Option<ValRange> = if promoted_hdr_params.is_empty() {
+            None
+        } else {
+            let new_len = (exit_args.len as usize) + promoted_hdr_params.len();
+            if ir.val_tys.len() + promoted_hdr_params.len() > MAX_IR_VALS_PER_FN
+                || ir.val_pool.len() + 2 * new_len > MAX_VAL_POOL_PER_FN
+            {
+                continue;
+            }
+            let mut hdr_vec = Vec::with_capacity(new_len);
+            hdr_vec.extend_from_slice(ir.pool_slice(exit_args));
+            for &hp in &promoted_hdr_params {
+                hdr_vec.push(hp);
+                exit_args_pre.push(map_at_pre(hp).unwrap());
+            }
+            let Ok(hr) = ir.push_pool(&hdr_vec) else {
+                continue;
+            };
+            Some(hr)
+        };
+        let Ok(exit_args_r) = ir.push_pool(&exit_args_pre) else {
+            continue;
+        };
+
+        if let Some(hr) = hdr_exit_args_new {
+            let mut subst: Vec<Val> = (0..ir.val_tys.len() as u32).map(Val).collect();
+            for &hp in &promoted_hdr_params {
+                let ty = ir.val_tys[hp.0 as usize];
+                let np = ir.push_val(ty);
+                def_block.push(exit_bb.0);
+                ir.blocks[exit_bb.0 as usize].params.push(np);
+                subst.push(np);
+                subst[hp.0 as usize] = np;
+            }
+            if let Term::CmpBranch {
+                then_args,
+                else_args,
+                ..
+            } = &mut ir.blocks[hdr as usize].term
+            {
+                if body_on_then {
+                    *else_args = hr;
+                } else {
+                    *then_args = hr;
+                }
+            }
+            let mut pool = std::mem::take(&mut ir.val_pool);
+            for b_idx in rewrite_blocks {
+                guard_steps += 1;
+                if let Some(bg) = budget
+                    && guard_steps >= 4096
+                {
+                    guard_steps = 0;
+                    if let Err(e) = bg.check_deadline() {
+                        ir.val_pool = pool;
+                        return Err(e);
+                    }
+                }
+                for inst in &mut ir.blocks[b_idx].insts {
+                    guard_steps += 1;
+                    if let Some(bg) = budget
+                        && guard_steps >= 4096
+                    {
+                        guard_steps = 0;
+                        if let Err(e) = bg.check_deadline() {
+                            ir.val_pool = pool;
+                            return Err(e);
+                        }
+                    }
+                    rewrite_op_uses(&mut inst.op, &mut pool, &subst);
+                }
+                rewrite_term_uses(&mut ir.blocks[b_idx].term, &mut pool, &ir.br_tables, &subst);
+            }
+            ir.val_pool = pool;
+        }
+
+        // Remove in reverse index order per block to keep indices valid, preserving original order.
+        let mut hoisted_insts: Vec<Inst> = Vec::with_capacity(to_hoist.len());
+        let mut by_block: HashMap<u32, Vec<usize>> = HashMap::new();
+        for &(bb_id, ii) in &to_hoist {
+            by_block.entry(bb_id).or_default().push(ii);
+        }
+        let mut extracted: HashMap<(u32, usize), Inst> = HashMap::with_capacity(to_hoist.len());
+        for (bb_id, mut idxs) in by_block {
+            idxs.sort_unstable();
+            for ii in idxs.into_iter().rev() {
+                let removed = ir.blocks[bb_id as usize].insts.remove(ii);
+                extracted.insert((bb_id, ii), removed);
+            }
+        }
+        for key in &to_hoist {
+            if let Some(inst) = extracted.remove(key) {
+                hoisted_insts.push(inst);
+            }
+        }
+
+        let guard_bb = BlockId(ir.blocks.len() as u32);
+        for inst in &hoisted_insts {
+            if let Some(res) = inst.res {
+                def_block[res.0 as usize] = guard_bb.0;
+            }
+        }
+        ir.blocks.push(Block {
+            params: Vec::new(),
+            insts: hoisted_insts,
+            term: Term::Jump {
+                target: BlockId(hdr),
+                args: entry_args,
+            },
+            is_loop_header: false,
+            preds: 1,
+        });
+        ir.blocks[pre as usize].term = if body_on_then {
+            Term::CmpBranch {
+                kind: CmpBranchKind::I32(cop),
+                a: a_pre,
+                b: b_pre,
+                then_bb: guard_bb,
+                then_args: ValRange::EMPTY,
+                else_bb: exit_bb,
+                else_args: exit_args_r,
+            }
+        } else {
+            Term::CmpBranch {
+                kind: CmpBranchKind::I32(cop),
+                a: a_pre,
+                b: b_pre,
+                then_bb: exit_bb,
+                then_args: exit_args_r,
+                else_bb: guard_bb,
+                else_args: ValRange::EMPTY,
+            }
+        };
+        ir.blocks[exit_bb.0 as usize].preds = ir.blocks[exit_bb.0 as usize].preds.saturating_add(1);
+        touched_blocks.insert(hdr);
+        touched_blocks.insert(pre);
+        touched_blocks.insert(exit_bb.0);
+        created_guard = true;
+    }
+
+    Ok(created_guard)
 }
 
 // ============================================================================
@@ -2119,16 +3199,40 @@ fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
     })
 }
 
+#[derive(Clone, Copy)]
+enum MemFactKind {
+    Load(LoadKind),
+    Store(StoreKind),
+}
+
+#[derive(Clone, Copy)]
+struct MemFact {
+    addr: Val,
+    const_addr: Option<u64>,
+    offset: u32,
+    size: u64,
+    kind: MemFactKind,
+    val: Val,
+    val_ty: Ty,
+}
+
+#[inline]
+fn ranges_disjoint(off1: u64, sz1: u64, off2: u64, sz2: u64) -> bool {
+    off1.saturating_add(sz1) <= off2 || off2.saturating_add(sz2) <= off1
+}
+
 enum UndoEntry {
     Expr(GvnKey, Option<Val>),
     Const32(Val, Option<i32>),
     AddConst(Val, Option<(Val, u32)>),
     Bound(Val, Option<u64>),
-    CheckedMax(Val, Option<(u32, u64)>),
+    CheckedMax(Val, Option<u64>),
     Global(u32, Option<(u32, Val)>),
     MemSize(Option<(u32, Val)>),
     Table((u32, Val), Option<(u32, Val)>),
-    Load((LoadKind, Val, u32), Option<(u32, Val)>),
+    MemPush,
+    MemRemove(usize, MemFact),
+    MemClear(Vec<MemFact>),
 }
 
 struct GvnState<'a> {
@@ -2140,6 +3244,7 @@ struct GvnState<'a> {
     fn_written_globals: HashSet<u32>,
     fn_writes_all_tables: bool,
     fn_written_tables: u64,
+    mem_min_bytes: u64,
     mem_max_bytes: u64,
 
     subst: Vec<Val>,
@@ -2148,15 +3253,14 @@ struct GvnState<'a> {
     const32: Vec<Option<i32>>,
     add_const: Vec<Option<(Val, u32)>>,
     non_wrap_bound: Vec<Option<u64>>,
-    checked_max: Vec<Option<(u32, u64)>>,
+    checked_max: Vec<Option<u64>>,
     globals: Vec<Option<(u32, Val)>>,
     mem_size: Option<(u32, Val)>,
     tables: HashMap<(u32, Val), (u32, Val)>,
-    loads: HashMap<(LoadKind, Val, u32), (u32, Val)>,
+    mem_facts: Vec<MemFact>,
     undo: Vec<UndoEntry>,
 
     grow_epoch: u32,
-    mem_epoch: u32,
     glob_epoch: u32,
     tbl_epoch: u32,
 }
@@ -2194,10 +3298,11 @@ impl<'a> GvnState<'a> {
     }
 
     fn record_checked(&mut self, addr: Val, end_off: u64) {
-        let ep = self.grow_epoch;
+        // Wasm linear memory can only grow, never shrink, so `checked_max` stays valid
+        // across the entire dominator subtree regardless of `MemGrow` or calls.
         let slot = &mut self.checked_max[addr.0 as usize];
-        if slot.is_none_or(|(ce, cm)| ce != ep || end_off > cm) {
-            let prev = slot.replace((ep, end_off));
+        if slot.is_none_or(|cm| end_off > cm) {
+            let prev = slot.replace(end_off);
             self.undo.push(UndoEntry::CheckedMax(addr, prev));
         }
         // If total linear memory capacity is strictly < 4 GiB, any successful check proves
@@ -2208,8 +3313,100 @@ impl<'a> GvnState<'a> {
     }
 
     fn is_checked(&self, addr: Val, end_off: u64) -> bool {
-        self.checked_max[addr.0 as usize]
-            .is_some_and(|(ce, cm)| ce == self.grow_epoch && cm >= end_off)
+        if self.checked_max[addr.0 as usize].is_some_and(|cm| cm >= end_off) {
+            return true;
+        }
+        if let Some(b) = self.non_wrap_bound[addr.0 as usize]
+            && b.saturating_add(end_off) <= self.mem_min_bytes
+        {
+            return true;
+        }
+        false
+    }
+
+    fn clear_mem_facts(&mut self) {
+        if !self.mem_facts.is_empty() {
+            let old = std::mem::take(&mut self.mem_facts);
+            self.undo.push(UndoEntry::MemClear(old));
+        }
+    }
+
+    fn push_mem_fact(&mut self, fact: MemFact) {
+        const MAX_MEM_FACTS: usize = 64;
+        if self.mem_facts.len() < MAX_MEM_FACTS {
+            self.mem_facts.push(fact);
+            self.undo.push(UndoEntry::MemPush);
+        }
+    }
+
+    /// Looks up a dominating `Load` or `Store` fact that can bit-exactly forward to `load_kind`.
+    fn find_forward_val(
+        &self,
+        addr: Val,
+        const_addr: Option<u64>,
+        offset: u32,
+        load_kind: LoadKind,
+    ) -> Option<Val> {
+        for fact in self.mem_facts.iter().rev() {
+            let same_loc = (fact.addr == addr && fact.offset == offset)
+                || (fact.const_addr.is_some() && fact.const_addr == const_addr);
+            if !same_loc {
+                continue;
+            }
+            match (fact.kind, load_kind) {
+                (MemFactKind::Load(lk), rk) if lk == rk => return Some(fact.val),
+                (MemFactKind::Store(StoreKind::I32), LoadKind::I32)
+                | (MemFactKind::Store(StoreKind::I64), LoadKind::I64)
+                | (MemFactKind::Store(StoreKind::F32), LoadKind::F32)
+                | (MemFactKind::Store(StoreKind::F64), LoadKind::F64)
+                | (MemFactKind::Store(StoreKind::V128), LoadKind::V128)
+                    if fact.val_ty == load_kind.ty() =>
+                {
+                    return Some(fact.val);
+                }
+                (MemFactKind::Store(StoreKind::I8), LoadKind::I32Load8U)
+                    if fact.val_ty == Ty::I32
+                        && self.non_wrap_bound[fact.val.0 as usize].is_some_and(|b| b <= 255) =>
+                {
+                    return Some(fact.val);
+                }
+                (MemFactKind::Store(StoreKind::I16), LoadKind::I32Load16U)
+                    if fact.val_ty == Ty::I32
+                        && self.non_wrap_bound[fact.val.0 as usize]
+                            .is_some_and(|b| b <= 65_535) =>
+                {
+                    return Some(fact.val);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Invalidates all `mem_facts` that may alias `[addr + offset .. + sz)` while preserving
+    /// provably disjoint facts (same SSA base with non-overlapping offsets, or disjoint constant addresses).
+    fn kill_aliasing_mem_facts(
+        &mut self,
+        addr: Val,
+        const_addr: Option<u64>,
+        offset: u32,
+        sz: u64,
+    ) {
+        let mut i = self.mem_facts.len();
+        while i > 0 {
+            i -= 1;
+            let f = self.mem_facts[i];
+            let disjoint = (f.addr == addr
+                && ranges_disjoint(u64::from(f.offset), f.size, u64::from(offset), sz))
+                || matches!(
+                    (f.const_addr, const_addr),
+                    (Some(a1), Some(a2)) if ranges_disjoint(a1, f.size, a2, sz)
+                );
+            if !disjoint {
+                let removed = self.mem_facts.remove(i);
+                self.undo.push(UndoEntry::MemRemove(i, removed));
+            }
+        }
     }
 
     fn try_fold_addr(&self, addr: Val, offset: u32) -> (Val, u32) {
@@ -2256,11 +3453,14 @@ impl<'a> GvnState<'a> {
                 UndoEntry::Table(k, None) => {
                     self.tables.remove(&k);
                 }
-                UndoEntry::Load(k, Some(v)) => {
-                    self.loads.insert(k, v);
+                UndoEntry::MemPush => {
+                    self.mem_facts.pop();
                 }
-                UndoEntry::Load(k, None) => {
-                    self.loads.remove(&k);
+                UndoEntry::MemRemove(idx, fact) => {
+                    self.mem_facts.insert(idx, fact);
+                }
+                UndoEntry::MemClear(old) => {
+                    self.mem_facts = old;
                 }
             }
         }
@@ -2324,6 +3524,9 @@ pub fn run_dom_gvn_and_bce(
     let mut folded_any_branch = false;
 
     let fixed_mem = module.fixed32.is_some();
+    let mem_min_bytes = module
+        .memory
+        .map_or(0u64, |(min_p, _)| min_p.saturating_mul(65_536));
     let mem_max_bytes = module
         .memory
         .map_or(0u64, |(_, max_p)| max_p.saturating_mul(65_536));
@@ -2409,6 +3612,7 @@ pub fn run_dom_gvn_and_bce(
         fn_written_globals,
         fn_writes_all_tables,
         fn_written_tables,
+        mem_min_bytes,
         mem_max_bytes,
         subst: (0..n_vals as u32).map(Val).collect(),
         any_subst: false,
@@ -2420,23 +3624,29 @@ pub fn run_dom_gvn_and_bce(
         globals: vec![None; module.globals.len()],
         mem_size: None,
         tables: HashMap::new(),
-        loads: HashMap::new(),
+        mem_facts: Vec::new(),
         undo: Vec::new(),
         grow_epoch: 1,
-        mem_epoch: 1,
         glob_epoch: 1,
         tbl_epoch: 1,
     };
 
-    // Iterative DFS over dominator tree: `(block_id, next_child_idx, undo_mark, saved_epochs)`.
+    #[derive(Clone, Copy)]
+    enum EdgeFact {
+        None,
+        Bound(Val, u64),
+        LtU(Val, Val),
+    }
+
+    // Iterative DFS over dominator tree: `(block_id, edge_fact)` / `Exit { mark, epochs }`.
     enum DfsAction {
-        Enter(u32),
+        Enter(u32, EdgeFact),
         Exit {
             mark: usize,
-            epochs: (u32, u32, u32, u32),
+            epochs: (u32, u32, u32),
         },
     }
-    let mut stack: Vec<DfsAction> = vec![DfsAction::Enter(0)];
+    let mut stack: Vec<DfsAction> = vec![DfsAction::Enter(0, EdgeFact::None)];
     let mut steps = 0usize;
     let mut pool = std::mem::take(&mut ir.val_pool);
 
@@ -2453,25 +3663,40 @@ pub fn run_dom_gvn_and_bce(
             DfsAction::Exit { mark, epochs } => {
                 st.rollback(mark);
                 st.grow_epoch = epochs.0;
-                st.mem_epoch = epochs.1;
-                st.glob_epoch = epochs.2;
-                st.tbl_epoch = epochs.3;
+                st.glob_epoch = epochs.1;
+                st.tbl_epoch = epochs.2;
             }
-            DfsAction::Enter(bid) => {
+            DfsAction::Enter(bid, edge_fact) => {
                 let mark = st.undo.len();
-                let saved_epochs = (st.grow_epoch, st.mem_epoch, st.glob_epoch, st.tbl_epoch);
+                let saved_epochs = (st.grow_epoch, st.glob_epoch, st.tbl_epoch);
                 stack.push(DfsAction::Exit {
                     mark,
                     epochs: saved_epochs,
                 });
 
-                // At multi-predecessor joins/loops, conservatively bump mutable epochs (read-only facts persist!).
+                // Apply branch-refined range fact when this block is uniquely dominated by one branch edge.
+                match edge_fact {
+                    EdgeFact::None => {}
+                    EdgeFact::Bound(v, b) => st.tighten_bound(v, b),
+                    EdgeFact::LtU(x, y) => {
+                        if let Some(by) = st.non_wrap_bound[y.0 as usize]
+                            && by > 0
+                        {
+                            st.tighten_bound(x, by - 1);
+                        }
+                        if let Some(cy) = st.checked_max[y.0 as usize] {
+                            st.record_checked(x, cy.saturating_add(1));
+                        }
+                    }
+                }
+
+                // At multi-predecessor joins/loops, conservatively invalidate mutable state (read-only facts persist!).
                 if dom.preds[bid as usize].len() > 1 {
                     if st.fn_may_grow {
                         st.grow_epoch = st.grow_epoch.wrapping_add(1);
                     }
                     if st.fn_writes_mem {
-                        st.mem_epoch = st.mem_epoch.wrapping_add(1);
+                        st.clear_mem_facts();
                     }
                     if st.fn_writes_all_globals || !st.fn_written_globals.is_empty() {
                         st.glob_epoch = st.glob_epoch.wrapping_add(1);
@@ -2498,6 +3723,8 @@ pub fn run_dom_gvn_and_bce(
                                     dst,
                                     src,
                                     len: c as u32,
+                                    dst_checked: false,
+                                    src_checked: false,
                                 };
                             }
                         }
@@ -2509,13 +3736,14 @@ pub fn run_dom_gvn_and_bce(
                                     dst,
                                     val,
                                     len: c as u32,
+                                    checked: false,
                                 };
                             }
                         }
                         _ => {}
                     }
 
-                    // Wrap-safe addressing-mode folding + cross-block dominator BCE + Load/Global/Table/MemSize/Expr GVN.
+                    // Wrap-safe addressing-mode folding + cross-block dominator BCE + alias-aware Load/Store forwarding.
                     match &mut inst.op {
                         Op::BoundsCheck { addr, end_off } => {
                             if st.is_checked(*addr, *end_off) {
@@ -2534,24 +3762,36 @@ pub fn run_dom_gvn_and_bce(
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
                             *addr = na;
                             *offset = noff;
-                            let end = u64::from(*offset) + kind.bytes();
-                            if *checked || st.is_checked(*addr, end) {
+                            let sz = kind.bytes();
+                            let end = u64::from(*offset) + sz;
+                            let is_safe = *checked || st.is_checked(*addr, end);
+                            if is_safe {
                                 *checked = true;
                             }
+                            let const_addr = st.const32[addr.0 as usize]
+                                .map(|c| u64::from(c as u32).saturating_add(u64::from(*offset)));
+                            if is_safe
+                                && let Some(res) = inst.res
+                                && let Some(prev_v) =
+                                    st.find_forward_val(*addr, const_addr, *offset, *kind)
+                            {
+                                // Dominated by an identical load or exact-width store with no aliasing write -> forward!
+                                st.record_checked(*addr, end);
+                                st.subst[res.0 as usize] = prev_v;
+                                st.any_subst = true;
+                                continue;
+                            }
                             st.record_checked(*addr, end);
-                            let lkey = (*kind, *addr, *offset);
-                            let expected_ep = if st.fn_writes_mem { st.mem_epoch } else { 0 };
                             if let Some(res) = inst.res {
-                                if let Some(&(ep, prev_v)) = st.loads.get(&lkey)
-                                    && ep == expected_ep
-                                {
-                                    // Dominated by an identical load with no intervening memory write -> CSE!
-                                    st.subst[res.0 as usize] = prev_v;
-                                    st.any_subst = true;
-                                    continue;
-                                }
-                                let prev = st.loads.insert(lkey, (expected_ep, res));
-                                st.undo.push(UndoEntry::Load(lkey, prev));
+                                st.push_mem_fact(MemFact {
+                                    addr: *addr,
+                                    const_addr,
+                                    offset: *offset,
+                                    size: sz,
+                                    kind: MemFactKind::Load(*kind),
+                                    val: res,
+                                    val_ty: ir.val_tys[res.0 as usize],
+                                });
                                 match *kind {
                                     LoadKind::I32Load8U => st.tighten_bound(res, 255),
                                     LoadKind::I32Load16U => st.tighten_bound(res, 65_535),
@@ -2564,32 +3804,73 @@ pub fn run_dom_gvn_and_bce(
                         Op::Store {
                             kind,
                             addr,
+                            val,
                             offset,
                             checked,
-                            ..
                         } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
                             *addr = na;
                             *offset = noff;
-                            let end = u64::from(*offset) + kind.bytes();
+                            let sz = kind.bytes();
+                            let end = u64::from(*offset) + sz;
                             if *checked || st.is_checked(*addr, end) {
                                 *checked = true;
                             }
                             st.record_checked(*addr, end);
-                            st.mem_epoch = st.mem_epoch.wrapping_add(1);
+                            let const_addr = st.const32[addr.0 as usize]
+                                .map(|c| u64::from(c as u32).saturating_add(u64::from(*offset)));
+                            st.kill_aliasing_mem_facts(*addr, const_addr, *offset, sz);
+                            st.push_mem_fact(MemFact {
+                                addr: *addr,
+                                const_addr,
+                                offset: *offset,
+                                size: sz,
+                                kind: MemFactKind::Store(*kind),
+                                val: *val,
+                                val_ty: ir.val_tys[val.0 as usize],
+                            });
                             out_insts.push(inst);
                             continue;
                         }
-                        Op::MemCopy { .. }
-                        | Op::MemFill { .. }
-                        | Op::MemCopyConst { .. }
-                        | Op::MemFillConst { .. } => {
-                            st.mem_epoch = st.mem_epoch.wrapping_add(1);
+                        Op::MemCopyConst {
+                            dst,
+                            src,
+                            len,
+                            dst_checked,
+                            src_checked,
+                        } => {
+                            let end = u64::from(*len);
+                            if *dst_checked || st.is_checked(*dst, end) {
+                                *dst_checked = true;
+                            }
+                            if *src_checked || st.is_checked(*src, end) {
+                                *src_checked = true;
+                            }
+                            st.record_checked(*dst, end);
+                            st.record_checked(*src, end);
+                            st.clear_mem_facts();
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::MemFillConst {
+                            dst, len, checked, ..
+                        } => {
+                            let end = u64::from(*len);
+                            if *checked || st.is_checked(*dst, end) {
+                                *checked = true;
+                            }
+                            st.record_checked(*dst, end);
+                            st.clear_mem_facts();
+                            out_insts.push(inst);
+                            continue;
+                        }
+                        Op::MemCopy { .. } | Op::MemFill { .. } => {
+                            st.clear_mem_facts();
                             out_insts.push(inst);
                             continue;
                         }
                         Op::MemGrow(_) => {
-                            st.mem_epoch = st.mem_epoch.wrapping_add(1);
+                            st.clear_mem_facts();
                             if st.module.fixed32.is_none() {
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
                             }
@@ -2680,7 +3961,7 @@ pub fn run_dom_gvn_and_bce(
                         Op::Call { func, .. } => {
                             let f = *func as usize;
                             if st.effects.writes_mem[f] {
-                                st.mem_epoch = st.mem_epoch.wrapping_add(1);
+                                st.clear_mem_facts();
                             }
                             if st.effects.grows_mem[f] {
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
@@ -2699,7 +3980,7 @@ pub fn run_dom_gvn_and_bce(
                             continue;
                         }
                         Op::CallIndirect { .. } => {
-                            st.mem_epoch = st.mem_epoch.wrapping_add(1);
+                            st.clear_mem_facts();
                             if st.module.fixed32.is_none() {
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
                             }
@@ -2800,12 +4081,32 @@ pub fn run_dom_gvn_and_bce(
                             }
                             Op::I32BinImm(IntBinOp::Add, base, k) if k > 0 => {
                                 st.insert_add_const(res, base, k as u32);
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize]
+                                    && b.saturating_add(u64::from(k as u32)) <= u32::MAX as u64
+                                {
+                                    st.tighten_bound(res, b + u64::from(k as u32));
+                                }
                             }
-                            Op::I32BinImm(IntBinOp::And, _, m) if m >= 0 => {
+                            Op::I32BinImm(IntBinOp::And, _, m) => {
                                 st.tighten_bound(res, u64::from(m as u32));
                             }
                             Op::I32BinImm(IntBinOp::ShrU, _, sh) if (1..32).contains(&sh) => {
                                 st.tighten_bound(res, u64::from(u32::MAX >> (sh as u32)));
+                            }
+                            Op::I32BinImm(IntBinOp::Shl, base, sh) if (1..32).contains(&sh) => {
+                                if let Some(b) = st.non_wrap_bound[base.0 as usize]
+                                    && b <= u64::from(u32::MAX >> (sh as u32))
+                                {
+                                    st.tighten_bound(res, b << (sh as u32));
+                                }
+                            }
+                            Op::Select { a, b, .. } | Op::CmpSelect { tv: a, fv: b, .. } => {
+                                if let (Some(ba), Some(bb)) = (
+                                    st.non_wrap_bound[a.0 as usize],
+                                    st.non_wrap_bound[b.0 as usize],
+                                ) {
+                                    st.tighten_bound(res, ba.max(bb));
+                                }
                             }
                             _ => {}
                         }
@@ -2876,9 +4177,53 @@ pub fn run_dom_gvn_and_bce(
                     _ => {}
                 }
 
+                // Compute optional branch-refined range facts for uniquely dominated children.
+                let term_snap = bb.term;
                 // Push dom_children in reverse so they visit in forward order.
                 for &child in dom.dom_children[bid as usize].iter().rev() {
-                    stack.push(DfsAction::Enter(child));
+                    let mut ef = EdgeFact::None;
+                    if dom.preds[child as usize].len() == 1
+                        && dom.preds[child as usize][0] == bid
+                        && let Term::CmpBranch {
+                            kind,
+                            a,
+                            b,
+                            then_bb,
+                            else_bb,
+                            ..
+                        } = term_snap
+                        && then_bb != else_bb
+                    {
+                        let on_then = child == then_bb.0;
+                        let on_else = child == else_bb.0;
+                        if on_then || on_else {
+                            match kind {
+                                CmpBranchKind::I32Imm(cop, imm) => {
+                                    let eff = if on_then { cop } else { cop.invert_int() };
+                                    let ku = imm as u32;
+                                    match eff {
+                                        CmpOp::LtU if ku > 0 => {
+                                            ef = EdgeFact::Bound(a, u64::from(ku - 1));
+                                        }
+                                        CmpOp::LeU => {
+                                            ef = EdgeFact::Bound(a, u64::from(ku));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                CmpBranchKind::I32(cop) => {
+                                    let eff = if on_then { cop } else { cop.invert_int() };
+                                    match eff {
+                                        CmpOp::LtU => ef = EdgeFact::LtU(a, b),
+                                        CmpOp::GtU => ef = EdgeFact::LtU(b, a),
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    stack.push(DfsAction::Enter(child, ef));
                 }
             }
         }
@@ -3012,50 +4357,72 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
             } => (Ok((kind, a, b)), then_bb, then_args, else_bb, else_args),
             _ => continue,
         };
-        if then_args.len != 0 || else_args.len != 0 {
-            continue;
-        }
         let ti = then_bb.0 as usize;
         let ei = else_bb.0 as usize;
-        if ti == ei || ti == bi || ei == bi || ti == 0 || ei == 0 || dead_arm[ti] || dead_arm[ei] {
+        if ti == ei || ti == bi || ei == bi || dead_arm[ti] || dead_arm[ei] {
             continue;
         }
-        if edge_in[ti] != 1 || edge_in[ei] != 1 {
-            continue;
-        }
-        if !ir.blocks[ti].params.is_empty() || !ir.blocks[ei].params.is_empty() {
-            continue;
-        }
-        if ir.blocks[ti].insts.len() > 2 || ir.blocks[ei].insts.len() > 2 {
-            continue;
-        }
-        if !ir.blocks[ti]
-            .insts
-            .iter()
-            .all(|ins| is_trivial_pure(&ins.op))
-            || !ir.blocks[ei]
-                .insts
-                .iter()
-                .all(|ins| is_trivial_pure(&ins.op))
+        let is_trivial_arm = |idx: usize| -> bool {
+            idx != 0
+                && !dead_arm[idx]
+                && edge_in[idx] == 1
+                && ir.blocks[idx].params.is_empty()
+                && ir.blocks[idx].insts.len() <= 2
+                && ir.blocks[idx]
+                    .insts
+                    .iter()
+                    .all(|ins| is_trivial_pure(&ins.op))
+        };
+
+        // Case 1: Classic 2-arm diamond (`bi -> ti -> merge`, `bi -> ei -> merge`).
+        // Case 2: Single-arm triangle (`bi -> ti -> merge`, `bi -> merge` directly via `else_bb`).
+        // Case 3: Single-arm triangle (`bi -> merge` directly via `then_bb`, `bi -> ei -> merge`).
+        let (merge_bb, ta, ea, kill_t, kill_e) = if then_args.len == 0
+            && else_args.len == 0
+            && is_trivial_arm(ti)
+            && is_trivial_arm(ei)
+            && let (
+                Term::Jump {
+                    target: tm,
+                    args: ta,
+                },
+                Term::Jump {
+                    target: em,
+                    args: ea,
+                },
+            ) = (ir.blocks[ti].term, ir.blocks[ei].term)
+            && tm == em
+            && ta.len == ea.len
+            && tm.0 as usize != ti
+            && tm.0 as usize != ei
         {
-            continue;
-        }
-        let (
-            Term::Jump {
+            (tm, ta, ea, true, true)
+        } else if then_args.len == 0
+            && is_trivial_arm(ti)
+            && let Term::Jump {
                 target: tm,
                 args: ta,
-            },
-            Term::Jump {
+            } = ir.blocks[ti].term
+            && tm == else_bb
+            && ta.len == else_args.len
+            && tm.0 as usize != ti
+        {
+            (tm, ta, else_args, true, false)
+        } else if else_args.len == 0
+            && is_trivial_arm(ei)
+            && let Term::Jump {
                 target: em,
                 args: ea,
-            },
-        ) = (ir.blocks[ti].term, ir.blocks[ei].term)
-        else {
+            } = ir.blocks[ei].term
+            && em == then_bb
+            && ea.len == then_args.len
+            && em.0 as usize != ei
+        {
+            (em, then_args, ea, false, true)
+        } else {
             continue;
         };
-        if tm != em || ta.len != ea.len || tm.0 as usize == ti || tm.0 as usize == ei {
-            continue;
-        }
+
         // Check differing positions: allow up to 2 GP values (lowered to branchless `cmovcc`).
         let t_slice = ir.pool_slice(ta);
         let e_slice = ir.pool_slice(ea);
@@ -3081,18 +4448,11 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
             continue;
         }
 
-        // Speculatively hoist both trivial arms into `bi` and emit `CmpSelect`/`Select` per diff!
+        // Speculatively hoist trivial arm(s) into `bi` and emit `CmpSelect`/`Select` per diff.
+        // Push merged edge args into `val_pool` BEFORE mutating any blocks so an error leaves CFG intact.
         let t_vals: Vec<Val> = t_slice.to_vec();
         let e_vals: Vec<Val> = e_slice.to_vec();
-        let t_insts = std::mem::take(&mut ir.blocks[ti].insts);
-        let e_insts = std::mem::take(&mut ir.blocks[ei].insts);
-        ir.blocks[ti].term = Term::Unreachable;
-        ir.blocks[ei].term = Term::Unreachable;
-        dead_arm[ti] = true;
-        dead_arm[ei] = true;
-
-        ir.blocks[bi].insts.extend(t_insts);
-        ir.blocks[bi].insts.extend(e_insts);
+        let mut sel_insts = Vec::with_capacity(diffs);
         let mut merged_args = Vec::with_capacity(t_vals.len());
         for (tv, ev) in t_vals.into_iter().zip(e_vals) {
             if tv == ev {
@@ -3110,19 +4470,31 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                     },
                     Err(cond) => Op::Select { cond, a: tv, b: ev },
                 };
-                ir.blocks[bi].insts.push(Inst {
+                sel_insts.push(Inst {
                     res: Some(sel_v),
                     op: sel_op,
                 });
                 merged_args.push(sel_v);
             }
         }
-        let range = match ir.push_pool(&merged_args) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(range) = ir.push_pool(&merged_args) else {
+            continue;
         };
+        if kill_t {
+            let t_insts = std::mem::take(&mut ir.blocks[ti].insts);
+            ir.blocks[ti].term = Term::Unreachable;
+            dead_arm[ti] = true;
+            ir.blocks[bi].insts.extend(t_insts);
+        }
+        if kill_e {
+            let e_insts = std::mem::take(&mut ir.blocks[ei].insts);
+            ir.blocks[ei].term = Term::Unreachable;
+            dead_arm[ei] = true;
+            ir.blocks[bi].insts.extend(e_insts);
+        }
+        ir.blocks[bi].insts.extend(sel_insts);
         ir.blocks[bi].term = Term::Jump {
-            target: tm,
+            target: merge_bb,
             args: range,
         };
         converted_any = true;
@@ -3146,8 +4518,10 @@ pub fn optimize_func_stage2(
         dom = rebuild_cfg_and_prune(ir, budget)?;
         let _ = prune_block_params(ir, &dom, budget)?;
     }
-    // 3. LICM + Dominator GVN/BCE/post-inlining constant folding + peephole fusion/DCE.
-    run_licm(ir, &dom, module, effects, budget)?;
+    // 3. LICM (incl. guarded loop-invariant DivU/RemU hoisting) + Dominator GVN/BCE/Store-to-Load + peephole/DCE.
+    if run_licm(ir, &dom, module, effects, budget)? {
+        dom = rebuild_cfg_and_prune(ir, budget)?;
+    }
     let folded_branch = run_dom_gvn_and_bce(ir, &dom, module, effects, budget)?;
     let prev_blocks = ir.blocks.len();
     optimize_ir_with_budget(ir, budget)?;
@@ -3185,34 +4559,161 @@ fn op_may_trap_locally(op: &Op) -> bool {
         | Op::TableSet { .. }
         | Op::MemCopy { .. }
         | Op::MemFill { .. }
-        | Op::MemCopyConst { .. }
-        | Op::MemFillConst { .. }
+        | Op::MemCopyConst {
+            dst_checked: false, ..
+        }
+        | Op::MemCopyConst {
+            src_checked: false, ..
+        }
+        | Op::MemFillConst { checked: false, .. }
         | Op::CallIndirect { .. }
         | Op::Trap(_) => true,
         _ => false,
     }
 }
 
-/// Runs Step 8a (native-frame stack-check elision using final post-regalloc `frame_size`)
-/// and strictly after it Step 8b (transitive direct-call trap-check elision).
-/// Returns `fn_can_trap: Vec<bool>` indexed by Wasm `func_index` (`0..n_imports + n_defs`).
-pub fn run_stack_and_trap_elision(
-    irs: &mut [IrFunc],
-    allocs: &[AllocResult],
+/// Per-function post-opt/post-regalloc input to Step 8a/8b stack & trap-check elision.
+#[derive(Clone)]
+pub struct FnElideInput {
+    pub own_stack_bytes: i32,
+    pub local_may_trap: bool,
+    pub calls_import_or_indirect: bool,
+    pub max_helper_bytes: i32,
+    /// Unique sorted direct defined callee indices `callee_bi` (`0..n_defs`).
+    pub direct_def_callees: Vec<u32>,
+}
+
+pub fn try_compute_fn_elide_input(
+    ir: &IrFunc,
+    alloc: &AllocResult,
+    n_imports: usize,
+    n_defs: usize,
+) -> Option<FnElideInput> {
+    let own_stack_bytes = alloc
+        .frame_size
+        .saturating_add((alloc.used_callee_gp.len() as i32) * 8)
+        .saturating_add(8);
+    let mut local_may_trap = false;
+    let mut calls_import_or_indirect = false;
+    let mut max_helper_bytes = 0i32;
+    let mut direct_def_callees: Vec<u32> = Vec::new();
+    for bb in &ir.blocks {
+        if matches!(bb.term, Term::Unreachable) {
+            local_may_trap = true;
+        }
+        for inst in &bb.insts {
+            if op_may_trap_locally(&inst.op) {
+                local_may_trap = true;
+            }
+            match inst.op {
+                Op::Call { func, .. } => {
+                    let f = func as usize;
+                    if f < n_imports {
+                        calls_import_or_indirect = true;
+                    } else if f - n_imports < n_defs {
+                        if direct_def_callees.len() == direct_def_callees.capacity() {
+                            direct_def_callees.try_reserve(1).ok()?;
+                        }
+                        direct_def_callees.push((f - n_imports) as u32);
+                    }
+                }
+                Op::CallIndirect { .. } => {
+                    calls_import_or_indirect = true;
+                }
+                Op::Trunc(_, _) | Op::MemGrow(_) | Op::MemCopy { .. } | Op::MemFill { .. } => {
+                    max_helper_bytes = max_helper_bytes.max(PURE_HELPER_STACK_BYTES);
+                }
+                _ => {}
+            }
+        }
+    }
+    direct_def_callees.sort_unstable();
+    direct_def_callees.dedup();
+    Some(FnElideInput {
+        own_stack_bytes,
+        local_may_trap,
+        calls_import_or_indirect,
+        max_helper_bytes,
+        direct_def_callees,
+    })
+}
+
+/// Output of Step 8a/8b stack & trap-check elision across all defined functions.
+pub struct ElideOutput {
+    pub needs_stack_check: Vec<bool>,
+    pub elided_callee_stack_bytes: Vec<i32>,
+    pub fn_can_trap: Vec<bool>,
+}
+
+/// Fallibly runs Step 8a + Step 8b strictly from per-function `FnElideInput` summaries,
+/// returning `Ok(None)` on allocation failure so optional cache work can fall back cleanly.
+pub fn try_run_stack_and_trap_elision_from_summaries(
+    inputs: &[FnElideInput],
     module: &X64Module,
     budget: Option<&CompileBudget>,
-) -> Res<Vec<bool>> {
+) -> Res<Option<ElideOutput>> {
     if let Some(bg) = budget {
         bg.check_deadline()?;
     }
     let n_imports = module.imports.len();
-    let n_defs = irs.len();
+    let n_defs = inputs.len();
     let n_total = n_imports + n_defs;
-    let (in_cycle, topo_bottom_up) = call_graph_sccs(irs, n_imports);
 
-    // ---- Step 8a: Native-Frame Stack-Check Elision (§5.1.8a) ----
-    let mut cannot_elide = vec![false; n_defs];
-    // Rule 1: Exported, `start`, or referenced in ANY `call_indirect` table MUST retain stack check!
+    let setup = (|| -> Option<_> {
+        let mut edges: Vec<Vec<usize>> = Vec::new();
+        edges.try_reserve_exact(n_defs).ok()?;
+        for inp in inputs {
+            let mut row = Vec::new();
+            row.try_reserve_exact(inp.direct_def_callees.len()).ok()?;
+            for &c in &inp.direct_def_callees {
+                row.push(c as usize);
+            }
+            edges.push(row);
+        }
+        let (in_cycle, topo_bottom_up) = try_call_graph_sccs_from_edges(&edges)?;
+        let mut cannot_elide = Vec::new();
+        cannot_elide.try_reserve_exact(n_defs).ok()?;
+        cannot_elide.resize(n_defs, false);
+        let mut elided = Vec::new();
+        elided.try_reserve_exact(n_defs).ok()?;
+        elided.resize(n_defs, false);
+        let mut subtree_bytes = Vec::new();
+        subtree_bytes.try_reserve_exact(n_defs).ok()?;
+        subtree_bytes.resize(n_defs, 0i32);
+        let mut needs_stack_check = Vec::new();
+        needs_stack_check.try_reserve_exact(n_defs).ok()?;
+        needs_stack_check.resize(n_defs, true);
+        let mut elided_callee_stack_bytes = Vec::new();
+        elided_callee_stack_bytes.try_reserve_exact(n_defs).ok()?;
+        elided_callee_stack_bytes.resize(n_defs, 0i32);
+        let mut fn_can_trap = Vec::new();
+        fn_can_trap.try_reserve_exact(n_total).ok()?;
+        fn_can_trap.resize(n_total, true);
+        Some((
+            in_cycle,
+            topo_bottom_up,
+            cannot_elide,
+            elided,
+            subtree_bytes,
+            needs_stack_check,
+            elided_callee_stack_bytes,
+            fn_can_trap,
+        ))
+    })();
+    let Some((
+        in_cycle,
+        topo_bottom_up,
+        mut cannot_elide,
+        mut elided,
+        mut subtree_bytes,
+        mut needs_stack_check,
+        mut elided_callee_stack_bytes,
+        mut fn_can_trap,
+    )) = setup
+    else {
+        return Ok(None);
+    };
+
     for &(_, f) in &module.exported_funcs {
         if f >= n_imports && f - n_imports < n_defs {
             cannot_elide[f - n_imports] = true;
@@ -3232,119 +4733,62 @@ pub fn run_stack_and_trap_elision(
             }
         }
     }
-
-    let mut direct_def_callees: Vec<Vec<usize>> = vec![Vec::new(); n_defs];
-    let mut seen_callee = vec![u32::MAX; n_defs];
-    let mut calls_import_or_indirect = vec![false; n_defs];
-    let mut max_helper_bytes = vec![0i32; n_defs];
-    let mut local_may_trap = vec![false; n_defs];
-    let mut scan_steps = 0usize;
-
-    for (bi, ir) in irs.iter().enumerate() {
-        let stamp = bi as u32;
-        if in_cycle[bi] {
+    for (bi, inp) in inputs.iter().enumerate() {
+        if in_cycle[bi] || inp.calls_import_or_indirect {
             cannot_elide[bi] = true;
-        }
-        for bb in &ir.blocks {
-            if matches!(bb.term, Term::Unreachable) {
-                local_may_trap[bi] = true;
-            }
-            for inst in &bb.insts {
-                scan_steps += 1;
-                if let Some(bg) = budget
-                    && (scan_steps & 4095) == 0
-                {
-                    bg.check_deadline()?;
-                }
-                if op_may_trap_locally(&inst.op) {
-                    local_may_trap[bi] = true;
-                }
-                match inst.op {
-                    Op::Call { func, .. } => {
-                        let f = func as usize;
-                        if f < n_imports {
-                            calls_import_or_indirect[bi] = true;
-                            cannot_elide[bi] = true;
-                        } else if f - n_imports < n_defs {
-                            let c = f - n_imports;
-                            if seen_callee[c] != stamp {
-                                seen_callee[c] = stamp;
-                                direct_def_callees[bi].push(c);
-                            }
-                        }
-                    }
-                    Op::CallIndirect { .. } => {
-                        calls_import_or_indirect[bi] = true;
-                        cannot_elide[bi] = true;
-                    }
-                    Op::Trunc(_, _) | Op::MemGrow(_) | Op::MemCopy { .. } | Op::MemFill { .. } => {
-                        max_helper_bytes[bi] = max_helper_bytes[bi].max(PURE_HELPER_STACK_BYTES);
-                    }
-                    _ => {}
-                }
-            }
         }
     }
 
-    // Bottom-up exact worst-case transitive native stack use (`own_bytes = frame_size + 8*saved_gp + 8`).
-    let mut elided = vec![false; n_defs];
-    let mut subtree_bytes = vec![0i32; n_defs];
     for &bi in &topo_bottom_up {
-        let own_bytes = allocs[bi]
-            .frame_size
-            .saturating_add((allocs[bi].used_callee_gp.len() as i32) * 8)
-            .saturating_add(8); // return address pushed by `call`
-        if cannot_elide[bi] || calls_import_or_indirect[bi] {
+        if cannot_elide[bi] {
             continue;
         }
-        // Rule 2: Calls ONLY other elided callees or pure helpers (NEVER a retaining callee!).
-        if direct_def_callees[bi].iter().any(|&c| !elided[c]) {
+        let inp = &inputs[bi];
+        if inp.direct_def_callees.iter().any(|&c| !elided[c as usize]) {
             continue;
         }
-        let max_callee = direct_def_callees[bi]
+        let max_callee = inp
+            .direct_def_callees
             .iter()
-            .map(|&c| subtree_bytes[c])
+            .map(|&c| subtree_bytes[c as usize])
             .max()
             .unwrap_or(0)
-            .max(max_helper_bytes[bi]);
-        let total = own_bytes.saturating_add(max_callee);
-        // Rule 3: Exact subtree native stack use <= 8 KiB.
+            .max(inp.max_helper_bytes);
+        let total = inp.own_stack_bytes.saturating_add(max_callee);
         if total <= ELIDE_MAX_SUBTREE_STACK_BYTES {
             elided[bi] = true;
             subtree_bytes[bi] = total;
         }
     }
 
-    // Apply Step 8a decisions & Rule 4 (every retaining caller reserves `max_elided_subtree_bytes`).
     for bi in 0..n_defs {
         if elided[bi] {
-            irs[bi].needs_stack_check = false;
-            irs[bi].elided_callee_stack_bytes = 0;
+            needs_stack_check[bi] = false;
+            elided_callee_stack_bytes[bi] = 0;
         } else {
-            irs[bi].needs_stack_check = true;
-            let reserve = direct_def_callees[bi]
+            needs_stack_check[bi] = true;
+            let reserve = inputs[bi]
+                .direct_def_callees
                 .iter()
-                .filter(|&&c| elided[c])
-                .map(|&c| subtree_bytes[c])
+                .filter(|&&c| elided[c as usize])
+                .map(|&c| subtree_bytes[c as usize])
                 .max()
                 .unwrap_or(0);
-            irs[bi].elided_callee_stack_bytes = reserve;
+            elided_callee_stack_bytes[bi] = reserve;
         }
     }
 
-    // ---- Step 8b: Direct-Call Trap-Check Elision (strictly AFTER Step 8a!) ----
-    let mut fn_can_trap = vec![true; n_total];
     for bi in 0..n_defs {
         let fi = n_imports + bi;
-        // Qualifies only if `!needs_stack_check` AND no local traps AND no imports/indirect calls!
-        fn_can_trap[fi] =
-            irs[bi].needs_stack_check || local_may_trap[bi] || calls_import_or_indirect[bi];
+        fn_can_trap[fi] = needs_stack_check[bi]
+            || inputs[bi].local_may_trap
+            || inputs[bi].calls_import_or_indirect;
     }
     let mut changed = true;
     let mut fix_steps = 0usize;
     while changed {
         changed = false;
-        for (bi, callees) in direct_def_callees.iter().enumerate() {
+        for (bi, inp) in inputs.iter().enumerate() {
             fix_steps += 1;
             if let Some(bg) = budget
                 && (fix_steps & 4095) == 0
@@ -3355,11 +4799,58 @@ pub fn run_stack_and_trap_elision(
             if fn_can_trap[fi] {
                 continue;
             }
-            if callees.iter().any(|&c| fn_can_trap[n_imports + c]) {
+            if inp
+                .direct_def_callees
+                .iter()
+                .any(|&c| fn_can_trap[n_imports + c as usize])
+            {
                 fn_can_trap[fi] = true;
                 changed = true;
             }
         }
     }
-    Ok(fn_can_trap)
+
+    Ok(Some(ElideOutput {
+        needs_stack_check,
+        elided_callee_stack_bytes,
+        fn_can_trap,
+    }))
+}
+
+/// Runs Step 8a + Step 8b strictly from per-function `FnElideInput` summaries.
+pub fn run_stack_and_trap_elision_from_summaries(
+    inputs: &[FnElideInput],
+    module: &X64Module,
+    budget: Option<&CompileBudget>,
+) -> Res<ElideOutput> {
+    try_run_stack_and_trap_elision_from_summaries(inputs, module, budget)?
+        .ok_or_else(|| "x64: out of memory allocating stack/trap elision buffers".to_string())
+}
+
+/// Runs Step 8a (native-frame stack-check elision using final post-regalloc `frame_size`)
+/// and strictly after it Step 8b (transitive direct-call trap-check elision).
+/// Returns `fn_can_trap: Vec<bool>` indexed by Wasm `func_index` (`0..n_imports + n_defs`).
+pub fn run_stack_and_trap_elision(
+    irs: &mut [IrFunc],
+    allocs: &[AllocResult],
+    module: &X64Module,
+    budget: Option<&CompileBudget>,
+) -> Res<Vec<bool>> {
+    let n_imports = module.imports.len();
+    let n_defs = irs.len();
+    let mut inputs = Vec::new();
+    inputs
+        .try_reserve_exact(n_defs)
+        .map_err(|_| "x64: out of memory allocating elision summaries".to_string())?;
+    for (ir, alloc) in irs.iter().zip(allocs) {
+        let inp = try_compute_fn_elide_input(ir, alloc, n_imports, n_defs)
+            .ok_or_else(|| "x64: out of memory allocating elision summary".to_string())?;
+        inputs.push(inp);
+    }
+    let out = run_stack_and_trap_elision_from_summaries(&inputs, module, budget)?;
+    for (bi, ir) in irs.iter_mut().enumerate() {
+        ir.needs_stack_check = out.needs_stack_check[bi];
+        ir.elided_callee_stack_bytes = out.elided_callee_stack_bytes[bi];
+    }
+    Ok(out.fn_can_trap)
 }

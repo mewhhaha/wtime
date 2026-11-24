@@ -1390,7 +1390,7 @@ fn emit_export_new(
     a.mov_rr(false, Gp::Rbp, Gp::Rax);
     a.cmp_ri(false, Gp::Rbp, 1);
     a.jcc(Cond::B, lbl_fail_isa);
-    if isa.has_abm_bmi1 {
+    if isa.has_abm_bmi1 || isa.has_bmi2 {
         a.cmp_ri(false, Gp::Rbp, 7);
         a.jcc(Cond::B, lbl_fail_isa);
     }
@@ -1411,7 +1411,7 @@ fn emit_export_new(
     a.cmp_ri(false, Gp::Rcx, baseline_mask);
     a.jcc(Cond::Ne, lbl_fail_isa);
 
-    // 3. Optional ABM (LZCNT) + BMI1 (TZCNT) when compiled for x64-v3.
+    // 3. Optional ABM (LZCNT) + BMI1 (TZCNT) + BMI2 (SHLX/SHRX/SARX/RORX) when compiled for x64-v3.
     if isa.has_abm_bmi1 {
         match hooks.cpuid {
             CpuidSource::Real => {
@@ -1439,7 +1439,15 @@ fn emit_export_new(
         }
         a.and_ri(false, Gp::Rcx, 1 << 5);
         a.jcc(Cond::E, lbl_fail_isa);
-
+    }
+    let mut need_ebx7: i32 = 0;
+    if isa.has_abm_bmi1 {
+        need_ebx7 |= 1 << 3; // BMI1
+    }
+    if isa.has_bmi2 {
+        need_ebx7 |= 1 << 8; // BMI2
+    }
+    if need_ebx7 != 0 {
         match hooks.cpuid {
             CpuidSource::Real => {
                 a.mov_ri32(Gp::Rax, 7);
@@ -1451,8 +1459,9 @@ fn emit_export_new(
                 a.mov_ri32(Gp::Rbx, ebx7);
             }
         }
-        a.and_ri(false, Gp::Rbx, 1 << 3);
-        a.jcc(Cond::E, lbl_fail_isa);
+        a.and_ri(false, Gp::Rbx, need_ebx7);
+        a.cmp_ri(false, Gp::Rbx, need_ebx7);
+        a.jcc(Cond::Ne, lbl_fail_isa);
     }
 
     // 4. Zero-syscall calling-thread CET SHSTK check (using preserved max_leaf in ebp even on x64-v2!).

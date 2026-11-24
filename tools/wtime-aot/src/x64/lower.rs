@@ -370,10 +370,12 @@ fn cmp_to_cond(op: CmpOp) -> Cond {
 }
 
 /// Resolved CPU ISA feature flags enforced by both lowering and `blot_aot_new`'s CPUID gate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TargetIsa {
     /// Emit `lzcnt`/`tzcnt` when true; emit branchless portable `bsr`/`bsf` + `cmovz` when false.
     pub has_abm_bmi1: bool,
+    /// Emit BMI2 `shlx`/`shrx`/`sarx`/`rorx` when true (eliminating `RCX` shift clobbers on `x64-v3`).
+    pub has_bmi2: bool,
 }
 
 struct Lower<'a> {
@@ -874,31 +876,46 @@ impl<'a> Lower<'a> {
                 }
             }
             IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU | IntBinOp::Rotl | IntBinOp::Rotr => {
-                // `regalloc` guarantees RCX is not live across variable shifts, though `a` or `b`
-                // dying at this instruction may reside in RCX. Stage `b -> R10`, then `a -> d`
-                // (choosing `d != RCX`), then `R10 -> RCX` so neither operand can clobber the other.
-                let br = self.gp_read(b, SCRATCH_GP2);
-                if br != SCRATCH_GP2 {
-                    self.asm.mov_rr(false, SCRATCH_GP2, br);
+                if self.isa.has_bmi2
+                    && matches!(op, IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU)
+                {
+                    let ar = self.gp_read(a, SCRATCH_GP1);
+                    let br = self.gp_read(b, SCRATCH_GP2);
+                    let d = self.gp_write_reg(dst_val);
+                    match op {
+                        IntBinOp::Shl => self.asm.shlx(is64, d, ar, br),
+                        IntBinOp::ShrS => self.asm.sarx(is64, d, ar, br),
+                        IntBinOp::ShrU => self.asm.shrx(is64, d, ar, br),
+                        _ => unreachable!(),
+                    }
+                    self.gp_commit(dst_val, d);
+                } else {
+                    // `regalloc` guarantees RCX is not live across CL shifts, though `a` or `b`
+                    // dying at this instruction may reside in RCX. Stage `b -> R10`, then `a -> d`
+                    // (choosing `d != RCX`), then `R10 -> RCX` so neither operand can clobber the other.
+                    let br = self.gp_read(b, SCRATCH_GP2);
+                    if br != SCRATCH_GP2 {
+                        self.asm.mov_rr(false, SCRATCH_GP2, br);
+                    }
+                    let mut d = self.gp_write_reg(dst_val);
+                    if d == Gp::Rcx {
+                        d = SCRATCH_GP1;
+                    }
+                    let ar = self.gp_read(a, d);
+                    if d != ar {
+                        self.asm.mov_rr(is64, d, ar);
+                    }
+                    self.asm.mov_rr(false, Gp::Rcx, SCRATCH_GP2);
+                    match op {
+                        IntBinOp::Shl => self.asm.shl_cl(is64, d),
+                        IntBinOp::ShrS => self.asm.sar_cl(is64, d),
+                        IntBinOp::ShrU => self.asm.shr_cl(is64, d),
+                        IntBinOp::Rotl => self.asm.rol_cl(is64, d),
+                        IntBinOp::Rotr => self.asm.ror_cl(is64, d),
+                        _ => unreachable!(),
+                    }
+                    self.gp_commit(dst_val, d);
                 }
-                let mut d = self.gp_write_reg(dst_val);
-                if d == Gp::Rcx {
-                    d = SCRATCH_GP1;
-                }
-                let ar = self.gp_read(a, d);
-                if d != ar {
-                    self.asm.mov_rr(is64, d, ar);
-                }
-                self.asm.mov_rr(false, Gp::Rcx, SCRATCH_GP2);
-                match op {
-                    IntBinOp::Shl => self.asm.shl_cl(is64, d),
-                    IntBinOp::ShrS => self.asm.sar_cl(is64, d),
-                    IntBinOp::ShrU => self.asm.shr_cl(is64, d),
-                    IntBinOp::Rotl => self.asm.rol_cl(is64, d),
-                    IntBinOp::Rotr => self.asm.ror_cl(is64, d),
-                    _ => unreachable!(),
-                }
-                self.gp_commit(dst_val, d);
             }
             _ => {
                 let d = self.gp_write_reg(dst_val);
@@ -938,6 +955,12 @@ impl<'a> Lower<'a> {
                 }
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let br = self.gp_read(b, SCRATCH_GP2);
+                // 3-operand `lea d, [ar + br]` avoids a `mov` whenever `Add` is non-two-address!
+                if op == IntBinOp::Add && d != ar && d != br && br != Gp::Rsp {
+                    self.asm.lea(is64, d, Mem::indexed(ar, br, 1, 0));
+                    self.gp_commit(dst_val, d);
+                    return;
+                }
                 // Careful if `d == br` and `d != ar`!
                 let (dest, rhs) = if d == br && d != ar {
                     if is_comm {
@@ -1236,7 +1259,12 @@ impl<'a> Lower<'a> {
                 }
             }
             IntBinOp::Mul => {
-                self.asm.imul_rri(is64, d, ar, imm);
+                if matches!(imm, 3 | 5 | 9) && ar != Gp::Rsp {
+                    self.asm
+                        .lea(is64, d, Mem::indexed(ar, ar, (imm - 1) as u8, 0));
+                } else {
+                    self.asm.imul_rri(is64, d, ar, imm);
+                }
             }
             IntBinOp::And => {
                 if d != ar {
@@ -1257,10 +1285,14 @@ impl<'a> Lower<'a> {
                 self.asm.xor_ri(is64, d, imm);
             }
             IntBinOp::Shl => {
-                if d != ar {
-                    self.asm.mov_rr(is64, d, ar);
+                if imm == 1 && d != ar && ar != Gp::Rsp {
+                    self.asm.lea(is64, d, Mem::indexed(ar, ar, 1, 0));
+                } else {
+                    if d != ar {
+                        self.asm.mov_rr(is64, d, ar);
+                    }
+                    self.asm.shl_imm(is64, d, imm as u8);
                 }
-                self.asm.shl_imm(is64, d, imm as u8);
             }
             IntBinOp::ShrS => {
                 if d != ar {
@@ -1275,16 +1307,26 @@ impl<'a> Lower<'a> {
                 self.asm.shr_imm(is64, d, imm as u8);
             }
             IntBinOp::Rotl => {
-                if d != ar {
-                    self.asm.mov_rr(is64, d, ar);
+                if self.isa.has_bmi2 && d != ar {
+                    let w: u8 = if is64 { 64 } else { 32 };
+                    let r = w.wrapping_sub((imm as u8) & (w - 1)) & (w - 1);
+                    self.asm.rorx(is64, d, ar, r);
+                } else {
+                    if d != ar {
+                        self.asm.mov_rr(is64, d, ar);
+                    }
+                    self.asm.rol_imm(is64, d, imm as u8);
                 }
-                self.asm.rol_imm(is64, d, imm as u8);
             }
             IntBinOp::Rotr => {
-                if d != ar {
-                    self.asm.mov_rr(is64, d, ar);
+                if self.isa.has_bmi2 && d != ar {
+                    self.asm.rorx(is64, d, ar, imm as u8);
+                } else {
+                    if d != ar {
+                        self.asm.mov_rr(is64, d, ar);
+                    }
+                    self.asm.ror_imm(is64, d, imm as u8);
                 }
-                self.asm.ror_imm(is64, d, imm as u8);
             }
             _ => unreachable!("unexpected imm binop {op:?}"),
         }
@@ -2676,12 +2718,22 @@ impl<'a> Lower<'a> {
                 self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
                 self.asm.jcc(Cond::Ne, prop);
             }
-            Op::MemCopyConst { dst, src, len } => {
-                // Mandatory bounds checks FIRST (even when len == 0 -> OOB trap if off > mem_len!).
-                let dr = self.gp_read(dst, SCRATCH_GP2);
-                self.emit_bounds_check(dr, u64::from(len));
-                let sr = self.gp_read(src, SCRATCH_GP2);
-                self.emit_bounds_check(sr, u64::from(len));
+            Op::MemCopyConst {
+                dst,
+                src,
+                len,
+                dst_checked,
+                src_checked,
+            } => {
+                // Mandatory bounds checks FIRST unless proven by BCE (even when len == 0!).
+                if !dst_checked {
+                    let dr = self.gp_read(dst, SCRATCH_GP2);
+                    self.emit_bounds_check(dr, u64::from(len));
+                }
+                if !src_checked {
+                    let sr = self.gp_read(src, SCRATCH_GP2);
+                    self.emit_bounds_check(sr, u64::from(len));
+                }
                 if len == 0 {
                     // Never dereference R14 (NULL on 0-capacity memories).
                 } else if len == 1 {
@@ -2816,10 +2868,17 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            Op::MemFillConst { dst, val, len } => {
-                // Mandatory bounds check FIRST (even when len == 0!).
-                let dr = self.gp_read(dst, SCRATCH_GP2);
-                self.emit_bounds_check(dr, u64::from(len));
+            Op::MemFillConst {
+                dst,
+                val,
+                len,
+                checked,
+            } => {
+                // Mandatory bounds check FIRST unless proven by BCE (even when len == 0!).
+                if !checked {
+                    let dr = self.gp_read(dst, SCRATCH_GP2);
+                    self.emit_bounds_check(dr, u64::from(len));
+                }
                 if len > 0 {
                     let vr = self.gp_read(val, SCRATCH_GP1);
                     self.asm.movzx_rr8(SCRATCH_GP1, vr);

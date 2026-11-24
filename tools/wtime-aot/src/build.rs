@@ -14,8 +14,17 @@
 //! toolchain needs, so no RUSTFLAGS, wrappers or registry access from the
 //! caller's environment apply; the target CPU (`--target-cpu`, default
 //! native) goes through CARGO_ENCODED_RUSTFLAGS, above any configuration.
-//! `--time-limit` bounds the build. The generated crates have no build scripts
-//! and no dependencies other than the runtime crate.
+//! `--time-limit` bounds the build cooperatively across compilation, locking,
+//! subprocesses, and off-thread artifact publication (when OS thread creation is
+//! available; if thread creation fails with `EAGAIN`, final publication runs
+//! synchronously and rolls back on deadline expiry). Because cache entries are
+//! content-addressed and verified against an immutable SHA-256 sidecar written
+//! as the sole final commit barrier, a timeout never leaves an unverified or
+//! corrupt entry reusable (if an in-flight final sidecar rename completes after
+//! timeout while rollback `unlink` is also stalled across process exit, the
+//! surviving pair is already complete, immutable, and SHA-256 verified). The
+//! generated crates have no build scripts and no dependencies other than the
+//! runtime crate.
 //!
 //! `--train ARGUMENTS` makes the build profile-guided: an instrumented
 //! program runs once with ARGUMENTS (the program's own flags, then `--` and
@@ -708,7 +717,7 @@ pub(crate) fn run_cmd_capture_with_deadline(
 /// `NotFound`) and parses `Uid:` field 2 (`euid`), staying exact for the calling thread even
 /// under `PR_SET_DUMPABLE=0` (where `/proc/self` metadata reports `st_uid == 0`).
 #[cfg(unix)]
-fn current_euid() -> Result<u32, String> {
+pub(crate) fn current_euid() -> Result<u32, String> {
     #[cfg(target_os = "linux")]
     {
         let status = match fs::read_to_string("/proc/thread-self/status") {
@@ -1039,12 +1048,95 @@ pub(crate) fn publish_digest_sidecar(
     Ok(())
 }
 
+/// RAII guard for an advisory cache lock file whose `Drop` closes the fd off-thread under
+/// `deadline` so early error returns, admission rejections, and lock-wait timeouts never block
+/// past `--time-limit` on a stalled `close(2)`. Call `release_checked` on success paths to also
+/// enforce that lock release completes before `deadline`, or `into_inner` when transferring the
+/// underlying `fs::File` to a dedicated off-thread publisher.
+pub(crate) struct BoundedLockGuard {
+    file: Option<fs::File>,
+    deadline: Option<std::time::Instant>,
+}
+
+impl BoundedLockGuard {
+    /// Transfers ownership of the raw `fs::File` out of the guard (disarming `Drop`).
+    fn into_inner(mut self) -> fs::File {
+        self.file.take().expect("lock file already consumed")
+    }
+
+    /// Releases the lock file off-thread under `self.deadline` and enforces that release completes
+    /// before `deadline` (returning a time-limit error otherwise, even under `EAGAIN`).
+    fn release_checked(mut self, time_limit: std::time::Duration) -> Result<(), String> {
+        let Some(file) = self.file.take() else {
+            return Ok(());
+        };
+        let Some(deadline) = self.deadline else {
+            drop(file);
+            return Ok(());
+        };
+        if !drop_file_off_thread(file, deadline) {
+            return Err(format!(
+                "the build exceeded its time limit of {time_limit:?}"
+            ));
+        }
+        check_deadline(deadline, time_limit)
+    }
+}
+
+impl Drop for BoundedLockGuard {
+    fn drop(&mut self) {
+        let Some(file) = self.file.take() else {
+            return;
+        };
+        let Some(deadline) = self.deadline else {
+            drop(file);
+            return;
+        };
+        let _ = drop_file_off_thread(file, deadline);
+    }
+}
+
+/// Drops `file` on a detached helper thread and waits at most until `deadline`, returning `true`
+/// if `close(2)` finished before `deadline` and `false` if the wait timed out. On thread-creation
+/// failure (`EAGAIN`), falls back to synchronous `drop(file)`.
+fn drop_file_off_thread(file: fs::File, deadline: std::time::Instant) -> bool {
+    let done = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let done_bg = Arc::clone(&done);
+    let file_slot = Arc::new(std::sync::Mutex::new(Some(file)));
+    let file_bg = Arc::clone(&file_slot);
+    if std::thread::Builder::new()
+        .spawn(move || {
+            let f = file_bg.lock().unwrap_or_else(|g| g.into_inner()).take();
+            drop(f);
+            let (lk, cv) = &*done_bg;
+            *lk.lock().unwrap_or_else(|g| g.into_inner()) = true;
+            cv.notify_all();
+        })
+        .is_ok()
+    {
+        let rem = deadline.saturating_duration_since(std::time::Instant::now());
+        if rem.is_zero() {
+            return false;
+        }
+        let (lk, cv) = &*done;
+        let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
+        let (guard, _) = cv
+            .wait_timeout_while(guard, rem, |d| !*d)
+            .unwrap_or_else(|e| e.into_inner());
+        *guard
+    } else {
+        let f = file_slot.lock().unwrap_or_else(|g| g.into_inner()).take();
+        drop(f);
+        std::time::Instant::now() < deadline
+    }
+}
+
 /// Acquires an advisory lock (`exclusive` or shared) on `lock_path` within `deadline`.
 fn lock_file_mode_with_deadline(
     lock_path: &Path,
     exclusive: bool,
     deadline: Option<std::time::Instant>,
-) -> Result<fs::File, String> {
+) -> Result<BoundedLockGuard, String> {
     let lock_file = fs::File::options()
         .read(true)
         .write(true)
@@ -1052,14 +1144,19 @@ fn lock_file_mode_with_deadline(
         .truncate(false)
         .open(lock_path)
         .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    let guard = BoundedLockGuard {
+        file: Some(lock_file),
+        deadline,
+    };
     loop {
+        let f = guard.file.as_ref().expect("lock file present");
         let res = if exclusive {
-            lock_file.try_lock()
+            f.try_lock()
         } else {
-            lock_file.try_lock_shared()
+            f.try_lock_shared()
         };
         match res {
-            Ok(()) => return Ok(lock_file),
+            Ok(()) => return Ok(guard),
             Err(fs::TryLockError::WouldBlock) => {
                 if let Some(dl) = deadline
                     && std::time::Instant::now() >= dl
@@ -1069,7 +1166,15 @@ fn lock_file_mode_with_deadline(
                         lock_path.display()
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                let sleep_for = match deadline {
+                    Some(dl) => dl
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(std::time::Duration::from_millis(10)),
+                    None => std::time::Duration::from_millis(10),
+                };
+                if !sleep_for.is_zero() {
+                    std::thread::sleep(sleep_for);
+                }
             }
             Err(fs::TryLockError::Error(e)) => {
                 return Err(format!("locking {}: {e}", lock_path.display()));
@@ -1082,7 +1187,7 @@ fn lock_file_mode_with_deadline(
 pub(crate) fn lock_file_with_deadline(
     lock_path: &Path,
     deadline: Option<std::time::Instant>,
-) -> Result<fs::File, String> {
+) -> Result<BoundedLockGuard, String> {
     lock_file_mode_with_deadline(lock_path, true, deadline)
 }
 
@@ -1090,20 +1195,20 @@ pub(crate) fn lock_file_with_deadline(
 pub(crate) fn lock_file_shared_with_deadline(
     lock_path: &Path,
     deadline: Option<std::time::Instant>,
-) -> Result<fs::File, String> {
+) -> Result<BoundedLockGuard, String> {
     lock_file_mode_with_deadline(lock_path, false, deadline)
 }
 
 /// Acquires an exclusive publication lock on `entry/.publish.lock` within `deadline`, returning
-/// the lock file and the verified canonical entry directory.
+/// the bounded lock guard and the verified canonical entry directory.
 fn lock_cache_entry(
     entry: &Path,
     deadline: std::time::Instant,
-) -> Result<(fs::File, PathBuf), String> {
+) -> Result<(BoundedLockGuard, PathBuf), String> {
     let canon_entry = ensure_private_dir(entry)?;
     let lock_path = canon_entry.join(".publish.lock");
-    let lock_file = lock_file_with_deadline(&lock_path, Some(deadline))?;
-    Ok((lock_file, canon_entry))
+    let lock_guard = lock_file_with_deadline(&lock_path, Some(deadline))?;
+    Ok((lock_guard, canon_entry))
 }
 
 /// Verifies `artifact` is a non-symlink immutable regular file owned by `euid` matching its
@@ -1190,16 +1295,23 @@ fn build_c(
     field(&mut key, "c opt", options.c_opt.tag().as_bytes());
     let key_hex = key.hex();
 
-    let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
+    let (publish_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
     check_deadline(deadline, options.time_limit)?;
     let program = entry.join("library.so");
     let digest_file = entry.join("library.so.sha256");
     if verified_cached_artifact(&program, &digest_file) {
-        check_deadline(deadline, options.time_limit)?;
+        sweep_stale_staged_artifacts_bounded(&entry, deadline);
+        publish_lock.release_checked(options.time_limit)?;
         return Ok(program);
     }
-    let _ = fs::remove_file(&program);
-    let _ = fs::remove_file(&digest_file);
+    for stale in [&digest_file, &program] {
+        if let Err(e) = fs::remove_file(stale)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!("{}: {e}", stale.display()));
+        }
+    }
+    sweep_stale_staged_artifacts_bounded(&entry, deadline);
     check_deadline(deadline, options.time_limit)?;
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
@@ -1257,6 +1369,7 @@ fn build_c(
                     crate::sha256::hex(&wasm)
                 ),
             );
+            publish_lock.release_checked(options.time_limit)?;
             Ok(program)
         }
         Err(e) => {
@@ -1284,30 +1397,63 @@ fn build_x64(
     let gen_bytes = fs::read(&generator).map_err(|e| format!("{}: {e}", generator.display()))?;
     check_deadline(deadline, options.time_limit)?;
 
+    let (wasm_sha, gen_sha) = std::thread::scope(|s| {
+        let h_gen = std::thread::Builder::new()
+            .spawn_scoped(s, || crate::sha256::digest(&gen_bytes))
+            .ok();
+        let w = crate::sha256::digest(&wasm);
+        let g = h_gen
+            .and_then(|h| h.join().ok())
+            .unwrap_or_else(|| crate::sha256::digest(&gen_bytes));
+        (w, g)
+    });
+    check_deadline(deadline, options.time_limit)?;
+
+    let verify = cfg!(debug_assertions)
+        || std::env::var_os("WTIME_AOT_VERIFY").is_some_and(|v| {
+            v.to_str()
+                .is_some_and(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        });
+
     // Key strictly by resolved internal ISA profile (`x64-v2` vs `x64-v3`), never raw `"native"`.
+    // In release builds, bind explicit `WTIME_AOT_VERIFY=1` into the cache key so an earlier
+    // unverified cache hit can never bypass IR/regalloc verification when verification is requested.
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build x64 1", &[]);
-    field(&mut key, "wasm", &wasm);
-    field(&mut key, "generator", &gen_bytes);
+    field(&mut key, "wtime-aot build x64 2", &[]);
+    field(&mut key, "wasm sha256", &wasm_sha);
+    field(&mut key, "generator sha256", &gen_sha);
     field(&mut key, "isa profile", isa_profile.as_bytes());
+    if verify && !cfg!(debug_assertions) {
+        field(&mut key, "verify", b"1");
+    }
     let key_hex = key.hex();
 
-    let (_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
+    let (publish_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
     check_deadline(deadline, options.time_limit)?;
     let program = entry.join("library.so");
     let digest_file = entry.join("library.so.sha256");
     if verified_cached_artifact(&program, &digest_file) {
-        check_deadline(deadline, options.time_limit)?;
+        sweep_stale_staged_artifacts_bounded(&entry, deadline);
+        publish_lock.release_checked(options.time_limit)?;
         return Ok(program);
     }
-    let _ = fs::remove_file(&program);
-    let _ = fs::remove_file(&digest_file);
+    for stale in [&digest_file, &program] {
+        if let Err(e) = fs::remove_file(stale)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(BuildError::Failed(format!("{}: {e}", stale.display())));
+        }
+    }
+    sweep_stale_staged_artifacts_bounded(&entry, deadline);
     check_deadline(deadline, options.time_limit)?;
 
     let compile_opts = crate::x64::X64CompileOptions {
         isa,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
+        verify,
+        inc_cache_dir: Some(cache.clone()),
+        cache_key_salt: Some(gen_sha),
         ..Default::default()
     };
     let so_bytes =
@@ -1317,37 +1463,253 @@ fn build_x64(
         })?;
     check_deadline(deadline, options.time_limit)?;
 
+    enum PublishPhase {
+        InProgress,
+        Completed(Result<(), String>),
+        TimedOut,
+    }
+
     let t_write = std::time::Instant::now();
     let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let staged = entry.join(format!("library.so.{}.{seq}", std::process::id()));
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    let so_sha = crate::sha256::hex(&so_bytes);
-    let publish_res = opts
-        .open(&staged)
-        .and_then(|mut f| f.write_all(&so_bytes))
-        .map_err(|e| format!("{}: {e}", staged.display()))
-        .and_then(|()| mark_artifact_immutable(&staged))
-        .and_then(|()| {
-            fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
-        })
-        .and_then(|()| publish_digest_sidecar(&entry, "library.so", &so_sha, &digest_file));
-    if let Err(e) = publish_res {
-        let _ = fs::remove_file(&staged);
-        let _ = fs::remove_file(&program);
-        let _ = fs::remove_file(&digest_file);
-        return Err(BuildError::Failed(e));
-    }
-    let _ = fs::write(
-        entry.join("key.txt"),
-        format!(
-            "key {key_hex}\nbackend x64\nisa profile {isa_profile}\ntarget cpu {}\nwasm sha256 {}\nso sha256 {so_sha}\n",
-            options.target_cpu,
-            crate::sha256::hex(&wasm)
-        ),
+    let key_file = entry.join("key.txt");
+    let key_txt_prefix = format!(
+        "key {key_hex}\nbackend x64\nisa profile {isa_profile}\ntarget cpu {}\nwasm sha256 {}\nso sha256 ",
+        options.target_cpu,
+        crate::sha256::to_hex(&wasm_sha)
     );
+    let time_limit = options.time_limit;
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let state = Arc::new((
+        std::sync::Mutex::new(PublishPhase::InProgress),
+        std::sync::Condvar::new(),
+    ));
+
+    let cleanup_entry =
+        |entry: &Path, staged: &Path, program: &Path, digest_file: &Path, key_file: &Path| {
+            // Invalidate the committed pair (`digest_file`, `program`) first before removing
+            // staging/metadata files.
+            let _ = fs::remove_file(digest_file);
+            let _ = fs::remove_file(program);
+            let _ = fs::remove_file(staged);
+            let _ = fs::remove_file(key_file);
+            sweep_stale_staged_artifacts_inner(entry, true, None);
+        };
+
+    let staged_name = format!("library.so.{}.{seq}", std::process::id());
+    let lock_pub = Arc::new(publish_lock.into_inner());
+    let lock_weak = Arc::downgrade(&lock_pub);
+
+    // Move the sole strong `Arc<fs::File>` (`lock_pub`) into `publish_task`; the main thread
+    // retains only `Weak<fs::File>` (`lock_weak`) and never upgrades it on the main thread (so a
+    // failed cleanup spawn under `EAGAIN` can never move the final `close(2)` onto the main
+    // thread). All filesystem I/O—including closing `.publish.lock`—runs strictly OUTSIDE the
+    // `state` mutex and BEFORE `Completed(Ok(()))` is published, so a stalled `close(2)` cannot
+    // block `wait_timeout_while` or report exit 0 past `--time-limit`.
+    // `publish_digest_sidecar` is the final atomic commit barrier (zero writes follow it):
+    // any timeout before its `rename` completes leaves no reusable pair, and on a post-timeout
+    // `rename` completion we attempt bounded rollback while guaranteeing that any surviving
+    // pair is already immutable, content-addressed, and SHA-256 verified.
+    let publish_task = {
+        let entry = entry.clone();
+        let staged = staged.clone();
+        let program = program.clone();
+        let digest_file = digest_file.clone();
+        let key_file = key_file.clone();
+        let staged_name = staged_name.clone();
+        let abandoned_bg = Arc::clone(&abandoned);
+        let state_bg = Arc::clone(&state);
+        move || {
+            let check_active = || -> Result<(), String> {
+                if abandoned_bg.load(Ordering::Acquire) {
+                    return Err(format!(
+                        "the build exceeded its time limit of {time_limit:?}"
+                    ));
+                }
+                check_deadline(deadline, time_limit)
+            };
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            // Overlap staging file write + chmod with SHA-256 computation over `so_bytes`.
+            let (write_res, so_sha) = std::thread::scope(|s| {
+                let h_sha = std::thread::Builder::new()
+                    .spawn_scoped(s, || crate::sha256::hex(&so_bytes))
+                    .ok();
+                let wr = opts
+                    .open(&staged)
+                    .and_then(|mut f| f.write_all(&so_bytes))
+                    .map_err(|e| format!("{}: {e}", staged.display()))
+                    .and_then(|()| mark_artifact_immutable(&staged));
+                let sha = h_sha
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_else(|| crate::sha256::hex(&so_bytes));
+                (wr, sha)
+            });
+            // Write diagnostic `key.txt` and sweep any stale staging files (excluding our
+            // active `staged_name`) BEFORE publishing `library.so` and its digest sidecar so
+            // `publish_digest_sidecar` is the sole final commit barrier.
+            let publish_res = write_res
+                .and_then(|()| check_active())
+                .and_then(|()| {
+                    let _ = fs::write(&key_file, format!("{key_txt_prefix}{so_sha}\n"));
+                    sweep_stale_staged_artifacts_inner(&entry, true, Some(&staged_name));
+                    check_active()
+                })
+                .and_then(|()| {
+                    fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
+                })
+                .and_then(|()| check_active())
+                .and_then(|()| publish_digest_sidecar(&entry, "library.so", &so_sha, &digest_file))
+                .and_then(|()| check_active());
+
+            let (lk, cv) = &*state_bg;
+            match publish_res {
+                Ok(()) => {
+                    let phase = lk.lock().unwrap_or_else(|g| g.into_inner());
+                    if matches!(*phase, PublishPhase::TimedOut) {
+                        drop(phase);
+                        // Main thread already timed out while we still hold `lock_pub`:
+                        // roll back under `lock_pub`, then close `lock_pub`.
+                        cleanup_entry(&entry, &staged, &program, &digest_file, &key_file);
+                        drop(lock_pub);
+                        return;
+                    }
+                    drop(phase);
+                    // Close `.publish.lock` OUTSIDE the `state` mutex and BEFORE recording
+                    // `Completed(Ok(()))` so a stalled `close(2)` cannot report exit 0 past
+                    // `--time-limit` or block `wait_timeout_while`.
+                    drop(lock_pub);
+                    let final_res = check_active();
+                    let mut phase = lk.lock().unwrap_or_else(|g| g.into_inner());
+                    if matches!(*phase, PublishPhase::InProgress) {
+                        *phase = PublishPhase::Completed(final_res);
+                        cv.notify_all();
+                    }
+                }
+                Err(e) => {
+                    // Roll back outside `state` mutex while STILL holding `lock_pub`, then
+                    // close `lock_pub` before publishing `Completed(Err(e))`.
+                    cleanup_entry(&entry, &staged, &program, &digest_file, &key_file);
+                    drop(lock_pub);
+                    let mut phase = lk.lock().unwrap_or_else(|g| g.into_inner());
+                    if matches!(*phase, PublishPhase::InProgress) {
+                        *phase = PublishPhase::Completed(Err(e));
+                        cv.notify_all();
+                    }
+                }
+            }
+        }
+    };
+
+    // Run final staging/rename/sidecar publication off-thread cooperatively under `--time-limit`
+    // (allowing up to 5 ms post-launch cleanup wait after timeout). If OS thread creation fails
+    // (`EAGAIN`), falls back synchronously on the current thread—where blocking filesystem
+    // syscalls (including `.publish.lock` close) must return before `check_active` records
+    // deadline expiry. In both paths publication never reports success past `deadline`, and
+    // rollbacks stay under `publish_lock`.
+    let task_slot = Arc::new(std::sync::Mutex::new(Some(publish_task)));
+    let task_bg = Arc::clone(&task_slot);
+    let spawned = std::thread::Builder::new().spawn(move || {
+        if let Some(f) = task_bg.lock().unwrap_or_else(|g| g.into_inner()).take() {
+            f();
+        }
+    });
+    match spawned {
+        Ok(_) => {
+            drop(task_slot);
+            let rem = deadline.saturating_duration_since(std::time::Instant::now());
+            let (lk, cv) = &*state;
+            let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
+            let (mut guard, _) = cv
+                .wait_timeout_while(guard, rem, |p| matches!(*p, PublishPhase::InProgress))
+                .unwrap_or_else(|e| e.into_inner());
+            let prev = std::mem::replace(&mut *guard, PublishPhase::TimedOut);
+            match prev {
+                PublishPhase::Completed(Ok(())) => {
+                    *guard = PublishPhase::Completed(Ok(()));
+                    drop(guard);
+                    check_deadline(deadline, options.time_limit)?;
+                }
+                PublishPhase::Completed(Err(e)) => {
+                    *guard = PublishPhase::Completed(Err(e.clone()));
+                    drop(guard);
+                    return Err(BuildError::Failed(e));
+                }
+                PublishPhase::InProgress | PublishPhase::TimedOut => {
+                    abandoned.store(true, Ordering::Release);
+                    drop(guard);
+                    // Move ONLY `Weak<fs::File>` into the cleanup closure and upgrade INSIDE the
+                    // spawned worker: if `spawn` fails with `EAGAIN`, dropping the closure drops
+                    // only `Weak` and never closes `.publish.lock` on the main thread. Inside the
+                    // worker, `upgrade()` succeeds iff `publish_task` still owns `lock_pub`,
+                    // keeping `.publish.lock` held across rollback and skipping unlocked cleanup
+                    // after commit.
+                    let cleanup_cap =
+                        std::time::Instant::now() + std::time::Duration::from_millis(5);
+                    if lock_weak.strong_count() > 0 {
+                        let clean_done =
+                            Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+                        let clean_bg = Arc::clone(&clean_done);
+                        let entry_c = entry.clone();
+                        let staged_c = staged.clone();
+                        let program_c = program.clone();
+                        let digest_c = digest_file.clone();
+                        let key_c = key_file.clone();
+                        if std::thread::Builder::new()
+                            .spawn(move || {
+                                if let Some(lock_clean) = lock_weak.upgrade() {
+                                    cleanup_entry(
+                                        &entry_c, &staged_c, &program_c, &digest_c, &key_c,
+                                    );
+                                    drop(lock_clean);
+                                }
+                                let (clk, ccv) = &*clean_bg;
+                                *clk.lock().unwrap_or_else(|g| g.into_inner()) = true;
+                                ccv.notify_all();
+                            })
+                            .is_ok()
+                        {
+                            let wait_clean =
+                                cleanup_cap.saturating_duration_since(std::time::Instant::now());
+                            if !wait_clean.is_zero() {
+                                let (clk, ccv) = &*clean_done;
+                                let cg = clk.lock().unwrap_or_else(|g| g.into_inner());
+                                drop(ccv.wait_timeout_while(cg, wait_clean, |d| !*d));
+                            }
+                        }
+                    }
+                    return Err(BuildError::Failed(format!(
+                        "the build exceeded its time limit of {:?}",
+                        options.time_limit
+                    )));
+                }
+            }
+        }
+        Err(_) => {
+            // Persistent `EAGAIN`: `publish_task` holds the sole `lock_pub`, closes it before
+            // the final `check_active()`, and rolls back on deadline expiry before commit.
+            if let Some(f) = task_slot.lock().unwrap_or_else(|g| g.into_inner()).take() {
+                f();
+            }
+            let (lk, _) = &*state;
+            let mut guard = lk.lock().unwrap_or_else(|g| g.into_inner());
+            match std::mem::replace(&mut *guard, PublishPhase::TimedOut) {
+                PublishPhase::Completed(Ok(())) => {
+                    drop(guard);
+                    check_deadline(deadline, options.time_limit)?;
+                }
+                PublishPhase::Completed(Err(e)) => return Err(BuildError::Failed(e)),
+                PublishPhase::InProgress | PublishPhase::TimedOut => {
+                    return Err(BuildError::Failed(format!(
+                        "the build exceeded its time limit of {:?}",
+                        options.time_limit
+                    )));
+                }
+            }
+        }
+    }
     if std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1") {
         eprintln!(
             "wtime-aot x64 write={:.2}ms",
@@ -1355,6 +1717,103 @@ fn build_x64(
         );
     }
     Ok(program)
+}
+
+/// Best-effort bounded wrapper around `sweep_stale_staged_artifacts` so a stalled cache
+/// directory read on warm hits or cold misses never exhausts `--time-limit` or blocks a valid
+/// hit. Only ever unlinks dead-PID/stale staging files (never live artifacts or live PIDs).
+fn sweep_stale_staged_artifacts_bounded(entry: &Path, deadline: std::time::Instant) {
+    let rem = deadline.saturating_duration_since(std::time::Instant::now());
+    let budget = rem
+        .saturating_sub(std::time::Duration::from_millis(200))
+        .min(std::time::Duration::from_millis(100));
+    if budget.is_zero() {
+        return;
+    }
+    let cap = std::time::Instant::now() + budget;
+    let done = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let done_bg = Arc::clone(&done);
+    let entry_buf = entry.to_path_buf();
+    if std::thread::Builder::new()
+        .spawn(move || {
+            // Never unlink `my_pid`'s staging files from a potentially detached pre-build sweep
+            // so a slow directory read cannot race with this process's own active staging later.
+            sweep_stale_staged_artifacts_inner(&entry_buf, false, None);
+            let (lk, cv) = &*done_bg;
+            *lk.lock().unwrap_or_else(|g| g.into_inner()) = true;
+            cv.notify_all();
+        })
+        .is_ok()
+    {
+        let wait = cap.saturating_duration_since(std::time::Instant::now());
+        if !wait.is_zero() {
+            let (lk, cv) = &*done;
+            let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
+            drop(cv.wait_timeout_while(guard, wait, |d| !*d));
+        }
+    }
+}
+
+/// Removes orphaned `library.so.<pid>.<seq>` and `library.so.sha256.<pid>.<seq>` staging files
+/// from `entry`. On Linux (`/proc/self` present), a live foreign PID's staging file is NEVER
+/// deleted regardless of age; only exited PIDs (or `my_pid` when `include_my_pid` is true)
+/// are removed. On platforms without `/proc`, falls back to a 60 s age threshold.
+fn sweep_stale_staged_artifacts_inner(
+    entry: &Path,
+    include_my_pid: bool,
+    exclude_name: Option<&str>,
+) {
+    let Ok(rd) = fs::read_dir(entry) else {
+        return;
+    };
+    let my_pid = std::process::id();
+    let has_proc = Path::new("/proc/self").exists();
+    let now = std::time::SystemTime::now();
+    for de in rd.flatten() {
+        let name = de.file_name();
+        let Some(s) = name.to_str() else {
+            continue;
+        };
+        if exclude_name == Some(s) {
+            continue;
+        }
+        let Some(rest) = s
+            .strip_prefix("library.so.sha256.")
+            .or_else(|| s.strip_prefix("library.so."))
+        else {
+            continue;
+        };
+        let Some((pid_s, seq_s)) = rest.split_once('.') else {
+            continue;
+        };
+        if pid_s.is_empty()
+            || seq_s.is_empty()
+            || !pid_s.bytes().all(|b| b.is_ascii_digit())
+            || !seq_s.bytes().all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(pid) = pid_s.parse::<u32>() else {
+            continue;
+        };
+        if !include_my_pid && pid == my_pid {
+            continue;
+        }
+        let dead_or_stale = if include_my_pid && pid == my_pid {
+            true
+        } else if has_proc {
+            !Path::new(&format!("/proc/{pid}")).exists()
+        } else {
+            de.metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mt| now.duration_since(mt).ok())
+                .is_some_and(|age| age >= std::time::Duration::from_secs(60))
+        };
+        if dead_or_stale {
+            let _ = fs::remove_file(de.path());
+        }
+    }
 }
 
 /// Builds (or finds in `cache`) the program for `module`, optimized with the
@@ -1534,7 +1993,7 @@ fn cached(
     let key = key.hex();
     let cache = &prepared.cache;
     check_deadline(deadline, options.time_limit)?;
-    let (_lock, entry) = lock_cache_entry(&cache.join(&key), deadline)?;
+    let (publish_lock, entry) = lock_cache_entry(&cache.join(&key), deadline)?;
     check_deadline(deadline, options.time_limit)?;
     let artifact_name = match options.target {
         crate::codegen::Target::GooseBin => "program",
@@ -1543,11 +2002,16 @@ fn cached(
     let program = entry.join(artifact_name);
     let digest_file = entry.join(format!("{artifact_name}.sha256"));
     if verified_cached_artifact(&program, &digest_file) {
-        check_deadline(deadline, options.time_limit)?;
+        publish_lock.release_checked(options.time_limit)?;
         return Ok(program);
     }
-    let _ = fs::remove_file(&program);
-    let _ = fs::remove_file(&digest_file);
+    for stale in [&digest_file, &program] {
+        if let Err(e) = fs::remove_file(stale)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!("{}: {e}", stale.display()));
+        }
+    }
     check_deadline(deadline, options.time_limit)?;
 
     // Generate and compile in a directory of this build's own, target
@@ -1588,6 +2052,7 @@ fn cached(
             prepared.record
         ),
     );
+    publish_lock.release_checked(options.time_limit)?;
     Ok(program)
 }
 

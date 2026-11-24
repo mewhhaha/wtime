@@ -230,14 +230,13 @@ fn abi18_full_behavioral_parity_reentry_mxcsr_pthread_and_c_deviations() {
     let so_bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa {
-                has_abm_bmi1: false,
-            },
+            isa: TargetIsa::default(),
             jobs: 2,
             deadline: None,
             opt: true,
             verify: true,
             hooks: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -780,10 +779,10 @@ fn fault_injection_cpuid_and_cet_shstk() {
     const OK_ECX1: u32 = (1 << 19) | (1 << 23); // SSE4.1 + POPCNT
     const OK_EXT_MAX: u32 = 0x8000_0001;
     const OK_EXT_ECX: u32 = 1 << 5; // ABM / LZCNT
-    const OK_EBX7: u32 = 1 << 3; // BMI1 / TZCNT
+    const OK_EBX7: u32 = (1 << 3) | (1 << 8); // BMI1 + BMI2
     const CET_SS: u32 = 1 << 7;
 
-    let cases: [(&str, bool, CpuidSource, RdsspSource, bool); 11] = [
+    let cases: [(&str, bool, CpuidSource, RdsspSource, bool); 12] = [
         (
             "v2_missing_leaf1",
             false,
@@ -877,7 +876,21 @@ fn fault_injection_cpuid_and_cet_shstk() {
                 ecx1: OK_ECX1,
                 ext_max: OK_EXT_MAX,
                 ext_ecx: OK_EXT_ECX,
-                ebx7: 0,
+                ebx7: 1 << 8,
+                ecx7: 0,
+            },
+            RdsspSource::Mock { ssp: 0 },
+            false,
+        ),
+        (
+            "v3_missing_bmi2",
+            true,
+            CpuidSource::Mock {
+                max_leaf: 7,
+                ecx1: OK_ECX1,
+                ext_max: OK_EXT_MAX,
+                ext_ecx: OK_EXT_ECX,
+                ebx7: 1 << 3,
                 ecx7: 0,
             },
             RdsspSource::Mock { ssp: 0 },
@@ -943,12 +956,15 @@ fn fault_injection_cpuid_and_cet_shstk() {
         ),
     ];
 
-    for (tag, has_abm_bmi1, cpuid, rdssp, expect_ok) in cases {
+    for (tag, is_v3, cpuid, rdssp, expect_ok) in cases {
         let so_path = root.0.join(format!("{tag}.so"));
         let bytes = compile_wasm_to_x64_so(
             &wasm,
             &X64CompileOptions {
-                isa: TargetIsa { has_abm_bmi1 },
+                isa: TargetIsa {
+                    has_abm_bmi1: is_v3,
+                    has_bmi2: is_v3,
+                },
                 jobs: 1,
                 deadline: None,
                 opt: true,
@@ -958,6 +974,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
                     rdssp,
                     syscall_fault: SyscallFault::None,
                 },
+                ..Default::default()
             },
         )
         .unwrap();
@@ -989,9 +1006,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
     let bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa {
-                has_abm_bmi1: false,
-            },
+            isa: TargetIsa::default(),
             jobs: 1,
             deadline: None,
             opt: true,
@@ -1008,6 +1023,7 @@ fn fault_injection_cpuid_and_cet_shstk() {
                 rdssp: RdsspSource::Mock { ssp: 0x7fff_2000 },
                 syscall_fault: SyscallFault::None,
             },
+            ..Default::default()
         },
     )
     .unwrap();
@@ -1136,9 +1152,7 @@ fn fault_injection_rlimit_as_and_per_site_mprotect() {
         let b = compile_wasm_to_x64_so(
             &wasm,
             &X64CompileOptions {
-                isa: TargetIsa {
-                    has_abm_bmi1: false,
-                },
+                isa: TargetIsa::default(),
                 jobs: 1,
                 deadline: None,
                 opt: true,
@@ -1148,6 +1162,7 @@ fn fault_injection_rlimit_as_and_per_site_mprotect() {
                     rdssp: RdsspSource::Real,
                     syscall_fault: fault,
                 },
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1382,14 +1397,12 @@ fn fault_injection_signal_at_floor_watchdog() {
     let so_bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa {
-                has_abm_bmi1: false,
-            },
+            isa: TargetIsa::default(),
             jobs: 1,
             deadline: None,
             opt: true,
             verify: true,
-            hooks: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -1667,14 +1680,12 @@ fn stage2_host_callback_xmm8_13_clobber_preservation() {
     let so_bytes = compile_wasm_to_x64_so(
         &wasm,
         &X64CompileOptions {
-            isa: TargetIsa {
-                has_abm_bmi1: false,
-            },
+            isa: TargetIsa::default(),
             jobs: 1,
             deadline: None,
             opt: true,
             verify: true,
-            hooks: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();

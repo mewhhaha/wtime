@@ -18,18 +18,24 @@ direct Linux x86-64 backend (`--backend x64 --blot-cdylib`).
     syscalls).
 - **Required baseline ISA**: SSE2 + SSE4.1 (`roundss`/`roundsd`, `pextrq`/`pinsrq`)
   + POPCNT.
-- **Optional ISA (`TargetIsa { has_abm_bmi1 }`)**:
-  - `x64-v3` (`has_abm_bmi1 = true`): emits `lzcnt`/`tzcnt` for `clz`/`ctz`.
-  - `x64-v2` (`has_abm_bmi1 = false`): emits branchless `bsr`/`bsf` + `cmovz`.
-  - `--target-cpu native` probes host features; `generic` / `x86-64-v2` select
-    `x64-v2`; `x86-64-v3`, `x86-64-v4`, `znver<digits>`, and listed Intel
-    Haswell+ profiles select `x64-v3`; unrecognized CPU names are rejected.
+- **Optional ISA (`TargetIsa { has_abm_bmi1, has_bmi2 }`)**:
+  - `x64-v3` (`has_abm_bmi1 = true, has_bmi2 = true`): emits `lzcnt`/`tzcnt`
+    for `clz`/`ctz`, BMI2 `shlx`/`shrx`/`sarx` for variable shifts (eliminating
+    `RCX` clobbers and extra copies on `shl`/`shr_s`/`shr_u`), and 3-operand
+    `rorx` for immediate rotates (variable `rotl`/`rotr` still use `CL`/`RCX`).
+  - `x64-v2` (`has_abm_bmi1 = false, has_bmi2 = false`): emits branchless
+    `bsr`/`bsf` + `cmovz` and legacy `shl`/`shr`/`sar`/`rol`/`ror`.
+  - `--target-cpu native` probes host features (`lzcnt`, `bmi1`, `bmi2`);
+    `generic` / `x86-64-v2` select `x64-v2`; `x86-64-v3`, `x86-64-v4`,
+    `znver<digits>`, and listed Intel Haswell+ profiles select `x64-v3`;
+    unrecognized CPU names are rejected.
   - Cache keys bind the resolved profile (`x64-v2` vs `x64-v3`), never raw
     `"native"`.
 - **Mandatory runtime CPUID & CET shadow-stack (`SHSTK`) gate**:
   - `blot_aot_new` probes CPUID leaves `0`, `1`, `0x8000_0000`/`0x8000_0001`
-    (unsigned comparison), and `7` to verify baseline/optional ISA features and
-    records `CPUID.(EAX=7, ECX=0):ECX[bit 7]` (`CET_SS`) in `Ctx`.
+    (unsigned comparison), and `7` (`EBX[3]` BMI1, `EBX[8]` BMI2, `ECX[7]`
+    `CET_SS`) to verify baseline/optional ISA features and records `CET_SS` in
+    `Ctx`.
   - Because generated `.so` code switches `rsp` to a dedicated 8 MiB guest stack
     without emitting `GNU_PROPERTY_X86_FEATURE_1_SHSTK`, **both `blot_aot_new`
     and every top-level `blot_aot_call_*` wrapper** check `rdsspq rax` whenever
@@ -66,8 +72,16 @@ budget/deadline, or internal errors. Compiler bounds enforce `MAX_EXPORTS = 65_5
 `MAX_GLOBALS = 65_536`, `MAX_CTX_BYTES = 16 MiB`, `MAX_BLOCKS_PER_FN = 262_144`,
 `MAX_IR_VALS_PER_FN = 1_000_000`, `MAX_LIVENESS_BYTES = 16 MiB` per function /
 `256 MiB` concurrent across workers, `MAX_TOTAL_CODE_BYTES = 512 MiB`,
-`MAX_TOTAL_RODATA_BYTES = 128 MiB`, and mandatory IR + register-allocation
-verification (`verify: true` by default).
+`MAX_TOTAL_RODATA_BYTES = 128 MiB`, and full IR + register-allocation
+verification (`verify: true` by default in `X64CompileOptions::default()`,
+direct single-shot `wtime-aot --backend x64 --blot-cdylib module.wasm -o out.so`,
+and debug builds; deliberately disabled by default in release cached
+`wtime-aot build --cache` invocations unless `WTIME_AOT_VERIFY=1` or `true` is
+set, which binds its own cache key so unverified hits never bypass verification;
+individual tests use `X64CompileOptions::default()` unless explicitly exercising
+the cached CLI default or setting `verify: false`). Cached `build --cache` invocations
+also maintain a SHA-256-integrity-checked per-function incremental cache under
+`<cache>/x64-inc/` that preserves bit-for-bit `.so` parity with cold builds.
 
 ## 3. Runtime Stack, Memory & Blot ABI 8 Contract
 

@@ -506,21 +506,26 @@ fn assert_oracle_matrix(
         ("opt-v2", true, false),
         ("opt-v3", true, true),
     ];
-    for (tag, opt, has_abm_bmi1) in cells {
-        if has_abm_bmi1
-            && (!std::is_x86_feature_detected!("lzcnt") || !std::is_x86_feature_detected!("bmi1"))
+    for (tag, opt, v3) in cells {
+        if v3
+            && (!std::is_x86_feature_detected!("lzcnt")
+                || !std::is_x86_feature_detected!("bmi1")
+                || !std::is_x86_feature_detected!("bmi2"))
         {
             continue;
         }
         let so_bytes = compile_wasm_to_x64_so(
             wasm,
             &X64CompileOptions {
-                isa: TargetIsa { has_abm_bmi1 },
+                isa: TargetIsa {
+                    has_abm_bmi1: v3,
+                    has_bmi2: v3,
+                },
                 jobs: 2,
                 deadline: None,
                 opt,
                 verify: true, // Runs BOTH verify_ir and verify_alloc on every function!
-                hooks: Default::default(),
+                ..Default::default()
             },
         )
         .unwrap_or_else(|e| panic!("[{name}/{tag}] compile failed: {e}"));
@@ -1946,4 +1951,250 @@ fn oracle_stage25_remat_fixed_mem_r13_self_nan_and_dynamic_memcopy_fill() {
         calls.push(c("self_nan", ArgSpec::F32(bits)));
     }
     assert_oracle_matrix("stage25_features", &wasm, &calls, &[], &[(0, 32)]);
+}
+
+#[test]
+fn oracle_stage3_undo_if_forwarding_guarded_licm_bmi2_and_holes() {
+    // f0(x: i32) -> i32: nested if/else, implicit else, loop-inside-if, unreachable-arm-in-if
+    // exercising the O(writes) `local_undo` SSA builder across all local mutation opcodes.
+    let mut b0 = Vec::new();
+    // l1 = x * 3 + 1; l2 = x ^ 0x55; l3 = 7
+    b0.extend_from_slice(&[0x20, 0, 0x41, 3, 0x6c, 0x41, 1, 0x6a, 0x21, 1]);
+    b0.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b0, 0x55);
+    b0.extend_from_slice(&[0x73, 0x21, 2, 0x41, 7, 0x21, 3]);
+    // Outer if (x & 1): mutate l1, nested if (x & 2) { mutate l2; loop 3 times } else { mutate l3 },
+    // nested if (x == -999) { l1 = 99; unreachable } (no else!)
+    b0.extend_from_slice(&[0x20, 0, 0x41, 1, 0x71, 0x04, 0x40]);
+    b0.extend_from_slice(&[0x20, 1, 0x41, 10, 0x6a, 0x22, 1, 0x1a]); // local.tee 1
+    b0.extend_from_slice(&[0x20, 0, 0x41, 2, 0x71, 0x04, 0x40]);
+    b0.extend_from_slice(&[0x20, 2, 0x41, 17, 0x6a, 0x21, 2]);
+    // loop inside if: l4 = 0; loop { l3 += l4; l4 += 1; br_if(l4 < 3) 0 }
+    b0.extend_from_slice(&[
+        0x41, 0, 0x21, 4, 0x03, 0x40, 0x20, 3, 0x20, 4, 0x6a, 0x21, 3, 0x20, 4, 0x41, 1, 0x6a,
+        0x22, 4, 0x41, 3, 0x48, 0x0d, 0, 0x0b,
+    ]);
+    b0.extend_from_slice(&[0x05, 0x20, 3, 0x41, 33, 0x6b, 0x21, 3, 0x0b]);
+    // implicit-else if with unreachable:
+    b0.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b0, -999);
+    b0.extend_from_slice(&[0x46, 0x04, 0x40, 0x41, 99, 0x21, 1, 0x00, 0x0b]);
+    // else of outer if: mutate only l2, leave l1 & l3 at entry values!
+    b0.extend_from_slice(&[0x05, 0x20, 2, 0x41, 5, 0x6c, 0x21, 2, 0x0b]);
+    // implicit-else outer if (x & 4): mutate l1 only!
+    b0.extend_from_slice(&[
+        0x20, 0, 0x41, 4, 0x71, 0x04, 0x40, 0x20, 1, 0x41, 13, 0x73, 0x21, 1, 0x0b,
+    ]);
+    // return l1 * 31 + l2 * 7 + l3
+    b0.extend_from_slice(&[
+        0x20, 1, 0x41, 31, 0x6c, 0x20, 2, 0x41, 7, 0x6c, 0x6a, 0x20, 3, 0x6a,
+    ]);
+
+    // f1(x: i32) -> i32: store-to-load forwarding, disjoint & overlapping stores, i8/i16 narrow forwarding,
+    // and MemCopyConst with dominated src check.
+    let mut b1 = Vec::new();
+    // Store [0]=x, [4]=x^0x1234, reload [0] (disjoint forward!), overwrite [2]=0xab (partial overlap!), reload [0] (must NOT forward!)
+    b1.extend_from_slice(&[0x41, 0, 0x20, 0, 0x36, 2, 0]);
+    b1.extend_from_slice(&[0x41, 4, 0x20, 0, 0x41]);
+    leb_i32(&mut b1, 0x1234);
+    b1.extend_from_slice(&[0x73, 0x36, 2, 0]);
+    b1.extend_from_slice(&[0x41, 0, 0x28, 2, 0, 0x21, 1]); // l1 = load[0] (forwarded)
+    b1.extend_from_slice(&[0x41, 2, 0x41]);
+    leb_i32(&mut b1, 0xab);
+    b1.extend_from_slice(&[0x3a, 0, 0]); // store8 [2] = 0xab (overlaps [0..4]!)
+    b1.extend_from_slice(&[0x41, 0, 0x28, 2, 0, 0x21, 2]); // l2 = load[0] (must see mutated byte 2!)
+    // Masked vs unmasked i8 store -> load8_u + load8_s:
+    b1.extend_from_slice(&[0x41, 8, 0x20, 0, 0x41]);
+    leb_i32(&mut b1, 0xff);
+    b1.extend_from_slice(&[0x71, 0x3a, 0, 0]); // store8 [8] = x & 0xff
+    b1.extend_from_slice(&[0x41, 8, 0x2d, 0, 0]); // load8_u [8]
+    b1.extend_from_slice(&[0x41, 8, 0x2c, 0, 0, 0x6a]); // + load8_s [8]
+    b1.extend_from_slice(&[0x41, 12, 0x20, 0, 0x3a, 0, 0]); // store8 [12] = x (unbounded!)
+    b1.extend_from_slice(&[0x41, 12, 0x2d, 0, 0, 0x6a]); // + load8_u [12] (must mask!)
+    // Dominated src load + MemCopyConst(32, 0, 16) + load[32]
+    b1.extend_from_slice(&[0x41, 12, 0x28, 2, 0, 0x1a]);
+    b1.extend_from_slice(&[0x41, 32, 0x41, 0, 0x41, 16, 0xfc, 0x0a, 0x00, 0x00]);
+    b1.extend_from_slice(&[0x41, 32, 0x28, 2, 0, 0x6a]);
+    b1.extend_from_slice(&[0x20, 1, 0x6a, 0x20, 2, 0x73]);
+
+    // f2(d: i32) -> i32: guarded LICM `DivU` & `RemU` with 0-iteration `d == 0` trap-safety!
+    // for i in 0..d { sum = sum * 3 + (1000u / d) + (1000u % d) + (i * 5) + (i * 9) + (i << 1) }
+    let mut b2 = Vec::new();
+    b2.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b2.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // if i >=u d break
+    b2.extend_from_slice(&[0x20, 2, 0x41, 3, 0x6c]); // sum * 3 (lea!)
+    b2.push(0x41);
+    leb_i32(&mut b2, 1000);
+    b2.extend_from_slice(&[0x20, 0, 0x6e, 0x6a]); // + 1000u / d
+    b2.push(0x41);
+    leb_i32(&mut b2, 1000);
+    b2.extend_from_slice(&[0x20, 0, 0x70, 0x6a]); // + 1000u % d
+    b2.extend_from_slice(&[0x20, 1, 0x41, 5, 0x6c, 0x6a]); // + i * 5 (lea!)
+    b2.extend_from_slice(&[0x20, 1, 0x41, 9, 0x6c, 0x6a]); // + i * 9 (lea!)
+    b2.extend_from_slice(&[0x20, 1, 0x41, 1, 0x74, 0x6a, 0x21, 2]); // + (i << 1) (lea!)
+    b2.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // f3(s: i32) -> i32: BMI2 variable shifts (i32 + i64) + constant rotates + live values across shifts
+    // + multi-accumulator loop exercising live-range holes!
+    let mut b3 = Vec::new();
+    // a0..a3 live across all variable shifts so RCX gets allocated on BMI2!
+    b3.extend_from_slice(&[0x20, 0, 0x41, 11, 0x6a, 0x21, 1]); // l1
+    b3.extend_from_slice(&[0x20, 0, 0x41, 23, 0x6c, 0x21, 2]); // l2
+    b3.extend_from_slice(&[0x20, 0, 0x41, 37, 0x73, 0x21, 3]); // l3
+    b3.extend_from_slice(&[0x20, 0, 0x41, 53, 0x6b, 0x21, 4]); // l4
+    // i32 shl/shr_s/shr_u with dynamic shift count s, plus const rotl 7 / rotr 13:
+    b3.extend_from_slice(&[
+        0x20, 1, 0x20, 0, 0x74, // l1 << s
+        0x20, 2, 0x20, 0, 0x75, 0x73, // ^ (l2 >>s s)
+        0x20, 3, 0x20, 0, 0x76, 0x6a, // + (l3 >>u s)
+        0x20, 4, 0x41, 7, 0x77, 0x73, // ^ rotl(l4, 7)
+        0x20, 1, 0x41, 13, 0x78, 0x6a, // + rotr(l1, 13)
+        0x21, 5,
+    ]);
+    // i64 shl/shr_s/shr_u + const rotl 19 / rotr 41:
+    b3.extend_from_slice(&[
+        0x20, 2, 0xac, 0x42, 32, 0x86, 0x20, 3, 0xad, 0x84, 0x21, 6, // l6: i64
+        0x20, 0, 0xac, 0x21, 7, // l7: i64 shift count
+        0x20, 6, 0x20, 7, 0x86, // shl
+        0x20, 6, 0x20, 7, 0x87, 0x85, // ^ shr_s
+        0x20, 6, 0x20, 7, 0x88, 0x7c, // + shr_u
+        0x20, 6, 0x42, 19, 0x89, 0x85, // ^ rotl 19
+        0x20, 6, 0x42, 41, 0x8a, 0x7c, // + rotr 41
+        0xa7, // i32.wrap_i64
+        0x20, 5, 0x73, 0x20, 1, 0x6a, 0x20, 2, 0x6a, 0x20, 3, 0x6a, 0x20, 4, 0x6a,
+    ]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0]),
+        section(5, &[1, 0x01, 1, 2]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("undo_if", 0, 0),
+            ("mem_fwd", 0, 1),
+            ("guarded_div", 0, 2),
+            ("bmi2_shifts", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[(4, 0x7f)], &b0),
+            enc_body(&[(2, 0x7f)], &b1),
+            enc_body(&[(2, 0x7f)], &b2),
+            enc_body(&[(5, 0x7f), (2, 0x7e)], &b3),
+        ]),
+    ]);
+
+    let mut calls = Vec::new();
+    for x in [0, 1, 2, 3, 4, 5, 6, 7, -1, -999, i32::MIN, i32::MAX] {
+        calls.push(c("undo_if", ArgSpec::I32(x)));
+    }
+    for x in [0, 1, -1, 0x1234_5678, -0x7654_3210, 0x80, 0xff, 0x180] {
+        calls.push(c("mem_fwd", ArgSpec::I32(x)));
+    }
+    for d in [0, 1, 2, 7, 13, 100] {
+        calls.push(c("guarded_div", ArgSpec::I32(d)));
+    }
+    for s in [0, 1, 7, 31, 32, 33, 63, 64, -1, i32::MIN, i32::MAX] {
+        calls.push(c("bmi2_shifts", ArgSpec::I32(s)));
+    }
+    assert_oracle_matrix("stage3_features", &wasm, &calls, &[], &[(0, 48)]);
+}
+
+#[test]
+fn oracle_stage3_council_round1_regressions() {
+    // f0(x: i32) -> i32: conditional infinite self-loop (`if x == 0 { loop { br 0 } } else { x + 41 }`)
+    let b0 = vec![
+        0x20, 0, 0x45, 0x04, 0x40, 0x03, 0x40, 0x0c, 0, 0x0b, 0x0b, 0x20, 0, 0x41, 41, 0x6a,
+    ];
+
+    // f1(v64: i64) -> i32: i64.store32 with non-zero high 32 bits followed by i32.load
+    // used in BOTH arithmetic AND as a linear memory address (catches dirty upper 32 bits!).
+    let b1 = vec![
+        // seed memory[16] = i32.wrap(v64 >> 32) ^ i32.wrap(v64)
+        0x41, 16, 0x20, 0, 0x42, 32, 0x88, 0xa7, 0x20, 0, 0xa7, 0x73, 0x36, 2, 0,
+        // i64.store32 [0], v64
+        0x41, 0, 0x20, 0, 0x3e, 2, 0,
+        // reload as i32 -> local 1 (must NOT forward Ty::I64 `v64`!)
+        0x41, 0, 0x28, 2, 0, 0x22, 1, // tee local 1
+        // use local 1 as address `(local1 & 12) + 4` to load + combine with local 1
+        0x41, 12, 0x71, 0x28, 2, 4, // i32.load [(local1 & 12) + 4]
+        0x20, 1, 0x6a,
+    ];
+
+    // f2(d: i32) -> i32: guarded-preheader LICM where `exit_bb` directly uses `hdr.params` (`i` and `x`)
+    let mut b2 = vec![0x20, 0, 0x41, 7, 0x6c, 0x41, 3, 0x6a, 0x21, 2];
+    b2.push(0x41);
+    leb_i32(&mut b2, 0x1234);
+    b2.extend_from_slice(&[0x21, 1, 0x02, 0x40, 0x03, 0x40]);
+    b2.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]);
+    b2.extend_from_slice(&[0x20, 2, 0x41]);
+    leb_i32(&mut b2, 1000);
+    b2.extend_from_slice(&[0x20, 0, 0x6e, 0x6a, 0x21, 2]);
+    b2.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
+    b2.extend_from_slice(&[0x20, 1, 0x41]);
+    leb_i32(&mut b2, 1000);
+    b2.extend_from_slice(&[0x6c, 0x20, 2, 0x6a]);
+
+    // f3(packed: i32) -> i32: unpack d1 = packed & 0xff, d2 = (packed >> 8) & 0xff;
+    // nested guarded-preheader LICM loops (`(10000u / d1) / d2`)
+    let mut b3 = Vec::new();
+    // local 1 = d1, local 2 = d2, local 3 = i2, local 4 = i1, local 5 = acc
+    b3.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b3, 0xff);
+    b3.extend_from_slice(&[0x71, 0x21, 1]);
+    b3.extend_from_slice(&[0x20, 0, 0x41, 8, 0x76, 0x41]);
+    leb_i32(&mut b3, 0xff);
+    b3.extend_from_slice(&[0x71, 0x21, 2]);
+    b3.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b3.extend_from_slice(&[0x20, 3, 0x20, 2, 0x4f, 0x0d, 1]); // if i2 >=u d2 break outer
+    b3.extend_from_slice(&[0x41, 0, 0x21, 4]); // i1 = 0
+    b3.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b3.extend_from_slice(&[0x20, 4, 0x20, 1, 0x4f, 0x0d, 1]); // if i1 >=u d1 break inner
+    b3.extend_from_slice(&[0x20, 5, 0x41]);
+    leb_i32(&mut b3, 10000);
+    b3.extend_from_slice(&[0x20, 1, 0x6e, 0x20, 2, 0x6e, 0x6a, 0x21, 5]);
+    b3.extend_from_slice(&[0x20, 4, 0x41, 1, 0x6a, 0x21, 4, 0x0c, 0, 0x0b, 0x0b]);
+    b3.extend_from_slice(&[0x20, 3, 0x41, 1, 0x6a, 0x21, 3, 0x0c, 0, 0x0b, 0x0b]);
+    b3.extend_from_slice(&[0x20, 5]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7e], &[0x7f])]),
+        func_sec(&[0, 1, 0, 0]),
+        section(5, &[1, 0x01, 1, 2]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("spin_if", 0, 0),
+            ("store32_load32", 0, 1),
+            ("licm_exit_hdr", 0, 2),
+            ("licm_nested", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[], &b0),
+            enc_body(&[(1, 0x7f)], &b1),
+            enc_body(&[(2, 0x7f)], &b2),
+            enc_body(&[(5, 0x7f)], &b3),
+        ]),
+    ]);
+
+    let mut calls = Vec::new();
+    for x in [1, -1, 42, i32::MAX] {
+        calls.push(c("spin_if", ArgSpec::I32(x)));
+    }
+    for v64 in [
+        0i64,
+        0x1234_5678_0000_000c,
+        -1i64,
+        (i32::MIN as i64) << 32 | 16,
+        0x7fff_ffff_8000_000c,
+    ] {
+        calls.push(c("store32_load32", ArgSpec::I64(v64)));
+    }
+    for d in [0, 1, 0x1233, 0x1234, 0x1235, 0x1240] {
+        calls.push(c("licm_exit_hdr", ArgSpec::I32(d)));
+    }
+    for (d1, d2) in [(0, 0), (0, 3), (3, 0), (1, 1), (3, 5), (7, 4)] {
+        calls.push(c("licm_nested", ArgSpec::I32(d1 | (d2 << 8))));
+    }
+    assert_oracle_matrix("stage3_r1_regressions", &wasm, &calls, &[], &[(0, 32)]);
 }

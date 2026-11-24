@@ -55,13 +55,15 @@ pub enum Loc {
     Remat(RematConst),
 }
 
-/// Optional module-wide extra callee-saved GP registers freed when pinning is unnecessary.
+/// Optional module-wide extra callee-saved GP registers and ISA clobber flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AllocConfig {
     /// True when `layout.pinned_global.is_none()`, freeing `R12` as a 3rd callee-saved GP register.
     pub allow_r12: bool,
     /// True when `layout.fixed_mem_bytes.is_some()`, freeing `R13` as a 4th callee-saved GP register.
     pub allow_r13: bool,
+    /// True when BMI2 `shlx`/`shrx`/`sarx` are enabled, eliminating `RCX` clobbers on variable shifts.
+    pub has_bmi2: bool,
 }
 
 impl AllocConfig {
@@ -332,11 +334,69 @@ struct Interval {
     val: u32,
     start: u32,
     end: u32,
+    /// Index into `segs_pool` when `seg_len > 0` (live range has holes); `seg_len == 0` means single `[start, end)`.
+    seg_off: u32,
+    seg_len: u16,
     ty: Ty,
     clob_gp: u16,
     clob_xmm: u16,
     score: u64,
     remat: Option<RematConst>,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveEntry {
+    start: u32,
+    end: u32,
+    seg_off: u32,
+    seg_len: u16,
+    reg_idx: u8,
+    val: u32,
+    score: u64,
+    remat: Option<RematConst>,
+}
+
+#[inline]
+fn segs_overlap(a: &[(u32, u32)], b: &[(u32, u32)]) -> bool {
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        let (as_, ae) = a[i];
+        let (bs, be) = b[j];
+        if as_ < be && bs < ae {
+            return true;
+        }
+        if ae <= be {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    false
+}
+
+#[inline]
+fn active_overlaps_iv(a: &ActiveEntry, iv: &Interval, pool: &[(u32, u32)]) -> bool {
+    if a.end <= iv.start || iv.end <= a.start {
+        return false;
+    }
+    if a.seg_len == 0 && iv.seg_len == 0 {
+        return true;
+    }
+    let a_single = [(a.start, a.end)];
+    let b_single = [(iv.start, iv.end)];
+    let sa = if a.seg_len == 0 {
+        &a_single[..]
+    } else {
+        let off = a.seg_off as usize;
+        &pool[off..off + a.seg_len as usize]
+    };
+    let sb = if iv.seg_len == 0 {
+        &b_single[..]
+    } else {
+        let off = iv.seg_off as usize;
+        &pool[off..off + iv.seg_len as usize]
+    };
+    segs_overlap(sa, sb)
 }
 
 /// Computes RPO order of reachable blocks, exact cross-block liveness, and linear-scan allocation.
@@ -540,11 +600,16 @@ pub fn allocate_with_config(
                             xmm_mask: 0,
                         });
                     }
-                    IntBinOp::Shl
-                    | IntBinOp::ShrS
-                    | IntBinOp::ShrU
-                    | IntBinOp::Rotl
-                    | IntBinOp::Rotr => {
+                    IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU => {
+                        if !cfg.has_bmi2 {
+                            clobbers.push(Clobber {
+                                pos: pos_use,
+                                gp_mask: MASK_RCX,
+                                xmm_mask: 0,
+                            });
+                        }
+                    }
+                    IntBinOp::Rotl | IntBinOp::Rotr => {
                         clobbers.push(Clobber {
                             pos: pos_use,
                             gp_mask: MASK_RCX,
@@ -607,20 +672,58 @@ pub fn allocate_with_config(
         }
     }
     let n_cb = cb_vals.len();
+    const MAX_SEGS_PER_VAL: usize = 64;
+    const MAX_SEG_SLOTS_PER_FN: usize = 65_536;
+    // Declare `_liveness_guard` BEFORE `cb_*` and `segs_pool` so Rust's LIFO drop order
+    // guarantees all liveness buffers drop BEFORE releasing the reservation even on early return.
+    let mut _liveness_guard = None;
+    let mut cb_hull: Vec<(u32, u32)> = Vec::new();
+    let mut cb_segs: Vec<Vec<(u32, u32)>> = Vec::new();
+    let mut cb_seg_overflow: Vec<bool> = Vec::new();
     if n_cb > 0 {
         let words = n_cb.div_ceil(64);
-        let liveness_bytes = n_ord
+        let matrix_bytes = n_ord
             .checked_mul(words)
             .and_then(|n| n.checked_mul(4 * 8))
             .ok_or("x64: liveness table size overflow")?;
-        if liveness_bytes > MAX_LIVENESS_BYTES {
+        // Account for BOTH `cb_hull` (8 B/val) and `last_use_in_blk` scratch (8 B/val).
+        let hull_and_scratch_bytes = n_cb
+            .checked_mul(2 * std::mem::size_of::<(u32, u32)>())
+            .ok_or("x64: liveness hull size overflow")?;
+        let base_bytes = matrix_bytes
+            .checked_add(hull_and_scratch_bytes)
+            .ok_or("x64: liveness memory size overflow")?;
+        if base_bytes > MAX_LIVENESS_BYTES {
             return Err(format!(
-                "x64: function {} liveness matrix ({liveness_bytes} B) exceeds cap {MAX_LIVENESS_BYTES} B",
+                "x64: function {} liveness matrix ({base_bytes} B) exceeds cap {MAX_LIVENESS_BYTES} B",
                 ir.func_index
             ));
         }
-        let _liveness_guard = match budget {
-            Some(b) => Some(b.reserve_liveness(liveness_bytes)?),
+        // Budget exact live-range hole storage (`cb_segs` + `segs_pool`) strictly inside the
+        // remaining `MAX_LIVENESS_BYTES` headroom (at most 2 MiB) so parallel workers can never
+        // exceed the documented 16 MiB/fn or 256 MiB aggregate liveness caps. Values exceeding
+        // per-value or per-function segment budgets cleanly collapse to their exact `[start, end)` hull.
+        let vec_hdr_bytes = n_cb.saturating_mul(std::mem::size_of::<Vec<(u32, u32)>>() + 1);
+        let remaining_cap = MAX_LIVENESS_BYTES.saturating_sub(base_bytes).min(2 << 20);
+        // Adjacent RPO blocks (e.g. consecutive Return leaves ending at `pos_term = block_end - 1`)
+        // can each start a disjoint live segment, so per-value segment count can reach `n_ord`.
+        let max_cap_per_val = n_ord.min(MAX_SEGS_PER_VAL).next_power_of_two().max(4);
+        let seg_cap_slots = if remaining_cap > vec_hdr_bytes {
+            // 16 B per slot covers 8 B in `cb_segs` (exact via `reserve_exact`) + 8 B in `segs_pool`.
+            ((remaining_cap - vec_hdr_bytes) / 16)
+                .min(n_cb.saturating_mul(max_cap_per_val))
+                .min(MAX_SEG_SLOTS_PER_FN)
+        } else {
+            0
+        };
+        let seg_reserve_bytes = if seg_cap_slots > 0 {
+            vec_hdr_bytes.saturating_add(seg_cap_slots.saturating_mul(16))
+        } else {
+            0
+        };
+        let total_liveness_bytes = base_bytes.saturating_add(seg_reserve_bytes);
+        _liveness_guard = match budget {
+            Some(b) => Some(b.reserve_liveness(total_liveness_bytes)?),
             None => None,
         };
         let mut live_use = vec![0u64; n_ord * words];
@@ -732,31 +835,101 @@ pub fn allocate_with_config(
             }
         }
 
-        for oi in 0..n_ord {
+        // Build exact sorted, merged per-block live-range segments within the budgeted `seg_cap_slots`
+        // (preserving live-range holes while falling back any overflowing value to its exact hull).
+        cb_hull = vec![(u32::MAX, 0u32); n_cb];
+        if seg_cap_slots > 0 {
+            cb_segs = vec![Vec::new(); n_cb];
+            cb_seg_overflow = vec![false; n_cb];
+        }
+        let mut total_seg_cap_slots = 0usize;
+        let mut last_use_in_blk = vec![(u32::MAX, 0u32); n_cb];
+        for (oi, &bid) in block_order.iter().enumerate() {
             if let Some(bg) = budget
                 && (oi & 4095) == 4095
             {
                 bg.check_deadline()?;
             }
+            let oi_u32 = oi as u32;
+            let bb = &ir.blocks[bid as usize];
             let bs = block_start[oi];
             let be = block_end[oi];
-            for w in 0..words {
-                let mut in_bits = live_in[oi * words + w];
-                while in_bits != 0 {
-                    let tz = in_bits.trailing_zeros() as usize;
-                    in_bits &= in_bits - 1;
-                    let vi = cb_vals[(w << 6) + tz] as usize;
-                    if bs < def_pos[vi] {
-                        def_pos[vi] = bs;
+            let mut t = bs + 2;
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    let c = cb_id[v.0 as usize];
+                    if c != u32::MAX {
+                        last_use_in_blk[c as usize] = (oi_u32, t);
                     }
+                });
+                t += 2;
+            }
+            let pos_term = t;
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                let c = cb_id[v.0 as usize];
+                if c != u32::MAX {
+                    last_use_in_blk[c as usize] = (oi_u32, pos_term);
                 }
-                let mut out_bits = live_out[oi * words + w];
-                while out_bits != 0 {
-                    let tz = out_bits.trailing_zeros() as usize;
-                    out_bits &= out_bits - 1;
-                    let vi = cb_vals[(w << 6) + tz] as usize;
-                    if be > last_use[vi] {
-                        last_use[vi] = be;
+            });
+            for w in 0..words {
+                let mut bits =
+                    live_in[oi * words + w] | live_out[oi * words + w] | live_def[oi * words + w];
+                while bits != 0 {
+                    let tz = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let c = (w << 6) + tz;
+                    let vi = cb_vals[c] as usize;
+                    let s = if def_block[vi] == oi_u32 {
+                        def_pos[vi]
+                    } else {
+                        bs
+                    };
+                    let is_out = (live_out[oi * words + w] & (1u64 << tz)) != 0;
+                    let e = if is_out {
+                        be
+                    } else if last_use_in_blk[c].0 == oi_u32 {
+                        last_use_in_blk[c].1.max(s + 1)
+                    } else {
+                        s + 1
+                    };
+                    if s < cb_hull[c].0 {
+                        cb_hull[c].0 = s;
+                    }
+                    if e > cb_hull[c].1 {
+                        cb_hull[c].1 = e;
+                    }
+                    if seg_cap_slots == 0 || cb_seg_overflow[c] {
+                        continue;
+                    }
+                    let segs = &mut cb_segs[c];
+                    if let Some(last) = segs.last_mut()
+                        && s <= last.1 + 1
+                    {
+                        if e > last.1 {
+                            last.1 = e;
+                        }
+                    } else {
+                        if segs.len() == segs.capacity() {
+                            let next_cap = if segs.capacity() == 0 {
+                                4
+                            } else {
+                                segs.capacity().saturating_mul(2)
+                            };
+                            let add_slots = next_cap.saturating_sub(segs.capacity());
+                            if next_cap > MAX_SEGS_PER_VAL
+                                || total_seg_cap_slots.saturating_add(add_slots) > seg_cap_slots
+                            {
+                                cb_seg_overflow[c] = true;
+                                total_seg_cap_slots =
+                                    total_seg_cap_slots.saturating_sub(segs.capacity());
+                                segs.clear();
+                                segs.shrink_to_fit();
+                                continue;
+                            }
+                            segs.reserve_exact(add_slots);
+                            total_seg_cap_slots += add_slots;
+                        }
+                        segs.push((s, e));
                     }
                 }
             }
@@ -1046,6 +1219,15 @@ pub fn allocate_with_config(
 
     let mut locs = vec![Loc::Spill(0); n_vals];
     let mut assigned = vec![false; n_vals];
+    let total_exact_seg_pairs: usize = cb_segs
+        .iter()
+        .filter(|s| s.len() > 1 && s.len() <= u16::MAX as usize)
+        .map(Vec::len)
+        .sum();
+    let mut segs_pool: Vec<(u32, u32)> = Vec::new();
+    segs_pool.reserve_exact(total_exact_seg_pairs);
+    let mut val_clob_gp = vec![0u16; n_vals];
+    let mut val_clob_xmm = vec![0u16; n_vals];
 
     let mut gp_intervals: Vec<Interval> = Vec::new();
     let mut fp_intervals: Vec<Interval> = Vec::new();
@@ -1055,15 +1237,63 @@ pub fn allocate_with_config(
         {
             bg.check_deadline()?;
         }
-        let start = def_pos[vi];
-        if start == u32::MAX {
+        let dp = def_pos[vi];
+        if dp == u32::MAX {
             continue;
         }
-        let end = last_use[vi].max(start + 1);
-        let clob_end = last_use[vi].max(start);
-        let lo = clobbers.partition_point(|c| c.pos <= start);
-        let hi = clobbers.partition_point(|c| c.pos < clob_end);
-        let (clob_gp, clob_xmm) = query_clobbers(lo, hi);
+        let c = cb_id[vi];
+        let (start, end, seg_off, seg_len, active_len, clob_gp, clob_xmm) =
+            if c != u32::MAX && cb_hull[c as usize].0 != u32::MAX {
+                let ci = c as usize;
+                if !cb_segs.is_empty() && !cb_seg_overflow[ci] && !cb_segs[ci].is_empty() {
+                    let segs = &cb_segs[ci];
+                    let s0 = segs[0].0;
+                    let e_last = segs[segs.len() - 1].1;
+                    let (mut cg, mut cx) = (0u16, 0u16);
+                    let mut act = 0u64;
+                    for &(s, e) in segs {
+                        act += u64::from(e.saturating_sub(s).max(1));
+                        let lo = clobbers.partition_point(|cl| cl.pos <= s);
+                        let hi = clobbers.partition_point(|cl| cl.pos < e);
+                        let (g, x) = query_clobbers(lo, hi);
+                        cg |= g;
+                        cx |= x;
+                    }
+                    let (so, sl) = if segs.len() > 1 && segs.len() <= u16::MAX as usize {
+                        let off = segs_pool.len() as u32;
+                        segs_pool.extend_from_slice(segs);
+                        (off, segs.len() as u16)
+                    } else {
+                        (0, 0)
+                    };
+                    (s0, e_last, so, sl, act.max(1), cg, cx)
+                } else {
+                    // Conservative exact hull fallback when segment budget is exceeded.
+                    let (s0, e_last) = cb_hull[ci];
+                    let lo = clobbers.partition_point(|cl| cl.pos <= s0);
+                    let hi = clobbers.partition_point(|cl| cl.pos < e_last);
+                    let (cg, cx) = query_clobbers(lo, hi);
+                    (
+                        s0,
+                        e_last,
+                        0,
+                        0,
+                        u64::from(e_last.saturating_sub(s0).max(1)),
+                        cg,
+                        cx,
+                    )
+                }
+            } else {
+                let s = dp;
+                let e = last_use[vi].max(s + 1);
+                let clob_end = last_use[vi].max(s);
+                let lo = clobbers.partition_point(|cl| cl.pos <= s);
+                let hi = clobbers.partition_point(|cl| cl.pos < clob_end);
+                let (cg, cx) = query_clobbers(lo, hi);
+                (s, e, 0, 0, u64::from((e - s).max(1)), cg, cx)
+            };
+        val_clob_gp[vi] = clob_gp;
+        val_clob_xmm[vi] = clob_xmm;
         let ty = ir.val_tys[vi];
         if let Some(rc) = val_remat[vi] {
             // Always rematerialize zeros (0-cycle `xor`/`xorps`, direct immediate stores — eliminates all
@@ -1081,17 +1311,18 @@ pub fn allocate_with_config(
                 continue;
             }
         }
-        let len = (end - start).max(1) as u64;
         let score = if val_remat[vi].is_some() {
             // Rematerializable constants are always preferred eviction victims over real values.
             0
         } else {
-            ((u64::from(val_weight[vi].max(1)) << 12) / len).max(1)
+            ((u64::from(val_weight[vi].max(1)) << 12) / active_len).max(1)
         };
         let iv = Interval {
             val: vi as u32,
             start,
             end,
+            seg_off,
+            seg_len,
             ty,
             clob_gp,
             clob_xmm,
@@ -1104,6 +1335,9 @@ pub fn allocate_with_config(
             gp_intervals.push(iv);
         }
     }
+    drop(cb_segs);
+    drop(cb_hull);
+    drop(cb_seg_overflow);
 
     if let Some(bg) = budget {
         bg.check_deadline()?;
@@ -1174,11 +1408,13 @@ pub fn allocate_with_config(
         Ok(off)
     };
 
-    // 5a. Linear scan for GP intervals with dynamic R12/R13, remat, hinting, & spill-slot coalescing.
-    // Active entries: `(start, end, reg_idx, val, score, remat)`.
-    let mut active_gp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> =
-        Vec::with_capacity(gp_alloc.len());
+    // 5a. Linear scan for GP intervals with exact live-range holes, dynamic R12/R13, remat,
+    // forward peer clobber avoidance, coalescing, and spill-slot reuse.
+    let mut active_gp: Vec<ActiveEntry> = Vec::with_capacity(gp_alloc.len() * 2);
     const GP_CALLER_COUNT: usize = 7;
+    // Preferred free-reg order (indices into `gp_alloc`): non-fixed caller-saved first (`R8, R9, Rsi, Rdi`),
+    // then `Rcx, Rdx, Rax`, then callee-saved (`Rbx, Rbp, R12, R13`).
+    const GP_PREF_ORDER: [usize; 11] = [5, 6, 3, 4, 1, 2, 0, 7, 8, 9, 10];
 
     for (idx, iv) in gp_intervals.iter().enumerate() {
         if let Some(bg) = budget
@@ -1186,90 +1422,172 @@ pub fn allocate_with_config(
         {
             bg.check_deadline()?;
         }
-        active_gp.retain(|&(_, e, _, _, _, _)| e > iv.start);
+        active_gp.retain(|a| a.end > iv.start);
         let mut used_regs = 0u16;
-        for &(_, _, ri, _, _, _) in &active_gp {
-            used_regs |= 1 << gp_alloc[ri].id();
+        for a in &active_gp {
+            if active_overlaps_iv(a, iv, &segs_pool) {
+                used_regs |= 1 << gp_alloc[a.reg_idx as usize].id();
+            }
         }
         let forbidden = used_regs | iv.clob_gp;
-
-        // Rematerializable constants may only take a free caller-saved register (never callee-saved).
-        let search_regs = if iv.remat.is_some() {
-            &gp_alloc[..GP_CALLER_COUNT]
+        let max_ri = if iv.remat.is_some() {
+            GP_CALLER_COUNT
         } else {
-            gp_alloc
+            gp_alloc.len()
         };
 
-        // Try coalescing peer register first, then ABI hint register, then first free in search_regs.
+        // 1. Coalescing peer already assigned a non-interfering register.
         let mut chosen: Option<(usize, Gp)> = None;
         for &peer in &hint_peers[iv.val as usize] {
             if peer != u32::MAX
                 && assigned[peer as usize]
                 && let Loc::Gp(g) = locs[peer as usize]
                 && (forbidden & (1 << g.id())) == 0
-                && let Some(ri) = search_regs.iter().position(|&x| x == g)
+                && let Some(ri) = gp_alloc[..max_ri].iter().position(|&x| x == g)
             {
                 chosen = Some((ri, g));
                 break;
             }
         }
+        // 2. Direct ABI hint register.
         if chosen.is_none()
             && let Some(g) = hint_gp[iv.val as usize]
             && (forbidden & (1 << g.id())) == 0
-            && let Some(ri) = search_regs.iter().position(|&x| x == g)
+            && let Some(ri) = gp_alloc[..max_ri].iter().position(|&x| x == g)
         {
             chosen = Some((ri, g));
         }
+        // 3. Forward peer ABI hint & peer clobber avoidance (so loop header params avoid regs clobbered by latch).
         if chosen.is_none() {
-            chosen = search_regs
-                .iter()
-                .enumerate()
-                .find(|&(_, &g)| (forbidden & (1 << g.id())) == 0)
-                .map(|(ri, &g)| (ri, g));
+            let mut peer_avoid = 0u16;
+            let mut peer_hint: Option<Gp> = None;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX && !assigned[peer as usize] {
+                    peer_avoid |= val_clob_gp[peer as usize];
+                    if peer_hint.is_none() {
+                        peer_hint = hint_gp[peer as usize];
+                    }
+                }
+            }
+            if let Some(g) = peer_hint
+                && ((forbidden | peer_avoid) & (1 << g.id())) == 0
+                && let Some(ri) = gp_alloc[..max_ri].iter().position(|&x| x == g)
+            {
+                chosen = Some((ri, g));
+            }
+            if chosen.is_none() && peer_avoid != 0 {
+                let avoid_mask = forbidden | peer_avoid;
+                for &ri in &GP_PREF_ORDER {
+                    if ri < max_ri && (avoid_mask & (1 << gp_alloc[ri].id())) == 0 {
+                        chosen = Some((ri, gp_alloc[ri]));
+                        break;
+                    }
+                }
+            }
+            if chosen.is_none() {
+                for &ri in &GP_PREF_ORDER {
+                    if ri < max_ri && (forbidden & (1 << gp_alloc[ri].id())) == 0 {
+                        chosen = Some((ri, gp_alloc[ri]));
+                        break;
+                    }
+                }
+            }
         }
 
         if let Some((ri, g)) = chosen {
             locs[iv.val as usize] = Loc::Gp(g);
             assigned[iv.val as usize] = true;
-            active_gp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
+            active_gp.push(ActiveEntry {
+                start: iv.start,
+                end: iv.end,
+                seg_off: iv.seg_off,
+                seg_len: iv.seg_len,
+                reg_idx: ri as u8,
+                val: iv.val,
+                score: iv.score,
+                remat: iv.remat,
+            });
         } else if let Some(rc) = iv.remat {
-            // Zero-cost fallback for constants: rematerialize instead of spilling or evicting.
             locs[iv.val as usize] = Loc::Remat(rc);
             assigned[iv.val as usize] = true;
         } else {
-            // Evict the active candidate with lowest spill score (remat constants have score 0; tie-break: furthest end).
-            let best_evict = active_gp
-                .iter()
-                .enumerate()
-                .filter(|&(_, &(_, e, ri, _, sc, _))| {
-                    (iv.clob_gp & (1 << gp_alloc[ri].id())) == 0
-                        && (sc < iv.score || (sc == iv.score && e > iv.end))
-                })
-                .min_by(|&(_, &(_, ea, _, _, sa, _)), &(_, &(_, eb, _, _, sb, _))| {
-                    sa.cmp(&sb).then_with(|| eb.cmp(&ea))
-                })
-                .map(|(ai, _)| ai);
-            if let Some(ai) = best_evict {
-                let (ev_start, ev_end, ri, ev_val, _, ev_remat) = active_gp.swap_remove(ai);
+            // Find the lowest-cost evictable register (evicting ALL active entries on `ri` overlapping `iv`).
+            let mut best_ri: Option<(usize, u64, usize, u32)> = None;
+            for (ri, &g) in gp_alloc.iter().enumerate() {
+                if (iv.clob_gp & (1 << g.id())) != 0 {
+                    continue;
+                }
+                let (mut cnt, mut max_sc, mut max_end) = (0usize, 0u64, 0u32);
+                let mut ok = true;
+                for a in &active_gp {
+                    if a.reg_idx as usize == ri && active_overlaps_iv(a, iv, &segs_pool) {
+                        cnt += 1;
+                        if a.score > max_sc {
+                            max_sc = a.score;
+                        }
+                        if a.end > max_end {
+                            max_end = a.end;
+                        }
+                        if a.score > iv.score {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok || cnt == 0 {
+                    continue;
+                }
+                if max_sc == iv.score && !(cnt == 1 && max_end > iv.end) {
+                    continue;
+                }
+                let better = match best_ri {
+                    None => true,
+                    Some((_, bsc, bcnt, bend)) => {
+                        (max_sc, cnt, Reverse(max_end)) < (bsc, bcnt, Reverse(bend))
+                    }
+                };
+                if better {
+                    best_ri = Some((ri, max_sc, cnt, max_end));
+                }
+            }
+            if let Some((ri, _, _, _)) = best_ri {
                 let g = gp_alloc[ri];
-                if let Some(rc) = ev_remat {
-                    locs[ev_val as usize] = Loc::Remat(rc);
-                } else {
-                    let sp = alloc_spill8(
-                        ev_val,
-                        ev_start,
-                        ev_end,
-                        &locs,
-                        &assigned,
-                        &mut slot8_end,
-                        &mut free_spills8,
-                        &mut next_spill_off,
-                    )?;
-                    locs[ev_val as usize] = Loc::Spill(sp);
+                let mut i = active_gp.len();
+                while i > 0 {
+                    i -= 1;
+                    if active_gp[i].reg_idx as usize == ri
+                        && active_overlaps_iv(&active_gp[i], iv, &segs_pool)
+                    {
+                        let ev = active_gp.swap_remove(i);
+                        if let Some(rc) = ev.remat {
+                            locs[ev.val as usize] = Loc::Remat(rc);
+                        } else {
+                            let sp = alloc_spill8(
+                                ev.val,
+                                ev.start,
+                                ev.end,
+                                &locs,
+                                &assigned,
+                                &mut slot8_end,
+                                &mut free_spills8,
+                                &mut next_spill_off,
+                            )?;
+                            locs[ev.val as usize] = Loc::Spill(sp);
+                        }
+                    }
                 }
                 locs[iv.val as usize] = Loc::Gp(g);
                 assigned[iv.val as usize] = true;
-                active_gp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
+                active_gp.push(ActiveEntry {
+                    start: iv.start,
+                    end: iv.end,
+                    seg_off: iv.seg_off,
+                    seg_len: iv.seg_len,
+                    reg_idx: ri as u8,
+                    val: iv.val,
+                    score: iv.score,
+                    remat: iv.remat,
+                });
             } else {
                 let sp = alloc_spill8(
                     iv.val,
@@ -1289,9 +1607,9 @@ pub fn allocate_with_config(
 
     // 5b. Linear scan for FP/V128 intervals (caller-saved Xmm0..Xmm7 + callee-saved Xmm8..Xmm13).
     let mut free_spills16: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
-    let mut active_fp: Vec<(u32, u32, usize, u32, u64, Option<RematConst>)> =
-        Vec::with_capacity(XMM_ALLOC.len());
+    let mut active_fp: Vec<ActiveEntry> = Vec::with_capacity(XMM_ALLOC.len() * 2);
     const XMM_CALLER_COUNT: usize = 8;
+    const XMM_PREF_ORDER: [usize; 14] = [7, 6, 5, 4, 3, 2, 1, 0, 8, 9, 10, 11, 12, 13];
 
     let alloc_spill_fp = |val: u32,
                           ty: Ty,
@@ -1336,16 +1654,18 @@ pub fn allocate_with_config(
         {
             bg.check_deadline()?;
         }
-        active_fp.retain(|&(_, e, _, _, _, _)| e > iv.start);
+        active_fp.retain(|a| a.end > iv.start);
         let mut used_regs = 0u16;
-        for &(_, _, ri, _, _, _) in &active_fp {
-            used_regs |= 1 << XMM_ALLOC[ri].id();
+        for a in &active_fp {
+            if active_overlaps_iv(a, iv, &segs_pool) {
+                used_regs |= 1 << XMM_ALLOC[a.reg_idx as usize].id();
+            }
         }
         let forbidden = used_regs | iv.clob_xmm;
-        let search_regs = if iv.remat.is_some() {
-            &XMM_ALLOC[..XMM_CALLER_COUNT]
+        let max_ri = if iv.remat.is_some() {
+            XMM_CALLER_COUNT
         } else {
-            &XMM_ALLOC[..]
+            XMM_ALLOC.len()
         };
 
         let mut chosen: Option<(usize, Xmm)> = None;
@@ -1354,7 +1674,7 @@ pub fn allocate_with_config(
                 && assigned[peer as usize]
                 && let Loc::Xmm(x) = locs[peer as usize]
                 && (forbidden & (1 << x.id())) == 0
-                && let Some(ri) = search_regs.iter().position(|&r| r == x)
+                && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
             {
                 chosen = Some((ri, x));
                 break;
@@ -1363,61 +1683,142 @@ pub fn allocate_with_config(
         if chosen.is_none()
             && let Some(x) = hint_xmm[iv.val as usize]
             && (forbidden & (1 << x.id())) == 0
-            && let Some(ri) = search_regs.iter().position(|&r| r == x)
+            && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
         {
             chosen = Some((ri, x));
         }
         if chosen.is_none() {
-            chosen = search_regs
-                .iter()
-                .enumerate()
-                .find(|&(_, &x)| (forbidden & (1 << x.id())) == 0)
-                .map(|(ri, &x)| (ri, x));
+            let mut peer_avoid = 0u16;
+            let mut peer_hint: Option<Xmm> = None;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX && !assigned[peer as usize] {
+                    peer_avoid |= val_clob_xmm[peer as usize];
+                    if peer_hint.is_none() {
+                        peer_hint = hint_xmm[peer as usize];
+                    }
+                }
+            }
+            if let Some(x) = peer_hint
+                && ((forbidden | peer_avoid) & (1 << x.id())) == 0
+                && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
+            {
+                chosen = Some((ri, x));
+            }
+            if chosen.is_none() && peer_avoid != 0 {
+                let avoid_mask = forbidden | peer_avoid;
+                for &ri in &XMM_PREF_ORDER {
+                    if ri < max_ri && (avoid_mask & (1 << XMM_ALLOC[ri].id())) == 0 {
+                        chosen = Some((ri, XMM_ALLOC[ri]));
+                        break;
+                    }
+                }
+            }
+            if chosen.is_none() {
+                for &ri in &XMM_PREF_ORDER {
+                    if ri < max_ri && (forbidden & (1 << XMM_ALLOC[ri].id())) == 0 {
+                        chosen = Some((ri, XMM_ALLOC[ri]));
+                        break;
+                    }
+                }
+            }
         }
 
         if let Some((ri, x)) = chosen {
             locs[iv.val as usize] = Loc::Xmm(x);
             assigned[iv.val as usize] = true;
-            active_fp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
+            active_fp.push(ActiveEntry {
+                start: iv.start,
+                end: iv.end,
+                seg_off: iv.seg_off,
+                seg_len: iv.seg_len,
+                reg_idx: ri as u8,
+                val: iv.val,
+                score: iv.score,
+                remat: iv.remat,
+            });
         } else if let Some(rc) = iv.remat {
             locs[iv.val as usize] = Loc::Remat(rc);
             assigned[iv.val as usize] = true;
         } else {
-            let best_evict = active_fp
-                .iter()
-                .enumerate()
-                .filter(|&(_, &(_, e, ri, _, sc, _))| {
-                    (iv.clob_xmm & (1 << XMM_ALLOC[ri].id())) == 0
-                        && (sc < iv.score || (sc == iv.score && e > iv.end))
-                })
-                .min_by(|&(_, &(_, ea, _, _, sa, _)), &(_, &(_, eb, _, _, sb, _))| {
-                    sa.cmp(&sb).then_with(|| eb.cmp(&ea))
-                })
-                .map(|(ai, _)| ai);
-            if let Some(ai) = best_evict {
-                let (ev_start, ev_end, ri, ev_val, _, ev_remat) = active_fp.swap_remove(ai);
+            let mut best_ri: Option<(usize, u64, usize, u32)> = None;
+            for (ri, &x) in XMM_ALLOC.iter().enumerate() {
+                if (iv.clob_xmm & (1 << x.id())) != 0 {
+                    continue;
+                }
+                let (mut cnt, mut max_sc, mut max_end) = (0usize, 0u64, 0u32);
+                let mut ok = true;
+                for a in &active_fp {
+                    if a.reg_idx as usize == ri && active_overlaps_iv(a, iv, &segs_pool) {
+                        cnt += 1;
+                        if a.score > max_sc {
+                            max_sc = a.score;
+                        }
+                        if a.end > max_end {
+                            max_end = a.end;
+                        }
+                        if a.score > iv.score {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok || cnt == 0 {
+                    continue;
+                }
+                if max_sc == iv.score && !(cnt == 1 && max_end > iv.end) {
+                    continue;
+                }
+                let better = match best_ri {
+                    None => true,
+                    Some((_, bsc, bcnt, bend)) => {
+                        (max_sc, cnt, Reverse(max_end)) < (bsc, bcnt, Reverse(bend))
+                    }
+                };
+                if better {
+                    best_ri = Some((ri, max_sc, cnt, max_end));
+                }
+            }
+            if let Some((ri, _, _, _)) = best_ri {
                 let x = XMM_ALLOC[ri];
-                if let Some(rc) = ev_remat {
-                    locs[ev_val as usize] = Loc::Remat(rc);
-                } else {
-                    let ev_ty = ir.val_tys[ev_val as usize];
-                    let sp = alloc_spill_fp(
-                        ev_val,
-                        ev_ty,
-                        ev_start,
-                        ev_end,
-                        &locs,
-                        &assigned,
-                        &mut slot8_end,
-                        &mut free_spills8,
-                        &mut free_spills16,
-                        &mut next_spill_off,
-                    )?;
-                    locs[ev_val as usize] = Loc::Spill(sp);
+                let mut i = active_fp.len();
+                while i > 0 {
+                    i -= 1;
+                    if active_fp[i].reg_idx as usize == ri
+                        && active_overlaps_iv(&active_fp[i], iv, &segs_pool)
+                    {
+                        let ev = active_fp.swap_remove(i);
+                        if let Some(rc) = ev.remat {
+                            locs[ev.val as usize] = Loc::Remat(rc);
+                        } else {
+                            let ev_ty = ir.val_tys[ev.val as usize];
+                            let sp = alloc_spill_fp(
+                                ev.val,
+                                ev_ty,
+                                ev.start,
+                                ev.end,
+                                &locs,
+                                &assigned,
+                                &mut slot8_end,
+                                &mut free_spills8,
+                                &mut free_spills16,
+                                &mut next_spill_off,
+                            )?;
+                            locs[ev.val as usize] = Loc::Spill(sp);
+                        }
+                    }
                 }
                 locs[iv.val as usize] = Loc::Xmm(x);
                 assigned[iv.val as usize] = true;
-                active_fp.push((iv.start, iv.end, ri, iv.val, iv.score, iv.remat));
+                active_fp.push(ActiveEntry {
+                    start: iv.start,
+                    end: iv.end,
+                    seg_off: iv.seg_off,
+                    seg_len: iv.seg_len,
+                    reg_idx: ri as u8,
+                    val: iv.val,
+                    score: iv.score,
+                    remat: iv.remat,
+                });
             } else {
                 let sp = alloc_spill_fp(
                     iv.val,

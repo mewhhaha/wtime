@@ -648,9 +648,11 @@ fn isa_profile_syntax_matches_pen_contract() {
     let (tag, isa) = resolve_x64_isa("x86-64-v2").unwrap();
     assert_eq!(tag, "x64-v2");
     assert!(!isa.has_abm_bmi1);
+    assert!(!isa.has_bmi2);
     let (tag3, isa3) = resolve_x64_isa("znver4").unwrap();
     assert_eq!(tag3, "x64-v3");
     assert!(isa3.has_abm_bmi1);
+    assert!(isa3.has_bmi2);
 }
 
 // ---- 8. Admission acceptance vs rejection suite (§4.3.3) ----
@@ -659,14 +661,12 @@ fn compile_admit_only(wasm: &[u8]) -> Result<Vec<u8>, X64CompileError> {
     compile_wasm_to_x64_so(
         wasm,
         &X64CompileOptions {
-            isa: TargetIsa {
-                has_abm_bmi1: false,
-            },
+            isa: TargetIsa::default(),
             jobs: 1,
             deadline: None,
             opt: true,
             verify: true,
-            hooks: Default::default(),
+            ..Default::default()
         },
     )
 }
@@ -1066,24 +1066,30 @@ fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
     let so_j1 = compile_wasm_to_x64_so(
         &bytes,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: true },
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+            },
             jobs: 1,
             deadline: None,
             opt: true,
             verify: false,
-            hooks: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
     let so_j8 = compile_wasm_to_x64_so(
         &bytes,
         &X64CompileOptions {
-            isa: TargetIsa { has_abm_bmi1: true },
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+            },
             jobs: 8,
             deadline: None,
             opt: true,
             verify: false,
-            hooks: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -1363,7 +1369,7 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
     // Module 1 (bounded 1-page memory):
     //   g0 = mut i32 (10, pinned), g1 = mut i32 (20, read-only inside licm_fn)
     //   f0: small_leaf(x) = x * 3 + 7 (internal, pure, inlined into f2, elided stack + !fn_can_trap)
-    //   f1: medium_pure(x) = >50 pure adds (internal, NOT inlined due to >48 insts, still elided stack + !fn_can_trap!)
+    //   f1: medium_pure(x) = >144 pure adds/xors (internal, NOT inlined due to >144 insts, still elided stack + !fn_can_trap!)
     //   f2: entry_caller(x) = calls f0(x) + f1(x) + diamond if(x > 5){x+1}else{x-1} (exported -> retains stack check + elided_callee_stack_bytes > 0!)
     //   f3: rec_fn(x) = if x <= 0 { 0 } else { rec_fn(x-1) + 1 } (recursive -> MUST retain stack check!)
     //   f4: tbl_fn(x) = x + 2 (in call_indirect table -> MUST retain stack check!)
@@ -1375,8 +1381,8 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
 
     let b0 = vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 7, 0x6a]; // small_leaf
     let mut b1 = vec![0x20, 0];
-    for k in 1..=55i32 {
-        // Alternate add & xor so local folding doesn't collapse below 48 insts.
+    for k in 1..=160i32 {
+        // Alternate add & xor so local folding doesn't collapse below the single-caller 144-inst cap.
         b1.push(0x41);
         leb_i32(&mut b1, k);
         b1.push(if k % 2 == 0 { 0x6a } else { 0x73 });
@@ -1473,7 +1479,7 @@ fn stage2_opt_inlining_licm_wrap_bce_diamond_and_stack_trap_elision() {
     );
     assert!(
         f2_calls.contains(&1),
-        "medium_pure f1 (>48 insts) must remain a direct call"
+        "medium_pure f1 (>144 insts) must remain a direct call"
     );
 
     // 2. Diamond if/else in f2 converted to branchless Op::CmpSelect!
@@ -1764,7 +1770,1093 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
     let cfg = AllocConfig {
         allow_r12: true,
         allow_r13: true,
+        has_bmi2: false,
     };
     let alloc = super::regalloc::allocate_with_config(&irs[1], cfg, None).unwrap();
     super::verify::verify_alloc_with_config(&irs[1], &alloc, cfg).unwrap();
+}
+
+#[test]
+fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
+    use super::asm::RelocTarget;
+    use super::ir::{
+        Block, BlockId, CmpBranchKind, CmpOp, Inst, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange,
+    };
+    use super::regalloc::{AllocConfig, Loc, allocate_with_config};
+    use super::verify::verify_alloc_with_config;
+
+    // 1. BMI2 VEX3 encodings verified byte-for-byte against Intel SDM / objdump.
+    let mut a = Asm::new();
+    a.shlx(false, Gp::Rax, Gp::Rdi, Gp::Rsi);
+    assert_eq!(a.code, [0xc4, 0xe2, 0x49, 0xf7, 0xc7]);
+
+    let mut a = Asm::new();
+    a.shrx(true, Gp::R8, Gp::R9, Gp::R10);
+    assert_eq!(a.code, [0xc4, 0x42, 0xab, 0xf7, 0xc1]);
+
+    let mut a = Asm::new();
+    a.sarx(true, Gp::R11, Gp::Rax, Gp::Rcx);
+    assert_eq!(a.code, [0xc4, 0x62, 0xf2, 0xf7, 0xd8]);
+
+    let mut a = Asm::new();
+    a.rorx(false, Gp::Rdx, Gp::R8, 7);
+    assert_eq!(a.code, [0xc4, 0xc3, 0x7b, 0xf0, 0xd0, 0x07]);
+
+    // 2. 0-byte fallthrough `jmp` elimination in `finish_labels()`, shifting labels & relocs accurately.
+    let mut a = Asm::new();
+    let l_skip = a.new_label();
+    let l_next = a.new_label();
+    a.jcc(Cond::E, l_skip);
+    a.jmp(l_next); // lands directly on l_next -> 5 B -> 0 B!
+    a.bind(l_next);
+    a.call_reloc(RelocTarget::Func(3));
+    a.bind(l_skip);
+    a.ret();
+    a.finish_labels().unwrap();
+    // Expect: 2-byte `je +5` (0x74, 0x05), 5-byte `call rel32`, 1-byte `ret` -> 8 bytes total!
+    assert_eq!(a.code.len(), 8);
+    assert_eq!(&a.code[0..2], &[0x74, 0x05]);
+    assert_eq!(a.code[2], 0xe8);
+    assert_eq!(a.code[7], 0xc3);
+    assert_eq!(a.relocs.len(), 1);
+    assert_eq!(a.relocs[0].patch_off, 3);
+    assert_eq!(a.relocs[0].next_ip_off, 7);
+
+    // 3. Exact per-block live-range holes: loop header param `acc` used in latch AND in `exit`
+    //    (ordered AFTER latch in RPO!). `acc_next` (computed in latch after `acc`'s last use) must
+    //    coalesce into `acc`'s exact register despite `exit` extending `acc`'s hull past latch!
+    let mut ir = IrFunc {
+        func_index: 0,
+        params: vec![Val(0), Val(1)],
+        result_tys: vec![Ty::I32],
+        val_tys: vec![Ty::I32; 7],
+        val_pool: vec![
+            Val(1), // 0: init i = param1
+            Val(0), // 1: init acc = param0
+            Val(5), // 2: next i = i_next
+            Val(4), // 3: next acc = acc_next
+            Val(3), // 4: return acc
+        ],
+        v128_consts: Vec::new(),
+        br_tables: Vec::new(),
+        blocks: vec![
+            // bb0: Jump bb1(v1, v0)
+            Block {
+                params: vec![Val(0), Val(1)],
+                insts: vec![],
+                term: Term::Jump {
+                    target: BlockId(1),
+                    args: ValRange { start: 0, len: 2 },
+                },
+                is_loop_header: false,
+                preds: 0,
+            },
+            // bb1 (loop header): params (v2=i, v3=acc); if i <u param0 goto bb2 else goto bb3
+            Block {
+                params: vec![Val(2), Val(3)],
+                insts: vec![],
+                term: Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::LtU),
+                    a: Val(2),
+                    b: Val(0),
+                    then_bb: BlockId(2),
+                    then_args: ValRange::EMPTY,
+                    else_bb: BlockId(3),
+                    else_args: ValRange::EMPTY,
+                },
+                is_loop_header: true,
+                preds: 2,
+            },
+            // bb2 (latch): v4 = acc + i; v5 = i + 1; v6 = v4 ^ 7; Jump bb1(v5, v4)
+            // Note: v3 dies at inst 0, v4 is live from inst 0 to term; v3 is live again in bb3!
+            Block {
+                params: vec![],
+                insts: vec![
+                    Inst {
+                        res: Some(Val(4)),
+                        op: Op::I32Bin(IntBinOp::Add, Val(3), Val(2)),
+                    },
+                    Inst {
+                        res: Some(Val(5)),
+                        op: Op::I32BinImm(IntBinOp::Add, Val(2), 1),
+                    },
+                    Inst {
+                        res: Some(Val(6)),
+                        op: Op::I32BinImm(IntBinOp::Xor, Val(4), 7),
+                    },
+                ],
+                term: Term::Jump {
+                    target: BlockId(1),
+                    args: ValRange { start: 2, len: 2 },
+                },
+                is_loop_header: false,
+                preds: 1,
+            },
+            // bb3 (exit, ordered AFTER bb2 in RPO): return v3 (acc)
+            Block {
+                params: vec![],
+                insts: vec![],
+                term: Term::Return {
+                    vals: ValRange { start: 4, len: 1 },
+                },
+                is_loop_header: false,
+                preds: 1,
+            },
+        ],
+        needs_stack_check: false,
+        elided_callee_stack_bytes: 0,
+    };
+    let alloc = allocate_with_config(&ir, AllocConfig::default(), None).unwrap();
+    verify_alloc_with_config(&ir, &alloc, AllocConfig::default()).unwrap();
+    assert_eq!(
+        alloc.locs[3], alloc.locs[4],
+        "live-range holes must let latch update v4 coalesce into loop header param v3"
+    );
+
+    // 4. BMI2 `has_bmi2 = true` allows a value to stay in RCX across `Shl`, while `has_bmi2 = false` rejects it!
+    ir.blocks[2].insts[0].op = Op::I32Bin(IntBinOp::Shl, Val(3), Val(2));
+    let mut forced = allocate_with_config(
+        &ir,
+        AllocConfig {
+            allow_r12: false,
+            allow_r13: false,
+            has_bmi2: true,
+        },
+        None,
+    )
+    .unwrap();
+    // Place loop-invariant `v0` (live across `Shl` in bb2!) explicitly in RCX if not already there.
+    let v0_orig = forced.locs[0];
+    let rcx_owner = forced.locs.iter().position(|&l| l == Loc::Gp(Gp::Rcx));
+    if let Some(oi) = rcx_owner {
+        forced.locs[oi] = v0_orig;
+    }
+    forced.locs[0] = Loc::Gp(Gp::Rcx);
+    verify_alloc_with_config(
+        &ir,
+        &forced,
+        AllocConfig {
+            allow_r12: false,
+            allow_r13: false,
+            has_bmi2: true,
+        },
+    )
+    .expect("BMI2 mode must allow RCX live across Shl");
+    assert!(
+        verify_alloc_with_config(
+            &ir,
+            &forced,
+            AllocConfig {
+                allow_r12: false,
+                allow_r13: false,
+                has_bmi2: false,
+            },
+        )
+        .is_err(),
+        "non-BMI2 mode must reject RCX live across Shl"
+    );
+}
+
+#[test]
+fn stage3_undo_log_if_nesting_and_inc_cache_parity() {
+    // 1. Deeply nested `if`s (40 levels) with 500 locals mutating only 1 local per level:
+    //    old full-locals snapshot cloning would exceed caps or blow up; undo-log handles it cleanly.
+    let mut deep_body = Vec::new();
+    for depth in 0..40u32 {
+        deep_body.extend_from_slice(&[0x20, 0, 0x41]);
+        leb_i32(&mut deep_body, depth as i32);
+        deep_body.extend_from_slice(&[0x4a, 0x04, 0x40]); // if (arg > depth)
+        deep_body.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1]); // local 1 += 1
+    }
+    deep_body.extend(std::iter::repeat_n(0x0b, 40)); // end
+    deep_body.extend_from_slice(&[0x20, 1]);
+    let deep_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        export_sec(&[("deep_if", 0, 0)]),
+        code_sec(&[enc_body(&[(500, 0x7f)], &deep_body)]),
+    ]);
+    let deep_so = compile_wasm_to_x64_so(&deep_wasm, &X64CompileOptions::default()).unwrap();
+    assert!(!deep_so.is_empty());
+
+    // 2. Per-function incremental cache bit-for-bit parity across leaf edit, inlineable callee edit,
+    //    effect cascade, trap/elision cascade, single-caller flip, and corrupted cache recovery.
+    let root = crate::build::create_fresh_test_root("wtime-aot-x64-inc-parity");
+    let build_variant = |leaf_body: &[u8], caller_body: &[u8], helper_body: &[u8]| -> Vec<u8> {
+        wasm_module(&[
+            type_sec(&[(&[0x7f], &[0x7f])]),
+            func_sec(&[0, 0, 0, 0]),
+            section(5, &[1, 0x01, 1, 2]),
+            section(6, &[1, 0x7f, 1, 0x41, 10, 0x0b]), // mut i32 global 0
+            export_sec(&[("entry", 0, 2), ("other", 0, 3)]),
+            code_sec(&[
+                enc_body(&[], leaf_body),                 // f0: internal leaf
+                enc_body(&[], helper_body),               // f1: internal helper
+                enc_body(&[], caller_body),               // f2: exported entry calling f0 & f1
+                enc_body(&[], &[0x20, 0, 0x41, 9, 0x6a]), // f3: untouched leaf
+            ]),
+        ])
+    };
+    let make_large_leaf = |k: i32, write_g: bool, add_trap: bool| -> Vec<u8> {
+        let mut b = vec![0x20, 0];
+        if write_g {
+            b.extend_from_slice(&[0x20, 0, 0x24, 0]);
+        }
+        if add_trap {
+            b.extend_from_slice(&[0x41, 100, 0x20, 0, 0x6e, 0x6a]); // div_u(100, x) -> traps!
+        }
+        for i in 1..=120i32 {
+            b.push(0x41);
+            leb_i32(&mut b, i + k);
+            b.push(if i % 2 == 0 { 0x6a } else { 0x73 });
+        }
+        b
+    };
+    let helper_v1 = vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 1, 0x6a];
+    let helper_v2 = vec![0x20, 0, 0x41, 5, 0x6c, 0x41, 2, 0x6a];
+    let caller_1x = vec![
+        0x23, 0, 0x20, 0, 0x10, 0, 0x20, 0, 0x10, 1, 0x6a, 0x6a, 0x23, 0, 0x6a,
+    ];
+    let caller_2x = vec![
+        0x23, 0, 0x20, 0, 0x10, 0, 0x20, 0, 0x10, 1, 0x6a, 0x20, 0, 0x10, 1, 0x6a, 0x6a, 0x23, 0,
+        0x6a,
+    ];
+
+    let variants = [
+        (
+            "v0_base",
+            build_variant(&make_large_leaf(0, false, false), &caller_1x, &helper_v1),
+        ),
+        (
+            "v1_leaf_edit",
+            build_variant(&make_large_leaf(1, false, false), &caller_1x, &helper_v1),
+        ),
+        (
+            "v2_inline_callee_edit",
+            build_variant(&make_large_leaf(1, false, false), &caller_1x, &helper_v2),
+        ),
+        (
+            "v3_effect_cascade",
+            build_variant(&make_large_leaf(1, true, false), &caller_1x, &helper_v2),
+        ),
+        (
+            "v4_trap_elide_cascade",
+            build_variant(&make_large_leaf(1, true, true), &caller_1x, &helper_v2),
+        ),
+        (
+            "v5_single_caller_flip",
+            build_variant(&make_large_leaf(1, true, true), &caller_2x, &helper_v2),
+        ),
+    ];
+    let salt = [0x42u8; 32];
+    let inc_opts = X64CompileOptions {
+        isa: TargetIsa {
+            has_abm_bmi1: true,
+            has_bmi2: true,
+        },
+        jobs: 2,
+        opt: true,
+        verify: true,
+        inc_cache_dir: Some(root.0.clone()),
+        cache_key_salt: Some(salt),
+        ..Default::default()
+    };
+    let cold_opts = X64CompileOptions {
+        inc_cache_dir: None,
+        ..inc_opts.clone()
+    };
+
+    for (tag, wasm) in &variants {
+        let so_inc = compile_wasm_to_x64_so(wasm, &inc_opts).unwrap();
+        let so_cold = compile_wasm_to_x64_so(wasm, &cold_opts).unwrap();
+        assert_eq!(
+            so_inc, so_cold,
+            "incremental cache output diverged from cold build on {tag}"
+        );
+    }
+
+    // Corrupt the on-disk incremental cache file and verify silent fallback produces identical bytes.
+    let inc_dir = root.0.join("x64-inc");
+    let mut corrupted = 0usize;
+    for entry in std::fs::read_dir(&inc_dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|e| e == "bin") {
+            let mut raw = std::fs::read(&p).unwrap();
+            let mid = raw.len() / 2;
+            raw[mid] ^= 0xff;
+            std::fs::write(&p, &raw).unwrap();
+            corrupted += 1;
+        }
+    }
+    assert!(corrupted >= 1, "expected at least one x64-inc cache file");
+    let so_recovered = compile_wasm_to_x64_so(&variants[5].1, &inc_opts).unwrap();
+    let so_cold = compile_wasm_to_x64_so(&variants[5].1, &cold_opts).unwrap();
+    assert_eq!(
+        so_recovered, so_cold,
+        "corrupted incremental cache must recover cleanly to exact cold bytes"
+    );
+}
+
+#[test]
+fn stage3_store_to_load_forwarding_guarded_licm_and_triangle_if() {
+    use super::ir::{IntBinOp, LoadKind, Op};
+    use super::opt;
+
+    // f0(p, v, w): store i32 [p+0]=v; store i32 [p+4]=w; load i32 [p+0] -> forwarded (0 loads left!)
+    let b0 = vec![
+        0x20, 0, 0x20, 1, 0x36, 2, 0, // store [p+0] = v
+        0x20, 0, 0x20, 2, 0x36, 2, 4, // store [p+4] = w (disjoint!)
+        0x20, 0, 0x28, 2, 0, // load [p+0] -> forwarded to v!
+    ];
+    // f1(p, v, w): store i32 [p+0]=v; store i32 [p+2]=w; load i32 [p+0] -> overlaps! load MUST remain!
+    let b1 = vec![
+        0x20, 0, 0x20, 1, 0x36, 2, 0, 0x20, 0, 0x20, 2, 0x36, 2, 2, 0x20, 0, 0x28, 2, 0,
+    ];
+    // f2(d): local i=0, sum=0; loop { br_if(i >=u d); sum += 100u / d; i += 1; br loop; } -> guarded LICM hoists DivU!
+    let b2 = vec![
+        0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // br_if(i >=u d) exit
+        0x20, 2, 0x41, 0xe4, 0x00, 0x20, 0, 0x6e, 0x6a, 0x21, 2, // sum += 100u / d
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ];
+    // f3(x): local y = 0; if x != 0 { y = x - 1 }; return y -> triangle if-conversion to CmpSelect!
+    let b3 = vec![
+        0x20, 0, 0x41, 0, 0x47, 0x04, 0x40, 0x20, 0, 0x41, 1, 0x6b, 0x21, 1, 0x0b, 0x20, 1,
+    ];
+    // f4(dst, src): load [src+0] + load [src+12] (proves src+16 checked), then memory.copy(dst, src, 16) -> src_checked == true!
+    let b4 = vec![
+        0x20, 1, 0x28, 2, 0, 0x1a, 0x20, 1, 0x28, 2, 12, 0x1a, 0x20, 0, 0x20, 1, 0x41, 16, 0xfc,
+        0x0a, 0x00, 0x00, 0x41, 0,
+    ];
+
+    let wasm = wasm_module(&[
+        type_sec(&[
+            (&[0x7f, 0x7f, 0x7f], &[0x7f]),
+            (&[0x7f], &[0x7f]),
+            (&[0x7f, 0x7f], &[0x7f]),
+        ]),
+        func_sec(&[0, 0, 1, 1, 2]),
+        section(5, &[1, 0x01, 1, 4]),
+        code_sec(&[
+            enc_body(&[], &b0),
+            enc_body(&[], &b1),
+            enc_body(&[(2, 0x7f)], &b2),
+            enc_body(&[(1, 0x7f)], &b3),
+            enc_body(&[], &b4),
+        ]),
+    ]);
+    let val =
+        wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits()).unwrap();
+    let dec = val.decoded();
+    let module = admit_x64_module(dec).unwrap();
+    let mut irs: Vec<IrFunc> = (0..dec.code.len())
+        .map(|bi| lower_wasm_to_ir(dec, &module, bi).unwrap())
+        .collect();
+    let effects = opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        opt::optimize_func_stage2(ir, &module, &effects, None).unwrap();
+        verify_ir(ir, &module).unwrap();
+    }
+
+    assert!(
+        !irs[0]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::Load { .. }))),
+        "disjoint store [p+4] must not kill store-to-load forwarding of [p+0]"
+    );
+    assert!(
+        irs[1]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(
+                i.op,
+                Op::Load {
+                    kind: LoadKind::I32,
+                    ..
+                }
+            ))),
+        "overlapping store [p+2] MUST kill forwarding of [p+0]"
+    );
+    // In f2, `DivU` must be hoisted out of the loop body into a non-loop guarded preheader!
+    let loop_hdrs: Vec<usize> = irs[2]
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(bi, b)| b.is_loop_header.then_some(bi))
+        .collect();
+    assert!(!loop_hdrs.is_empty());
+    let div_in_non_loop = irs[2].blocks.iter().any(|b| {
+        !b.is_loop_header
+            && b.preds == 1
+            && b.insts
+                .iter()
+                .any(|i| matches!(i.op, Op::I32Bin(IntBinOp::DivU, _, _)))
+    });
+    assert!(
+        div_in_non_loop,
+        "guarded LICM must hoist divisor-guarded DivU into a non-loop preheader"
+    );
+    assert!(
+        irs[3]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::CmpSelect { .. }))),
+        "triangle if without else must convert to Op::CmpSelect"
+    );
+    assert!(
+        irs[4]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(
+                i.op,
+                Op::MemCopyConst {
+                    len: 16,
+                    src_checked: true,
+                    dst_checked: false,
+                    ..
+                }
+            ))),
+        "MemCopyConst BCE must elide dominated src bounds check while retaining unchecked dst"
+    );
+}
+
+#[test]
+fn stage3_council_round1_regressions() {
+    use super::asm::Asm;
+    use super::build_shared_rodata;
+    use super::ir::{IntBinOp, LoadKind, Op};
+    use super::lower::lower_ir_to_x64;
+    use super::opt;
+
+    // 1. Self-loop (`L: jmp L`) and empty mutual jump cycle (`L1: jmp L2; L2: jmp L1`) must
+    //    NEVER be erased by 0-byte fallthrough `jmp` elimination.
+    {
+        let mut a = Asm::new();
+        let l = a.new_label();
+        a.bind(l);
+        a.jmp(l);
+        a.finish_labels().unwrap();
+        assert_eq!(a.code, vec![0xeb, 0xfe], "self-loop jmp must remain eb fe");
+
+        let mut b = Asm::new();
+        let l1 = b.new_label();
+        let l2 = b.new_label();
+        b.bind(l1);
+        b.jmp(l2);
+        b.bind(l2);
+        b.jmp(l1);
+        b.finish_labels().unwrap();
+        assert_eq!(
+            b.code,
+            vec![0xeb, 0xfe],
+            "empty mutual jump cycle must collapse to eb fe, not empty fallthrough"
+        );
+
+        // End-to-end Wasm `(if (local.get 0) (then (loop $l (br $l)))) (i32.const 42)`:
+        let spin_body = vec![
+            0x20, 0, 0x04, 0x40, 0x03, 0x40, 0x0c, 0, 0x0b, 0x0b, 0x41, 42,
+        ];
+        let spin_wasm = wasm_module(&[
+            type_sec(&[(&[0x7f], &[0x7f])]),
+            func_sec(&[0]),
+            export_sec(&[("spin", 0, 0)]),
+            code_sec(&[enc_body(&[], &spin_body)]),
+        ]);
+        let val =
+            wtime_validate::validate(&spin_wasm, &x64_validate_features(), &x64_validate_limits())
+                .unwrap();
+        let dec = val.decoded();
+        let module = admit_x64_module(dec).unwrap();
+        let layout = CtxLayout::compute(&module, Vec::new()).unwrap();
+        let budget = CompileBudget::new(None);
+        let shared = build_shared_rodata(dec, &module, &layout.global_offs, &budget).unwrap();
+        let mut ir = lower_wasm_to_ir(dec, &module, 0).unwrap();
+        let effects =
+            opt::compute_module_effects(std::slice::from_ref(&ir), &module, None).unwrap();
+        opt::optimize_func_stage2(&mut ir, &module, &effects, None).unwrap();
+        verify_ir(&ir, &module).unwrap();
+        let alloc = allocate(&ir).unwrap();
+        verify_alloc(&ir, &alloc).unwrap();
+        let asm =
+            lower_ir_to_x64(&ir, &alloc, &layout, &shared.consts, TargetIsa::default()).unwrap();
+        assert!(
+            asm.code.windows(2).any(|w| w == [0xeb, 0xfe]),
+            "emitted spin loop must preserve eb fe self-jump: {:02x?}",
+            asm.code
+        );
+    }
+
+    // 2. `i64.store32 -> i32.load` must NOT forward `Ty::I64` as `Ty::I32`, and
+    //    guarded-preheader LICM must preserve SSA dominance when `exit_bb` uses `hdr.params`
+    //    and never panic on nested loops.
+    {
+        // f0(addr: i32, v64: i64) -> i32: i64.store32 [addr], v64; i32.load [addr]
+        let f0 = vec![0x20, 0, 0x20, 1, 0x3e, 2, 0, 0x20, 0, 0x28, 2, 0];
+        // f1(d: i32) -> i32: x = d*7+3; i = 0x1234; while i <u d { x += 1000u / d; i += 1 }; return i*1000 + x
+        let mut f1 = vec![0x20, 0, 0x41, 7, 0x6c, 0x41, 3, 0x6a, 0x21, 2];
+        f1.push(0x41);
+        leb_i32(&mut f1, 0x1234);
+        f1.extend_from_slice(&[0x21, 1, 0x02, 0x40, 0x03, 0x40]);
+        f1.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // br_if(i >=u d) exit
+        f1.extend_from_slice(&[0x20, 2, 0x41]);
+        leb_i32(&mut f1, 1000);
+        f1.extend_from_slice(&[0x20, 0, 0x6e, 0x6a, 0x21, 2]);
+        f1.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
+        f1.extend_from_slice(&[0x20, 1, 0x41]);
+        leb_i32(&mut f1, 1000);
+        f1.extend_from_slice(&[0x6c, 0x20, 2, 0x6a]);
+        // f2(d1: i32, d2: i32) -> i32: nested unsigned-guarded loops where inner hoists `v1 = 10000u /u d1`
+        // and outer computes `v1 /u d2` inside the inner loop (triggers stale `dom` if unchecked!).
+        let mut f2 = Vec::new();
+        // local 2 = i2, local 3 = i1, local 4 = acc
+        f2.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]); // outer block/loop
+        f2.extend_from_slice(&[0x20, 2, 0x20, 1, 0x4f, 0x0d, 1]); // if i2 >=u d2 break outer
+        f2.extend_from_slice(&[0x41, 0, 0x21, 3]); // i1 = 0
+        f2.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]); // inner block/loop
+        f2.extend_from_slice(&[0x20, 3, 0x20, 0, 0x4f, 0x0d, 1]); // if i1 >=u d1 break inner
+        f2.extend_from_slice(&[0x20, 4, 0x41]);
+        leb_i32(&mut f2, 10000);
+        f2.extend_from_slice(&[0x20, 0, 0x6e, 0x20, 1, 0x6e, 0x6a, 0x21, 4]); // acc += (10000u / d1) / d2
+        f2.extend_from_slice(&[0x20, 3, 0x41, 1, 0x6a, 0x21, 3, 0x0c, 0, 0x0b, 0x0b]); // end inner
+        f2.extend_from_slice(&[0x20, 2, 0x41, 1, 0x6a, 0x21, 2, 0x0c, 0, 0x0b, 0x0b]); // end outer
+        f2.extend_from_slice(&[0x20, 4]);
+
+        let wasm = wasm_module(&[
+            type_sec(&[
+                (&[0x7f, 0x7e], &[0x7f]),
+                (&[0x7f], &[0x7f]),
+                (&[0x7f, 0x7f], &[0x7f]),
+            ]),
+            func_sec(&[0, 1, 2]),
+            section(5, &[1, 0x01, 1, 2]),
+            code_sec(&[
+                enc_body(&[], &f0),
+                enc_body(&[(2, 0x7f)], &f1),
+                enc_body(&[(3, 0x7f)], &f2),
+            ]),
+        ]);
+        let val = wtime_validate::validate(&wasm, &x64_validate_features(), &x64_validate_limits())
+            .unwrap();
+        let dec = val.decoded();
+        let module = admit_x64_module(dec).unwrap();
+        let mut irs: Vec<IrFunc> = (0..dec.code.len())
+            .map(|bi| lower_wasm_to_ir(dec, &module, bi).unwrap())
+            .collect();
+        let effects = opt::compute_module_effects(&irs, &module, None).unwrap();
+        for ir in &mut irs {
+            opt::optimize_func_stage2(ir, &module, &effects, None).unwrap();
+            verify_ir(ir, &module).unwrap();
+        }
+        assert!(
+            irs[0]
+                .blocks
+                .iter()
+                .any(|b| b.insts.iter().any(|i| matches!(
+                    i.op,
+                    Op::Load {
+                        kind: LoadKind::I32,
+                        ..
+                    }
+                ))),
+            "i64.store32 must NOT forward I64 Val to i32.load"
+        );
+        assert!(
+            irs[1].blocks.iter().any(|b| !b.is_loop_header
+                && b.preds == 1
+                && b.insts
+                    .iter()
+                    .any(|i| matches!(i.op, Op::I32Bin(IntBinOp::DivU, _, _)))),
+            "guarded LICM must still hoist DivU when exit_bb promotes escaping hdr.params"
+        );
+    }
+
+    // 3. Incremental cache parity on SCC cycle break + two-table `call_indirect` reorder +
+    //    hardened handling of symlinked cache directories/files and crafted out-of-range indices.
+    {
+        let root = crate::build::create_fresh_test_root("wtime-aot-x64-inc-r1-reg");
+        let opts_inc = X64CompileOptions {
+            isa: TargetIsa {
+                has_abm_bmi1: true,
+                has_bmi2: true,
+            },
+            jobs: 2,
+            opt: true,
+            verify: true,
+            inc_cache_dir: Some(root.0.clone()),
+            cache_key_salt: Some([0x77u8; 32]),
+            ..Default::default()
+        };
+        let opts_cold = X64CompileOptions {
+            inc_cache_dir: None,
+            ..opts_inc.clone()
+        };
+
+        // 3a. SCC cycle break: f0 (small) calls f1; f1 calls f0 in v1 (cycle!) and does not in v2 (breaks cycle!);
+        //     f2 (exported caller) calls f0. Build v1 then v2 incrementally and assert exact cold parity.
+        let build_cycle = |f1_calls_f0: bool| -> Vec<u8> {
+            let f0 = vec![0x20, 0, 0x41, 1, 0x6a, 0x10, 1]; // f1(x + 1)
+            let f1 = if f1_calls_f0 {
+                // if x > 0 { f0(x - 1) } else { 7 }
+                vec![
+                    0x20, 0, 0x41, 0, 0x4a, 0x04, 0x7f, 0x20, 0, 0x41, 1, 0x6b, 0x10, 0, 0x05,
+                    0x41, 7, 0x0b,
+                ]
+            } else {
+                // x * 3 + 7 (no call to f0 -> breaks cycle!)
+                vec![0x20, 0, 0x41, 3, 0x6c, 0x41, 7, 0x6a]
+            };
+            let f2 = vec![0x20, 0, 0x10, 0, 0x41, 5, 0x6a]; // f0(x) + 5
+            let f3 = vec![0x20, 0, 0x41, 9, 0x73]; // untouched padding fn
+            wasm_module(&[
+                type_sec(&[(&[0x7f], &[0x7f])]),
+                func_sec(&[0, 0, 0, 0]),
+                export_sec(&[("entry", 0, 2), ("other", 0, 3)]),
+                code_sec(&[
+                    enc_body(&[], &f0),
+                    enc_body(&[], &f1),
+                    enc_body(&[], &f2),
+                    enc_body(&[], &f3),
+                ]),
+            ])
+        };
+        let w_cyc = build_cycle(true);
+        let w_brk = build_cycle(false);
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_cyc, &opts_inc).unwrap(),
+            compile_wasm_to_x64_so(&w_cyc, &opts_cold).unwrap(),
+            "cycle v1 inc vs cold"
+        );
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_brk, &opts_inc).unwrap(),
+            compile_wasm_to_x64_so(&w_brk, &opts_cold).unwrap(),
+            "cycle-break v2 inc must match cold bit-for-bit"
+        );
+
+        // 3b. Two funcref tables with identical slots where encounter order of `(tbl, type)` swaps.
+        let build_two_tables = |swap_order: bool| -> Vec<u8> {
+            let (t_first, t_second) = if swap_order { (1u8, 0u8) } else { (0u8, 1u8) };
+            let f0 = vec![0x20, 0, 0x41, 1, 0x6a];
+            let f1 = vec![0x20, 0, 0x20, 0, 0x11, 0, t_first]; // call_indirect type 0 table t_first
+            let f2 = vec![0x20, 0, 0x20, 0, 0x11, 0, t_second]; // call_indirect type 0 table t_second
+            wasm_module(&[
+                type_sec(&[(&[0x7f], &[0x7f])]),
+                func_sec(&[0, 0, 0]),
+                // Table section: 2 funcref tables of min=1, max=1
+                section(4, &[2, 0x70, 0x01, 1, 1, 0x70, 0x01, 1, 1]),
+                export_sec(&[("a", 0, 1), ("b", 0, 2)]),
+                // Elem section: table 0 slot 0 = f0; table 1 slot 0 = f0
+                section(
+                    9,
+                    &[
+                        2, // 2 elem segments
+                        0x00, 0x41, 0, 0x0b, 1, 0, // active tbl 0 offset 0 -> [f0]
+                        0x02, 1, 0x41, 0, 0x0b, 0x00, 1, 0, // active tbl 1 offset 0 -> [f0]
+                    ],
+                ),
+                code_sec(&[enc_body(&[], &f0), enc_body(&[], &f1), enc_body(&[], &f2)]),
+            ])
+        };
+        let w_t1 = build_two_tables(false);
+        let w_t2 = build_two_tables(true);
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_t1, &opts_inc).unwrap(),
+            compile_wasm_to_x64_so(&w_t1, &opts_cold).unwrap()
+        );
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_t2, &opts_inc).unwrap(),
+            compile_wasm_to_x64_so(&w_t2, &opts_cold).unwrap(),
+            "swapped two-table ci_index must not collide in abi_hash"
+        );
+
+        // 3c. Crafted cache file with valid Merkle trailer + out-of-range `eff_callees` and huge
+        //     `n_relocs` must be rejected cleanly by `load_inc_cache` without panic or OOM.
+        let crafted_root = crate::build::create_fresh_test_root("wtime-aot-x64-inc-crafted");
+        let opts_crafted = X64CompileOptions {
+            inc_cache_dir: Some(crafted_root.0.clone()),
+            ..opts_inc.clone()
+        };
+        let expected_so = compile_wasm_to_x64_so(&w_brk, &opts_crafted).unwrap();
+        let inc_dir = crafted_root.0.join("x64-inc");
+        let bin_path = std::fs::read_dir(&inc_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "bin"))
+            .expect("inc cache file");
+        let orig = std::fs::read(&bin_path).unwrap();
+        let sign_payload = |p: &[u8]| -> Vec<u8> {
+            let mut v = p.to_vec();
+            let mut root_h = crate::sha256::Sha256::new();
+            root_h.update(b"WTX64INC-ROOT-1");
+            root_h.update(&(p.len() as u64).to_le_bytes());
+            root_h.update(&crate::sha256::digest(p));
+            v.extend_from_slice(&root_h.finish());
+            v
+        };
+        // Truncated payload with valid Merkle signature must fall back cleanly.
+        std::fs::write(&bin_path, sign_payload(&orig[..orig.len() - 40])).unwrap();
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_brk, &opts_crafted).unwrap(),
+            expected_so,
+            "truncated signed cache file must fall back cleanly"
+        );
+
+        // Crafted signed cache file with out-of-range `eff_callees` index (9999) and bogus huge
+        // `n_relocs` must return `None` from `load_inc_cache` without panicking or OOMing.
+        {
+            let mut bad = orig[..orig.len() - 32].to_vec();
+            // Header is 53 bytes (8 magic + 4 ver + 32 abi_hash + 4 n_defs + 4 global_words + 1 hit_cap).
+            // First fn starts at offset 53: 32 raw_body_hash + 1 flags = offset 86 for n_pre.
+            // Overwrite first fn's `inlined_callees` to contain out-of-range callee 9999!
+            let mut crafted = bad[..53].to_vec();
+            crafted.extend_from_slice(&[0u8; 32]); // raw_body_hash
+            crafted.push(0); // flags
+            crafted.extend_from_slice(&0u32.to_le_bytes()); // n_pre = 0
+            crafted.extend_from_slice(&1u32.to_le_bytes()); // n_inlined = 1
+            crafted.extend_from_slice(&9999u32.to_le_bytes()); // OOB callee!
+            crafted.extend_from_slice(&[0u8; 200]); // padding
+            bad.clear();
+            let abi: [u8; 32] = crafted[12..44].try_into().unwrap();
+            let zero_hashes = [[0u8; 32]; 4];
+            std::fs::write(&bin_path, sign_payload(&crafted)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(
+                    &crafted_root.0,
+                    &abi,
+                    0,
+                    4,
+                    0,
+                    4096,
+                    &zero_hashes
+                )
+                .is_none(),
+                "OOB inlined_callees in signed cache file must be rejected"
+            );
+            // Also verify `save_inc_cache` + `compile_wasm_to_x64_so` recovers cleanly.
+            assert_eq!(
+                compile_wasm_to_x64_so(&w_brk, &opts_crafted).unwrap(),
+                expected_so
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            // Replace cache file with a symlink to a decoy file and confirm loader ignores it safely.
+            let decoy = crafted_root.0.join("decoy.bin");
+            std::fs::write(&decoy, &orig).unwrap();
+            std::fs::remove_file(&bin_path).unwrap();
+            std::os::unix::fs::symlink(&decoy, &bin_path).unwrap();
+            assert_eq!(
+                compile_wasm_to_x64_so(&w_brk, &opts_crafted).unwrap(),
+                expected_so,
+                "symlinked inc cache file must be rejected safely"
+            );
+        }
+
+        // 3d. Crafted cache file with `RelocTarget::LocalRodata(0)` when `ro_len == 0` must be
+        //     rejected by `load_inc_cache` rather than causing a link-time failure.
+        {
+            let mut crafted = orig[..53].to_vec();
+            for _ in 0..4 {
+                crafted.extend_from_slice(&[0u8; 32]); // raw_body_hash
+                crafted.push(0); // flags
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_pre
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_inlined
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // inline_added_insts
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_eff
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_elide
+                crafted.extend_from_slice(&0u64.to_le_bytes()); // written_tables
+                crafted.extend_from_slice(&0i32.to_le_bytes()); // max_helper_bytes
+                crafted.extend_from_slice(&0i32.to_le_bytes()); // own_stack_bytes
+                crafted.extend_from_slice(&0i32.to_le_bytes()); // elided_callee_stack_bytes
+                crafted.extend_from_slice(&[0u8; 32]); // callee_effects_hash
+                crafted.extend_from_slice(&[0u8; 32]); // callee_trap_hash
+                crafted.extend_from_slice(&8u32.to_le_bytes()); // pre_relax_code_len = 8
+                crafted.extend_from_slice(&8u32.to_le_bytes()); // code_len = 8
+                crafted.extend_from_slice(&[0x90u8; 8]); // code
+                crafted.extend_from_slice(&1u32.to_le_bytes()); // n_relocs = 1
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // patch_off = 0
+                crafted.extend_from_slice(&4u32.to_le_bytes()); // next_ip_off = 4
+                crafted.push(3u8); // RelocTarget::LocalRodata
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // off = 0
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // ro_len = 0 (invalid with LocalRodata(0)!)
+                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_jt = 0
+            }
+            let abi: [u8; 32] = crafted[12..44].try_into().unwrap();
+            let zero_hashes = [[0u8; 32]; 4];
+            let _ = std::fs::remove_file(&bin_path);
+            std::fs::write(&bin_path, sign_payload(&crafted)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(
+                    &crafted_root.0,
+                    &abi,
+                    0,
+                    4,
+                    0,
+                    4096,
+                    &zero_hashes
+                )
+                .is_none(),
+                "LocalRodata(0) with ro_len == 0 must be rejected"
+            );
+        }
+
+        // 3e. Transitive post-compaction `was_inlinable` flip (`Outer -> Main -> Mid -> Leaf`):
+        //     In v1, `Mid` is not inlinable and `Outer` inlines `Main` (leaving `call Mid`).
+        //     In v2, `Mid` calls `Leaf` (which traps `unreachable`) before >16 dead `if` blocks,
+        //     so `Mid` has >16 raw blocks (`is_inlinable_ir(raw) == false`) yet compacts to <=16
+        //     blocks after inlining `Leaf` (`track.was_inlinable[Mid] == true`).
+        //     Transitive promotion MUST dirty BOTH `Main` and `Outer` for exact cold parity!
+        let build_transitive_flip = |mid_v2: bool| -> Vec<u8> {
+            let leaf = vec![0x00]; // unreachable
+            let mid = if !mid_v2 {
+                // > 64 insts -> not inlinable in v1
+                let mut m = vec![0x20, 0];
+                for i in 1..=80i32 {
+                    m.push(0x41);
+                    leb_i32(&mut m, i);
+                    m.push(0x6a);
+                }
+                m
+            } else {
+                // Calls `Leaf` (f0), followed by 9 `if (x) { x += 1 } else { x += 2 }` blocks
+                // (> 16 raw blocks so `is_inlinable_ir(raw) == false`, <= 64 insts, all dead after inlining `Leaf`!).
+                let mut m = vec![0x20, 0, 0x10, 0, 0x21, 0];
+                for _ in 0..9 {
+                    m.extend_from_slice(&[
+                        0x20, 0, 0x04, 0x7f, 0x20, 0, 0x41, 1, 0x6a, 0x05, 0x20, 0, 0x41, 2, 0x6a,
+                        0x0b, 0x21, 0,
+                    ]);
+                }
+                m.extend_from_slice(&[0x20, 0]);
+                m
+            };
+            let main_fn = vec![0x20, 0, 0x10, 1, 0x41, 1, 0x6a]; // Mid(x) + 1
+            let outer_fn = vec![0x20, 0, 0x10, 2, 0x41, 2, 0x6a]; // Main(x) + 2
+            let mut bodies = vec![
+                enc_body(&[], &leaf),
+                enc_body(&[], &mid),
+                enc_body(&[], &main_fn),
+                enc_body(&[], &outer_fn),
+            ];
+            let mut func_tys = vec![0u32; 10];
+            for k in 0..6i32 {
+                let pad = vec![0x20, 0, 0x41, (k + 1) as u8, 0x73];
+                bodies.push(enc_body(&[], &pad));
+                func_tys[4 + k as usize] = 0;
+            }
+            wasm_module(&[
+                type_sec(&[(&[0x7f], &[0x7f])]),
+                func_sec(&func_tys),
+                export_sec(&[("outer", 0, 3), ("pad", 0, 4)]),
+                code_sec(&bodies),
+            ])
+        };
+        let tr_root = crate::build::create_fresh_test_root("wtime-aot-x64-inc-trans-flip");
+        let opts_tr_inc = X64CompileOptions {
+            inc_cache_dir: Some(tr_root.0.clone()),
+            ..opts_inc.clone()
+        };
+        let w_tr1 = build_transitive_flip(false);
+        let w_tr2 = build_transitive_flip(true);
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_tr1, &opts_tr_inc).unwrap(),
+            compile_wasm_to_x64_so(&w_tr1, &opts_cold).unwrap()
+        );
+        assert_eq!(
+            compile_wasm_to_x64_so(&w_tr2, &opts_tr_inc).unwrap(),
+            compile_wasm_to_x64_so(&w_tr2, &opts_cold).unwrap(),
+            "transitive post-compaction was_inlinable flip must match cold build bit-for-bit"
+        );
+
+        // 3f. Sequential equal-size guarded-LICM loops (with bb0 parameter numerators so guarded
+        //     LICM actually fires on loop 1 while loop 2's preheader collides with loop 1's exit!)
+        //     must compile deterministically across runs.
+        let mut seq_loops = Vec::new();
+        // Params: 0 = num1, 1 = num2, 2 = n; Locals: 3 = i, 4 = acc, 5 = j
+        // Loop 1: for i=0..n { acc += num1 /u n }
+        seq_loops.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+        seq_loops.extend_from_slice(&[0x20, 3, 0x20, 2, 0x4f, 0x0d, 1]);
+        seq_loops.extend_from_slice(&[0x20, 4, 0x20, 0, 0x20, 2, 0x6e, 0x6a, 0x21, 4]);
+        seq_loops.extend_from_slice(&[0x20, 3, 0x41, 1, 0x6a, 0x21, 3, 0x0c, 0, 0x0b, 0x0b]);
+        // Loop 2 (same block count!): for j=0..n { acc += num2 /u n }
+        seq_loops.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+        seq_loops.extend_from_slice(&[0x20, 5, 0x20, 2, 0x4f, 0x0d, 1]);
+        seq_loops.extend_from_slice(&[0x20, 4, 0x20, 1, 0x20, 2, 0x6e, 0x6a, 0x21, 4]);
+        seq_loops.extend_from_slice(&[0x20, 5, 0x41, 1, 0x6a, 0x21, 5, 0x0c, 0, 0x0b, 0x0b]);
+        seq_loops.extend_from_slice(&[0x20, 4]);
+        let w_seq = wasm_module(&[
+            type_sec(&[(&[0x7f, 0x7f, 0x7f], &[0x7f])]),
+            func_sec(&[0]),
+            export_sec(&[("seq", 0, 0)]),
+            code_sec(&[enc_body(&[(3, 0x7f)], &seq_loops)]),
+        ]);
+        let ref_so = compile_wasm_to_x64_so(&w_seq, &opts_cold).unwrap();
+        for _ in 0..8 {
+            assert_eq!(
+                compile_wasm_to_x64_so(&w_seq, &opts_cold).unwrap(),
+                ref_so,
+                "equal-size sequential guarded LICM loops must be 100% deterministic"
+            );
+        }
+
+        // 3g. Hardening invariants:
+        //     - `CfgDom::dominates` returns `false` on identical invalid/out-of-range IDs.
+        //     - `sweep_stale_tmp_files` never removes non-staging files like `tmp.notes`.
+        //     - High-alternation cross-block CFG triggering `MAX_SEGS_PER_VAL` fallback passes `verify_alloc`.
+        {
+            let val =
+                wtime_validate::validate(&w_seq, &x64_validate_features(), &x64_validate_limits())
+                    .unwrap();
+            let dec = val.decoded();
+            let module = admit_x64_module(dec).unwrap();
+            let mut ir = lower_wasm_to_ir(dec, &module, 0).unwrap();
+            let dom = opt::rebuild_cfg_and_prune(&mut ir, None).unwrap();
+            assert!(
+                !dom.dominates(9999, 9999),
+                "dominates must return false for identical OOB block IDs"
+            );
+
+            // Exercise `sweep_stale_tmp_files_with_cutoff` directly on both a non-staging file
+            // (`tmp.notes`, must survive) and a staging file (`tmp.<pid>.<seq>`, must be deleted).
+            let x64_inc = tr_root.0.join("x64-inc");
+            let notes = x64_inc.join("tmp.notes");
+            let stale = x64_inc.join("tmp.999999.0");
+            std::fs::write(&notes, b"keep").unwrap();
+            std::fs::write(&stale, b"stale").unwrap();
+            super::inc_cache::sweep_stale_tmp_files_with_cutoff(
+                &x64_inc,
+                std::time::Duration::ZERO,
+            );
+            assert!(
+                notes.exists(),
+                "sweep must not delete non-staging tmp.notes"
+            );
+            assert!(
+                !stale.exists(),
+                "sweep must delete stale staging tmp.<pid>.<seq> file"
+            );
+            let _ = std::fs::remove_file(&notes);
+
+            // Build a synthetic CFG whose RPO is `[0, 1, 2, 3, ..., 2*N]` where `Val(0)` is live
+            // only in even blocks (`0, 2, ..., 2*N`) and dead in every odd block (`1, 3, ..., 2*N-1`).
+            // Odd block `1` keeps 9 non-rematerializable GP values (`Val(1)` + `t0..t7`) live
+            // simultaneously (= all 9 default GP regs):
+            // - At `N = 10` (11 disjoint segments <= `MAX_SEGS_PER_VAL = 64`), exact live-range
+            //   holes let one of block `1`'s 9 values reuse `Val(0)`'s GP register.
+            // - At `N = 80` (81 disjoint segments > `MAX_SEGS_PER_VAL = 64`), `Val(0)` triggers
+            //   `cb_seg_overflow` and falls back to its conservative full hull, forcing `Val(0)`'s
+            //   location to stay disjoint from all 9 simultaneously live values in block `1`.
+            let build_alt_ir = |pairs: u32| -> (super::ir::IrFunc, Vec<super::ir::Val>) {
+                use super::ir::{
+                    Block, BlockId, Inst, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange,
+                };
+                let mut ir = IrFunc {
+                    func_index: 0,
+                    params: vec![Val(0), Val(1)],
+                    result_tys: vec![Ty::I32],
+                    val_tys: vec![Ty::I32, Ty::I32],
+                    blocks: Vec::with_capacity((2 * pairs + 1) as usize),
+                    val_pool: vec![Val(0), Val(1)],
+                    v128_consts: Vec::new(),
+                    br_tables: Vec::new(),
+                    needs_stack_check: false,
+                    elided_callee_stack_bytes: 0,
+                };
+                let empty = ValRange { start: 0, len: 0 };
+                let ret_v0 = ValRange { start: 0, len: 1 };
+                let ret_v1 = ValRange { start: 1, len: 1 };
+                let mut hole_live = vec![Val(1)];
+                for i in 0..pairs {
+                    ir.blocks.push(Block {
+                        params: if i == 0 {
+                            vec![Val(0), Val(1)]
+                        } else {
+                            Vec::new()
+                        },
+                        insts: Vec::new(),
+                        term: Term::BranchIf {
+                            cond: Val(1),
+                            then_bb: BlockId(2 * i + 2),
+                            then_args: empty,
+                            else_bb: BlockId(2 * i + 1),
+                            else_args: empty,
+                        },
+                        is_loop_header: false,
+                        preds: if i == 0 { 0 } else { 1 },
+                    });
+                    if i == 0 {
+                        let mut insts = Vec::with_capacity(16);
+                        let mut prev = Val(1);
+                        let mut prev2 = Val(1);
+                        let mut temps = Vec::with_capacity(8);
+                        for _ in 0..8 {
+                            let t = ir.push_val(Ty::I32);
+                            insts.push(Inst {
+                                res: Some(t),
+                                op: Op::I32Bin(IntBinOp::Add, prev2, prev),
+                            });
+                            temps.push(t);
+                            hole_live.push(t);
+                            prev2 = prev;
+                            prev = t;
+                        }
+                        let mut acc = Val(1);
+                        for &t in &temps {
+                            let next = ir.push_val(Ty::I32);
+                            insts.push(Inst {
+                                res: Some(next),
+                                op: Op::I32Bin(IntBinOp::Xor, acc, t),
+                            });
+                            acc = next;
+                        }
+                        let ret_acc = ir.push_pool(&[acc]).unwrap();
+                        ir.blocks.push(Block {
+                            params: Vec::new(),
+                            insts,
+                            term: Term::Return { vals: ret_acc },
+                            is_loop_header: false,
+                            preds: 1,
+                        });
+                    } else {
+                        ir.blocks.push(Block {
+                            params: Vec::new(),
+                            insts: Vec::new(),
+                            term: Term::Return { vals: ret_v1 },
+                            is_loop_header: false,
+                            preds: 1,
+                        });
+                    }
+                }
+                ir.blocks.push(Block {
+                    params: Vec::new(),
+                    insts: Vec::new(),
+                    term: Term::Return { vals: ret_v0 },
+                    is_loop_header: false,
+                    preds: 1,
+                });
+                (ir, hole_live)
+            };
+
+            let (ir_holes, hole_live_small) = build_alt_ir(10);
+            let alloc_holes = super::regalloc::allocate(&ir_holes).unwrap();
+            super::verify::verify_alloc(&ir_holes, &alloc_holes).unwrap();
+            assert!(
+                hole_live_small
+                    .iter()
+                    .any(|&v| alloc_holes.locs[v.0 as usize] == alloc_holes.locs[0]),
+                "with 11 <= 64 segments, exact live-range hole in block 1 should allow reusing Val(0)'s register"
+            );
+
+            let (ir_overflow, hole_live_big) = build_alt_ir(80);
+            let alloc_overflow = super::regalloc::allocate(&ir_overflow).unwrap();
+            super::verify::verify_alloc(&ir_overflow, &alloc_overflow).unwrap();
+            assert!(
+                hole_live_big
+                    .iter()
+                    .all(|&v| alloc_overflow.locs[v.0 as usize] != alloc_overflow.locs[0]),
+                "with 81 > 64 segments, Val(0) must fall back to its conservative full hull across block 1"
+            );
+        }
+    }
 }

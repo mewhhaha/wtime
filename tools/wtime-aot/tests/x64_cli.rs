@@ -172,12 +172,14 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
     assert_eq!(fs::read_to_string(&sha_path).unwrap().trim().len(), 64);
 
     // Verify `native` maps to the exact same cache key as the resolved `x86-64-v3` or `x86-64-v2` profile!
-    let resolved_flag =
-        if std::is_x86_feature_detected!("lzcnt") && std::is_x86_feature_detected!("bmi1") {
-            "x86-64-v3"
-        } else {
-            "x86-64-v2"
-        };
+    let resolved_flag = if std::is_x86_feature_detected!("lzcnt")
+        && std::is_x86_feature_detected!("bmi1")
+        && std::is_x86_feature_detected!("bmi2")
+    {
+        "x86-64-v3"
+    } else {
+        "x86-64-v2"
+    };
     let warm = Command::new(bin)
         .arg("build")
         .arg(&ok_wasm)

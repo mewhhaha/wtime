@@ -388,12 +388,15 @@ pub enum Op {
         dst: Val,
         src: Val,
         len: u32,
+        dst_checked: bool,
+        src_checked: bool,
     },
     /// Inline small constant-length bulk fill (`len <= 64`, zero GP clobbers).
     MemFillConst {
         dst: Val,
         val: Val,
         len: u32,
+        checked: bool,
     },
 
     V128Splat {
@@ -742,6 +745,57 @@ pub struct IrFunc {
 }
 
 impl IrFunc {
+    /// Fallibly clones the entire `IrFunc` using `try_reserve_exact` on all owned buffers,
+    /// returning `None` on allocation failure so optional incremental cache work can fall back cleanly.
+    pub fn try_clone(&self) -> Option<Self> {
+        fn try_copy<T: Copy>(src: &[T]) -> Option<Vec<T>> {
+            let mut out = Vec::new();
+            out.try_reserve_exact(src.len()).ok()?;
+            out.extend_from_slice(src);
+            Some(out)
+        }
+        let params = try_copy(&self.params)?;
+        let result_tys = try_copy(&self.result_tys)?;
+        let val_tys = try_copy(&self.val_tys)?;
+        let val_pool = try_copy(&self.val_pool)?;
+        let v128_consts = try_copy(&self.v128_consts)?;
+
+        let mut blocks = Vec::new();
+        blocks.try_reserve_exact(self.blocks.len()).ok()?;
+        for bb in &self.blocks {
+            blocks.push(Block {
+                params: try_copy(&bb.params)?,
+                insts: try_copy(&bb.insts)?,
+                term: bb.term,
+                is_loop_header: bb.is_loop_header,
+                preds: bb.preds,
+            });
+        }
+
+        let mut br_tables = Vec::new();
+        br_tables.try_reserve_exact(self.br_tables.len()).ok()?;
+        for bt in &self.br_tables {
+            br_tables.push(BrTableData {
+                targets: try_copy(&bt.targets)?,
+                default: bt.default,
+                unique_edges: try_copy(&bt.unique_edges)?,
+            });
+        }
+
+        Some(Self {
+            func_index: self.func_index,
+            params,
+            result_tys,
+            val_tys,
+            blocks,
+            val_pool,
+            v128_consts,
+            br_tables,
+            needs_stack_check: self.needs_stack_check,
+            elided_callee_stack_bytes: self.elided_callee_stack_bytes,
+        })
+    }
+
     pub fn push_val(&mut self, ty: Ty) -> Val {
         let id = self.val_tys.len() as u32;
         self.val_tys.push(ty);
@@ -894,10 +948,10 @@ struct BuildFrame {
     target_bb: BlockId,
     /// Locals carried into `target_bb` as trailing block params.
     carried_locals: Vec<u32>,
-    /// For `If`: else block, entry operand values, entry locals snapshot, whether `else` was seen.
+    /// For `If`: else block, entry operand values, undo-log mark into `local_undo`, whether `else` was seen.
     else_bb: Option<BlockId>,
     if_entry_params: Vec<Val>,
-    if_entry_locals: Vec<Val>,
+    if_undo_mark: usize,
     has_else: bool,
     unreachable: bool,
 }
@@ -1370,6 +1424,8 @@ pub fn lower_wasm_to_ir_with_budget(
     }
 
     let scan = scan_frame_locals(&body.instructions, local_tys.len(), budget)?;
+    let mut local_undo: Vec<(u32, Val)> = Vec::new();
+    let mut active_if_then_depth: usize = 0;
     let mut total_if_snapshot_entries: usize = 0;
     // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
     // allocated native frame bytes and call depth.
@@ -1412,11 +1468,33 @@ pub fn lower_wasm_to_ir_with_budget(
         carried_locals: Vec::new(),
         else_bb: None,
         if_entry_params: Vec::new(),
-        if_entry_locals: Vec::new(),
+        if_undo_mark: 0,
         has_else: false,
         unreachable: false,
     }];
     let mut dead: usize = 0;
+
+    let set_local = |locals: &mut [Val],
+                     local_undo: &mut Vec<(u32, Val)>,
+                     active_if_then_depth: usize,
+                     total_if_snapshot_entries: &mut usize,
+                     lx: usize,
+                     new_val: Val|
+     -> Res<()> {
+        let old = locals[lx];
+        if active_if_then_depth > 0 && old != new_val {
+            *total_if_snapshot_entries = total_if_snapshot_entries.saturating_add(1);
+            if *total_if_snapshot_entries > MAX_IF_SNAPSHOT_ENTRIES {
+                return Err(format!(
+                    "x64: function {func_index} if-nesting snapshot budget ({}) exceeds cap {MAX_IF_SNAPSHOT_ENTRIES}",
+                    *total_if_snapshot_entries
+                ));
+            }
+            local_undo.push((lx as u32, old));
+        }
+        locals[lx] = new_val;
+        Ok(())
+    };
 
     let build_branch_args =
         |b: &mut Builder, stack: &[Val], locals: &[Val], frame: &BuildFrame| -> Res<ValRange> {
@@ -1508,7 +1586,7 @@ pub fn lower_wasm_to_ir_with_budget(
                     carried_locals: carried,
                     else_bb: None,
                     if_entry_params: Vec::new(),
-                    if_entry_locals: Vec::new(),
+                    if_undo_mark: 0,
                     has_else: false,
                     unreachable: false,
                 });
@@ -1547,7 +1625,14 @@ pub fn lower_wasm_to_ir_with_budget(
                     stack[height + k] = v;
                 }
                 for (&lx, v) in carried.iter().zip(header_local_vals) {
-                    locals[lx as usize] = v;
+                    set_local(
+                        &mut locals,
+                        &mut local_undo,
+                        active_if_then_depth,
+                        &mut total_if_snapshot_entries,
+                        lx as usize,
+                        v,
+                    )?;
                 }
                 frames.push(BuildFrame {
                     kind: FrameKind::Loop,
@@ -1558,7 +1643,7 @@ pub fn lower_wasm_to_ir_with_budget(
                     carried_locals: carried,
                     else_bb: None,
                     if_entry_params: Vec::new(),
-                    if_entry_locals: Vec::new(),
+                    if_undo_mark: 0,
                     has_else: false,
                     unreachable: false,
                 });
@@ -1594,15 +1679,16 @@ pub fn lower_wasm_to_ir_with_budget(
                 b.add_pred(then_bb);
                 b.add_pred(else_bb);
                 b.cur_bb = then_bb;
-                let snap_entries = (stack.len() - height).saturating_add(locals.len());
-                total_if_snapshot_entries = total_if_snapshot_entries.saturating_add(snap_entries);
+                let param_entries = stack.len() - height;
+                total_if_snapshot_entries = total_if_snapshot_entries.saturating_add(param_entries);
                 if total_if_snapshot_entries > MAX_IF_SNAPSHOT_ENTRIES {
                     return Err(format!(
                         "x64: function {func_index} if-nesting snapshot budget ({total_if_snapshot_entries}) exceeds cap {MAX_IF_SNAPSHOT_ENTRIES}"
                     ));
                 }
                 let if_entry_params = stack[height..].to_vec();
-                let if_entry_locals = locals.clone();
+                let if_undo_mark = local_undo.len();
+                active_if_then_depth += 1;
                 frames.push(BuildFrame {
                     kind: FrameKind::If,
                     height,
@@ -1612,7 +1698,7 @@ pub fn lower_wasm_to_ir_with_budget(
                     carried_locals: carried,
                     else_bb: Some(else_bb),
                     if_entry_params,
-                    if_entry_locals,
+                    if_undo_mark,
                     has_else: false,
                     unreachable: false,
                 });
@@ -1630,13 +1716,18 @@ pub fn lower_wasm_to_ir_with_budget(
                     b.add_pred(target);
                 }
                 let f = frames.last_mut().unwrap();
+                debug_assert!(!f.has_else && active_if_then_depth > 0);
                 f.has_else = true;
                 f.unreachable = false;
                 dead = 0;
                 b.cur_bb = f.else_bb.unwrap();
                 stack.truncate(f.height);
                 stack.extend_from_slice(&f.if_entry_params);
-                locals = std::mem::take(&mut f.if_entry_locals);
+                active_if_then_depth -= 1;
+                while local_undo.len() > f.if_undo_mark {
+                    let (lx, old_val) = local_undo.pop().unwrap();
+                    locals[lx as usize] = old_val;
+                }
             }
             0x0b => {
                 // end
@@ -1670,14 +1761,21 @@ pub fn lower_wasm_to_ir_with_budget(
                             b.add_pred(target);
                         }
                         if f.kind == FrameKind::If && !f.has_else {
-                            // Emit implicit else -> merge_bb edge carrying original entry params & locals.
+                            // Unwind `then`-branch local mutations back to exact `if`-entry state,
+                            // then emit implicit else -> merge_bb edge carrying entry params & locals.
+                            debug_assert!(active_if_then_depth > 0);
+                            active_if_then_depth -= 1;
+                            while local_undo.len() > f.if_undo_mark {
+                                let (lx, old_val) = local_undo.pop().unwrap();
+                                locals[lx as usize] = old_val;
+                            }
                             b.cur_bb = f.else_bb.unwrap();
                             let mut args = Vec::with_capacity(
                                 f.if_entry_params.len() + f.carried_locals.len(),
                             );
                             args.extend_from_slice(&f.if_entry_params);
                             for &lx in &f.carried_locals {
-                                args.push(f.if_entry_locals[lx as usize]);
+                                args.push(locals[lx as usize]);
                             }
                             let args_r = b.ir.push_pool(&args)?;
                             b.terminate(Term::Jump {
@@ -1697,7 +1795,14 @@ pub fn lower_wasm_to_ir_with_budget(
                                 stack.push(rv);
                             }
                             for (&lx, &lv) in f.carried_locals.iter().zip(&mparams[n_res..]) {
-                                locals[lx as usize] = lv;
+                                set_local(
+                                    &mut locals,
+                                    &mut local_undo,
+                                    active_if_then_depth,
+                                    &mut total_if_snapshot_entries,
+                                    lx as usize,
+                                    lv,
+                                )?;
                             }
                         }
                     }
@@ -1915,12 +2020,27 @@ pub fn lower_wasm_to_ir_with_budget(
             }
             0x21 => {
                 let x = imm_idx()? as usize;
-                locals[x] = stack.pop().ok_or("local.set")?;
+                let v = stack.pop().ok_or("local.set")?;
+                set_local(
+                    &mut locals,
+                    &mut local_undo,
+                    active_if_then_depth,
+                    &mut total_if_snapshot_entries,
+                    x,
+                    v,
+                )?;
             }
             0x22 => {
                 let x = imm_idx()? as usize;
                 let v = *stack.last().ok_or("local.tee")?;
-                locals[x] = v;
+                set_local(
+                    &mut locals,
+                    &mut local_undo,
+                    active_if_then_depth,
+                    &mut total_if_snapshot_entries,
+                    x,
+                    v,
+                )?;
             }
             0x23 => {
                 let x = imm_idx()? as usize;
@@ -2110,6 +2230,8 @@ pub fn lower_wasm_to_ir_with_budget(
                         dst,
                         src,
                         len: c as u32,
+                        dst_checked: false,
+                        src_checked: false,
                     });
                 } else {
                     b.emit_void(Op::MemCopy { dst, src, len });
@@ -2126,6 +2248,7 @@ pub fn lower_wasm_to_ir_with_budget(
                         dst,
                         val,
                         len: c as u32,
+                        checked: false,
                     });
                 } else {
                     b.emit_void(Op::MemFill { dst, val, len });
@@ -2785,11 +2908,12 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                         i += 1;
                         continue;
                     }
-                    // Look ahead over pure non-trapping instructions and loads from the SAME `addr`
-                    // (stopping at any different-address load or side-effecting op to preserve exact
-                    // Wasm trap order and keep lookahead strictly linear).
+                    // Look ahead over pure non-trapping instructions, loads from the SAME `addr`,
+                    // and an optional FIRST unchecked store to the SAME `addr` (stopping immediately
+                    // after that first store or any other side-effecting op so no observable state
+                    // changes can precede an OOB trap and lookahead stays strictly linear).
                     let mut max_end = end;
-                    let mut run_loads = 1usize;
+                    let mut run_ops = 1usize;
                     let mut j = i + 1;
                     while j < insts.len() {
                         if let Some(bg) = budget
@@ -2808,14 +2932,27 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                                 if e > max_end {
                                     max_end = e;
                                 }
-                                run_loads += 1;
+                                run_ops += 1;
+                            }
+                            Op::Store {
+                                kind: sk,
+                                addr: sa,
+                                offset: so,
+                                ..
+                            } if sa == a => {
+                                let e = (so as u64) + sk.bytes();
+                                if e > max_end {
+                                    max_end = e;
+                                }
+                                run_ops += 1;
+                                break;
                             }
                             ref other if !other.has_side_effect() => {}
                             _ => break,
                         }
                         j += 1;
                     }
-                    if run_loads >= 2 && max_end > end {
+                    if run_ops >= 2 && max_end > end {
                         out.push(Inst {
                             res: None,
                             op: Op::BoundsCheck {
@@ -2849,10 +2986,8 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                     }
                     out.push(inst);
                 }
-                Op::Call { .. } | Op::CallIndirect { .. } | Op::MemGrow(_) => {
-                    checked_max.clear();
-                    out.push(inst);
-                }
+                // Note: Wasm linear memory can only grow, never shrink, so `checked_max`
+                // bounds remain strictly valid across `Call`, `CallIndirect`, and `MemGrow`.
                 _ => out.push(inst),
             }
             i += 1;

@@ -11,11 +11,12 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/// An incremental SHA-256.
+/// An incremental SHA-256 hasher (zero heap allocation, direct 64-byte chunk compression).
 #[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],
-    block: Vec<u8>,
+    block: [u8; 64],
+    block_len: usize,
     length: u64,
 }
 
@@ -26,83 +27,136 @@ impl Sha256 {
                 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
                 0x5be0cd19,
             ],
-            block: Vec::with_capacity(64),
+            block: [0u8; 64],
+            block_len: 0,
             length: 0,
         }
     }
 
     pub fn update(&mut self, mut bytes: &[u8]) {
         self.length = self.length.wrapping_add(bytes.len() as u64);
-        while !bytes.is_empty() {
-            let take = (64 - self.block.len()).min(bytes.len());
-            self.block.extend_from_slice(&bytes[..take]);
+        if self.block_len > 0 {
+            let take = (64 - self.block_len).min(bytes.len());
+            self.block[self.block_len..self.block_len + take].copy_from_slice(&bytes[..take]);
+            self.block_len += take;
             bytes = &bytes[take..];
-            if self.block.len() == 64 {
-                let block: [u8; 64] = self.block[..].try_into().unwrap_or([0; 64]);
-                self.compress(&block);
-                self.block.clear();
+            if self.block_len == 64 {
+                let b = self.block;
+                self.compress(&b);
+                self.block_len = 0;
             }
         }
+        let (chunks, rem) = bytes.as_chunks::<64>();
+        for chunk in chunks {
+            self.compress(chunk);
+        }
+        if !rem.is_empty() {
+            self.block[..rem.len()].copy_from_slice(rem);
+            self.block_len = rem.len();
+        }
+    }
+
+    /// Finalizes and returns the raw 32-byte digest.
+    pub fn finish(mut self) -> [u8; 32] {
+        let bits = self.length.wrapping_mul(8);
+        self.block[self.block_len] = 0x80;
+        self.block_len += 1;
+        if self.block_len > 56 {
+            self.block[self.block_len..64].fill(0);
+            let b = self.block;
+            self.compress(&b);
+            self.block_len = 0;
+        }
+        self.block[self.block_len..56].fill(0);
+        self.block[56..64].copy_from_slice(&bits.to_be_bytes());
+        let b = self.block;
+        self.compress(&b);
+        let mut out = [0u8; 32];
+        for (i, word) in self.state.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
     }
 
     /// The digest as 64 lowercase hex digits.
-    pub fn hex(mut self) -> String {
-        let bits = self.length.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.block.len() != 56 {
-            self.update(&[0]);
-        }
-        self.update(&bits.to_be_bytes());
-        self.state
-            .iter()
-            .map(|word| format!("{word:08x}"))
-            .collect()
+    pub fn hex(self) -> String {
+        to_hex(&self.finish())
     }
 
+    #[inline(always)]
     fn compress(&mut self, block: &[u8; 64]) {
         let mut w = [0u32; 64];
-        for (t, word) in block.as_chunks::<4>().0.iter().enumerate() {
-            w[t] = u32::from_be_bytes(*word);
+        let words = block.as_chunks::<4>().0;
+        for t in 0..16 {
+            w[t] = u32::from_be_bytes(words[t]);
         }
         for t in 16..64 {
-            let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
-            let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
+            let wm15 = w[t - 15];
+            let wm2 = w[t - 2];
+            let s0 = wm15.rotate_right(7) ^ wm15.rotate_right(18) ^ (wm15 >> 3);
+            let s1 = wm2.rotate_right(17) ^ wm2.rotate_right(19) ^ (wm2 >> 10);
             w[t] = w[t - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[t - 7])
                 .wrapping_add(s1);
         }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        for t in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choice = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(choice)
-                .wrapping_add(K[t])
-                .wrapping_add(w[t]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
+        macro_rules! round {
+            ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $idx:expr) => {{
+                let s1 = $e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25);
+                let ch = ($e & $f) ^ (!$e & $g);
+                let t1 = $h
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[$idx])
+                    .wrapping_add(w[$idx]);
+                let s0 = $a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22);
+                let maj = ($a & $b) ^ ($a & $c) ^ ($b & $c);
+                $d = $d.wrapping_add(t1);
+                $h = t1.wrapping_add(s0.wrapping_add(maj));
+            }};
         }
-        for (state, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-            *state = state.wrapping_add(value);
+        let mut i = 0;
+        while i < 64 {
+            round!(a, b, c, d, e, f, g, h, i);
+            round!(h, a, b, c, d, e, f, g, i + 1);
+            round!(g, h, a, b, c, d, e, f, i + 2);
+            round!(f, g, h, a, b, c, d, e, i + 3);
+            round!(e, f, g, h, a, b, c, d, i + 4);
+            round!(d, e, f, g, h, a, b, c, i + 5);
+            round!(c, d, e, f, g, h, a, b, i + 6);
+            round!(b, c, d, e, f, g, h, a, i + 7);
+            i += 8;
         }
+        self.state[0] = self.state[0].wrapping_add(a);
+        self.state[1] = self.state[1].wrapping_add(b);
+        self.state[2] = self.state[2].wrapping_add(c);
+        self.state[3] = self.state[3].wrapping_add(d);
+        self.state[4] = self.state[4].wrapping_add(e);
+        self.state[5] = self.state[5].wrapping_add(f);
+        self.state[6] = self.state[6].wrapping_add(g);
+        self.state[7] = self.state[7].wrapping_add(h);
     }
 }
 
-pub fn hex(bytes: &[u8]) -> String {
+pub fn to_hex(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for &b in digest {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+pub fn digest(bytes: &[u8]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(bytes);
-    hash.hex()
+    hash.finish()
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    to_hex(&digest(bytes))
 }
 
 #[cfg(test)]
@@ -131,5 +185,15 @@ mod tests {
             million.hex(),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
+        // Boundary lengths around 55/56/63/64/65/128 bytes
+        for len in [55usize, 56, 57, 63, 64, 65, 119, 120, 128, 129] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 31) as u8).collect();
+            let one_shot = hex(&data);
+            let mut inc = Sha256::new();
+            for ch in data.chunks(7) {
+                inc.update(ch);
+            }
+            assert_eq!(one_shot, inc.hex(), "mismatch at len {len}");
+        }
     }
 }

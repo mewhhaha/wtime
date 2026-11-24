@@ -263,6 +263,9 @@ struct LocalFixup {
 
 pub struct Asm {
     pub code: Vec<u8>,
+    /// Pre-relaxation byte length of `code` charged to `CompileBudget` during emission
+    /// (recorded by `finish_labels()` so warm incremental reuse charges identical code caps).
+    pub pre_relax_code_len: u32,
     pub relocs: Vec<Reloc>,
     pub local_rodata: Vec<u8>,
     pub jt_patches: Vec<JumpTablePatch>,
@@ -276,6 +279,7 @@ impl Asm {
     pub fn new() -> Self {
         Self {
             code: Vec::with_capacity(256),
+            pre_relax_code_len: 0,
             relocs: Vec::new(),
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
@@ -289,6 +293,7 @@ impl Asm {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             code: Vec::with_capacity(cap),
+            pre_relax_code_len: 0,
             relocs: Vec::new(),
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
@@ -347,6 +352,7 @@ impl Asm {
                 self.code.len()
             ));
         }
+        self.pre_relax_code_len = self.code.len() as u32;
         let n_fix = self.fixups.len();
         if n_fix == 0 {
             return Ok(());
@@ -362,38 +368,61 @@ impl Asm {
             target_orig.push(t);
         }
 
-        // Monotonic short-branch relaxation (2 iterations catch cascading shrinks cleanly):
-        // shrinking a `jmp rel32` (5 B -> 2 B) saves 3 B; `jcc rel32` (6 B -> 2 B) saves 4 B.
-        let mut is_short = vec![false; n_fix];
+        // Monotonic branch relaxation (3 passes catch cascading shrinks cleanly):
+        // - `jmp` directly to the immediately following instruction (`rel == 0`): 5 B -> 0 B (saves 5 B)
+        // - `jmp rel32` within `rel8`: 5 B -> 2 B (saves 3 B)
+        // - `jcc rel32` within `rel8`: 6 B -> 2 B (saves 4 B)
+        // Mode: 0 = rel32, 1 = rel8, 2 = elided 0-byte fallthrough jmp.
+        let mut mode = vec![0u8; n_fix];
         let mut saved_prefix = vec![0u32; n_fix + 1];
-        let mut any_short = false;
-        for _pass in 0..3 {
+        let mut any_changed = false;
+        let save_for = |kind: FixupKind, m: u8| -> u32 {
+            match (kind, m) {
+                (FixupKind::Jmp, 2) => 5,
+                (FixupKind::Jmp, 1) => 3,
+                (FixupKind::Jcc(_), 1) => 4,
+                _ => 0,
+            }
+        };
+        for _pass in 0..4 {
             let mut changed = false;
             let shift_of = |orig_off: u32, fixups: &[LocalFixup], prefix: &[u32]| -> u32 {
                 let idx = fixups.partition_point(|fx| fx.next_ip_off <= orig_off);
                 prefix[idx]
             };
             for (i, f) in self.fixups.iter().enumerate() {
-                if is_short[i] {
-                    continue;
-                }
-                let save = match f.kind {
-                    FixupKind::Jmp => 3u32,
-                    FixupKind::Jcc(_) => 4u32,
-                };
+                let cur_m = mode[i];
+                let cur_save = save_for(f.kind, cur_m);
                 let t_cur = i64::from(target_orig[i])
                     - i64::from(shift_of(target_orig[i], &self.fixups, &saved_prefix));
-                let ip_cur = i64::from(f.inst_off) - i64::from(saved_prefix[i]) + 2;
-                let adj = if target_orig[i] >= f.next_ip_off {
-                    i64::from(save)
-                } else {
-                    0
-                };
-                let rel = (t_cur - adj) - ip_cur;
-                if i8::try_from(rel).is_ok() {
-                    is_short[i] = true;
-                    any_short = true;
-                    changed = true;
+                // Check if a forward `Jmp` lands directly on the byte immediately after itself
+                // (0-byte fallthrough). Backward/self jumps (`target_orig[i] < f.next_ip_off`)
+                // MUST never be elided or infinite loops (`L: jmp L`) and empty cycles vanish.
+                if matches!(f.kind, FixupKind::Jmp) && cur_m < 2 && target_orig[i] >= f.next_ip_off
+                {
+                    let add_save = 5 - cur_save;
+                    let ip_zero = i64::from(f.inst_off) - i64::from(saved_prefix[i]);
+                    if (t_cur - i64::from(add_save)) == ip_zero {
+                        mode[i] = 2;
+                        any_changed = true;
+                        changed = true;
+                        continue;
+                    }
+                }
+                if cur_m == 0 {
+                    let save = save_for(f.kind, 1);
+                    let ip_cur = i64::from(f.inst_off) - i64::from(saved_prefix[i]) + 2;
+                    let adj = if target_orig[i] >= f.next_ip_off {
+                        i64::from(save)
+                    } else {
+                        0
+                    };
+                    let rel = (t_cur - adj) - ip_cur;
+                    if i8::try_from(rel).is_ok() {
+                        mode[i] = 1;
+                        any_changed = true;
+                        changed = true;
+                    }
                 }
             }
             if !changed {
@@ -402,17 +431,12 @@ impl Asm {
             let mut acc = 0u32;
             for (i, f) in self.fixups.iter().enumerate() {
                 saved_prefix[i] = acc;
-                if is_short[i] {
-                    acc += match f.kind {
-                        FixupKind::Jmp => 3,
-                        FixupKind::Jcc(_) => 4,
-                    };
-                }
+                acc += save_for(f.kind, mode[i]);
             }
             saved_prefix[n_fix] = acc;
         }
 
-        if !any_short {
+        if !any_changed {
             for (i, f) in self.fixups.iter().enumerate() {
                 let rel = i128::from(target_orig[i]) - i128::from(f.next_ip_off);
                 let rel32 = i32::try_from(rel)
@@ -455,36 +479,42 @@ impl Asm {
             let orig_end = f.next_ip_off as usize;
             new_code.extend_from_slice(&self.code[cursor..inst_start]);
             let target_new = self.labels[f.label.0 as usize].unwrap();
-            if is_short[i] {
-                let new_next_ip = new_code.len() as u32 + 2;
-                let rel = i64::from(target_new) - i64::from(new_next_ip);
-                let rel8 = i8::try_from(rel)
-                    .map_err(|_| "short branch displacement overflow".to_string())?;
-                match f.kind {
-                    FixupKind::Jmp => {
-                        new_code.push(0xeb);
-                        new_code.push(rel8 as u8);
-                    }
-                    FixupKind::Jcc(c) => {
-                        new_code.push(0x70 + c);
-                        new_code.push(rel8 as u8);
+            match mode[i] {
+                2 => {
+                    debug_assert_eq!(target_new, new_code.len() as u32);
+                }
+                1 => {
+                    let new_next_ip = new_code.len() as u32 + 2;
+                    let rel = i64::from(target_new) - i64::from(new_next_ip);
+                    let rel8 = i8::try_from(rel)
+                        .map_err(|_| "short branch displacement overflow".to_string())?;
+                    match f.kind {
+                        FixupKind::Jmp => {
+                            new_code.push(0xeb);
+                            new_code.push(rel8 as u8);
+                        }
+                        FixupKind::Jcc(c) => {
+                            new_code.push(0x70 + c);
+                            new_code.push(rel8 as u8);
+                        }
                     }
                 }
-            } else {
-                let orig_len = (orig_end - inst_start) as u32;
-                let new_next_ip = new_code.len() as u32 + orig_len;
-                let rel = i128::from(target_new) - i128::from(new_next_ip);
-                let rel32 = i32::try_from(rel)
-                    .map_err(|_| "local branch displacement exceeds rel32".to_string())?;
-                match f.kind {
-                    FixupKind::Jmp => {
-                        new_code.push(0xe9);
-                        new_code.extend_from_slice(&rel32.to_le_bytes());
-                    }
-                    FixupKind::Jcc(c) => {
-                        new_code.push(0x0f);
-                        new_code.push(0x80 + c);
-                        new_code.extend_from_slice(&rel32.to_le_bytes());
+                _ => {
+                    let orig_len = (orig_end - inst_start) as u32;
+                    let new_next_ip = new_code.len() as u32 + orig_len;
+                    let rel = i128::from(target_new) - i128::from(new_next_ip);
+                    let rel32 = i32::try_from(rel)
+                        .map_err(|_| "local branch displacement exceeds rel32".to_string())?;
+                    match f.kind {
+                        FixupKind::Jmp => {
+                            new_code.push(0xe9);
+                            new_code.extend_from_slice(&rel32.to_le_bytes());
+                        }
+                        FixupKind::Jcc(c) => {
+                            new_code.push(0x0f);
+                            new_code.push(0x80 + c);
+                            new_code.extend_from_slice(&rel32.to_le_bytes());
+                        }
                     }
                 }
             }
@@ -495,6 +525,60 @@ impl Asm {
         self.code = new_code;
         self.fixups.clear();
         Ok(())
+    }
+
+    /// Fallibly extracts resolved `(rodata_off, table_rodata_off, label_code_off)` jump-table
+    /// entries after `finish_labels()` for optional incremental function cache snapshotting.
+    pub fn try_export_jt_entries(&self) -> Option<Vec<(u32, u32, u32)>> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(self.jt_patches.len()).ok()?;
+        for jt in &self.jt_patches {
+            let off = self.labels.get(jt.label.0 as usize).and_then(|&o| o)?;
+            out.push((jt.rodata_off, jt.table_rodata_off, off));
+        }
+        Some(out)
+    }
+
+    /// Reconstructs a link-ready `Asm` from cached buffers and pre-built jump-table metadata
+    /// with zero heap allocations.
+    pub fn from_cached_parts(
+        code: Vec<u8>,
+        pre_relax_code_len: u32,
+        relocs: Vec<Reloc>,
+        local_rodata: Vec<u8>,
+        labels: Vec<Option<u32>>,
+        jt_patches: Vec<JumpTablePatch>,
+    ) -> Self {
+        Self {
+            pre_relax_code_len: pre_relax_code_len.max(code.len() as u32),
+            code,
+            relocs,
+            local_rodata,
+            jt_patches,
+            labels,
+            fixups: Vec::new(),
+            f32_pool: HashMap::new(),
+            f64_pool: HashMap::new(),
+        }
+    }
+
+    /// Fallibly builds `(labels, jt_patches)` from cached `(rodata_off, table_rodata_off, label_off)` tuples.
+    pub fn try_build_cached_jt(
+        jt_entries: &[(u32, u32, u32)],
+    ) -> Option<(Vec<Option<u32>>, Vec<JumpTablePatch>)> {
+        let mut labels = Vec::new();
+        labels.try_reserve_exact(jt_entries.len()).ok()?;
+        let mut jt_patches = Vec::new();
+        jt_patches.try_reserve_exact(jt_entries.len()).ok()?;
+        for (i, &(rodata_off, table_rodata_off, label_off)) in jt_entries.iter().enumerate() {
+            labels.push(Some(label_off));
+            jt_patches.push(JumpTablePatch {
+                rodata_off,
+                table_rodata_off,
+                label: Label(i as u32),
+            });
+        }
+        Some((labels, jt_patches))
     }
 
     /// Resolves jump-table entries in `local_rodata` once `fn_vaddr` and `local_rodata_vaddr` are known.
@@ -1239,6 +1323,40 @@ impl Asm {
     }
     pub fn sar_imm(&mut self, is64: bool, dst: Gp, n: u8) {
         self.shift_imm(7, is64, dst, n);
+    }
+
+    // ---- BMI2 non-flag-modifying 3-operand shifts & rotate ----
+
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_rr(&mut self, is64: bool, map: u8, pp: u8, dst: Gp, vvvv_id: u8, rm: Gp, op: u8) {
+        let r_inv = (!dst.hi()) & 1;
+        let b_inv = (!rm.hi()) & 1;
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(is64) << 7) | (((!vvvv_id) & 0x0f) << 3) | (pp & 3));
+        self.emit_u8(op);
+        self.modrm_reg(dst.lo(), rm.lo());
+    }
+
+    /// BMI2 `shlx dst, src, cnt` (`VEX.LZ.66.0F38.W0/W1 F7 /r`): `dst = src << (cnt & (w-1))`.
+    pub fn shlx(&mut self, is64: bool, dst: Gp, src: Gp, cnt: Gp) {
+        self.vex3_rr(is64, 2, 1, dst, cnt.id(), src, 0xf7);
+    }
+
+    /// BMI2 `sarx dst, src, cnt` (`VEX.LZ.F3.0F38.W0/W1 F7 /r`): `dst = src >>s (cnt & (w-1))`.
+    pub fn sarx(&mut self, is64: bool, dst: Gp, src: Gp, cnt: Gp) {
+        self.vex3_rr(is64, 2, 2, dst, cnt.id(), src, 0xf7);
+    }
+
+    /// BMI2 `shrx dst, src, cnt` (`VEX.LZ.F2.0F38.W0/W1 F7 /r`): `dst = src >>u (cnt & (w-1))`.
+    pub fn shrx(&mut self, is64: bool, dst: Gp, src: Gp, cnt: Gp) {
+        self.vex3_rr(is64, 2, 3, dst, cnt.id(), src, 0xf7);
+    }
+
+    /// BMI2 `rorx dst, src, imm8` (`VEX.LZ.F2.0F3A.W0/W1 F0 /r ib`): non-destructive rotate right.
+    pub fn rorx(&mut self, is64: bool, dst: Gp, src: Gp, imm: u8) {
+        self.vex3_rr(is64, 3, 3, dst, 0, src, 0xf0);
+        self.emit_u8(imm);
     }
 
     pub fn lzcnt(&mut self, is64: bool, dst: Gp, src: Gp) {

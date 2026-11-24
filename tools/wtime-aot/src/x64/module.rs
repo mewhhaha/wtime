@@ -110,6 +110,19 @@ impl CompileBudget {
         }
     }
 
+    /// Forks a fresh budget inheriting the current shared code and rodata charges so
+    /// speculative incremental compilation enforces the exact combined caps while discarding
+    /// warm-only charges cleanly if it falls back to cold compilation.
+    pub fn fork_snapshot(&self) -> Self {
+        Self {
+            deadline: self.deadline,
+            liveness_mu: Mutex::new(0),
+            liveness_cv: Condvar::new(),
+            total_code_bytes: AtomicUsize::new(self.total_code_bytes.load(Ordering::Acquire)),
+            total_rodata_bytes: AtomicUsize::new(self.total_rodata_bytes.load(Ordering::Acquire)),
+        }
+    }
+
     #[inline]
     pub fn check_deadline(&self) -> Res<()> {
         if self.deadline.is_some_and(|d| Instant::now() >= d) {
