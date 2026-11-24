@@ -4,6 +4,7 @@
     python3 -B tools/wtime-aot/chart.py tools/wtime-aot/charts/results.json -o tools/wtime-aot/charts
 
 Writes standalone light/dark SVG images:
+  - summary.svg         : Headline speedup / size-reduction vs Wasmtime (log parity chart)
   - runtime-kernels.svg : Representative Wasm kernels runtime (us, log scale)
   - compile-cold.svg    : Cold multi-core compilation time (ms/s, log scale)
   - compile-hot.svg     : Incremental 1-fn rebuild, warm load, & warm cache-hit (ms/s, log scale)
@@ -263,6 +264,144 @@ def render_bar_chart(
     return "\n".join(out) + "\n"
 
 
+def hbar_parity(x0: float, x1: float, y: float, cls: str) -> str:
+    """Horizontal bar extending from parity line x0 to x1 (rounded at the data end)."""
+    if abs(x1 - x0) < 2.0:
+        x1 = x0 + 2.0 if x1 >= x0 else x0 - 2.0
+    r = min(3.5, abs(x1 - x0) / 2.0, BAR / 2.0)
+    if x1 >= x0:
+        d = (
+            f"M{x0:.1f},{y:.1f}H{x1 - r:.1f}"
+            f"Q{x1:.1f},{y:.1f} {x1:.1f},{y + r:.1f}"
+            f"V{y + BAR - r:.1f}"
+            f"Q{x1:.1f},{y + BAR:.1f} {x1 - r:.1f},{y + BAR:.1f}"
+            f"H{x0:.1f}Z"
+        )
+    else:
+        d = (
+            f"M{x0:.1f},{y:.1f}H{x1 + r:.1f}"
+            f"Q{x1:.1f},{y:.1f} {x1:.1f},{y + r:.1f}"
+            f"V{y + BAR - r:.1f}"
+            f"Q{x1:.1f},{y + BAR:.1f} {x1 + r:.1f},{y + BAR:.1f}"
+            f"H{x0:.1f}Z"
+        )
+    return f'<path class="{cls}" d="{d}"/>'
+
+
+def fmt_ratio(v: float) -> str:
+    if v >= 10.0:
+        return f"{v:.0f}×"
+    return f"{v:.2f}×"
+
+
+def render_parity_chart(
+    *,
+    title: str,
+    subtitle: str,
+    series: list[tuple[str, str]],
+    groups: list[tuple[str, list[tuple[str, dict[str, tuple[float, str]]]]]],
+    right_pad: int = 168,
+) -> str:
+    """Parity-anchored log10 speedup chart (>1× right of parity is faster/smaller)."""
+    all_vals = [
+        ratio
+        for _, rows in groups
+        for _, vals in rows
+        for k, _ in series
+        if (item := vals.get(k)) is not None and (ratio := item[0]) > 0
+    ]
+    assert all_vals, f"no positive ratios for {title}"
+
+    longest_label = max(len(lbl) for _, rows in groups for lbl, _ in rows)
+    left = max(148, 30 + int(6.8 * longest_label))
+    plot = WIDTH - left - right_pad
+
+    lo_val = min(0.75, min(all_vals) / 1.25)
+    hi_val = max(2.0, max(all_vals) * 1.45)
+    lo_log = math.log10(lo_val)
+    hi_log = math.log10(hi_val)
+
+    ticks = [t for t in (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0) if lo_log - 1e-9 <= math.log10(t) <= hi_log + 1e-9]
+
+    def x_of(v: float) -> float:
+        return left + (math.log10(v) - lo_log) / (hi_log - lo_log) * plot
+
+    x_par = x_of(1.0)
+    top = 100
+    group_heights = []
+    for gname, rows in groups:
+        gh = 24 if gname else 4
+        for _, vals in rows:
+            present = sum(1 for k, _ in series if vals.get(k) is not None)
+            gh += present * BAR + max(0, present - 1) * GAP + ROW_GAP
+        group_heights.append(gh)
+    bottom = top + sum(group_heights)
+    height = int(math.ceil(bottom + 38))
+
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" class="c" viewBox="0 0 {WIDTH} {height}" '
+        f'width="{WIDTH}" height="{height}" role="img" aria-labelledby="title desc">',
+        f'<title id="title">{esc(title)}</title>',
+        f'<desc id="desc">{esc(subtitle)}</desc>',
+        f"<style>{STYLE}</style>",
+        f'<rect class="bg" x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="10"/>',
+        f'<text class="t" x="20" y="30">{esc(title)}</text>',
+        f'<text class="st" x="20" y="49">{esc(subtitle)}</text>',
+    ]
+
+    lx = 20
+    for key, text in series:
+        cls = CLASS_FOR[key]
+        out.append(f'<rect class="{cls}" x="{lx}" y="64" width="11" height="11" rx="3"/>')
+        out.append(f'<text class="lg" x="{lx + 16}" y="73.5">{esc(text)}</text>')
+        lx += 30 + int(6.5 * len(text))
+
+    for t in ticks:
+        tx = x_of(t)
+        is_par = abs(t - 1.0) < 1e-9
+        out.append(
+            f'<line class="{"ax" if is_par else "grid"}" x1="{tx:.1f}" x2="{tx:.1f}" '
+            f'y1="{top - 6}" y2="{bottom:.1f}"/>'
+        )
+        t_lbl = "1× (Wasmtime)" if is_par else f"{t:g}×"
+        out.append(
+            f'<text class="tick" x="{tx:.1f}" y="{bottom + 18:.1f}" text-anchor="middle">'
+            f"{esc(t_lbl)}</text>"
+        )
+
+    y = float(top)
+    for gname, rows in groups:
+        if gname:
+            out.append(f'<text class="grp" x="20" y="{y + 11:.1f}">{esc(gname.upper())}</text>')
+            y += 24
+        else:
+            y += 4
+        for rlabel, vals in rows:
+            active = [(k, text, vals[k][0], vals[k][1]) for k, text in series if vals.get(k) is not None]
+            best_val = max(r for _, _, r, _ in active)
+            row_h = len(active) * BAR + max(0, len(active) - 1) * GAP
+            out.append(
+                f'<text class="lb" x="{left - 12}" y="{y + row_h / 2.0 + 4.0:.1f}" text-anchor="end">'
+                f"{esc(rlabel)}</text>"
+            )
+            for idx, (k, text, ratio, detail) in enumerate(active):
+                by = y + idx * (BAR + GAP)
+                end = x_of(ratio)
+                lbl = f"{fmt_ratio(ratio)}  {detail}" if detail else fmt_ratio(ratio)
+                vcls = "v-hi" if ratio >= 1.05 and abs(ratio - best_val) <= best_val * 0.01 else "v"
+                out.append(f"<g><title>{esc(rlabel)} — {esc(text)}: {esc(lbl)}</title>")
+                out.append(hbar_parity(x_par, end, by, CLASS_FOR[k]))
+                tx = max(end, x_par) + 7.0
+                out.append(
+                    f'<text class="{vcls}" x="{tx:.1f}" y="{by + BAR - 1.5:.1f}" '
+                    f'text-anchor="start">{esc(lbl)}</text></g>'
+                )
+            y += row_h + ROW_GAP
+
+    out.append("</svg>")
+    return "\n".join(out) + "\n"
+
+
 def build_all(data: dict, out_dir: Path) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     host = data["host"]
@@ -335,7 +474,7 @@ def build_all(data: dict, out_dir: Path) -> int:
     (out_dir / "runtime-kernels.svg").write_text(
         render_bar_chart(
             title="Execution time: Wasm kernels (wtime-aot vs Wasmtime & V8)",
-            subtitle=f"median µs per call over {kr['rounds']} paired rounds on CPU 0 — exact output parity across all engines (log scale, lower is better; {cpu_short})",
+            subtitle=f"median µs per call, {kr['rounds']} paired rounds on CPU 0, exact parity (log scale, lower is better; {cpu_short})",
             series=kernel_series,
             groups=[("", kernel_rows)],
             scale="log",
@@ -457,6 +596,68 @@ def build_all(data: dict, out_dir: Path) -> int:
         )
     )
     rendered += 1
+
+    # 4. Headline summary parity chart vs Wasmtime (when Wasmtime data is present)
+    if has_wt_kernels:
+        summary_groups = []
+        build_rows = []
+        if large_cold_vals and large_cold_vals.get("x64") and large_cold_vals.get("wasmtime"):
+            vx, vw = large_cold_vals["x64"], large_cold_vals["wasmtime"]
+            build_rows.append(("Cold compile", {"x64": (vw / vx, f"({fmt_ms(vx)} vs {fmt_ms(vw)})")}))
+        if inc_vals and inc_vals.get("x64") and inc_vals.get("wasmtime"):
+            vx, vw = inc_vals["x64"], inc_vals["wasmtime"]
+            build_rows.append(("1-fn edit rebuild", {"x64": (vw / vx, f"({fmt_ms(vx)} vs {fmt_ms(vw)})")}))
+        if load_vals and load_vals.get("x64") and load_vals.get("wasmtime"):
+            vx, vw = load_vals["x64"], load_vals["wasmtime"]
+            build_rows.append(("Warm artifact load", {"x64": (vw / vx, f"({fmt_ms(vx)} vs {fmt_ms(vw)})")}))
+        art = large_meta.get("artifact_bytes", {}) if large_meta else {}
+        if art.get("x64") and art.get("wasmtime_cwasm"):
+            sx, sw = art["x64"] / (1024 * 1024), art["wasmtime_cwasm"] / (1024 * 1024)
+            build_rows.append(("Artifact size", {"x64": (sw / sx, f"({sx:.2f} vs {sw:.2f} MiB)")}))
+        if build_rows:
+            blabel = f"build, load, & size ({large_fns:,}-fn, {large_mib} app)" if large_fns and large_mib else "build, load, & size"
+            summary_groups.append((blabel, build_rows))
+
+        exec_rows = []
+        ratios_x64 = []
+        ratios_rust = []
+        for c in kr["cases"]:
+            mu = c["median_us"]
+            vw = mu.get("wasmtime")
+            if not vw:
+                continue
+            row_map = {}
+            if mu.get("x64"):
+                r = vw / mu["x64"]
+                ratios_x64.append(r)
+                row_map["x64"] = (r, f"({fmt_us(mu['x64'])} vs {fmt_us(vw)})")
+            if mu.get("rust"):
+                r = vw / mu["rust"]
+                ratios_rust.append(r)
+                row_map["rust"] = (r, f"({fmt_us(mu['rust'])} vs {fmt_us(vw)})")
+            exec_rows.append((c["name"], row_map))
+        if ratios_x64 and ratios_rust:
+            gm_x64 = math.prod(ratios_x64) ** (1.0 / len(ratios_x64))
+            gm_rust = math.prod(ratios_rust) ** (1.0 / len(ratios_rust))
+            exec_rows.insert(0, (
+                "Kernels geomean",
+                {"x64": (gm_x64, "(4 kernels)"), "rust": (gm_rust, "(4 kernels)")},
+            ))
+        summary_groups.append(("execution speedup on self-contained Wasm kernels (CPU 0)", exec_rows))
+
+        (out_dir / "summary.svg").write_text(
+            render_parity_chart(
+                title=f"At a glance: wtime-aot vs {wt_label}",
+                subtitle=f"speedup / size-reduction ratio vs {wt_label} (log scale, right of 1× is faster or smaller; {host_tag})",
+                series=[
+                    ("x64", "wtime-aot x64 (pure Rust, 0 LLVM)"),
+                    ("rust", "wtime-aot rust (-O3)"),
+                ],
+                groups=summary_groups,
+                right_pad=186,
+            )
+        )
+        rendered += 1
     return rendered
 
 

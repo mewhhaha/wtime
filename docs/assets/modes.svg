@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="m" viewBox="0 0 820 356" width="820" height="356" role="img" aria-labelledby="title desc">
+<title id="title">Choosing a wtime execution mode: compile speed vs. steady-state runtime speed</title>
+<desc id="desc">Two-dimensional trade-off chart plotting wtime-runtime (instant startup, interpreter), wtime-aot x64 (sub-second pure-Rust AOT matching or beating Cranelift), wtime-aot c (sharded Clang), wtime-aot rust (peak LLVM -O3 runtime), and Wasmtime Cranelift as a reference.</desc>
+<style>
+.m {
+  --surface:#fcfcfb; --plot:#ffffff; --border:#e6e4dc; --grid:#eceae2; --axis:#c4c2b8;
+  --ink:#111110; --ink2:#575652; --muted:#85837c;
+  --blue:#2563eb; --blue-bg:#eff6ff; --blue-bd:#93c5fd;
+  --green:#16a34a; --green-bg:#f0fdf4; --green-bd:#86efac;
+  --orange:#ea580c; --orange-bg:#fff7ed; --orange-bd:#fdba74;
+  --violet:#7c3aed; --violet-bg:#f5f3ff; --violet-bd:#c4b5fd;
+  --ref:#64748b; --ref-bg:#f8fafc; --ref-bd:#cbd5e1;
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  .m {
+    --surface:#161615; --plot:#1b1b19; --border:#2b2b28; --grid:#262623; --axis:#44433e;
+    --ink:#f2f1ed; --ink2:#b8b6ad; --muted:#8a8880;
+    --blue:#60a5fa; --blue-bg:#172554; --blue-bd:#2563eb;
+    --green:#4ade80; --green-bg:#052e16; --green-bd:#16a34a;
+    --orange:#fb923c; --orange-bg:#431407; --orange-bd:#ea580c;
+    --violet:#c4b5fd; --violet-bg:#2e1065; --violet-bd:#7c3aed;
+    --ref:#94a3b8; --ref-bg:#1e293b; --ref-bd:#475569;
+  }
+}
+.bg { fill:var(--surface); stroke:var(--border); stroke-width:1; }
+.plot { fill:var(--plot); stroke:var(--border); stroke-width:1; }
+.grid { stroke:var(--grid); stroke-width:1; stroke-dasharray:4 4; }
+.ax { stroke:var(--axis); stroke-width:1.4; }
+.t { fill:var(--ink); font-size:15px; font-weight:600; letter-spacing:-0.01em; }
+.st { fill:var(--ink2); font-size:12px; }
+.axlbl { fill:var(--muted); font-size:10.5px; font-weight:600; letter-spacing:.05em; }
+.tick { fill:var(--muted); font-size:11px; }
+.card-h { fill:var(--ink); font-size:12px; font-weight:600; }
+.card-s { fill:var(--ink2); font-size:10.8px; }
+.dot-b { fill:var(--blue); stroke:var(--plot); stroke-width:2.5; }
+.dot-g { fill:var(--green); stroke:var(--plot); stroke-width:2.5; }
+.dot-o { fill:var(--orange); stroke:var(--plot); stroke-width:2.5; }
+.dot-v { fill:var(--violet); stroke:var(--plot); stroke-width:2.5; }
+.dot-r { fill:var(--plot); stroke:var(--ref); stroke-width:2.2; stroke-dasharray:3 2; }
+.b-b { fill:var(--blue-bg); stroke:var(--blue-bd); stroke-width:1.2; }
+.b-g { fill:var(--green-bg); stroke:var(--green-bd); stroke-width:1.2; }
+.b-o { fill:var(--orange-bg); stroke:var(--orange-bd); stroke-width:1.2; }
+.b-v { fill:var(--violet-bg); stroke:var(--violet-bd); stroke-width:1.2; }
+.b-r { fill:var(--ref-bg); stroke:var(--ref-bd); stroke-width:1.1; stroke-dasharray:4 3; }
+.tag-b { fill:var(--blue); font-size:11.5px; font-weight:600; }
+.tag-g { fill:var(--green); font-size:11.5px; font-weight:600; }
+.tag-o { fill:var(--orange); font-size:11.5px; font-weight:600; }
+.tag-v { fill:var(--violet); font-size:11.5px; font-weight:600; }
+.tag-r { fill:var(--ref); font-size:11px; font-weight:600; }
+.stem { stroke:var(--axis); stroke-width:1.1; }
+</style>
+
+<rect class="bg" x="0.5" y="0.5" width="819" height="355" rx="10"/>
+<text class="t" x="20" y="30">Choosing a mode: compile speed vs. runtime speed</text>
+<text class="st" x="20" y="49">Up = faster steady-state execution · Right = faster cold compile &amp; startup (Wasmtime shown for reference)</text>
+
+<!-- Plot area: x=[88..792], y=[70..302] -->
+<rect class="plot" x="88" y="70" width="704" height="232" rx="8"/>
+
+<!-- Subtle guide lines -->
+<line class="grid" x1="88" y1="147" x2="792" y2="147"/>
+<line class="grid" x1="88" y1="225" x2="792" y2="225"/>
+<line class="grid" x1="322" y1="70" x2="322" y2="302"/>
+<line class="grid" x1="558" y1="70" x2="558" y2="302"/>
+
+<!-- Axes ticks -->
+<text class="tick" x="78" y="106" text-anchor="end">Peak</text>
+<text class="tick" x="78" y="119" text-anchor="end">LLVM -O3</text>
+<text class="tick" x="78" y="184" text-anchor="end">Native</text>
+<text class="tick" x="78" y="197" text-anchor="end">(Cranelift)</text>
+<text class="tick" x="78" y="268" text-anchor="end">Interpreter</text>
+
+<text class="tick" x="180" y="321" text-anchor="middle">Seconds (LLVM / Clang)</text>
+<text class="tick" x="456" y="321" text-anchor="middle">~100–300 ms (Cranelift / pure Rust)</text>
+<text class="tick" x="720" y="321" text-anchor="middle">Instant (no codegen)</text>
+<text class="axlbl" x="440" y="341" text-anchor="middle">COMPILE &amp; STARTUP SPEED  →</text>
+
+<!-- 1. wtime-aot rust (top-left: x=142, y=104) -->
+<line class="stem" x1="142" y1="104" x2="162" y2="104"/>
+<circle class="dot-v" cx="142" cy="104" r="6.5"/>
+<rect class="b-v" x="162" y="81" width="194" height="46" rx="6"/>
+<text class="tag-v" x="172" y="98">wtime-aot --backend rust</text>
+<text class="card-s" x="172" y="115">1.3–13× vs WT · safe-Rust binaries</text>
+
+<!-- 2. wtime-aot c (upper-mid-left: x=240, y=154) -->
+<line class="stem" x1="240" y1="154" x2="220" y2="174"/>
+<circle class="dot-o" cx="240" cy="154" r="6.5"/>
+<rect class="b-o" x="104" y="174" width="204" height="46" rx="6"/>
+<text class="tag-o" x="114" y="191">wtime-aot --backend c (-O2)</text>
+<text class="card-s" x="114" y="208">Sharded Clang + CET · ~820 ms edit</text>
+
+<!-- 3. Wasmtime reference (mid-upper: x=456, y=188) -->
+<line class="stem" x1="456" y1="188" x2="456" y2="212"/>
+<circle class="dot-r" cx="456" cy="188" r="6"/>
+<rect class="b-r" x="366" y="212" width="180" height="42" rx="6"/>
+<text class="tag-r" x="376" y="229">Wasmtime (reference)</text>
+<text class="card-s" x="376" y="244">284 ms cold · 279 ms edit</text>
+
+<!-- 4. wtime-aot x64 (upper-right, ahead of Wasmtime on both axes: x=540, y=156) -->
+<line class="stem" x1="540" y1="156" x2="562" y2="132"/>
+<circle class="dot-b" cx="540" cy="156" r="7"/>
+<rect class="b-b" x="562" y="92" width="216" height="60" rx="6"/>
+<text class="tag-b" x="572" y="109">wtime-aot --backend x64</text>
+<text class="card-s" x="572" y="126">Pure Rust · 0 LLVM · 0 Clang</text>
+<text class="card-s" x="572" y="142">207 ms cold · 111 ms 1-fn edit</text>
+
+<!-- 5. wtime-runtime (bottom-right: x=756, y=268) -->
+<line class="stem" x1="756" y1="268" x2="738" y2="246"/>
+<circle class="dot-g" cx="756" cy="268" r="7"/>
+<rect class="b-g" x="562" y="206" width="216" height="60" rx="6"/>
+<text class="tag-g" x="572" y="223">wtime-runtime (core)</text>
+<text class="card-s" x="572" y="240">0 deps · no JIT · full Core 3.0+</text>
+<text class="card-s" x="572" y="256">Fuel, cancellation, GC, threads</text>
+</svg>

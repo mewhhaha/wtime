@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" class="c" viewBox="0 0 820 482" width="820" height="482" role="img" aria-labelledby="title desc">
 <title id="title">Execution time: Wasm kernels (wtime-aot vs Wasmtime &amp; V8)</title>
-<desc id="desc">median µs per call over 7 paired rounds on CPU 0 — exact output parity across all engines (log scale, lower is better; AMD Ryzen 7 7800X3D)</desc>
+<desc id="desc">median µs per call, 7 paired rounds on CPU 0, exact parity (log scale, lower is better; AMD Ryzen 7 7800X3D)</desc>
 <style>
 .c { --surface:#fcfcfb; --border:#e6e4dc; --ink:#111110; --ink2:#575652; --muted:#898781; --grid:#e6e4dc; --axis:#c4c2b8;
      --x64:#2563eb; --c:#ea580c; --rust:#7c3aed; --wt:#16a34a; --v8:#0d9488;
@@ -28,7 +28,7 @@
 </style>
 <rect class="bg" x="0.5" y="0.5" width="819" height="481" rx="10"/>
 <text class="t" x="20" y="30">Execution time: Wasm kernels (wtime-aot vs Wasmtime &amp; V8)</text>
-<text class="st" x="20" y="49">median µs per call over 7 paired rounds on CPU 0 — exact output parity across all engines (log scale, lower is better; AMD Ryzen 7 7800X3D)</text>
+<text class="st" x="20" y="49">median µs per call, 7 paired rounds on CPU 0, exact parity (log scale, lower is better; AMD Ryzen 7 7800X3D)</text>
 <rect class="x64" x="20" y="64" width="11" height="11" rx="3"/>
 <text class="lg" x="36" y="73.5">wtime-aot x64</text>
 <rect class="bc" x="134" y="64" width="11" height="11" rx="3"/>

@@ -69,8 +69,8 @@
 <rect class="box-green" x="402" y="20" width="396" height="96" rx="9"/>
 <text class="pill p-green" x="418" y="40">CORE RUNTIME · ZERO DEPS · NO JIT</text>
 <text class="h" x="418" y="61">wtime-runtime  +  wtime-cli</text>
-<text class="sub" x="418" y="80">Full Core 3.0 + GC, exceptions, threads, memory64, SIMD, continuations</text>
-<text class="sub" x="418" y="98">Deterministic fuel · cooperative cancellation · recoverable OOM limits</text>
+<text class="sub" x="418" y="80">Core 3.0 + GC, exceptions, threads, SIMD, continuations</text>
+<text class="sub" x="418" y="98">Deterministic fuel · cancellation · recoverable OOM</text>
 
 <!-- Column 3 Bottom: Opt-in AOT -->
 <rect class="box" x="402" y="132" width="396" height="116" rx="9"/>
