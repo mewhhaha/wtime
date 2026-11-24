@@ -53,21 +53,21 @@
   "evidence": {
     "core3": {
       "path": "docs/verification/core3.json",
-      "sha256": "56cbd8f428102a7b2fe60810388c10066ba498759f93864c3e964ed75a4cf2a6"
+      "sha256": "25cb267f0d300fdf5149eb9c5d29b733d511bd794dbb7a59454805fb0d233cc9"
     },
     "phase3": {
       "path": "docs/verification/phase3.json",
-      "sha256": "e078df46c37b296e7723b5067dbe1faa93a54e06becdb0ce5e2640a801d7890a"
+      "sha256": "9a960513e771bb186861f79764baf6c76f23900e51777bedf1a16ecba223510a"
     },
     "feature_profiles": {
       "path": "docs/verification/feature-profiles.json",
-      "sha256": "894f6c268a1a4cff92488c3230a15ff17beba102d894961a98fe7bbb7b038e3c"
+      "sha256": "fb22ac04d8b38db3320624d042f29d81612648135ca199b5e962d6f18e56a463"
     },
     "interactions": {
       "path": "docs/verification/interactions.json",
-      "sha256": "a220e4b2d8f11d547e8a54935e41b7a7bf50d38747d04baf5e8fb4d8280a2e03",
+      "sha256": "1769236535435146fc4d5b547efc9931708856bad06feaf0a4c191c7077db967",
       "corpus_report": "docs/verification/interaction-corpus.json",
-      "corpus_sha256": "8c1542cc307536aef475b93ca7ee018a1ee06d90b195310b4a5c1a2ffa8baf35"
+      "corpus_sha256": "fcad4905154591f0dcebb8b9642e74c7fb8c4336d8cb3b7a64340b12270e683d"
     },
     "fuzz": {
       "path": "docs/verification/fuzz.json",
@@ -79,24 +79,24 @@
     },
     "hardening": {
       "path": "docs/verification/native-x86_64.json",
-      "sha256": "7eb52e78ec858399ac26863d2e584149d711464b293eb2a71d79ce403f382e9b"
+      "sha256": "4b8ad14733a7da3bb63a820d5cdbc062e180d385f89d027cc2ac49399e8bebd3"
     },
     "build_final": {
       "path": "docs/verification/build-final.json",
-      "sha256": "2493876be34166c7ef8a67c82b2939c3b5ddbef1e7e1f1f7ba481f2c7e471a3d"
+      "sha256": "7584d091d57a03709eed9237402acc711a84d543890536ae1ebf8c721f60334b"
     },
     "api_docs": {
       "path": "docs/verification/api-docs.json",
-      "sha256": "e44dfeacaf648736d5c1ac07d9ece9c15df21d79fdada89966a368193162164e"
+      "sha256": "8f5e3fb3615c55a33e55880619497813b9a441353acc9ca1de4d2839ac226bfe"
     },
     "native_x86_64": {
       "path": "docs/verification/native-x86_64.json",
-      "sha256": "7eb52e78ec858399ac26863d2e584149d711464b293eb2a71d79ce403f382e9b"
+      "sha256": "4b8ad14733a7da3bb63a820d5cdbc062e180d385f89d027cc2ac49399e8bebd3"
     },
     "allocation_failure": {
       "path": "docs/verification/allocation-failure.json",
-      "sha256": "539104230fe02f0c11a35d31e3d121ad11f5c5356b9524173ac0f32455eae532"
+      "sha256": "d55ed4eb5ae263e953da08d60f7f9374b42cb254ab3e6602177e127d7af1dbdd"
     }
   },
-  "source_sha256": "3108eb892cb3f8d3c33844371ed23724ffedbc27b8a53c7da7c0200e9ed27edb"
+  "source_sha256": "d852893670ce91a2a84647982a537984c9ee3be3d2ed58032a7e18c9523f526c"
 }

@@ -1,5 +1,5 @@
 {
-  "source_sha256": "3108eb892cb3f8d3c33844371ed23724ffedbc27b8a53c7da7c0200e9ed27edb",
+  "source_sha256": "d852893670ce91a2a84647982a537984c9ee3be3d2ed58032a7e18c9523f526c",
   "source_stable": true,
   "executed": 4,
   "passed": true,
@@ -17,7 +17,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "20 + 22 = 42\n",
-      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s\n     Running `target/evidence/debug/examples/embedding`\n"
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s\n     Running `target/debug/examples/embedding`\n"
     },
     {
       "command": [
@@ -32,11 +32,11 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "suspended with 7; resumed with 9\n",
-      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s\n     Running `target/evidence/debug/examples/suspension`\n"
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s\n     Running `target/debug/examples/suspension`\n"
     },
     {
       "command": [
-        "target/evidence/debug/wtime-cli",
+        "target/debug/wtime-cli",
         "--profile",
         "all-phase3-core",
         "run",
@@ -50,7 +50,7 @@
     },
     {
       "command": [
-        "target/evidence/debug/wtime-cli",
+        "target/debug/wtime-cli",
         "--profile",
         "all-phase3-core",
         "run",
@@ -66,7 +66,7 @@
   "documents": {
     "docs/embedding.md": "c86ebbeeb814a344c901d72f32c8c1cacd1b221bdd6dac00db704c3bd13ca40c",
     "examples/README.md": "64926d38d7bb32bf80a51cc13a8a92e0f2c3dbb0cba6b274a8cb6511d5d74862",
-    "README.md": "6f38dbeaf94eea8ac69e0d1129a7699a544a759944eba66ab0d98bf41527aad7",
+    "README.md": "7374e640bd30c44ae340fa4b2c3ac31ca20caae7a2e0408785715785595b4a91",
     "examples/memory64-table64.wat": "666790be61e72bfa60bbe77486d9584fabfc3ab78bed2a057b3339cb4fdccbd6",
     "examples/memory64-table64.wasm": "3920201aeccfd378c6e88a8882392bbcb3cbf1b040ba604c1064b158708d5990",
     "docs/architecture/api.md": "cb61d31789dfa962a4817320f579a346c9109f136eb06414a37d3ced954e59af",
