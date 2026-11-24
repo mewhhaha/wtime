@@ -233,6 +233,143 @@ pub(crate) fn expression_bounded(
     }
     Ok((out, exceeded))
 }
+#[repr(align(64))]
+pub(crate) struct AlignedAtomicUsize(pub(crate) std::sync::atomic::AtomicUsize);
+
+impl AlignedAtomicUsize {
+    pub(crate) fn new(v: usize) -> Self {
+        Self(std::sync::atomic::AtomicUsize::new(v))
+    }
+}
+
+/// Per-worker reservation bank for parallel function-body decoding.
+/// Amortizes cross-core atomic updates over `shared_insns` and `shared_locals`
+/// into batched refills while strictly bounding aggregate retained memory and
+/// releasing any unspent reservation on `Drop`.
+pub(crate) struct DecodeWorkerBudget<'a> {
+    shared_insns: &'a AlignedAtomicUsize,
+    shared_imm_elems: &'a AlignedAtomicUsize,
+    shared_locals: &'a AlignedAtomicUsize,
+    max_insns: usize,
+    max_locals: usize,
+    insn_chunk: usize,
+    local_chunk: usize,
+    rem_insns: usize,
+    rem_locals: usize,
+}
+
+impl<'a> DecodeWorkerBudget<'a> {
+    pub(crate) fn new(
+        shared_insns: &'a AlignedAtomicUsize,
+        shared_imm_elems: &'a AlignedAtomicUsize,
+        shared_locals: &'a AlignedAtomicUsize,
+        max_insns: usize,
+        max_locals: usize,
+        threads: usize,
+    ) -> Self {
+        let denom = threads.max(1).saturating_mul(4);
+        Self {
+            shared_insns,
+            shared_imm_elems,
+            shared_locals,
+            max_insns,
+            max_locals,
+            insn_chunk: (max_insns / denom).clamp(1, 8192),
+            local_chunk: (max_locals / denom).clamp(1, 2048),
+            rem_insns: 0,
+            rem_locals: 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn try_reserve_locals(&mut self, want: usize) -> bool {
+        if want == 0 {
+            return true;
+        }
+        if self.rem_locals >= want {
+            self.rem_locals -= want;
+            return true;
+        }
+        let need = want - self.rem_locals;
+        let refill = need.max(self.local_chunk);
+        let got = reserve_budget(&self.shared_locals.0, self.max_locals, refill);
+        if got >= need {
+            self.rem_locals = self.rem_locals + got - want;
+            true
+        } else {
+            if got > 0 {
+                self.shared_locals
+                    .0
+                    .fetch_sub(got, std::sync::atomic::Ordering::Relaxed);
+            }
+            false
+        }
+    }
+
+    #[inline]
+    pub(crate) fn release_locals(&mut self, count: usize) {
+        self.rem_locals = self.rem_locals.saturating_add(count);
+    }
+
+    #[inline]
+    pub(crate) fn consume_one_insn(&mut self, hint: usize) -> bool {
+        if self.rem_insns > 0 {
+            self.rem_insns -= 1;
+            return true;
+        }
+        let refill = hint.clamp(1, 1024).max(self.insn_chunk);
+        let got = reserve_budget(&self.shared_insns.0, self.max_insns, refill);
+        if got == 0 {
+            return false;
+        }
+        self.rem_insns = got - 1;
+        true
+    }
+
+    #[inline]
+    fn insns_exhausted(&self) -> bool {
+        self.rem_insns == 0
+            && self
+                .shared_insns
+                .0
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= self.max_insns
+    }
+
+    #[inline]
+    fn avail_insns(&self) -> usize {
+        self.rem_insns.saturating_add(
+            self.max_insns.saturating_sub(
+                self.shared_insns
+                    .0
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        )
+    }
+
+    #[inline]
+    fn shared_imm(&self) -> &'a std::sync::atomic::AtomicUsize {
+        &self.shared_imm_elems.0
+    }
+}
+
+impl Drop for DecodeWorkerBudget<'_> {
+    fn drop(&mut self) {
+        if self.rem_insns > 0 {
+            self.shared_insns
+                .0
+                .fetch_sub(self.rem_insns, std::sync::atomic::Ordering::Relaxed);
+            self.rem_insns = 0;
+        }
+        if self.rem_locals > 0 {
+            self.shared_locals
+                .0
+                .fetch_sub(self.rem_locals, std::sync::atomic::Ordering::Relaxed);
+            self.rem_locals = 0;
+        }
+    }
+}
+
 pub(crate) fn reserve_budget(
     shared: &std::sync::atomic::AtomicUsize,
     max_total: usize,
@@ -295,64 +432,40 @@ impl ImmBudget<'_> {
         }
     }
 }
-struct QuotaGuard<'a> {
-    shared: Option<&'a std::sync::atomic::AtomicUsize>,
-    rem: usize,
-}
-impl QuotaGuard<'_> {
-    fn release(&mut self) {
-        if self.rem > 0
-            && let Some(s) = self.shared
-        {
-            s.fetch_sub(self.rem, std::sync::atomic::Ordering::Relaxed);
-            self.rem = 0;
-        }
-    }
-}
-impl Drop for QuotaGuard<'_> {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
 /// A function body's instructions and the absolute offset of each in the
-/// module. Pre-reserves quota from `shared_insns` AND `shared_imm_elems` BEFORE
-/// retaining instructions or variable-length immediates so aggregate retained
-/// memory across all parallel workers never exceeds `max_insns`. When `keep` is
-/// false or quota is exhausted, syntax decoding continues in full with zero
-/// heap allocation so malformed bytecode still reports `ErrorKind::Decode`.
+/// module. Pre-reserves quota from `worker_budget` BEFORE retaining
+/// instructions or variable-length immediates so aggregate retained memory
+/// across all parallel workers never exceeds `max_insns`. When `keep` is false
+/// or quota is exhausted, syntax decoding continues in full with zero heap
+/// allocation so malformed bytecode still reports `ErrorKind::Decode`.
 pub(crate) fn body_expression_bounded(
     r: &mut Reader,
-    shared_insns: Option<&std::sync::atomic::AtomicUsize>,
-    shared_imm_elems: Option<&std::sync::atomic::AtomicUsize>,
+    mut worker_budget: Option<&mut DecodeWorkerBudget<'_>>,
     max_insns: usize,
     mut keep: bool,
 ) -> Result<BoundedBody> {
-    use std::sync::atomic::Ordering;
     let mut instructions = Vec::new();
     let mut offsets = Vec::new();
     let mut dropped = !keep;
     let mut imm_exceeded = false;
     let mut local_imm_elems: usize = 0;
+    let shared_imm_elems = worker_budget.as_ref().map(|wb| wb.shared_imm());
     if keep
-        && let Some(c) = shared_insns
-        && c.load(Ordering::Relaxed) >= max_insns
+        && let Some(wb) = worker_budget.as_ref()
+        && wb.insns_exhausted()
     {
         keep = false;
         dropped = true;
     }
     if keep {
-        let avail = match shared_insns {
-            Some(c) => max_insns.saturating_sub(c.load(Ordering::Relaxed)),
+        let avail = match worker_budget.as_ref() {
+            Some(wb) => wb.avail_insns(),
             None => max_insns,
         };
         let estimate = (r.remaining() / 3).min(1 << 16).min(avail);
         let _ = instructions.try_reserve_exact(estimate);
         let _ = offsets.try_reserve_exact(estimate);
     }
-    let mut quota = QuotaGuard {
-        shared: shared_insns,
-        rem: 0,
-    };
     let mut depth = 1usize;
     let mut count = 0usize;
     let mut body_imm_elems = 0usize;
@@ -364,19 +477,17 @@ pub(crate) fn body_expression_bounded(
                 "module too large for u32 instruction offsets",
             )
         })?;
+        let mut reserved_this_insn = false;
         if keep {
             if count >= max_insns {
-                quota.release();
                 instructions = Vec::new();
                 offsets = Vec::new();
                 keep = false;
                 dropped = true;
-            } else if let Some(c) = shared_insns
-                && quota.rem == 0
-            {
-                let want = r.remaining().clamp(1, 1024);
-                quota.rem = reserve_budget(c, max_insns, want);
-                if quota.rem == 0 {
+            } else if let Some(wb) = worker_budget.as_deref_mut() {
+                if wb.consume_one_insn(r.remaining()) {
+                    reserved_this_insn = true;
+                } else {
                     instructions = Vec::new();
                     offsets = Vec::new();
                     keep = false;
@@ -424,21 +535,19 @@ pub(crate) fn body_expression_bounded(
         if imm_over {
             imm_exceeded = true;
             if keep {
-                quota.release();
+                if reserved_this_insn && let Some(wb) = worker_budget.as_deref_mut() {
+                    wb.rem_insns = wb.rem_insns.saturating_add(1);
+                }
                 instructions = Vec::new();
                 offsets = Vec::new();
                 keep = false;
                 dropped = true;
             }
         } else if keep {
-            if shared_insns.is_some() {
-                quota.rem -= 1;
-            }
             instructions.push(insn);
             offsets.push(offset);
         }
     }
-    quota.release();
     if instructions.capacity() > instructions.len().saturating_mul(2).max(16) {
         instructions.shrink_to_fit();
         offsets.shrink_to_fit();

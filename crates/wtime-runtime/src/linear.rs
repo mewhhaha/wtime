@@ -145,6 +145,58 @@ impl LinearBytes {
         slot.copy_from_slice(&data);
         true
     }
+    /// Returns mutable slices for up to two allocated 64 KiB pages `(p0, p1)`,
+    /// each clamped to `self.len`. Unallocated or out-of-range pages return an
+    /// empty slice, as does `p1` when `p1 == p0`.
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    #[inline(always)]
+    pub(crate) fn allocated_two_pages_mut(
+        &mut self,
+        p0: usize,
+        p1: usize,
+    ) -> (&mut [u8], &mut [u8]) {
+        #[inline(always)]
+        fn clamp(len: usize, page_idx: usize, slot: &mut Option<Box<[u8]>>) -> &mut [u8] {
+            let Some(page_start) = page_idx.checked_shl(PAGE_BITS) else {
+                return &mut [];
+            };
+            if page_start >= len {
+                return &mut [];
+            }
+            let valid = (len - page_start).min(PAGE);
+            let Some(bytes) = slot.as_deref_mut() else {
+                return &mut [];
+            };
+            let cap = bytes.len().min(valid);
+            &mut bytes[..cap]
+        }
+        let len = self.len;
+        let pages = self.pages.as_mut_slice();
+        if p0 == p1 || p1 >= pages.len() {
+            let s0 = pages
+                .get_mut(p0)
+                .map_or(&mut [][..], |slot| clamp(len, p0, slot));
+            return (s0, &mut []);
+        }
+        if p0 >= pages.len() {
+            let s1 = clamp(len, p1, &mut pages[p1]);
+            return (&mut [], s1);
+        }
+        if p0 < p1 {
+            let (lo, hi) = pages.split_at_mut(p1);
+            (clamp(len, p0, &mut lo[p0]), clamp(len, p1, &mut hi[0]))
+        } else {
+            let (lo, hi) = pages.split_at_mut(p0);
+            (clamp(len, p0, &mut hi[0]), clamp(len, p1, &mut lo[p1]))
+        }
+    }
     /// Copies `out.len()` bytes at `at` into `out`.
     #[inline]
     pub(crate) fn read(&self, at: usize, out: &mut [u8]) {

@@ -24,10 +24,12 @@ where
         return items.iter().map(|item| f(&mut state, item)).collect();
     }
     let batch = (items.len() / (threads * 16)).clamp(1, 64);
+    let est_per_worker = items.len() / threads + batch;
     let next = AtomicUsize::new(0);
     let work = || {
         let mut state = init();
         let mut done = Vec::new();
+        let _ = done.try_reserve(est_per_worker);
         loop {
             let start = next.fetch_add(batch, Ordering::Relaxed);
             if start >= items.len() {

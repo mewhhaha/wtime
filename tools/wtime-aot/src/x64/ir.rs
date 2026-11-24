@@ -59,8 +59,12 @@ pub enum IntBinOp {
     Mul,
     DivS,
     DivU,
+    /// Unsigned division whose divisor is statically proven non-zero (traps-free; omits `div0` check).
+    DivUNz,
     RemS,
     RemU,
+    /// Unsigned remainder whose divisor is statically proven non-zero (traps-free; omits `div0` check).
+    RemUNz,
     And,
     Or,
     Xor,
@@ -454,6 +458,9 @@ pub enum Op {
     BoundsCheck {
         addr: Val,
         end_off: u64,
+        /// `true` when emitted to guard an atomic bulk-memory op (`MemCopyConst` forwarding)
+        /// so standalone guard-page BCE must still execute this check before any stores.
+        for_bulk: bool,
     },
     Load {
         kind: LoadKind,
@@ -510,6 +517,13 @@ pub enum Op {
         val: Val,
         len: u32,
         checked: bool,
+    },
+    /// Bounds-checked-by-caller unsigned byte-sum reduction over `mem[base + offset .. + count]`
+    /// (`count` is a multiple of 16; returns `i32` sum mod `2^32`, lowered to AVX2/SSE2/NEON).
+    MemByteSum {
+        base: Val,
+        count: Val,
+        offset: u64,
     },
 
     V128Splat {
@@ -725,6 +739,10 @@ impl Op {
                 f(dst);
                 f(val);
             }
+            Op::MemByteSum { base, count, .. } => {
+                f(base);
+                f(count);
+            }
             Op::Call { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
                     f(v);
@@ -905,6 +923,10 @@ pub struct IrFunc {
     /// Extra native stack headroom reserved by a stack-check-retaining caller on behalf of
     /// direct stack-check-elided callees (Step 8a).
     pub elided_callee_stack_bytes: i32,
+    /// Early-prune state set by `prune_early_block_params` (`0` = not early-pruned / mutated by
+    /// inlining, `1` = CFG compacted & params pruned with changes so Stage 2 still needs one
+    /// `optimize_ir` pass, `2` = CFG compacted & params pruned with zero changes).
+    pub early_pruned: u8,
 }
 
 impl IrFunc {
@@ -957,6 +979,7 @@ impl IrFunc {
             br_tables,
             needs_stack_check: self.needs_stack_check,
             elided_callee_stack_bytes: self.elided_callee_stack_bytes,
+            early_pruned: self.early_pruned,
         })
     }
 
@@ -1190,6 +1213,7 @@ impl Builder {
             br_tables: Vec::new(),
             needs_stack_check,
             elided_callee_stack_bytes: 0,
+            early_pruned: 0,
         };
         ir.blocks[0].preds = 1;
         Self {
@@ -1611,6 +1635,26 @@ pub fn lower_wasm_to_ir_with_budget(
     opt: bool,
     budget: Option<&CompileBudget>,
 ) -> Res<IrFunc> {
+    let mut opt_scratch = OptIrScratch::default();
+    lower_wasm_to_ir_with_budget_and_scratch(
+        decoded,
+        module,
+        func_index,
+        opt,
+        budget,
+        &mut opt_scratch,
+    )
+}
+
+/// Same as `lower_wasm_to_ir_with_budget`, reusing worker-local `OptIrScratch` buffers.
+pub fn lower_wasm_to_ir_with_budget_and_scratch(
+    decoded: &DecodedModule,
+    module: &X64Module,
+    func_index: usize,
+    opt: bool,
+    budget: Option<&CompileBudget>,
+    opt_scratch: &mut OptIrScratch,
+) -> Res<IrFunc> {
     if let Some(bg) = budget {
         bg.check_deadline()?;
     }
@@ -1706,13 +1750,28 @@ pub fn lower_wasm_to_ir_with_budget(
             } else {
                 frame.results.len()
             };
-            let mut args = Vec::with_capacity(arity + frame.carried_locals.len());
-            let base = stack.len() - arity;
-            args.extend_from_slice(&stack[base..]);
-            for &lx in &frame.carried_locals {
-                args.push(locals[lx as usize]);
+            let count = arity + frame.carried_locals.len();
+            if count == 0 {
+                return Ok(ValRange::EMPTY);
             }
-            b.ir.push_pool(&args)
+            let new_len = b.ir.val_pool.len().saturating_add(count);
+            if new_len > MAX_VAL_POOL_PER_FN {
+                return Err(format!(
+                    "x64: function {} val_pool ({new_len}) exceeds cap {MAX_VAL_POOL_PER_FN}",
+                    b.ir.func_index
+                ));
+            }
+            let start = u32::try_from(b.ir.val_pool.len())
+                .map_err(|_| "x64: val_pool exceeded u32::MAX")?;
+            let len = u32::try_from(count).map_err(|_| "x64: val range exceeded u32::MAX")?;
+            let _ = start.checked_add(len).ok_or("x64: val_pool overflow")?;
+            let base = stack.len() - arity;
+            b.ir.val_pool.reserve(count);
+            b.ir.val_pool.extend_from_slice(&stack[base..]);
+            for &lx in &frame.carried_locals {
+                b.ir.val_pool.push(locals[lx as usize]);
+            }
+            Ok(ValRange { start, len })
         };
 
     for (pc, insn) in body.instructions.iter().enumerate() {
@@ -3034,9 +3093,18 @@ pub fn lower_wasm_to_ir_with_budget(
 
     let mut ir = b.ir;
     if opt {
-        optimize_ir_with_budget(&mut ir, budget)?;
+        optimize_ir_with_budget_and_scratch(&mut ir, budget, opt_scratch)?;
     }
     Ok(ir)
+}
+
+/// Reusable worker-local scratch buffers for `optimize_ir_with_budget_and_scratch`.
+#[derive(Default)]
+pub struct OptIrScratch {
+    checked_stamp: Vec<(u32, u64)>,
+    out_buf: Vec<Inst>,
+    uses: Vec<u32>,
+    keep: Vec<bool>,
 }
 
 /// Fast O(N) SSA optimizations:
@@ -3049,6 +3117,16 @@ pub fn optimize_ir(ir: &mut IrFunc) {
 
 /// Runs `optimize_ir` while cooperatively polling `budget`'s deadline across blocks.
 pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) -> Res<()> {
+    let mut scratch = OptIrScratch::default();
+    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch)
+}
+
+/// Same as `optimize_ir_with_budget`, reusing worker-local `OptIrScratch` buffers.
+pub fn optimize_ir_with_budget_and_scratch(
+    ir: &mut IrFunc,
+    budget: Option<&CompileBudget>,
+    scratch: &mut OptIrScratch,
+) -> Res<()> {
     // Pass 1: Fuse `Select` -> `CmpSelect` and `BranchIf` -> `CmpBranch` (without crossing Call/CallIndirect!).
     let find_def_no_call = |insts: &[Inst], v: Val| -> Option<Op> {
         for inst in insts.iter().rev() {
@@ -3062,6 +3140,7 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
         None
     };
     let mut dropped_preds: Vec<BlockId> = Vec::new();
+    let mut any_mem_op = false;
     for (bi, bb) in ir.blocks.iter_mut().enumerate() {
         if let Some(bg) = budget
             && (bi & 255) == 0
@@ -3070,65 +3149,70 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
         }
         // Pass 1a: Fuse `Cmp` + optional `I32Eqz` + `Select` -> `Op::CmpSelect`.
         for idx in 0..bb.insts.len() {
-            if let Op::Select {
-                mut cond,
-                a: mut tv,
-                b: mut fv,
-            } = bb.insts[idx].op
-            {
-                let prefix = &bb.insts[..idx];
-                if let Some(Op::I32Eqz(inner)) = find_def_no_call(prefix, cond) {
-                    cond = inner;
-                    std::mem::swap(&mut tv, &mut fv);
+            match bb.insts[idx].op {
+                Op::BoundsCheck { .. } | Op::Load { .. } | Op::Store { .. } => {
+                    any_mem_op = true;
                 }
-                let fused_sel = match find_def_no_call(prefix, cond) {
-                    Some(Op::I32Cmp(op, a, b)) => Some(Op::CmpSelect {
-                        kind: CmpBranchKind::I32(op),
-                        a,
-                        b,
-                        tv,
-                        fv,
-                    }),
-                    Some(Op::I32CmpImm(op, a, imm)) => Some(Op::CmpSelect {
-                        kind: CmpBranchKind::I32Imm(op, imm),
-                        a,
-                        b: a,
-                        tv,
-                        fv,
-                    }),
-                    Some(Op::I64Cmp(op, a, b)) => Some(Op::CmpSelect {
-                        kind: CmpBranchKind::I64(op),
-                        a,
-                        b,
-                        tv,
-                        fv,
-                    }),
-                    Some(Op::I64CmpImm(op, a, imm)) => Some(Op::CmpSelect {
-                        kind: CmpBranchKind::I64Imm(op, imm),
-                        a,
-                        b: a,
-                        tv,
-                        fv,
-                    }),
-                    Some(Op::F32Cmp(op, a, b)) => Some(Op::CmpSelect {
-                        kind: CmpBranchKind::F32(op),
-                        a,
-                        b,
-                        tv,
-                        fv,
-                    }),
-                    Some(Op::F64Cmp(op, a, b)) => Some(Op::CmpSelect {
-                        kind: CmpBranchKind::F64(op),
-                        a,
-                        b,
-                        tv,
-                        fv,
-                    }),
-                    _ => None,
-                };
-                if let Some(new_op) = fused_sel {
-                    bb.insts[idx].op = new_op;
+                Op::Select {
+                    mut cond,
+                    a: mut tv,
+                    b: mut fv,
+                } => {
+                    let prefix = &bb.insts[..idx];
+                    if let Some(Op::I32Eqz(inner)) = find_def_no_call(prefix, cond) {
+                        cond = inner;
+                        std::mem::swap(&mut tv, &mut fv);
+                    }
+                    let fused_sel = match find_def_no_call(prefix, cond) {
+                        Some(Op::I32Cmp(op, a, b)) => Some(Op::CmpSelect {
+                            kind: CmpBranchKind::I32(op),
+                            a,
+                            b,
+                            tv,
+                            fv,
+                        }),
+                        Some(Op::I32CmpImm(op, a, imm)) => Some(Op::CmpSelect {
+                            kind: CmpBranchKind::I32Imm(op, imm),
+                            a,
+                            b: a,
+                            tv,
+                            fv,
+                        }),
+                        Some(Op::I64Cmp(op, a, b)) => Some(Op::CmpSelect {
+                            kind: CmpBranchKind::I64(op),
+                            a,
+                            b,
+                            tv,
+                            fv,
+                        }),
+                        Some(Op::I64CmpImm(op, a, imm)) => Some(Op::CmpSelect {
+                            kind: CmpBranchKind::I64Imm(op, imm),
+                            a,
+                            b: a,
+                            tv,
+                            fv,
+                        }),
+                        Some(Op::F32Cmp(op, a, b)) => Some(Op::CmpSelect {
+                            kind: CmpBranchKind::F32(op),
+                            a,
+                            b,
+                            tv,
+                            fv,
+                        }),
+                        Some(Op::F64Cmp(op, a, b)) => Some(Op::CmpSelect {
+                            kind: CmpBranchKind::F64(op),
+                            a,
+                            b,
+                            tv,
+                            fv,
+                        }),
+                        _ => None,
+                    };
+                    if let Some(new_op) = fused_sel {
+                        bb.insts[idx].op = new_op;
+                    }
                 }
+                _ => {}
             }
         }
         // Pass 1b: Fuse `BranchIf` with defining `Cmp`/`Eqz`/`ConstI32` in the same block (not crossing Call/CallIndirect).
@@ -3253,45 +3337,154 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
     // Uses a dense block-stamped array (O(1) indexing, zero SipHash) and in-place mutation when no
     // hoisted `BoundsCheck` is inserted into the block.
     let n_vals = ir.val_tys.len();
-    let mut checked_stamp: Vec<(u32, u64)> = vec![(0, 0); n_vals];
-    let mut out_buf: Vec<Inst> = Vec::new();
-    for (bi, bb) in ir.blocks.iter_mut().enumerate() {
-        if let Some(bg) = budget
-            && (bi & 255) == 0
-        {
-            bg.check_deadline()?;
+    if any_mem_op {
+        scratch.checked_stamp.clear();
+        if scratch.checked_stamp.capacity() > 16_384 && n_vals <= 4096 {
+            scratch.checked_stamp.shrink_to(4096);
         }
-        let stamp = (bi as u32) + 1;
-        let mut need_rewrite = false;
-        let mut i = 0;
-        while i < bb.insts.len() {
+        scratch.checked_stamp.resize(n_vals, (0, 0));
+        let checked_stamp = &mut scratch.checked_stamp;
+        let out_buf = &mut scratch.out_buf;
+        for (bi, bb) in ir.blocks.iter_mut().enumerate() {
             if let Some(bg) = budget
-                && (i & 4095) == 4095
+                && (bi & 255) == 0
             {
                 bg.check_deadline()?;
             }
-            match bb.insts[i].op {
-                Op::BoundsCheck { addr, end_off } => {
-                    let slot = &mut checked_stamp[addr.0 as usize];
-                    if slot.0 != stamp || end_off > slot.1 {
-                        *slot = (stamp, end_off);
-                    }
-                    if need_rewrite {
-                        out_buf.push(bb.insts[i]);
-                    }
+            let stamp = (bi as u32) + 1;
+            let mut need_rewrite = false;
+            let mut i = 0;
+            while i < bb.insts.len() {
+                if let Some(bg) = budget
+                    && (i & 4095) == 4095
+                {
+                    bg.check_deadline()?;
                 }
-                Op::Load {
-                    kind,
-                    addr,
-                    offset,
-                    checked,
-                } => {
-                    let end = offset.saturating_add(kind.bytes());
-                    let slot = &mut checked_stamp[addr.0 as usize];
-                    let prev_max = if slot.0 == stamp { slot.1 } else { 0 };
-                    if checked || (slot.0 == stamp && prev_max >= end) {
+                match bb.insts[i].op {
+                    Op::BoundsCheck { addr, end_off, .. } => {
+                        let slot = &mut checked_stamp[addr.0 as usize];
+                        if slot.0 != stamp || end_off > slot.1 {
+                            *slot = (stamp, end_off);
+                        }
+                        if need_rewrite {
+                            out_buf.push(bb.insts[i]);
+                        }
+                    }
+                    Op::Load {
+                        kind,
+                        addr,
+                        offset,
+                        checked,
+                    } => {
+                        let end = offset.saturating_add(kind.bytes());
+                        let slot = &mut checked_stamp[addr.0 as usize];
+                        let prev_max = if slot.0 == stamp { slot.1 } else { 0 };
+                        if checked || (slot.0 == stamp && prev_max >= end) {
+                            if !checked
+                                && let Op::Load {
+                                    checked: ref mut c, ..
+                                } = bb.insts[i].op
+                            {
+                                *c = true;
+                            }
+                            if slot.0 != stamp || end > prev_max {
+                                *slot = (stamp, end);
+                            }
+                            if need_rewrite {
+                                out_buf.push(bb.insts[i]);
+                            }
+                            i += 1;
+                            continue;
+                        }
+                        let mut max_end = end;
+                        let mut run_ops = 1usize;
+                        let mut j = i + 1;
+                        while j < bb.insts.len() {
+                            if let Some(bg) = budget
+                                && (j & 4095) == 4095
+                            {
+                                bg.check_deadline()?;
+                            }
+                            match bb.insts[j].op {
+                                Op::Load {
+                                    kind: lk,
+                                    addr: la,
+                                    offset: lo,
+                                    ..
+                                } if la == addr => {
+                                    let Some(e) = lo.checked_add(lk.bytes()) else {
+                                        break;
+                                    };
+                                    if e > max_end {
+                                        max_end = e;
+                                    }
+                                    run_ops += 1;
+                                }
+                                Op::Store {
+                                    kind: sk,
+                                    addr: sa,
+                                    offset: so,
+                                    ..
+                                } if sa == addr => {
+                                    let Some(e) = so.checked_add(sk.bytes()) else {
+                                        break;
+                                    };
+                                    if e > max_end {
+                                        max_end = e;
+                                    }
+                                    run_ops += 1;
+                                    break;
+                                }
+                                ref other if !other.has_side_effect() => {}
+                                _ => break,
+                            }
+                            j += 1;
+                        }
+                        if run_ops >= 2 && max_end > end {
+                            if !need_rewrite {
+                                out_buf.clear();
+                                out_buf.reserve(bb.insts.len() + 4);
+                                out_buf.extend_from_slice(&bb.insts[..i]);
+                                need_rewrite = true;
+                            }
+                            out_buf.push(Inst {
+                                res: None,
+                                op: Op::BoundsCheck {
+                                    addr,
+                                    end_off: max_end,
+                                    for_bulk: false,
+                                },
+                            });
+                            checked_stamp[addr.0 as usize] = (stamp, max_end);
+                            let mut inst = bb.insts[i];
+                            if let Op::Load {
+                                checked: ref mut c, ..
+                            } = inst.op
+                            {
+                                *c = true;
+                            }
+                            out_buf.push(inst);
+                        } else {
+                            checked_stamp[addr.0 as usize] = (stamp, end);
+                            if need_rewrite {
+                                out_buf.push(bb.insts[i]);
+                            }
+                        }
+                    }
+                    Op::Store {
+                        kind,
+                        addr,
+                        offset,
+                        checked,
+                        ..
+                    } => {
+                        let end = offset.saturating_add(kind.bytes());
+                        let slot = &mut checked_stamp[addr.0 as usize];
+                        let prev_max = if slot.0 == stamp { slot.1 } else { 0 };
                         if !checked
-                            && let Op::Load {
+                            && slot.0 == stamp
+                            && prev_max >= end
+                            && let Op::Store {
                                 checked: ref mut c, ..
                             } = bb.insts[i].op
                         {
@@ -3303,125 +3496,29 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
                         if need_rewrite {
                             out_buf.push(bb.insts[i]);
                         }
-                        i += 1;
-                        continue;
                     }
-                    let mut max_end = end;
-                    let mut run_ops = 1usize;
-                    let mut j = i + 1;
-                    while j < bb.insts.len() {
-                        if let Some(bg) = budget
-                            && (j & 4095) == 4095
-                        {
-                            bg.check_deadline()?;
-                        }
-                        match bb.insts[j].op {
-                            Op::Load {
-                                kind: lk,
-                                addr: la,
-                                offset: lo,
-                                ..
-                            } if la == addr => {
-                                let Some(e) = lo.checked_add(lk.bytes()) else {
-                                    break;
-                                };
-                                if e > max_end {
-                                    max_end = e;
-                                }
-                                run_ops += 1;
-                            }
-                            Op::Store {
-                                kind: sk,
-                                addr: sa,
-                                offset: so,
-                                ..
-                            } if sa == addr => {
-                                let Some(e) = so.checked_add(sk.bytes()) else {
-                                    break;
-                                };
-                                if e > max_end {
-                                    max_end = e;
-                                }
-                                run_ops += 1;
-                                break;
-                            }
-                            ref other if !other.has_side_effect() => {}
-                            _ => break,
-                        }
-                        j += 1;
-                    }
-                    if run_ops >= 2 && max_end > end {
-                        if !need_rewrite {
-                            out_buf.clear();
-                            out_buf.reserve(bb.insts.len() + 4);
-                            out_buf.extend_from_slice(&bb.insts[..i]);
-                            need_rewrite = true;
-                        }
-                        out_buf.push(Inst {
-                            res: None,
-                            op: Op::BoundsCheck {
-                                addr,
-                                end_off: max_end,
-                            },
-                        });
-                        checked_stamp[addr.0 as usize] = (stamp, max_end);
-                        let mut inst = bb.insts[i];
-                        if let Op::Load {
-                            checked: ref mut c, ..
-                        } = inst.op
-                        {
-                            *c = true;
-                        }
-                        out_buf.push(inst);
-                    } else {
-                        checked_stamp[addr.0 as usize] = (stamp, end);
+                    _ => {
                         if need_rewrite {
                             out_buf.push(bb.insts[i]);
                         }
                     }
                 }
-                Op::Store {
-                    kind,
-                    addr,
-                    offset,
-                    checked,
-                    ..
-                } => {
-                    let end = offset.saturating_add(kind.bytes());
-                    let slot = &mut checked_stamp[addr.0 as usize];
-                    let prev_max = if slot.0 == stamp { slot.1 } else { 0 };
-                    if !checked
-                        && slot.0 == stamp
-                        && prev_max >= end
-                        && let Op::Store {
-                            checked: ref mut c, ..
-                        } = bb.insts[i].op
-                    {
-                        *c = true;
-                    }
-                    if slot.0 != stamp || end > prev_max {
-                        *slot = (stamp, end);
-                    }
-                    if need_rewrite {
-                        out_buf.push(bb.insts[i]);
-                    }
-                }
-                _ => {
-                    if need_rewrite {
-                        out_buf.push(bb.insts[i]);
-                    }
-                }
+                i += 1;
             }
-            i += 1;
-        }
-        if need_rewrite {
-            bb.insts.clear();
-            bb.insts.extend_from_slice(&out_buf);
+            if need_rewrite {
+                bb.insts.clear();
+                bb.insts.extend_from_slice(out_buf);
+            }
         }
     }
 
     // Pass 3: Dead-code elimination (single reverse use-count pass with saturating u32 counts).
-    let mut uses = vec![0u32; n_vals];
+    scratch.uses.clear();
+    if scratch.uses.capacity() > 16_384 && n_vals <= 4096 {
+        scratch.uses.shrink_to(4096);
+    }
+    scratch.uses.resize(n_vals, 0u32);
+    let uses = &mut scratch.uses;
     for (bi, bb) in ir.blocks.iter().enumerate() {
         if let Some(bg) = budget
             && (bi & 255) == 0
@@ -3442,7 +3539,7 @@ pub fn optimize_ir_with_budget(ir: &mut IrFunc, budget: Option<&CompileBudget>) 
             uses[v.0 as usize] = uses[v.0 as usize].saturating_add(1);
         });
     }
-    let mut keep: Vec<bool> = Vec::new();
+    let keep = &mut scratch.keep;
     for (bi, bb) in ir.blocks.iter_mut().rev().enumerate() {
         if let Some(bg) = budget
             && (bi & 255) == 0

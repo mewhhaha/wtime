@@ -386,6 +386,11 @@ impl A64Asm {
         );
     }
 
+    /// `add xd, xn, wm, uxtw #0` (zero-extends 32-bit `wm` and adds to 64-bit `xn` in 1 insn).
+    pub fn add_ext_uxtw(&mut self, rd: Reg, rn: Reg, rm: Reg) {
+        self.emit(0x8b20_4000 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | rd.0 as u32);
+    }
+
     pub fn adds_r(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg) {
         self.emit(
             Self::sf(is64)
@@ -1060,10 +1065,21 @@ impl A64Asm {
         );
     }
 
-    /// Encodes `[rn, rm, LSL #0]` (64-bit `rm`, `uxtw=false`) or `[rn, wm, UXTW #0]` (`uxtw=true`).
+    /// Encodes `[rn, rm, LSL #0/#scale]` (`uxtw=false`) or `[rn, wm, UXTW #0/#scale]` (`uxtw=true`).
     #[allow(clippy::too_many_arguments)]
-    fn ldst_reg(&mut self, size: u32, is_fp: bool, opc: u32, rt: u8, rn: Reg, rm: Reg, uxtw: bool) {
+    fn ldst_reg_ext(
+        &mut self,
+        size: u32,
+        is_fp: bool,
+        opc: u32,
+        rt: u8,
+        rn: Reg,
+        rm: Reg,
+        uxtw: bool,
+        scaled: bool,
+    ) {
         let opt = if uxtw { 0b010u32 } else { 0b011u32 };
+        let s = u32::from(scaled);
         self.emit(
             (size << 30)
                 | 0x3820_0800
@@ -1071,9 +1087,15 @@ impl A64Asm {
                 | (opc << 22)
                 | ((rm.0 as u32) << 16)
                 | (opt << 13)
+                | (s << 12)
                 | ((rn.0 as u32) << 5)
                 | (rt as u32),
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ldst_reg(&mut self, size: u32, is_fp: bool, opc: u32, rt: u8, rn: Reg, rm: Reg, uxtw: bool) {
+        self.ldst_reg_ext(size, is_fp, opc, rt, rn, rm, uxtw, false);
     }
 
     pub fn ldr_uimm(&mut self, is64: bool, rt: Reg, rn: Reg, off: u32) {
@@ -1203,6 +1225,19 @@ impl A64Asm {
 
     pub fn str_q_reg(&mut self, vt: VReg, rn: Reg, rm: Reg, uxtw: bool) {
         self.ldst_reg(0, true, 2, vt.0, rn, rm, uxtw);
+    }
+
+    /// Scaled register-indexed `[rn, rm, UXTW/LSL #scale]` (`scale = 2` for 32-bit, `3` for 64-bit).
+    pub fn ldr_reg_scaled(&mut self, is64: bool, rt: Reg, rn: Reg, rm: Reg, uxtw: bool) {
+        self.ldst_reg_ext(if is64 { 3 } else { 2 }, false, 1, rt.0, rn, rm, uxtw, true);
+    }
+
+    pub fn str_reg_scaled(&mut self, is64: bool, rt: Reg, rn: Reg, rm: Reg, uxtw: bool) {
+        self.ldst_reg_ext(if is64 { 3 } else { 2 }, false, 0, rt.0, rn, rm, uxtw, true);
+    }
+
+    pub fn ldrsw_reg_scaled(&mut self, rt: Reg, rn: Reg, rm: Reg, uxtw: bool) {
+        self.ldst_reg_ext(2, false, 2, rt.0, rn, rm, uxtw, true);
     }
 
     // Load/Store Pair (64-bit GP & 128-bit Q)
@@ -1566,6 +1601,191 @@ impl A64Asm {
     /// `movi vd.16b, #0` (zero 128-bit vector register).
     pub fn movi_zero_16b(&mut self, vd: VReg) {
         self.emit(0x4f00_0400 | vd.0 as u32);
+    }
+
+    /// `tbl vd.16b, {vn.16b}, vm.16b`: 16-byte table lookup (indices >= 16 yield 0).
+    pub fn tbl_16b(&mut self, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(0x4e00_0000 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+
+    /// `saddlp vd.<T>, vn.<2T>` (`size`: `0`=16b->8h, `1`=8h->4s, `2`=4s->2d).
+    pub fn saddlp_128(&mut self, size: u8, vd: VReg, vn: VReg) {
+        self.emit(0x4e20_2800 | (((size & 3) as u32) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+
+    /// `addp vd.<T>, vn.<T>, vm.<T>` (`size`: `0`=16b, `1`=8h, `2`=4s, `3`=2d).
+    pub fn addp_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(
+            0x4e20_bc00
+                | (((size & 3) as u32) << 22)
+                | ((vm.0 as u32) << 16)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
+    /// `uminv rd, vn.<T>` across-lanes unsigned min (`size`: `0`=16b, `1`=8h, `2`=4s).
+    pub fn uminv_128(&mut self, size: u8, vd: VReg, vn: VReg) {
+        self.emit(0x6e31_a800 | (((size & 3) as u32) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+
+    /// `abs vd.<T>, vn.<T>` (`size`: `0`=16b, `1`=8h, `2`=4s, `3`=2d).
+    pub fn abs_v128(&mut self, size: u8, vd: VReg, vn: VReg) {
+        self.emit(0x4e20_b800 | (((size & 3) as u32) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+
+    /// `neg vd.<T>, vn.<T>` (`size`: `0`=16b, `1`=8h, `2`=4s, `3`=2d).
+    pub fn neg_v128(&mut self, size: u8, vd: VReg, vn: VReg) {
+        self.emit(0x6e20_b800 | (((size & 3) as u32) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+
+    /// Helper for AdvSIMD three-same 128-bit integer ops (`0|Q=1|U|01110|size|1|Rm|opcode|1|Rn|Rd`).
+    fn neon_3same(&mut self, base: u32, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(
+            base | (((size & 3) as u32) << 22)
+                | ((vm.0 as u32) << 16)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
+    pub fn cmeq_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_8c00, size, vd, vn, vm);
+    }
+    pub fn cmgt_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_3400, size, vd, vn, vm);
+    }
+    pub fn cmge_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_3c00, size, vd, vn, vm);
+    }
+    pub fn cmhi_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_3400, size, vd, vn, vm);
+    }
+    pub fn cmhs_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_3c00, size, vd, vn, vm);
+    }
+    pub fn sqadd_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_0c00, size, vd, vn, vm);
+    }
+    pub fn uqadd_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_0c00, size, vd, vn, vm);
+    }
+    pub fn sqsub_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_2c00, size, vd, vn, vm);
+    }
+    pub fn uqsub_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_2c00, size, vd, vn, vm);
+    }
+    pub fn smax_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_6400, size, vd, vn, vm);
+    }
+    pub fn umax_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_6400, size, vd, vn, vm);
+    }
+    pub fn smin_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_6c00, size, vd, vn, vm);
+    }
+    pub fn umin_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_6c00, size, vd, vn, vm);
+    }
+    pub fn urhadd_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_1400, size, vd, vn, vm);
+    }
+    pub fn sqrdmulh_8h(&mut self, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_b400, 1, vd, vn, vm);
+    }
+    pub fn sshl_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x4e20_4400, size, vd, vn, vm);
+    }
+    pub fn ushl_v128(&mut self, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.neon_3same(0x6e20_4400, size, vd, vn, vm);
+    }
+
+    /// `sshr vd.<T>, vn.<T>, #shift` (`size`: `0`=16b, `1`=8h, `2`=4s, `3`=2d; `1 <= shift <= 8<<size`).
+    pub fn sshr_imm_v128(&mut self, size: u8, vd: VReg, vn: VReg, shift: u8) {
+        let enc = (16u32 << size) - u32::from(shift);
+        self.emit(0x4f00_0400 | (enc << 16) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+
+    /// `sxtl` / `sxtl2` / `uxtl` / `uxtl2` (`size`: `0`=8b->8h, `1`=4h->4s, `2`=2s->2d).
+    pub fn xtl_128(&mut self, unsigned: bool, high: bool, size: u8, vd: VReg, vn: VReg) {
+        let immh = 1u32 << size;
+        self.emit(
+            0x0f00_a400
+                | (u32::from(high) << 30)
+                | (u32::from(unsigned) << 29)
+                | (immh << 19)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
+    /// `sqxtn` / `sqxtn2` (signed saturating narrow, `size`: `0`=8h->8b, `1`=4s->4h).
+    pub fn sqxtn_128(&mut self, high: bool, size: u8, vd: VReg, vn: VReg) {
+        self.emit(
+            0x0e21_4800
+                | (u32::from(high) << 30)
+                | (((size & 3) as u32) << 22)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
+    /// `sqxtun` / `sqxtun2` (signed-to-unsigned saturating narrow, `size`: `0`=8h->8b, `1`=4s->4h).
+    pub fn sqxtun_128(&mut self, high: bool, size: u8, vd: VReg, vn: VReg) {
+        self.emit(
+            0x2e21_2800
+                | (u32::from(high) << 30)
+                | (((size & 3) as u32) << 22)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
+    /// `smull` / `smull2` / `umull` / `umull2` (`size`: `0`=8b->8h, `1`=4h->4s, `2`=2s->2d).
+    pub fn mull_128(&mut self, unsigned: bool, high: bool, size: u8, vd: VReg, vn: VReg, vm: VReg) {
+        self.emit(
+            0x0e20_c000
+                | (u32::from(high) << 30)
+                | (u32::from(unsigned) << 29)
+                | (((size & 3) as u32) << 22)
+                | ((vm.0 as u32) << 16)
+                | ((vn.0 as u32) << 5)
+                | vd.0 as u32,
+        );
+    }
+
+    pub fn frintn_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x4e21_8800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn frintm_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x4e21_9800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn frintp_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x4ea1_8800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn frintz_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x4ea1_9800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn scvtf_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x4e21_d800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn ucvtf_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x6e21_d800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn fcvtzs_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x4ea1_b800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    pub fn fcvtzu_v128(&mut self, is64: bool, vd: VReg, vn: VReg) {
+        self.emit(0x6ea1_b800 | (u32::from(is64) << 22) | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    /// `fcvtn vd.2s, vn.2d` (demotes 2 f64s to 2 f32s and zeroes upper 64 bits!).
+    pub fn fcvtn_2s_2d(&mut self, vd: VReg, vn: VReg) {
+        self.emit(0x0e61_6800 | ((vn.0 as u32) << 5) | vd.0 as u32);
+    }
+    /// `fcvtl vd.2d, vn.2s` (promotes low 2 f32s to 2 f64s).
+    pub fn fcvtl_2d_2s(&mut self, vd: VReg, vn: VReg) {
+        self.emit(0x0e61_7800 | ((vn.0 as u32) << 5) | vd.0 as u32);
     }
 }
 

@@ -3,7 +3,8 @@ use crate::instructions::expression;
 use crate::{
     Immediate, Instruction, Reader,
     instructions::{
-        body_expression_bounded, count, expression_bounded, try_reserve_exact_budget, val,
+        AlignedAtomicUsize, DecodeWorkerBudget, body_expression_bounded, count, expression_bounded,
+        val,
     },
 };
 use std::sync::Arc;
@@ -860,7 +861,7 @@ pub fn decode(
                     for _ in 0..n {
                         let size = s.u32()?;
                         let b = s.child(size as usize)?;
-                        let parsed = parse_function_body(b, policy, None, None, None, false)?;
+                        let parsed = parse_function_body(b, policy, None, false)?;
                         saw_data_count_op |= parsed.saw_data_count_op;
                     }
                     decl_limit_exceeded = true;
@@ -882,26 +883,26 @@ pub fn decode(
                     let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
                     let keep_bodies =
                         !decl_limit_exceeded && !rec_group_limit_exceeded && !expr_limit_exceeded;
-                    // Share module-wide pre-reserved budgets across all workers for instructions,
-                    // variable-length immediate elements, AND retained local-group entries so
-                    // parallel decoding never retains past `policy` limits while scanning full syntax.
-                    let shared_insns = std::sync::atomic::AtomicUsize::new(expr_insns);
-                    let shared_imm_elems = std::sync::atomic::AtomicUsize::new(expr_imm_elems);
-                    let shared_locals = std::sync::atomic::AtomicUsize::new(0);
+                    // Share cache-line-isolated module-wide pre-reserved budgets across all workers
+                    // via per-worker batched banks so parallel decoding never retains past `policy`
+                    // limits while avoiding per-body atomic contention.
+                    let shared_insns = AlignedAtomicUsize::new(expr_insns);
+                    let shared_imm_elems = AlignedAtomicUsize::new(expr_imm_elems);
+                    let shared_locals = AlignedAtomicUsize::new(0);
                     let decoded = wtime_types::parallel::map_ordered(
                         &bodies,
                         threads,
-                        || (),
-                        |_, b| {
-                            parse_function_body(
-                                b.clone(),
-                                policy,
-                                Some(&shared_insns),
-                                Some(&shared_imm_elems),
-                                Some(&shared_locals),
-                                keep_bodies,
+                        || {
+                            DecodeWorkerBudget::new(
+                                &shared_insns,
+                                &shared_imm_elems,
+                                &shared_locals,
+                                policy.max_instructions,
+                                policy.max_total_locals,
+                                threads,
                             )
                         },
+                        |wb, b| parse_function_body(b.clone(), policy, Some(wb), keep_bodies),
                     );
                     let mut parsed_bodies = Vec::with_capacity(decoded.len());
                     let mut total_decoded_locals: usize = 0;
@@ -960,23 +961,12 @@ pub fn decode(
                             let parsed = if parsed.dropped
                                 && (parsed.insn_count > 0 || parsed.total_locals > 0)
                             {
-                                parse_function_body(
-                                    bodies[idx].clone(),
-                                    policy,
-                                    None,
-                                    None,
-                                    None,
-                                    true,
-                                )?
+                                parse_function_body(bodies[idx].clone(), policy, None, true)?
                             } else {
                                 parsed
                             };
-                            let mut locals = Vec::with_capacity(parsed.total_locals as usize);
-                            for (cnt, ty) in parsed.local_groups {
-                                locals.resize(locals.len() + cnt as usize, ty);
-                            }
                             m.code.push(FunctionBody {
-                                locals,
+                                locals: parsed.locals,
                                 instructions: parsed.instructions,
                                 offsets: parsed.offsets,
                                 span: parsed.span,
@@ -1131,7 +1121,7 @@ pub fn decode(
     Ok(m)
 }
 struct ParsedBody {
-    local_groups: Vec<(u32, ValType)>,
+    locals: Vec<ValType>,
     total_locals: u32,
     insn_count: usize,
     imm_elems: usize,
@@ -1143,22 +1133,20 @@ struct ParsedBody {
     span: Span,
 }
 
-/// One function body of the code section, parsed without expanding `locals`.
-/// Uses `body_expression_bounded` AND `shared_locals` / `shared_imm_elems` so
-/// retained instructions, variable-length immediates, and local-group entries
-/// never exceed module-wide `policy` caps while full syntax checking still runs.
+/// One function body of the code section, expanding bounded `locals` in parallel
+/// once reserved against `worker_budget` so aggregate retained memory never
+/// exceeds `policy` caps while full syntax checking still runs.
 fn parse_function_body(
     mut b: Reader,
     policy: &ResourceLimits,
-    shared_insns: Option<&std::sync::atomic::AtomicUsize>,
-    shared_imm_elems: Option<&std::sync::atomic::AtomicUsize>,
-    shared_locals: Option<&std::sync::atomic::AtomicUsize>,
+    mut worker_budget: Option<&mut DecodeWorkerBudget<'_>>,
     keep: bool,
 ) -> Result<ParsedBody> {
     let start = b.offset();
     let groups = count(&mut b)?;
-    let mut local_groups = Vec::new();
+    let mut locals = Vec::new();
     let mut total = 0u32;
+    let mut reserved_locals = 0usize;
     let mut keep_locals = keep;
     let mut dropped_locals = !keep;
     for _ in 0..groups {
@@ -1169,20 +1157,34 @@ fn parse_function_body(
             .ok_or_else(|| b.error("local count overflow"))?;
         if n > 0 && keep_locals {
             if (total as usize) > policy.max_locals {
-                local_groups.clear();
+                if reserved_locals > 0
+                    && let Some(wb) = worker_budget.as_deref_mut()
+                {
+                    wb.release_locals(reserved_locals);
+                    reserved_locals = 0;
+                }
+                locals = Vec::new();
                 keep_locals = false;
                 dropped_locals = true;
             } else {
-                let reserved = match shared_locals {
-                    Some(shared) => {
-                        try_reserve_exact_budget(shared, policy.max_total_locals, n as usize)
-                    }
+                let reserved = match worker_budget.as_deref_mut() {
+                    Some(wb) => wb.try_reserve_locals(n as usize),
                     None => (total as usize) <= policy.max_total_locals,
                 };
-                if reserved {
-                    local_groups.push((n, ty));
+                if reserved && locals.try_reserve(n as usize).is_ok() {
+                    reserved_locals += n as usize;
+                    locals.resize(locals.len() + n as usize, ty);
                 } else {
-                    local_groups.clear();
+                    if reserved && let Some(wb) = worker_budget.as_deref_mut() {
+                        wb.release_locals(reserved_locals + n as usize);
+                        reserved_locals = 0;
+                    } else if reserved_locals > 0
+                        && let Some(wb) = worker_budget.as_deref_mut()
+                    {
+                        wb.release_locals(reserved_locals);
+                        reserved_locals = 0;
+                    }
+                    locals = Vec::new();
                     keep_locals = false;
                     dropped_locals = true;
                 }
@@ -1192,19 +1194,22 @@ fn parse_function_body(
     let keep_body = keep && (total as usize) <= policy.max_locals;
     let parsed_body = body_expression_bounded(
         &mut b,
-        shared_insns,
-        shared_imm_elems,
+        worker_budget.as_deref_mut(),
         policy.max_instructions,
         keep_body,
     )?;
     b.finish()?;
     let dropped = dropped_locals || parsed_body.dropped;
+    if dropped && !locals.is_empty() {
+        if reserved_locals > 0
+            && let Some(wb) = worker_budget
+        {
+            wb.release_locals(reserved_locals);
+        }
+        locals = Vec::new();
+    }
     Ok(ParsedBody {
-        local_groups: if dropped && (parsed_body.count > 0 || total > 0) {
-            Vec::new()
-        } else {
-            local_groups
-        },
+        locals,
         total_locals: total,
         insn_count: parsed_body.count,
         imm_elems: parsed_body.imm_elems,

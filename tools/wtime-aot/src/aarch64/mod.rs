@@ -12,9 +12,12 @@ pub mod elf;
 pub mod lower;
 pub mod regalloc;
 pub mod runtime;
+pub mod simd_lower;
 #[cfg(test)]
 mod tests_aarch64;
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use asm::{A64Asm, A64RelocTarget, patch_a64_relocs};
@@ -24,13 +27,14 @@ use regalloc::allocate;
 use runtime::{emit_a64_exports, emit_a64_helpers, emit_a64_standalone_start};
 
 use crate::x64::elf::ExportDef;
-use crate::x64::ir::lower_wasm_to_ir_with_budget;
+use crate::x64::ir::{IrFunc, OptIrScratch, lower_wasm_to_ir_with_budget_and_scratch};
 use crate::x64::module::{
     CompileBudget, MAX_TOTAL_CODE_BYTES, MAX_TOTAL_RODATA_BYTES, X64Target,
     admit_x64_module_for_target, x64_validate_features, x64_validate_limits,
 };
 use crate::x64::opt::{
-    Stage2Scratch, compute_module_effects, inline_small_helpers, optimize_func_stage2_with_scratch,
+    self, InlineMode, Stage2Scratch, compute_module_effects, inline_small_helpers,
+    optimize_func_stage2_with_scratch,
 };
 use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables, TRAP_MESSAGES};
 use crate::x64::verify::verify_ir;
@@ -41,6 +45,8 @@ use crate::x64::{CiTableLayout, CtxLayout, MAX_WASM_BYTES_X64, NUM_HELPERS, X64C
 pub struct A64CompileOptions {
     pub target: X64Target,
     pub optimize: bool,
+    /// Worker thread count (`0` = automatic up to available CPU cores).
+    pub jobs: usize,
     pub deadline: Option<Instant>,
 }
 
@@ -49,9 +55,20 @@ impl Default for A64CompileOptions {
         Self {
             target: X64Target::BlotCdylib,
             optimize: true,
+            jobs: 0,
             deadline: None,
         }
     }
+}
+
+fn resolve_a64_jobs(jobs: usize) -> usize {
+    if jobs > 0 {
+        return jobs.min(64);
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(16)
 }
 
 /// Compiled AArch64 artifact details (used by both ELF emission and the in-process AArch64 test oracle).
@@ -210,40 +227,254 @@ fn compile_wasm_to_aarch64_detailed(
     let layout =
         CtxLayout::compute(&module, ci_tables).map_err(X64CompileError::AdmissionRejected)?;
 
-    // 2. Lower all defined functions -> shared SSA IR -> Stage 2 opt -> verify_ir -> AArch64 regalloc & lowering.
+    // 2. Parallel multi-core IR lowering -> parallel inlining -> module effects ->
+    //    parallel Stage 2 opt + verify_ir + AArch64 regalloc & lowering (100% deterministic layout).
     let n_defs = decoded.code.len();
-    let mut irs = Vec::with_capacity(n_defs);
-    for di in 0..n_defs {
-        budget.check_deadline().map_err(X64CompileError::Failed)?;
-        let ir = lower_wasm_to_ir_with_budget(
-            decoded,
-            &module,
-            module.imports.len() + di,
-            opts.optimize,
-            Some(&budget),
-        )
-        .map_err(X64CompileError::AdmissionRejected)?;
-        irs.push(ir);
-    }
-    if opts.optimize {
-        inline_small_helpers(&mut irs, &module, Some(&budget)).map_err(X64CompileError::Failed)?;
-        let effects = compute_module_effects(&irs, &module, Some(&budget))
-            .map_err(X64CompileError::Failed)?;
-        let mut scratch = Stage2Scratch::default();
-        for ir in &mut irs {
-            optimize_func_stage2_with_scratch(ir, &module, &effects, Some(&budget), &mut scratch)
-                .map_err(X64CompileError::Failed)?;
-        }
+    let n_imports = module.imports.len();
+    let n_workers = resolve_a64_jobs(opts.jobs).min(n_defs.max(1));
+
+    // LPT order (largest Wasm bodies first) prevents long-tail worker stragglers while keeping
+    // final function indices 0..n_defs 100% deterministic.
+    let mut work_order: Vec<usize> = (0..n_defs).collect();
+    if n_workers > 1 && n_defs > 1 {
+        work_order.sort_unstable_by(|&a, &b| {
+            decoded.code[b]
+                .instructions
+                .len()
+                .cmp(&decoded.code[a].instructions.len())
+                .then_with(|| a.cmp(&b))
+        });
     }
 
-    let mut fn_asms: Vec<A64Asm> = Vec::with_capacity(n_defs);
-    for ir in &irs {
-        verify_ir(ir, &module).map_err(X64CompileError::Failed)?;
-        let alloc = allocate(ir, Some(&budget)).map_err(X64CompileError::AdmissionRejected)?;
-        let fa =
-            lower_ir_to_aarch64(ir, &alloc, &layout).map_err(X64CompileError::AdmissionRejected)?;
-        fn_asms.push(fa);
-    }
+    let mut irs: Vec<IrFunc> = if n_workers <= 1 || n_defs <= 1 {
+        let mut out = Vec::with_capacity(n_defs);
+        let mut opt_scratch = OptIrScratch::default();
+        for di in 0..n_defs {
+            budget.check_deadline().map_err(X64CompileError::Failed)?;
+            let mut ir = lower_wasm_to_ir_with_budget_and_scratch(
+                decoded,
+                &module,
+                n_imports + di,
+                opts.optimize,
+                Some(&budget),
+                &mut opt_scratch,
+            )
+            .map_err(X64CompileError::AdmissionRejected)?;
+            if opts.optimize {
+                opt::prune_early_block_params(&mut ir, Some(&budget))
+                    .map_err(X64CompileError::Failed)?;
+            }
+            out.push(ir);
+        }
+        out
+    } else {
+        let ir_slots: Vec<Mutex<Option<IrFunc>>> = (0..n_defs).map(|_| Mutex::new(None)).collect();
+        let next_pos = AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        let first_err: Mutex<Option<(usize, X64CompileError)>> = Mutex::new(None);
+        let run_lower = || {
+            let mut opt_scratch = OptIrScratch::default();
+            loop {
+                if failed.load(Ordering::Acquire) {
+                    break;
+                }
+                let pos = next_pos.fetch_add(1, Ordering::Relaxed);
+                if pos >= n_defs {
+                    break;
+                }
+                let di = work_order[pos];
+                let res = budget
+                    .check_deadline()
+                    .map_err(X64CompileError::Failed)
+                    .and_then(|()| {
+                        let mut ir = lower_wasm_to_ir_with_budget_and_scratch(
+                            decoded,
+                            &module,
+                            n_imports + di,
+                            opts.optimize,
+                            Some(&budget),
+                            &mut opt_scratch,
+                        )
+                        .map_err(X64CompileError::AdmissionRejected)?;
+                        if opts.optimize {
+                            opt::prune_early_block_params(&mut ir, Some(&budget))
+                                .map_err(X64CompileError::Failed)?;
+                        }
+                        Ok(ir)
+                    });
+                match res {
+                    Ok(ir) => {
+                        *ir_slots[di].lock().unwrap_or_else(|g| g.into_inner()) = Some(ir);
+                    }
+                    Err(err) => {
+                        failed.store(true, Ordering::Release);
+                        let mut g = first_err.lock().unwrap_or_else(|g| g.into_inner());
+                        if g.as_ref().is_none_or(|(prev, _)| di < *prev) {
+                            *g = Some((di, err));
+                        }
+                        break;
+                    }
+                }
+            }
+        };
+        std::thread::scope(|s| {
+            for _ in 1..n_workers {
+                let _ = std::thread::Builder::new().spawn_scoped(s, run_lower);
+            }
+            run_lower();
+        });
+        if let Some((_, err)) = first_err.into_inner().unwrap_or_else(|g| g.into_inner()) {
+            return Err(err);
+        }
+        ir_slots
+            .into_iter()
+            .map(|m| m.into_inner().unwrap_or_else(|g| g.into_inner()).unwrap())
+            .collect()
+    };
+
+    let effects = if opts.optimize && n_defs > 0 {
+        if n_workers > 1 && n_defs > 1 {
+            let mut pre_all: Vec<Vec<(u32, u32)>> = Vec::with_capacity(n_defs);
+            let mut ok_pre = true;
+            for ir in &irs {
+                if let Some(cs) = opt::try_collect_pre_inline_callees(ir, n_imports, n_defs) {
+                    pre_all.push(cs);
+                } else {
+                    ok_pre = false;
+                    break;
+                }
+            }
+            if ok_pre {
+                let mut counts = vec![0u32; n_defs];
+                let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
+                for cs in &pre_all {
+                    edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
+                    for &(c, cnt) in cs {
+                        counts[c as usize] = counts[c as usize].saturating_add(cnt);
+                    }
+                }
+                let (in_cycle, topo) = opt::call_graph_sccs_from_edges(&edges);
+                let mut opt_irs: Vec<Option<IrFunc>> = irs.into_iter().map(Some).collect();
+                opt::inline_small_helpers_subset_parallel(
+                    &mut opt_irs,
+                    &in_cycle,
+                    &topo,
+                    &counts,
+                    &module,
+                    0,
+                    InlineMode::ColdNoCache,
+                    n_workers,
+                    Some(&budget),
+                )
+                .map_err(X64CompileError::Failed)?;
+                irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
+            } else {
+                inline_small_helpers(&mut irs, &module, Some(&budget))
+                    .map_err(X64CompileError::Failed)?;
+            }
+        } else {
+            inline_small_helpers(&mut irs, &module, Some(&budget))
+                .map_err(X64CompileError::Failed)?;
+        }
+        Some(
+            compute_module_effects(&irs, &module, Some(&budget))
+                .map_err(X64CompileError::Failed)?,
+        )
+    } else {
+        None
+    };
+
+    let mut fn_asms: Vec<A64Asm> = if n_workers <= 1 || n_defs <= 1 {
+        let mut out = Vec::with_capacity(n_defs);
+        let mut scratch = Stage2Scratch::default();
+        for mut ir in irs {
+            if let Some(ref eff) = effects {
+                optimize_func_stage2_with_scratch(
+                    &mut ir,
+                    &module,
+                    eff,
+                    Some(&budget),
+                    &mut scratch,
+                )
+                .map_err(X64CompileError::Failed)?;
+            }
+            verify_ir(&ir, &module).map_err(X64CompileError::Failed)?;
+            let alloc = allocate(&ir, Some(&budget)).map_err(X64CompileError::AdmissionRejected)?;
+            let fa = lower_ir_to_aarch64(&ir, &alloc, &layout)
+                .map_err(X64CompileError::AdmissionRejected)?;
+            out.push(fa);
+        }
+        out
+    } else {
+        let ir_slots: Vec<Mutex<Option<IrFunc>>> =
+            irs.into_iter().map(|ir| Mutex::new(Some(ir))).collect();
+        let asm_slots: Vec<Mutex<Option<A64Asm>>> = (0..n_defs).map(|_| Mutex::new(None)).collect();
+        let next_pos = AtomicUsize::new(0);
+        let failed = AtomicBool::new(false);
+        let first_err: Mutex<Option<(usize, X64CompileError)>> = Mutex::new(None);
+        let eff_ref = effects.as_ref();
+        let run_compile = || {
+            let mut scratch = Stage2Scratch::default();
+            loop {
+                if failed.load(Ordering::Acquire) {
+                    break;
+                }
+                let pos = next_pos.fetch_add(1, Ordering::Relaxed);
+                if pos >= n_defs {
+                    break;
+                }
+                let di = work_order[pos];
+                let mut ir = ir_slots[di]
+                    .lock()
+                    .unwrap_or_else(|g| g.into_inner())
+                    .take()
+                    .unwrap();
+                let res = (|| -> Result<A64Asm, X64CompileError> {
+                    if let Some(eff) = eff_ref {
+                        optimize_func_stage2_with_scratch(
+                            &mut ir,
+                            &module,
+                            eff,
+                            Some(&budget),
+                            &mut scratch,
+                        )
+                        .map_err(X64CompileError::Failed)?;
+                    }
+                    verify_ir(&ir, &module).map_err(X64CompileError::Failed)?;
+                    let alloc =
+                        allocate(&ir, Some(&budget)).map_err(X64CompileError::AdmissionRejected)?;
+                    lower_ir_to_aarch64(&ir, &alloc, &layout)
+                        .map_err(X64CompileError::AdmissionRejected)
+                })();
+                match res {
+                    Ok(fa) => {
+                        *asm_slots[di].lock().unwrap_or_else(|g| g.into_inner()) = Some(fa);
+                    }
+                    Err(err) => {
+                        failed.store(true, Ordering::Release);
+                        let mut g = first_err.lock().unwrap_or_else(|g| g.into_inner());
+                        if g.as_ref().is_none_or(|(prev, _)| di < *prev) {
+                            *g = Some((di, err));
+                        }
+                        break;
+                    }
+                }
+            }
+        };
+        std::thread::scope(|s| {
+            for _ in 1..n_workers {
+                let _ = std::thread::Builder::new().spawn_scoped(s, run_compile);
+            }
+            run_compile();
+        });
+        if let Some((_, err)) = first_err.into_inner().unwrap_or_else(|g| g.into_inner()) {
+            return Err(err);
+        }
+        asm_slots
+            .into_iter()
+            .map(|m| m.into_inner().unwrap_or_else(|g| g.into_inner()).unwrap())
+            .collect()
+    };
 
     // 3. Emit helpers and either Blot ABI 8 exports (`ET_DYN`) or standalone `_start` (`ET_EXEC`).
     let helper_asms =

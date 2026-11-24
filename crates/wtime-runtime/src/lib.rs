@@ -270,6 +270,15 @@ impl Engine {
                     ))
                 ))]
                 register_fast,
+                #[cfg(all(
+                    feature = "register-executor",
+                    not(any(
+                        feature = "execution-reference",
+                        feature = "performance-counters",
+                        feature = "opcode-coverage"
+                    ))
+                ))]
+                register_fast_fuel: self.config.limits.fuel.is_some(),
                 control,
                 local_runs,
                 #[cfg(not(feature = "execution-reference"))]
@@ -387,6 +396,15 @@ struct ModuleData {
         ))
     ))]
     register_fast: Box<[std::sync::OnceLock<Option<Arc<execution::register::fast::FastFunction>>>]>,
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    register_fast_fuel: bool,
     control: ControlMap,
     /// Each body's declared locals as (zero value, count) runs of one type.
     local_runs: Box<[LocalRuns]>,

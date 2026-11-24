@@ -88,6 +88,7 @@ pub enum CpuidSource {
         ext_ecx: u32,
         ebx7: u32,
         ecx7: u32,
+        xcr0: u32,
     },
 }
 
@@ -1418,12 +1419,13 @@ fn emit_export_new(
     a.mov_rr(false, Gp::Rbp, Gp::Rax);
     a.cmp_ri(false, Gp::Rbp, 1);
     a.jcc(Cond::B, lbl_fail_isa);
-    if isa.has_abm_bmi1 || isa.has_bmi2 {
+    if isa.has_abm_bmi1 || isa.has_bmi2 || isa.has_avx2 {
         a.cmp_ri(false, Gp::Rbp, 7);
         a.jcc(Cond::B, lbl_fail_isa);
     }
 
-    // 2. Leaf 1 -> require x86-64-v2 baseline: SSSE3 (bit 9), SSE4.1 (bit 19), SSE4.2 (bit 20), POPCNT (bit 23).
+    // 2. Leaf 1 -> require x86-64-v2 baseline: SSSE3 (bit 9), SSE4.1 (bit 19), SSE4.2 (bit 20), POPCNT (bit 23),
+    //    plus OSXSAVE (bit 27) & AVX (bit 28) when AVX2 codegen is enabled.
     match hooks.cpuid {
         CpuidSource::Real => {
             a.mov_ri32(Gp::Rax, 1);
@@ -1434,12 +1436,32 @@ fn emit_export_new(
             a.mov_ri32(Gp::Rcx, ecx1);
         }
     }
-    let baseline_mask: i32 = (1 << 9) | (1 << 19) | (1 << 20) | (1 << 23);
+    let mut baseline_mask: i32 = (1 << 9) | (1 << 19) | (1 << 20) | (1 << 23);
+    if isa.has_avx2 {
+        baseline_mask |= (1 << 27) | (1 << 28); // OSXSAVE + AVX
+    }
     a.and_ri(false, Gp::Rcx, baseline_mask);
     a.cmp_ri(false, Gp::Rcx, baseline_mask);
     a.jcc(Cond::Ne, lbl_fail_isa);
 
-    // 3. Optional ABM (LZCNT) + BMI1 (TZCNT) + BMI2 (SHLX/SHRX/SARX/RORX) when compiled for x64-v3.
+    // 2b. Verify OS enabled XMM + YMM state saving via XGETBV(0) when AVX2 is enabled!
+    if isa.has_avx2 {
+        match hooks.cpuid {
+            CpuidSource::Real => {
+                a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+                a.xgetbv();
+            }
+            #[cfg(test)]
+            CpuidSource::Mock { xcr0, .. } => {
+                a.mov_ri32(Gp::Rax, xcr0);
+            }
+        }
+        a.and_ri(false, Gp::Rax, 0x6);
+        a.cmp_ri(false, Gp::Rax, 0x6);
+        a.jcc(Cond::Ne, lbl_fail_isa);
+    }
+
+    // 3. Optional ABM (LZCNT) + BMI1 (TZCNT) + BMI2 (SHLX/SHRX/SARX/RORX) + AVX2 when compiled for x64-v3.
     if isa.has_abm_bmi1 {
         match hooks.cpuid {
             CpuidSource::Real => {
@@ -1471,6 +1493,9 @@ fn emit_export_new(
     let mut need_ebx7: i32 = 0;
     if isa.has_abm_bmi1 {
         need_ebx7 |= 1 << 3; // BMI1
+    }
+    if isa.has_avx2 {
+        need_ebx7 |= 1 << 5; // AVX2
     }
     if isa.has_bmi2 {
         need_ebx7 |= 1 << 8; // BMI2
@@ -2739,6 +2764,22 @@ pub fn emit_all_helpers(
     helpers.push(emit_helper_initialize(module, layout, tables)?);
     debug_assert_eq!(helpers.len(), HELPER_READ_GLOBAL as usize);
     helpers.push(emit_helper_read_global(tables)?);
+    debug_assert_eq!(helpers.len(), super::HELPER_GOOSE_FMT_FLOAT as usize);
+    let need_goose_float = module.target == super::module::X64Target::StandaloneExec
+        && module.imports.iter().any(|(m, f)| {
+            m == "goose"
+                && matches!(
+                    f.as_str(),
+                    "print_f64" | "print_f32" | "format_f64" | "format_f32"
+                )
+        });
+    if need_goose_float {
+        helpers.push(super::standalone_rt::emit_helper_goose_fmt_float()?);
+    } else {
+        let mut stub = Asm::with_capacity(4);
+        stub.ret();
+        helpers.push(stub);
+    }
     debug_assert_eq!(helpers.len(), super::NUM_HELPERS);
     Ok(helpers)
 }

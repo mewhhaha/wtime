@@ -19,16 +19,21 @@ validator and compiles it ahead of time through one of four backends:
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) SSA
   optimizer, register allocator, independent IR/allocation verifier (enabled by
   default in `X64CompileOptions`, single-shot CLI, and debug builds; opt-in via
-  `WTIME_AOT_VERIFY=1` for release `build --cache`), x86-64 assembler, and
-  ELF64 linker with zero external compilers, zero subprocesses, and zero
-  `libc`/`DT_NEEDED` runtime dependencies. Supports `memory32`, `memory64`, and
-  all 236 fixed-width 128-bit Wasm SIMD opcodes. See
-  [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md) for the exact
-  admission, ABI, stack, signal, and CET `rdsspq` contract.
+  `WTIME_AOT_VERIFY=1` for release `build --cache`), x86-64 assembler (with
+  `x64-v3` BMI1/BMI2/AVX2 + runtime OSXSAVE/XGETBV gating), and ELF64 linker
+  with zero external compilers, zero subprocesses, and zero `libc`/`DT_NEEDED`
+  runtime dependencies. Supports `memory32`, `memory64`, all 236 fixed-width
+  128-bit Wasm SIMD opcodes, and standalone `ET_EXEC` `8 GiB + 64 KiB`
+  guard-page BCE + Goose Ryū float/bench imports (with zero signal handlers in
+  `--blot-cdylib`). See [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md)
+  for the exact admission, ABI, stack, signal, and CET `rdsspq` contract.
 - **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
-  `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) ARMv8-A
-  backend emitting Linux AArch64 ELF64 shared libraries (Blot ABI 8) and static
-  executables with zero external compilers or cross-toolchains.
+  `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) multi-core
+  ARMv8-A backend (`--jobs`) with full 236-opcode NEON 128-bit SIMD and
+  `memory64` parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]`
+  addressing, and `madd`/`msub` fusion, emitting Linux AArch64 ELF64 shared
+  libraries (Blot ABI 8) and static executables with zero external compilers or
+  cross-toolchains.
 
 Nothing is JIT-compiled at run time.
 
@@ -104,13 +109,16 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     + `i64x2` splat/extract/replace.
 - **Blot ABI 8 shared libraries (`--blot-cdylib` across `x64`, `aarch64`, `c`, `rust`)** and **pure-Rust static Linux executables (`--backend x64` / `--backend aarch64`)**:
   - One non-shared Wasm32 memory (`max <= 65_536` pages; plus `memory64` and all
-    236 fixed-width 128-bit Wasm SIMD opcodes on `--backend x64`), static 32-bit
-    nullable `funcref` tables with `call_indirect`, mutable 32-bit nullable
-    `externref` tables with `table.get`/`table.set`, `br_table`, multi-value
-    blocks/functions, Blot host function imports (including byte-exact embedded
-    NUL names), exported globals (including `externref`), and all 18 Blot ABI 8
-    C exports with identical MXCSR (`0x1f80`) isolation, `in_call` reentry/drop
-    guards, and null-handle defensive behavior.
+    236 fixed-width 128-bit Wasm SIMD opcodes on both `--backend x64` and
+    `--backend aarch64`), static 32-bit nullable `funcref` tables with
+    `call_indirect`, mutable 32-bit nullable `externref` tables with
+    `table.get`/`table.set`, `br_table`, multi-value blocks/functions, Blot host
+    function imports (including byte-exact embedded NUL names), exported globals
+    (including `externref`), and all 18 Blot ABI 8 C exports with identical
+    MXCSR (`0x1f80`) isolation, `in_call` reentry/drop guards, and null-handle
+    defensive behavior. Standalone `--backend x64` `ET_EXEC` binaries also
+    support Goose stdout/Ryū float formatting (`goose::*`), `env::bench_input*`,
+    and `8 GiB + 64 KiB` guard-page memory32 bounds checks.
 
 Unsupported constructs are rejected before codegen (`--backend x64` uses exit
 code `4` for admission rejections vs. exit code `1` for I/O, timeout, or

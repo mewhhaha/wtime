@@ -175,6 +175,7 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
     let resolved_flag = if std::is_x86_feature_detected!("lzcnt")
         && std::is_x86_feature_detected!("bmi1")
         && std::is_x86_feature_detected!("bmi2")
+        && std::is_x86_feature_detected!("avx2")
     {
         "x86-64-v3"
     } else {
@@ -651,6 +652,226 @@ fn standalone_x64_static_exec_wasi_goose_simd_memory64_and_traps() {
         String::from_utf8_lossy(&aout.stderr),
         "goose runtime error: boom (line 99)\n"
     );
+
+    // 5. Standalone guard-page OOB trap (both 1-page and 0-page memory32) + `--timing-json` still emitted!
+    for (label, min_pages, addr) in [("1page", 1u8, 65_536i32), ("0page", 0u8, 0i32)] {
+        let mut oob_body = Vec::new();
+        push_i32(&mut oob_body, addr);
+        oob_body.extend_from_slice(&[0x28, 2, 0, 0x1a]); // i32.load offset=0; drop
+        let oob_wasm = wasm_module(&[
+            section(1, &[1, 0x60, 0, 0]),
+            section(3, &[1, 0]),
+            section(5, &[1, 0x01, min_pages, 2]),
+            section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 0]),
+            section(
+                10,
+                &[1].into_iter()
+                    .chain(enc_body(&[], &oob_body))
+                    .collect::<Vec<_>>(),
+            ),
+        ]);
+        let p = root.path(&format!("oob_{label}.wasm"));
+        let e = root.path(&format!("oob_{label}_exe"));
+        let tj = root.path(&format!("oob_{label}_timing.json"));
+        fs::write(&p, &oob_wasm).unwrap();
+        assert!(
+            Command::new(bin)
+                .arg(&p)
+                .args(["-o"])
+                .arg(&e)
+                .args(["--backend", "x64"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let out = Command::new(&e)
+            .args(["--timing-json"])
+            .arg(&tj)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "oob_{label} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "Trap: out of bounds\n",
+            "oob_{label}"
+        );
+        let tj_txt = fs::read_to_string(&tj).unwrap();
+        assert!(
+            tj_txt.contains("\"start_function_ns\": "),
+            "oob_{label} bad timing json: {tj_txt}"
+        );
+    }
+
+    // 6. Goose float formatting (`print_f64`, `print_f32`, `format_f64`, `format_f32`) +
+    //    `env::bench_input` / `env::bench_input_f64` exact round-trip parity with `wtime-aot-rt`.
+    let mut imp_f = vec![8];
+    for (m, n, ty) in [
+        ("goose", "print_f64", 0u32),  // 0: (f64)->()
+        ("goose", "print_f32", 1),     // 1: (f32)->()
+        ("goose", "format_f64", 2),    // 2: (f64, i32)->i32
+        ("goose", "format_f32", 3),    // 3: (f32, i32)->i32
+        ("goose", "write", 4),         // 4: (i32, i32)->()
+        ("goose", "newline", 5),       // 5: ()->()
+        ("env", "bench_input", 6),     // 6: ()->i64
+        ("env", "bench_input_f64", 7), // 7: ()->f64
+    ] {
+        enc_str(&mut imp_f, m);
+        enc_str(&mut imp_f, n);
+        imp_f.push(0x00);
+        leb_u32(&mut imp_f, ty);
+    }
+    #[allow(clippy::excessive_precision)]
+    let f64_cases: &[(f64, &str)] = &[
+        (0.0, "0.0"),
+        (-0.0, "-0.0"),
+        (f64::NAN, "nan"),
+        (f64::INFINITY, "inf"),
+        (f64::NEG_INFINITY, "-inf"),
+        (1.0, "1.0"),
+        (-1.5, "-1.5"),
+        (0.1, "0.1"),
+        (123.456, "123.456"),
+        (1e-4, "0.0001"),
+        (1e-5, "1e-05"),
+        (1.5e-7, "1.5e-07"),
+        (1e14, "100000000000000.0"),
+        (1e15, "1e+15"),
+        (123456789012345680.0, "1.2345678901234568e+17"),
+        (1234567890123456.0, "1234567890123456.0"),
+        (1e100, "1e+100"),
+        (5e-324, "5e-324"),
+        (f64::MAX, "1.7976931348623157e+308"),
+        (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+        (0.30000000000000004, "0.30000000000000004"),
+        (2.0f64.powi(-25), "2.9802322387695312e-08"),
+        (12345678901234.5625, "12345678901234.562"),
+        (597659464700.90625, "597659464700.9062"),
+        (9007199254740993.0 * 4.0, "3.602879701896397e+16"),
+    ];
+    let f32_cases: &[(f32, &str)] = &[
+        (0.0f32, "0.0"),
+        (-0.0, "-0.0"),
+        (f32::NAN, "nan"),
+        (f32::INFINITY, "inf"),
+        (f32::NEG_INFINITY, "-inf"),
+        (1.0, "1.0"),
+        (0.1, "0.1"),
+        (-2.5, "-2.5"),
+        (16777216.0, "16777216.0"),
+        (1e10, "10000000000.0"),
+        (1e15, "1e+15"),
+        (1e-5, "1e-05"),
+        (3.4028235e38, "3.4028235e+38"),
+        (1.1754944e-38, "1.1754944e-38"),
+        (1e-45, "1e-45"),
+        (0.3, "0.3"),
+        (9.999999e-5, "9.999999e-05"),
+    ];
+    let mut f_body = Vec::new();
+    let mut expected_f = String::new();
+    for &(v, txt) in f64_cases {
+        f_body.push(0x44);
+        f_body.extend_from_slice(&v.to_bits().to_le_bytes());
+        f_body.extend_from_slice(&[0x10, 0, 0x10, 5]); // print_f64; newline
+        expected_f.push_str(txt);
+        expected_f.push('\n');
+    }
+    // Also exercise format_f64(ptr, val) -> write into memory at offset 64
+    push_i32(&mut f_body, 64);
+    f_body.push(0x44);
+    f_body.extend_from_slice(&(-123.456f64).to_bits().to_le_bytes());
+    f_body.extend_from_slice(&[0x10, 2, 0x21, 0]); // len = format_f64(64, -123.456)
+    push_i32(&mut f_body, 64);
+    f_body.extend_from_slice(&[0x20, 0, 0x10, 4, 0x10, 5]); // write(64, len); newline
+    expected_f.push_str("-123.456\n");
+    for &(v, txt) in f32_cases {
+        f_body.push(0x43);
+        f_body.extend_from_slice(&v.to_bits().to_le_bytes());
+        f_body.extend_from_slice(&[0x10, 1, 0x10, 5]); // print_f32; newline
+        expected_f.push_str(txt);
+        expected_f.push('\n');
+    }
+    // Exercise format_f32(ptr, val) -> write
+    push_i32(&mut f_body, 128);
+    f_body.push(0x43);
+    f_body.extend_from_slice(&0.1f32.to_bits().to_le_bytes());
+    f_body.extend_from_slice(&[0x10, 3, 0x21, 0]);
+    push_i32(&mut f_body, 128);
+    f_body.extend_from_slice(&[0x20, 0, 0x10, 4, 0x10, 5]);
+    expected_f.push_str("0.1\n");
+    // Exercise bench_input (reads -42) -> convert to f64 & print, then bench_input_f64 (reads -3.25e2) & print
+    f_body.extend_from_slice(&[0x10, 6, 0xb9, 0x10, 0, 0x10, 5]); // f64.convert_i64_s(bench_input()); print_f64; newline
+    f_body.extend_from_slice(&[0x10, 7, 0x10, 0, 0x10, 5]); // print_f64(bench_input_f64()); newline
+    expected_f.push_str("-42.0\n-325.0\n");
+
+    let flt_wasm = wasm_module(&[
+        section(
+            1,
+            &[
+                8, 0x60, 1, 0x7c, 0, // 0: (f64)->()
+                0x60, 1, 0x7d, 0, // 1: (f32)->()
+                0x60, 2, 0x7f, 0x7c, 1, 0x7f, // 2: (i32, f64)->i32
+                0x60, 2, 0x7f, 0x7d, 1, 0x7f, // 3: (i32, f32)->i32
+                0x60, 2, 0x7f, 0x7f, 0, // 4: (i32, i32)->()
+                0x60, 0, 0, // 5: ()->()
+                0x60, 0, 1, 0x7e, // 6: ()->i64
+                0x60, 0, 1, 0x7c, // 7: ()->f64
+            ],
+        ),
+        section(2, &imp_f),
+        section(3, &[1, 5]),
+        section(5, &[1, 0x01, 1, 1]),
+        section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 8]),
+        section(
+            10,
+            &[1].into_iter()
+                .chain(enc_body(&[(1, 0x7f)], &f_body))
+                .collect::<Vec<_>>(),
+        ),
+    ]);
+    let flt_path = root.path("goose_floats.wasm");
+    let flt_exe = root.path("goose_floats_exe");
+    fs::write(&flt_path, &flt_wasm).unwrap();
+    let st_flt = Command::new(bin)
+        .arg(&flt_path)
+        .args(["-o"])
+        .arg(&flt_exe)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(
+        st_flt.status.success(),
+        "goose floats build failed: {}",
+        String::from_utf8_lossy(&st_flt.stderr)
+    );
+    let mut child = Command::new(&flt_exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"  -42 \t -3.25e2 \n")
+            .unwrap();
+    }
+    let fout = child.wait_with_output().unwrap();
+    assert!(
+        fout.status.success(),
+        "goose floats run failed: code={:?} stderr={}",
+        fout.status.code(),
+        String::from_utf8_lossy(&fout.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&fout.stdout), expected_f);
 }
 
 #[test]

@@ -6,6 +6,7 @@ mod continuations;
 mod exceptions;
 mod gc;
 mod types;
+use std::borrow::Cow;
 use std::rc::Rc;
 use types::value_subtype;
 // Validation is the sole constructor of executable modules.
@@ -231,16 +232,16 @@ fn fast_instruction(
     }
 }
 struct Context<'a> {
-    tags: Vec<usize>,
+    tags: Cow<'a, [usize]>,
     types: Rc<types::TypeEnvironment>,
     m: &'a DecodedModule,
-    funcs: Vec<usize>,
+    funcs: Cow<'a, [usize]>,
     imported_funcs: usize,
     exact_func_imports: std::sync::Arc<Vec<bool>>,
     declared_funcs: std::sync::Arc<HashSet<u32>>,
-    globals: Vec<GlobalType>,
-    tables: Vec<TableType>,
-    memories: Vec<MemoryType>,
+    globals: Cow<'a, [GlobalType]>,
+    tables: Cow<'a, [TableType]>,
+    memories: Cow<'a, [MemoryType]>,
     imported_globals: usize,
     features: &'a FeatureSet,
     limits: &'a ResourceLimits,
@@ -479,19 +480,19 @@ pub fn validate(
     let m = decode(bytes, features, limits)?;
 
     let mut c = Context {
-        tags: vec![],
+        tags: Cow::Owned(vec![]),
         types: Rc::new(types::TypeEnvironment::new(
             &m.type_groups,
             limits.max_type_work,
         )),
         m: &m,
-        funcs: vec![],
+        funcs: Cow::Owned(vec![]),
         imported_funcs: 0,
         exact_func_imports: std::sync::Arc::new(vec![]),
         declared_funcs: std::sync::Arc::new(HashSet::new()),
-        globals: vec![],
-        tables: vec![],
-        memories: vec![],
+        globals: Cow::Owned(vec![]),
+        tables: Cow::Owned(vec![]),
+        memories: Cow::Owned(vec![]),
         imported_globals: 0,
         features,
         limits,
@@ -519,23 +520,23 @@ pub fn validate(
                 ImportKind::Func(t) => {
                     let ti = t.0 as usize;
                     c.ty(ti)?;
-                    c.funcs.push(ti);
+                    c.funcs.to_mut().push(ti);
                     exact_imports.push(false);
                 }
                 ImportKind::ExactFunc(t) => {
                     c.enabled(features.custom_descriptors)?;
                     let ti = t.0 as usize;
                     c.ty(ti)?;
-                    c.funcs.push(ti);
+                    c.funcs.to_mut().push(ti);
                     exact_imports.push(true);
                 }
                 ImportKind::Global(t) => {
                     c.enabled(!t.mutable || features.mutable_globals)?;
-                    c.globals.push(*t);
+                    c.globals.to_mut().push(*t);
                     c.imported_globals += 1
                 }
-                ImportKind::Table(t) => c.tables.push(*t),
-                ImportKind::Memory(t) => c.memories.push(*t),
+                ImportKind::Table(t) => c.tables.to_mut().push(*t),
+                ImportKind::Memory(t) => c.memories.to_mut().push(*t),
                 ImportKind::Tag(t) => c.add_tag(*t)?,
             }
         }
@@ -547,10 +548,10 @@ pub fn validate(
         for t in &m.functions {
             let ti = t.0 as usize;
             c.ty(ti)?;
-            c.funcs.push(ti);
+            c.funcs.to_mut().push(ti);
         }
-        c.tables.extend(&m.tables);
-        c.memories.extend(&m.memories);
+        c.tables.to_mut().extend(&m.tables);
+        c.memories.to_mut().extend(&m.memories);
         c.enabled(features.multi_memory || c.memories.len() <= 1)?;
         c.enabled(features.reference_types || c.tables.len() <= 1)?;
         budget(
@@ -561,7 +562,7 @@ pub fn validate(
                 && c.tags.len() <= limits.max_tags,
             "imported declaration limits exceeded",
         )?;
-        for t in &c.memories {
+        for t in c.memories.iter() {
             c.enabled(t.index_type == IndexType::I32 || features.memory64)?;
             c.enabled(!t.shared || features.threads)?;
             c.enabled(t.page_size_log2 == 16 || features.custom_page_sizes)?;
@@ -588,7 +589,7 @@ pub fn validate(
                 "shared memory requires maximum",
             )?;
         }
-        for t in &c.tables {
+        for t in c.tables.iter() {
             c.enabled(t.index_type == IndexType::I32 || features.memory64)?;
             check(
                 t.index_type != IndexType::I32
@@ -601,7 +602,7 @@ pub fn validate(
                 c.valtype(ValType::Ref(t.element))?;
             }
         }
-        for t in &c.globals {
+        for t in c.globals.iter() {
             c.valtype(t.value)?;
         }
         // Precompute declared function references ONCE before validating constant expressions
@@ -639,7 +640,7 @@ pub fn validate(
         for g in &m.globals {
             c.valtype(g.ty.value)?;
             c.constant(&g.init, g.ty.value)?;
-            c.globals.push(g.ty)
+            c.globals.to_mut().push(g.ty)
         }
         let mut names = HashSet::new();
         for e in &m.exports {
@@ -737,10 +738,11 @@ pub fn validate(
         let pairs: Vec<(u32, &FunctionBody)> =
             m.functions.iter().map(|t| t.0).zip(&m.code).collect();
         if threads == 1 {
+            let mut scratch = BodyScratch::new(c.types.clone(), limits.max_stack_height);
             for &(t, b) in &pairs {
                 let ti = t as usize;
                 c.ty(ti)?;
-                function_bounds.push(c.body(ti, b)?)
+                function_bounds.push(c.body_with_scratch(ti, b, &mut scratch)?)
             }
             return Ok(());
         }
@@ -753,50 +755,54 @@ pub fn validate(
                 .collect();
             let stop_at = AtomicUsize::new(indexed.len());
             let type_data = c.types.shared_data();
-            let parts = (
-                &c.tags,
-                &c.funcs,
-                c.imported_funcs,
-                &c.exact_func_imports,
-                &c.declared_funcs,
-                &c.globals,
-                &c.tables,
-                &c.memories,
-                c.imported_globals,
-            );
-            // Share immutable `TypeEnvironment` declarations via `Arc` (`from_shared`) and accumulate
-            // type work monotonically per worker WITHOUT resetting between bodies. Because `map_ordered`
-            // assigns batches in strictly increasing index order, a worker reaching `exhausted()` at
-            // index `m` proves `sum_{0..=m} work >= worker_work > max_type_work`, bounding total parallel
-            // work to `<= threads * max_type_work` while preserving the exact deterministic first error.
+            let tags_ref: &[usize] = &c.tags;
+            let funcs_ref: &[usize] = &c.funcs;
+            let globals_ref: &[GlobalType] = &c.globals;
+            let tables_ref: &[TableType] = &c.tables;
+            let memories_ref: &[MemoryType] = &c.memories;
+            let exact_ref = &c.exact_func_imports;
+            let declared_ref = &c.declared_funcs;
+            let imported_funcs = c.imported_funcs;
+            let imported_globals = c.imported_globals;
+            // Share immutable module tables by reference and `TypeEnvironment` declarations via
+            // `Arc`, reusing one `BodyScratch` per worker across all assigned bodies while
+            // accumulating type work monotonically so total work stays `<= threads * max_type_work`
+            // and the exact deterministic first error is preserved.
             wtime_types::parallel::map_ordered(
                 &indexed,
                 threads,
-                || Context {
-                    tags: parts.0.clone(),
-                    types: Rc::new(types::TypeEnvironment::from_shared(
+                || {
+                    let types = Rc::new(types::TypeEnvironment::from_shared(
                         std::sync::Arc::clone(&type_data),
                         limits.max_type_work,
-                    )),
-                    m: &m,
-                    funcs: parts.1.clone(),
-                    imported_funcs: parts.2,
-                    exact_func_imports: parts.3.clone(),
-                    declared_funcs: parts.4.clone(),
-                    globals: parts.5.clone(),
-                    tables: parts.6.clone(),
-                    memories: parts.7.clone(),
-                    imported_globals: parts.8,
-                    features,
-                    limits,
+                    ));
+                    let scratch = BodyScratch::new(types.clone(), limits.max_stack_height);
+                    let ctx = Context {
+                        tags: Cow::Borrowed(tags_ref),
+                        types,
+                        m: &m,
+                        funcs: Cow::Borrowed(funcs_ref),
+                        imported_funcs,
+                        exact_func_imports: exact_ref.clone(),
+                        declared_funcs: declared_ref.clone(),
+                        globals: Cow::Borrowed(globals_ref),
+                        tables: Cow::Borrowed(tables_ref),
+                        memories: Cow::Borrowed(memories_ref),
+                        imported_globals,
+                        features,
+                        limits,
+                    };
+                    (ctx, scratch)
                 },
-                |worker, &(idx, t, b)| {
+                |(worker, scratch), &(idx, t, b)| {
                     if worker.types.exhausted() || idx >= stop_at.load(Ordering::Relaxed) {
                         return (None, 0);
                     }
                     let before = worker.types.work();
                     let ti = t as usize;
-                    let result = worker.ty(ti).and_then(|_| worker.body(ti, b));
+                    let result = worker
+                        .ty(ti)
+                        .and_then(|_| worker.body_with_scratch(ti, b, scratch));
                     let delta = worker.types.work().saturating_sub(before);
                     if worker.types.exhausted() || result.is_err() {
                         stop_at.fetch_min(idx + 1, Ordering::Relaxed);
@@ -934,47 +940,97 @@ impl Context<'_> {
         }
         check(s.controls.is_empty(), "unterminated constant expression")
     }
-    fn body(&self, ti: usize, b: &FunctionBody) -> Result<FunctionBounds> {
+}
+
+struct BodyScratch {
+    locals: Vec<ValType>,
+    stack: Stack,
+}
+
+impl BodyScratch {
+    fn new(types: Rc<types::TypeEnvironment>, max_stack_height: usize) -> Self {
+        Self {
+            locals: Vec::new(),
+            stack: Stack {
+                initialization_changes: Vec::new(),
+                unknown: Vec::new(),
+                initialized: Vec::new(),
+                types,
+                values: Vec::new(),
+                controls: Vec::new(),
+                max_stack_height,
+            },
+        }
+    }
+
+    fn reset(&mut self, ti: usize) {
+        self.locals.clear();
+        if self.locals.capacity() > 4096 {
+            self.locals.shrink_to(1024);
+        }
+        let s = &mut self.stack;
+        s.initialization_changes.clear();
+        if s.initialization_changes.capacity() > 4096 {
+            s.initialization_changes.shrink_to(1024);
+        }
+        s.unknown.clear();
+        if s.unknown.capacity() > 4096 {
+            s.unknown.shrink_to(1024);
+        }
+        s.initialized.clear();
+        if s.initialized.capacity() > 4096 {
+            s.initialized.shrink_to(1024);
+        }
+        s.values.clear();
+        if s.values.capacity() > 4096 {
+            s.values.shrink_to(1024);
+        }
+        s.controls.clear();
+        if s.controls.capacity() > 4096 {
+            s.controls.shrink_to(1024);
+        }
+        s.controls.push(Control {
+            kind: 0,
+            height: 0,
+            sig: BlockSig::FuncResultsOnly(ti),
+            unreachable: false,
+            has_else: false,
+            initialized: 0,
+        });
+    }
+}
+
+impl Context<'_> {
+    fn body_with_scratch(
+        &self,
+        ti: usize,
+        b: &FunctionBody,
+        scratch: &mut BodyScratch,
+    ) -> Result<FunctionBounds> {
         let t = self.ty(ti)?;
         let n_locals = t.params.len().saturating_add(b.locals.len());
         budget(n_locals <= self.limits.max_locals, "too many locals")?;
-        let mut locals = Vec::with_capacity(n_locals);
-        locals.extend_from_slice(&t.params);
-        locals.extend_from_slice(&b.locals);
+        scratch.reset(ti);
+        scratch.locals.reserve(n_locals);
+        scratch.locals.extend_from_slice(&t.params);
+        scratch.locals.extend_from_slice(&b.locals);
         // `t.params` were already validated when checking `m.types` before body validation.
         for v in &b.locals {
             self.valtype(*v)?
         }
-        let mut s = Stack {
-            initialization_changes: vec![],
-            unknown: Vec::new(),
-            initialized: vec![],
-            types: self.types.clone(),
-            values: vec![],
-            controls: vec![Control {
-                kind: 0,
-                height: 0,
-                sig: BlockSig::FuncResultsOnly(ti),
-                unreachable: false,
-                has_else: false,
-                initialized: 0,
-            }],
-            max_stack_height: self.limits.max_stack_height,
-        };
-        s.initialized = locals
-            .iter()
-            .enumerate()
-            .map(|(n, v)| {
-                n < t.params.len()
-                    || !matches!(
-                        v,
-                        ValType::Ref(RefType {
-                            nullable: false,
-                            ..
-                        })
-                    )
-            })
-            .collect();
+        let s = &mut scratch.stack;
+        let locals = &scratch.locals;
+        s.initialized.reserve(n_locals);
+        s.initialized.resize(t.params.len(), true);
+        for v in &b.locals {
+            s.initialized.push(!matches!(
+                v,
+                ValType::Ref(RefType {
+                    nullable: false,
+                    ..
+                })
+            ));
+        }
         let mut bounds = FunctionBounds {
             stack_peak: 0,
             maximum_nesting: 1,
@@ -986,8 +1042,8 @@ impl Context<'_> {
                 .offsets
                 .get(n)
                 .map_or(b.span.start, |&offset| offset as usize);
-            if !fast_instruction(&mut s, &locals, &self.globals, &self.memories, i) {
-                self.instruction(&mut s, &locals, i).map_err(|e| e.at(at))?;
+            if !fast_instruction(s, locals, &self.globals, &self.memories, i) {
+                self.instruction(s, locals, i).map_err(|e| e.at(at))?;
             }
             bounds.stack_peak = bounds.stack_peak.max(s.values.len());
             bounds.maximum_nesting = bounds.maximum_nesting.max(s.controls.len());
@@ -1000,6 +1056,9 @@ impl Context<'_> {
         check(s.controls.is_empty(), "unterminated function")?;
         Ok(bounds)
     }
+}
+
+impl Context<'_> {
     fn enabled(&self, b: bool) -> Result<()> {
         if b {
             Ok(())

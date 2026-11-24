@@ -250,6 +250,7 @@ pub struct JumpTablePatch {
 enum FixupKind {
     Jmp,
     Jcc(u8),
+    LeaRip,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -443,7 +444,7 @@ impl Asm {
                         continue;
                     }
                 }
-                if cur_m == 0 {
+                if cur_m == 0 && !matches!(f.kind, FixupKind::LeaRip) {
                     let save = save_for(f.kind, 1);
                     let ip_cur = i64::from(f.inst_off) - i64::from(saved_prefix[i]) + 2;
                     let adj = if target_orig[i] >= f.next_ip_off {
@@ -551,6 +552,7 @@ impl Asm {
                                 new_code.push(0x70 + c);
                                 new_code.push(rel8 as u8);
                             }
+                            FixupKind::LeaRip => unreachable!(),
                         }
                         if has_align16 {
                             post_branches.push(PostBranch {
@@ -580,6 +582,13 @@ impl Asm {
                                 new_code.push(0x80 + c);
                                 new_code.extend_from_slice(&rel32.to_le_bytes());
                                 new_inst_off + 2
+                            }
+                            FixupKind::LeaRip => {
+                                let p_rel = (f.patch_off as usize) - inst_start;
+                                new_code
+                                    .extend_from_slice(&self.code[inst_start..inst_start + p_rel]);
+                                new_code.extend_from_slice(&rel32.to_le_bytes());
+                                new_inst_off + (p_rel as u32)
                             }
                         };
                         if has_align16 {
@@ -1108,6 +1117,24 @@ impl Asm {
         });
     }
 
+    /// `lea dst, [rip + label]` resolved by `finish_labels()`.
+    pub fn lea_rip_label(&mut self, dst: Gp, label: Label) {
+        let inst_off = self.pos();
+        self.rex(true, dst.hi(), 0, 0, false);
+        self.emit_u8(0x8d);
+        self.emit_u8((dst.lo() << 3) | 5);
+        let patch_off = self.pos();
+        self.emit_i32(0);
+        let next_ip_off = self.pos();
+        self.fixups.push(LocalFixup {
+            inst_off,
+            patch_off,
+            next_ip_off,
+            label,
+            kind: FixupKind::LeaRip,
+        });
+    }
+
     pub fn movss_rip(&mut self, dst: Xmm, target: RelocTarget) {
         self.emit_u8(0xf3);
         self.rex(false, dst.hi(), 0, 0, false);
@@ -1432,6 +1459,14 @@ impl Asm {
         self.modrm_reg(b.lo(), a.lo());
     }
 
+    /// `test r/m32/64, imm32` (`[REX.W+B] F7 /0 id`).
+    pub fn test_ri(&mut self, is64: bool, a: Gp, imm: i32) {
+        self.rex(is64, 0, 0, a.hi(), false);
+        self.emit_u8(0xf7);
+        self.modrm_reg(0, a.lo());
+        self.emit_i32(imm);
+    }
+
     pub fn imul_rr(&mut self, is64: bool, dst: Gp, src: Gp) {
         self.rex(is64, dst.hi(), 0, src.hi(), false);
         self.emit_u8(0x0f);
@@ -1529,6 +1564,22 @@ impl Asm {
     }
     pub fn sar_cl(&mut self, is64: bool, dst: Gp) {
         self.shift_cl(7, is64, dst);
+    }
+
+    /// `adc dst, imm8` (`[REX.W+B] 83 /2 ib`).
+    pub fn adc_ri8(&mut self, is64: bool, dst: Gp, imm: i8) {
+        self.rex(is64, 0, 0, dst.hi(), false);
+        self.emit_u8(0x83);
+        self.modrm_reg(2, dst.lo());
+        self.emit_u8(imm as u8);
+    }
+
+    /// `shrd dst, src, cl` (`[REX.W+R+B] 0F AD /r`).
+    pub fn shrd_cl(&mut self, is64: bool, dst: Gp, src: Gp) {
+        self.rex(is64, src.hi(), 0, dst.hi(), false);
+        self.emit_u8(0x0f);
+        self.emit_u8(0xad);
+        self.modrm_reg(src.lo(), dst.lo());
     }
 
     pub fn rol_imm(&mut self, is64: bool, dst: Gp, n: u8) {
@@ -2596,11 +2647,112 @@ impl Asm {
         self.vex3_fma(true, 0xa8, d, a, b);
     }
 
-    // ---- CPUID, MXCSR, and portable BSR/BSF ----
+    // ---- AVX2 (256-bit YMM) VEX Encoders + XGETBV + VZEROUPPER ----
+
+    /// Emits a 3-byte VEX prefix (`0xC4`) for 256-bit (`L=1`) register-register instructions.
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_ymm_rr(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm: Xmm,
+        op: u8,
+    ) {
+        let r_inv = u8::from(reg.hi() == 0);
+        let b_inv = u8::from(rm.hi() == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
+        self.emit_u8(op);
+        self.modrm_reg(reg.lo(), rm.lo());
+    }
+
+    /// Emits a 3-byte VEX prefix (`0xC4`) for 256-bit (`L=1`) register-memory instructions.
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_ymm_mem(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        mem: Mem,
+        op: u8,
+    ) {
+        let (x_hi, b_hi) = match mem {
+            Mem::BaseDisp { base, .. } => (0, base.hi()),
+            Mem::BaseIndexDisp { base, index, .. } => (index.hi(), base.hi()),
+        };
+        let r_inv = u8::from(reg.hi() == 0);
+        let x_inv = u8::from(x_hi == 0);
+        let b_inv = u8::from(b_hi == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (1 << 2) | (pp & 0x03));
+        self.emit_u8(op);
+        self.modrm_mem(reg.lo(), mem);
+    }
+
+    /// `vmovdqu ymm, m256` (`VEX.256.F3.0F.WIG 6F /r`).
+    pub fn vmovdqu_ym(&mut self, dst: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 2, false, dst, None, mem, 0x6f);
+    }
+
+    /// `vmovdqu m256, ymm` (`VEX.256.F3.0F.WIG 7F /r`).
+    pub fn vmovdqu_my(&mut self, mem: Mem, src: Xmm) {
+        self.vex3_ymm_mem(1, 2, false, src, None, mem, 0x7f);
+    }
+
+    /// `vpbroadcastb ymm, xmm` (`VEX.256.66.0F38.W0 78 /r`).
+    pub fn vpbroadcastb_yx(&mut self, dst: Xmm, src: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, dst, None, src, 0x78);
+    }
+
+    /// `vpxor ymm, ymm, ymm` (`VEX.256.66.0F.WIG EF /r`).
+    pub fn vpxor_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0xef);
+    }
+
+    /// `vpsadbw ymm, ymm, m256` (`VEX.256.66.0F.WIG F6 /r`).
+    pub fn vpsadbw_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 1, false, dst, Some(a), mem, 0xf6);
+    }
+
+    /// `vpaddq ymm, ymm, ymm` (`VEX.256.66.0F.WIG D4 /r`).
+    pub fn vpaddq_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0xd4);
+    }
+
+    /// `vextracti128 xmm, ymm, imm8` (`VEX.256.66.0F3A.W0 39 /r ib`; `reg = src`, `rm = dst`).
+    pub fn vextracti128_xy(&mut self, dst: Xmm, src: Xmm, imm: u8) {
+        self.vex3_ymm_rr(3, 1, false, src, None, dst, 0x39);
+        self.emit_u8(imm & 1);
+    }
+
+    /// `vzeroupper` (`C5 F8 77`): clears upper 128 bits of all YMM0..YMM15, eliminating AVX-SSE stalls.
+    pub fn vzeroupper(&mut self) {
+        self.emit_u8(0xc5);
+        self.emit_u8(0xf8);
+        self.emit_u8(0x77);
+    }
+
+    // ---- CPUID, XGETBV, MXCSR, and portable BSR/BSF ----
 
     pub fn cpuid(&mut self) {
         self.emit_u8(0x0f);
         self.emit_u8(0xa2);
+    }
+
+    /// `xgetbv` (`0F 01 D0`): reads extended control register `XCR[ecx]` into `EDX:EAX`.
+    pub fn xgetbv(&mut self) {
+        self.emit_u8(0x0f);
+        self.emit_u8(0x01);
+        self.emit_u8(0xd0);
     }
 
     /// `rdsspq dst` (`F3 [REX.W+B] 0F 1E /1`): architectural multi-byte NOP when CET shadow stack

@@ -17,7 +17,7 @@ mod tests_abi_faults;
 #[cfg(test)]
 mod tests_oracle;
 #[cfg(test)]
-mod tests_unit;
+pub(crate) mod tests_unit;
 pub mod verify;
 
 use std::collections::BTreeMap;
@@ -31,13 +31,13 @@ use wtime_validate::DecodedModule;
 
 use asm::{Asm, Reloc, RelocTarget};
 use elf::{ElfExecLayout, ElfLayout, ExportDef};
-use ir::{IrFunc, lower_wasm_to_ir_with_budget};
+use ir::{IrFunc, OptIrScratch, lower_wasm_to_ir_with_budget_and_scratch};
 use lower::{TargetIsa, lower_ir_to_x64_with_budget};
 use module::{
     CompileBudget, MAX_CTX_BYTES, MAX_TOTAL_CODE_BYTES, MAX_TOTAL_RODATA_BYTES, X64ConstVal,
     X64Module, X64Target, admit_x64_module_for_target, x64_validate_features, x64_validate_limits,
 };
-use regalloc::{AllocConfig, AllocResult, allocate_with_config};
+use regalloc::{AllocConfig, AllocResult, RegallocScratch, allocate_with_config_and_scratch};
 use runtime::{
     EXPORT_NAMES, RuntimeTables, RuntimeTestHooks, TRAP_MESSAGES, emit_all_exports,
     emit_all_helpers, emit_import_trampoline, export_val_kind, global_kind_code,
@@ -123,7 +123,8 @@ pub(crate) const HELPER_HOST_CALL: u32 = 19;
 pub(crate) const HELPER_GROW_CORE: u32 = 20;
 pub(crate) const HELPER_INITIALIZE: u32 = 21;
 pub(crate) const HELPER_READ_GLOBAL: u32 = 22;
-pub(crate) const NUM_HELPERS: usize = 23;
+pub(crate) const HELPER_GOOSE_FMT_FLOAT: u32 = 23;
+pub(crate) const NUM_HELPERS: usize = 24;
 
 /// Per-signature `call_indirect` dispatch table metadata in `.rodata`.
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +143,9 @@ pub struct CtxLayout {
     pub fixed_mem_bytes: Option<u64>,
     /// `true` iff linear memory 0 uses 64-bit (`memory64`) addressing.
     pub memory64: bool,
+    /// `true` iff standalone `ET_EXEC` reserves an `8 GiB + 64 KiB` `PROT_NONE` guard region with
+    /// a `SIGSEGV` handler for `memory32` (NEVER enabled for `--blot-cdylib` `.so`).
+    pub use_guard_pages: bool,
     pub global_offs: Vec<i32>,
     pub extern_tables: BTreeMap<u32, (i32, u32)>,
     pub ci_tables: Vec<CiTableLayout>,
@@ -199,6 +203,9 @@ impl CtxLayout {
             pinned_global: module.pinned_global,
             fixed_mem_bytes: module.fixed32,
             memory64: module.memory64,
+            use_guard_pages: module.target == X64Target::StandaloneExec
+                && !module.memory64
+                && module.memory.is_some(),
             global_offs,
             extern_tables,
             ci_tables,
@@ -279,6 +286,7 @@ impl Default for X64CompileOptions {
             isa: TargetIsa {
                 has_abm_bmi1: false,
                 has_bmi2: false,
+                has_avx2: false,
             },
             jobs: 0,
             deadline: None,
@@ -339,6 +347,7 @@ pub fn resolve_x64_isa(target_cpu: &str) -> Result<(&'static str, TargetIsa), St
                 if std::is_x86_feature_detected!("lzcnt")
                     && std::is_x86_feature_detected!("bmi1")
                     && std::is_x86_feature_detected!("bmi2")
+                    && std::is_x86_feature_detected!("avx2")
                 {
                     "x64-v3"
                 } else {
@@ -351,6 +360,7 @@ pub fn resolve_x64_isa(target_cpu: &str) -> Result<(&'static str, TargetIsa), St
             TargetIsa {
                 has_abm_bmi1: tag == "x64-v3",
                 has_bmi2: tag == "x64-v3",
+                has_avx2: tag == "x64-v3",
             },
         ))
     }
@@ -1269,6 +1279,7 @@ fn compile_wasm_to_x64_so_inner(
             Mutex::new(Vec::with_capacity(n_workers));
         let run_5a = || {
             let mut local_out: Vec<(usize, IrFunc)> = Vec::new();
+            let mut opt_scratch = OptIrScratch::default();
             let mut loc_ssa = 0u64;
             loop {
                 if failed.load(Ordering::Acquire) {
@@ -1281,12 +1292,13 @@ fn compile_wasm_to_x64_so_inner(
                 let bi = order_5a[pos];
                 let func_index = n_imports + bi;
                 let ts = Instant::now();
-                let res = lower_wasm_to_ir_with_budget(
+                let res = lower_wasm_to_ir_with_budget_and_scratch(
                     decoded,
                     &module,
                     func_index,
                     opts.opt,
                     Some(&budget),
+                    &mut opt_scratch,
                 )
                 .and_then(|mut ir| {
                     if opts.opt {
@@ -1518,6 +1530,7 @@ fn compile_wasm_to_x64_so_inner(
             let mut local_out: Vec<(usize, IrFunc, AllocResult)> = Vec::new();
             let mut local_batch: Vec<(usize, IrFunc)> = Vec::with_capacity(16);
             let mut scratch = opt::Stage2Scratch::default();
+            let mut ra_scratch = RegallocScratch::default();
             let mut loc_ssa = 0u64;
             let mut loc_ra = 0u64;
             'outer: loop {
@@ -1558,7 +1571,12 @@ fn compile_wasm_to_x64_so_inner(
                             verify_ir(&ir, &module)?;
                         }
                         let tr = Instant::now();
-                        let alloc = allocate_with_config(&ir, alloc_cfg, Some(&budget))?;
+                        let alloc = allocate_with_config_and_scratch(
+                            &ir,
+                            alloc_cfg,
+                            Some(&budget),
+                            &mut ra_scratch,
+                        )?;
                         loc_ra = loc_ra.saturating_add(tr.elapsed().as_nanos() as u64);
                         if opts.verify {
                             verify_alloc_with_config(&ir, &alloc, alloc_cfg)?;
@@ -1824,11 +1842,11 @@ fn compile_wasm_to_x64_so_inner(
             if std::thread::Builder::new()
                 .spawn(move || {
                     inc_cache::save_inc_cache(&dir_buf, &data_bg);
-                    drop(bg_cold_drop);
-                    drop(bg_validated);
                     let (lk, cv) = &*done_bg;
                     *lk.lock().unwrap_or_else(|g| g.into_inner()) = true;
                     cv.notify_all();
+                    drop(bg_cold_drop);
+                    drop(bg_validated);
                 })
                 .is_ok()
             {
@@ -1876,6 +1894,10 @@ fn compile_wasm_to_x64_so_inner(
         let mut exp_local_rodata_offs: Vec<u64> = Vec::with_capacity(export_asms.len());
         for asm in &export_asms {
             exp_local_rodata_offs.push(reserve_local_ro_len(asm.local_rodata.len())?);
+        }
+        let mut helper_local_rodata_offs: Vec<u64> = Vec::with_capacity(helper_asms.len());
+        for asm in &helper_asms {
+            helper_local_rodata_offs.push(reserve_local_ro_len(asm.local_rodata.len())?);
         }
         let mut imp_local_rodata_offs: Vec<u64> = Vec::with_capacity(import_asms.len());
         for asm in &import_asms {
@@ -2001,6 +2023,13 @@ fn compile_wasm_to_x64_so_inner(
         for (i, asm) in export_asms.iter_mut().enumerate() {
             if !asm.local_rodata.is_empty() {
                 let target_off = exp_local_rodata_offs[i] as usize;
+                rodata.resize(target_off, 0);
+                rodata.extend_from_slice(&asm.local_rodata);
+            }
+        }
+        for (i, asm) in helper_asms.iter().enumerate() {
+            if !asm.local_rodata.is_empty() {
+                let target_off = helper_local_rodata_offs[i] as usize;
                 rodata.resize(target_off, 0);
                 rodata.extend_from_slice(&asm.local_rodata);
             }
@@ -2142,7 +2171,8 @@ fn compile_wasm_to_x64_so_inner(
                 .map_err(X64CompileError::Failed)?;
         }
         for (i, asm) in helper_asms.iter().enumerate() {
-            patch_relocs(&mut text, helper_text_offs[i], &asm.relocs, None, &link_ctx)
+            let lro = (!asm.local_rodata.is_empty()).then_some(helper_local_rodata_offs[i]);
+            patch_relocs(&mut text, helper_text_offs[i], &asm.relocs, lro, &link_ctx)
                 .map_err(X64CompileError::Failed)?;
         }
         for (k, asm) in import_asms.iter().enumerate() {
@@ -2305,6 +2335,7 @@ fn try_compile_defs_incremental(
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
         let workers = n_workers.min(indices.len());
         let run_worker = || {
+            let mut opt_scratch = OptIrScratch::default();
             let mut loc_ssa = 0u64;
             loop {
                 if failed.load(Ordering::Acquire) {
@@ -2317,12 +2348,13 @@ fn try_compile_defs_incremental(
                 let bi = indices[pos];
                 let func_index = n_imports + bi;
                 let ts = Instant::now();
-                let res = lower_wasm_to_ir_with_budget(
+                let res = lower_wasm_to_ir_with_budget_and_scratch(
                     decoded,
                     module,
                     func_index,
                     opts.opt,
                     Some(budget),
+                    &mut opt_scratch,
                 )
                 .and_then(|mut ir| {
                     opt::prune_early_block_params(&mut ir, Some(budget))?;
@@ -2382,12 +2414,10 @@ fn try_compile_defs_incremental(
         Some(mut pre_callees_changed),
         Some(mut new_inlinable),
         Some(mut cur_edges),
-        Some(mut rev_callers),
         Some(mut cur_call_counts),
     ) = (
         inc_cache::try_vec_with_capacity::<Option<Vec<(u32, u32)>>>(n_defs),
         inc_cache::try_vec_with_capacity::<bool>(n_defs),
-        inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
         inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
         inc_cache::try_vec_with_capacity::<u32>(n_defs),
     )
@@ -2395,9 +2425,6 @@ fn try_compile_defs_incremental(
         return Ok(None);
     };
     new_inlinable.resize(n_defs, false);
-    for _ in 0..n_defs {
-        rev_callers.push(Vec::new());
-    }
     cur_call_counts.resize(n_defs, 0u32);
 
     let mut any_callees_changed = false;
@@ -2425,13 +2452,33 @@ fn try_compile_defs_incremental(
         for &(c, cnt) in cur_cs {
             cur_row.push(c as usize);
             cur_call_counts[c as usize] = cur_call_counts[c as usize].saturating_add(cnt);
-            let rev = &mut rev_callers[c as usize];
-            if rev.len() == rev.capacity() && rev.try_reserve(1).is_err() {
-                return Ok(None);
-            }
-            rev.push(bi);
         }
         cur_edges.push(cur_row);
+    }
+
+    let mut rev_callers_opt: Option<Vec<Vec<usize>>> = None;
+    fn ensure_rev_callers<'a>(
+        slot: &'a mut Option<Vec<Vec<usize>>>,
+        edges: &[Vec<usize>],
+    ) -> Option<&'a [Vec<usize>]> {
+        if slot.is_none() {
+            let n_defs = edges.len();
+            let mut rev = inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs)?;
+            for _ in 0..n_defs {
+                rev.push(Vec::new());
+            }
+            for (bi, row) in edges.iter().enumerate() {
+                for &c in row {
+                    let r = &mut rev[c];
+                    if r.len() == r.capacity() && r.try_reserve(1).is_err() {
+                        return None;
+                    }
+                    r.push(bi);
+                }
+            }
+            *slot = Some(rev);
+        }
+        slot.as_deref()
     }
 
     let Some((in_cycle, topo_bottom_up)) = opt::try_call_graph_sccs_from_edges(&cur_edges) else {
@@ -2506,12 +2553,20 @@ fn try_compile_defs_incremental(
         }
     }
     // Propagate dirty upward through callers of any dirty potentially-inlinable callee.
-    while let Some(c) = queue.pop() {
-        if prev_cache.funcs[c].was_inlinable || new_inlinable[c] {
-            for &caller in &rev_callers[c] {
-                if !dirty[caller] {
-                    dirty[caller] = true;
-                    queue.push(caller);
+    if queue
+        .iter()
+        .any(|&c| prev_cache.funcs[c].was_inlinable || new_inlinable[c])
+    {
+        let Some(rev_callers) = ensure_rev_callers(&mut rev_callers_opt, &cur_edges) else {
+            return Ok(None);
+        };
+        while let Some(c) = queue.pop() {
+            if prev_cache.funcs[c].was_inlinable || new_inlinable[c] {
+                for &caller in &rev_callers[c] {
+                    if !dirty[caller] {
+                        dirty[caller] = true;
+                        queue.push(caller);
+                    }
                 }
             }
         }
@@ -2668,6 +2723,9 @@ fn try_compile_defs_incremental(
         }
         let mut promoted = false;
         if !newly_inlinable.is_empty() {
+            let Some(rev_callers) = ensure_rev_callers(&mut rev_callers_opt, &cur_edges) else {
+                return Ok(None);
+            };
             let (Some(mut seen_promo), Some(mut promo_q)) = (
                 inc_cache::try_vec_with_capacity(n_defs),
                 inc_cache::try_vec_with_capacity(n_defs),
@@ -2764,6 +2822,7 @@ fn try_compile_defs_incremental(
             let workers = n_workers.min(newly_dirty_list.len());
             let run_worker = || {
                 let mut scratch = opt::Stage2Scratch::default();
+                let mut ra_scratch = RegallocScratch::default();
                 let mut loc_ssa = 0u64;
                 let mut loc_ra = 0u64;
                 loop {
@@ -2788,7 +2847,12 @@ fn try_compile_defs_incremental(
                             verify_ir(&ir, module)?;
                         }
                         let tr = Instant::now();
-                        let alloc = allocate_with_config(&ir, alloc_cfg, Some(budget))?;
+                        let alloc = allocate_with_config_and_scratch(
+                            &ir,
+                            alloc_cfg,
+                            Some(budget),
+                            &mut ra_scratch,
+                        )?;
                         loc_ra = loc_ra.saturating_add(tr.elapsed().as_nanos() as u64);
                         if opts.verify {
                             verify_alloc_with_config(&ir, &alloc, alloc_cfg)?;

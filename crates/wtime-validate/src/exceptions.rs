@@ -12,7 +12,7 @@ impl Context<'_> {
             ty.results.is_empty() || self.features.stack_switching,
             "tag type must have no results",
         )?;
-        self.tags.push(ti);
+        self.tags.to_mut().push(ti);
         Ok(())
     }
     pub(super) fn exception_instruction(&self, s: &mut Stack, i: &Instruction) -> Result<()> {

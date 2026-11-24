@@ -224,6 +224,7 @@ fn main() {
         let opts = aarch64::A64CompileOptions {
             target: a64_target,
             optimize: true,
+            jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
         };
         let elf_bytes = match aarch64::compile_wasm_to_aarch64(&bytes, &opts) {

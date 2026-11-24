@@ -231,6 +231,54 @@ fn asm_byte_level_encodings() {
     let mut a = Asm::new();
     a.ldmxcsr(Mem::base(Gp::Rsp)); // 0f ae 14 24
     assert_eq!(a.code, [0x0f, 0xae, 0x14, 0x24]);
+
+    // Track 2 additions: test_ri, adc_ri8, shrd_cl, xgetbv, vzeroupper, 256-bit AVX2 VEX, lea_rip_label
+    let mut a = Asm::new();
+    a.test_ri(false, Gp::Rbp, 8);
+    assert_eq!(a.code, [0xf7, 0xc5, 0x08, 0x00, 0x00, 0x00]);
+    let mut a = Asm::new();
+    a.test_ri(true, Gp::R12, 1);
+    assert_eq!(a.code, [0x49, 0xf7, 0xc4, 0x01, 0x00, 0x00, 0x00]);
+    let mut a = Asm::new();
+    a.adc_ri8(true, Gp::Rdx, 0);
+    assert_eq!(a.code, [0x48, 0x83, 0xd2, 0x00]);
+    let mut a = Asm::new();
+    a.shrd_cl(true, Gp::Rax, Gp::Rdx);
+    assert_eq!(a.code, [0x48, 0x0f, 0xad, 0xd0]);
+    let mut a = Asm::new();
+    a.xgetbv();
+    assert_eq!(a.code, [0x0f, 0x01, 0xd0]);
+    let mut a = Asm::new();
+    a.vzeroupper();
+    assert_eq!(a.code, [0xc5, 0xf8, 0x77]);
+    let mut a = Asm::new();
+    a.vmovdqu_ym(Xmm::Xmm8, Mem::base(Gp::R14));
+    assert_eq!(a.code, [0xc4, 0x41, 0x7e, 0x6f, 0x06]);
+    let mut a = Asm::new();
+    a.vmovdqu_my(Mem::base_disp(Gp::Rdi, 32), Xmm::Xmm0);
+    assert_eq!(a.code, [0xc4, 0xe1, 0x7e, 0x7f, 0x47, 0x20]);
+    let mut a = Asm::new();
+    a.vpbroadcastb_yx(Xmm::Xmm1, Xmm::Xmm0);
+    assert_eq!(a.code, [0xc4, 0xe2, 0x7d, 0x78, 0xc8]);
+    let mut a = Asm::new();
+    a.vpxor_yyy(Xmm::Xmm2, Xmm::Xmm2, Xmm::Xmm2);
+    assert_eq!(a.code, [0xc4, 0xe1, 0x6d, 0xef, 0xd2]);
+    let mut a = Asm::new();
+    a.vpsadbw_yym(Xmm::Xmm3, Xmm::Xmm1, Mem::base(Gp::Rax));
+    assert_eq!(a.code, [0xc4, 0xe1, 0x75, 0xf6, 0x18]);
+    let mut a = Asm::new();
+    a.vpaddq_yyy(Xmm::Xmm2, Xmm::Xmm2, Xmm::Xmm3);
+    assert_eq!(a.code, [0xc4, 0xe1, 0x6d, 0xd4, 0xd3]);
+    let mut a = Asm::new();
+    a.vextracti128_xy(Xmm::Xmm3, Xmm::Xmm2, 1);
+    assert_eq!(a.code, [0xc4, 0xe3, 0x7d, 0x39, 0xd3, 0x01]);
+    let mut a = Asm::new();
+    let lbl = a.new_label();
+    a.lea_rip_label(Gp::Rax, lbl);
+    a.nop();
+    a.bind(lbl);
+    a.finish_labels().unwrap();
+    assert_eq!(a.code, [0x48, 0x8d, 0x05, 0x01, 0x00, 0x00, 0x00, 0x90]);
 }
 
 // ---- 2. `elf.rs` SysV hash collision & validation unit tests (§4.3.2) ----
@@ -486,6 +534,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        early_pruned: 0,
     };
     verify_ir(&good_ir, &empty_mod).unwrap();
     let good_alloc = allocate(&good_ir).unwrap();
@@ -515,6 +564,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        early_pruned: 0,
     };
     assert!(verify_ir(&bad_ty, &empty_mod).is_err());
 
@@ -573,6 +623,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        early_pruned: 0,
     };
     assert!(verify_ir(&bad_dom, &empty_mod).is_err());
 
@@ -607,6 +658,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         needs_stack_check: true,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        early_pruned: 0,
     };
     verify_ir(&two_live_ir, &empty_mod).unwrap();
     let mut bad_alloc = allocate(&two_live_ir).unwrap();
@@ -1083,6 +1135,7 @@ fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
             isa: TargetIsa {
                 has_abm_bmi1: true,
                 has_bmi2: true,
+                has_avx2: true,
             },
             jobs: 1,
             deadline: None,
@@ -1098,6 +1151,7 @@ fn verify_ir_and_alloc_pass_on_unopt_and_opt_for_gdev_if_present() {
             isa: TargetIsa {
                 has_abm_bmi1: true,
                 has_bmi2: true,
+                has_avx2: true,
             },
             jobs: 8,
             deadline: None,
@@ -1920,6 +1974,7 @@ fn stage3_bmi2_encodings_zero_byte_jmp_and_live_range_holes() {
         needs_stack_check: false,
         elided_callee_stack_bytes: 0,
         memory64: false,
+        early_pruned: 0,
     };
     let alloc = allocate_with_config(&ir, AllocConfig::default(), None).unwrap();
     verify_alloc_with_config(&ir, &alloc, AllocConfig::default()).unwrap();
@@ -2068,6 +2123,7 @@ fn stage3_undo_log_if_nesting_and_inc_cache_parity() {
         isa: TargetIsa {
             has_abm_bmi1: true,
             has_bmi2: true,
+            has_avx2: true,
         },
         jobs: 2,
         opt: true,
@@ -2205,7 +2261,7 @@ fn stage3_store_to_load_forwarding_guarded_licm_and_triangle_if() {
             && b.preds == 1
             && b.insts
                 .iter()
-                .any(|i| matches!(i.op, Op::I32Bin(IntBinOp::DivU, _, _)))
+                .any(|i| matches!(i.op, Op::I32Bin(IntBinOp::DivU | IntBinOp::DivUNz, _, _)))
     });
     assert!(
         div_in_non_loop,
@@ -2378,9 +2434,9 @@ fn stage3_council_round1_regressions() {
         assert!(
             irs[1].blocks.iter().any(|b| !b.is_loop_header
                 && b.preds == 1
-                && b.insts
-                    .iter()
-                    .any(|i| matches!(i.op, Op::I32Bin(IntBinOp::DivU, _, _)))),
+                && b.insts.iter().any(|i| {
+                    matches!(i.op, Op::I32Bin(IntBinOp::DivU | IntBinOp::DivUNz, _, _))
+                })),
             "guarded LICM must still hoist DivU when exit_bb promotes escaping hdr.params"
         );
     }
@@ -2393,6 +2449,7 @@ fn stage3_council_round1_regressions() {
             isa: TargetIsa {
                 has_abm_bmi1: true,
                 has_bmi2: true,
+                has_avx2: true,
             },
             jobs: 2,
             opt: true,
@@ -2793,6 +2850,7 @@ fn stage3_council_round1_regressions() {
                     needs_stack_check: false,
                     elided_callee_stack_bytes: 0,
                     memory64: false,
+                    early_pruned: 0,
                 };
                 let empty = ValRange { start: 0, len: 0 };
                 let ret_v0 = ValRange { start: 0, len: 1 };

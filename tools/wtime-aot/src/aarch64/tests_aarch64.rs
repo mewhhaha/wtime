@@ -336,12 +336,21 @@ impl A64Vm {
             let res = self.add_with_carry(sf, a, b, is_sub, s_flag);
             self.set_x(rd, res, false);
         } else if (insn & 0x1fe0_0000) == 0x0b20_0000 {
-            // ADD / SUB extended register (`SP` delta add)
+            // ADD / SUB extended register (`SP` delta add and `ADD Xd, Xn, Wm, UXTW`)
             let is_sub = ((insn >> 30) & 1) != 0;
             let s_flag = ((insn >> 29) & 1) != 0;
+            let opt = (insn >> 13) & 7;
+            let shift = (insn >> 10) & 7;
             let a = self.get_x(rn, true);
             let raw_b = self.get_x(rm, false);
-            let b = if is_sub { !raw_b } else { raw_b };
+            let ext_b = match opt {
+                0b010 => u64::from(raw_b as u32), // UXTW
+                0b011 => raw_b,                   // UXTX
+                0b110 => (raw_b as i32) as i64 as u64,
+                0b111 => raw_b,
+                _ => return Err(format!("A64Vm: unsupported ext add opt {opt}")),
+            } << shift;
+            let b = if is_sub { !ext_b } else { ext_b };
             let res = self.add_with_carry(sf, a, b, is_sub, s_flag);
             self.set_x(rd, res, !s_flag);
         } else if (insn & 0x1f00_0000) == 0x0a00_0000 {
@@ -596,13 +605,21 @@ impl A64Vm {
                 base.wrapping_add(imm12 << shift)
             } else {
                 let opt = (insn >> 13) & 7;
+                let s_bit = ((insn >> 12) & 1) != 0;
                 let idx = self.get_x(rm, false);
-                let off = if opt == 0b010 {
+                let base_off = if opt == 0b010 {
                     u64::from(idx as u32)
                 } else {
                     idx
                 };
-                base.wrapping_add(off)
+                let shift = if !s_bit {
+                    0
+                } else if is_fp && size == 0 && opc >= 2 {
+                    4
+                } else {
+                    size
+                };
+                base.wrapping_add(base_off << shift)
             };
             if is_fp {
                 match (size, opc) {
@@ -943,19 +960,35 @@ impl A64Vm {
             let sum: u8 = self.v[rn][0..8].iter().fold(0u8, |a, &b| a.wrapping_add(b));
             self.v[rd] = [0; 16];
             self.v[rd][0] = sum;
-        } else if (insn & 0xff3f_fc00) == 0x6e20_2800 {
-            // UADDLP Vd, Vn (128-bit)
+        } else if (insn & 0xffe0_fc00) == 0x4e00_0000 {
+            // TBL Vd.16B, {Vn.16B}, Vm.16B
+            let tbl = self.v[rn];
+            let idx = self.v[rm];
+            let mut out = [0u8; 16];
+            for i in 0..16 {
+                out[i] = if idx[i] < 16 { tbl[idx[i] as usize] } else { 0 };
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xdf3f_fc00) == 0x4e20_2800 {
+            // SADDLP (U=0) / UADDLP (U=1) 128-bit
+            let unsigned = ((insn >> 29) & 1) != 0;
             let size = (insn >> 22) & 3;
             let src = self.v[rn];
             let mut out = [0u8; 16];
-            match size {
-                0 => {
+            match (unsigned, size) {
+                (true, 0) => {
                     for i in 0..8 {
                         let s = u16::from(src[2 * i]) + u16::from(src[2 * i + 1]);
                         out[2 * i..2 * i + 2].copy_from_slice(&s.to_le_bytes());
                     }
                 }
-                1 => {
+                (false, 0) => {
+                    for i in 0..8 {
+                        let s = i16::from(src[2 * i] as i8) + i16::from(src[2 * i + 1] as i8);
+                        out[2 * i..2 * i + 2].copy_from_slice(&s.to_le_bytes());
+                    }
+                }
+                (true, 1) => {
                     for i in 0..4 {
                         let a = u16::from_le_bytes(src[4 * i..4 * i + 2].try_into().unwrap());
                         let b = u16::from_le_bytes(src[4 * i + 2..4 * i + 4].try_into().unwrap());
@@ -963,7 +996,15 @@ impl A64Vm {
                             .copy_from_slice(&(u32::from(a) + u32::from(b)).to_le_bytes());
                     }
                 }
-                2 => {
+                (false, 1) => {
+                    for i in 0..4 {
+                        let a = i16::from_le_bytes(src[4 * i..4 * i + 2].try_into().unwrap());
+                        let b = i16::from_le_bytes(src[4 * i + 2..4 * i + 4].try_into().unwrap());
+                        out[4 * i..4 * i + 4]
+                            .copy_from_slice(&(i32::from(a) + i32::from(b)).to_le_bytes());
+                    }
+                }
+                (true, 2) => {
                     for i in 0..2 {
                         let a = u32::from_le_bytes(src[8 * i..8 * i + 4].try_into().unwrap());
                         let b = u32::from_le_bytes(src[8 * i + 4..8 * i + 8].try_into().unwrap());
@@ -971,7 +1012,680 @@ impl A64Vm {
                             .copy_from_slice(&(u64::from(a) + u64::from(b)).to_le_bytes());
                     }
                 }
-                _ => return Err(format!("A64Vm: bad uaddlp size {size}")),
+                (false, 2) => {
+                    for i in 0..2 {
+                        let a = i32::from_le_bytes(src[8 * i..8 * i + 4].try_into().unwrap());
+                        let b = i32::from_le_bytes(src[8 * i + 4..8 * i + 8].try_into().unwrap());
+                        out[8 * i..8 * i + 8]
+                            .copy_from_slice(&(i64::from(a) + i64::from(b)).to_le_bytes());
+                    }
+                }
+                _ => return Err(format!("A64Vm: bad addlp size {size}")),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xff3f_fc00) == 0x6e31_a800 {
+            // UMINV Vd, Vn (128-bit)
+            let size = (insn >> 22) & 3;
+            let src = self.v[rn];
+            let mut out = [0u8; 16];
+            match size {
+                0 => out[0] = *src.iter().min().unwrap(),
+                1 => {
+                    let m = (0..8)
+                        .map(|i| u16::from_le_bytes(src[2 * i..2 * i + 2].try_into().unwrap()))
+                        .min()
+                        .unwrap();
+                    out[0..2].copy_from_slice(&m.to_le_bytes());
+                }
+                2 => {
+                    let m = (0..4)
+                        .map(|i| u32::from_le_bytes(src[4 * i..4 * i + 4].try_into().unwrap()))
+                        .min()
+                        .unwrap();
+                    out[0..4].copy_from_slice(&m.to_le_bytes());
+                }
+                _ => return Err(format!("A64Vm: bad uminv size {size}")),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xdf3f_fc00) == 0x4e20_b800 {
+            // ABS (U=0) / NEG (U=1) 128-bit integer
+            let is_neg = ((insn >> 29) & 1) != 0;
+            let size = (insn >> 22) & 3;
+            let src = self.v[rn];
+            let mut out = [0u8; 16];
+            match size {
+                0 => {
+                    for i in 0..16 {
+                        let x = src[i] as i8;
+                        out[i] = (if is_neg {
+                            x.wrapping_neg()
+                        } else {
+                            x.wrapping_abs()
+                        }) as u8;
+                    }
+                }
+                1 => {
+                    for i in 0..8 {
+                        let x = i16::from_le_bytes(src[2 * i..2 * i + 2].try_into().unwrap());
+                        let r = if is_neg {
+                            x.wrapping_neg()
+                        } else {
+                            x.wrapping_abs()
+                        };
+                        out[2 * i..2 * i + 2].copy_from_slice(&r.to_le_bytes());
+                    }
+                }
+                2 => {
+                    for i in 0..4 {
+                        let x = i32::from_le_bytes(src[4 * i..4 * i + 4].try_into().unwrap());
+                        let r = if is_neg {
+                            x.wrapping_neg()
+                        } else {
+                            x.wrapping_abs()
+                        };
+                        out[4 * i..4 * i + 4].copy_from_slice(&r.to_le_bytes());
+                    }
+                }
+                3 => {
+                    for i in 0..2 {
+                        let x = i64::from_le_bytes(src[8 * i..8 * i + 8].try_into().unwrap());
+                        let r = if is_neg {
+                            x.wrapping_neg()
+                        } else {
+                            x.wrapping_abs()
+                        };
+                        out[8 * i..8 * i + 8].copy_from_slice(&r.to_le_bytes());
+                    }
+                }
+                _ => unreachable!(),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xff20_fc00) == 0x4e20_bc00 {
+            // ADDP 128-bit pairwise add
+            let size = (insn >> 22) & 3;
+            let (a, b) = (self.v[rn], self.v[rm]);
+            let mut out = [0u8; 16];
+            match size {
+                0 => {
+                    for i in 0..8 {
+                        out[i] = a[2 * i].wrapping_add(a[2 * i + 1]);
+                        out[8 + i] = b[2 * i].wrapping_add(b[2 * i + 1]);
+                    }
+                }
+                1 => {
+                    for i in 0..4 {
+                        let x0 = u16::from_le_bytes(a[4 * i..4 * i + 2].try_into().unwrap());
+                        let x1 = u16::from_le_bytes(a[4 * i + 2..4 * i + 4].try_into().unwrap());
+                        let y0 = u16::from_le_bytes(b[4 * i..4 * i + 2].try_into().unwrap());
+                        let y1 = u16::from_le_bytes(b[4 * i + 2..4 * i + 4].try_into().unwrap());
+                        out[2 * i..2 * i + 2].copy_from_slice(&x0.wrapping_add(x1).to_le_bytes());
+                        out[8 + 2 * i..8 + 2 * i + 2]
+                            .copy_from_slice(&y0.wrapping_add(y1).to_le_bytes());
+                    }
+                }
+                2 => {
+                    for i in 0..2 {
+                        let x0 = u32::from_le_bytes(a[8 * i..8 * i + 4].try_into().unwrap());
+                        let x1 = u32::from_le_bytes(a[8 * i + 4..8 * i + 8].try_into().unwrap());
+                        let y0 = u32::from_le_bytes(b[8 * i..8 * i + 4].try_into().unwrap());
+                        let y1 = u32::from_le_bytes(b[8 * i + 4..8 * i + 8].try_into().unwrap());
+                        out[4 * i..4 * i + 4].copy_from_slice(&x0.wrapping_add(x1).to_le_bytes());
+                        out[8 + 4 * i..8 + 4 * i + 4]
+                            .copy_from_slice(&y0.wrapping_add(y1).to_le_bytes());
+                    }
+                }
+                3 => {
+                    let x0 = u64::from_le_bytes(a[0..8].try_into().unwrap());
+                    let x1 = u64::from_le_bytes(a[8..16].try_into().unwrap());
+                    let y0 = u64::from_le_bytes(b[0..8].try_into().unwrap());
+                    let y1 = u64::from_le_bytes(b[8..16].try_into().unwrap());
+                    out[0..8].copy_from_slice(&x0.wrapping_add(x1).to_le_bytes());
+                    out[8..16].copy_from_slice(&y0.wrapping_add(y1).to_le_bytes());
+                }
+                _ => unreachable!(),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xdf20_fc00) == 0x4e20_0c00
+            || (insn & 0xdf20_fc00) == 0x4e20_2c00
+            || (insn & 0xdf20_fc00) == 0x4e20_3400
+            || (insn & 0xdf20_fc00) == 0x4e20_3c00
+            || (insn & 0xdf20_fc00) == 0x4e20_4400
+            || (insn & 0xdf20_fc00) == 0x4e20_6400
+            || (insn & 0xdf20_fc00) == 0x4e20_6c00
+            || (insn & 0xff20_fc00) == 0x6e20_8c00
+            || (insn & 0xff20_fc00) == 0x6e20_1400
+            || (insn & 0xff20_fc00) == 0x6e20_b400
+        {
+            // Three-same 128-bit integer ops: SQADD/UQADD/SQSUB/UQSUB/CMEQ/CMGT/CMGE/CMHI/CMHS/
+            // SSHL/USHL/SMAX/UMAX/SMIN/UMIN/URHADD/SQRDMULH
+            let u = ((insn >> 29) & 1) != 0;
+            let size = (insn >> 22) & 3;
+            let opc = (insn >> 11) & 31;
+            let (a, b) = (self.v[rn], self.v[rm]);
+            let mut out = [0u8; 16];
+            let lane_bytes = 1usize << size;
+            let n_lanes = 16 / lane_bytes;
+            for i in 0..n_lanes {
+                let s = i * lane_bytes;
+                match size {
+                    0 => {
+                        let (au, bu) = (a[s], b[s]);
+                        let (ai, bi) = (au as i8, bu as i8);
+                        out[s] = match (u, opc) {
+                            (false, 0b00001) => ai.saturating_add(bi) as u8,
+                            (true, 0b00001) => au.saturating_add(bu),
+                            (false, 0b00101) => ai.saturating_sub(bi) as u8,
+                            (true, 0b00101) => au.saturating_sub(bu),
+                            (true, 0b10001) => {
+                                if au == bu {
+                                    0xff
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00110) => {
+                                if ai > bi {
+                                    0xff
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00111) => {
+                                if ai >= bi {
+                                    0xff
+                                } else {
+                                    0
+                                }
+                            }
+                            (true, 0b00110) => {
+                                if au > bu {
+                                    0xff
+                                } else {
+                                    0
+                                }
+                            }
+                            (true, 0b00111) => {
+                                if au >= bu {
+                                    0xff
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b01100) => ai.max(bi) as u8,
+                            (true, 0b01100) => au.max(bu),
+                            (false, 0b01101) => ai.min(bi) as u8,
+                            (true, 0b01101) => au.min(bu),
+                            (true, 0b00010) => ((u16::from(au) + u16::from(bu) + 1) >> 1) as u8,
+                            (false, 0b01000) => {
+                                let sh = bi;
+                                if sh >= 0 {
+                                    if sh >= 8 { 0 } else { (ai << sh) as u8 }
+                                } else {
+                                    let r = (-sh).min(7);
+                                    (ai >> r) as u8
+                                }
+                            }
+                            (true, 0b01000) => {
+                                let sh = bi;
+                                if sh >= 0 {
+                                    if sh >= 8 { 0 } else { au << sh }
+                                } else if -sh >= 8 {
+                                    0
+                                } else {
+                                    au >> (-sh)
+                                }
+                            }
+                            _ => return Err(format!("A64Vm: bad neon3s8 u={u} opc={opc:#x}")),
+                        };
+                    }
+                    1 => {
+                        let au = u16::from_le_bytes(a[s..s + 2].try_into().unwrap());
+                        let bu = u16::from_le_bytes(b[s..s + 2].try_into().unwrap());
+                        let (ai, bi) = (au as i16, bu as i16);
+                        let r: u16 = match (u, opc) {
+                            (false, 0b00001) => ai.saturating_add(bi) as u16,
+                            (true, 0b00001) => au.saturating_add(bu),
+                            (false, 0b00101) => ai.saturating_sub(bi) as u16,
+                            (true, 0b00101) => au.saturating_sub(bu),
+                            (true, 0b10001) => {
+                                if au == bu {
+                                    u16::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00110) => {
+                                if ai > bi {
+                                    u16::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00111) => {
+                                if ai >= bi {
+                                    u16::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (true, 0b00110) => {
+                                if au > bu {
+                                    u16::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (true, 0b00111) => {
+                                if au >= bu {
+                                    u16::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b01100) => ai.max(bi) as u16,
+                            (true, 0b01100) => au.max(bu),
+                            (false, 0b01101) => ai.min(bi) as u16,
+                            (true, 0b01101) => au.min(bu),
+                            (true, 0b00010) => ((u32::from(au) + u32::from(bu) + 1) >> 1) as u16,
+                            (true, 0b10110) => {
+                                // SQRDMULH
+                                let prod = i32::from(ai) * i32::from(bi);
+                                let rounded = (prod + 0x4000) >> 15;
+                                rounded.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+                                    as u16
+                            }
+                            (false, 0b01000) => {
+                                let sh = (bu & 0xff) as i8;
+                                if sh >= 0 {
+                                    if sh >= 16 { 0 } else { (ai << sh) as u16 }
+                                } else {
+                                    let r = (-sh).min(15);
+                                    (ai >> r) as u16
+                                }
+                            }
+                            (true, 0b01000) => {
+                                let sh = (bu & 0xff) as i8;
+                                if sh >= 0 {
+                                    if sh >= 16 { 0 } else { au << sh }
+                                } else if -sh >= 16 {
+                                    0
+                                } else {
+                                    au >> (-sh)
+                                }
+                            }
+                            _ => return Err(format!("A64Vm: bad neon3s16 u={u} opc={opc:#x}")),
+                        };
+                        out[s..s + 2].copy_from_slice(&r.to_le_bytes());
+                    }
+                    2 => {
+                        let au = u32::from_le_bytes(a[s..s + 4].try_into().unwrap());
+                        let bu = u32::from_le_bytes(b[s..s + 4].try_into().unwrap());
+                        let (ai, bi) = (au as i32, bu as i32);
+                        let r: u32 = match (u, opc) {
+                            (true, 0b10001) => {
+                                if au == bu {
+                                    u32::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00110) => {
+                                if ai > bi {
+                                    u32::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00111) => {
+                                if ai >= bi {
+                                    u32::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (true, 0b00110) => {
+                                if au > bu {
+                                    u32::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (true, 0b00111) => {
+                                if au >= bu {
+                                    u32::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b01100) => ai.max(bi) as u32,
+                            (true, 0b01100) => au.max(bu),
+                            (false, 0b01101) => ai.min(bi) as u32,
+                            (true, 0b01101) => au.min(bu),
+                            (false, 0b01000) => {
+                                let sh = (bu & 0xff) as i8;
+                                if sh >= 0 {
+                                    if sh >= 32 { 0 } else { (ai << sh) as u32 }
+                                } else {
+                                    let r = (-sh).min(31);
+                                    (ai >> r) as u32
+                                }
+                            }
+                            (true, 0b01000) => {
+                                let sh = (bu & 0xff) as i8;
+                                if sh >= 0 {
+                                    if sh >= 32 { 0 } else { au << sh }
+                                } else if -sh >= 32 {
+                                    0
+                                } else {
+                                    au >> (-sh)
+                                }
+                            }
+                            _ => return Err(format!("A64Vm: bad neon3s32 u={u} opc={opc:#x}")),
+                        };
+                        out[s..s + 4].copy_from_slice(&r.to_le_bytes());
+                    }
+                    3 => {
+                        let au = u64::from_le_bytes(a[s..s + 8].try_into().unwrap());
+                        let bu = u64::from_le_bytes(b[s..s + 8].try_into().unwrap());
+                        let (ai, bi) = (au as i64, bu as i64);
+                        let r: u64 = match (u, opc) {
+                            (true, 0b10001) => {
+                                if au == bu {
+                                    u64::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00110) => {
+                                if ai > bi {
+                                    u64::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b00111) => {
+                                if ai >= bi {
+                                    u64::MAX
+                                } else {
+                                    0
+                                }
+                            }
+                            (false, 0b01000) => {
+                                let sh = (bu & 0xff) as i8;
+                                if sh >= 0 {
+                                    if sh >= 64 { 0 } else { (ai << sh) as u64 }
+                                } else {
+                                    let r = (-sh).min(63);
+                                    (ai >> r) as u64
+                                }
+                            }
+                            (true, 0b01000) => {
+                                let sh = (bu & 0xff) as i8;
+                                if sh >= 0 {
+                                    if sh >= 64 { 0 } else { au << sh }
+                                } else if -sh >= 64 {
+                                    0
+                                } else {
+                                    au >> (-sh)
+                                }
+                            }
+                            _ => return Err(format!("A64Vm: bad neon3s64 u={u} opc={opc:#x}")),
+                        };
+                        out[s..s + 8].copy_from_slice(&r.to_le_bytes());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xff80_fc00) == 0x4f00_0400 && ((insn >> 19) & 15) != 0 {
+            // SSHR Vd.<T>, Vn.<T>, #shift (Q=1)
+            let enc = (insn >> 16) & 0x7f;
+            let immh = enc >> 3;
+            let (size, base_w) = if (immh & 8) != 0 {
+                (3, 128)
+            } else if (immh & 4) != 0 {
+                (2, 64)
+            } else if (immh & 2) != 0 {
+                (1, 32)
+            } else {
+                (0, 16)
+            };
+            let shift = base_w - enc;
+            let src = self.v[rn];
+            let mut out = [0u8; 16];
+            match size {
+                0 => {
+                    for i in 0..16 {
+                        out[i] = ((src[i] as i8) >> shift.min(7)) as u8;
+                    }
+                }
+                1 => {
+                    for i in 0..8 {
+                        let x = i16::from_le_bytes(src[2 * i..2 * i + 2].try_into().unwrap());
+                        out[2 * i..2 * i + 2].copy_from_slice(&(x >> shift.min(15)).to_le_bytes());
+                    }
+                }
+                2 => {
+                    for i in 0..4 {
+                        let x = i32::from_le_bytes(src[4 * i..4 * i + 4].try_into().unwrap());
+                        out[4 * i..4 * i + 4].copy_from_slice(&(x >> shift.min(31)).to_le_bytes());
+                    }
+                }
+                3 => {
+                    for i in 0..2 {
+                        let x = i64::from_le_bytes(src[8 * i..8 * i + 8].try_into().unwrap());
+                        out[8 * i..8 * i + 8].copy_from_slice(&(x >> shift.min(63)).to_le_bytes());
+                    }
+                }
+                _ => unreachable!(),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0x9f80_fc00) == 0x0f00_a400 {
+            // SXTL / SXTL2 / UXTL / UXTL2
+            let high = ((insn >> 30) & 1) != 0;
+            let unsigned = ((insn >> 29) & 1) != 0;
+            let immh = (insn >> 19) & 15;
+            let src = self.v[rn];
+            let base = if high { 8 } else { 0 };
+            let mut out = [0u8; 16];
+            match immh {
+                1 => {
+                    for i in 0..8 {
+                        let b = src[base + i];
+                        let w: u16 = if unsigned {
+                            u16::from(b)
+                        } else {
+                            i16::from(b as i8) as u16
+                        };
+                        out[2 * i..2 * i + 2].copy_from_slice(&w.to_le_bytes());
+                    }
+                }
+                2 => {
+                    for i in 0..4 {
+                        let h = u16::from_le_bytes(
+                            src[base + 2 * i..base + 2 * i + 2].try_into().unwrap(),
+                        );
+                        let w: u32 = if unsigned {
+                            u32::from(h)
+                        } else {
+                            i32::from(h as i16) as u32
+                        };
+                        out[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+                    }
+                }
+                4 => {
+                    for i in 0..2 {
+                        let s = u32::from_le_bytes(
+                            src[base + 4 * i..base + 4 * i + 4].try_into().unwrap(),
+                        );
+                        let d: u64 = if unsigned {
+                            u64::from(s)
+                        } else {
+                            i64::from(s as i32) as u64
+                        };
+                        out[8 * i..8 * i + 8].copy_from_slice(&d.to_le_bytes());
+                    }
+                }
+                _ => return Err(format!("A64Vm: bad xtl immh {immh}")),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xbf3f_fc00) == 0x0e21_4800 || (insn & 0xbf3f_fc00) == 0x2e21_2800 {
+            // SQXTN / SQXTN2 / SQXTUN / SQXTUN2
+            let high = ((insn >> 30) & 1) != 0;
+            let unsigned = ((insn >> 29) & 1) != 0;
+            let size = (insn >> 22) & 3;
+            let src = self.v[rn];
+            let mut out = if high { self.v[rd] } else { [0u8; 16] };
+            let base = if high { 8 } else { 0 };
+            match size {
+                0 => {
+                    for i in 0..8 {
+                        let x = i16::from_le_bytes(src[2 * i..2 * i + 2].try_into().unwrap());
+                        out[base + i] = if unsigned {
+                            x.clamp(0, 255) as u8
+                        } else {
+                            x.clamp(-128, 127) as i8 as u8
+                        };
+                    }
+                }
+                1 => {
+                    for i in 0..4 {
+                        let x = i32::from_le_bytes(src[4 * i..4 * i + 4].try_into().unwrap());
+                        let h: u16 = if unsigned {
+                            x.clamp(0, 65535) as u16
+                        } else {
+                            x.clamp(-32768, 32767) as i16 as u16
+                        };
+                        out[base + 2 * i..base + 2 * i + 2].copy_from_slice(&h.to_le_bytes());
+                    }
+                }
+                _ => return Err(format!("A64Vm: bad sqxt*n size {size}")),
+            }
+            self.v[rd] = out;
+        } else if (insn & 0x9f20_fc00) == 0x0e20_c000 {
+            // SMULL / SMULL2 / UMULL / UMULL2
+            let high = ((insn >> 30) & 1) != 0;
+            let unsigned = ((insn >> 29) & 1) != 0;
+            let size = (insn >> 22) & 3;
+            let (a, b) = (self.v[rn], self.v[rm]);
+            let base = if high { 8 } else { 0 };
+            let mut out = [0u8; 16];
+            match size {
+                0 => {
+                    for i in 0..8 {
+                        let r: u16 = if unsigned {
+                            u16::from(a[base + i]) * u16::from(b[base + i])
+                        } else {
+                            (i16::from(a[base + i] as i8) * i16::from(b[base + i] as i8)) as u16
+                        };
+                        out[2 * i..2 * i + 2].copy_from_slice(&r.to_le_bytes());
+                    }
+                }
+                1 => {
+                    for i in 0..4 {
+                        let x = u16::from_le_bytes(
+                            a[base + 2 * i..base + 2 * i + 2].try_into().unwrap(),
+                        );
+                        let y = u16::from_le_bytes(
+                            b[base + 2 * i..base + 2 * i + 2].try_into().unwrap(),
+                        );
+                        let r: u32 = if unsigned {
+                            u32::from(x) * u32::from(y)
+                        } else {
+                            (i32::from(x as i16) * i32::from(y as i16)) as u32
+                        };
+                        out[4 * i..4 * i + 4].copy_from_slice(&r.to_le_bytes());
+                    }
+                }
+                2 => {
+                    for i in 0..2 {
+                        let x = u32::from_le_bytes(
+                            a[base + 4 * i..base + 4 * i + 4].try_into().unwrap(),
+                        );
+                        let y = u32::from_le_bytes(
+                            b[base + 4 * i..base + 4 * i + 4].try_into().unwrap(),
+                        );
+                        let r: u64 = if unsigned {
+                            u64::from(x) * u64::from(y)
+                        } else {
+                            (i64::from(x as i32) * i64::from(y as i32)) as u64
+                        };
+                        out[8 * i..8 * i + 8].copy_from_slice(&r.to_le_bytes());
+                    }
+                }
+                _ => return Err(format!("A64Vm: bad mull size {size}")),
+            }
+            self.v[rd] = out;
+        } else if matches!(
+            insn & 0xffbf_fc00,
+            0x4e21_8800
+                | 0x4e21_9800
+                | 0x4ea1_8800
+                | 0x4ea1_9800
+                | 0x4e21_d800
+                | 0x6e21_d800
+                | 0x4ea1_b800
+                | 0x6ea1_b800
+        ) {
+            // Vector FP round & int<->fp convert (FRINTN/M/P/Z, SCVTF, UCVTF, FCVTZS, FCVTZU)
+            let is64 = ((insn >> 22) & 1) != 0;
+            let tag = insn & 0xffbf_fc00;
+            let a = self.v[rn];
+            let mut out = [0u8; 16];
+            if is64 {
+                for i in 0..2 {
+                    let s = 8 * i;
+                    let raw = u64::from_le_bytes(a[s..s + 8].try_into().unwrap());
+                    let f = f64::from_bits(raw);
+                    let bits: u64 = match tag {
+                        0x4e21_8800 => f.round_ties_even().to_bits(),
+                        0x4e21_9800 => f.floor().to_bits(),
+                        0x4ea1_8800 => f.ceil().to_bits(),
+                        0x4ea1_9800 => f.trunc().to_bits(),
+                        0x4e21_d800 => ((raw as i64) as f64).to_bits(),
+                        0x6e21_d800 => (raw as f64).to_bits(),
+                        0x4ea1_b800 => (f as i64) as u64,
+                        0x6ea1_b800 => f as u64,
+                        _ => unreachable!(),
+                    };
+                    out[s..s + 8].copy_from_slice(&bits.to_le_bytes());
+                }
+            } else {
+                for i in 0..4 {
+                    let s = 4 * i;
+                    let raw = u32::from_le_bytes(a[s..s + 4].try_into().unwrap());
+                    let f = f32::from_bits(raw);
+                    let bits: u32 = match tag {
+                        0x4e21_8800 => f.round_ties_even().to_bits(),
+                        0x4e21_9800 => f.floor().to_bits(),
+                        0x4ea1_8800 => f.ceil().to_bits(),
+                        0x4ea1_9800 => f.trunc().to_bits(),
+                        0x4e21_d800 => ((raw as i32) as f32).to_bits(),
+                        0x6e21_d800 => (raw as f32).to_bits(),
+                        0x4ea1_b800 => (f as i32) as u32,
+                        0x6ea1_b800 => f as u32,
+                        _ => unreachable!(),
+                    };
+                    out[s..s + 4].copy_from_slice(&bits.to_le_bytes());
+                }
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xffff_fc00) == 0x0e61_6800 {
+            // FCVTN Vd.2S, Vn.2D (clears upper 64 bits)
+            let a = self.v[rn];
+            let mut out = [0u8; 16];
+            for i in 0..2 {
+                let d = f64::from_le_bytes(a[8 * i..8 * i + 8].try_into().unwrap());
+                out[4 * i..4 * i + 4].copy_from_slice(&(d as f32).to_le_bytes());
+            }
+            self.v[rd] = out;
+        } else if (insn & 0xffff_fc00) == 0x0e61_7800 {
+            // FCVTL Vd.2D, Vn.2S
+            let a = self.v[rn];
+            let mut out = [0u8; 16];
+            for i in 0..2 {
+                let s = f32::from_le_bytes(a[4 * i..4 * i + 4].try_into().unwrap());
+                out[8 * i..8 * i + 8].copy_from_slice(&f64::from(s).to_le_bytes());
             }
             self.v[rd] = out;
         } else if (insn & 0xdf20_fc00) == 0x4e20_1c00 {
@@ -1368,6 +2082,7 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
         &A64CompileOptions {
             target: X64Target::BlotCdylib,
             optimize: true,
+            jobs: 0,
             deadline: None,
         },
     )
@@ -1736,6 +2451,7 @@ fn aarch64_oracle_arith_fp_memory64_slp_traps_and_standalone_exec() {
         &A64CompileOptions {
             target: X64Target::StandaloneExec,
             optimize: true,
+            jobs: 0,
             deadline: None,
         },
     )
@@ -1759,4 +2475,462 @@ fn aarch64_oracle_arith_fp_memory64_slp_traps_and_standalone_exec() {
         Some(0),
         "standalone AArch64 ET_EXEC must exit(0)"
     );
+}
+
+#[test]
+fn aarch64_oracle_all_236_simd_opcodes_madd_msub_and_parallel_determinism() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, leb_u32, section, type_sec, wasm_module,
+    };
+
+    fn push_simd_op(out: &mut Vec<u8>, op: u16) {
+        assert_eq!(op >> 8, 0xfd);
+        out.push(0xfd);
+        leb_u32(out, u32::from(op & 0xff));
+    }
+    fn push_v128_const(out: &mut Vec<u8>, bytes: [u8; 16]) {
+        out.push(0xfd);
+        leb_u32(out, 12);
+        out.extend_from_slice(&bytes);
+    }
+
+    let covered = std::cell::RefCell::new(std::collections::BTreeSet::<u16>::new());
+    let emit_op = |out: &mut Vec<u8>, op: u16| {
+        covered.borrow_mut().insert(op);
+        push_simd_op(out, op);
+    };
+
+    // Rich edge-case seed identical to x64 `oracle_hill1_all_236_simd_opcodes`.
+    let mut seed = [0u8; 256];
+    seed[0..16].copy_from_slice(&[
+        0x00, 0x01, 0x7f, 0x80, 0x81, 0xff, 0x10, 0x20, 0xfe, 0x02, 0x55, 0xaa, 0x0f, 0xf0, 0x33,
+        0xcc,
+    ]);
+    seed[0..2].copy_from_slice(&(-32768i16).to_le_bytes());
+    seed[16..32].copy_from_slice(&[
+        0x00, 0x80, 0x7f, 0x80, 0xff, 0x01, 0x00, 0x7f, 0x03, 0x11, 0x10, 0x20, 0xff, 0x00, 0x07,
+        0x08,
+    ]);
+    for (i, v) in [
+        (-0.0f32).to_bits(),
+        3.75f32.to_bits(),
+        0x7fc0_1234u32,
+        (-2147483904.0f32).to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed[32 + i * 4..36 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    for (i, v) in [
+        0.0f32.to_bits(),
+        (-3.75f32).to_bits(),
+        2147483648.0f32.to_bits(),
+        4294967296.0f32.to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed[48 + i * 4..52 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    for (i, v) in [
+        f32::INFINITY.to_bits(),
+        f32::NEG_INFINITY.to_bits(),
+        3000000000.0f32.to_bits(),
+        (-0.5f32).to_bits(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        seed[64 + i * 4..68 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    seed[80..88].copy_from_slice(&(-0.0f64).to_bits().to_le_bytes());
+    seed[88..96].copy_from_slice(&3.75f64.to_bits().to_le_bytes());
+    seed[96..104].copy_from_slice(&0.0f64.to_bits().to_le_bytes());
+    seed[104..112].copy_from_slice(&0x7ff8_0000_0000_0042u64.to_le_bytes());
+    seed[112..120].copy_from_slice(&(-3_000_000_000.0f64).to_bits().to_le_bytes());
+    seed[120..128].copy_from_slice(&5_000_000_000.0f64.to_bits().to_le_bytes());
+    seed[128..136].copy_from_slice(&f64::NEG_INFINITY.to_bits().to_le_bytes());
+    seed[136..144].copy_from_slice(&3_000_000_000.5f64.to_bits().to_le_bytes());
+    seed[144..152].copy_from_slice(&i64::MIN.to_le_bytes());
+    seed[152..160].copy_from_slice(&i64::MAX.to_le_bytes());
+    seed[160..168].copy_from_slice(&(-1i64).to_le_bytes());
+    seed[168..176].copy_from_slice(&0x0123_4567_89ab_cdefi64.to_le_bytes());
+
+    let mut out_off: i32 = 512;
+    let store_v128 =
+        |b: &mut Vec<u8>,
+         cursor: &mut i32,
+         cov: &std::cell::RefCell<std::collections::BTreeSet<u16>>| {
+            b.extend_from_slice(&[0x21, 1]);
+            b.push(0x41);
+            leb_i32(b, *cursor);
+            b.extend_from_slice(&[0x20, 1]);
+            cov.borrow_mut().insert(0xfd0b);
+            push_simd_op(b, 0xfd0b);
+            b.extend_from_slice(&[0, 0]);
+            *cursor += 16;
+        };
+    let load_at =
+        |b: &mut Vec<u8>, off: i32, cov: &std::cell::RefCell<std::collections::BTreeSet<u16>>| {
+            b.push(0x41);
+            leb_i32(b, off);
+            cov.borrow_mut().insert(0xfd00);
+            push_simd_op(b, 0xfd00);
+            b.extend_from_slice(&[0, 0]);
+        };
+
+    // f0: loads, lane loads/stores, shuffle, swizzle, splats, extract/replace, bitselect, to_i32
+    let mut b0 = Vec::new();
+    for op in [
+        0xfd00, 0xfd01, 0xfd02, 0xfd03, 0xfd04, 0xfd05, 0xfd06, 0xfd07, 0xfd08, 0xfd09, 0xfd0a,
+        0xfd5c, 0xfd5d,
+    ] {
+        b0.extend_from_slice(&[0x41, 0]);
+        emit_op(&mut b0, op);
+        b0.extend_from_slice(&[0, 0]);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    covered.borrow_mut().insert(0xfd0c);
+    push_v128_const(
+        &mut b0,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    );
+    store_v128(&mut b0, &mut out_off, &covered);
+    for lanes in [
+        [0, 16, 1, 17, 2, 18, 15, 31, 30, 14, 7, 23, 8, 24, 0, 31],
+        [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+        [
+            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ],
+    ] {
+        load_at(&mut b0, 0, &covered);
+        load_at(&mut b0, 16, &covered);
+        emit_op(&mut b0, 0xfd0d);
+        b0.extend_from_slice(&lanes);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    load_at(&mut b0, 0, &covered);
+    load_at(&mut b0, 16, &covered);
+    emit_op(&mut b0, 0xfd0e);
+    store_v128(&mut b0, &mut out_off, &covered);
+    for (op, push_arg) in [
+        (0xfd0fu16, vec![0x20, 0]),
+        (0xfd10, vec![0x20, 0]),
+        (0xfd11, vec![0x20, 0]),
+        (0xfd12, vec![0x20, 0, 0xac]),
+        (0xfd13, vec![0x20, 0, 0xb2]),
+        (0xfd14, vec![0x20, 0, 0xb7]),
+    ] {
+        b0.extend_from_slice(&push_arg);
+        emit_op(&mut b0, op);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    let mix_i32 = |b: &mut Vec<u8>| {
+        b.extend_from_slice(&[0x20, 2, 0x41, 31, 0x6c, 0x73, 0x21, 2]);
+    };
+    for (op, lane, conv) in [
+        (0xfd15u16, 3u8, vec![]),
+        (0xfd16, 3, vec![]),
+        (0xfd18, 1, vec![]),
+        (0xfd19, 1, vec![]),
+        (0xfd1b, 2, vec![]),
+        (0xfd1d, 1, vec![0xa7]),
+        (0xfd1f, 1, vec![0xbc]),
+        (0xfd21, 1, vec![0xbd, 0xa7]),
+    ] {
+        load_at(&mut b0, if op >= 0xfd1f { 32 } else { 0 }, &covered);
+        emit_op(&mut b0, op);
+        b0.push(lane);
+        b0.extend_from_slice(&conv);
+        mix_i32(&mut b0);
+    }
+    for (op, lane, val_ops) in [
+        (0xfd17u16, 5u8, vec![0x20, 0]),
+        (0xfd1a, 3, vec![0x20, 0]),
+        (0xfd1c, 2, vec![0x20, 0]),
+        (0xfd1e, 1, vec![0x20, 0, 0xac]),
+        (0xfd20, 2, vec![0x20, 0, 0xb2]),
+        (0xfd22, 1, vec![0x20, 0, 0xb7]),
+    ] {
+        load_at(&mut b0, 0, &covered);
+        b0.extend_from_slice(&val_ops);
+        emit_op(&mut b0, op);
+        b0.push(lane);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    for (op, lane) in [(0xfd54u16, 7u8), (0xfd55, 5), (0xfd56, 3), (0xfd57, 1)] {
+        b0.extend_from_slice(&[0x41, 4]);
+        load_at(&mut b0, 0, &covered);
+        emit_op(&mut b0, op);
+        b0.extend_from_slice(&[0, 0, lane]);
+        store_v128(&mut b0, &mut out_off, &covered);
+    }
+    for (op, lane) in [(0xfd58u16, 7u8), (0xfd59, 5), (0xfd5a, 3), (0xfd5b, 1)] {
+        b0.push(0x41);
+        leb_i32(&mut b0, out_off);
+        load_at(&mut b0, 0, &covered);
+        emit_op(&mut b0, op);
+        b0.extend_from_slice(&[0, 0, lane]);
+        out_off += 16;
+    }
+    for op in [
+        0xfd53u16, 0xfd63, 0xfd83, 0xfda3, 0xfdc3, 0xfd64, 0xfd84, 0xfda4, 0xfdc4,
+    ] {
+        for off in [0, 16, 144] {
+            load_at(&mut b0, off, &covered);
+            emit_op(&mut b0, op);
+            mix_i32(&mut b0);
+        }
+        push_v128_const(&mut b0, [0xff; 16]);
+        emit_op(&mut b0, op);
+        mix_i32(&mut b0);
+    }
+    load_at(&mut b0, 0, &covered);
+    load_at(&mut b0, 16, &covered);
+    load_at(&mut b0, 144, &covered);
+    emit_op(&mut b0, 0xfd52);
+    store_v128(&mut b0, &mut out_off, &covered);
+    b0.extend_from_slice(&[0x20, 2]);
+
+    // f1: ALL unary V128 ops + ALL 12 shifts
+    let mut b1 = Vec::new();
+    for &(op, offs) in &[
+        (0xfd4du16, &[0i32][..]),
+        (0xfd5e, &[80, 96, 112]),
+        (0xfd5f, &[32, 48, 64]),
+        (0xfd60, &[0, 16]),
+        (0xfd61, &[0, 16]),
+        (0xfd62, &[0, 16]),
+        (0xfd67, &[32, 48, 64]),
+        (0xfd68, &[32, 48, 64]),
+        (0xfd69, &[32, 48, 64]),
+        (0xfd6a, &[32, 48, 64]),
+        (0xfd74, &[80, 96, 112, 128]),
+        (0xfd75, &[80, 96, 112, 128]),
+        (0xfd7a, &[80, 96, 112, 128]),
+        (0xfd94, &[80, 96, 112, 128]),
+        (0xfd7c, &[0, 16]),
+        (0xfd7d, &[0, 16]),
+        (0xfd7e, &[0, 16]),
+        (0xfd7f, &[0, 16]),
+        (0xfd80, &[0, 16]),
+        (0xfd81, &[0, 16]),
+        (0xfd87, &[0]),
+        (0xfd88, &[0]),
+        (0xfd89, &[0]),
+        (0xfd8a, &[0]),
+        (0xfda0, &[0, 144]),
+        (0xfda1, &[0, 144]),
+        (0xfda7, &[0]),
+        (0xfda8, &[0]),
+        (0xfda9, &[0]),
+        (0xfdaa, &[0]),
+        (0xfdc0, &[144, 160]),
+        (0xfdc1, &[144, 160]),
+        (0xfdc7, &[0, 144]),
+        (0xfdc8, &[0, 144]),
+        (0xfdc9, &[0, 144]),
+        (0xfdca, &[0, 144]),
+        (0xfde0, &[32, 48, 64]),
+        (0xfde1, &[32, 48, 64]),
+        (0xfde3, &[32, 48, 64]),
+        (0xfdec, &[80, 96, 112]),
+        (0xfded, &[80, 96, 112]),
+        (0xfdef, &[80, 96, 112]),
+        (0xfdf8, &[32, 48, 64]),
+        (0xfdf9, &[32, 48, 64]),
+        (0xfdfa, &[0, 144]),
+        (0xfdfb, &[0, 144]),
+        (0xfdfc, &[80, 96, 112, 128]),
+        (0xfdfd, &[80, 96, 112, 128]),
+        (0xfdfe, &[0, 144]),
+        (0xfdff, &[0, 144]),
+    ] {
+        for &off in offs {
+            load_at(&mut b1, off, &covered);
+            emit_op(&mut b1, op);
+            store_v128(&mut b1, &mut out_off, &covered);
+        }
+    }
+    for op in [
+        0xfd6bu16, 0xfd6c, 0xfd6d, 0xfd8b, 0xfd8c, 0xfd8d, 0xfdab, 0xfdac, 0xfdad, 0xfdcb, 0xfdcc,
+        0xfdcd,
+    ] {
+        for off in [0, 144] {
+            load_at(&mut b1, off, &covered);
+            b1.extend_from_slice(&[0x20, 0]);
+            emit_op(&mut b1, op);
+            store_v128(&mut b1, &mut out_off, &covered);
+        }
+    }
+    b1.push(0x41);
+    leb_i32(&mut b1, out_off);
+
+    // f2: ALL binary V128 ops
+    let mut b2 = Vec::new();
+    for &op in &[
+        0xfd23u16, 0xfd24, 0xfd25, 0xfd26, 0xfd27, 0xfd28, 0xfd29, 0xfd2a, 0xfd2b, 0xfd2c, 0xfd2d,
+        0xfd2e, 0xfd2f, 0xfd30, 0xfd31, 0xfd32, 0xfd33, 0xfd34, 0xfd35, 0xfd36, 0xfd37, 0xfd38,
+        0xfd39, 0xfd3a, 0xfd3b, 0xfd3c, 0xfd3d, 0xfd3e, 0xfd3f, 0xfd40, 0xfd4e, 0xfd4f, 0xfd50,
+        0xfd51, 0xfd65, 0xfd66, 0xfd85, 0xfd86, 0xfd6e, 0xfd6f, 0xfd70, 0xfd71, 0xfd72, 0xfd73,
+        0xfd76, 0xfd77, 0xfd78, 0xfd79, 0xfd7b, 0xfd82, 0xfd8e, 0xfd8f, 0xfd90, 0xfd91, 0xfd92,
+        0xfd93, 0xfd95, 0xfd96, 0xfd97, 0xfd98, 0xfd99, 0xfd9b, 0xfd9c, 0xfd9d, 0xfd9e, 0xfd9f,
+        0xfdae, 0xfdb1, 0xfdb5, 0xfdb6, 0xfdb7, 0xfdb8, 0xfdb9, 0xfdba, 0xfdbc, 0xfdbd, 0xfdbe,
+        0xfdbf, 0xfdce, 0xfdd1, 0xfdd5, 0xfdd6, 0xfdd7, 0xfdd8, 0xfdd9, 0xfdda, 0xfddb, 0xfddc,
+        0xfddd, 0xfdde, 0xfddf,
+    ] {
+        let (a_off, b_off) = if op >= 0xfdce { (144, 160) } else { (0, 16) };
+        load_at(&mut b2, a_off, &covered);
+        load_at(&mut b2, b_off, &covered);
+        emit_op(&mut b2, op);
+        store_v128(&mut b2, &mut out_off, &covered);
+    }
+    for op in [
+        0xfd41u16, 0xfd42, 0xfd43, 0xfd44, 0xfd45, 0xfd46, 0xfde4, 0xfde5, 0xfde6, 0xfde7, 0xfde8,
+        0xfde9, 0xfdea, 0xfdeb,
+    ] {
+        for (a_off, b_off) in [(32, 48), (48, 32), (32, 64)] {
+            load_at(&mut b2, a_off, &covered);
+            load_at(&mut b2, b_off, &covered);
+            emit_op(&mut b2, op);
+            store_v128(&mut b2, &mut out_off, &covered);
+        }
+    }
+    for op in [
+        0xfd47u16, 0xfd48, 0xfd49, 0xfd4a, 0xfd4b, 0xfd4c, 0xfdf0, 0xfdf1, 0xfdf2, 0xfdf3, 0xfdf4,
+        0xfdf5, 0xfdf6, 0xfdf7,
+    ] {
+        for (a_off, b_off) in [(80, 96), (96, 80), (112, 128)] {
+            load_at(&mut b2, a_off, &covered);
+            load_at(&mut b2, b_off, &covered);
+            emit_op(&mut b2, op);
+            store_v128(&mut b2, &mut out_off, &covered);
+        }
+    }
+    b2.push(0x41);
+    leb_i32(&mut b2, out_off);
+
+    assert_eq!(covered.borrow().len(), 236);
+    assert!(out_off < 65_536);
+
+    // f3: exercises integer `madd`/`msub` fusion + wide overlapping `memory.copy` (1..=64 B) & `memory.fill`!
+    // madd: (x * y) + z; msub: z - (x * y)
+    let mut b3 = vec![
+        // x = arg, y = arg + 7, z = arg ^ 0x55
+        0x20, 0, 0x41, 7, 0x6a, 0x21, 1, // local 1 = y
+        0x20, 0, 0x41, 0x55, 0x73, 0x21, 2, // local 2 = z
+        // madd: (x * y) + z
+        0x20, 0, 0x20, 1, 0x6c, 0x20, 2, 0x6a, // msub: z - (y * (x ^ 3))
+        0x20, 2, 0x20, 1, 0x20, 0, 0x41, 3, 0x73, 0x6c, 0x6b, // combine
+        0x73,
+    ];
+    // Wide overlapping memory.copy (sizes 17, 32, 49, 64, fwd & bwd) + memory.fill(64)
+    for &(len, bwd_s, fwd_s) in &[(17i32, 5i32, 3i32), (32, 8, 7), (49, 13, 11), (64, 15, 19)] {
+        b3.push(0x41);
+        leb_i32(&mut b3, 256 + bwd_s);
+        b3.push(0x41);
+        leb_i32(&mut b3, 256);
+        b3.push(0x41);
+        leb_i32(&mut b3, len);
+        b3.extend_from_slice(&[0xfc, 10, 0, 0]);
+        b3.push(0x41);
+        leb_i32(&mut b3, 256 - fwd_s);
+        b3.push(0x41);
+        leb_i32(&mut b3, 256);
+        b3.push(0x41);
+        leb_i32(&mut b3, len);
+        b3.extend_from_slice(&[0xfc, 10, 0, 0]);
+    }
+    b3.push(0x41);
+    leb_i32(&mut b3, 384);
+    b3.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b3, 64);
+    b3.extend_from_slice(&[0xfc, 11, 0]);
+
+    let mut data_sec = vec![1, 0x00, 0x41, 0, 0x0b];
+    leb_u32(&mut data_sec, seed.len() as u32);
+    data_sec.extend_from_slice(&seed);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("simd_misc", 0, 0),
+            ("simd_un_shift", 0, 1),
+            ("simd_bin", 0, 2),
+            ("madd_copy", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[(1, 0x7b), (1, 0x7f)], &b0),
+            enc_body(&[(1, 0x7b)], &b1),
+            enc_body(&[(1, 0x7b)], &b2),
+            enc_body(&[(2, 0x7f)], &b3),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    assert_aarch64_oracle(
+        "a64_simd_236",
+        &wasm,
+        &[
+            ("simd_misc", Value::I32(-42)),
+            ("simd_bin", Value::I32(0)),
+            ("simd_un_shift", Value::I32(0)),
+            ("simd_un_shift", Value::I32(1)),
+            ("simd_un_shift", Value::I32(7)),
+            ("simd_un_shift", Value::I32(15)),
+            ("simd_un_shift", Value::I32(63)),
+            ("simd_un_shift", Value::I32(-1)),
+            ("madd_copy", Value::I32(12345)),
+            ("madd_copy", Value::I32(-77)),
+        ],
+        out_off as usize,
+    );
+
+    // Parallel compilation determinism: `--jobs 1` vs `--jobs 8` MUST emit 100% byte-identical ELF!
+    for (name, bytes) in [
+        ("simd236", wasm.as_slice()),
+        (
+            "image_filter",
+            &std::fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/image_filter.wasm"),
+            )
+            .unwrap(),
+        ),
+        (
+            "graph_bfs",
+            &std::fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/graph_bfs.wasm"),
+            )
+            .unwrap(),
+        ),
+    ] {
+        let j1 = compile_wasm_to_aarch64_for_test(
+            bytes,
+            &A64CompileOptions {
+                target: X64Target::BlotCdylib,
+                optimize: true,
+                jobs: 1,
+                deadline: None,
+            },
+        )
+        .unwrap();
+        let j8 = compile_wasm_to_aarch64_for_test(
+            bytes,
+            &A64CompileOptions {
+                target: X64Target::BlotCdylib,
+                optimize: true,
+                jobs: 8,
+                deadline: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            j1.elf, j8.elf,
+            "aarch64 --jobs 1 vs --jobs 8 ELF must be byte-identical for {name}"
+        );
+    }
 }

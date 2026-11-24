@@ -134,13 +134,18 @@ pub struct CachedFn {
 
 impl CachedFn {
     pub fn into_asm(self) -> Asm {
+        let (jt_labels, jt_patches) = if self.jt_labels.is_empty() && !self.jt_entries.is_empty() {
+            Asm::try_build_cached_jt(&self.jt_entries).unwrap_or_default()
+        } else {
+            (self.jt_labels, self.jt_patches)
+        };
         Asm::from_cached_parts(
             self.code,
             self.pre_relax_code_len,
             self.relocs,
             self.local_rodata,
-            self.jt_labels,
-            self.jt_patches,
+            jt_labels,
+            jt_patches,
         )
     }
 }
@@ -219,6 +224,7 @@ pub fn compute_abi_hash(
     h.update(&[
         u8::from(isa.has_abm_bmi1),
         u8::from(isa.has_bmi2),
+        u8::from(isa.has_avx2),
         u8::from(opt),
         u8::from(verify),
         u8::from(module.memory64),
@@ -752,11 +758,9 @@ fn decode_cached_fn(
         return None;
     }
 
-    let (jt_labels, jt_patches) = if is_changed {
-        (Vec::new(), Vec::new())
-    } else {
-        Asm::try_build_cached_jt(&jt_entries)?
-    };
+    // Leave `jt_labels`/`jt_patches` empty on load: the normal `link_cache` path patches jump
+    // tables directly from `jt_entries`, and `CachedFn::into_asm` builds them lazily if needed.
+    let (jt_labels, jt_patches) = (Vec::new(), Vec::new());
 
     Some((
         CachedFn {

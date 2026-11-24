@@ -373,17 +373,21 @@ pub(crate) fn read_bounded_wasm_for_x64(
         )));
     }
     let mut file = open_regular_file(path).map_err(BuildError::Failed)?;
+    let mut prealloc = 0usize;
     if let Ok(meta) = file.metadata()
         && meta.is_file()
-        && meta.len() > max_bytes as u64
     {
-        return Err(BuildError::AdmissionRejected(format!(
-            "x64: {}: input size ({} B) exceeds x64 maximum module limit ({max_bytes} B)",
-            path.display(),
-            meta.len()
-        )));
+        if meta.len() > max_bytes as u64 {
+            return Err(BuildError::AdmissionRejected(format!(
+                "x64: {}: input size ({} B) exceeds x64 maximum module limit ({max_bytes} B)",
+                path.display(),
+                meta.len()
+            )));
+        }
+        prealloc = (meta.len() as usize).min(max_bytes);
     }
     let mut buf = Vec::new();
+    let _ = buf.try_reserve_exact(prealloc);
     let mut chunk = [0u8; 65_536];
     loop {
         if let Some(dl) = deadline
@@ -1444,6 +1448,7 @@ fn build_aarch64(
     let compile_opts = crate::aarch64::A64CompileOptions {
         target: a64_target,
         optimize: true,
+        jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
     };
     let elf_bytes =
@@ -1539,7 +1544,6 @@ fn build_x64(
             return Err(BuildError::Failed(format!("{}: {e}", stale.display())));
         }
     }
-    sweep_stale_staged_artifacts_bounded(&entry, deadline);
     check_deadline(deadline, options.time_limit)?;
 
     let compile_opts = crate::x64::X64CompileOptions {

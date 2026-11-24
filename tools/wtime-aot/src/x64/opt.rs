@@ -100,14 +100,13 @@ fn fx_set<K>() -> HashSet<K> {
 
 use super::ir::{
     Block, BlockId, BrTableData, CmpBranchKind, CmpOp, FloatBinOp, FloatUnOp, Inst, IntBinOp,
-    IrFunc, LoadKind, Op, SimdLaneKind, SimdSplatKind, StoreKind, Term, TruncOp, Ty, Val, ValRange,
-    optimize_ir_with_budget,
+    IrFunc, LoadKind, Op, OptIrScratch, SimdLaneKind, SimdSplatKind, StoreKind, Term, TruncOp, Ty,
+    Val, ValRange, optimize_ir_with_budget_and_scratch,
 };
 use super::module::{
     CompileBudget, MAX_BLOCKS_PER_FN, MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64Module,
 };
 use super::regalloc::AllocResult;
-use super::simd_lower::V128_OP_PSADBW;
 
 type Res<T> = Result<T, String>;
 
@@ -420,7 +419,10 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::V128Bin { a, b, .. }
         | Op::V128Shift { v: a, shift: b, .. }
         | Op::MemCopyConst { dst: a, src: b, .. }
-        | Op::MemFillConst { dst: a, val: b, .. } => {
+        | Op::MemFillConst { dst: a, val: b, .. }
+        | Op::MemByteSum {
+            base: a, count: b, ..
+        } => {
             r(a);
             r(b);
         }
@@ -794,63 +796,66 @@ pub fn prune_block_params(
         }
 
         // Part A: Redundant block-param elimination (`bi > 0` only; never touch entry ABI `bb0.params`).
-        let mut subst: Vec<Val> = (0..n_vals as u32).map(Val).collect();
+        let has_non_entry_params = ir.blocks.iter().skip(1).any(|b| !b.params.is_empty());
         let mut any_subst = false;
-        let mut steps = 0usize;
-        for _sweep in 0..4 {
-            let mut sweep_changed = false;
-            for (bi, edges) in in_edges.iter().enumerate().skip(1) {
-                let params = &ir.blocks[bi].params;
-                if params.is_empty() || edges.is_empty() {
-                    continue;
-                }
-                for (k, &p) in params.iter().enumerate() {
-                    steps += 1;
-                    if let Some(bg) = budget
-                        && (steps & 4095) == 0
-                    {
-                        bg.check_deadline()?;
-                    }
-                    if subst[p.0 as usize] != p {
+        if has_non_entry_params {
+            let mut subst: Vec<Val> = (0..n_vals as u32).map(Val).collect();
+            let mut steps = 0usize;
+            for _sweep in 0..4 {
+                let mut sweep_changed = false;
+                for (bi, edges) in in_edges.iter().enumerate().skip(1) {
+                    let params = &ir.blocks[bi].params;
+                    if params.is_empty() || edges.is_empty() {
                         continue;
                     }
-                    let mut unique: Option<Val> = None;
-                    let mut conflict = false;
-                    for &r in edges {
-                        let raw = ir.val_pool[r.start as usize + k];
-                        let a = resolve_subst(&subst, raw);
-                        if a == p {
+                    for (k, &p) in params.iter().enumerate() {
+                        steps += 1;
+                        if let Some(bg) = budget
+                            && (steps & 4095) == 0
+                        {
+                            bg.check_deadline()?;
+                        }
+                        if subst[p.0 as usize] != p {
                             continue;
                         }
-                        match unique {
-                            None => unique = Some(a),
-                            Some(u) if u == a => {}
-                            Some(_) => {
-                                conflict = true;
-                                break;
+                        let mut unique: Option<Val> = None;
+                        let mut conflict = false;
+                        for &r in edges {
+                            let raw = ir.val_pool[r.start as usize + k];
+                            let a = resolve_subst(&subst, raw);
+                            if a == p {
+                                continue;
+                            }
+                            match unique {
+                                None => unique = Some(a),
+                                Some(u) if u == a => {}
+                                Some(_) => {
+                                    conflict = true;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    if !conflict
-                        && let Some(u) = unique
-                        && u != p
-                        && def_block[u.0 as usize] != u32::MAX
-                        && dom.dominates(def_block[u.0 as usize], bi as u32)
-                    {
-                        subst[p.0 as usize] = u;
-                        any_subst = true;
-                        sweep_changed = true;
+                        if !conflict
+                            && let Some(u) = unique
+                            && u != p
+                            && def_block[u.0 as usize] != u32::MAX
+                            && dom.dominates(def_block[u.0 as usize], bi as u32)
+                        {
+                            subst[p.0 as usize] = u;
+                            any_subst = true;
+                            sweep_changed = true;
+                        }
                     }
                 }
+                if !sweep_changed {
+                    break;
+                }
             }
-            if !sweep_changed {
-                break;
+            if any_subst {
+                flatten_subst(&mut subst);
+                apply_subst_to_func(ir, &subst);
+                changed_any = true;
             }
-        }
-        if any_subst {
-            flatten_subst(&mut subst);
-            apply_subst_to_func(ir, &subst);
-            changed_any = true;
         }
 
         // Part B: Exact O(V + E) global mark-sweep liveness over instructions + block params
@@ -1115,10 +1120,27 @@ pub fn prune_block_params(
 /// small helpers drop dead loop/if local params and inline cleanly without bloating `val_pool`.
 pub fn prune_early_block_params(ir: &mut IrFunc, budget: Option<&CompileBudget>) -> Res<()> {
     if ir.blocks.len() <= 1 {
+        let mut self_edges = 0u32;
+        if let Some(b0) = ir.blocks.first_mut() {
+            b0.term.for_each_succ(&ir.br_tables, |s| {
+                if s.0 == 0 {
+                    self_edges = self_edges.saturating_add(1);
+                }
+            });
+            b0.preds = self_edges;
+            b0.is_loop_header = self_edges > 0;
+        }
+        ir.early_pruned = 2;
         return Ok(());
     }
+    let blocks_before = ir.blocks.len();
     let dom = rebuild_cfg_and_prune(ir, budget)?;
-    let _ = prune_block_params(ir, &dom, budget)?;
+    let pruned = prune_block_params(ir, &dom, budget)?;
+    ir.early_pruned = if ir.blocks.len() != blocks_before || pruned {
+        1
+    } else {
+        2
+    };
     Ok(())
 }
 
@@ -1726,9 +1748,14 @@ fn clone_callee_into_caller(
                     idx: map_v(idx),
                     val: map_v(val),
                 },
-                Op::BoundsCheck { addr, end_off } => Op::BoundsCheck {
+                Op::BoundsCheck {
+                    addr,
+                    end_off,
+                    for_bulk,
+                } => Op::BoundsCheck {
                     addr: map_v(addr),
                     end_off,
+                    for_bulk,
                 },
                 Op::Load {
                     kind,
@@ -1819,6 +1846,15 @@ fn clone_callee_into_caller(
                     val: map_v(val),
                     len,
                     checked,
+                },
+                Op::MemByteSum {
+                    base,
+                    count,
+                    offset,
+                } => Op::MemByteSum {
+                    base: map_v(base),
+                    count: map_v(count),
+                    offset,
                 },
                 Op::V128Splat { kind, val } => Op::V128Splat {
                     kind,
@@ -1936,6 +1972,7 @@ fn clone_callee_into_caller(
         target: BlockId(base_bb),
         args: call_args,
     };
+    caller.early_pruned = 0;
     Ok(())
 }
 
@@ -2662,6 +2699,7 @@ pub fn inline_small_helpers(
                     needs_stack_check: true,
                     elided_callee_stack_bytes: 0,
                     memory64: false,
+                    early_pruned: 0,
                 },
             ))
         })
@@ -3874,6 +3912,7 @@ enum UndoEntry {
     AddConst(Val, Option<(Val, u32)>),
     Bound(Val, Option<u64>),
     CheckedMax(Val, Option<u64>),
+    NonZero(Val, bool),
     Global(u32, Option<(u32, Val)>),
     MemSize(Option<(u32, Val)>),
     Table((u32, Val), Option<(u32, Val)>),
@@ -3891,11 +3930,14 @@ pub struct Stage2Scratch {
     add_const: Vec<Option<(Val, u32)>>,
     non_wrap_bound: Vec<Option<u64>>,
     checked_max: Vec<Option<u64>>,
+    non_zero: Vec<bool>,
     globals: Vec<Option<(u32, Val)>>,
     tables: HashMap<(u32, Val), (u32, Val)>,
     mem_facts: Vec<MemFact>,
     undo: Vec<UndoEntry>,
     fn_written_globals: Vec<u64>,
+    out_insts: Vec<Inst>,
+    opt_ir: OptIrScratch,
 }
 
 impl Default for Stage2Scratch {
@@ -3907,11 +3949,14 @@ impl Default for Stage2Scratch {
             add_const: Vec::new(),
             non_wrap_bound: Vec::new(),
             checked_max: Vec::new(),
+            non_zero: Vec::new(),
             globals: Vec::new(),
             tables: fx_map(),
             mem_facts: Vec::new(),
             undo: Vec::new(),
             fn_written_globals: Vec::new(),
+            out_insts: Vec::new(),
+            opt_ir: OptIrScratch::default(),
         }
     }
 }
@@ -3936,6 +3981,7 @@ struct GvnState<'a> {
     add_const: Vec<Option<(Val, u32)>>,
     non_wrap_bound: Vec<Option<u64>>,
     checked_max: Vec<Option<u64>>,
+    non_zero: Vec<bool>,
     globals: Vec<Option<(u32, Val)>>,
     mem_size: Option<(u32, Val)>,
     tables: HashMap<(u32, Val), (u32, Val)>,
@@ -3982,6 +4028,14 @@ impl<'a> GvnState<'a> {
         if slot.is_none_or(|old| b < old) {
             let prev = slot.replace(b);
             self.undo.push(UndoEntry::Bound(v, prev));
+        }
+    }
+
+    fn mark_non_zero(&mut self, v: Val) {
+        let slot = &mut self.non_zero[v.0 as usize];
+        if !*slot {
+            *slot = true;
+            self.undo.push(UndoEntry::NonZero(v, false));
         }
     }
 
@@ -4166,6 +4220,9 @@ impl<'a> GvnState<'a> {
                 UndoEntry::CheckedMax(k, prev) => {
                     self.checked_max[k.0 as usize] = prev;
                 }
+                UndoEntry::NonZero(k, prev) => {
+                    self.non_zero[k.0 as usize] = prev;
+                }
                 UndoEntry::Global(k, prev) => {
                     self.globals[k as usize] = prev;
                 }
@@ -4199,13 +4256,13 @@ fn fold_i32_bin_const(op: IntBinOp, ca: i32, cb: i32) -> Option<i32> {
         IntBinOp::Sub => Some(ca.wrapping_sub(cb)),
         IntBinOp::Mul => Some(ca.wrapping_mul(cb)),
         IntBinOp::DivS if cb != 0 && !(ca == i32::MIN && cb == -1) => Some(ca.wrapping_div(cb)),
-        IntBinOp::DivU if cb != 0 => Some(((ca as u32) / (cb as u32)) as i32),
+        IntBinOp::DivU | IntBinOp::DivUNz if cb != 0 => Some(((ca as u32) / (cb as u32)) as i32),
         IntBinOp::RemS if cb != 0 => Some(if ca == i32::MIN && cb == -1 {
             0
         } else {
             ca.wrapping_rem(cb)
         }),
-        IntBinOp::RemU if cb != 0 => Some(((ca as u32) % (cb as u32)) as i32),
+        IntBinOp::RemU | IntBinOp::RemUNz if cb != 0 => Some(((ca as u32) % (cb as u32)) as i32),
         IntBinOp::And => Some(ca & cb),
         IntBinOp::Or => Some(ca | cb),
         IntBinOp::Xor => Some(ca ^ cb),
@@ -4235,7 +4292,7 @@ fn fold_i32_cmp_const(op: CmpOp, ca: i32, cb: i32) -> bool {
 
 /// Runs dominator-tree scoped GVN/CSE, post-inlining `const32` folding, `GlobalGet`/`MemSize`/`TableGet`/
 /// alias-safe `Load` CSE, cross-block dominator `checked_max` bounds-check elimination, and wrap-safe
-/// addressing-mode folding. Returns `true` if any conditional branch was constant-folded to `Jump`.
+/// addressing-mode folding. Returns `(folded_any_branch, ir_mutated)`.
 fn run_dom_gvn_and_bce_with_scratch(
     ir: &mut IrFunc,
     dom: &CfgDom,
@@ -4243,11 +4300,12 @@ fn run_dom_gvn_and_bce_with_scratch(
     effects: &ModuleEffects,
     budget: Option<&CompileBudget>,
     scratch: &mut Stage2Scratch,
-) -> Res<bool> {
+) -> Res<(bool, bool)> {
     if dom.rpo.is_empty() {
-        return Ok(false);
+        return Ok((false, false));
     }
     let mut folded_any_branch = false;
+    let mut ir_mutated = false;
 
     let fixed_mem = module.fixed32.is_some();
     let mem_min_bytes = module
@@ -4357,6 +4415,9 @@ fn run_dom_gvn_and_bce_with_scratch(
     let mut checked_max = std::mem::take(&mut scratch.checked_max);
     checked_max.clear();
     checked_max.resize(n_vals, None);
+    let mut non_zero = std::mem::take(&mut scratch.non_zero);
+    non_zero.clear();
+    non_zero.resize(n_vals, false);
     let mut globals = std::mem::take(&mut scratch.globals);
     globals.clear();
     globals.resize(module.globals.len(), None);
@@ -4386,6 +4447,7 @@ fn run_dom_gvn_and_bce_with_scratch(
         add_const,
         non_wrap_bound,
         checked_max,
+        non_zero,
         globals,
         mem_size: None,
         tables,
@@ -4401,6 +4463,7 @@ fn run_dom_gvn_and_bce_with_scratch(
         None,
         Bound(Val, u64),
         LtU(Val, Val),
+        NonZero(Val),
     }
 
     // Iterative DFS over dominator tree: `(block_id, edge_fact)` / `Exit { mark, epochs }`.
@@ -4415,6 +4478,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     let mut steps = 0usize;
     let mut pool = std::mem::take(&mut ir.val_pool);
 
+    let mut out_insts = std::mem::take(&mut scratch.out_insts);
     while let Some(act) = stack.pop() {
         steps += 1;
         if let Some(bg) = budget
@@ -4439,11 +4503,12 @@ fn run_dom_gvn_and_bce_with_scratch(
                     epochs: saved_epochs,
                 });
 
-                // Apply branch-refined range fact when this block is uniquely dominated by one branch edge.
+                // Apply branch-refined range & non-zero facts when this block is uniquely dominated by one branch edge.
                 match edge_fact {
                     EdgeFact::None => {}
                     EdgeFact::Bound(v, b) => st.tighten_bound(v, b),
                     EdgeFact::LtU(x, y) => {
+                        st.mark_non_zero(y);
                         if let Some(by) = st.non_wrap_bound[y.0 as usize]
                             && by > 0
                         {
@@ -4453,6 +4518,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             st.record_checked(x, cy.saturating_add(1));
                         }
                     }
+                    EdgeFact::NonZero(v) => st.mark_non_zero(v),
                 }
 
                 // At multi-predecessor joins/loops, conservatively invalidate mutable state (read-only facts persist!).
@@ -4472,7 +4538,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                 }
 
                 let bb = &mut ir.blocks[bid as usize];
-                let mut out_insts = Vec::with_capacity(bb.insts.len());
+                out_insts.clear();
                 for mut inst in bb.insts.drain(..) {
                     if st.any_subst {
                         rewrite_op_uses(&mut inst.op, &mut pool, &st.subst);
@@ -4492,6 +4558,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         dst_checked: false,
                                         src_checked: false,
                                     };
+                                    ir_mutated = true;
                                 }
                             }
                             Op::MemFill { dst, val, len } => {
@@ -4504,6 +4571,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         len: c as u32,
                                         checked: false,
                                     };
+                                    ir_mutated = true;
                                 }
                             }
                             _ => {}
@@ -4512,8 +4580,9 @@ fn run_dom_gvn_and_bce_with_scratch(
 
                     // Wrap-safe addressing-mode folding + cross-block dominator BCE + alias-aware Load/Store forwarding.
                     match &mut inst.op {
-                        Op::BoundsCheck { addr, end_off } => {
+                        Op::BoundsCheck { addr, end_off, .. } => {
                             if st.is_checked(*addr, *end_off) {
+                                ir_mutated = true;
                                 continue;
                             }
                             st.record_checked(*addr, *end_off);
@@ -4527,8 +4596,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                             checked,
                         } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
-                            *addr = na;
-                            *offset = noff;
+                            if na != *addr || noff != *offset {
+                                *addr = na;
+                                *offset = noff;
+                                ir_mutated = true;
+                            }
                             let sz = kind.bytes();
                             let end = (*offset).saturating_add(sz);
                             let is_safe = *checked || st.is_checked(*addr, end);
@@ -4580,8 +4652,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                             checked,
                         } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
-                            *addr = na;
-                            *offset = noff;
+                            if na != *addr || noff != *offset {
+                                *addr = na;
+                                *offset = noff;
+                                ir_mutated = true;
+                            }
                             let sz = kind.bytes();
                             let end = (*offset).saturating_add(sz);
                             if *checked || st.is_checked(*addr, end) {
@@ -4615,8 +4690,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                             ..
                         } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
-                            *addr = na;
-                            *offset = noff;
+                            if na != *addr || noff != *offset {
+                                *addr = na;
+                                *offset = noff;
+                                ir_mutated = true;
+                            }
                             let end = (*offset).saturating_add(u64::from(*width));
                             if *checked || st.is_checked(*addr, end) {
                                 *checked = true;
@@ -4633,8 +4711,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                             ..
                         } => {
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
-                            *addr = na;
-                            *offset = noff;
+                            if na != *addr || noff != *offset {
+                                *addr = na;
+                                *offset = noff;
+                                ir_mutated = true;
+                            }
                             let sz = u64::from(*width);
                             let end = (*offset).saturating_add(sz);
                             if *checked || st.is_checked(*addr, end) {
@@ -4716,12 +4797,14 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
 
                             if n_lanes > 0 {
+                                ir_mutated = true;
                                 if !dst_ok {
                                     out_insts.push(Inst {
                                         res: None,
                                         op: Op::BoundsCheck {
                                             addr: *dst,
                                             end_off: end,
+                                            for_bulk: true,
                                         },
                                     });
                                 }
@@ -4731,6 +4814,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         op: Op::BoundsCheck {
                                             addr: *src,
                                             end_off: end,
+                                            for_bulk: true,
                                         },
                                     });
                                 }
@@ -4933,6 +5017,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             Op::I32Eqz(a) => {
                                 if let Some(ca) = st.const32[a.0 as usize] {
                                     inst.op = Op::ConstI32(i32::from(ca == 0));
+                                    ir_mutated = true;
                                 }
                             }
                             Op::I32BinImm(bop, a, imm) => {
@@ -4940,6 +5025,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     && let Some(v) = fold_i32_bin_const(bop, ca, imm)
                                 {
                                     inst.op = Op::ConstI32(v);
+                                    ir_mutated = true;
                                 }
                             }
                             Op::I32Bin(bop, a, b) => {
@@ -4948,12 +5034,35 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     && let Some(v) = fold_i32_bin_const(bop, ca, cb)
                                 {
                                     inst.op = Op::ConstI32(v);
+                                    ir_mutated = true;
+                                } else if matches!(bop, IntBinOp::DivU | IntBinOp::RemU)
+                                    && st.non_zero[b.0 as usize]
+                                {
+                                    let nz_op = if bop == IntBinOp::DivU {
+                                        IntBinOp::DivUNz
+                                    } else {
+                                        IntBinOp::RemUNz
+                                    };
+                                    inst.op = Op::I32Bin(nz_op, a, b);
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::I64Bin(bop @ (IntBinOp::DivU | IntBinOp::RemU), a, b) => {
+                                if st.non_zero[b.0 as usize] {
+                                    let nz_op = if bop == IntBinOp::DivU {
+                                        IntBinOp::DivUNz
+                                    } else {
+                                        IntBinOp::RemUNz
+                                    };
+                                    inst.op = Op::I64Bin(nz_op, a, b);
+                                    ir_mutated = true;
                                 }
                             }
                             Op::I32CmpImm(cop, a, imm) => {
                                 if let Some(ca) = st.const32[a.0 as usize] {
                                     inst.op =
                                         Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, imm)));
+                                    ir_mutated = true;
                                 }
                             }
                             Op::I32Cmp(cop, a, b) => {
@@ -4962,6 +5071,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 {
                                     inst.op =
                                         Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, cb)));
+                                    ir_mutated = true;
                                 }
                             }
                             Op::Select { cond, a, b } => {
@@ -5012,6 +5122,18 @@ fn run_dom_gvn_and_bce_with_scratch(
                             Op::ConstI32(c) => {
                                 st.insert_const32(res, c);
                                 st.tighten_bound(res, u64::from(c as u32));
+                                if c != 0 {
+                                    st.mark_non_zero(res);
+                                }
+                            }
+                            Op::ConstI64(c) if c != 0 => {
+                                st.mark_non_zero(res);
+                            }
+                            Op::I32BinImm(IntBinOp::Or, _, m)
+                            | Op::I64BinImm(IntBinOp::Or, _, m)
+                                if m != 0 =>
+                            {
+                                st.mark_non_zero(res);
                             }
                             Op::I32BinImm(IntBinOp::Add, base, k) if k > 0 => {
                                 st.insert_add_const(res, base, k as u32);
@@ -5019,6 +5141,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     && b.saturating_add(u64::from(k as u32)) <= u32::MAX as u64
                                 {
                                     st.tighten_bound(res, b + u64::from(k as u32));
+                                    st.mark_non_zero(res);
                                 }
                             }
                             Op::I32BinImm(IntBinOp::And, _, m) => {
@@ -5047,7 +5170,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                     }
                     out_insts.push(inst);
                 }
-                bb.insts = out_insts;
+                bb.insts.extend_from_slice(&out_insts);
                 if st.any_subst {
                     rewrite_term_uses(&mut bb.term, &mut pool, &ir.br_tables, &st.subst);
                 }
@@ -5142,6 +5265,21 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         CmpOp::LeU => {
                                             ef = EdgeFact::Bound(a, u64::from(ku));
                                         }
+                                        CmpOp::Ne if imm == 0 => {
+                                            ef = EdgeFact::NonZero(a);
+                                        }
+                                        CmpOp::GtU => {
+                                            ef = EdgeFact::NonZero(a);
+                                        }
+                                        CmpOp::GeU if ku >= 1 => {
+                                            ef = EdgeFact::NonZero(a);
+                                        }
+                                        CmpOp::GtS if imm >= 0 => {
+                                            ef = EdgeFact::NonZero(a);
+                                        }
+                                        CmpOp::LtS if imm <= 0 => {
+                                            ef = EdgeFact::NonZero(a);
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -5150,6 +5288,25 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     match eff {
                                         CmpOp::LtU => ef = EdgeFact::LtU(a, b),
                                         CmpOp::GtU => ef = EdgeFact::LtU(b, a),
+                                        _ => {}
+                                    }
+                                }
+                                CmpBranchKind::I64Imm(cop, imm) => {
+                                    let eff = if on_then { cop } else { cop.invert_int() };
+                                    match eff {
+                                        CmpOp::Ne if imm == 0 => ef = EdgeFact::NonZero(a),
+                                        CmpOp::GtU => ef = EdgeFact::NonZero(a),
+                                        CmpOp::GeU if imm != 0 => ef = EdgeFact::NonZero(a),
+                                        CmpOp::GtS if imm >= 0 => ef = EdgeFact::NonZero(a),
+                                        CmpOp::LtS if imm <= 0 => ef = EdgeFact::NonZero(a),
+                                        _ => {}
+                                    }
+                                }
+                                CmpBranchKind::I64(cop) => {
+                                    let eff = if on_then { cop } else { cop.invert_int() };
+                                    match eff {
+                                        CmpOp::LtU => ef = EdgeFact::NonZero(b),
+                                        CmpOp::GtU => ef = EdgeFact::NonZero(a),
                                         _ => {}
                                     }
                                 }
@@ -5170,12 +5327,17 @@ fn run_dom_gvn_and_bce_with_scratch(
     scratch.add_const = st.add_const;
     scratch.non_wrap_bound = st.non_wrap_bound;
     scratch.checked_max = st.checked_max;
+    scratch.non_zero = st.non_zero;
     scratch.globals = st.globals;
     scratch.tables = st.tables;
     scratch.mem_facts = st.mem_facts;
     scratch.undo = st.undo;
     scratch.fn_written_globals = st.fn_written_globals;
-    Ok(folded_any_branch)
+    scratch.out_insts = out_insts;
+    Ok((
+        folded_any_branch,
+        ir_mutated || st.any_subst || folded_any_branch,
+    ))
 }
 
 /// Converts trivial single-predecessor `if/else` diamonds with <= 2 strictly pure non-trapping
@@ -5453,6 +5615,13 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
 /// conditional branches so `optimize_ir_with_budget` fuses both directly into `CmpBranch`
 /// (eliminating `setcc + movzx + or/and + test` in hot inner loops).
 fn split_short_circuit_branches(ir: &mut IrFunc) -> bool {
+    if !ir
+        .blocks
+        .iter()
+        .any(|b| matches!(b.term, Term::BranchIf { .. }))
+    {
+        return false;
+    }
     let n_vals = ir.val_tys.len();
     let mut use_count = vec![0u32; n_vals];
     let mut is_bool_cmp = vec![false; n_vals];
@@ -5744,7 +5913,10 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::V128Bin { a, b, .. }
         | Op::V128Shift { v: a, shift: b, .. }
         | Op::MemCopyConst { dst: a, src: b, .. }
-        | Op::MemFillConst { dst: a, val: b, .. } => {
+        | Op::MemFillConst { dst: a, val: b, .. }
+        | Op::MemByteSum {
+            base: a, count: b, ..
+        } => {
             r(a);
             r(b);
         }
@@ -6565,7 +6737,7 @@ fn version_checked_counted_loops(
                             proven_ops.insert((bb_id, ii), ProvenMemOp::MemFill);
                         }
                     }
-                    Op::BoundsCheck { addr, end_off } => {
+                    Op::BoundsCheck { addr, end_off, .. } => {
                         if let Some(bnd) = get_bound(addr, &bounds)
                             && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
                         {
@@ -7480,77 +7652,110 @@ pub fn optimize_func_stage2_with_scratch(
     budget: Option<&CompileBudget>,
     scratch: &mut Stage2Scratch,
 ) -> Res<()> {
-    // 1. Compact any jump chains left by inlining and prune redundant/dead block params FIRST so
-    //    dead loop/if local carries never block if-conversion, LICM, GVN, or regalloc!
-    let mut dom = rebuild_cfg_and_prune(ir, budget)?;
+    // 1. Compact any jump chains left by inlining and prune redundant/dead block params FIRST.
+    //    When `ir.early_pruned != 0` (inlining did not touch this function), Phase 5a already
+    //    compacted the CFG and pruned dead/redundant block params to fixed-point!
+    let early_state = ir.early_pruned;
+    let mut dom = if early_state != 0 {
+        CfgDom::compute_with_budget(ir, budget)?
+    } else {
+        rebuild_cfg_and_prune(ir, budget)?
+    };
     if ir.blocks.len() == 1 {
-        let _ = run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
-        optimize_ir_with_budget(ir, budget)?;
+        let (_, gvn_changed) =
+            run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+        if gvn_changed || early_state != 2 {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+        }
+        if slp_vectorize_f64x2(ir, &dom) {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+        }
         return Ok(());
     }
-    let _ = prune_block_params(ir, &dom, budget)?;
-    // 2. Convert trivial pure `if/else` diamonds into branchless `CmpSelect` and re-compact if any converted.
-    if if_convert_trivial_diamonds(ir) {
-        dom = rebuild_cfg_and_prune(ir, budget)?;
+    if early_state == 0 {
         let _ = prune_block_params(ir, &dom, budget)?;
     }
-    // 3. LICM (incl. guarded loop-invariant DivU/RemU hoisting) + Dominator GVN/BCE/Store-to-Load + peephole/DCE.
-    if run_licm(ir, &dom, module, effects, budget)? {
+    // 2. Convert trivial pure `if/else` diamonds into branchless `CmpSelect` and re-compact if any converted.
+    let mut cfg_or_ir_mutated = early_state != 2;
+    if if_convert_trivial_diamonds(ir) {
+        cfg_or_ir_mutated = true;
         dom = rebuild_cfg_and_prune(ir, budget)?;
+        if ir.blocks.len() == 1 {
+            let _ = run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            if slp_vectorize_f64x2(ir, &dom) {
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            }
+            return Ok(());
+        }
+        let _ = prune_block_params(ir, &dom, budget)?;
     }
-    let folded_branch =
+    // 3. LICM (only when natural loops exist) + Dominator GVN/BCE/Store-to-Load + peephole/DCE.
+    let mut has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+    if has_loops && run_licm(ir, &dom, module, effects, budget)? {
+        cfg_or_ir_mutated = true;
+        dom = rebuild_cfg_and_prune(ir, budget)?;
+        has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+    }
+    let (folded_branch, gvn_mutated) =
         run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
     let split_sc = split_short_circuit_branches(ir);
     let prev_blocks = ir.blocks.len();
-    optimize_ir_with_budget(ir, budget)?;
-    if folded_branch
-        || split_sc
-        || (prev_blocks > 1 && ir.blocks.iter().skip(1).any(|b| b.preds == 0))
-    {
-        dom = rebuild_cfg_and_prune(ir, budget)?;
+    if cfg_or_ir_mutated || gvn_mutated || split_sc {
+        optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
     }
-    // 4. Prune redundant/dead phis exposed by GVN/branch folding (skip if zero non-entry params:
-    //    `optimize_ir_with_budget` already swept all non-cyclic dead instructions).
-    if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+    let cfg_rebuilt = folded_branch
+        || split_sc
+        || (prev_blocks > 1 && ir.blocks.iter().skip(1).any(|b| b.preds == 0));
+    if cfg_rebuilt {
+        dom = rebuild_cfg_and_prune(ir, budget)?;
+        has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+    }
+    // 4. Prune redundant/dead phis (and dead cross-block vals if CFG rebuilt) exposed by GVN/branch folding.
+    if cfg_rebuilt
+        || ((cfg_or_ir_mutated || gvn_mutated)
+            && ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()))
+    {
         let _ = prune_block_params(ir, &dom, budget)?;
     }
-    // 5. Preheader-guarded counted-loop BCE versioning + post-version DCE/compaction.
-    if version_checked_counted_loops(ir, &dom, module, budget)? {
-        optimize_ir_with_budget(ir, budget)?;
-        dom = rebuild_cfg_and_prune(ir, budget)?;
-        if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
-            let _ = prune_block_params(ir, &dom, budget)?;
+    // 5-7. Loop-only passes (BCE versioning, loop rotation, boundary-clamp peeling, byte-sum SIMD):
+    //      skip completely on acyclic functions!
+    let mut post_rot_changed = false;
+    if has_loops {
+        if version_checked_counted_loops(ir, &dom, module, budget)? {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            dom = rebuild_cfg_and_prune(ir, budget)?;
+            if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                let _ = prune_block_params(ir, &dom, budget)?;
+            }
         }
-    }
-    // 6. Loop rotation: convert top-tested counted loops into bottom-tested loops with entry guards.
-    if rotate_counted_loops(ir, &dom, budget)? {
-        optimize_ir_with_budget(ir, budget)?;
-        dom = rebuild_cfg_and_prune(ir, budget)?;
-        if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
-            let _ = prune_block_params(ir, &dom, budget)?;
+        if rotate_counted_loops(ir, &dom, budget)? {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            dom = rebuild_cfg_and_prune(ir, budget)?;
+            if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                let _ = prune_block_params(ir, &dom, budget)?;
+            }
         }
-    }
-    // 7. Bit-exact SSE2 auto-vectorization (16-byte `psadbw` byte-sum reductions + `f64x2` SLP)
-    //    and boundary-clamp counted-loop peeling (eliminates `i == 0` / `i + 1 >= n` clamps in stencils).
-    let mut post_rot_changed = peel_boundary_clamped_loops(ir, module);
-    if post_rot_changed {
-        optimize_ir_with_budget(ir, budget)?;
-        dom = rebuild_cfg_and_prune(ir, budget)?;
-        if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
-            let _ = prune_block_params(ir, &dom, budget)?;
+        post_rot_changed = peel_boundary_clamped_loops(ir, module);
+        if post_rot_changed {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            dom = rebuild_cfg_and_prune(ir, budget)?;
+            if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                let _ = prune_block_params(ir, &dom, budget)?;
+            }
         }
-    }
-    if vectorize_byte_sum_loops(ir, module) {
-        post_rot_changed = true;
-        optimize_ir_with_budget(ir, budget)?;
-        dom = rebuild_cfg_and_prune(ir, budget)?;
-        if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
-            let _ = prune_block_params(ir, &dom, budget)?;
+        if vectorize_byte_sum_loops(ir, module) {
+            post_rot_changed = true;
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            dom = rebuild_cfg_and_prune(ir, budget)?;
+            if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                let _ = prune_block_params(ir, &dom, budget)?;
+            }
         }
     }
     if slp_vectorize_f64x2(ir, &dom) {
         post_rot_changed = true;
-        optimize_ir_with_budget(ir, budget)?;
+        optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
         dom = rebuild_cfg_and_prune(ir, budget)?;
         if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
             let _ = prune_block_params(ir, &dom, budget)?;
@@ -8368,11 +8573,11 @@ fn vectorize_byte_sum_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
             continue;
         }
 
-        // Build `pre_vec` -> `pre_vec2` -> `vec_loop` -> `vec_done` -> (`bi` | `else_bb`).
+        // Build `pre_vec` -> `pre_vec2` -> `vec_run` -> (`bi` | `else_bb`) using `Op::MemByteSum`
+        // (lowered to 64B unrolled AVX2 `vpsadbw ymm`, 16B SSE2 `psadbw`, or 16B NEON on AArch64).
         let pre_vec_id = BlockId(ir.blocks.len() as u32);
         let pre_vec2_id = BlockId(pre_vec_id.0 + 1);
-        let vec_loop_id = BlockId(pre_vec_id.0 + 2);
-        let vec_done_id = BlockId(pre_vec_id.0 + 3);
+        let vec_run_id = BlockId(pre_vec_id.0 + 2);
 
         let mut pv: Vec<Val> = Vec::with_capacity(orig_params.len());
         for &op in &orig_params {
@@ -8396,29 +8601,12 @@ fn vectorize_byte_sum_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
 
         let rem_v = ir.push_val(Ty::I32);
         let vec_cnt_v = ir.push_val(Ty::I32);
-        let vec_end_v = ir.push_val(Ty::I32);
-        let zero_idx = intern_v128_const(ir, [0u8; 16]);
-        let zero_v = ir.push_val(Ty::V128);
-        let Ok(vloop_init_args) = ir.push_pool(&[pv[iv_idx], zero_v]) else {
-            continue;
-        };
         let Ok(pv_range2) = ir.push_pool(&pv) else {
             continue;
         };
 
-        let vi = ir.push_val(Ty::I32);
-        let vacc = ir.push_val(Ty::V128);
-        let chunk = ir.push_val(Ty::V128);
-        let sad = ir.push_val(Ty::V128);
-        let vacc_next = ir.push_val(Ty::V128);
+        let vsum_v = ir.push_val(Ty::I32);
         let vi_next = ir.push_val(Ty::I32);
-        let Ok(vloop_back_args) = ir.push_pool(&[vi_next, vacc_next]) else {
-            continue;
-        };
-
-        let lo_v = ir.push_val(Ty::I32);
-        let hi_v = ir.push_val(Ty::I32);
-        let s1_v = ir.push_val(Ty::I32);
         let acc_after_v = ir.push_val(Ty::I32);
         let mut tail_args_vec = pv.clone();
         tail_args_vec[iv_idx] = vi_next;
@@ -8500,21 +8688,13 @@ fn vectorize_byte_sum_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
                     res: Some(vec_cnt_v),
                     op: Op::I32BinImm(IntBinOp::And, rem_v, -16),
                 },
-                Inst {
-                    res: Some(vec_end_v),
-                    op: Op::I32Bin(IntBinOp::Add, pv[iv_idx], vec_cnt_v),
-                },
-                Inst {
-                    res: Some(zero_v),
-                    op: Op::ConstV128(zero_idx),
-                },
             ],
             term: Term::CmpBranch {
                 kind: CmpBranchKind::I32Imm(CmpOp::Ne, 0),
                 a: vec_cnt_v,
                 b: vec_cnt_v,
-                then_bb: vec_loop_id,
-                then_args: vloop_init_args,
+                then_bb: vec_run_id,
+                then_args: ValRange::EMPTY,
                 else_bb: bi_id,
                 else_args: pv_range2,
             },
@@ -8522,76 +8702,23 @@ fn vectorize_byte_sum_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
             preds: 1,
         });
         ir.blocks.push(Block {
-            params: vec![vi, vacc],
+            params: Vec::new(),
             insts: vec![
                 Inst {
-                    res: Some(chunk),
-                    op: Op::Load {
-                        kind: LoadKind::V128,
-                        addr: vi,
+                    res: Some(vsum_v),
+                    op: Op::MemByteSum {
+                        base: pv[iv_idx],
+                        count: vec_cnt_v,
                         offset,
-                        checked: true,
-                    },
-                },
-                Inst {
-                    res: Some(sad),
-                    op: Op::V128Bin {
-                        op: V128_OP_PSADBW,
-                        a: chunk,
-                        b: zero_v,
-                    },
-                },
-                Inst {
-                    res: Some(vacc_next),
-                    op: Op::V128Bin {
-                        op: 0xfdce,
-                        a: vacc,
-                        b: sad,
                     },
                 },
                 Inst {
                     res: Some(vi_next),
-                    op: Op::I32BinImm(IntBinOp::Add, vi, 16),
-                },
-            ],
-            term: Term::CmpBranch {
-                kind: CmpBranchKind::I32(CmpOp::LtU),
-                a: vi_next,
-                b: vec_end_v,
-                then_bb: vec_loop_id,
-                then_args: vloop_back_args,
-                else_bb: vec_done_id,
-                else_args: ValRange::EMPTY,
-            },
-            is_loop_header: true,
-            preds: 2,
-        });
-        ir.blocks.push(Block {
-            params: Vec::new(),
-            insts: vec![
-                Inst {
-                    res: Some(lo_v),
-                    op: Op::V128ExtractLane {
-                        kind: SimdLaneKind::I32x4,
-                        v: vacc_next,
-                        lane: 0,
-                    },
-                },
-                Inst {
-                    res: Some(hi_v),
-                    op: Op::V128ExtractLane {
-                        kind: SimdLaneKind::I32x4,
-                        v: vacc_next,
-                        lane: 2,
-                    },
-                },
-                Inst {
-                    res: Some(s1_v),
-                    op: Op::I32Bin(IntBinOp::Add, pv[acc_idx], lo_v),
+                    op: Op::I32Bin(IntBinOp::Add, pv[iv_idx], vec_cnt_v),
                 },
                 Inst {
                     res: Some(acc_after_v),
-                    op: Op::I32Bin(IntBinOp::Add, s1_v, hi_v),
+                    op: Op::I32Bin(IntBinOp::Add, pv[acc_idx], vsum_v),
                 },
             ],
             term: Term::CmpBranch {
@@ -8694,6 +8821,7 @@ fn op_touches_linear_mem(op: &Op) -> bool {
             | Op::MemFill { .. }
             | Op::MemCopyConst { .. }
             | Op::MemFillConst { .. }
+            | Op::MemByteSum { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
             | Op::Trap(_)

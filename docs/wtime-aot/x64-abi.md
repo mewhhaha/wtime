@@ -21,24 +21,33 @@ shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
   `pmaddubsw`, `pmulhrsw`) + SSE4.1 (`round*`, `pextr*`/`pinsr*`, `pmovsx*`/
   `pmovzx*`, `pmulld`, `pmin*`/`pmax*`, `ptest`, `pcmpeqq`) + SSE4.2 (`pcmpgtq`)
   + POPCNT.
-- **Optional ISA (`TargetIsa { has_abm_bmi1, has_bmi2 }`)**:
-  - `x64-v3` (`has_abm_bmi1 = true, has_bmi2 = true`): emits `lzcnt`/`tzcnt`
-    for `clz`/`ctz`, BMI2 `shlx`/`shrx`/`sarx` for variable shifts (eliminating
-    `RCX` clobbers and extra copies on `shl`/`shr_s`/`shr_u`), and 3-operand
-    `rorx` for immediate rotates (variable `rotl`/`rotr` still use `CL`/`RCX`).
-  - `x64-v2` (`has_abm_bmi1 = false, has_bmi2 = false`): emits branchless
-    `bsr`/`bsf` + `cmovz` and legacy `shl`/`shr`/`sar`/`rol`/`ror`.
-  - `--target-cpu native` probes host features (`lzcnt`, `bmi1`, `bmi2`);
-    `generic` / `x86-64-v2` select `x64-v2`; `x86-64-v3`, `x86-64-v4`,
-    `znver<digits>`, and listed Intel Haswell+ profiles select `x64-v3`;
-    unrecognized CPU names are rejected.
+- **Optional ISA (`TargetIsa { has_abm_bmi1, has_bmi2, has_avx2 }`)**:
+  - `x64-v3` (`has_abm_bmi1 = true, has_bmi2 = true, has_avx2 = true`): emits
+    `lzcnt`/`tzcnt` for `clz`/`ctz`, BMI2 `shlx`/`shrx`/`sarx` for variable
+    shifts (eliminating `RCX` clobbers and extra copies on `shl`/`shr_s`/
+    `shr_u`), 3-operand `rorx` for immediate rotates (variable `rotl`/`rotr`
+    still use `CL`/`RCX`), and 256-bit AVX2 VEX loops (`vmovdqu`,
+    `vpbroadcastb`, `vpxor`, `vpsadbw`, `vpaddq`, `vextracti128`) for bulk
+    memory copy/fill and byte-sum reductions, with mandatory `vzeroupper`
+    before every external/helper call and return boundary.
+  - `x64-v2` (`has_abm_bmi1 = false, has_bmi2 = false, has_avx2 = false`):
+    emits branchless `bsr`/`bsf` + `cmovz`, legacy `shl`/`shr`/`sar`/`rol`/
+    `ror`, and 128-bit SSE2 memory/reduction loops.
+  - `--target-cpu native` probes host features (`lzcnt`, `bmi1`, `bmi2`,
+    `avx2`); `generic` / `x86-64-v2` select `x64-v2`; `x86-64-v3`,
+    `x86-64-v4`, `znver<digits>`, and listed Intel Haswell+ profiles select
+    `x64-v3`; unrecognized CPU names are rejected.
   - Cache keys bind the resolved profile (`x64-v2` vs `x64-v3`), never raw
     `"native"`.
-- **Mandatory runtime CPUID & CET shadow-stack (`SHSTK`) gate**:
-  - `blot_aot_new` probes CPUID leaves `0`, `1`, `0x8000_0000`/`0x8000_0001`
-    (unsigned comparison), and `7` (`EBX[3]` BMI1, `EBX[8]` BMI2, `ECX[7]`
-    `CET_SS`) to verify baseline/optional ISA features and records `CET_SS` in
-    `Ctx`.
+- **Mandatory runtime CPUID, OSXSAVE/XCR0 & CET shadow-stack (`SHSTK`) gate**:
+  - `blot_aot_new` (and standalone `_start`) probes CPUID leaves `0`, `1`
+    (`ECX[27]` OSXSAVE, `ECX[28]` AVX), `0x8000_0000`/`0x8000_0001` (unsigned
+    comparison), and `7` (`EBX[3]` BMI1, `EBX[5]` AVX2, `EBX[8]` BMI2,
+    `ECX[7]` `CET_SS`) to verify baseline/optional ISA features and records
+    `CET_SS` in `Ctx`. When `has_avx2` is enabled, startup also executes
+    `xgetbv(0)` and requires `(XCR0 & 0x6) == 0x6` (OS XMM/YMM state enabled)
+    before running any AVX2 code, failing closed with `TRAP_UNSUPPORTED_ISA (22)`
+    if the CPU or OS lacks AVX2 support.
   - Because generated `.so` code switches `rsp` to a dedicated 8 MiB guest stack
     without emitting `GNU_PROPERTY_X86_FEATURE_1_SHSTK`, **both `blot_aot_new`
     and every top-level `blot_aot_call_*` wrapper** check `rdsspq rax` whenever
@@ -69,12 +78,15 @@ Admitted constructs:
 - Active memory-0 data segments with constant `i32` (Wasm32) or `i64`
   (`memory64`) offsets.
 - Plain function imports with Blot ABI-compatible signatures (for
-  `--blot-cdylib`) or direct-syscall WASI Preview 1 / Goose / `env` imports
-  (for standalone static `ET_EXEC` executables), and globals of `i32`, `i64`,
-  `f32`, `f64`, `v128`, or nullable `externref`.
+  `--blot-cdylib`) or direct-syscall WASI Preview 1 / Goose (`goose::*`
+  including pure-x86-64 Ryū shortest round-trip `print_f64`/`print_f32`/
+  `format_f64`/`format_f32`) / benchmark `env::{bench_input, bench_input_f64}`
+  imports (for standalone static `ET_EXEC` executables), and globals of `i32`,
+  `i64`, `f32`, `f64`, `v128`, or nullable `externref`.
 - MVP opcodes, saturating float-to-int truncations, `memory.copy`/`memory.fill`,
   `memory64` 64-bit addressing, and all 236 standard Wasm 1.0 fixed-width
-  128-bit SIMD opcodes (`0xfd00..=0xfdff`).
+  128-bit SIMD opcodes (`0xfd00..=0xfdff`) — mirrored with multi-core parallel
+  compilation (`--jobs`) and full 236-opcode NEON parity on `--backend aarch64`.
 
 Unsupported modules are rejected cleanly before codegen with CLI exit code `4`
 (`X64_ADMISSION_REJECTED_EXIT_CODE`), distinct from exit code `1` for I/O,
@@ -114,6 +126,16 @@ also maintain a SHA-256-integrity-checked per-function incremental cache under
   (`<= 16 KiB` kernel xstate + `<= 32 KiB` handler frame each). Embedders with
   deeper/larger async signal handlers or CPUs where `AT_MINSIGSTKSZ > 16 KiB`
   must configure `SA_ONSTACK` + `sigaltstack`.
+- **Zero signal handlers in `--blot-cdylib`; guard-page BCE strictly in standalone `ET_EXEC`**:
+  - `--blot-cdylib` `.so` shared libraries NEVER install process-wide signal
+    handlers and always enforce explicit software memory bounds checks.
+  - Standalone static `ET_EXEC` binaries targeting `memory32` reserve an
+    `8 GiB + 64 KiB` `PROT_NONE` virtual guard region around linear memory 0
+    (enabling zero-branch hardware bounds checks for constant offsets
+    `< 4 GiB`), backed by a scoped `rt_sigaction(SIGSEGV, SA_SIGINFO | SA_RESTORER)`
+    handler that redirects faults inside `[mem_base, mem_base + 8 GiB + 64 KiB)`
+    to the standard `"Trap: out of bounds"` exit-1 / `--timing-json` landing
+    pad and re-raises any fault outside that window with `SIG_DFL`.
 
 ### Blot ABI 8 Exports (18 Symbols)
 All four Blot backends (`x64`, `aarch64`, `c`, `rust`) expose the same 18 C-ABI symbols:

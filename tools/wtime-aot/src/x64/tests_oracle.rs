@@ -510,7 +510,8 @@ fn assert_oracle_matrix(
         if v3
             && (!std::is_x86_feature_detected!("lzcnt")
                 || !std::is_x86_feature_detected!("bmi1")
-                || !std::is_x86_feature_detected!("bmi2"))
+                || !std::is_x86_feature_detected!("bmi2")
+                || !std::is_x86_feature_detected!("avx2"))
         {
             continue;
         }
@@ -520,6 +521,7 @@ fn assert_oracle_matrix(
                 isa: TargetIsa {
                     has_abm_bmi1: v3,
                     has_bmi2: v3,
+                    has_avx2: v3,
                 },
                 jobs: 2,
                 deadline: None,

@@ -578,6 +578,26 @@ pub fn check_standalone_import_sig(
         ("goose", "print_i64" | "print_u64" | "print_bool" | "exit") => {
             ty.params.len() == 1 && is_int(ty.params[0]) && ty.results.is_empty()
         }
+        ("goose", "print_f64") => {
+            ty.params.len() == 1 && matches!(ty.params[0], F64 | F32) && ty.results.is_empty()
+        }
+        ("goose", "print_f32") => {
+            ty.params.len() == 1 && matches!(ty.params[0], F32 | F64) && ty.results.is_empty()
+        }
+        ("goose", "format_f64") => {
+            ty.params.len() == 2
+                && is_int(ty.params[0])
+                && matches!(ty.params[1], F64 | F32)
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("goose", "format_f32") => {
+            ty.params.len() == 2
+                && is_int(ty.params[0])
+                && matches!(ty.params[1], F32 | F64)
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
         ("goose", "newline") => ty.params.is_empty() && ty.results.is_empty(),
         ("goose", "abort") => {
             ty.params.len() == 3 && ty.params.iter().all(|&t| is_int(t)) && ty.results.is_empty()
@@ -591,9 +611,12 @@ pub fn check_standalone_import_sig(
         }
         (
             "env",
-            "gs_os_clock_ns" | "bench_clock" | "gs_os_time_ns" | "gs_os_arg_count"
+            "gs_os_clock_ns" | "bench_clock" | "bench_input" | "gs_os_time_ns" | "gs_os_arg_count"
             | "gs_os_resource_dir",
         ) => ty.params.is_empty() && ty.results.len() == 1 && is_int(ty.results[0]),
+        ("env", "bench_input_f64") => {
+            ty.params.is_empty() && ty.results.len() == 1 && matches!(ty.results[0], F64 | F32)
+        }
         ("env", "gs_os_flush_stdout" | "bench_sink" | "emscripten_notify_memory_growth") => {
             ty.params.len() <= 1
                 && ty

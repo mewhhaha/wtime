@@ -848,6 +848,11 @@ fn verify_inst_types(
             expect_ty(ir, bi, val, Ty::I32, "MemFillConst.val")?;
             expect_no_res(ir, bi, res, "MemFillConst")?;
         }
+        Op::MemByteSum { base, count, .. } => {
+            expect_ty(ir, bi, base, Ty::I32, "MemByteSum.base")?;
+            expect_ty(ir, bi, count, Ty::I32, "MemByteSum.count")?;
+            expect_res(ir, bi, res, Ty::I32, "MemByteSum")?;
+        }
         Op::V128Splat { kind, val } => {
             expect_ty(ir, bi, val, kind.scalar_ty(), "V128Splat")?;
             expect_res(ir, bi, res, Ty::V128, "V128Splat")?;
@@ -1561,9 +1566,12 @@ pub fn verify_alloc_with_config(
                 Op::MemGrow(_) => helper_clobbers(HelperKind::MemGrow),
                 Op::Trunc(_, _) => helper_clobbers(HelperKind::Trunc),
                 Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => match op {
-                    IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU => {
-                        (MASK_RAX_RDX, 0)
-                    }
+                    IntBinOp::DivS
+                    | IntBinOp::DivU
+                    | IntBinOp::DivUNz
+                    | IntBinOp::RemS
+                    | IntBinOp::RemU
+                    | IntBinOp::RemUNz => (MASK_RAX_RDX, 0),
                     IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU => {
                         if cfg.has_bmi2 {
                             (0, 0)

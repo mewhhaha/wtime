@@ -418,6 +418,46 @@ pub fn allocate_with_budget(
     allocate_with_config(ir, AllocConfig::default(), budget)
 }
 
+/// Reusable per-worker scratch buffers for `allocate_with_config_and_scratch`, eliminating
+/// ~20 per-function heap allocations per compiled function.
+#[derive(Default)]
+pub struct RegallocScratch {
+    def_pos: Vec<u32>,
+    def_block: Vec<u32>,
+    last_use: Vec<u32>,
+    cross_block: Vec<bool>,
+    val_remat: Vec<Option<RematConst>>,
+    clobbers: Vec<Clobber>,
+    clob_seg: Vec<(u16, u16)>,
+    scratch_tys: Vec<Ty>,
+    cb_id: Vec<u32>,
+    cb_vals: Vec<u32>,
+    val_weight: Vec<u32>,
+    hint_gp: Vec<Option<Gp>>,
+    hint_xmm: Vec<Option<Xmm>>,
+    hint_peers: Vec<[u32; 4]>,
+    first_edge_arg: Vec<u32>,
+    assigned: Vec<bool>,
+    val_clob_gp: Vec<u16>,
+    val_clob_xmm: Vec<u16>,
+    gp_intervals: Vec<Interval>,
+    fp_intervals: Vec<Interval>,
+    active_gp: Vec<ActiveEntry>,
+    active_fp: Vec<ActiveEntry>,
+    slot8_end: Vec<u32>,
+    free_spills8: BinaryHeap<Reverse<(u32, i32)>>,
+    free_spills16: BinaryHeap<Reverse<(u32, i32)>>,
+}
+
+#[inline]
+fn reset_fill<T: Copy>(v: &mut Vec<T>, len: usize, fill: T) {
+    v.clear();
+    if v.capacity() > 16_384 && len <= 4096 {
+        v.shrink_to(4096);
+    }
+    v.resize(len, fill);
+}
+
 /// Computes RPO order, exact cross-block liveness (charging concurrent peak liveness memory BEFORE
 /// allocation), constant rematerialization, spill-slot coalescing, and linear-scan allocation while
 /// polling `budget`'s cooperative deadline.
@@ -425,6 +465,17 @@ pub fn allocate_with_config(
     ir: &IrFunc,
     cfg: AllocConfig,
     budget: Option<&CompileBudget>,
+) -> Result<AllocResult, String> {
+    let mut scratch = RegallocScratch::default();
+    allocate_with_config_and_scratch(ir, cfg, budget, &mut scratch)
+}
+
+/// Same as `allocate_with_config`, reusing worker-local `RegallocScratch` buffers.
+pub fn allocate_with_config_and_scratch(
+    ir: &IrFunc,
+    cfg: AllocConfig,
+    budget: Option<&CompileBudget>,
+    scratch: &mut RegallocScratch,
 ) -> Result<AllocResult, String> {
     if let Some(b) = budget {
         b.check_deadline()?;
@@ -436,218 +487,237 @@ pub fn allocate_with_config(
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
-    // 1. Compute reachable block order (iterative DFS postorder -> reversed = RPO)
-    // with O(1) per-edge successor deduplication.
-    let mut visited = vec![false; n_blocks];
-    let mut postorder = Vec::with_capacity(n_blocks);
-    let mut dfs: Vec<(u32, usize)> = vec![(0, 0)];
-    let mut succs: Vec<Vec<u32>> = vec![Vec::new(); n_blocks];
-    let mut succ_seen = vec![u32::MAX; n_blocks];
-    for (bi, bb) in ir.blocks.iter().enumerate() {
-        if let Some(b) = budget
-            && (bi & 4095) == 4095
-        {
-            b.check_deadline()?;
-        }
-        let stamp = bi as u32;
-        bb.term.for_each_succ(&ir.br_tables, |s| {
-            let sid = s.0 as usize;
-            if succ_seen[sid] != stamp {
-                succ_seen[sid] = stamp;
-                succs[bi].push(s.0);
+    // 1. Compute reachable block order (RPO) and hot-fallthrough trace layout.
+    //    Single-block functions bypass DFS, successor dedup, and trace-layout heuristics completely.
+    let (succs, rpo, rpo_pos, block_order, block_pos_in_order) = if n_blocks == 1 {
+        let mut s0 = Vec::new();
+        let mut has_self = false;
+        ir.blocks[0].term.for_each_succ(&ir.br_tables, |s| {
+            if s.0 == 0 && !has_self {
+                has_self = true;
+                s0.push(0);
             }
         });
-    }
-    visited[0] = true;
-    let mut dfs_steps: usize = 0;
-    while let Some((b, si)) = dfs.last_mut() {
-        dfs_steps += 1;
-        if let Some(bg) = budget
-            && (dfs_steps & 4095) == 0
-        {
-            bg.check_deadline()?;
-        }
-        let cur = *b as usize;
-        if *si < succs[cur].len() {
-            let nxt = succs[cur][*si];
-            *si += 1;
-            if !visited[nxt as usize] {
-                visited[nxt as usize] = true;
-                dfs.push((nxt, 0));
+        (vec![s0], vec![0u32], vec![0u32], vec![0u32], vec![0u32])
+    } else {
+        let mut visited = vec![false; n_blocks];
+        let mut postorder = Vec::with_capacity(n_blocks);
+        let mut dfs: Vec<(u32, usize)> = vec![(0, 0)];
+        let mut succs: Vec<Vec<u32>> = vec![Vec::new(); n_blocks];
+        let mut succ_seen = vec![u32::MAX; n_blocks];
+        for (bi, bb) in ir.blocks.iter().enumerate() {
+            if let Some(b) = budget
+                && (bi & 4095) == 4095
+            {
+                b.check_deadline()?;
             }
-        } else {
-            postorder.push(*b);
-            dfs.pop();
+            let stamp = bi as u32;
+            bb.term.for_each_succ(&ir.br_tables, |s| {
+                let sid = s.0 as usize;
+                if succ_seen[sid] != stamp {
+                    succ_seen[sid] = stamp;
+                    succs[bi].push(s.0);
+                }
+            });
         }
-    }
-    postorder.reverse();
-    let rpo = postorder;
-    let n_ord = rpo.len();
-    let mut rpo_pos = vec![u32::MAX; n_blocks];
-    for (ri, &b) in rpo.iter().enumerate() {
-        rpo_pos[b as usize] = ri as u32;
-    }
+        visited[0] = true;
+        let mut dfs_steps: usize = 0;
+        while let Some((b, si)) = dfs.last_mut() {
+            dfs_steps += 1;
+            if let Some(bg) = budget
+                && (dfs_steps & 4095) == 0
+            {
+                bg.check_deadline()?;
+            }
+            let cur = *b as usize;
+            if *si < succs[cur].len() {
+                let nxt = succs[cur][*si];
+                *si += 1;
+                if !visited[nxt as usize] {
+                    visited[nxt as usize] = true;
+                    dfs.push((nxt, 0));
+                }
+            } else {
+                postorder.push(*b);
+                dfs.pop();
+            }
+        }
+        postorder.reverse();
+        let rpo = postorder;
+        let n_ord = rpo.len();
+        let mut rpo_pos = vec![u32::MAX; n_blocks];
+        for (ri, &b) in rpo.iter().enumerate() {
+            rpo_pos[b as usize] = ri as u32;
+        }
 
-    // 1b. Hot-fallthrough trace layout over reachable blocks (always starts with bb0).
-    // Keeps loop bodies, loop latches, and versioned fast loops contiguous while sinking cold
-    // traps, rare side-bodies (e.g. `if` bodies with stores/calls), and checked slow clones
-    // out-of-line so hot loops need zero taken jumps on fallthrough paths.
-    let mut is_trap_blk = vec![false; n_blocks];
-    let mut has_call_blk = vec![false; n_blocks];
-    let mut has_store_blk = vec![false; n_blocks];
-    let mut has_unchecked_mem_blk = vec![false; n_blocks];
-    for &b in &rpo {
-        let bb = &ir.blocks[b as usize];
-        let mut trap = matches!(bb.term, Term::Unreachable);
-        let mut call = false;
-        let mut store = false;
-        let mut unchecked_mem = false;
-        for inst in &bb.insts {
-            match inst.op {
-                Op::Trap(_) | Op::MemGrow(_) => trap = true,
-                Op::Call { .. } | Op::CallIndirect { .. } => call = true,
-                Op::Store { checked, .. } | Op::V128StoreLane { checked, .. } => {
-                    store = true;
-                    if !checked {
+        // 1b. Hot-fallthrough trace layout over reachable blocks (always starts with bb0).
+        let mut is_trap_blk = vec![false; n_blocks];
+        let mut has_call_blk = vec![false; n_blocks];
+        let mut has_store_blk = vec![false; n_blocks];
+        let mut has_unchecked_mem_blk = vec![false; n_blocks];
+        for &b in &rpo {
+            let bb = &ir.blocks[b as usize];
+            let mut trap = matches!(bb.term, Term::Unreachable);
+            let mut call = false;
+            let mut store = false;
+            let mut unchecked_mem = false;
+            for inst in &bb.insts {
+                match inst.op {
+                    Op::Trap(_) | Op::MemGrow(_) => trap = true,
+                    Op::Call { .. } | Op::CallIndirect { .. } => call = true,
+                    Op::Store { checked, .. } | Op::V128StoreLane { checked, .. } => {
+                        store = true;
+                        if !checked {
+                            unchecked_mem = true;
+                        }
+                    }
+                    Op::Load { checked: false, .. }
+                    | Op::V128LoadLane { checked: false, .. }
+                    | Op::BoundsCheck { .. }
+                    | Op::MemCopy { .. }
+                    | Op::MemFill { .. }
+                    | Op::MemCopyConst {
+                        dst_checked: false, ..
+                    }
+                    | Op::MemCopyConst {
+                        src_checked: false, ..
+                    }
+                    | Op::MemFillConst { checked: false, .. } => {
                         unchecked_mem = true;
                     }
+                    Op::MemCopyConst { .. } | Op::MemFillConst { .. } => store = true,
+                    _ => {}
                 }
-                Op::Load { checked: false, .. }
-                | Op::V128LoadLane { checked: false, .. }
-                | Op::BoundsCheck { .. }
-                | Op::MemCopy { .. }
-                | Op::MemFill { .. }
-                | Op::MemCopyConst {
-                    dst_checked: false, ..
-                }
-                | Op::MemCopyConst {
-                    src_checked: false, ..
-                }
-                | Op::MemFillConst { checked: false, .. } => {
-                    unchecked_mem = true;
-                }
-                Op::MemCopyConst { .. } | Op::MemFillConst { .. } => store = true,
-                _ => {}
             }
+            is_trap_blk[b as usize] = trap;
+            has_call_blk[b as usize] = call;
+            has_store_blk[b as usize] = store;
+            has_unchecked_mem_blk[b as usize] = unchecked_mem;
         }
-        is_trap_blk[b as usize] = trap;
-        has_call_blk[b as usize] = call;
-        has_store_blk[b as usize] = store;
-        has_unchecked_mem_blk[b as usize] = unchecked_mem;
-    }
 
-    let cand_score = |cur: u32, cand: u32, is_then: bool, placed: &[bool]| -> i32 {
-        let mut s = 0i32;
-        if is_trap_blk[cand as usize] {
-            s += 1000;
-        }
-        // Non-self FP `CmpBranch` cannot invert in `lower.rs`, so prefer falling through to `else_bb`.
-        if is_then
-            && let Term::CmpBranch { kind, a, b, .. } = ir.blocks[cur as usize].term
-            && matches!(
-                kind,
-                super::ir::CmpBranchKind::F32(_) | super::ir::CmpBranchKind::F64(_)
-            )
-            && a != b
-        {
-            s += 500;
-        }
-        let cbb = &ir.blocks[cand as usize];
-        // Prefer loop headers and loop latches that backedge directly to an already-placed header.
-        let backedges_to_placed_hdr = succs[cand as usize]
-            .iter()
-            .any(|&x| placed[x as usize] && ir.blocks[x as usize].is_loop_header);
-        if cbb.is_loop_header || backedges_to_placed_hdr {
-            s -= 100;
-        }
-        if has_call_blk[cand as usize] {
-            s += 40;
-        }
-        if has_store_blk[cand as usize] {
-            s += 20;
-        }
-        if !cbb.is_loop_header && cbb.insts.len() > 4 {
-            s += 10;
-        }
-        // Distinguish bounds-check-free fast loop guards/bodies from checked slow loop clones.
-        let mut unchecked = has_unchecked_mem_blk[cand as usize];
-        if !unchecked
-            && cbb.insts.is_empty()
-            && let Term::CmpBranch { then_bb, .. } | Term::BranchIf { then_bb, .. } = cbb.term
-        {
-            unchecked = has_unchecked_mem_blk[then_bb.0 as usize];
-        }
-        if unchecked {
-            s += 15;
-        }
-        s
-    };
+        let cand_score = |cur: u32, cand: u32, is_then: bool, placed: &[bool]| -> i32 {
+            let mut s = 0i32;
+            if is_trap_blk[cand as usize] {
+                s += 1000;
+            }
+            if is_then
+                && let Term::CmpBranch { kind, a, b, .. } = ir.blocks[cur as usize].term
+                && matches!(
+                    kind,
+                    super::ir::CmpBranchKind::F32(_) | super::ir::CmpBranchKind::F64(_)
+                )
+                && a != b
+            {
+                s += 500;
+            }
+            let cbb = &ir.blocks[cand as usize];
+            let backedges_to_placed_hdr = succs[cand as usize]
+                .iter()
+                .any(|&x| placed[x as usize] && ir.blocks[x as usize].is_loop_header);
+            if cbb.is_loop_header || backedges_to_placed_hdr {
+                s -= 100;
+            }
+            if has_call_blk[cand as usize] {
+                s += 40;
+            }
+            if has_store_blk[cand as usize] {
+                s += 20;
+            }
+            if !cbb.is_loop_header && cbb.insts.len() > 4 {
+                s += 10;
+            }
+            let mut unchecked = has_unchecked_mem_blk[cand as usize];
+            if !unchecked
+                && cbb.insts.is_empty()
+                && let Term::CmpBranch { then_bb, .. } | Term::BranchIf { then_bb, .. } = cbb.term
+            {
+                unchecked = has_unchecked_mem_blk[then_bb.0 as usize];
+            }
+            if unchecked {
+                s += 15;
+            }
+            s
+        };
 
-    let mut block_order = Vec::with_capacity(n_ord);
-    let mut placed = vec![false; n_blocks];
-    for &seed in &rpo {
-        if placed[seed as usize] {
-            continue;
-        }
-        let mut cur = seed;
-        loop {
-            placed[cur as usize] = true;
-            block_order.push(cur);
-            let next = match ir.blocks[cur as usize].term {
-                Term::Jump { target, .. } => (!placed[target.0 as usize]
-                    && !is_trap_blk[target.0 as usize])
-                    .then_some(target.0),
-                Term::BranchIf {
-                    then_bb, else_bb, ..
-                }
-                | Term::CmpBranch {
-                    then_bb, else_bb, ..
-                } => {
-                    let t_ok = !placed[then_bb.0 as usize];
-                    let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
-                    match (t_ok, e_ok) {
-                        (true, true) => {
-                            let ts = cand_score(cur, then_bb.0, true, &placed);
-                            let es = cand_score(cur, else_bb.0, false, &placed);
-                            let best = if (ts, rpo_pos[then_bb.0 as usize])
-                                <= (es, rpo_pos[else_bb.0 as usize])
-                            {
-                                then_bb.0
-                            } else {
-                                else_bb.0
-                            };
-                            (!is_trap_blk[best as usize]).then_some(best)
-                        }
-                        (true, false) => (!is_trap_blk[then_bb.0 as usize]).then_some(then_bb.0),
-                        (false, true) => (!is_trap_blk[else_bb.0 as usize]).then_some(else_bb.0),
-                        (false, false) => None,
+        let mut block_order = Vec::with_capacity(n_ord);
+        let mut placed = vec![false; n_blocks];
+        for &seed in &rpo {
+            if placed[seed as usize] {
+                continue;
+            }
+            let mut cur = seed;
+            loop {
+                placed[cur as usize] = true;
+                block_order.push(cur);
+                let next = match ir.blocks[cur as usize].term {
+                    Term::Jump { target, .. } => (!placed[target.0 as usize]
+                        && !is_trap_blk[target.0 as usize])
+                        .then_some(target.0),
+                    Term::BranchIf {
+                        then_bb, else_bb, ..
                     }
+                    | Term::CmpBranch {
+                        then_bb, else_bb, ..
+                    } => {
+                        let t_ok = !placed[then_bb.0 as usize];
+                        let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
+                        match (t_ok, e_ok) {
+                            (true, true) => {
+                                let ts = cand_score(cur, then_bb.0, true, &placed);
+                                let es = cand_score(cur, else_bb.0, false, &placed);
+                                let best = if (ts, rpo_pos[then_bb.0 as usize])
+                                    <= (es, rpo_pos[else_bb.0 as usize])
+                                {
+                                    then_bb.0
+                                } else {
+                                    else_bb.0
+                                };
+                                (!is_trap_blk[best as usize]).then_some(best)
+                            }
+                            (true, false) => {
+                                (!is_trap_blk[then_bb.0 as usize]).then_some(then_bb.0)
+                            }
+                            (false, true) => {
+                                (!is_trap_blk[else_bb.0 as usize]).then_some(else_bb.0)
+                            }
+                            (false, false) => None,
+                        }
+                    }
+                    Term::BrTable { .. } | Term::Return { .. } | Term::Unreachable => None,
+                };
+                match next {
+                    Some(nxt) => cur = nxt,
+                    None => break,
                 }
-                Term::BrTable { .. } | Term::Return { .. } | Term::Unreachable => None,
-            };
-            match next {
-                Some(nxt) => cur = nxt,
-                None => break,
             }
         }
-    }
-    let mut block_pos_in_order = vec![u32::MAX; n_blocks];
-    for (oi, &b) in block_order.iter().enumerate() {
-        block_pos_in_order[b as usize] = oi as u32;
-    }
+        let mut block_pos_in_order = vec![u32::MAX; n_blocks];
+        for (oi, &b) in block_order.iter().enumerate() {
+            block_pos_in_order[b as usize] = oi as u32;
+        }
+        (succs, rpo, rpo_pos, block_order, block_pos_in_order)
+    };
+    let n_ord = rpo.len();
 
     // 2. Assign linear program positions (2 ticks per instruction: even=use, odd=def).
     let mut block_start = vec![0u32; n_ord];
     let mut block_end = vec![0u32; n_ord];
-    let mut def_pos = vec![u32::MAX; n_vals];
-    let mut def_block = vec![u32::MAX; n_vals];
-    let mut last_use = vec![0u32; n_vals];
-    let mut cross_block = vec![false; n_vals];
-    let mut val_remat: Vec<Option<RematConst>> = vec![None; n_vals];
-    let mut clobbers: Vec<Clobber> = Vec::new();
+    reset_fill(&mut scratch.def_pos, n_vals, u32::MAX);
+    reset_fill(&mut scratch.def_block, n_vals, u32::MAX);
+    reset_fill(&mut scratch.last_use, n_vals, 0u32);
+    reset_fill(&mut scratch.cross_block, n_vals, false);
+    reset_fill(&mut scratch.val_remat, n_vals, None);
+    scratch.clobbers.clear();
+    scratch.scratch_tys.clear();
+    let def_pos = &mut scratch.def_pos;
+    let def_block = &mut scratch.def_block;
+    let last_use = &mut scratch.last_use;
+    let cross_block = &mut scratch.cross_block;
+    let val_remat = &mut scratch.val_remat;
+    let clobbers = &mut scratch.clobbers;
+    let scratch_tys = &mut scratch.scratch_tys;
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
-    let mut scratch_tys: Vec<Ty> = Vec::new();
 
     let mut tick = 0u32;
     let mut scan_steps: usize = 0;
@@ -693,7 +763,7 @@ pub fn allocate_with_config(
                     for &av in ir.pool_slice(args) {
                         scratch_tys.push(ir.val_tys[av.0 as usize]);
                     }
-                    let arg_layout = layout_args(&scratch_tys)?;
+                    let arg_layout = layout_args(scratch_tys)?;
                     if arg_layout.stack_bytes > max_outgoing_arg_bytes {
                         max_outgoing_arg_bytes = arg_layout.stack_bytes;
                     }
@@ -707,7 +777,7 @@ pub fn allocate_with_config(
                             last_use[vi] = pos_def + 1;
                         }
                     }
-                    let ret_layout = layout_rets(&scratch_tys)?;
+                    let ret_layout = layout_rets(scratch_tys)?;
                     if ret_layout.stack_bytes > max_ret_buf_bytes {
                         max_ret_buf_bytes = ret_layout.stack_bytes;
                     }
@@ -745,7 +815,12 @@ pub fn allocate_with_config(
                     });
                 }
                 Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => match op {
-                    IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU => {
+                    IntBinOp::DivS
+                    | IntBinOp::DivU
+                    | IntBinOp::DivUNz
+                    | IntBinOp::RemS
+                    | IntBinOp::RemU
+                    | IntBinOp::RemUNz => {
                         clobbers.push(Clobber {
                             pos: pos_use,
                             gp_mask: MASK_RAX_RDX,
@@ -815,8 +890,10 @@ pub fn allocate_with_config(
     }
 
     // 3. Exact cross-block liveness ONLY for values with `cross_block[v] == true`.
-    let mut cb_id = vec![u32::MAX; n_vals];
-    let mut cb_vals: Vec<u32> = Vec::new();
+    reset_fill(&mut scratch.cb_id, n_vals, u32::MAX);
+    scratch.cb_vals.clear();
+    let cb_id = &mut scratch.cb_id;
+    let cb_vals = &mut scratch.cb_vals;
     for vi in 0..n_vals {
         if cross_block[vi] && def_pos[vi] != u32::MAX {
             cb_id[vi] = cb_vals.len() as u32;
@@ -824,6 +901,13 @@ pub fn allocate_with_config(
         }
     }
     let n_cb = cb_vals.len();
+    let has_backedge = n_cb > 0
+        && rpo.iter().enumerate().any(|(ri, &bid)| {
+            succs[bid as usize].iter().any(|&sid| {
+                let sri = rpo_pos[sid as usize];
+                sri != u32::MAX && sri <= ri as u32
+            })
+        });
     const MAX_SEGS_PER_VAL: usize = 64;
     const MAX_SEG_SLOTS_PER_FN: usize = 65_536;
     // Declare `_liveness_guard` BEFORE `cb_*` and `segs_pool` so Rust's LIFO drop order
@@ -942,13 +1026,17 @@ pub fn allocate_with_config(
 
         let mut work_units: usize = 0;
         let mut changed = true;
+        // Walk blocks in reverse RPO (exact topological order on acyclic CFGs):
+        // DAGs converge in 1 single pass with zero verification pass, and cyclic CFGs converge in
+        // minimum loop-depth iterations while producing bit-identical `live_in`/`live_out`.
         while changed {
             if let Some(b) = budget {
                 b.check_deadline()?;
             }
             changed = false;
-            for oi in (0..n_ord).rev() {
-                let bid = block_order[oi] as usize;
+            for &bid_u32 in rpo.iter().rev() {
+                let bid = bid_u32 as usize;
+                let oi = block_pos_in_order[bid] as usize;
                 for &sid in &succs[bid] {
                     let soi = block_pos_in_order[sid as usize];
                     if soi == u32::MAX {
@@ -986,6 +1074,9 @@ pub fn allocate_with_config(
                         changed = true;
                     }
                 }
+            }
+            if !has_backedge {
+                break;
             }
         }
 
@@ -1094,7 +1185,8 @@ pub fn allocate_with_config(
 
     // 4. Build O(log C) segment tree over clobbers and build exact intervals.
     let n_clob = clobbers.len();
-    let mut clob_seg = vec![(0u16, 0u16); n_clob * 2];
+    reset_fill(&mut scratch.clob_seg, n_clob * 2, (0u16, 0u16));
+    let clob_seg = &mut scratch.clob_seg;
     for (i, c) in clobbers.iter().enumerate() {
         clob_seg[n_clob + i] = (c.gp_mask, c.xmm_mask);
     }
@@ -1130,55 +1222,63 @@ pub fn allocate_with_config(
     // 4b. Compute loop-depth weighting (strictly in RPO so hot-fallthrough block layout
     // never turns a cold rejoin edge into a false backedge) and ABI / phi / two-address hints.
     let mut loop_depth = vec![0u8; n_ord];
-    let mut rpo_preds: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
-    let mut backedges: Vec<(u32, u32)> = Vec::new();
-    for (ri, &bid) in rpo.iter().enumerate() {
-        for &sid in &succs[bid as usize] {
-            let sri = rpo_pos[sid as usize];
-            if sri == u32::MAX {
-                continue;
-            }
-            rpo_preds[sri as usize].push(ri as u32);
-            if sri <= ri as u32 {
-                backedges.push((ri as u32, sri));
+    if n_ord > 1 || !succs[0].is_empty() {
+        let mut rpo_preds: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
+        let mut backedges: Vec<(u32, u32)> = Vec::new();
+        for (ri, &bid) in rpo.iter().enumerate() {
+            for &sid in &succs[bid as usize] {
+                let sri = rpo_pos[sid as usize];
+                if sri == u32::MAX {
+                    continue;
+                }
+                rpo_preds[sri as usize].push(ri as u32);
+                if sri <= ri as u32 {
+                    backedges.push((ri as u32, sri));
+                }
             }
         }
-    }
-    if !backedges.is_empty() {
-        let mut rpo_depth = vec![0u8; n_ord];
-        let mut loop_seen = vec![u32::MAX; n_ord];
-        let mut worklist: Vec<u32> = Vec::new();
-        for (li, &(latch, header)) in backedges.iter().take(512).enumerate() {
-            let stamp = li as u32;
-            loop_seen[header as usize] = stamp;
-            rpo_depth[header as usize] = rpo_depth[header as usize].saturating_add(1).min(4);
-            if latch != header {
-                loop_seen[latch as usize] = stamp;
-                rpo_depth[latch as usize] = rpo_depth[latch as usize].saturating_add(1).min(4);
-                worklist.clear();
-                worklist.push(latch);
-                while let Some(cur) = worklist.pop() {
-                    for &p in &rpo_preds[cur as usize] {
-                        if p > header && loop_seen[p as usize] != stamp {
-                            loop_seen[p as usize] = stamp;
-                            rpo_depth[p as usize] = rpo_depth[p as usize].saturating_add(1).min(4);
-                            worklist.push(p);
+        if !backedges.is_empty() {
+            let mut rpo_depth = vec![0u8; n_ord];
+            let mut loop_seen = vec![u32::MAX; n_ord];
+            let mut worklist: Vec<u32> = Vec::new();
+            for (li, &(latch, header)) in backedges.iter().take(512).enumerate() {
+                let stamp = li as u32;
+                loop_seen[header as usize] = stamp;
+                rpo_depth[header as usize] = rpo_depth[header as usize].saturating_add(1).min(4);
+                if latch != header {
+                    loop_seen[latch as usize] = stamp;
+                    rpo_depth[latch as usize] = rpo_depth[latch as usize].saturating_add(1).min(4);
+                    worklist.clear();
+                    worklist.push(latch);
+                    while let Some(cur) = worklist.pop() {
+                        for &p in &rpo_preds[cur as usize] {
+                            if p > header && loop_seen[p as usize] != stamp {
+                                loop_seen[p as usize] = stamp;
+                                rpo_depth[p as usize] =
+                                    rpo_depth[p as usize].saturating_add(1).min(4);
+                                worklist.push(p);
+                            }
                         }
                     }
                 }
             }
-        }
-        for (ri, &bid) in rpo.iter().enumerate() {
-            let oi = block_pos_in_order[bid as usize] as usize;
-            loop_depth[oi] = rpo_depth[ri];
+            for (ri, &bid) in rpo.iter().enumerate() {
+                let oi = block_pos_in_order[bid as usize] as usize;
+                loop_depth[oi] = rpo_depth[ri];
+            }
         }
     }
 
-    let mut val_weight = vec![0u32; n_vals];
-    let mut hint_gp: Vec<Option<Gp>> = vec![None; n_vals];
-    let mut hint_xmm: Vec<Option<Xmm>> = vec![None; n_vals];
-    // For coalescing: up to 4 preferred peer values (phi/sibling-edge-arg/two-addr LHS).
-    let mut hint_peers: Vec<[u32; 4]> = vec![[u32::MAX; 4]; n_vals];
+    reset_fill(&mut scratch.val_weight, n_vals, 0u32);
+    reset_fill(&mut scratch.hint_gp, n_vals, None);
+    reset_fill(&mut scratch.hint_xmm, n_vals, None);
+    reset_fill(&mut scratch.hint_peers, n_vals, [u32::MAX; 4]);
+    reset_fill(&mut scratch.first_edge_arg, n_vals, u32::MAX);
+    let val_weight = &mut scratch.val_weight;
+    let hint_gp = &mut scratch.hint_gp;
+    let hint_xmm = &mut scratch.hint_xmm;
+    let hint_peers = &mut scratch.hint_peers;
+    let first_edge_arg = &mut scratch.first_edge_arg;
     let add_peer = |peers: &mut Vec<[u32; 4]>, a: u32, b: u32| {
         if a == b {
             return;
@@ -1194,7 +1294,6 @@ pub fn allocate_with_config(
             }
         }
     };
-    let mut first_edge_arg: Vec<u32> = vec![u32::MAX; n_vals];
 
     // Hint entry params with their incoming ABI registers.
     if !ir.params.is_empty() {
@@ -1241,7 +1340,7 @@ pub fn allocate_with_config(
                 val_weight[r.0 as usize] = val_weight[r.0 as usize].saturating_add(w);
                 match inst.op {
                     Op::I32Bin(bop, a, b) | Op::I64Bin(bop, a, b) => {
-                        add_peer(&mut hint_peers, r.0, a.0);
+                        add_peer(hint_peers, r.0, a.0);
                         if matches!(
                             bop,
                             IntBinOp::Add
@@ -1250,25 +1349,25 @@ pub fn allocate_with_config(
                                 | IntBinOp::Or
                                 | IntBinOp::Xor
                         ) {
-                            add_peer(&mut hint_peers, r.0, b.0);
+                            add_peer(hint_peers, r.0, b.0);
                         }
                     }
                     Op::I32BinImm(_, a, _) | Op::I64BinImm(_, a, _) => {
-                        add_peer(&mut hint_peers, r.0, a.0);
+                        add_peer(hint_peers, r.0, a.0);
                     }
                     Op::F32Bin(bop, a, b) | Op::F64Bin(bop, a, b) => {
-                        add_peer(&mut hint_peers, r.0, a.0);
+                        add_peer(hint_peers, r.0, a.0);
                         if matches!(bop, super::ir::FloatBinOp::Add | super::ir::FloatBinOp::Mul) {
-                            add_peer(&mut hint_peers, r.0, b.0);
+                            add_peer(hint_peers, r.0, b.0);
                         }
                     }
                     Op::Select { a, b, .. } => {
-                        add_peer(&mut hint_peers, r.0, a.0);
-                        add_peer(&mut hint_peers, r.0, b.0);
+                        add_peer(hint_peers, r.0, a.0);
+                        add_peer(hint_peers, r.0, b.0);
                     }
                     Op::CmpSelect { tv, fv, .. } => {
-                        add_peer(&mut hint_peers, r.0, tv.0);
-                        add_peer(&mut hint_peers, r.0, fv.0);
+                        add_peer(hint_peers, r.0, tv.0);
+                        add_peer(hint_peers, r.0, fv.0);
                     }
                     _ => {}
                 }
@@ -1279,7 +1378,7 @@ pub fn allocate_with_config(
                     for &av in ir.pool_slice(args) {
                         scratch_tys.push(ir.val_tys[av.0 as usize]);
                     }
-                    if let Ok(al) = layout_args(&scratch_tys) {
+                    if let Ok(al) = layout_args(scratch_tys) {
                         for (&av, slot) in ir.pool_slice(args).iter().zip(al.slots) {
                             match slot {
                                 AbiSlot::Gp(g) if hint_gp[av.0 as usize].is_none() => {
@@ -1297,7 +1396,7 @@ pub fn allocate_with_config(
                         val_weight[rv.0 as usize] = val_weight[rv.0 as usize].saturating_add(w);
                         scratch_tys.push(ir.val_tys[rv.0 as usize]);
                     }
-                    if let Ok(rl) = layout_rets(&scratch_tys) {
+                    if let Ok(rl) = layout_rets(scratch_tys) {
                         for (&rv, slot) in ir.pool_slice(rets).iter().zip(rl.slots) {
                             match slot {
                                 AbiSlot::Gp(g) => hint_gp[rv.0 as usize] = Some(g),
@@ -1317,15 +1416,15 @@ pub fn allocate_with_config(
             let params = &ir.blocks[target_bb as usize].params;
             let avals = ir.pool_slice(args);
             for (&p, &a) in params.iter().zip(avals) {
-                add_peer(&mut hint_peers, p.0, a.0);
-                add_peer(&mut hint_peers, a.0, p.0);
+                add_peer(hint_peers, p.0, a.0);
+                add_peer(hint_peers, a.0, p.0);
                 if a != p {
                     let prev = first_edge_arg[p.0 as usize];
                     if prev == u32::MAX {
                         first_edge_arg[p.0 as usize] = a.0;
                     } else if prev != a.0 {
-                        add_peer(&mut hint_peers, a.0, prev);
-                        add_peer(&mut hint_peers, prev, a.0);
+                        add_peer(hint_peers, a.0, prev);
+                        add_peer(hint_peers, prev, a.0);
                     }
                 }
             }
@@ -1360,7 +1459,7 @@ pub fn allocate_with_config(
                 for &rv in ir.pool_slice(vals) {
                     scratch_tys.push(ir.val_tys[rv.0 as usize]);
                 }
-                if let Ok(rl) = layout_rets(&scratch_tys) {
+                if let Ok(rl) = layout_rets(scratch_tys) {
                     for (&rv, slot) in ir.pool_slice(vals).iter().zip(rl.slots) {
                         match slot {
                             AbiSlot::Gp(g) if hint_gp[rv.0 as usize].is_none() => {
@@ -1379,7 +1478,8 @@ pub fn allocate_with_config(
     }
 
     let mut locs = vec![Loc::Spill(0); n_vals];
-    let mut assigned = vec![false; n_vals];
+    reset_fill(&mut scratch.assigned, n_vals, false);
+    let assigned = &mut scratch.assigned;
     let total_exact_seg_pairs: usize = cb_segs
         .iter()
         .filter(|s| s.len() > 1 && s.len() <= u16::MAX as usize)
@@ -1387,11 +1487,14 @@ pub fn allocate_with_config(
         .sum();
     let mut segs_pool: Vec<(u32, u32)> = Vec::new();
     segs_pool.reserve_exact(total_exact_seg_pairs);
-    let mut val_clob_gp = vec![0u16; n_vals];
-    let mut val_clob_xmm = vec![0u16; n_vals];
-
-    let mut gp_intervals: Vec<Interval> = Vec::new();
-    let mut fp_intervals: Vec<Interval> = Vec::new();
+    reset_fill(&mut scratch.val_clob_gp, n_vals, 0u16);
+    reset_fill(&mut scratch.val_clob_xmm, n_vals, 0u16);
+    scratch.gp_intervals.clear();
+    scratch.fp_intervals.clear();
+    let val_clob_gp = &mut scratch.val_clob_gp;
+    let val_clob_xmm = &mut scratch.val_clob_xmm;
+    let gp_intervals = &mut scratch.gp_intervals;
+    let fp_intervals = &mut scratch.fp_intervals;
     for vi in 0..n_vals {
         if let Some(bg) = budget
             && (vi & 4095) == 4095
@@ -1511,8 +1614,10 @@ pub fn allocate_with_config(
 
     let mut next_spill_off: i32 = 0;
     // Exact current max `end` for each 8-byte spill slot (`idx = off / 8`); `u32::MAX` marks non-8B/padding slots.
-    let mut slot8_end: Vec<u32> = Vec::new();
-    let mut free_spills8: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
+    scratch.slot8_end.clear();
+    scratch.free_spills8.clear();
+    let slot8_end = &mut scratch.slot8_end;
+    let free_spills8 = &mut scratch.free_spills8;
 
     // Allocates an 8-byte spill slot for `val` over `[start, end]`, first attempting O(1) spill-slot
     // coalescing with any already-spilled non-interfering `hint_peers` value to eliminate edge-copy
@@ -1571,7 +1676,8 @@ pub fn allocate_with_config(
 
     // 5a. Linear scan for GP intervals with exact live-range holes, dynamic R12/R13, remat,
     // forward peer clobber avoidance, coalescing, and spill-slot reuse.
-    let mut active_gp: Vec<ActiveEntry> = Vec::with_capacity(gp_alloc.len() * 2);
+    scratch.active_gp.clear();
+    let active_gp = &mut scratch.active_gp;
     const GP_CALLER_COUNT: usize = 7;
     // Preferred free-reg order (indices into `gp_alloc`): non-fixed caller-saved first (`R8, R9, Rsi, Rdi`),
     // then `Rcx, Rdx, Rax`, then callee-saved (`Rbx, Rbp, R12, R13`).
@@ -1585,7 +1691,7 @@ pub fn allocate_with_config(
         }
         active_gp.retain(|a| a.end > iv.start);
         let mut used_regs = 0u16;
-        for a in &active_gp {
+        for a in active_gp.iter() {
             if active_overlaps_iv(a, iv, &segs_pool) {
                 used_regs |= 1 << gp_alloc[a.reg_idx as usize].id();
             }
@@ -1680,7 +1786,7 @@ pub fn allocate_with_config(
                 }
                 let (mut cnt, mut max_sc, mut max_end) = (0usize, 0u64, 0u32);
                 let mut ok = true;
-                for a in &active_gp {
+                for a in active_gp.iter() {
                     if a.reg_idx as usize == ri && active_overlaps_iv(a, iv, &segs_pool) {
                         cnt += 1;
                         if a.score > max_sc {
@@ -1728,9 +1834,9 @@ pub fn allocate_with_config(
                                 ev.start,
                                 ev.end,
                                 &locs,
-                                &assigned,
-                                &mut slot8_end,
-                                &mut free_spills8,
+                                assigned,
+                                slot8_end,
+                                free_spills8,
                                 &mut next_spill_off,
                             )?;
                             locs[ev.val as usize] = Loc::Spill(sp);
@@ -1755,9 +1861,9 @@ pub fn allocate_with_config(
                     iv.start,
                     iv.end,
                     &locs,
-                    &assigned,
-                    &mut slot8_end,
-                    &mut free_spills8,
+                    assigned,
+                    slot8_end,
+                    free_spills8,
                     &mut next_spill_off,
                 )?;
                 locs[iv.val as usize] = Loc::Spill(sp);
@@ -1767,8 +1873,10 @@ pub fn allocate_with_config(
     }
 
     // 5b. Linear scan for FP/V128 intervals (caller-saved Xmm0..Xmm7 + callee-saved Xmm8..Xmm13).
-    let mut free_spills16: BinaryHeap<Reverse<(u32, i32)>> = BinaryHeap::new();
-    let mut active_fp: Vec<ActiveEntry> = Vec::with_capacity(XMM_ALLOC.len() * 2);
+    scratch.free_spills16.clear();
+    scratch.active_fp.clear();
+    let free_spills16 = &mut scratch.free_spills16;
+    let active_fp = &mut scratch.active_fp;
     const XMM_CALLER_COUNT: usize = 8;
     const XMM_PREF_ORDER: [usize; 14] = [7, 6, 5, 4, 3, 2, 1, 0, 8, 9, 10, 11, 12, 13];
 
@@ -1817,7 +1925,7 @@ pub fn allocate_with_config(
         }
         active_fp.retain(|a| a.end > iv.start);
         let mut used_regs = 0u16;
-        for a in &active_fp {
+        for a in active_fp.iter() {
             if active_overlaps_iv(a, iv, &segs_pool) {
                 used_regs |= 1 << XMM_ALLOC[a.reg_idx as usize].id();
             }
@@ -1908,7 +2016,7 @@ pub fn allocate_with_config(
                 }
                 let (mut cnt, mut max_sc, mut max_end) = (0usize, 0u64, 0u32);
                 let mut ok = true;
-                for a in &active_fp {
+                for a in active_fp.iter() {
                     if a.reg_idx as usize == ri && active_overlaps_iv(a, iv, &segs_pool) {
                         cnt += 1;
                         if a.score > max_sc {
@@ -1958,10 +2066,10 @@ pub fn allocate_with_config(
                                 ev.start,
                                 ev.end,
                                 &locs,
-                                &assigned,
-                                &mut slot8_end,
-                                &mut free_spills8,
-                                &mut free_spills16,
+                                assigned,
+                                slot8_end,
+                                free_spills8,
+                                free_spills16,
                                 &mut next_spill_off,
                             )?;
                             locs[ev.val as usize] = Loc::Spill(sp);
@@ -1987,10 +2095,10 @@ pub fn allocate_with_config(
                     iv.start,
                     iv.end,
                     &locs,
-                    &assigned,
-                    &mut slot8_end,
-                    &mut free_spills8,
-                    &mut free_spills16,
+                    assigned,
+                    slot8_end,
+                    free_spills8,
+                    free_spills16,
                     &mut next_spill_off,
                 )?;
                 locs[iv.val as usize] = Loc::Spill(sp);

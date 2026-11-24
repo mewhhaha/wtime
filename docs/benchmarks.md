@@ -27,36 +27,36 @@ Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/re
 
 | Kernel | `wtime-aot x64` | `wtime-aot c (-O2)` | `wtime-aot rust (-O3)` | Wasmtime `49.0.3` | V8 (`Node v26.5`) | Parity hash |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `graph_bfs` | **1.17 µs** *(5.75× vs WT)* | 6.67 µs | **1.21 µs** *(5.54× vs WT)* | 6.73 µs | 2.65 µs | `04aa4f2359a193ae` |
-| `parser_hash` | **3.52 µs** *(1.00× vs WT)* | **3.45 µs** | **3.47 µs** *(1.02× vs WT)* | 3.52 µs | 3.54 µs | `0501be7dc7425cf0` |
-| `image_filter` | **3.63 µs** *(1.57× vs WT)* | **4.45 µs** *(1.28× vs WT)* | **3.52 µs** *(1.62× vs WT)* | 5.71 µs | 4.54 µs | `79b786ce0d4a3fc0` |
-| `ecs_kernel` | **6.61 µs** *(3.36× vs WT)* | **11.49 µs** *(1.93× vs WT)* | **7.10 µs** *(3.12× vs WT)* | 22.17 µs | 14.15 µs | `9f9dd941bb465bbb` |
+| `graph_bfs` | **1.13 µs** *(5.78× vs WT)* | 6.75 µs | **1.26 µs** *(5.21× vs WT)* | 6.54 µs | 2.59 µs | `04aa4f2359a193ae` |
+| `parser_hash` | **3.32 µs** *(1.16× vs WT)* | **3.31 µs** *(1.16× vs WT)* | **3.41 µs** *(1.12× vs WT)* | 3.84 µs | 3.74 µs | `0501be7dc7425cf0` |
+| `image_filter` | **4.70 µs** *(1.06× vs WT)* | **4.20 µs** *(1.18× vs WT)* | **3.61 µs** *(1.38× vs WT)* | 4.98 µs | 4.75 µs | `79b786ce0d4a3fc0` |
+| `ecs_kernel` | **5.34 µs** *(3.71× vs WT)* | **10.52 µs** *(1.88× vs WT)* | **6.39 µs** *(3.10× vs WT)* | 19.83 µs | 13.01 µs | `9f9dd941bb465bbb` |
 
-Across all 4 kernels, pure-Rust `--backend x64` achieves a **2.35×** geometric-mean speedup over Wasmtime `49.0.3`, edging out `--backend rust (-O3)` (**2.31×**).
+Across all 4 kernels, pure-Rust `--backend x64` beats both Wasmtime `49.0.3` and V8 (`Node v26.5`) on every kernel, achieving a **2.27×** geometric-mean speedup over Wasmtime `49.0.3`, edging out `--backend rust (-O3)` (**2.24×**) and beating Clang `-O2` by **1.97×** on `ecs_kernel`. On standalone Linux `ET_EXEC` workloads, `--backend x64` also adds runtime-gated 256-bit AVX2 loops (up to **1.88–1.97×** faster than SSE2 on vector loops), `8 GiB + 64 KiB` guard-page bounds-check elimination, and built-in pure-x64 Ryū float/bench runtime support (executing 10/10 Goose examples byte-exact and 4/4 Goose bench fixtures within **1.01–1.24×** of `rustc -O3`), while `--backend aarch64` delivers multi-core parallel builds (**3.14×** faster on 2,000-fn cold builds) and full **236/236** NEON SIMD parity.
 
 ---
 
 ## 3. Compilation, Incremental Rebuilds, & Warm Load
 
-Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds on a real **3.90 MiB, 5,034-function** WebAssembly application (`--jobs 0`, 16 threads) plus the 4 self-contained kernels.
+Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds on a real **3.96 MiB, 5,072-function** WebAssembly application (`--jobs 0`, 16 threads) plus the 4 self-contained kernels.
 
 - **Cold compile boundary** (identical across engines): fresh process reads `.wasm` from disk, compiles multi-core, and writes the compiled artifact (`.so` + `.sha256` for `wtime-aot`; serialized `.cwasm` for Wasmtime).
-- **1-function edit boundary**: inserts a `nop` into one function body with a warmed cache (`x64-inc-v7` parallel function cache for `x64`, `c-obj/` shard cache for `c`; full recompile for Wasmtime).
+- **1-function edit boundary**: inserts a `nop` into one function body with a warmed cache (`x64-inc-v7` parallel function cache with parallel SHA-256 Merkle trailer for `x64`, `c-obj/` shard cache for `c`; full recompile for Wasmtime).
 - **Warm artifact load boundary**: fresh process maps and validates the compiled artifact (`dlopen(..., RTLD_NOW)` + `dlsym` for `.so`; `Module::deserialize_file` for `.cwasm`).
 
 ![Cold compilation time comparing wtime-aot backends and Wasmtime](../tools/wtime-aot/charts/compile-cold.svg)
 
 ![Incremental rebuild, warm load, and cache hit latency](../tools/wtime-aot/charts/compile-hot.svg)
 
-| Metric (`5,034`-fn, `3.90 MiB` app) | `wtime-aot x64` | `wtime-aot c (-O2)` | Wasmtime `49.0.3` |
+| Metric (`5,072`-fn, `3.96 MiB` app) | `wtime-aot x64` | `wtime-aot c (-O2)` | Wasmtime `49.0.3` |
 | --- | ---: | ---: | ---: |
-| Cold compile (empty cache, 16T) | **152 ms** *(2.04× vs WT, 102× vs c)* | 15.45 s | 309 ms |
-| Incremental 1-fn edit (warm cache, 16T) | **61.5 ms** *(4.96× vs WT, 13.4× vs c)* | 825 ms | 305 ms |
-| Warm fresh-process load (`.so` vs `.cwasm`) | **0.027 ms** *(80× vs WT)* | **0.188 ms** | 2.16 ms |
-| Warm CLI `wtime-aot build --cache` hit | **22.1 ms** | 323 ms | — |
-| Compiled artifact size | **6.74 MiB** (`.so`) | 9.24 MiB (`.so`) | 7.69 MiB (`.cwasm`) |
+| Cold compile (empty cache, 16T) | **141.5 ms** *(2.17× vs WT, 114× vs c)* | 16.16 s | 306.5 ms |
+| Incremental 1-fn edit (warm cache, 16T) | **62.1 ms** *(5.97× vs WT, 15.6× vs c)* | 970 ms | 371.0 ms |
+| Warm fresh-process load (`.so` vs `.cwasm`) | **0.036 ms** *(60× vs WT)* | **0.180 ms** | 2.16 ms |
+| Warm CLI `wtime-aot build --cache` hit | **22.0 ms** | 375 ms | — |
+| Compiled artifact size | **6.81 MiB** (`.so`) | 9.36 MiB (`.so`) | 7.76 MiB (`.cwasm`) |
 
-On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.39–1.70 ms** (warm cache hits **0.81–0.93 ms**), beating Wasmtime (**1.56–1.92 ms**) on all 4 kernels, compared to **441–470 ms** for Clang `-O2` and **1.90–2.01 s** for Rust `-O3`.
+On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.42–2.15 ms** (warm cache hits **0.76–1.08 ms**), beating Wasmtime (**1.55–1.83 ms**) on 3 of 4 kernels, compared to **397–610 ms** for Clang `-O2` and **1.80–2.03 s** for Rust `-O3`.
 
 ---
 
@@ -78,7 +78,7 @@ On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.39–1.7
 The core interpreter (`crates/*`) intentionally excludes JIT compilation and native stack execution to keep `#![forbid(unsafe_code)]`, zero dependencies, deterministic source-level fuel, and full Core 3.0 + Phase 3–5 semantics:
 
 - **Fast cold startup & small inputs**: on short programs and uncached cold loads, `wtime-runtime` finishes in **0.06–0.15×** of V8's process time and avoids multi-second uncached JIT compilation (preparing a `7.3 MiB` compiler module in `0.20–0.29 s` vs. `5.4–7.5 s` for uncached Wasmtime).
-- **Compute-heavy steady state**: long-running CPU loops run roughly **10–120×** slower than native JIT/AOT code in the default decoded interpreter. Enabling the opt-in experimental `--features register-executor` lazy untyped-`u64` register tier speeds up the 4 kernel workloads by **1.82–4.07×** (`graph_bfs` `2.89×`, `parser_hash` `4.07×`, `image_filter` `1.82×`, `ecs_f64` `3.49×`) while preserving bit-exact Wasm semantics, source-level fuel, and cancellation (and lazily admitting `83.5%` of functions in the 5k-fn app in `32 ms`). When native throughput matters, compile hot modules ahead of time with `tools/wtime-aot`.
+- **Compute-heavy steady state**: long-running CPU loops run roughly **10–120×** slower than native JIT/AOT code in the default decoded interpreter. Enabling the opt-in experimental `--features register-executor` lazy untyped-`u64` register tier (12-byte packed `RegOp`, direct 2-page memory slice cache, zero-`Arc` intra-instance calls, fused integer/float/branch superinstructions, and native `call_indirect`/`memory.copy`/`memory.fill`/`memory.grow` lowering) speeds up the 4 kernel workloads by **3.68–4.22×** (`ecs_f64` `4.22×`, `parser_hash` `3.89×`, `graph_bfs` `3.85×`, `image_filter` `3.68×`) while preserving bit-exact Wasm semantics, source-level fuel, and cancellation — and lazily admitting **99.8%** (`5,047 / 5,057`) of functions in the 5k-fn app in `38.3 ms`. When native throughput matters, compile hot modules ahead of time with `tools/wtime-aot`.
 
 See [`tools/wtime-goose/README.md`](../tools/wtime-goose/README.md#results-2026-11-20) for the full interpreter benchmark tables.
 
