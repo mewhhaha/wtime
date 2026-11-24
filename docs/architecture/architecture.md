@@ -1,12 +1,12 @@
 # Runtime architecture
 
-Status: `v0.1.0` core interpreter architecture.
+Status: `v0.1.x` core interpreter architecture.
 
 ## Scope and design choices
 
 Build a portable **interpreter for Core WebAssembly** in Rust. Implement the core portions of every finished proposal and every active proposal at Phase 3 or later in the pinned catalog. Browser and JavaScript embedding APIs are excluded. See [scope.md](scope.md) and [spec-lock.json](spec-lock.json) for the 24 included entries (including MVP and tooling-only annotations), five excluded JS/browser entries, and the partial core-only scope of custom descriptors.
 
-The verified `v0.1.0` native target is 64-bit Linux `x86_64-unknown-linux-gnu`; native `aarch64-unknown-linux-gnu` release verification is planned for a follow-up release. Keep byte order, guest widths and reference representation portable; host-address limits are resource limits, not alternate guest semantics. Portable software SIMD and explicit checked accesses avoid native SIMD/JIT prerequisites. A 32-bit-host port, no_std, WASI, component model, JS engine integration, JIT/AOT, optimizing IR, debugger protocol, custom allocator and package ecosystem are outside this goal. WASI is an embedding interface, not implied by core conformance.
+The verified `v0.1.x` native target is 64-bit Linux `x86_64-unknown-linux-gnu`; native `aarch64-unknown-linux-gnu` release verification is planned for a follow-up release. Keep byte order, guest widths and reference representation portable; host-address limits are resource limits, not alternate guest semantics. Portable software SIMD and explicit checked accesses avoid native SIMD/JIT prerequisites. A 32-bit-host port, no_std, WASI, component model, JS engine integration, JIT/AOT, optimizing IR, debugger protocol, custom allocator and package ecosystem are outside this goal. WASI is an embedding interface, not implied by core conformance.
 
 Interpretation is a deliberate implementation strategy, not a temporary second backend. It gives fast Rust builds and low Wasm-module preparation latency: decode, validate and lower to simple instructions, without optimization passes. Start with explicit instructions plus side tables; measure before compact bytecode, opcode fusion or register allocation. No Cranelift, LLVM, Tokio or native stack-switching dependency.
 

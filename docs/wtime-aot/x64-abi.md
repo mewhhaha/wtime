@@ -116,7 +116,7 @@ also maintain a SHA-256-integrity-checked per-function incremental cache under
   must configure `SA_ONSTACK` + `sigaltstack`.
 
 ### Blot ABI 8 Exports (18 Symbols)
-All three Blot backends (`x64`, `c`, `rust`) expose the same 18 C-ABI symbols:
+All four Blot backends (`x64`, `aarch64`, `c`, `rust`) expose the same 18 C-ABI symbols:
 - Metadata: `blot_aot_abi_version` (returns `1`), `blot_aot_trap_message`,
   `blot_aot_import_count`, `blot_aot_import_name` (exact byte lengths, preserving
   embedded NULs).
@@ -143,7 +143,7 @@ All three Blot backends (`x64`, `c`, `rust`) expose the same 18 C-ABI symbols:
   `blot_aot_active_allocate`, `blot_aot_active_reset`,
   `blot_aot_active_get_global`. Synchronous callback reentry is capped at
   `MAX_ACTIVE_REENTRY_DEPTH = 16` on `--backend x64` (`TRAP_CALL_STACK = 8`).
-- **MXCSR isolation**: all three backends save host MXCSR on entry, execute Wasm
+- **MXCSR isolation**: all three x86-64 Blot backends (`x64`, `c`, `rust`) save host MXCSR on entry, execute Wasm
   under canonical `0x1f80` (subnormals preserved, round-to-nearest-even), restore
   host MXCSR around `host_fn` callbacks, and restore host MXCSR on normal or
   trapping return.

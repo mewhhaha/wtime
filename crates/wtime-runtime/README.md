@@ -11,7 +11,7 @@ workspace.
 - Uses explicit heap guest frames (no native JIT or guest stack execution),
   lazily paged linear memory, a non-moving mark/sweep GC, source-level fuel
   metering, cooperative cancellation, and bounded resource limits.
-- Supported `v0.1.0` target: `x86_64-unknown-linux-gnu`.
+- Supported `v0.1.x` target: `x86_64-unknown-linux-gnu`.
 
 See the [embedding guide](https://github.com/mewhhaha/wtime/blob/main/docs/embedding.md),
 [API contract](https://github.com/mewhhaha/wtime/blob/main/docs/architecture/api.md),

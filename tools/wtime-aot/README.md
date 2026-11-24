@@ -18,9 +18,11 @@ validator and compiles it ahead of time through one of four backends:
 - **`--backend x64`** (`--blot-cdylib` or standalone static Linux x86-64
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) SSA
   optimizer, register allocator, independent IR/allocation verifier (enabled by
-  default), x86-64 assembler, and ELF64 linker with zero external compilers,
-  zero subprocesses, and zero `libc`/`DT_NEEDED` runtime dependencies. Supports
-  `memory32`, `memory64`, and all 236 fixed-width 128-bit Wasm SIMD opcodes. See
+  default in `X64CompileOptions`, single-shot CLI, and debug builds; opt-in via
+  `WTIME_AOT_VERIFY=1` for release `build --cache`), x86-64 assembler, and
+  ELF64 linker with zero external compilers, zero subprocesses, and zero
+  `libc`/`DT_NEEDED` runtime dependencies. Supports `memory32`, `memory64`, and
+  all 236 fixed-width 128-bit Wasm SIMD opcodes. See
   [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md) for the exact
   admission, ABI, stack, signal, and CET `rdsspq` contract.
 - **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
@@ -132,10 +134,11 @@ toolchain, target-CPU, and active Cargo-config inputs (with owner-private `0700`
 directories and immutable SHA-256 sidecars).
 
 Per-backend input and build bounds:
-- **Max input `.wasm` size**: `64 MiB` for `--backend x64`; `256 MiB` for
-  `--backend c` and `--backend rust` (inputs must be regular files, opened
-  non-blockingly on Unix to reject FIFOs/devices immediately, and read in
-  deadline-checked 64 KiB chunks before full buffering).
+- **Max input `.wasm` size**: `64 MiB` for `--backend x64` and
+  `--backend aarch64`; `256 MiB` for `--backend c` and `--backend rust` (inputs
+  must be regular files, opened non-blockingly on Unix to reject FIFOs/devices
+  immediately, and read in deadline-checked 64 KiB chunks before full
+  buffering).
 - **Build timeout**: `--time-limit SECONDS` (default `3600`) bounds regular-file
   reads, validation, codegen, and child compiler/linker processes (run builds on
   untrusted inputs inside an OS memory cgroup as well).
@@ -159,8 +162,12 @@ Per-backend input and build bounds:
     with a sanitized environment and verifies compiler/linker/header identity
     before publishing to `c-obj/`; host C compiler soundness is part of the
     build trust boundary.
-  - `--backend x64` invokes no external compilers or linkers at all, enforces
-    mandatory IR and register-allocation verification by default, and fails
-    closed (`TRAP_UNSUPPORTED_ISA = 22`) on CPUs missing SSE4.1/POPCNT (or
-    ABM/BMI1 for `x64-v3`) or on threads with active Linux CET hardware shadow
-    stacks (`rdsspq != 0`).
+  - `--backend x64` invokes no external compilers or linkers at all, includes an
+    independent IR and register-allocation verifier (`WTIME_AOT_VERIFY=1` for
+    release `build --cache`; enabled by default in single-shot CLI and debug
+    builds), and fails closed (`TRAP_UNSUPPORTED_ISA = 22`) on CPUs missing
+    SSE4.1/POPCNT (or ABM/BMI1 for `x64-v3`) or on threads with active Linux
+    CET hardware shadow stacks (`rdsspq != 0`).
+  - `--backend aarch64` likewise invokes no external compilers or linkers and
+    emits Linux AArch64 ELF64 Blot ABI 8 `.so` libraries and static `ET_EXEC`
+    executables directly in pure safe Rust.

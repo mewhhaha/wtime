@@ -29,10 +29,14 @@ compiler tooling**:
    - `--backend c` invokes the operator's host C compiler (`clang`/`gcc`) and
      linker (`ld.lld`/`ld`) on generated C99; compiler bugs and operator-owned
      toolchain/header integrity are part of the build trust boundary.
-   - `--backend x64` emits Linux x86-64 LP64 machine code directly in pure safe
-     Rust with zero external compilers or `libc`. Generated `.so` modules run
-     on a dedicated `mmap`ed guest stack with a `PROT_NONE` guard page and
-     enforce CPUID + `rdsspq` CET shadow-stack checks at runtime.
+   - `--backend x64` emits Linux x86-64 LP64 machine code (`.so` and static
+     `ET_EXEC`) directly in pure safe Rust with zero external compilers or
+     `libc`. Generated `.so` modules run on a dedicated `mmap`ed guest stack
+     with a `PROT_NONE` guard page and enforce CPUID + `rdsspq` CET
+     shadow-stack checks at runtime.
+   - `--backend aarch64` emits Linux AArch64 ELF64 machine code (Blot ABI 8
+     `.so` and static `ET_EXEC`) directly in pure safe Rust with zero external
+     compilers or `libc`.
    - Run `wtime-aot build` on untrusted modules with `--time-limit` and an OS
      memory cgroup, using a private cache directory (`0700`) owned solely by the
      operator.

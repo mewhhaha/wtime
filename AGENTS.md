@@ -11,9 +11,9 @@
   disabled by default and must preserve Wasm semantics, resource limits,
   source-level fuel, and cancellation contracts.
 - `tools/wtime-aot` is a standalone opt-in AOT compiler excluded from the core
-  workspace dependency graph. Keep `--backend x64`, `--backend c`, and
-  `--backend rust` aligned on the Blot ABI 8 contract documented in
-  `docs/wtime-aot/x64-abi.md`.
+  workspace dependency graph. Keep `--backend x64`, `--backend aarch64`,
+  `--backend c`, and `--backend rust` aligned on the Blot ABI 8 contract
+  documented in `docs/wtime-aot/x64-abi.md`.
 
 ## Verification
 

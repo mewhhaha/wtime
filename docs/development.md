@@ -20,7 +20,7 @@ Standalone tools excluded from the core workspace dependency graph:
 
 | Tool | Role |
 | --- | --- |
-| [`tools/wtime-aot`](../tools/wtime-aot/README.md) | Opt-in ahead-of-time compiler (`--backend x64`, `--backend c`, `--backend rust`) |
+| [`tools/wtime-aot`](../tools/wtime-aot/README.md) | Opt-in ahead-of-time compiler (`--backend x64`, `--backend aarch64`, `--backend c`, `--backend rust`) |
 | [`tools/wtime-goose`](../tools/wtime-goose/README.md) | Goose host & benchmark harness comparing `wtime`, `wtime-aot`, Wasmtime, and V8 |
 
 ---
@@ -86,9 +86,9 @@ WTIME_AOT_REQUIRE_NATIVE_TESTS=1 cargo test --locked --manifest-path tools/wtime
 
 ---
 
-## `v0.1.0` Release Scope & Further Reading
+## `v0.1.x` Release Scope & Further Reading
 
-- **Supported `v0.1.0` target**: `x86_64-unknown-linux-gnu` (native AArch64 release verification is planned for a follow-up release).
+- **Supported `v0.1.x` target**: `x86_64-unknown-linux-gnu` (native AArch64 release verification is planned for a follow-up release).
 - **Spec scope**: WebAssembly Core 3.0 plus active Phase 3–5 proposals listed in [architecture/scope.md](architecture/scope.md). Browser/JS embedding APIs are excluded.
 - **Additional docs**:
   - [Embedding guide](embedding.md) and [native examples](../examples/README.md)
