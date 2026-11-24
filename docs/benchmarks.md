@@ -27,10 +27,10 @@ Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/re
 
 | Kernel | `wtime-aot x64` | `wtime-aot c (-O2)` | `wtime-aot rust (-O3)` | Wasmtime `49.0.3` | V8 (`Node v26.5`) | Parity hash |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `graph_bfs` | **1.66 µs** *(4.0× vs WT)* | 6.52 µs | **1.13 µs** *(5.9× vs WT)* | 6.69 µs | 2.58 µs | `04aa4f2359a193ae` |
-| `parser_hash` | **3.32 µs** | 3.36 µs | 3.46 µs | 3.37 µs | 3.48 µs | `0501be7dc7425cf0` |
-| `image_filter` | **4.83 µs** *(1.0× vs WT)* | **4.11 µs** *(1.2× vs WT)* | **3.44 µs** *(1.4× vs WT)* | 4.83 µs | 4.75 µs | `79b786ce0d4a3fc0` |
-| `ecs_kernel` | **12.56 µs** *(1.8× vs WT)* | **10.93 µs** *(2.1× vs WT)* | **7.25 µs** *(3.2× vs WT)* | 22.99 µs | 15.78 µs | `9f9dd941bb465bbb` |
+| `graph_bfs` | **1.17 µs** *(5.7× vs WT)* | 6.64 µs | **1.16 µs** *(5.8× vs WT)* | 6.71 µs | 2.62 µs | `04aa4f2359a193ae` |
+| `parser_hash` | **3.46 µs** *(1.08× vs WT)* | 3.64 µs | 3.66 µs | 3.75 µs | 3.70 µs | `0501be7dc7425cf0` |
+| `image_filter` | **5.27 µs** *(1.04× vs WT)* | **4.40 µs** *(1.24× vs WT)* | **3.61 µs** *(1.52× vs WT)* | 5.47 µs | 5.35 µs | `79b786ce0d4a3fc0` |
+| `ecs_kernel` | **8.00 µs** *(2.7× vs WT)* | **11.19 µs** *(1.9× vs WT)* | **6.81 µs** *(3.2× vs WT)* | 21.57 µs | 14.17 µs | `9f9dd941bb465bbb` |
 
 ---
 
@@ -39,7 +39,7 @@ Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/re
 Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds on a real **3.75 MiB, 5,036-function** WebAssembly application (`--jobs 0`, 16 threads) plus the 4 self-contained kernels.
 
 - **Cold compile boundary** (identical across engines): fresh process reads `.wasm` from disk, compiles multi-core, and writes the compiled artifact (`.so` + `.sha256` for `wtime-aot`; serialized `.cwasm` for Wasmtime).
-- **1-function edit boundary**: inserts a `nop` into one function body with a warmed cache (`x64-inc-v5` function cache for `x64`, `c-obj/` shard cache for `c`; full recompile for Wasmtime).
+- **1-function edit boundary**: inserts a `nop` into one function body with a warmed cache (`x64-inc-v6` parallel function cache for `x64`, `c-obj/` shard cache for `c`; full recompile for Wasmtime).
 - **Warm artifact load boundary**: fresh process maps and validates the compiled artifact (`dlopen(..., RTLD_NOW)` + `dlsym` for `.so`; `Engine::new` + `Module::deserialize_file` for `.cwasm`).
 
 ![Cold compilation time comparing wtime-aot backends and Wasmtime](../tools/wtime-aot/charts/compile-cold.svg)
@@ -48,13 +48,13 @@ Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds 
 
 | Metric (`5,036`-fn, `3.75 MiB` app) | `wtime-aot x64` | `wtime-aot c (-O2)` | Wasmtime `49.0.3` |
 | --- | ---: | ---: | ---: |
-| Cold compile (empty cache, 16T) | **210 ms** *(1.5× vs WT, 39× vs c)* | 8.21 s | 318 ms |
-| Incremental 1-fn edit (warm cache, 16T) | **81.4 ms** *(3.8× vs WT, 12.5× vs c)* | 1.02 s | 312 ms |
-| Warm fresh-process load (`.so` vs `.cwasm`) | **0.039 ms** *(83× vs WT)* | **0.226 ms** | 3.26 ms |
-| Warm CLI `wtime-aot build --cache` hit | **31.7 ms** | 382 ms | — |
-| Compiled artifact size | **6.46 MiB** (`.so`) | 9.01 MiB (`.so`) | 7.51 MiB (`.cwasm`) |
+| Cold compile (empty cache, 16T) | **195 ms** *(1.5× vs WT, 38× vs c)* | 7.38 s | 294 ms |
+| Incremental 1-fn edit (warm cache, 16T) | **63.3 ms** *(4.8× vs WT, 12.3× vs c)* | 781 ms | 306 ms |
+| Warm fresh-process load (`.so` vs `.cwasm`) | **0.032 ms** *(68× vs WT)* | **0.195 ms** | 2.18 ms |
+| Warm CLI `wtime-aot build --cache` hit | **21.1 ms** | 278 ms | — |
+| Compiled artifact size | **6.61 MiB** (`.so`) | 9.01 MiB (`.so`) | 7.51 MiB (`.cwasm`) |
 
-On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.34–1.76 ms** (warm cache hits **0.80–0.91 ms**), matching or beating Wasmtime (**1.63–5.41 ms**), compared to **447–504 ms** for Clang `-O2` and **1.90–2.21 s** for Rust `-O3`.
+On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.69–1.91 ms** (warm cache hits **0.82–0.97 ms**), matching or beating Wasmtime (**1.62–2.25 ms**), compared to **451–579 ms** for Clang `-O2` and **2.00–2.33 s** for Rust `-O3`.
 
 ---
 

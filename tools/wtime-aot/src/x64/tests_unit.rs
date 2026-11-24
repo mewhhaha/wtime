@@ -2501,21 +2501,29 @@ fn stage3_council_round1_regressions() {
             "truncated signed cache file must fall back cleanly"
         );
 
-        // Crafted signed cache file with out-of-range `eff_callees` index (9999) and bogus huge
+        // Crafted signed cache file with out-of-range `inlined_callees` index (9999) and bogus huge
         // `n_relocs` must return `None` from `load_inc_cache` without panicking or OOMing.
         {
-            let mut bad = orig[..orig.len() - 32].to_vec();
-            // Header is 53 bytes (8 magic + 4 ver + 32 abi_hash + 4 n_defs + 4 global_words + 1 hit_cap).
-            // First fn starts at offset 53: 32 raw_body_hash + 1 flags = offset 86 for n_pre.
-            // Overwrite first fn's `inlined_callees` to contain out-of-range callee 9999!
-            let mut crafted = bad[..53].to_vec();
-            crafted.extend_from_slice(&[0u8; 32]); // raw_body_hash
-            crafted.push(0); // flags
-            crafted.extend_from_slice(&0u32.to_le_bytes()); // n_pre = 0
-            crafted.extend_from_slice(&1u32.to_le_bytes()); // n_inlined = 1
-            crafted.extend_from_slice(&9999u32.to_le_bytes()); // OOB callee!
-            crafted.extend_from_slice(&[0u8; 200]); // padding
-            bad.clear();
+            let mut entries = Vec::new();
+            let mut offsets = vec![0u32];
+            for fi in 0..4 {
+                entries.extend_from_slice(&[0u8; 32]); // raw_body_hash
+                entries.push(0); // flags
+                entries.extend_from_slice(&0u32.to_le_bytes()); // n_pre = 0
+                if fi == 0 {
+                    entries.extend_from_slice(&1u32.to_le_bytes()); // n_inlined = 1
+                    entries.extend_from_slice(&9999u32.to_le_bytes()); // OOB callee!
+                } else {
+                    entries.extend_from_slice(&0u32.to_le_bytes()); // n_inlined = 0
+                }
+                entries.extend_from_slice(&[0u8; 160]); // padding >= min_fn_wire
+                offsets.push(entries.len() as u32);
+            }
+            let mut crafted = orig[..53].to_vec();
+            for off in offsets {
+                crafted.extend_from_slice(&off.to_le_bytes());
+            }
+            crafted.extend_from_slice(&entries);
             let abi: [u8; 32] = crafted[12..44].try_into().unwrap();
             let zero_hashes = [[0u8; 32]; 4];
             std::fs::write(&bin_path, sign_payload(&crafted)).unwrap();
@@ -2556,32 +2564,39 @@ fn stage3_council_round1_regressions() {
         // 3d. Crafted cache file with `RelocTarget::LocalRodata(0)` when `ro_len == 0` must be
         //     rejected by `load_inc_cache` rather than causing a link-time failure.
         {
-            let mut crafted = orig[..53].to_vec();
+            let mut entries = Vec::new();
+            let mut offsets = vec![0u32];
             for _ in 0..4 {
-                crafted.extend_from_slice(&[0u8; 32]); // raw_body_hash
-                crafted.push(0); // flags
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_pre
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_inlined
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // inline_added_insts
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_eff
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_elide
-                crafted.extend_from_slice(&0u64.to_le_bytes()); // written_tables
-                crafted.extend_from_slice(&0i32.to_le_bytes()); // max_helper_bytes
-                crafted.extend_from_slice(&0i32.to_le_bytes()); // own_stack_bytes
-                crafted.extend_from_slice(&0i32.to_le_bytes()); // elided_callee_stack_bytes
-                crafted.extend_from_slice(&[0u8; 32]); // callee_effects_hash
-                crafted.extend_from_slice(&[0u8; 32]); // callee_trap_hash
-                crafted.extend_from_slice(&8u32.to_le_bytes()); // pre_relax_code_len = 8
-                crafted.extend_from_slice(&8u32.to_le_bytes()); // code_len = 8
-                crafted.extend_from_slice(&[0x90u8; 8]); // code
-                crafted.extend_from_slice(&1u32.to_le_bytes()); // n_relocs = 1
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // patch_off = 0
-                crafted.extend_from_slice(&4u32.to_le_bytes()); // next_ip_off = 4
-                crafted.push(3u8); // RelocTarget::LocalRodata
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // off = 0
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // ro_len = 0 (invalid with LocalRodata(0)!)
-                crafted.extend_from_slice(&0u32.to_le_bytes()); // n_jt = 0
+                entries.extend_from_slice(&[0u8; 32]); // raw_body_hash
+                entries.push(0); // flags
+                entries.extend_from_slice(&0u32.to_le_bytes()); // n_pre
+                entries.extend_from_slice(&0u32.to_le_bytes()); // n_inlined
+                entries.extend_from_slice(&0u32.to_le_bytes()); // inline_added_insts
+                entries.extend_from_slice(&0u32.to_le_bytes()); // n_eff
+                entries.extend_from_slice(&0u32.to_le_bytes()); // n_elide
+                entries.extend_from_slice(&0u64.to_le_bytes()); // written_tables
+                entries.extend_from_slice(&0i32.to_le_bytes()); // max_helper_bytes
+                entries.extend_from_slice(&0i32.to_le_bytes()); // own_stack_bytes
+                entries.extend_from_slice(&0i32.to_le_bytes()); // elided_callee_stack_bytes
+                entries.extend_from_slice(&[0u8; 32]); // callee_effects_hash
+                entries.extend_from_slice(&[0u8; 32]); // callee_trap_hash
+                entries.extend_from_slice(&8u32.to_le_bytes()); // pre_relax_code_len = 8
+                entries.extend_from_slice(&8u32.to_le_bytes()); // code_len = 8
+                entries.extend_from_slice(&[0x90u8; 8]); // code
+                entries.extend_from_slice(&1u32.to_le_bytes()); // n_relocs = 1
+                entries.extend_from_slice(&0u32.to_le_bytes()); // patch_off = 0
+                entries.extend_from_slice(&4u32.to_le_bytes()); // next_ip_off = 4
+                entries.push(3u8); // RelocTarget::LocalRodata
+                entries.extend_from_slice(&0u32.to_le_bytes()); // off = 0
+                entries.extend_from_slice(&0u32.to_le_bytes()); // ro_len = 0 (invalid with LocalRodata(0)!)
+                entries.extend_from_slice(&0u32.to_le_bytes()); // n_jt = 0
+                offsets.push(entries.len() as u32);
             }
+            let mut crafted = orig[..53].to_vec();
+            for off in offsets {
+                crafted.extend_from_slice(&off.to_le_bytes());
+            }
+            crafted.extend_from_slice(&entries);
             let abi: [u8; 32] = crafted[12..44].try_into().unwrap();
             let zero_hashes = [[0u8; 32]; 4];
             let _ = std::fs::remove_file(&bin_path);
@@ -3024,5 +3039,357 @@ fn stage4_hills_ir_loop_versioning_short_circuit_and_parallel_admit() {
             so_inc, so_cold,
             "300-fn parallel admit + inc cache parity failed on edit_kind={edit_kind}"
         );
+    }
+}
+
+#[test]
+fn stage5_wave2_rotation_alignment_memcopy_forward_and_inc_v6() {
+    use super::asm::{Asm, Cond, Gp, RelocTarget};
+    use super::ir::{Op, StoreKind, Term};
+    use super::opt;
+
+    // 1. `graph_bfs.wasm` + `image_filter.wasm`: verify loop rotation turns top-tested loops into
+    //    bottom-tested loops (`is_loop_header` blocks contain actual loop work) and hot-fallthrough
+    //    layout keeps loop latches contiguous while sinking cold side bodies.
+    {
+        let bfs_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/graph_bfs.wasm");
+        let bfs_wasm = std::fs::read(&bfs_path).expect("read graph_bfs.wasm");
+        let val = wtime_validate::validate(
+            &bfs_wasm,
+            &super::module::x64_validate_features(),
+            &super::module::x64_validate_limits(),
+        )
+        .unwrap();
+        let module = super::module::admit_x64_module(val.decoded()).unwrap();
+        let mut irs: Vec<_> = (0..val.decoded().code.len())
+            .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+            .collect();
+        opt::inline_small_helpers(&mut irs, &module, None).unwrap();
+        let eff = opt::compute_module_effects(&irs, &module, None).unwrap();
+        opt::optimize_func_stage2(&mut irs[2], &module, &eff, None).unwrap();
+        verify_ir(&irs[2], &module).unwrap();
+        let alloc = super::regalloc::allocate(&irs[2]).unwrap();
+        verify_alloc(&irs[2], &alloc).unwrap();
+
+        let inner_hdr_oi = alloc
+            .block_order
+            .iter()
+            .position(|&b| {
+                let bb = &irs[2].blocks[b as usize];
+                bb.is_loop_header
+                    && matches!(bb.term, Term::CmpBranch { .. })
+                    && bb.insts.is_empty()
+            })
+            .expect("expected rotated inner loop header in graph_bfs");
+        let next_b = alloc.block_order[inner_hdr_oi + 1];
+        let next_has_store = irs[2].blocks[next_b as usize]
+            .insts
+            .iter()
+            .any(|ins| matches!(ins.op, Op::Store { .. }));
+        assert!(
+            !next_has_store,
+            "hot-fallthrough layout must sink store-heavy `hit` block out of line after inner loop latch"
+        );
+    }
+    {
+        let img_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/image_filter.wasm");
+        let img_wasm = std::fs::read(&img_path).expect("read image_filter.wasm");
+        let val = wtime_validate::validate(
+            &img_wasm,
+            &super::module::x64_validate_features(),
+            &super::module::x64_validate_limits(),
+        )
+        .unwrap();
+        let module = super::module::admit_x64_module(val.decoded()).unwrap();
+        let mut irs: Vec<_> = (0..val.decoded().code.len())
+            .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+            .collect();
+        opt::inline_small_helpers(&mut irs, &module, None).unwrap();
+        let eff = opt::compute_module_effects(&irs, &module, None).unwrap();
+        opt::optimize_func_stage2(&mut irs[1], &module, &eff, None).unwrap();
+        verify_ir(&irs[1], &module).unwrap();
+        let alloc = super::regalloc::allocate(&irs[1]).unwrap();
+        verify_alloc(&irs[1], &alloc).unwrap();
+
+        let fast_rotated_hdrs = irs[1]
+            .blocks
+            .iter()
+            .filter(|bb| {
+                bb.is_loop_header
+                    && bb.insts.iter().any(|ins| {
+                        matches!(
+                            ins.op,
+                            Op::Load { checked: true, .. } | Op::Store { checked: true, .. }
+                        )
+                    })
+            })
+            .count();
+        assert!(
+            fast_rotated_hdrs >= 2,
+            "both fast versioned loops in image_filter must rotate (got {fast_rotated_hdrs})"
+        );
+    }
+
+    // 2. `Asm::mark_align16`: verify exact 16-byte alignment, relocation offset preservation across
+    //    NOP padding, and safe skipping when padding would overflow a crossing `rel8` branch.
+    {
+        let mut a = Asm::new();
+        let lbl_loop = a.new_label();
+        let lbl_exit = a.new_label();
+        a.nop(); // 1 B -> call at 1..6 (`next_ip_off == 6`)
+        a.call_reloc(RelocTarget::Func(0));
+        let pre_reloc_patch = a.relocs[0].patch_off;
+        let pre_reloc_next = a.relocs[0].next_ip_off;
+        a.mark_align16(lbl_loop);
+        a.bind(lbl_loop);
+        a.call_reloc(RelocTarget::Func(1));
+        let post_reloc_orig_patch = a.relocs[1].patch_off;
+        a.cmp_ri(false, Gp::Rax, 0);
+        a.jcc(Cond::E, lbl_exit);
+        a.jmp(lbl_loop);
+        a.bind(lbl_exit);
+        a.ret();
+        a.finish_labels().unwrap();
+
+        assert_eq!(
+            a.relocs[0].patch_off, pre_reloc_patch,
+            "reloc ending right before aligned label must keep patch_off unshifted"
+        );
+        assert_eq!(
+            a.relocs[0].next_ip_off, pre_reloc_next,
+            "reloc ending right before aligned label must keep next_ip_off unshifted"
+        );
+        assert_eq!(
+            a.relocs[1].patch_off,
+            post_reloc_orig_patch + 10,
+            "reloc starting at aligned label must shift forward by exact NOP pad (10 B)"
+        );
+        assert_eq!(
+            (a.relocs[1].patch_off - 1) & 15,
+            0,
+            "aligned loop header start must sit on an exact 16-byte boundary"
+        );
+    }
+    {
+        // `rel8` boundary safety: forward `jcc` crosses a misaligned `align16` label with
+        // displacement `+124` (after relaxation); inserting 13 B of NOPs would push it to `+137 > 127`,
+        // so `finish_labels` must skip padding that label rather than overflowing `i8`.
+        let mut a = Asm::new();
+        let lbl_mid = a.new_label();
+        let lbl_far = a.new_label();
+        a.nop();
+        a.jcc(Cond::E, lbl_far);
+        a.mark_align16(lbl_mid);
+        a.bind(lbl_mid);
+        for _ in 0..124 {
+            a.nop();
+        }
+        a.bind(lbl_far);
+        a.ret();
+        a.finish_labels().unwrap();
+        assert_eq!(a.code[1], 0x74, "expected relaxed je rel8");
+        assert_eq!(
+            a.code[2] as i8, 124,
+            "rel8 displacement must stay exact +124"
+        );
+    }
+
+    // 3. `MemCopyConst` store-to-load forwarding + checked-store offset folding in counted loops.
+    {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+        body.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]);
+        body.extend_from_slice(&[0x20, 1, 0x41, 5, 0x74, 0x21, 2]);
+        body.extend_from_slice(&[0x20, 2, 0x2b, 3, 0, 0x21, 3]);
+        body.extend_from_slice(&[0x20, 2, 0x2b, 3, 8, 0x21, 4]);
+        body.extend_from_slice(&[0x20, 2, 0x2b, 3, 16, 0x21, 5]);
+        body.extend_from_slice(&[0x20, 2, 0x2b, 3, 24, 0x21, 6]);
+        body.extend_from_slice(&[0x20, 2, 0x20, 3, 0x20, 5, 0xa0, 0x39, 3, 0]);
+        body.extend_from_slice(&[0x20, 2, 0x20, 4, 0x20, 6, 0xa0, 0x39, 3, 8]);
+        body.extend_from_slice(&[0x20, 2, 0x41]);
+        leb_i32(&mut body, 4096);
+        body.extend_from_slice(&[0x6a, 0x20, 2, 0x41, 32, 0xfc, 0x0a, 0, 0]);
+        body.extend_from_slice(&[0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b]);
+        let wasm = wasm_module(&[
+            type_sec(&[(&[0x7f], &[])]),
+            func_sec(&[0]),
+            section(5, &[1, 0x01, 2, 2]),
+            export_sec(&[("f", 0, 0)]),
+            code_sec(&[enc_body(&[(2, 0x7f), (4, 0x7c)], &body)]),
+        ]);
+        let val = wtime_validate::validate(
+            &wasm,
+            &super::module::x64_validate_features(),
+            &super::module::x64_validate_limits(),
+        )
+        .unwrap();
+        let module = super::module::admit_x64_module(val.decoded()).unwrap();
+        let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, 0).unwrap();
+        let eff = opt::compute_module_effects(std::slice::from_ref(&ir), &module, None).unwrap();
+        opt::optimize_func_stage2(&mut ir, &module, &eff, None).unwrap();
+        verify_ir(&ir, &module).unwrap();
+
+        let has_memcopy = ir.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|ins| matches!(ins.op, Op::MemCopyConst { .. }))
+        });
+        assert!(
+            !has_memcopy,
+            "fully register-resident 32B MemCopyConst must be forwarded to direct checked f64 stores"
+        );
+        let folded_dest_stores = ir
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|ins| {
+                matches!(
+                    ins.op,
+                    Op::Store {
+                        kind: StoreKind::F64,
+                        offset: 4096 | 4104 | 4112 | 4120,
+                        checked: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(
+            folded_dest_stores >= 4,
+            "forwarded f64 stores must fold +4096 base offset (got {folded_dest_stores})"
+        );
+        let has_bce_free_loop = ir.blocks.iter().any(|b| {
+            b.is_loop_header
+                && b.insts.iter().any(|ins| {
+                    matches!(
+                        ins.op,
+                        Op::Store {
+                            kind: StoreKind::F64,
+                            offset: 4096,
+                            checked: true,
+                            ..
+                        }
+                    )
+                })
+                && !b
+                    .insts
+                    .iter()
+                    .any(|ins| matches!(ins.op, Op::BoundsCheck { .. }))
+        });
+        assert!(
+            has_bce_free_loop,
+            "versioned rotated fast loop must have folded f64 stores with zero BoundsChecks"
+        );
+    }
+
+    // 4. `inc_cache` v6 offset-table integrity hardening: crafted malformed offset tables and
+    //    trailing bytes inside an entry slice must all be rejected cleanly with `None`.
+    {
+        let root = crate::build::create_fresh_test_root("wtime-aot-inc-v6-hardening");
+        let w = wasm_module(&[
+            type_sec(&[(&[0x7f], &[0x7f])]),
+            func_sec(&[0, 0]),
+            code_sec(&[
+                enc_body(&[], &[0x20, 0, 0x41, 1, 0x6a]),
+                enc_body(&[], &[0x20, 0, 0x41, 2, 0x6a]),
+            ]),
+        ]);
+        let opts = X64CompileOptions {
+            opt: true,
+            inc_cache_dir: Some(root.0.clone()),
+            cache_key_salt: Some([0x77u8; 32]),
+            ..Default::default()
+        };
+        let expected_so = compile_wasm_to_x64_so(&w, &opts).unwrap();
+        let inc_dir = root.0.join("x64-inc");
+        let bin_path = std::fs::read_dir(&inc_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "bin"))
+            .expect("v6 cache file");
+        let orig = std::fs::read(&bin_path).unwrap();
+        let orig_payload = &orig[..orig.len() - 32];
+        let abi: [u8; 32] = orig_payload[12..44].try_into().unwrap();
+        let entries_base = 53 + 3 * 4;
+        let off1 = u32::from_le_bytes(orig_payload[53 + 4..53 + 8].try_into().unwrap());
+        let off2 = u32::from_le_bytes(orig_payload[53 + 8..53 + 12].try_into().unwrap());
+        let bh0: [u8; 32] = orig_payload[entries_base..entries_base + 32]
+            .try_into()
+            .unwrap();
+        let bh1: [u8; 32] = orig_payload
+            [entries_base + off1 as usize..entries_base + off1 as usize + 32]
+            .try_into()
+            .unwrap();
+        let bhs = [bh0, bh1];
+
+        let sign = |p: &[u8]| -> Vec<u8> {
+            let mut out = p.to_vec();
+            let sum = super::inc_cache::parallel_payload_digest(p).unwrap();
+            out.extend_from_slice(&sum);
+            out
+        };
+
+        assert!(
+            super::inc_cache::load_inc_cache(&root.0, &abi, 0, 2, 0, 4096, &bhs).is_some(),
+            "valid v6 cache file must load"
+        );
+
+        // Case A: non-zero `offsets[0]`
+        {
+            let mut p = orig_payload.to_vec();
+            p[53..57].copy_from_slice(&4u32.to_le_bytes());
+            std::fs::write(&bin_path, sign(&p)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(&root.0, &abi, 0, 2, 0, 4096, &bhs).is_none(),
+                "non-zero offsets[0] must be rejected"
+            );
+        }
+        // Case B: non-monotonic offsets (`offsets[1] > offsets[2]`)
+        {
+            let mut p = orig_payload.to_vec();
+            p[57..61].copy_from_slice(&(off2 + 4).to_le_bytes());
+            std::fs::write(&bin_path, sign(&p)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(&root.0, &abi, 0, 2, 0, 4096, &bhs).is_none(),
+                "non-monotonic offset table must be rejected"
+            );
+        }
+        // Case C: `offsets[n_defs]` != `entries.len()`
+        {
+            let mut p = orig_payload.to_vec();
+            p[61..65].copy_from_slice(&(off2 - 1).to_le_bytes());
+            std::fs::write(&bin_path, sign(&p)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(&root.0, &abi, 0, 2, 0, 4096, &bhs).is_none(),
+                "mismatched final offset must be rejected"
+            );
+        }
+        // Case D: truncated offset table
+        {
+            let p = orig_payload[..57].to_vec();
+            std::fs::write(&bin_path, sign(&p)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(&root.0, &abi, 0, 2, 0, 4096, &bhs).is_none(),
+                "truncated offset table must be rejected"
+            );
+        }
+        // Case E: extra trailing byte inside entry 0's slice
+        {
+            let mut p = orig_payload[..entries_base].to_vec();
+            p[57..61].copy_from_slice(&(off1 + 1).to_le_bytes());
+            p[61..65].copy_from_slice(&(off2 + 1).to_le_bytes());
+            p.extend_from_slice(&orig_payload[entries_base..entries_base + off1 as usize]);
+            p.push(0u8);
+            p.extend_from_slice(&orig_payload[entries_base + off1 as usize..]);
+            std::fs::write(&bin_path, sign(&p)).unwrap();
+            assert!(
+                super::inc_cache::load_inc_cache(&root.0, &abi, 0, 2, 0, 4096, &bhs).is_none(),
+                "trailing byte inside v6 entry slice must be rejected"
+            );
+        }
+        assert_eq!(compile_wasm_to_x64_so(&w, &opts).unwrap(), expected_so);
     }
 }

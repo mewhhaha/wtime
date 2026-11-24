@@ -3257,11 +3257,17 @@ impl<'a> Lower<'a> {
                 else_args,
             } => {
                 let cr = self.gp_read(cond, SCRATCH_GP1);
-                if next_bb == Some(then_bb.0) {
+                let loop_backedge_inline = next_bb != Some(then_bb.0)
+                    && self.ir.blocks[then_bb.0 as usize].is_loop_header
+                    && self.edge_has_moves(then_bb.0, then_args);
+                if next_bb == Some(then_bb.0) || loop_backedge_inline {
                     let else_lbl = self.edge_target_label(else_bb.0, else_args);
                     self.asm.test_rr(false, cr, cr);
                     self.asm.jcc(Cond::E, else_lbl);
                     self.emit_edge_moves(then_bb.0, then_args);
+                    if next_bb != Some(then_bb.0) {
+                        self.asm.jmp(self.bb_labels[then_bb.0 as usize]);
+                    }
                 } else {
                     let then_lbl = self.edge_target_label(then_bb.0, then_args);
                     self.asm.test_rr(false, cr, cr);
@@ -3281,8 +3287,9 @@ impl<'a> Lower<'a> {
                 else_bb,
                 else_args,
             } => {
-                // Fast fallthrough when `then_bb` is next (integer cmp or self-NaN FP cmp):
-                // invert to `else_lbl`, emit any `then_args` inline, and fall straight into `then_bb`.
+                // Fast fallthrough when `then_bb` is next, OR inline hot backedge moves when
+                // targeting a rotated loop header whose backedge requires register moves (avoids
+                // emitting a 2-jump cold trampoline per iteration).
                 let fp_self_cond = match kind {
                     CmpBranchKind::F32(CmpOp::Eq) | CmpBranchKind::F64(CmpOp::Eq) if a == b => {
                         Some(Cond::Np)
@@ -3292,15 +3299,20 @@ impl<'a> Lower<'a> {
                     }
                     _ => None,
                 };
-                let invert_to_else = next_bb == Some(then_bb.0)
-                    && (fp_self_cond.is_some()
-                        || matches!(
-                            kind,
-                            CmpBranchKind::I32(_)
-                                | CmpBranchKind::I32Imm(_, _)
-                                | CmpBranchKind::I64(_)
-                                | CmpBranchKind::I64Imm(_, _)
-                        ));
+                let can_invert = fp_self_cond.is_some()
+                    || matches!(
+                        kind,
+                        CmpBranchKind::I32(_)
+                            | CmpBranchKind::I32Imm(_, _)
+                            | CmpBranchKind::I64(_)
+                            | CmpBranchKind::I64Imm(_, _)
+                    );
+                let loop_backedge_inline = next_bb != Some(then_bb.0)
+                    && can_invert
+                    && self.ir.blocks[then_bb.0 as usize].is_loop_header
+                    && self.edge_has_moves(then_bb.0, then_args);
+                let invert_to_else =
+                    (next_bb == Some(then_bb.0) && can_invert) || loop_backedge_inline;
                 if invert_to_else {
                     let else_lbl = self.edge_target_label(else_bb.0, else_args);
                     match kind {
@@ -3354,6 +3366,9 @@ impl<'a> Lower<'a> {
                         }
                     }
                     self.emit_edge_moves(then_bb.0, then_args);
+                    if next_bb != Some(then_bb.0) {
+                        self.asm.jmp(self.bb_labels[then_bb.0 as usize]);
+                    }
                     return Ok(());
                 }
                 let then_lbl = self.edge_target_label(then_bb.0, then_args);
@@ -3775,8 +3790,11 @@ pub fn lower_ir_to_x64_with_budget(
         {
             b.check_deadline()?;
         }
-        l.asm.bind(l.bb_labels[bid as usize]);
         let bb = &ir.blocks[bid as usize];
+        if bb.is_loop_header && oi > 0 {
+            l.asm.mark_align16(l.bb_labels[bid as usize]);
+        }
+        l.asm.bind(l.bb_labels[bid as usize]);
         for (ii, inst) in bb.insts.iter().enumerate() {
             l.emit_inst(inst.res, inst.op)?;
             if (ii & 255) == 255 {
@@ -3864,5 +3882,6 @@ pub fn lower_ir_to_x64_with_budget(
 
     check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     l.asm.finish_labels()?;
+    check_limits(&l.asm, &mut charged_code, &mut charged_rodata)?;
     Ok(l.asm)
 }

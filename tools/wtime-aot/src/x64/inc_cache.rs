@@ -14,7 +14,7 @@
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use wtime_types::{FuncType, HeapType, ValType};
 
@@ -30,7 +30,8 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
+const PARALLEL_INC_MIN_FUNCS: usize = 256;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20; // 128 MiB cap on read
 const PARALLEL_HASH_CHUNK_BYTES: usize = 256 << 10; // 256 KiB chunks for parallel SHA-256 Merkle trailer
 
@@ -605,9 +606,235 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Decodes and validates a single `CachedFn` entry slice, returning `(entry, code_len,
+/// pre_relax_code_len, ro_len)`. Requires exact slice consumption (`r.pos == slice.len()`).
+fn decode_cached_fn(
+    slice: &[u8],
+    expected_bh: &[u8; 32],
+    n_defs: usize,
+    n_total: usize,
+    global_words: usize,
+    expected_rodata_len: usize,
+) -> Option<(CachedFn, usize, usize, usize)> {
+    let mut r = Reader { buf: slice, pos: 0 };
+    let raw_body_hash = r.read_hash()?;
+    let is_changed = &raw_body_hash != expected_bh;
+    let flags = r.read_u8()?;
+    let was_inlinable = (flags & 1) != 0;
+    let writes_mem = (flags & 2) != 0;
+    let grows_mem = (flags & 4) != 0;
+    let writes_all_globals = (flags & 8) != 0;
+    let writes_all_tables = (flags & 16) != 0;
+    let local_may_trap = (flags & 32) != 0;
+    let calls_import_or_indirect = (flags & 64) != 0;
+    let needs_stack_check = (flags & 128) != 0;
+
+    let n_pre = r.read_u32()? as usize;
+    if n_pre > n_defs {
+        return None;
+    }
+    r.check_remaining(n_pre, 8)?;
+    let mut pre_inline_callees = try_vec_with_capacity(n_pre)?;
+    for _ in 0..n_pre {
+        let c = r.read_u32()?;
+        let cnt = r.read_u32()?;
+        if (c as usize) >= n_defs {
+            return None;
+        }
+        pre_inline_callees.push((c, cnt));
+    }
+
+    let inlined_callees = r.read_u32_vec(n_defs)?;
+    if inlined_callees.iter().any(|&c| (c as usize) >= n_defs) {
+        return None;
+    }
+    let inline_added_insts = r.read_u32()?;
+    let eff_callees = r.read_u32_vec(n_total)?;
+    if eff_callees.iter().any(|&fi| (fi as usize) >= n_total) {
+        return None;
+    }
+    let elide_callees = r.read_u32_vec(n_defs)?;
+    if elide_callees.iter().any(|&c| (c as usize) >= n_defs) {
+        return None;
+    }
+
+    r.check_remaining(global_words, 8)?;
+    let mut written_globals = try_vec_with_capacity(global_words)?;
+    for _ in 0..global_words {
+        written_globals.push(r.read_u64()?);
+    }
+    let written_tables = r.read_u64()?;
+    let max_helper_bytes = r.read_i32()?;
+    let own_stack_bytes = r.read_i32()?;
+    let elided_callee_stack_bytes = r.read_i32()?;
+    if max_helper_bytes < 0 || own_stack_bytes < 0 || elided_callee_stack_bytes < 0 {
+        return None;
+    }
+    let callee_effects_hash = r.read_hash()?;
+    let callee_trap_hash = r.read_hash()?;
+
+    let pre_relax_code_len = r.read_u32()?;
+    let code_len = r.read_u32()? as usize;
+    if code_len > MAX_FN_CODE_BYTES
+        || (pre_relax_code_len as usize) < code_len
+        || (pre_relax_code_len as usize) > MAX_FN_CODE_BYTES
+    {
+        return None;
+    }
+    let code_slice = r.read_bytes(code_len)?;
+    let code = if is_changed {
+        Vec::new()
+    } else {
+        try_copy_slice(code_slice)?
+    };
+
+    let n_relocs = r.read_u32()? as usize;
+    if n_relocs > code_len.saturating_add(16) {
+        return None;
+    }
+    r.check_remaining(n_relocs, 13)?;
+    let mut relocs = if is_changed {
+        Vec::new()
+    } else {
+        try_vec_with_capacity(n_relocs)?
+    };
+    let mut max_local_rodata_off: Option<u32> = None;
+    for _ in 0..n_relocs {
+        let patch_off = r.read_u32()?;
+        let next_ip_off = r.read_u32()?;
+        let kind = r.read_u8()?;
+        let val = r.read_u32()?;
+        let patch_end = (patch_off as usize).checked_add(4)?;
+        if patch_end > code_len || (next_ip_off as usize) > code_len {
+            return None;
+        }
+        let target = match kind {
+            0 => {
+                if (val as usize) >= n_total {
+                    return None;
+                }
+                RelocTarget::Func(val)
+            }
+            1 => {
+                if (val as usize) >= NUM_HELPERS {
+                    return None;
+                }
+                RelocTarget::Helper(val)
+            }
+            2 => {
+                if expected_rodata_len == 0 || (val as usize) >= expected_rodata_len {
+                    return None;
+                }
+                RelocTarget::Rodata(val)
+            }
+            3 => {
+                max_local_rodata_off = Some(max_local_rodata_off.map_or(val, |m| m.max(val)));
+                RelocTarget::LocalRodata(val)
+            }
+            _ => return None,
+        };
+        if !is_changed {
+            relocs.push(Reloc {
+                patch_off,
+                next_ip_off,
+                target,
+            });
+        }
+    }
+
+    let ro_len = r.read_u32()? as usize;
+    if ro_len > MAX_FN_LOCAL_RODATA_BYTES {
+        return None;
+    }
+    let ro_slice = r.read_bytes(ro_len)?;
+    if let Some(max_off) = max_local_rodata_off
+        && (ro_len == 0 || (max_off as usize) >= ro_len)
+    {
+        return None;
+    }
+    let local_rodata = if is_changed {
+        Vec::new()
+    } else {
+        try_copy_slice(ro_slice)?
+    };
+
+    let n_jt = r.read_u32()? as usize;
+    if n_jt > ro_len / 4 + 1 {
+        return None;
+    }
+    r.check_remaining(n_jt, 12)?;
+    let mut jt_entries = if is_changed {
+        Vec::new()
+    } else {
+        try_vec_with_capacity(n_jt)?
+    };
+    for _ in 0..n_jt {
+        let ro_off = r.read_u32()?;
+        let tbl_off = r.read_u32()?;
+        let lbl_off = r.read_u32()?;
+        let ro_end = (ro_off as usize).checked_add(4)?;
+        if ro_end > ro_len || (tbl_off as usize) > ro_len || (lbl_off as usize) > code_len {
+            return None;
+        }
+        if !is_changed {
+            jt_entries.push((ro_off, tbl_off, lbl_off));
+        }
+    }
+
+    if r.pos != slice.len() {
+        return None;
+    }
+
+    let (jt_labels, jt_patches) = if is_changed {
+        (Vec::new(), Vec::new())
+    } else {
+        Asm::try_build_cached_jt(&jt_entries)?
+    };
+
+    Some((
+        CachedFn {
+            raw_body_hash,
+            was_inlinable,
+            pre_inline_callees,
+            inlined_callees,
+            inline_added_insts,
+            own_effects: FnOwnEffects {
+                writes_mem,
+                grows_mem,
+                writes_all_globals,
+                written_globals,
+                writes_all_tables,
+                written_tables,
+                direct_callees: eff_callees,
+            },
+            elide_input: FnElideInput {
+                own_stack_bytes,
+                local_may_trap,
+                calls_import_or_indirect,
+                max_helper_bytes,
+                direct_def_callees: elide_callees,
+            },
+            callee_effects_hash,
+            needs_stack_check,
+            elided_callee_stack_bytes,
+            callee_trap_hash,
+            pre_relax_code_len,
+            code,
+            relocs,
+            local_rodata,
+            jt_entries,
+            jt_labels,
+            jt_patches,
+        },
+        code_len,
+        pre_relax_code_len as usize,
+        ro_len,
+    ))
+}
+
 /// Loads and integrity-checks (SHA-256 Merkle trailer) the incremental function cache for `abi_hash`.
-/// Uses fallible allocations and early body-hash filtering so low memory or >50% edited modules
-/// cleanly discard the optional cache and fall back to cold compilation without aborting.
+/// Uses fallible allocations, offset-table early body-hash filtering, and parallel entry decoding
+/// (up to 16 threads for large modules) so low memory or >50% edited modules cleanly fall back.
 pub fn load_inc_cache(
     cache_dir: &Path,
     expected_abi_hash: &[u8; 32],
@@ -665,238 +892,146 @@ pub fn load_inc_cache(
     // Minimum fixed wire size per CachedFn entry (with empty vectors/code/rodata):
     // 32 + 1 + 4 + 4 + 4 + 4 + 4 + global_words*8 + 8 + 12 + 64 + 4 (pre_relax) + 4 + 4 + 4 + 4 = 157 + global_words*8.
     let min_fn_wire = 157usize.checked_add(global_words.checked_mul(8)?)?;
-    r.check_remaining(n_defs, min_fn_wire)?;
 
-    let mut funcs = try_vec_with_capacity(n_defs)?;
+    // Format v6 offset table: `(n_defs + 1)` little-endian `u32` byte offsets relative to `entries`.
+    let n_offs = n_defs.checked_add(1)?;
+    let off_raw = r.read_bytes(n_offs.checked_mul(4)?)?;
+    let entries = &payload[r.pos..];
+    if entries.len() < n_defs.checked_mul(min_fn_wire)? {
+        return None;
+    }
+    let mut offsets = try_vec_with_capacity::<u32>(n_offs)?;
+    for &chunk in off_raw.as_chunks::<4>().0 {
+        offsets.push(u32::from_le_bytes(chunk));
+    }
+    if offsets[0] != 0 || (offsets[n_defs] as usize) != entries.len() {
+        return None;
+    }
+    for i in 0..n_defs {
+        let start = offsets[i] as usize;
+        let end = offsets[i + 1] as usize;
+        if end < start || end - start < min_fn_wire {
+            return None;
+        }
+    }
+
+    // Fast O(n_defs) early-bail check using the 32-byte `raw_body_hash` at the start of each entry.
+    let mut changed_count = 0usize;
+    for (i, expected_bh) in expected_body_hashes.iter().enumerate() {
+        let start = offsets[i] as usize;
+        if &entries[start..start + 32] != expected_bh {
+            changed_count += 1;
+            if changed_count > n_defs / 2 {
+                // Incremental path would bail to cold compile anyway — abort before materializing!
+                return None;
+            }
+        }
+    }
+
+    let mut funcs = try_vec_with_capacity::<CachedFn>(n_defs)?;
     let mut total_code = 0usize;
     let mut total_pre_relax_code = 0usize;
     let mut total_rodata = 0usize;
-    let mut changed_count = 0usize;
-    for &expected_bh in expected_body_hashes {
-        let raw_body_hash = r.read_hash()?;
-        let is_changed = raw_body_hash != expected_bh;
-        if is_changed {
-            changed_count += 1;
-            if changed_count > n_defs / 2 {
-                // Incremental path would bail to cold compile anyway — abort early before materializing!
+
+    if n_defs < PARALLEL_INC_MIN_FUNCS {
+        for (i, expected_bh) in expected_body_hashes.iter().enumerate() {
+            let slice = &entries[offsets[i] as usize..offsets[i + 1] as usize];
+            let (cfn, code_len, pre_len, ro_len) = decode_cached_fn(
+                slice,
+                expected_bh,
+                n_defs,
+                n_total,
+                global_words,
+                expected_rodata_len,
+            )?;
+            total_code = total_code.checked_add(code_len)?;
+            total_pre_relax_code = total_pre_relax_code.checked_add(pre_len)?;
+            total_rodata = total_rodata.checked_add(ro_len)?;
+            if total_code > MAX_TOTAL_CODE_BYTES
+                || total_pre_relax_code > MAX_TOTAL_CODE_BYTES
+                || total_rodata > MAX_TOTAL_RODATA_BYTES
+            {
                 return None;
             }
+            funcs.push(cfn);
         }
-        let flags = r.read_u8()?;
-        let was_inlinable = (flags & 1) != 0;
-        let writes_mem = (flags & 2) != 0;
-        let grows_mem = (flags & 4) != 0;
-        let writes_all_globals = (flags & 8) != 0;
-        let writes_all_tables = (flags & 16) != 0;
-        let local_may_trap = (flags & 32) != 0;
-        let calls_import_or_indirect = (flags & 64) != 0;
-        let needs_stack_check = (flags & 128) != 0;
-
-        let n_pre = r.read_u32()? as usize;
-        if n_pre > n_defs {
-            return None;
+    } else {
+        type DecodedSlot = Option<(CachedFn, usize, usize, usize)>;
+        let mut decoded_slots = try_vec_with_capacity::<DecodedSlot>(n_defs)?;
+        for _ in 0..n_defs {
+            decoded_slots.push(None);
         }
-        r.check_remaining(n_pre, 8)?;
-        let mut pre_inline_callees = try_vec_with_capacity(n_pre)?;
-        for _ in 0..n_pre {
-            let c = r.read_u32()?;
-            let cnt = r.read_u32()?;
-            if (c as usize) >= n_defs {
-                return None;
-            }
-            pre_inline_callees.push((c, cnt));
-        }
-
-        let inlined_callees = r.read_u32_vec(n_defs)?;
-        if inlined_callees.iter().any(|&c| (c as usize) >= n_defs) {
-            return None;
-        }
-        let inline_added_insts = r.read_u32()?;
-        let eff_callees = r.read_u32_vec(n_total)?;
-        if eff_callees.iter().any(|&fi| (fi as usize) >= n_total) {
-            return None;
-        }
-        let elide_callees = r.read_u32_vec(n_defs)?;
-        if elide_callees.iter().any(|&c| (c as usize) >= n_defs) {
-            return None;
-        }
-
-        r.check_remaining(global_words, 8)?;
-        let mut written_globals = try_vec_with_capacity(global_words)?;
-        for _ in 0..global_words {
-            written_globals.push(r.read_u64()?);
-        }
-        let written_tables = r.read_u64()?;
-        let max_helper_bytes = r.read_i32()?;
-        let own_stack_bytes = r.read_i32()?;
-        let elided_callee_stack_bytes = r.read_i32()?;
-        if max_helper_bytes < 0 || own_stack_bytes < 0 || elided_callee_stack_bytes < 0 {
-            return None;
-        }
-        let callee_effects_hash = r.read_hash()?;
-        let callee_trap_hash = r.read_hash()?;
-
-        let pre_relax_code_len = r.read_u32()?;
-        let code_len = r.read_u32()? as usize;
-        if code_len > MAX_FN_CODE_BYTES
-            || (pre_relax_code_len as usize) < code_len
-            || (pre_relax_code_len as usize) > MAX_FN_CODE_BYTES
-        {
-            return None;
-        }
-        total_code = total_code.checked_add(code_len)?;
-        total_pre_relax_code = total_pre_relax_code.checked_add(pre_relax_code_len as usize)?;
-        if total_code > MAX_TOTAL_CODE_BYTES || total_pre_relax_code > MAX_TOTAL_CODE_BYTES {
-            return None;
-        }
-        let code_slice = r.read_bytes(code_len)?;
-        let code = if is_changed {
-            Vec::new()
-        } else {
-            try_copy_slice(code_slice)?
-        };
-
-        let n_relocs = r.read_u32()? as usize;
-        if n_relocs > code_len.saturating_add(16) {
-            return None;
-        }
-        r.check_remaining(n_relocs, 13)?;
-        let mut relocs = if is_changed {
-            Vec::new()
-        } else {
-            try_vec_with_capacity(n_relocs)?
-        };
-        let mut max_local_rodata_off: Option<u32> = None;
-        for _ in 0..n_relocs {
-            let patch_off = r.read_u32()?;
-            let next_ip_off = r.read_u32()?;
-            let kind = r.read_u8()?;
-            let val = r.read_u32()?;
-            let patch_end = (patch_off as usize).checked_add(4)?;
-            if patch_end > code_len || (next_ip_off as usize) > code_len {
-                return None;
-            }
-            let target = match kind {
-                0 => {
-                    if (val as usize) >= n_total {
-                        return None;
+        let n_threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(16)
+            .min(n_defs);
+        let per_worker = n_defs.div_ceil(n_threads);
+        let failed = AtomicBool::new(false);
+        let offsets_ref = &offsets;
+        let decode_range = |start_idx: usize, slots: &mut [DecodedSlot]| {
+            for (j, slot) in slots.iter_mut().enumerate() {
+                if failed.load(Ordering::Acquire) {
+                    return;
+                }
+                let i = start_idx + j;
+                let slice = &entries[offsets_ref[i] as usize..offsets_ref[i + 1] as usize];
+                match decode_cached_fn(
+                    slice,
+                    &expected_body_hashes[i],
+                    n_defs,
+                    n_total,
+                    global_words,
+                    expected_rodata_len,
+                ) {
+                    Some(v) => *slot = Some(v),
+                    None => {
+                        failed.store(true, Ordering::Release);
+                        return;
                     }
-                    RelocTarget::Func(val)
                 }
-                1 => {
-                    if (val as usize) >= NUM_HELPERS {
-                        return None;
-                    }
-                    RelocTarget::Helper(val)
-                }
-                2 => {
-                    if expected_rodata_len == 0 || (val as usize) >= expected_rodata_len {
-                        return None;
-                    }
-                    RelocTarget::Rodata(val)
-                }
-                3 => {
-                    max_local_rodata_off = Some(max_local_rodata_off.map_or(val, |m| m.max(val)));
-                    RelocTarget::LocalRodata(val)
-                }
-                _ => return None,
-            };
-            if !is_changed {
-                relocs.push(Reloc {
-                    patch_off,
-                    next_ip_off,
-                    target,
-                });
             }
-        }
-
-        let ro_len = r.read_u32()? as usize;
-        if ro_len > MAX_FN_LOCAL_RODATA_BYTES {
-            return None;
-        }
-        total_rodata = total_rodata.checked_add(ro_len)?;
-        if total_rodata > MAX_TOTAL_RODATA_BYTES {
-            return None;
-        }
-        let ro_slice = r.read_bytes(ro_len)?;
-        if let Some(max_off) = max_local_rodata_off
-            && (ro_len == 0 || (max_off as usize) >= ro_len)
-        {
-            return None;
-        }
-        let local_rodata = if is_changed {
-            Vec::new()
-        } else {
-            try_copy_slice(ro_slice)?
         };
-
-        let n_jt = r.read_u32()? as usize;
-        if n_jt > ro_len / 4 + 1 {
-            return None;
-        }
-        r.check_remaining(n_jt, 12)?;
-        let mut jt_entries = if is_changed {
-            Vec::new()
-        } else {
-            try_vec_with_capacity(n_jt)?
-        };
-        for _ in 0..n_jt {
-            let ro_off = r.read_u32()?;
-            let tbl_off = r.read_u32()?;
-            let lbl_off = r.read_u32()?;
-            let ro_end = (ro_off as usize).checked_add(4)?;
-            if ro_end > ro_len || (tbl_off as usize) > ro_len || (lbl_off as usize) > code_len {
-                return None;
+        let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
+        let mut n_unspawned = 0usize;
+        std::thread::scope(|s| {
+            let mut rem = decoded_slots.as_mut_slice();
+            let mut idx = 0usize;
+            while !rem.is_empty() {
+                let take = per_worker.min(rem.len());
+                let (chunk, rest) = rem.split_at_mut(take);
+                let start_idx = idx;
+                rem = rest;
+                idx += take;
+                if rem.is_empty() {
+                    decode_range(start_idx, chunk);
+                } else if std::thread::Builder::new()
+                    .spawn_scoped(s, move || decode_range(start_idx, chunk))
+                    .is_err()
+                {
+                    unspawned[n_unspawned] = Some((start_idx, take));
+                    n_unspawned += 1;
+                }
             }
-            if !is_changed {
-                jt_entries.push((ro_off, tbl_off, lbl_off));
-            }
-        }
-
-        let (jt_labels, jt_patches) = if is_changed {
-            (Vec::new(), Vec::new())
-        } else {
-            Asm::try_build_cached_jt(&jt_entries)?
-        };
-
-        funcs.push(CachedFn {
-            raw_body_hash,
-            was_inlinable,
-            pre_inline_callees,
-            inlined_callees,
-            inline_added_insts,
-            own_effects: FnOwnEffects {
-                writes_mem,
-                grows_mem,
-                writes_all_globals,
-                written_globals,
-                writes_all_tables,
-                written_tables,
-                direct_callees: eff_callees,
-            },
-            elide_input: FnElideInput {
-                own_stack_bytes,
-                local_may_trap,
-                calls_import_or_indirect,
-                max_helper_bytes,
-                direct_def_callees: elide_callees,
-            },
-            callee_effects_hash,
-            needs_stack_check,
-            elided_callee_stack_bytes,
-            callee_trap_hash,
-            pre_relax_code_len,
-            code,
-            relocs,
-            local_rodata,
-            jt_entries,
-            jt_labels,
-            jt_patches,
         });
-    }
-
-    if r.pos != payload.len() {
-        return None;
+        for &(start_idx, take) in unspawned[..n_unspawned].iter().flatten() {
+            decode_range(start_idx, &mut decoded_slots[start_idx..start_idx + take]);
+        }
+        if failed.load(Ordering::Acquire) {
+            return None;
+        }
+        for slot in decoded_slots {
+            let (cfn, code_len, pre_len, ro_len) = slot?;
+            total_code = total_code.checked_add(code_len)?;
+            total_pre_relax_code = total_pre_relax_code.checked_add(pre_len)?;
+            total_rodata = total_rodata.checked_add(ro_len)?;
+            if total_code > MAX_TOTAL_CODE_BYTES
+                || total_pre_relax_code > MAX_TOTAL_CODE_BYTES
+                || total_rodata > MAX_TOTAL_RODATA_BYTES
+            {
+                return None;
+            }
+            funcs.push(cfn);
+        }
     }
 
     Some(IncCacheData {
@@ -963,119 +1098,245 @@ fn sweep_stale_tmp_files(dir: &Path) {
     sweep_stale_tmp_files_with_cutoff(dir, std::time::Duration::from_secs(60));
 }
 
-/// Atomically writes `data` to `<cache_dir>/x64-inc/<abi_hash>.bin` with a trailing SHA-256.
-/// Best-effort: silently ignores I/O, permission, or OOM failures so caching can never break compilation.
+struct SliceWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> SliceWriter<'a> {
+    #[inline]
+    fn write_bytes(&mut self, s: &[u8]) {
+        let end = self.pos + s.len();
+        self.buf[self.pos..end].copy_from_slice(s);
+        self.pos = end;
+    }
+
+    #[inline]
+    fn write_u8(&mut self, v: u8) {
+        self.buf[self.pos] = v;
+        self.pos += 1;
+    }
+
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_i32(&mut self, v: i32) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.write_bytes(&v.to_le_bytes());
+    }
+}
+
+fn fn_wire_len(f: &CachedFn, fixed_fn: usize) -> Option<usize> {
+    fixed_fn
+        .checked_add(f.pre_inline_callees.len().checked_mul(8)?)?
+        .checked_add(f.inlined_callees.len().checked_mul(4)?)?
+        .checked_add(f.own_effects.direct_callees.len().checked_mul(4)?)?
+        .checked_add(f.elide_input.direct_def_callees.len().checked_mul(4)?)?
+        .checked_add(f.code.len())?
+        .checked_add(f.relocs.len().checked_mul(13)?)?
+        .checked_add(f.local_rodata.len())?
+        .checked_add(f.jt_entries.len().checked_mul(12)?)
+}
+
+fn write_cached_fn(w: &mut SliceWriter<'_>, f: &CachedFn, global_words: usize) {
+    w.write_bytes(&f.raw_body_hash);
+    let flags = u8::from(f.was_inlinable)
+        | (u8::from(f.own_effects.writes_mem) << 1)
+        | (u8::from(f.own_effects.grows_mem) << 2)
+        | (u8::from(f.own_effects.writes_all_globals) << 3)
+        | (u8::from(f.own_effects.writes_all_tables) << 4)
+        | (u8::from(f.elide_input.local_may_trap) << 5)
+        | (u8::from(f.elide_input.calls_import_or_indirect) << 6)
+        | (u8::from(f.needs_stack_check) << 7);
+    w.write_u8(flags);
+
+    w.write_u32(f.pre_inline_callees.len() as u32);
+    for &(c, cnt) in &f.pre_inline_callees {
+        w.write_u32(c);
+        w.write_u32(cnt);
+    }
+
+    w.write_u32(f.inlined_callees.len() as u32);
+    for &c in &f.inlined_callees {
+        w.write_u32(c);
+    }
+    w.write_u32(f.inline_added_insts);
+
+    w.write_u32(f.own_effects.direct_callees.len() as u32);
+    for &c in &f.own_effects.direct_callees {
+        w.write_u32(c);
+    }
+
+    w.write_u32(f.elide_input.direct_def_callees.len() as u32);
+    for &c in &f.elide_input.direct_def_callees {
+        w.write_u32(c);
+    }
+
+    for gw in 0..global_words {
+        let val = f.own_effects.written_globals.get(gw).copied().unwrap_or(0);
+        w.write_u64(val);
+    }
+    w.write_u64(f.own_effects.written_tables);
+    w.write_i32(f.elide_input.max_helper_bytes);
+    w.write_i32(f.elide_input.own_stack_bytes);
+    w.write_i32(f.elided_callee_stack_bytes);
+    w.write_bytes(&f.callee_effects_hash);
+    w.write_bytes(&f.callee_trap_hash);
+
+    w.write_u32(f.pre_relax_code_len);
+    w.write_u32(f.code.len() as u32);
+    w.write_bytes(&f.code);
+
+    w.write_u32(f.relocs.len() as u32);
+    for r in &f.relocs {
+        w.write_u32(r.patch_off);
+        w.write_u32(r.next_ip_off);
+        let (kind, val) = match r.target {
+            RelocTarget::Func(v) => (0u8, v),
+            RelocTarget::Helper(v) => (1u8, v),
+            RelocTarget::Rodata(v) => (2u8, v),
+            RelocTarget::LocalRodata(v) => (3u8, v),
+        };
+        w.write_u8(kind);
+        w.write_u32(val);
+    }
+
+    w.write_u32(f.local_rodata.len() as u32);
+    w.write_bytes(&f.local_rodata);
+
+    w.write_u32(f.jt_entries.len() as u32);
+    for &(ro_off, tbl_off, lbl_off) in &f.jt_entries {
+        w.write_u32(ro_off);
+        w.write_u32(tbl_off);
+        w.write_u32(lbl_off);
+    }
+}
+
+/// Atomically writes `data` to `<cache_dir>/x64-inc/<abi_hash>.bin` with an offset table and
+/// trailing parallel SHA-256 Merkle digest. Best-effort: silently ignores I/O, permission, or
+/// OOM failures so caching can never break compilation.
 pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
     let Ok(dir) = crate::build::ensure_private_dir(&cache_dir.join("x64-inc")) else {
         return;
     };
     sweep_stale_tmp_files(&dir);
 
-    // Header (8+4+32+4+4+1 = 53 B) + trailing Merkle digest (32 B).
-    let mut est: usize = 53 + 32;
-    let fixed_fn = 157usize.saturating_add(data.global_words.saturating_mul(8));
+    let n_defs = data.funcs.len();
+    let Some(fixed_fn) = data
+        .global_words
+        .checked_mul(8)
+        .and_then(|g| 157usize.checked_add(g))
+    else {
+        return;
+    };
+    let Some(off_table_bytes) = n_defs.checked_add(1).and_then(|n| n.checked_mul(4)) else {
+        return;
+    };
+    let entries_base = 53usize.saturating_add(off_table_bytes);
+    let Some(mut offsets) = try_vec_with_capacity::<u32>(n_defs + 1) else {
+        return;
+    };
+    let mut cur_entry_off = 0usize;
+    offsets.push(0u32);
     for f in &data.funcs {
-        est = est
-            .saturating_add(fixed_fn)
-            .saturating_add(f.pre_inline_callees.len().saturating_mul(8))
-            .saturating_add(f.inlined_callees.len().saturating_mul(4))
-            .saturating_add(f.own_effects.direct_callees.len().saturating_mul(4))
-            .saturating_add(f.elide_input.direct_def_callees.len().saturating_mul(4))
-            .saturating_add(f.code.len())
-            .saturating_add(f.relocs.len().saturating_mul(13))
-            .saturating_add(f.local_rodata.len())
-            .saturating_add(f.jt_entries.len().saturating_mul(12));
-        if est > MAX_CACHE_FILE_BYTES {
+        let Some(sz) = fn_wire_len(f, fixed_fn) else {
+            return;
+        };
+        let Some(next) = cur_entry_off.checked_add(sz) else {
+            return;
+        };
+        if entries_base.saturating_add(next).saturating_add(32) > MAX_CACHE_FILE_BYTES {
             return;
         }
+        let Ok(next_u32) = u32::try_from(next) else {
+            return;
+        };
+        cur_entry_off = next;
+        offsets.push(next_u32);
     }
-    let Some(mut out) = try_vec_with_capacity(est) else {
+
+    let payload_len = entries_base + cur_entry_off;
+    let Some(mut out) = try_vec_with_capacity::<u8>(payload_len + 32) else {
         return;
     };
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&data.abi_hash);
-    out.extend_from_slice(&(data.funcs.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(n_defs as u32).to_le_bytes());
     out.extend_from_slice(&(data.global_words as u32).to_le_bytes());
     out.push(u8::from(data.hit_inline_cap));
+    for &off in &offsets {
+        out.extend_from_slice(&off.to_le_bytes());
+    }
+    debug_assert_eq!(out.len(), entries_base);
+    out.resize(payload_len, 0);
 
-    for f in &data.funcs {
-        out.extend_from_slice(&f.raw_body_hash);
-        let flags = u8::from(f.was_inlinable)
-            | (u8::from(f.own_effects.writes_mem) << 1)
-            | (u8::from(f.own_effects.grows_mem) << 2)
-            | (u8::from(f.own_effects.writes_all_globals) << 3)
-            | (u8::from(f.own_effects.writes_all_tables) << 4)
-            | (u8::from(f.elide_input.local_may_trap) << 5)
-            | (u8::from(f.elide_input.calls_import_or_indirect) << 6)
-            | (u8::from(f.needs_stack_check) << 7);
-        out.push(flags);
-
-        out.extend_from_slice(&(f.pre_inline_callees.len() as u32).to_le_bytes());
-        for &(c, cnt) in &f.pre_inline_callees {
-            out.extend_from_slice(&c.to_le_bytes());
-            out.extend_from_slice(&cnt.to_le_bytes());
+    let global_words = data.global_words;
+    let funcs = &data.funcs;
+    let entries_buf = &mut out[entries_base..payload_len];
+    if n_defs < PARALLEL_INC_MIN_FUNCS {
+        let mut w = SliceWriter {
+            buf: entries_buf,
+            pos: 0,
+        };
+        for f in funcs {
+            write_cached_fn(&mut w, f, global_words);
         }
-
-        out.extend_from_slice(&(f.inlined_callees.len() as u32).to_le_bytes());
-        for &c in &f.inlined_callees {
-            out.extend_from_slice(&c.to_le_bytes());
-        }
-        out.extend_from_slice(&f.inline_added_insts.to_le_bytes());
-
-        out.extend_from_slice(&(f.own_effects.direct_callees.len() as u32).to_le_bytes());
-        for &c in &f.own_effects.direct_callees {
-            out.extend_from_slice(&c.to_le_bytes());
-        }
-
-        out.extend_from_slice(&(f.elide_input.direct_def_callees.len() as u32).to_le_bytes());
-        for &c in &f.elide_input.direct_def_callees {
-            out.extend_from_slice(&c.to_le_bytes());
-        }
-
-        for w in 0..data.global_words {
-            let val = f.own_effects.written_globals.get(w).copied().unwrap_or(0);
-            out.extend_from_slice(&val.to_le_bytes());
-        }
-        out.extend_from_slice(&f.own_effects.written_tables.to_le_bytes());
-        out.extend_from_slice(&f.elide_input.max_helper_bytes.to_le_bytes());
-        out.extend_from_slice(&f.elide_input.own_stack_bytes.to_le_bytes());
-        out.extend_from_slice(&f.elided_callee_stack_bytes.to_le_bytes());
-        out.extend_from_slice(&f.callee_effects_hash);
-        out.extend_from_slice(&f.callee_trap_hash);
-
-        out.extend_from_slice(&f.pre_relax_code_len.to_le_bytes());
-        out.extend_from_slice(&(f.code.len() as u32).to_le_bytes());
-        out.extend_from_slice(&f.code);
-
-        out.extend_from_slice(&(f.relocs.len() as u32).to_le_bytes());
-        for r in &f.relocs {
-            out.extend_from_slice(&r.patch_off.to_le_bytes());
-            out.extend_from_slice(&r.next_ip_off.to_le_bytes());
-            let (kind, val) = match r.target {
-                RelocTarget::Func(v) => (0u8, v),
-                RelocTarget::Helper(v) => (1u8, v),
-                RelocTarget::Rodata(v) => (2u8, v),
-                RelocTarget::LocalRodata(v) => (3u8, v),
-            };
-            out.push(kind);
-            out.extend_from_slice(&val.to_le_bytes());
-        }
-
-        out.extend_from_slice(&(f.local_rodata.len() as u32).to_le_bytes());
-        out.extend_from_slice(&f.local_rodata);
-
-        out.extend_from_slice(&(f.jt_entries.len() as u32).to_le_bytes());
-        for &(ro_off, tbl_off, lbl_off) in &f.jt_entries {
-            out.extend_from_slice(&ro_off.to_le_bytes());
-            out.extend_from_slice(&tbl_off.to_le_bytes());
-            out.extend_from_slice(&lbl_off.to_le_bytes());
+        debug_assert_eq!(w.pos, entries_buf.len());
+    } else {
+        let n_threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(16)
+            .min(n_defs);
+        let per_worker = n_defs.div_ceil(n_threads);
+        let write_range = |start_idx: usize, end_idx: usize, slice: &mut [u8]| {
+            let mut w = SliceWriter { buf: slice, pos: 0 };
+            for f in &funcs[start_idx..end_idx] {
+                write_cached_fn(&mut w, f, global_words);
+            }
+            debug_assert_eq!(w.pos, slice.len());
+        };
+        let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
+        let mut n_unspawned = 0usize;
+        std::thread::scope(|s| {
+            let mut rem_buf = entries_buf;
+            let mut idx = 0usize;
+            while idx < n_defs {
+                let end_idx = (idx + per_worker).min(n_defs);
+                let byte_len = (offsets[end_idx] - offsets[idx]) as usize;
+                let (chunk_buf, rest_buf) = rem_buf.split_at_mut(byte_len);
+                let start_idx = idx;
+                rem_buf = rest_buf;
+                idx = end_idx;
+                if idx == n_defs {
+                    write_range(start_idx, end_idx, chunk_buf);
+                } else if std::thread::Builder::new()
+                    .spawn_scoped(s, move || write_range(start_idx, end_idx, chunk_buf))
+                    .is_err()
+                {
+                    unspawned[n_unspawned] = Some((start_idx, end_idx));
+                    n_unspawned += 1;
+                }
+            }
+        });
+        for &(start_idx, end_idx) in unspawned[..n_unspawned].iter().flatten() {
+            let b0 = offsets[start_idx] as usize;
+            let b1 = offsets[end_idx] as usize;
+            write_range(
+                start_idx,
+                end_idx,
+                &mut out[entries_base + b0..entries_base + b1],
+            );
         }
     }
 
-    if out.len().saturating_add(32) > MAX_CACHE_FILE_BYTES {
-        return;
-    }
     let Some(checksum) = parallel_payload_digest(&out) else {
         return;
     };

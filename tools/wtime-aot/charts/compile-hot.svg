@@ -37,55 +37,55 @@
 <text class="lg" x="290" y="73.5">wtime-aot rust (-O3)</text>
 <rect class="wt" x="434" y="64" width="11" height="11" rx="3"/>
 <text class="lg" x="450" y="73.5">Wasmtime 49.0.3</text>
-<line class="grid" x1="235.1" x2="235.1" y1="94" y2="381.5"/>
-<text class="tick" x="235.1" y="399.5" text-anchor="middle">0.1 ms</text>
-<line class="grid" x1="335.7" x2="335.7" y1="94" y2="381.5"/>
-<text class="tick" x="335.7" y="399.5" text-anchor="middle">1 ms</text>
-<line class="grid" x1="436.2" x2="436.2" y1="94" y2="381.5"/>
-<text class="tick" x="436.2" y="399.5" text-anchor="middle">10 ms</text>
-<line class="grid" x1="536.8" x2="536.8" y1="94" y2="381.5"/>
-<text class="tick" x="536.8" y="399.5" text-anchor="middle">100 ms</text>
-<line class="grid" x1="637.3" x2="637.3" y1="94" y2="381.5"/>
-<text class="tick" x="637.3" y="399.5" text-anchor="middle">1 s</text>
+<line class="grid" x1="244.3" x2="244.3" y1="94" y2="381.5"/>
+<text class="tick" x="244.3" y="399.5" text-anchor="middle">0.1 ms</text>
+<line class="grid" x1="345.4" x2="345.4" y1="94" y2="381.5"/>
+<text class="tick" x="345.4" y="399.5" text-anchor="middle">1 ms</text>
+<line class="grid" x1="446.6" x2="446.6" y1="94" y2="381.5"/>
+<text class="tick" x="446.6" y="399.5" text-anchor="middle">10 ms</text>
+<line class="grid" x1="547.7" x2="547.7" y1="94" y2="381.5"/>
+<text class="tick" x="547.7" y="399.5" text-anchor="middle">100 ms</text>
+<line class="grid" x1="648.9" x2="648.9" y1="94" y2="381.5"/>
+<text class="tick" x="648.9" y="399.5" text-anchor="middle">1 s</text>
 <line class="ax" x1="166.0" x2="166.0" y1="94" y2="381.5"/>
 <text class="grp" x="20" y="111.0">INCREMENTAL 1-FUNCTION EDIT (5,036 FNS, WARM FUNCTION/OBJECT CACHE)</text>
 <text class="lb" x="154" y="148.0" text-anchor="end">1-fn rebuild</text>
-<g><title>1-fn rebuild — wtime-aot x64: 81.4 ms (3.8× vs WT, 12.5× vs c)</title>
-<path class="x64" d="M166.0,124.0H524.3Q527.8,124.0 527.8,127.5V131.5Q527.8,135.0 524.3,135.0H166.0Z"/>
-<text class="v-hi" x="534.8" y="133.5" text-anchor="start">81.4 ms (3.8× vs WT, 12.5× vs c)</text></g>
-<g><title>1-fn rebuild — wtime-aot c (-O2): 1.02 s</title>
-<path class="bc" d="M166.0,138.5H634.6Q638.1,138.5 638.1,142.0V146.0Q638.1,149.5 634.6,149.5H166.0Z"/>
-<text class="v" x="645.1" y="148.0" text-anchor="start">1.02 s</text></g>
-<g><title>1-fn rebuild — Wasmtime 49.0.3: 312 ms</title>
-<path class="wt" d="M166.0,153.0H583.0Q586.5,153.0 586.5,156.5V160.5Q586.5,164.0 583.0,164.0H166.0Z"/>
-<text class="v" x="593.5" y="162.5" text-anchor="start">312 ms</text></g>
+<g><title>1-fn rebuild — wtime-aot x64: 63.3 ms (4.8× vs WT, 12.3× vs c)</title>
+<path class="x64" d="M166.0,124.0H524.2Q527.7,124.0 527.7,127.5V131.5Q527.7,135.0 524.2,135.0H166.0Z"/>
+<text class="v-hi" x="534.7" y="133.5" text-anchor="start">63.3 ms (4.8× vs WT, 12.3× vs c)</text></g>
+<g><title>1-fn rebuild — wtime-aot c (-O2): 781 ms</title>
+<path class="bc" d="M166.0,138.5H634.5Q638.0,138.5 638.0,142.0V146.0Q638.0,149.5 634.5,149.5H166.0Z"/>
+<text class="v" x="645.0" y="148.0" text-anchor="start">781 ms</text></g>
+<g><title>1-fn rebuild — Wasmtime 49.0.3: 306 ms</title>
+<path class="wt" d="M166.0,153.0H593.4Q596.9,153.0 596.9,156.5V160.5Q596.9,164.0 593.4,164.0H166.0Z"/>
+<text class="v" x="603.9" y="162.5" text-anchor="start">306 ms</text></g>
 <text class="grp" x="20" y="191.0">WARM FRESH-PROCESS ARTIFACT LOAD (.SO DLOPEN VS .CWASM DESERIALIZE)</text>
 <text class="lb" x="154" y="228.0" text-anchor="end">warm load</text>
-<g><title>warm load — wtime-aot x64: 0.039 ms (83.5× vs WT)</title>
-<path class="x64" d="M166.0,204.0H190.5Q194.0,204.0 194.0,207.5V211.5Q194.0,215.0 190.5,215.0H166.0Z"/>
-<text class="v-hi" x="201.0" y="213.5" text-anchor="start">0.039 ms (83.5× vs WT)</text></g>
-<g><title>warm load — wtime-aot c (-O2): 0.226 ms</title>
-<path class="bc" d="M166.0,218.5H267.3Q270.8,218.5 270.8,222.0V226.0Q270.8,229.5 267.3,229.5H166.0Z"/>
-<text class="v" x="277.8" y="228.0" text-anchor="start">0.226 ms</text></g>
-<g><title>warm load — Wasmtime 49.0.3: 3.25 ms</title>
-<path class="wt" d="M166.0,233.0H383.7Q387.2,233.0 387.2,236.5V240.5Q387.2,244.0 383.7,244.0H166.0Z"/>
-<text class="v" x="394.2" y="242.5" text-anchor="start">3.25 ms</text></g>
+<g><title>warm load — wtime-aot x64: 0.032 ms (68.2× vs WT)</title>
+<path class="x64" d="M166.0,204.0H190.7Q194.2,204.0 194.2,207.5V211.5Q194.2,215.0 190.7,215.0H166.0Z"/>
+<text class="v-hi" x="201.2" y="213.5" text-anchor="start">0.032 ms (68.2× vs WT)</text></g>
+<g><title>warm load — wtime-aot c (-O2): 0.195 ms</title>
+<path class="bc" d="M166.0,218.5H270.1Q273.6,218.5 273.6,222.0V226.0Q273.6,229.5 270.1,229.5H166.0Z"/>
+<text class="v" x="280.6" y="228.0" text-anchor="start">0.195 ms</text></g>
+<g><title>warm load — Wasmtime 49.0.3: 2.18 ms</title>
+<path class="wt" d="M166.0,233.0H376.2Q379.7,233.0 379.7,236.5V240.5Q379.7,244.0 376.2,244.0H166.0Z"/>
+<text class="v" x="386.7" y="242.5" text-anchor="start">2.18 ms</text></g>
 <text class="grp" x="20" y="271.0">WARM BUILD --CACHE HIT (CLI)</text>
 <text class="lb" x="154" y="300.8" text-anchor="end">5k-fn app (3.75 MiB)</text>
-<g><title>5k-fn app (3.75 MiB) — wtime-aot x64: 31.7 ms</title>
-<path class="x64" d="M166.0,284.0H483.1Q486.6,284.0 486.6,287.5V291.5Q486.6,295.0 483.1,295.0H166.0Z"/>
-<text class="v-hi" x="493.6" y="293.5" text-anchor="start">31.7 ms</text></g>
-<g><title>5k-fn app (3.75 MiB) — wtime-aot c (-O2): 382 ms</title>
-<path class="bc" d="M166.0,298.5H591.8Q595.3,298.5 595.3,302.0V306.0Q595.3,309.5 591.8,309.5H166.0Z"/>
-<text class="v" x="602.3" y="308.0" text-anchor="start">382 ms</text></g>
+<g><title>5k-fn app (3.75 MiB) — wtime-aot x64: 21.1 ms</title>
+<path class="x64" d="M166.0,284.0H475.9Q479.4,284.0 479.4,287.5V291.5Q479.4,295.0 475.9,295.0H166.0Z"/>
+<text class="v-hi" x="486.4" y="293.5" text-anchor="start">21.1 ms</text></g>
+<g><title>5k-fn app (3.75 MiB) — wtime-aot c (-O2): 278 ms</title>
+<path class="bc" d="M166.0,298.5H589.1Q592.6,298.5 592.6,302.0V306.0Q592.6,309.5 589.1,309.5H166.0Z"/>
+<text class="v" x="599.6" y="308.0" text-anchor="start">278 ms</text></g>
 <text class="lb" x="154" y="349.5" text-anchor="end">kernels (mean)</text>
-<g><title>kernels (mean) — wtime-aot x64: 0.849 ms</title>
-<path class="x64" d="M166.0,325.5H325.0Q328.5,325.5 328.5,329.0V333.0Q328.5,336.5 325.0,336.5H166.0Z"/>
-<text class="v-hi" x="335.5" y="335.0" text-anchor="start">0.849 ms</text></g>
-<g><title>kernels (mean) — wtime-aot c (-O2): 319 ms</title>
-<path class="bc" d="M166.0,340.0H583.9Q587.4,340.0 587.4,343.5V347.5Q587.4,351.0 583.9,351.0H166.0Z"/>
-<text class="v" x="594.4" y="349.5" text-anchor="start">319 ms</text></g>
-<g><title>kernels (mean) — wtime-aot rust (-O3): 59.2 ms</title>
-<path class="rust" d="M166.0,354.5H510.4Q513.9,354.5 513.9,358.0V362.0Q513.9,365.5 510.4,365.5H166.0Z"/>
-<text class="v" x="520.9" y="364.0" text-anchor="start">59.2 ms</text></g>
+<g><title>kernels (mean) — wtime-aot x64: 0.889 ms</title>
+<path class="x64" d="M166.0,325.5H336.7Q340.2,325.5 340.2,329.0V333.0Q340.2,336.5 336.7,336.5H166.0Z"/>
+<text class="v-hi" x="347.2" y="335.0" text-anchor="start">0.889 ms</text></g>
+<g><title>kernels (mean) — wtime-aot c (-O2): 324 ms</title>
+<path class="bc" d="M166.0,340.0H595.9Q599.4,340.0 599.4,343.5V347.5Q599.4,351.0 595.9,351.0H166.0Z"/>
+<text class="v" x="606.4" y="349.5" text-anchor="start">324 ms</text></g>
+<g><title>kernels (mean) — wtime-aot rust (-O3): 56.5 ms</title>
+<path class="rust" d="M166.0,354.5H519.1Q522.6,354.5 522.6,358.0V362.0Q522.6,365.5 519.1,365.5H166.0Z"/>
+<text class="v" x="529.6" y="364.0" text-anchor="start">56.5 ms</text></g>
 </svg>

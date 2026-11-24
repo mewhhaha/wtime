@@ -477,8 +477,155 @@ pub fn allocate_with_config(
         }
     }
     postorder.reverse();
-    let block_order = postorder;
-    let n_ord = block_order.len();
+    let rpo = postorder;
+    let n_ord = rpo.len();
+    let mut rpo_pos = vec![u32::MAX; n_blocks];
+    for (ri, &b) in rpo.iter().enumerate() {
+        rpo_pos[b as usize] = ri as u32;
+    }
+
+    // 1b. Hot-fallthrough trace layout over reachable blocks (always starts with bb0).
+    // Keeps loop bodies, loop latches, and versioned fast loops contiguous while sinking cold
+    // traps, rare side-bodies (e.g. `if` bodies with stores/calls), and checked slow clones
+    // out-of-line so hot loops need zero taken jumps on fallthrough paths.
+    let mut is_trap_blk = vec![false; n_blocks];
+    let mut has_call_blk = vec![false; n_blocks];
+    let mut has_store_blk = vec![false; n_blocks];
+    let mut has_unchecked_mem_blk = vec![false; n_blocks];
+    for &b in &rpo {
+        let bb = &ir.blocks[b as usize];
+        let mut trap = matches!(bb.term, Term::Unreachable);
+        let mut call = false;
+        let mut store = false;
+        let mut unchecked_mem = false;
+        for inst in &bb.insts {
+            match inst.op {
+                Op::Trap(_) | Op::MemGrow(_) => trap = true,
+                Op::Call { .. } | Op::CallIndirect { .. } => call = true,
+                Op::Store { checked, .. } => {
+                    store = true;
+                    if !checked {
+                        unchecked_mem = true;
+                    }
+                }
+                Op::Load { checked: false, .. }
+                | Op::BoundsCheck { .. }
+                | Op::MemCopy { .. }
+                | Op::MemFill { .. }
+                | Op::MemCopyConst {
+                    dst_checked: false, ..
+                }
+                | Op::MemCopyConst {
+                    src_checked: false, ..
+                }
+                | Op::MemFillConst { checked: false, .. } => {
+                    unchecked_mem = true;
+                }
+                Op::MemCopyConst { .. } | Op::MemFillConst { .. } => store = true,
+                _ => {}
+            }
+        }
+        is_trap_blk[b as usize] = trap;
+        has_call_blk[b as usize] = call;
+        has_store_blk[b as usize] = store;
+        has_unchecked_mem_blk[b as usize] = unchecked_mem;
+    }
+
+    let cand_score = |cur: u32, cand: u32, is_then: bool, placed: &[bool]| -> i32 {
+        let mut s = 0i32;
+        if is_trap_blk[cand as usize] {
+            s += 1000;
+        }
+        // Non-self FP `CmpBranch` cannot invert in `lower.rs`, so prefer falling through to `else_bb`.
+        if is_then
+            && let Term::CmpBranch { kind, a, b, .. } = ir.blocks[cur as usize].term
+            && matches!(
+                kind,
+                super::ir::CmpBranchKind::F32(_) | super::ir::CmpBranchKind::F64(_)
+            )
+            && a != b
+        {
+            s += 500;
+        }
+        let cbb = &ir.blocks[cand as usize];
+        // Prefer loop headers and loop latches that backedge directly to an already-placed header.
+        let backedges_to_placed_hdr = succs[cand as usize]
+            .iter()
+            .any(|&x| placed[x as usize] && ir.blocks[x as usize].is_loop_header);
+        if cbb.is_loop_header || backedges_to_placed_hdr {
+            s -= 100;
+        }
+        if has_call_blk[cand as usize] {
+            s += 40;
+        }
+        if has_store_blk[cand as usize] {
+            s += 20;
+        }
+        if !cbb.is_loop_header && cbb.insts.len() > 4 {
+            s += 10;
+        }
+        // Distinguish bounds-check-free fast loop guards/bodies from checked slow loop clones.
+        let mut unchecked = has_unchecked_mem_blk[cand as usize];
+        if !unchecked
+            && cbb.insts.is_empty()
+            && let Term::CmpBranch { then_bb, .. } | Term::BranchIf { then_bb, .. } = cbb.term
+        {
+            unchecked = has_unchecked_mem_blk[then_bb.0 as usize];
+        }
+        if unchecked {
+            s += 15;
+        }
+        s
+    };
+
+    let mut block_order = Vec::with_capacity(n_ord);
+    let mut placed = vec![false; n_blocks];
+    for &seed in &rpo {
+        if placed[seed as usize] {
+            continue;
+        }
+        let mut cur = seed;
+        loop {
+            placed[cur as usize] = true;
+            block_order.push(cur);
+            let next = match ir.blocks[cur as usize].term {
+                Term::Jump { target, .. } => (!placed[target.0 as usize]
+                    && !is_trap_blk[target.0 as usize])
+                    .then_some(target.0),
+                Term::BranchIf {
+                    then_bb, else_bb, ..
+                }
+                | Term::CmpBranch {
+                    then_bb, else_bb, ..
+                } => {
+                    let t_ok = !placed[then_bb.0 as usize];
+                    let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
+                    match (t_ok, e_ok) {
+                        (true, true) => {
+                            let ts = cand_score(cur, then_bb.0, true, &placed);
+                            let es = cand_score(cur, else_bb.0, false, &placed);
+                            let best = if (ts, rpo_pos[then_bb.0 as usize])
+                                <= (es, rpo_pos[else_bb.0 as usize])
+                            {
+                                then_bb.0
+                            } else {
+                                else_bb.0
+                            };
+                            (!is_trap_blk[best as usize]).then_some(best)
+                        }
+                        (true, false) => (!is_trap_blk[then_bb.0 as usize]).then_some(then_bb.0),
+                        (false, true) => (!is_trap_blk[else_bb.0 as usize]).then_some(else_bb.0),
+                        (false, false) => None,
+                    }
+                }
+                Term::BrTable { .. } | Term::Return { .. } | Term::Unreachable => None,
+            };
+            match next {
+                Some(nxt) => cur = nxt,
+                None => break,
+            }
+        }
+    }
     let mut block_pos_in_order = vec![u32::MAX; n_blocks];
     for (oi, &b) in block_order.iter().enumerate() {
         block_pos_in_order[b as usize] = oi as u32;
@@ -971,45 +1118,50 @@ pub fn allocate_with_config(
         (gp, xmm)
     };
 
-    // 4b. Compute loop-depth weighting and ABI / loop-phi / two-address register hints.
+    // 4b. Compute loop-depth weighting (strictly in RPO so hot-fallthrough block layout
+    // never turns a cold rejoin edge into a false backedge) and ABI / phi / two-address hints.
     let mut loop_depth = vec![0u8; n_ord];
     let mut rpo_preds: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
     let mut backedges: Vec<(u32, u32)> = Vec::new();
-    for (oi, &bid) in block_order.iter().enumerate() {
+    for (ri, &bid) in rpo.iter().enumerate() {
         for &sid in &succs[bid as usize] {
-            let soi = block_pos_in_order[sid as usize];
-            if soi == u32::MAX {
+            let sri = rpo_pos[sid as usize];
+            if sri == u32::MAX {
                 continue;
             }
-            rpo_preds[soi as usize].push(oi as u32);
-            if soi <= oi as u32 {
-                backedges.push((oi as u32, soi));
+            rpo_preds[sri as usize].push(ri as u32);
+            if sri <= ri as u32 {
+                backedges.push((ri as u32, sri));
             }
         }
     }
     if !backedges.is_empty() {
+        let mut rpo_depth = vec![0u8; n_ord];
         let mut loop_seen = vec![u32::MAX; n_ord];
         let mut worklist: Vec<u32> = Vec::new();
         for (li, &(latch, header)) in backedges.iter().take(512).enumerate() {
             let stamp = li as u32;
             loop_seen[header as usize] = stamp;
-            loop_depth[header as usize] = loop_depth[header as usize].saturating_add(1).min(4);
+            rpo_depth[header as usize] = rpo_depth[header as usize].saturating_add(1).min(4);
             if latch != header {
                 loop_seen[latch as usize] = stamp;
-                loop_depth[latch as usize] = loop_depth[latch as usize].saturating_add(1).min(4);
+                rpo_depth[latch as usize] = rpo_depth[latch as usize].saturating_add(1).min(4);
                 worklist.clear();
                 worklist.push(latch);
                 while let Some(cur) = worklist.pop() {
                     for &p in &rpo_preds[cur as usize] {
                         if p > header && loop_seen[p as usize] != stamp {
                             loop_seen[p as usize] = stamp;
-                            loop_depth[p as usize] =
-                                loop_depth[p as usize].saturating_add(1).min(4);
+                            rpo_depth[p as usize] = rpo_depth[p as usize].saturating_add(1).min(4);
                             worklist.push(p);
                         }
                     }
                 }
             }
+        }
+        for (ri, &bid) in rpo.iter().enumerate() {
+            let oi = block_pos_in_order[bid as usize] as usize;
+            loop_depth[oi] = rpo_depth[ri];
         }
     }
 

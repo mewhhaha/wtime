@@ -33,71 +33,69 @@
 <text class="lg" x="36" y="73.5">wtime-aot x64 (pure Rust, 0 LLVM)</text>
 <rect class="rust" x="264" y="64" width="11" height="11" rx="3"/>
 <text class="lg" x="280" y="73.5">wtime-aot rust (-O3)</text>
-<line class="ax" x1="179.3" x2="179.3" y1="94" y2="463.5"/>
-<text class="tick" x="179.3" y="481.5" text-anchor="middle">1× (Wasmtime)</text>
-<line class="grid" x1="245.0" x2="245.0" y1="94" y2="463.5"/>
-<text class="tick" x="245.0" y="481.5" text-anchor="middle">2×</text>
-<line class="grid" x1="331.9" x2="331.9" y1="94" y2="463.5"/>
-<text class="tick" x="331.9" y="481.5" text-anchor="middle">5×</text>
-<line class="grid" x1="397.6" x2="397.6" y1="94" y2="463.5"/>
-<text class="tick" x="397.6" y="481.5" text-anchor="middle">10×</text>
-<line class="grid" x1="463.3" x2="463.3" y1="94" y2="463.5"/>
-<text class="tick" x="463.3" y="481.5" text-anchor="middle">20×</text>
-<line class="grid" x1="550.2" x2="550.2" y1="94" y2="463.5"/>
-<text class="tick" x="550.2" y="481.5" text-anchor="middle">50×</text>
-<line class="grid" x1="615.9" x2="615.9" y1="94" y2="463.5"/>
-<text class="tick" x="615.9" y="481.5" text-anchor="middle">100×</text>
+<line class="ax" x1="180.4" x2="180.4" y1="94" y2="463.5"/>
+<text class="tick" x="180.4" y="481.5" text-anchor="middle">1× (Wasmtime)</text>
+<line class="grid" x1="248.9" x2="248.9" y1="94" y2="463.5"/>
+<text class="tick" x="248.9" y="481.5" text-anchor="middle">2×</text>
+<line class="grid" x1="339.3" x2="339.3" y1="94" y2="463.5"/>
+<text class="tick" x="339.3" y="481.5" text-anchor="middle">5×</text>
+<line class="grid" x1="407.8" x2="407.8" y1="94" y2="463.5"/>
+<text class="tick" x="407.8" y="481.5" text-anchor="middle">10×</text>
+<line class="grid" x1="476.2" x2="476.2" y1="94" y2="463.5"/>
+<text class="tick" x="476.2" y="481.5" text-anchor="middle">20×</text>
+<line class="grid" x1="566.7" x2="566.7" y1="94" y2="463.5"/>
+<text class="tick" x="566.7" y="481.5" text-anchor="middle">50×</text>
 <text class="grp" x="20" y="111.0">BUILD, LOAD, &amp; SIZE (5,036-FN, 3.75 MIB APP)</text>
 <text class="lb" x="140" y="133.5" text-anchor="end">Cold compile</text>
-<g><title>Cold compile — wtime-aot x64 (pure Rust, 0 LLVM): 1.51×  (210 ms vs 318 ms)</title>
-<path class="x64" d="M179.3,124.0H215.1Q218.6,124.0 218.6,127.5V131.5Q218.6,135.0 215.1,135.0H179.3Z"/>
-<text class="v-hi" x="225.6" y="133.5" text-anchor="start">1.51×  (210 ms vs 318 ms)</text></g>
+<g><title>Cold compile — wtime-aot x64 (pure Rust, 0 LLVM): 1.50×  (195 ms vs 294 ms)</title>
+<path class="x64" d="M180.4,124.0H217.2Q220.7,124.0 220.7,127.5V131.5Q220.7,135.0 217.2,135.0H180.4Z"/>
+<text class="v-hi" x="227.7" y="133.5" text-anchor="start">1.50×  (195 ms vs 294 ms)</text></g>
 <text class="lb" x="140" y="160.5" text-anchor="end">1-fn edit rebuild</text>
-<g><title>1-fn edit rebuild — wtime-aot x64 (pure Rust, 0 LLVM): 3.83×  (81.4 ms vs 312 ms)</title>
-<path class="x64" d="M179.3,151.0H303.1Q306.6,151.0 306.6,154.5V158.5Q306.6,162.0 303.1,162.0H179.3Z"/>
-<text class="v-hi" x="313.6" y="160.5" text-anchor="start">3.83×  (81.4 ms vs 312 ms)</text></g>
+<g><title>1-fn edit rebuild — wtime-aot x64 (pure Rust, 0 LLVM): 4.83×  (63.3 ms vs 306 ms)</title>
+<path class="x64" d="M180.4,151.0H332.5Q336.0,151.0 336.0,154.5V158.5Q336.0,162.0 332.5,162.0H180.4Z"/>
+<text class="v-hi" x="343.0" y="160.5" text-anchor="start">4.83×  (63.3 ms vs 306 ms)</text></g>
 <text class="lb" x="140" y="187.5" text-anchor="end">Warm artifact load</text>
-<g><title>Warm artifact load — wtime-aot x64 (pure Rust, 0 LLVM): 83×  (0.039 ms vs 3.25 ms)</title>
-<path class="x64" d="M179.3,178.0H595.3Q598.8,178.0 598.8,181.5V185.5Q598.8,189.0 595.3,189.0H179.3Z"/>
-<text class="v-hi" x="605.8" y="187.5" text-anchor="start">83×  (0.039 ms vs 3.25 ms)</text></g>
+<g><title>Warm artifact load — wtime-aot x64 (pure Rust, 0 LLVM): 68×  (0.032 ms vs 2.18 ms)</title>
+<path class="x64" d="M180.4,178.0H593.8Q597.3,178.0 597.3,181.5V185.5Q597.3,189.0 593.8,189.0H180.4Z"/>
+<text class="v-hi" x="604.3" y="187.5" text-anchor="start">68×  (0.032 ms vs 2.18 ms)</text></g>
 <text class="lb" x="140" y="214.5" text-anchor="end">Artifact size</text>
-<g><title>Artifact size — wtime-aot x64 (pure Rust, 0 LLVM): 1.16×  (6.46 vs 7.51 MiB)</title>
-<path class="x64" d="M179.3,205.0H190.0Q193.5,205.0 193.5,208.5V212.5Q193.5,216.0 190.0,216.0H179.3Z"/>
-<text class="v-hi" x="200.5" y="214.5" text-anchor="start">1.16×  (6.46 vs 7.51 MiB)</text></g>
+<g><title>Artifact size — wtime-aot x64 (pure Rust, 0 LLVM): 1.13×  (6.61 vs 7.51 MiB)</title>
+<path class="x64" d="M180.4,205.0H189.4Q192.9,205.0 192.9,208.5V212.5Q192.9,216.0 189.4,216.0H180.4Z"/>
+<text class="v-hi" x="199.9" y="214.5" text-anchor="start">1.13×  (6.61 vs 7.51 MiB)</text></g>
 <text class="grp" x="20" y="243.0">EXECUTION SPEEDUP ON SELF-CONTAINED WASM KERNELS (CPU 0)</text>
 <text class="lb" x="140" y="272.8" text-anchor="end">Kernels geomean</text>
-<g><title>Kernels geomean — wtime-aot x64 (pure Rust, 0 LLVM): 1.65×  (4 kernels)</title>
-<path class="x64" d="M179.3,256.0H223.5Q227.0,256.0 227.0,259.5V263.5Q227.0,267.0 223.5,267.0H179.3Z"/>
-<text class="v" x="234.0" y="265.5" text-anchor="start">1.65×  (4 kernels)</text></g>
-<g><title>Kernels geomean — wtime-aot rust (-O3): 2.25×  (4 kernels)</title>
-<path class="rust" d="M179.3,270.5H252.7Q256.2,270.5 256.2,274.0V278.0Q256.2,281.5 252.7,281.5H179.3Z"/>
-<text class="v-hi" x="263.2" y="280.0" text-anchor="start">2.25×  (4 kernels)</text></g>
+<g><title>Kernels geomean — wtime-aot x64 (pure Rust, 0 LLVM): 2.04×  (4 kernels)</title>
+<path class="x64" d="M180.4,256.0H247.4Q250.9,256.0 250.9,259.5V263.5Q250.9,267.0 247.4,267.0H180.4Z"/>
+<text class="v" x="257.9" y="265.5" text-anchor="start">2.04×  (4 kernels)</text></g>
+<g><title>Kernels geomean — wtime-aot rust (-O3): 2.31×  (4 kernels)</title>
+<path class="rust" d="M180.4,270.5H259.5Q263.0,270.5 263.0,274.0V278.0Q263.0,281.5 259.5,281.5H180.4Z"/>
+<text class="v-hi" x="270.0" y="280.0" text-anchor="start">2.31×  (4 kernels)</text></g>
 <text class="lb" x="140" y="314.2" text-anchor="end">graph_bfs</text>
-<g><title>graph_bfs — wtime-aot x64 (pure Rust, 0 LLVM): 4.03×  (1.66 µs vs 6.69 µs)</title>
-<path class="x64" d="M179.3,297.5H308.0Q311.5,297.5 311.5,301.0V305.0Q311.5,308.5 308.0,308.5H179.3Z"/>
-<text class="v" x="318.5" y="307.0" text-anchor="start">4.03×  (1.66 µs vs 6.69 µs)</text></g>
-<g><title>graph_bfs — wtime-aot rust (-O3): 5.93×  (1.13 µs vs 6.69 µs)</title>
-<path class="rust" d="M179.3,312.0H344.5Q348.0,312.0 348.0,315.5V319.5Q348.0,323.0 344.5,323.0H179.3Z"/>
-<text class="v-hi" x="355.0" y="321.5" text-anchor="start">5.93×  (1.13 µs vs 6.69 µs)</text></g>
+<g><title>graph_bfs — wtime-aot x64 (pure Rust, 0 LLVM): 5.74×  (1.17 µs vs 6.71 µs)</title>
+<path class="x64" d="M180.4,297.5H349.5Q353.0,297.5 353.0,301.0V305.0Q353.0,308.5 349.5,308.5H180.4Z"/>
+<text class="v-hi" x="360.0" y="307.0" text-anchor="start">5.74×  (1.17 µs vs 6.71 µs)</text></g>
+<g><title>graph_bfs — wtime-aot rust (-O3): 5.78×  (1.16 µs vs 6.71 µs)</title>
+<path class="rust" d="M180.4,312.0H350.1Q353.6,312.0 353.6,315.5V319.5Q353.6,323.0 350.1,323.0H180.4Z"/>
+<text class="v-hi" x="360.6" y="321.5" text-anchor="start">5.78×  (1.16 µs vs 6.71 µs)</text></g>
 <text class="lb" x="140" y="355.8" text-anchor="end">parser_hash</text>
-<g><title>parser_hash — wtime-aot x64 (pure Rust, 0 LLVM): 1.01×  (3.32 µs vs 3.37 µs)</title>
-<path class="x64" d="M179.3,339.0H180.3Q181.3,339.0 181.3,340.0V349.0Q181.3,350.0 180.3,350.0H179.3Z"/>
-<text class="v" x="187.7" y="348.5" text-anchor="start">1.01×  (3.32 µs vs 3.37 µs)</text></g>
-<g><title>parser_hash — wtime-aot rust (-O3): 0.98×  (3.46 µs vs 3.37 µs)</title>
-<path class="rust" d="M179.3,353.5H178.1Q176.9,353.5 176.9,354.7V363.3Q176.9,364.5 178.1,364.5H179.3Z"/>
-<text class="v" x="186.3" y="363.0" text-anchor="start">0.98×  (3.46 µs vs 3.37 µs)</text></g>
+<g><title>parser_hash — wtime-aot x64 (pure Rust, 0 LLVM): 1.08×  (3.46 µs vs 3.75 µs)</title>
+<path class="x64" d="M180.4,339.0H184.8Q188.3,339.0 188.3,342.5V346.5Q188.3,350.0 184.8,350.0H180.4Z"/>
+<text class="v-hi" x="195.3" y="348.5" text-anchor="start">1.08×  (3.46 µs vs 3.75 µs)</text></g>
+<g><title>parser_hash — wtime-aot rust (-O3): 1.02×  (3.66 µs vs 3.75 µs)</title>
+<path class="rust" d="M180.4,353.5H181.6Q182.8,353.5 182.8,354.7V363.3Q182.8,364.5 181.6,364.5H180.4Z"/>
+<text class="v" x="189.8" y="363.0" text-anchor="start">1.02×  (3.66 µs vs 3.75 µs)</text></g>
 <text class="lb" x="140" y="397.2" text-anchor="end">image_filter</text>
-<g><title>image_filter — wtime-aot x64 (pure Rust, 0 LLVM): 1.00×  (4.83 µs vs 4.83 µs)</title>
-<path class="x64" d="M179.3,380.5H180.3Q181.3,380.5 181.3,381.5V390.5Q181.3,391.5 180.3,391.5H179.3Z"/>
-<text class="v" x="186.4" y="390.0" text-anchor="start">1.00×  (4.83 µs vs 4.83 µs)</text></g>
-<g><title>image_filter — wtime-aot rust (-O3): 1.40×  (3.44 µs vs 4.83 µs)</title>
-<path class="rust" d="M179.3,395.0H207.8Q211.3,395.0 211.3,398.5V402.5Q211.3,406.0 207.8,406.0H179.3Z"/>
-<text class="v-hi" x="218.3" y="404.5" text-anchor="start">1.40×  (3.44 µs vs 4.83 µs)</text></g>
+<g><title>image_filter — wtime-aot x64 (pure Rust, 0 LLVM): 1.04×  (5.27 µs vs 5.47 µs)</title>
+<path class="x64" d="M180.4,380.5H182.3Q184.1,380.5 184.1,382.4V389.6Q184.1,391.5 182.3,391.5H180.4Z"/>
+<text class="v" x="191.1" y="390.0" text-anchor="start">1.04×  (5.27 µs vs 5.47 µs)</text></g>
+<g><title>image_filter — wtime-aot rust (-O3): 1.52×  (3.61 µs vs 5.47 µs)</title>
+<path class="rust" d="M180.4,395.0H218.1Q221.6,395.0 221.6,398.5V402.5Q221.6,406.0 218.1,406.0H180.4Z"/>
+<text class="v-hi" x="228.6" y="404.5" text-anchor="start">1.52×  (3.61 µs vs 5.47 µs)</text></g>
 <text class="lb" x="140" y="438.8" text-anchor="end">ecs_kernel</text>
-<g><title>ecs_kernel — wtime-aot x64 (pure Rust, 0 LLVM): 1.83×  (12.6 µs vs 23.0 µs)</title>
-<path class="x64" d="M179.3,422.0H233.1Q236.6,422.0 236.6,425.5V429.5Q236.6,433.0 233.1,433.0H179.3Z"/>
-<text class="v" x="243.6" y="431.5" text-anchor="start">1.83×  (12.6 µs vs 23.0 µs)</text></g>
-<g><title>ecs_kernel — wtime-aot rust (-O3): 3.17×  (7.25 µs vs 23.0 µs)</title>
-<path class="rust" d="M179.3,436.5H285.2Q288.7,436.5 288.7,440.0V444.0Q288.7,447.5 285.2,447.5H179.3Z"/>
-<text class="v-hi" x="295.7" y="446.0" text-anchor="start">3.17×  (7.25 µs vs 23.0 µs)</text></g>
+<g><title>ecs_kernel — wtime-aot x64 (pure Rust, 0 LLVM): 2.69×  (8.00 µs vs 21.6 µs)</title>
+<path class="x64" d="M180.4,422.0H274.8Q278.3,422.0 278.3,425.5V429.5Q278.3,433.0 274.8,433.0H180.4Z"/>
+<text class="v" x="285.3" y="431.5" text-anchor="start">2.69×  (8.00 µs vs 21.6 µs)</text></g>
+<g><title>ecs_kernel — wtime-aot rust (-O3): 3.17×  (6.81 µs vs 21.6 µs)</title>
+<path class="rust" d="M180.4,436.5H290.7Q294.2,436.5 294.2,440.0V444.0Q294.2,447.5 290.7,447.5H180.4Z"/>
+<text class="v-hi" x="301.2" y="446.0" text-anchor="start">3.17×  (6.81 µs vs 21.6 µs)</text></g>
 </svg>

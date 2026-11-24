@@ -80,8 +80,8 @@
 <rect class="box-blue" x="416" y="164" width="118" height="70" rx="7"/>
 <text class="pill p-blue" x="426" y="180">--backend x64</text>
 <text class="sub" x="426" y="198">Pure Rust · 0 LLVM</text>
-<text class="sub" x="426" y="214">~210 ms cold .so</text>
-<text class="sub" x="426" y="227">~81 ms 1-fn edit</text>
+<text class="sub" x="426" y="214">~195 ms cold .so</text>
+<text class="sub" x="426" y="227">~63 ms 1-fn edit</text>
 
 <rect class="box-orange" x="544" y="164" width="118" height="70" rx="7"/>
 <text class="pill p-orange" x="554" y="180">--backend c</text>

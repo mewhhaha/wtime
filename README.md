@@ -13,7 +13,7 @@ Most WebAssembly runtimes force a trade-off: ship a large JIT compiler with a br
 `wtime` keeps those concerns cleanly separated:
 
 - **Safe core runtime (`crates/*`)** — 100% safe Rust with zero third-party dependencies, full Core 3.0 + Phase 3–5 coverage (GC, exceptions, threads/atomics, memory64, relaxed SIMD, stack-switching continuations), deterministic fuel metering, cooperative cancellation, and recoverable OOM limits. No JIT and no native guest stack.
-- **Opt-in AOT compiler (`tools/wtime-aot`)** — compiles validated modules *ahead of time* to native code while keeping execution JIT-free. Choose between a **pure-Rust x86-64 compiler** (no LLVM/Clang, ~210 ms cold builds, ~81 ms incremental rebuilds) or **C99/Clang** and **safe Rust** backends when peak LLVM optimization matters.
+- **Opt-in AOT compiler (`tools/wtime-aot`)** — compiles validated modules *ahead of time* to native code while keeping execution JIT-free. Choose between a **pure-Rust x86-64 compiler** (no LLVM/Clang, ~195 ms cold builds, ~63 ms incremental rebuilds) or **C99/Clang** and **safe Rust** backends when peak LLVM optimization matters.
 
 <br>
 
@@ -41,7 +41,7 @@ Across 18 real workloads (algorithms plus a self-hosting 32- and 64-bit Wasm com
 
 ### Execution Speed — Self-Contained Wasm Kernels
 
-Direct 5-engine comparison on CPU 0 (`AMD Ryzen 7 7800X3D`, Wasmtime `49.0.3`, Node `v26.5.0`). Pure-Rust `--backend x64` matches or beats Wasmtime on all 4 kernels (**1.65×** geomean, up to **4.0×** faster, and ahead of V8 on 3 of 4); `--backend rust (-O3)` reaches **2.25×** geomean (up to **5.9×**) over Wasmtime.
+Direct 5-engine comparison on CPU 0 (`AMD Ryzen 7 7800X3D`, Wasmtime `49.0.3`, Node `v26.5.0`). Pure-Rust `--backend x64` beats **both** Wasmtime and V8 on **all 4 kernels** (**2.04×** geomean over Wasmtime, up to **5.7×** faster — tying Rust/LLVM `-O3` on `graph_bfs` and beating Clang `-O2` by **1.4×** on `ecs_kernel`); `--backend rust (-O3)` reaches **2.31×** geomean (up to **5.8×**) over Wasmtime.
 
 ![Execution time on Wasm kernels comparing wtime-aot backends, Wasmtime, and V8](tools/wtime-aot/charts/runtime-kernels.svg)
 
@@ -49,7 +49,7 @@ Direct 5-engine comparison on CPU 0 (`AMD Ryzen 7 7800X3D`, Wasmtime `49.0.3`, N
 
 ### Compilation Speed, Incremental Rebuilds, & Warm Load
 
-On a **5,036-function (`3.75 MiB`)** Wasm application, pure-Rust `--backend x64` needs no external compiler or LLVM, compiles **1.5× faster cold** than Wasmtime Cranelift (**39×** faster than Clang `-O2`), rebuilds a 1-function edit **3.8× faster** (**81 ms**) via per-function incremental caching, compiles small kernels in **1.3–1.8 ms** (matching or beating Wasmtime), and produces a **6.46 MiB** `.so` (vs. `7.51 MiB` `.cwasm`) that loads in **0.039 ms**.
+On a **5,036-function (`3.75 MiB`)** Wasm application, pure-Rust `--backend x64` needs no external compiler or LLVM, compiles **1.5× faster cold** than Wasmtime Cranelift (`195 ms` vs. `294 ms`; **38×** faster than Clang `-O2`), rebuilds a 1-function edit **4.8× faster** (**63 ms**) via parallel per-function incremental caching, compiles small kernels in **1.7–1.9 ms**, and produces a **6.61 MiB** `.so` (vs. `7.51 MiB` `.cwasm`) that loads in **0.032 ms** (**68×** faster).
 
 ![Cold compilation time comparing wtime-aot backends and Wasmtime](tools/wtime-aot/charts/compile-cold.svg)
 

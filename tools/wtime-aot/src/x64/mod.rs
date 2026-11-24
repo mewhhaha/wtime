@@ -862,6 +862,77 @@ pub(crate) fn compile_wasm_to_x64_so_with_pending_save(
     }
 }
 
+/// Fallibly maps `0..n` in parallel across up to `n_workers.min(16)` threads when `n >= 256`,
+/// with inline fallback if `spawn_scoped` fails and early abort on any `None` (OOM).
+fn parallel_try_map<T: Send, F: Fn(usize) -> Option<T> + Sync>(
+    n: usize,
+    n_workers: usize,
+    f: F,
+) -> Option<Vec<T>> {
+    if n < 256 || n_workers <= 1 {
+        let mut out = inc_cache::try_vec_with_capacity::<T>(n)?;
+        for i in 0..n {
+            out.push(f(i)?);
+        }
+        return Some(out);
+    }
+    let mut slots = inc_cache::try_vec_with_capacity::<Option<T>>(n)?;
+    for _ in 0..n {
+        slots.push(None);
+    }
+    let workers = n_workers.min(16).min(n);
+    let per_worker = n.div_ceil(workers);
+    let failed = AtomicBool::new(false);
+    let f_ref = &f;
+    let run_range = |start_idx: usize, chunk: &mut [Option<T>]| {
+        for (j, slot) in chunk.iter_mut().enumerate() {
+            if failed.load(Ordering::Acquire) {
+                return;
+            }
+            match f_ref(start_idx + j) {
+                Some(v) => *slot = Some(v),
+                None => {
+                    failed.store(true, Ordering::Release);
+                    return;
+                }
+            }
+        }
+    };
+    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
+    let mut n_unspawned = 0usize;
+    std::thread::scope(|s| {
+        let mut rem = slots.as_mut_slice();
+        let mut idx = 0usize;
+        while !rem.is_empty() {
+            let take = per_worker.min(rem.len());
+            let (chunk, rest) = rem.split_at_mut(take);
+            let start_idx = idx;
+            rem = rest;
+            idx += take;
+            if rem.is_empty() {
+                run_range(start_idx, chunk);
+            } else if std::thread::Builder::new()
+                .spawn_scoped(s, move || run_range(start_idx, chunk))
+                .is_err()
+            {
+                unspawned[n_unspawned] = Some((start_idx, take));
+                n_unspawned += 1;
+            }
+        }
+    });
+    for &(start_idx, take) in unspawned[..n_unspawned].iter().flatten() {
+        run_range(start_idx, &mut slots[start_idx..start_idx + take]);
+    }
+    if failed.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut out = inc_cache::try_vec_with_capacity::<T>(n)?;
+    for slot in slots {
+        out.push(slot?);
+    }
+    Some(out)
+}
+
 fn compile_wasm_to_x64_so_inner(
     wasm: &[u8],
     opts: &X64CompileOptions,
@@ -872,16 +943,22 @@ fn compile_wasm_to_x64_so_inner(
     check_dl()?;
 
     // 1. Validate Wasm under Stage 1's strict feature profile and resource limits.
+    //    Unlock up to 16 parallel decode/validate workers for large modules (>= 256 KiB).
     let t0 = Instant::now();
-    let validated =
-        wtime_validate::validate(wasm, &x64_validate_features(), &x64_validate_limits()).map_err(
-            |e| match e.kind {
-                ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
-                    X64CompileError::AdmissionRejected(format!("x64: {e}"))
-                }
-                _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
-            },
-        )?;
+    let mut vlimits = x64_validate_limits();
+    vlimits.compile_threads = if wasm.len() >= 256 * 1024 {
+        resolve_jobs(opts.jobs).min(16)
+    } else {
+        1
+    };
+    let validated = wtime_validate::validate(wasm, &x64_validate_features(), &vlimits).map_err(
+        |e| match e.kind {
+            ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
+                X64CompileError::AdmissionRejected(format!("x64: {e}"))
+            }
+            _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
+        },
+    )?;
     let decoded = validated.decoded();
     let d_validate = t0.elapsed();
     check_dl()?;
@@ -958,6 +1035,7 @@ fn compile_wasm_to_x64_so_inner(
     let mut compiled: Vec<Option<Asm>> = (0..n_defs).map(|_| None).collect();
     let mut new_inc_cache: Option<inc_cache::IncCacheData> = None;
     let mut inc_reused_count: usize = 0;
+    let mut deferred_cold_drop: Option<(Vec<IrFunc>, Vec<AllocResult>)> = None;
 
     let map_worker_err = |err: String| -> X64CompileError {
         if budget.check_deadline().is_ok()
@@ -1227,28 +1305,16 @@ fn compile_wasm_to_x64_so_inner(
 
         let mut capture_cache = inc_ctx.is_some();
         let mut pre_inline_callees: Vec<Vec<(u32, u32)>> = if capture_cache {
-            let mut collected = match inc_cache::try_vec_with_capacity(n_defs) {
-                Some(v) => v,
+            match parallel_try_map(n_defs, n_workers, |bi| {
+                opt::try_collect_pre_inline_callees(&irs[bi], n_imports, n_defs)
+            }) {
+                Some(collected) => collected,
                 None => {
                     capture_cache = false;
                     inc_ctx = None;
                     Vec::new()
                 }
-            };
-            if capture_cache {
-                for ir in &irs {
-                    match opt::try_collect_pre_inline_callees(ir, n_imports, n_defs) {
-                        Some(cs) => collected.push(cs),
-                        None => {
-                            capture_cache = false;
-                            inc_ctx = None;
-                            collected.clear();
-                            break;
-                        }
-                    }
-                }
             }
-            collected
         } else {
             Vec::new()
         };
@@ -1305,28 +1371,19 @@ fn compile_wasm_to_x64_so_inner(
                 }
                 let n_total = n_imports + n_defs;
                 let mut eff_opt: Option<opt::ModuleEffects> = None;
-                if capture_cache && let Some(mut own_eff) = inc_cache::try_vec_with_capacity(n_defs)
+                if capture_cache
+                    && let Some(own_eff) = parallel_try_map(n_defs, n_workers, |bi| {
+                        opt::try_compute_fn_own_effects(&irs[bi], &module, n_total)
+                    })
+                    && let Some(eff) = opt::try_compute_module_effects_from_summaries(
+                        &own_eff,
+                        &module,
+                        Some(&budget),
+                    )
+                    .map_err(map_worker_err)?
                 {
-                    let mut own_ok = true;
-                    for ir in &irs {
-                        if let Some(s) = opt::try_compute_fn_own_effects(ir, &module, n_total) {
-                            own_eff.push(s);
-                        } else {
-                            own_ok = false;
-                            break;
-                        }
-                    }
-                    if own_ok
-                        && let Some(eff) = opt::try_compute_module_effects_from_summaries(
-                            &own_eff,
-                            &module,
-                            Some(&budget),
-                        )
-                        .map_err(map_worker_err)?
-                    {
-                        own_effects_vec = own_eff;
-                        eff_opt = Some(eff);
-                    }
+                    own_effects_vec = own_eff;
+                    eff_opt = Some(eff);
                 }
                 if let Some(eff) = eff_opt {
                     d_inline_effects = ti.elapsed();
@@ -1474,32 +1531,23 @@ fn compile_wasm_to_x64_so_inner(
         let fn_can_trap: Option<Vec<bool>> = if opts.opt {
             let te = Instant::now();
             let mut cached_elide: Option<Vec<bool>> = None;
-            if capture_cache && let Some(mut elide_in) = inc_cache::try_vec_with_capacity(n_defs) {
-                let mut ok = true;
-                for (ir, alloc) in irs.iter().zip(&allocs) {
-                    if let Some(inp) = opt::try_compute_fn_elide_input(ir, alloc, n_imports, n_defs)
-                    {
-                        elide_in.push(inp);
-                    } else {
-                        ok = false;
-                        break;
-                    }
+            if capture_cache
+                && let Some(elide_in) = parallel_try_map(n_defs, n_workers, |bi| {
+                    opt::try_compute_fn_elide_input(&irs[bi], &allocs[bi], n_imports, n_defs)
+                })
+                && let Some(out) = opt::try_run_stack_and_trap_elision_from_summaries(
+                    &elide_in,
+                    &module,
+                    Some(&budget),
+                )
+                .map_err(map_worker_err)?
+            {
+                elide_inputs_vec = elide_in;
+                for (bi, ir) in irs.iter_mut().enumerate() {
+                    ir.needs_stack_check = out.needs_stack_check[bi];
+                    ir.elided_callee_stack_bytes = out.elided_callee_stack_bytes[bi];
                 }
-                if ok
-                    && let Some(out) = opt::try_run_stack_and_trap_elision_from_summaries(
-                        &elide_in,
-                        &module,
-                        Some(&budget),
-                    )
-                    .map_err(map_worker_err)?
-                {
-                    elide_inputs_vec = elide_in;
-                    for (bi, ir) in irs.iter_mut().enumerate() {
-                        ir.needs_stack_check = out.needs_stack_check[bi];
-                        ir.elided_callee_stack_bytes = out.elided_callee_stack_bytes[bi];
-                    }
-                    cached_elide = Some(out.fn_can_trap);
-                }
+                cached_elide = Some(out.fn_can_trap);
             }
             let res = if let Some(v) = cached_elide {
                 v
@@ -1589,58 +1637,81 @@ fn compile_wasm_to_x64_so_inner(
             }
         }
 
-        // Snapshot pre-link per-function data for incremental cache publication (before Phase 6d mutates local_rodata).
-        // Moves single-use metadata directly and uses fallible reservations for `Asm` buffers so low memory
-        // cleanly skips optional cache publication without aborting.
+        // Snapshot pre-link per-function data for incremental cache publication in parallel across
+        // up to 16 workers (before Phase 6d mutates local_rodata). Uses fallible reservations so
+        // low memory cleanly skips optional cache publication without aborting.
         if let (Some((abi_hash, body_hashes, _)), Some(mut track), Some(eff), Some(can_trap)) = (
             &inc_ctx,
             inline_track,
             effects.as_ref(),
             fn_can_trap.as_ref(),
-        ) && let Some(mut cached_funcs) = inc_cache::try_vec_with_capacity(n_defs)
-        {
-            let mut ok_jt = true;
-            for (bi, (own_eff, elide_in)) in own_effects_vec
-                .into_iter()
-                .zip(elide_inputs_vec)
-                .enumerate()
-            {
-                let asm = compiled[bi].as_ref().unwrap();
-                let (Some(jt_entries), Some(code), Some(relocs), Some(local_rodata)) = (
-                    asm.try_export_jt_entries(),
-                    inc_cache::try_copy_slice(&asm.code),
-                    inc_cache::try_copy_slice(&asm.relocs),
-                    inc_cache::try_copy_slice(&asm.local_rodata),
-                ) else {
-                    ok_jt = false;
-                    break;
-                };
+        ) {
+            let compiled_ref = &compiled;
+            let own_ref = &own_effects_vec;
+            let elide_ref = &elide_inputs_vec;
+            let snaps = parallel_try_map(n_defs, n_workers, |bi| {
+                let asm = compiled_ref[bi].as_ref().unwrap();
+                let jt_entries = asm.try_export_jt_entries()?;
+                let code = inc_cache::try_copy_slice(&asm.code)?;
+                let relocs = inc_cache::try_copy_slice(&asm.relocs)?;
+                let local_rodata = inc_cache::try_copy_slice(&asm.local_rodata)?;
                 let callee_effects_hash =
-                    inc_cache::hash_callee_effects(&own_eff.direct_callees, eff);
-                let callee_trap_hash =
-                    inc_cache::hash_callee_traps(&elide_in.direct_def_callees, n_imports, can_trap);
-                cached_funcs.push(inc_cache::CachedFn {
-                    raw_body_hash: body_hashes[bi],
-                    was_inlinable: track.was_inlinable[bi],
-                    pre_inline_callees: std::mem::take(&mut pre_inline_callees[bi]),
-                    inlined_callees: std::mem::take(&mut track.inlined_callees[bi]),
-                    inline_added_insts: track.added_insts[bi],
-                    own_effects: own_eff,
-                    elide_input: elide_in,
-                    callee_effects_hash,
-                    needs_stack_check: irs[bi].needs_stack_check,
-                    elided_callee_stack_bytes: irs[bi].elided_callee_stack_bytes,
-                    callee_trap_hash,
-                    pre_relax_code_len: asm.pre_relax_code_len.max(asm.code.len() as u32),
+                    inc_cache::hash_callee_effects(&own_ref[bi].direct_callees, eff);
+                let callee_trap_hash = inc_cache::hash_callee_traps(
+                    &elide_ref[bi].direct_def_callees,
+                    n_imports,
+                    can_trap,
+                );
+                let pre_relax_code_len = asm.pre_relax_code_len.max(asm.code.len() as u32);
+                Some((
+                    jt_entries,
                     code,
                     relocs,
                     local_rodata,
-                    jt_entries,
-                    jt_labels: Vec::new(),
-                    jt_patches: Vec::new(),
-                });
-            }
-            if ok_jt {
+                    callee_effects_hash,
+                    callee_trap_hash,
+                    pre_relax_code_len,
+                ))
+            });
+            if let Some(snaps) = snaps
+                && let Some(mut cached_funcs) = inc_cache::try_vec_with_capacity(n_defs)
+            {
+                for (bi, ((own_eff, elide_in), snap)) in own_effects_vec
+                    .into_iter()
+                    .zip(elide_inputs_vec)
+                    .zip(snaps)
+                    .enumerate()
+                {
+                    let (
+                        jt_entries,
+                        code,
+                        relocs,
+                        local_rodata,
+                        callee_effects_hash,
+                        callee_trap_hash,
+                        pre_relax_code_len,
+                    ) = snap;
+                    cached_funcs.push(inc_cache::CachedFn {
+                        raw_body_hash: body_hashes[bi],
+                        was_inlinable: track.was_inlinable[bi],
+                        pre_inline_callees: std::mem::take(&mut pre_inline_callees[bi]),
+                        inlined_callees: std::mem::take(&mut track.inlined_callees[bi]),
+                        inline_added_insts: track.added_insts[bi],
+                        own_effects: own_eff,
+                        elide_input: elide_in,
+                        callee_effects_hash,
+                        needs_stack_check: irs[bi].needs_stack_check,
+                        elided_callee_stack_bytes: irs[bi].elided_callee_stack_bytes,
+                        callee_trap_hash,
+                        pre_relax_code_len,
+                        code,
+                        relocs,
+                        local_rodata,
+                        jt_entries,
+                        jt_labels: Vec::new(),
+                        jt_patches: Vec::new(),
+                    });
+                }
                 new_inc_cache = Some(inc_cache::IncCacheData {
                     abi_hash: *abi_hash,
                     global_words: module.globals.len().div_ceil(64),
@@ -1649,19 +1720,27 @@ fn compile_wasm_to_x64_so_inner(
                 });
             }
         }
+        if n_defs >= 256 {
+            deferred_cold_drop = Some((irs, allocs));
+        }
     }
     check_dl()?;
 
-    // 6. Deterministic merge & ELF64 linking (overlapped with best-effort incremental cache write).
+    // 6. Deterministic merge & ELF64 linking (overlapped with best-effort incremental cache write
+    //    and, on large modules, background deallocation of decoded/IR/alloc structures).
     let t_link = Instant::now();
     let save_done: Option<std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>> =
         if let (Some(dir), Some(data)) = (opts.inc_cache_dir.as_deref(), new_inc_cache.take()) {
             let dir_buf = dir.to_path_buf();
             let done = std::sync::Arc::new((Mutex::new(false), std::sync::Condvar::new()));
             let done_bg = std::sync::Arc::clone(&done);
+            let bg_validated = (n_defs >= 256).then_some(validated);
+            let bg_cold_drop = deferred_cold_drop.take();
             if std::thread::Builder::new()
                 .spawn(move || {
                     inc_cache::save_inc_cache(&dir_buf, &data);
+                    drop(bg_cold_drop);
+                    drop(bg_validated);
                     let (lk, cv) = &*done_bg;
                     *lk.lock().unwrap_or_else(|g| g.into_inner()) = true;
                     cv.notify_all();
@@ -2672,17 +2751,46 @@ fn try_compile_defs_incremental(
     }
 
     // Assemble final `Vec<Asm>` and optional updated `IncCacheData`.
-    // Charges exact pre-relaxation code bytes (matching cold emission's `CompileBudget` accounting)
-    // and uses fallible clones so low memory moves cached `Asm`s cleanly and skips cache save instead of aborting.
-    let mut save_ok = true;
-    let mut updated_funcs = match inc_cache::try_vec_with_capacity(n_defs) {
-        Some(v) => v,
-        None => {
-            save_ok = false;
-            Vec::new()
-        }
-    };
+    // 1. Charge exact pre-relaxation code/rodata bytes for unchanged functions in deterministic order.
     let mut reused = 0usize;
+    for (bi, prev_cached) in prev_cache.funcs.iter().enumerate() {
+        if !dirty[bi] {
+            budget
+                .charge_code(prev_cached.pre_relax_code_len as usize)
+                .map_err(map_worker_err)?;
+            budget
+                .charge_rodata(prev_cached.local_rodata.len())
+                .map_err(map_worker_err)?;
+            reused += 1;
+        }
+    }
+    // 2. When saving the updated cache on large modules, clone unchanged `Asm`s in parallel so
+    //    we don't copy ~8+ MiB across thousands of tiny vectors on one thread.
+    let mut cloned_reused_asms: Option<Vec<Option<Asm>>> = if n_defs >= 256 && n_workers > 1 {
+        let prev_ref = &prev_cache.funcs;
+        let dirty_ref = &dirty;
+        parallel_try_map(n_defs, n_workers, |bi| {
+            if dirty_ref[bi] {
+                Some(None)
+            } else {
+                Some(Some(prev_ref[bi].try_to_asm()?))
+            }
+        })
+    } else {
+        None
+    };
+    let mut save_ok = n_defs < 256 || n_workers <= 1 || cloned_reused_asms.is_some();
+    let mut updated_funcs = if save_ok {
+        match inc_cache::try_vec_with_capacity(n_defs) {
+            Some(v) => v,
+            None => {
+                save_ok = false;
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
     for (bi, prev_cached) in prev_cache.funcs.drain(..).enumerate() {
         if dirty[bi] {
             let asm = dirty_asms[bi].take().unwrap();
@@ -2739,14 +2847,12 @@ fn try_compile_defs_incremental(
                 });
             }
             final_asms.push(asm);
-        } else {
-            budget
-                .charge_code(prev_cached.pre_relax_code_len as usize)
-                .map_err(map_worker_err)?;
-            budget
-                .charge_rodata(prev_cached.local_rodata.len())
-                .map_err(map_worker_err)?;
-            if save_ok && let Some(asm) = prev_cached.try_to_asm() {
+        } else if save_ok {
+            let cloned = cloned_reused_asms
+                .as_mut()
+                .and_then(|v| v[bi].take())
+                .or_else(|| prev_cached.try_to_asm());
+            if let Some(asm) = cloned {
                 final_asms.push(asm);
                 updated_funcs.push(prev_cached);
             } else {
@@ -2754,7 +2860,8 @@ fn try_compile_defs_incremental(
                 updated_funcs.clear();
                 final_asms.push(prev_cached.into_asm());
             }
-            reused += 1;
+        } else {
+            final_asms.push(prev_cached.into_asm());
         }
     }
 

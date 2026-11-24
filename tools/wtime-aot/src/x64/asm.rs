@@ -270,6 +270,7 @@ pub struct Asm {
     pub local_rodata: Vec<u8>,
     pub jt_patches: Vec<JumpTablePatch>,
     labels: Vec<Option<u32>>,
+    align16_labels: Vec<bool>,
     fixups: Vec<LocalFixup>,
     f32_pool: HashMap<u32, u32>,
     f64_pool: HashMap<u64, u32>,
@@ -284,6 +285,7 @@ impl Asm {
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
             labels: Vec::new(),
+            align16_labels: Vec::new(),
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -298,6 +300,7 @@ impl Asm {
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
             labels: Vec::new(),
+            align16_labels: Vec::new(),
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -333,7 +336,15 @@ impl Asm {
     pub fn new_label(&mut self) -> Label {
         let id = u32::try_from(self.labels.len()).expect("label count exceeded u32::MAX");
         self.labels.push(None);
+        self.align16_labels.push(false);
         Label(id)
+    }
+
+    #[inline]
+    pub fn mark_align16(&mut self, label: Label) {
+        if let Some(slot) = self.align16_labels.get_mut(label.0 as usize) {
+            *slot = true;
+        }
     }
 
     #[inline]
@@ -342,9 +353,31 @@ impl Asm {
         self.labels[label.0 as usize] = Some(self.pos());
     }
 
+    /// Appends `n` bytes of canonical x86-64 multi-byte NOP padding (1..=15 bytes).
+    fn emit_nops(buf: &mut Vec<u8>, mut n: usize) {
+        const NOPS: [&[u8]; 9] = [
+            &[0x90],
+            &[0x66, 0x90],
+            &[0x0f, 0x1f, 0x00],
+            &[0x0f, 0x1f, 0x40, 0x00],
+            &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        while n > 0 {
+            let chunk = n.min(9);
+            buf.extend_from_slice(NOPS[chunk - 1]);
+            n -= chunk;
+        }
+    }
+
     /// Resolves all local branch fixups, relaxing branches whose target lies within `rel8`
     /// (`[-128, 127]`) from 5/6-byte `rel32` encodings to 2-byte `rel8` encodings while
-    /// keeping `labels` and `relocs` exact. Must be called before linking.
+    /// keeping `labels` and `relocs` exact, then pads `align16`-marked labels (e.g. loop
+    /// headers) to 16-byte boundaries using canonical multi-byte NOPs whenever all crossing
+    /// `rel8` branches remain safely within `i8` range. Must be called before linking.
     pub fn finish_labels(&mut self) -> Result<(), String> {
         if self.code.len() > i32::MAX as usize {
             return Err(format!(
@@ -353,8 +386,9 @@ impl Asm {
             ));
         }
         self.pre_relax_code_len = self.code.len() as u32;
+        let has_align16 = self.align16_labels.iter().any(|&a| a);
         let n_fix = self.fixups.len();
-        if n_fix == 0 {
+        if n_fix == 0 && !has_align16 {
             return Ok(());
         }
         // Validate every fixup label upfront.
@@ -368,7 +402,7 @@ impl Asm {
             target_orig.push(t);
         }
 
-        // Monotonic branch relaxation (3 passes catch cascading shrinks cleanly):
+        // Monotonic branch relaxation (up to 4 passes catch cascading shrinks cleanly):
         // - `jmp` directly to the immediately following instruction (`rel == 0`): 5 B -> 0 B (saves 5 B)
         // - `jmp rel32` within `rel8`: 5 B -> 2 B (saves 3 B)
         // - `jcc rel32` within `rel8`: 6 B -> 2 B (saves 4 B)
@@ -436,6 +470,19 @@ impl Asm {
             saved_prefix[n_fix] = acc;
         }
 
+        struct PostBranch {
+            inst_off: u32,
+            patch_off: u32,
+            target_off: u32,
+            cur_rel: i64,
+            is_rel8: bool,
+        }
+        let mut post_branches: Vec<PostBranch> = if has_align16 {
+            Vec::with_capacity(n_fix)
+        } else {
+            Vec::new()
+        };
+
         if !any_changed {
             for (i, f) in self.fixups.iter().enumerate() {
                 let rel = i128::from(target_orig[i]) - i128::from(f.next_ip_off);
@@ -452,78 +499,221 @@ impl Asm {
                     ));
                 }
                 self.code[p..end].copy_from_slice(&rel32.to_le_bytes());
-            }
-            self.fixups.clear();
-            return Ok(());
-        }
-
-        // Recompute final exact label offsets, reloc offsets, and compact machine code in O(code.len()).
-        let shift_of = |orig_off: u32| -> u32 {
-            let idx = self.fixups.partition_point(|fx| fx.next_ip_off <= orig_off);
-            saved_prefix[idx]
-        };
-        for off in self.labels.iter_mut().flatten() {
-            *off -= shift_of(*off);
-        }
-        for rel in &mut self.relocs {
-            let sh = shift_of(rel.patch_off);
-            rel.patch_off -= sh;
-            rel.next_ip_off -= sh;
-        }
-
-        let total_saved = saved_prefix[n_fix] as usize;
-        let mut new_code = Vec::with_capacity(self.code.len() - total_saved);
-        let mut cursor = 0usize;
-        for (i, f) in self.fixups.iter().enumerate() {
-            let inst_start = f.inst_off as usize;
-            let orig_end = f.next_ip_off as usize;
-            new_code.extend_from_slice(&self.code[cursor..inst_start]);
-            let target_new = self.labels[f.label.0 as usize].unwrap();
-            match mode[i] {
-                2 => {
-                    debug_assert_eq!(target_new, new_code.len() as u32);
+                if has_align16 {
+                    post_branches.push(PostBranch {
+                        inst_off: f.inst_off,
+                        patch_off: f.patch_off,
+                        target_off: target_orig[i],
+                        cur_rel: i64::from(rel32),
+                        is_rel8: false,
+                    });
                 }
-                1 => {
-                    let new_next_ip = new_code.len() as u32 + 2;
-                    let rel = i64::from(target_new) - i64::from(new_next_ip);
-                    let rel8 = i8::try_from(rel)
-                        .map_err(|_| "short branch displacement overflow".to_string())?;
-                    match f.kind {
-                        FixupKind::Jmp => {
-                            new_code.push(0xeb);
-                            new_code.push(rel8 as u8);
+            }
+        } else {
+            // Recompute final exact label offsets, reloc offsets, and compact machine code in O(code.len()).
+            let shift_of = |orig_off: u32| -> u32 {
+                let idx = self.fixups.partition_point(|fx| fx.next_ip_off <= orig_off);
+                saved_prefix[idx]
+            };
+            for off in self.labels.iter_mut().flatten() {
+                *off -= shift_of(*off);
+            }
+            for rel in &mut self.relocs {
+                let sh = shift_of(rel.patch_off);
+                rel.patch_off -= sh;
+                rel.next_ip_off -= sh;
+            }
+
+            let total_saved = saved_prefix[n_fix] as usize;
+            let mut new_code = Vec::with_capacity(self.code.len() - total_saved);
+            let mut cursor = 0usize;
+            for (i, f) in self.fixups.iter().enumerate() {
+                let inst_start = f.inst_off as usize;
+                let orig_end = f.next_ip_off as usize;
+                new_code.extend_from_slice(&self.code[cursor..inst_start]);
+                let target_new = self.labels[f.label.0 as usize].unwrap();
+                match mode[i] {
+                    2 => {
+                        debug_assert_eq!(target_new, new_code.len() as u32);
+                    }
+                    1 => {
+                        let new_inst_off = new_code.len() as u32;
+                        let new_next_ip = new_inst_off + 2;
+                        let rel = i64::from(target_new) - i64::from(new_next_ip);
+                        let rel8 = i8::try_from(rel)
+                            .map_err(|_| "short branch displacement overflow".to_string())?;
+                        match f.kind {
+                            FixupKind::Jmp => {
+                                new_code.push(0xeb);
+                                new_code.push(rel8 as u8);
+                            }
+                            FixupKind::Jcc(c) => {
+                                new_code.push(0x70 + c);
+                                new_code.push(rel8 as u8);
+                            }
                         }
-                        FixupKind::Jcc(c) => {
-                            new_code.push(0x70 + c);
-                            new_code.push(rel8 as u8);
+                        if has_align16 {
+                            post_branches.push(PostBranch {
+                                inst_off: new_inst_off,
+                                patch_off: new_inst_off + 1,
+                                target_off: target_new,
+                                cur_rel: i64::from(rel8),
+                                is_rel8: true,
+                            });
+                        }
+                    }
+                    _ => {
+                        let new_inst_off = new_code.len() as u32;
+                        let orig_len = (orig_end - inst_start) as u32;
+                        let new_next_ip = new_inst_off + orig_len;
+                        let rel = i128::from(target_new) - i128::from(new_next_ip);
+                        let rel32 = i32::try_from(rel)
+                            .map_err(|_| "local branch displacement exceeds rel32".to_string())?;
+                        let patch_off = match f.kind {
+                            FixupKind::Jmp => {
+                                new_code.push(0xe9);
+                                new_code.extend_from_slice(&rel32.to_le_bytes());
+                                new_inst_off + 1
+                            }
+                            FixupKind::Jcc(c) => {
+                                new_code.push(0x0f);
+                                new_code.push(0x80 + c);
+                                new_code.extend_from_slice(&rel32.to_le_bytes());
+                                new_inst_off + 2
+                            }
+                        };
+                        if has_align16 {
+                            post_branches.push(PostBranch {
+                                inst_off: new_inst_off,
+                                patch_off,
+                                target_off: target_new,
+                                cur_rel: i64::from(rel32),
+                                is_rel8: false,
+                            });
                         }
                     }
                 }
-                _ => {
-                    let orig_len = (orig_end - inst_start) as u32;
-                    let new_next_ip = new_code.len() as u32 + orig_len;
-                    let rel = i128::from(target_new) - i128::from(new_next_ip);
-                    let rel32 = i32::try_from(rel)
-                        .map_err(|_| "local branch displacement exceeds rel32".to_string())?;
-                    match f.kind {
-                        FixupKind::Jmp => {
-                            new_code.push(0xe9);
-                            new_code.extend_from_slice(&rel32.to_le_bytes());
-                        }
-                        FixupKind::Jcc(c) => {
-                            new_code.push(0x0f);
-                            new_code.push(0x80 + c);
-                            new_code.extend_from_slice(&rel32.to_le_bytes());
-                        }
-                    }
-                }
+                cursor = orig_end;
             }
-            cursor = orig_end;
+            new_code.extend_from_slice(&self.code[cursor..]);
+            debug_assert_eq!(new_code.len(), self.code.len() - total_saved);
+            self.code = new_code;
         }
-        new_code.extend_from_slice(&self.code[cursor..]);
-        debug_assert_eq!(new_code.len(), self.code.len() - total_saved);
-        self.code = new_code;
         self.fixups.clear();
+
+        // Optional 16-byte loop header alignment via multi-byte NOPs (skipped cleanly on any
+        // label whose padding would push a crossing `rel8` branch out of `[-128, 127]` or
+        // exceed `MAX_FN_CODE_BYTES`).
+        if has_align16 && !self.code.is_empty() {
+            let code_len = self.code.len() as u32;
+            let mut align_offs: Vec<u32> = self
+                .labels
+                .iter()
+                .zip(&self.align16_labels)
+                .filter_map(|(&off, &want)| want.then_some(off).flatten())
+                .filter(|&off| off > 0 && off < code_len)
+                .collect();
+            align_offs.sort_unstable();
+            align_offs.dedup();
+
+            let mut pads: Vec<(u32, u32)> = Vec::new();
+            let mut total_pad: u32 = 0;
+            for orig_off in align_offs {
+                let cur_off = orig_off.wrapping_add(total_pad);
+                let pad = (16 - (cur_off & 15)) & 15;
+                if pad == 0 {
+                    continue;
+                }
+                if self
+                    .code
+                    .len()
+                    .saturating_add(total_pad as usize + pad as usize)
+                    > super::module::MAX_FN_CODE_BYTES
+                {
+                    continue;
+                }
+                let mut safe = true;
+                for br in &post_branches {
+                    let delta = if br.inst_off < orig_off && br.target_off >= orig_off {
+                        i64::from(pad)
+                    } else if br.inst_off >= orig_off && br.target_off < orig_off {
+                        -i64::from(pad)
+                    } else {
+                        0
+                    };
+                    if delta != 0 {
+                        let next_rel = br.cur_rel + delta;
+                        let fits = if br.is_rel8 {
+                            i8::try_from(next_rel).is_ok()
+                        } else {
+                            i32::try_from(next_rel).is_ok()
+                        };
+                        if !fits {
+                            safe = false;
+                            break;
+                        }
+                    }
+                }
+                if !safe {
+                    continue;
+                }
+                for br in &mut post_branches {
+                    if br.inst_off < orig_off && br.target_off >= orig_off {
+                        br.cur_rel += i64::from(pad);
+                    } else if br.inst_off >= orig_off && br.target_off < orig_off {
+                        br.cur_rel -= i64::from(pad);
+                    }
+                }
+                pads.push((orig_off, pad));
+                total_pad += pad;
+            }
+
+            if !pads.is_empty() {
+                let mut pad_prefix = Vec::with_capacity(pads.len() + 1);
+                let mut acc = 0u32;
+                pad_prefix.push(0u32);
+                for &(_, p) in &pads {
+                    acc += p;
+                    pad_prefix.push(acc);
+                }
+                let pad_shift = |orig_off: u32| -> u32 {
+                    let idx = pads.partition_point(|&(poff, _)| poff <= orig_off);
+                    pad_prefix[idx]
+                };
+
+                let mut padded = Vec::with_capacity(self.code.len() + total_pad as usize);
+                let mut cursor = 0usize;
+                for &(poff, pad) in &pads {
+                    let po = poff as usize;
+                    padded.extend_from_slice(&self.code[cursor..po]);
+                    Self::emit_nops(&mut padded, pad as usize);
+                    cursor = po;
+                }
+                padded.extend_from_slice(&self.code[cursor..]);
+                debug_assert_eq!(padded.len(), self.code.len() + total_pad as usize);
+
+                // Patch all branch displacements at their shifted offsets.
+                for br in &post_branches {
+                    let p = (br.patch_off + pad_shift(br.inst_off)) as usize;
+                    if br.is_rel8 {
+                        padded[p] = (br.cur_rel as i8) as u8;
+                    } else {
+                        padded[p..p + 4].copy_from_slice(&(br.cur_rel as i32).to_le_bytes());
+                    }
+                }
+                // Shift all bound labels (`>= poff`) and relocations (`patch_off >= poff`).
+                for off in self.labels.iter_mut().flatten() {
+                    *off += pad_shift(*off);
+                }
+                for rel in &mut self.relocs {
+                    let sh = pad_shift(rel.patch_off);
+                    rel.patch_off += sh;
+                    rel.next_ip_off += sh;
+                }
+                self.code = padded;
+                self.pre_relax_code_len = self.pre_relax_code_len.max(self.code.len() as u32);
+            }
+        }
         Ok(())
     }
 
@@ -556,6 +746,7 @@ impl Asm {
             local_rodata,
             jt_patches,
             labels,
+            align16_labels: Vec::new(),
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),

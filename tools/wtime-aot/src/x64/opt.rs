@@ -1871,20 +1871,13 @@ pub fn inline_small_helpers_subset(
         if caller_insts >= INLINE_MAX_CALLER_INSTS {
             continue;
         }
-        let Some(mut caller_in_loop) = try_compute_in_loop_blocks(irs[caller_bi].as_ref().unwrap())
-        else {
-            if warm {
-                return Ok(None);
-            }
-            return Err("x64: out of memory computing loop blocks during inlining".into());
-        };
+        let mut caller_in_loop: Option<Vec<bool>> = None;
         let mut caller_added = 0usize;
         let mut did_inline = false;
 
         // Scan blocks dynamically (splitting pushes new blocks at the end; cont_bb inherits loop status).
         let mut bi = 0usize;
         while bi < irs[caller_bi].as_ref().unwrap().blocks.len() {
-            let block_in_loop = caller_in_loop.get(bi).copied().unwrap_or(false);
             let mut ii = 0usize;
             while ii < irs[caller_bi].as_ref().unwrap().blocks[bi].insts.len() {
                 inline_steps += 1;
@@ -1927,6 +1920,35 @@ pub fn inline_small_helpers_subset(
                 let c_vals = callee_ir.val_tys.len();
                 let is_single_site = !ext_ref[callee_bi]
                     && total_call_counts.get(callee_bi).copied().unwrap_or(0) == 1;
+                // Compute natural-loop block status lazily only when a caller actually has an
+                // eligible non-single-site defined callee whose size could depend on loop status.
+                let block_in_loop = if is_single_site {
+                    false
+                } else {
+                    if caller_in_loop.is_none() {
+                        let caller_ir = irs[caller_bi].as_ref().unwrap();
+                        let has_loop = caller_ir.blocks.iter().any(|b| b.is_loop_header);
+                        let v = if !has_loop {
+                            Vec::new()
+                        } else {
+                            let Some(v) = try_compute_in_loop_blocks(caller_ir) else {
+                                if warm {
+                                    return Ok(None);
+                                }
+                                return Err(
+                                    "x64: out of memory computing loop blocks during inlining"
+                                        .into(),
+                                );
+                            };
+                            v
+                        };
+                        caller_in_loop = Some(v);
+                    }
+                    caller_in_loop
+                        .as_ref()
+                        .and_then(|v| v.get(bi).copied())
+                        .unwrap_or(false)
+                };
                 let (max_insts, max_blocks, max_vals) = if is_single_site {
                     (
                         INLINE_MAX_SINGLE_CALLEE_INSTS,
@@ -1957,15 +1979,38 @@ pub fn inline_small_helpers_subset(
                     ii += 1;
                     continue;
                 }
+                // Ensure `caller_in_loop` is materialized BEFORE the first mutation to `caller`
+                // whenever `caller` has a loop header (so any later non-single-site call sees the
+                // exact original loop membership of every block).
+                if caller_in_loop.is_none() {
+                    let v = if caller_ir.blocks.iter().any(|b| b.is_loop_header) {
+                        let Some(v) = try_compute_in_loop_blocks(caller_ir) else {
+                            if warm {
+                                return Ok(None);
+                            }
+                            return Err(
+                                "x64: out of memory computing loop blocks during inlining".into()
+                            );
+                        };
+                        v
+                    } else {
+                        Vec::new()
+                    };
+                    caller_in_loop = Some(v);
+                }
                 // Reserve `caller_in_loop` capacity BEFORE mutating the caller IR so an OOM
                 // cannot leave a caller partially inlined.
-                let needed_blocks = caller_ir.blocks.len() + c_blocks + 1;
-                let extra_loop_slots = needed_blocks.saturating_sub(caller_in_loop.len());
-                if caller_in_loop.try_reserve(extra_loop_slots).is_err() {
-                    if warm {
-                        return Ok(None);
+                if let Some(ref mut cil) = caller_in_loop {
+                    let needed_blocks = caller_ir.blocks.len() + c_blocks + 1;
+                    let extra_loop_slots = needed_blocks.saturating_sub(cil.len());
+                    if cil.try_reserve(extra_loop_slots).is_err() {
+                        if warm {
+                            return Ok(None);
+                        }
+                        return Err(
+                            "x64: out of memory extending loop blocks during inlining".into()
+                        );
                     }
-                    return Err("x64: out of memory extending loop blocks during inlining".into());
                 }
                 // Borrow disjoint `caller` (&mut) and `callee` (&) directly via `split_at_mut` (zero cloning!).
                 let ok = if caller_bi < callee_bi {
@@ -1993,7 +2038,9 @@ pub fn inline_small_helpers_subset(
                 };
                 if ok {
                     let new_blocks_len = irs[caller_bi].as_ref().unwrap().blocks.len();
-                    caller_in_loop.resize(new_blocks_len, block_in_loop);
+                    if let Some(ref mut cil) = caller_in_loop {
+                        cil.resize(new_blocks_len, block_in_loop);
+                    }
                     let cost = c_insts.max(1);
                     caller_insts += cost;
                     caller_added += cost;
@@ -2796,6 +2843,17 @@ pub fn run_licm(
                     let ndb = def_block[num.0 as usize];
                     if ndb != u32::MAX && !body_set.contains(&ndb) && dom.dominates(ndb, pre) {
                         to_hoist.push((bb_id, ii));
+                    } else if ndb != u32::MAX
+                        && body_set.contains(&ndb)
+                        && let Some(num_ii) = ir.blocks[ndb as usize].insts.iter().position(|ins| {
+                            ins.res == Some(num) && matches!(ins.op, Op::ConstI32(_))
+                        })
+                    {
+                        let key = (ndb, num_ii);
+                        if !to_hoist.contains(&key) {
+                            to_hoist.push(key);
+                        }
+                        to_hoist.push((bb_id, ii));
                     }
                 }
             }
@@ -3383,6 +3441,40 @@ impl<'a> GvnState<'a> {
         None
     }
 
+    /// Looks up a dominating exact 4-byte or 8-byte `Load`/`Store` fact at `(addr, offset)`
+    /// for bit-exact `MemCopyConst` store-to-load forwarding.
+    fn find_exact_lane_fact(
+        &self,
+        addr: Val,
+        const_addr: Option<u64>,
+        offset: u32,
+        width: u64,
+    ) -> Option<(Val, StoreKind)> {
+        for fact in self.mem_facts.iter().rev() {
+            let same_loc = (fact.addr == addr && fact.offset == offset)
+                || (fact.const_addr.is_some() && fact.const_addr == const_addr);
+            if !same_loc || fact.size != width {
+                continue;
+            }
+            match (width, fact.kind) {
+                (8, MemFactKind::Load(LoadKind::F64) | MemFactKind::Store(StoreKind::F64)) => {
+                    return Some((fact.val, StoreKind::F64));
+                }
+                (8, MemFactKind::Load(LoadKind::I64) | MemFactKind::Store(StoreKind::I64)) => {
+                    return Some((fact.val, StoreKind::I64));
+                }
+                (4, MemFactKind::Load(LoadKind::F32) | MemFactKind::Store(StoreKind::F32)) => {
+                    return Some((fact.val, StoreKind::F32));
+                }
+                (4, MemFactKind::Load(LoadKind::I32) | MemFactKind::Store(StoreKind::I32)) => {
+                    return Some((fact.val, StoreKind::I32));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Invalidates all `mem_facts` that may alias `[addr + offset .. + sz)` while preserving
     /// provably disjoint facts (same SSA base with non-overlapping offsets, or disjoint constant addresses).
     fn kill_aliasing_mem_facts(
@@ -3840,10 +3932,120 @@ pub fn run_dom_gvn_and_bce(
                             src_checked,
                         } => {
                             let end = u64::from(*len);
-                            if *dst_checked || st.is_checked(*dst, end) {
+                            let dst_ok = *dst_checked || st.is_checked(*dst, end);
+                            let src_ok = *src_checked || st.is_checked(*src, end);
+
+                            // If every lane of `src[0..len]` is already live in dominating SSA
+                            // `mem_facts` (`Load`/`Store` of exact 4/8-byte lanes, <= 4 stores),
+                            // lower `MemCopyConst` directly to `BoundsCheck`(s) + checked `Store`s.
+                            // This eliminates store-to-load forwarding (STLF) stalls and redundant
+                            // loads while preserving exact overlap (`memmove`) and zero-write OOB
+                            // trap semantics (all source values are already snapped in SSA regs
+                            // and both bounds checks execute before any store).
+                            let mut forwarded_lanes: [(u32, Val, StoreKind); 4] =
+                                [(0, Val(0), StoreKind::I64); 4];
+                            let mut n_lanes = 0usize;
+                            if *len > 0 && *len <= 32 && (*len & 3) == 0 {
+                                let (mut s_base, mut s_off) = st.try_fold_addr(*src, 0);
+                                if u64::from(s_off) + end > i32::MAX as u64 {
+                                    s_base = *src;
+                                    s_off = 0;
+                                }
+                                let s_const_base =
+                                    st.const32[s_base.0 as usize].map(|c| u64::from(c as u32));
+                                let mut cur = 0u32;
+                                let mut ok = true;
+                                while cur < *len {
+                                    if n_lanes >= 4 {
+                                        ok = false;
+                                        break;
+                                    }
+                                    let off = s_off + cur;
+                                    let ca =
+                                        s_const_base.map(|cb| cb.saturating_add(u64::from(off)));
+                                    if cur + 8 <= *len
+                                        && let Some((v, sk)) =
+                                            st.find_exact_lane_fact(s_base, ca, off, 8)
+                                    {
+                                        forwarded_lanes[n_lanes] = (cur, v, sk);
+                                        n_lanes += 1;
+                                        cur += 8;
+                                    } else if let Some((v, sk)) =
+                                        st.find_exact_lane_fact(s_base, ca, off, 4)
+                                    {
+                                        forwarded_lanes[n_lanes] = (cur, v, sk);
+                                        n_lanes += 1;
+                                        cur += 4;
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                if !ok {
+                                    n_lanes = 0;
+                                }
+                            }
+
+                            if n_lanes > 0 {
+                                if !dst_ok {
+                                    out_insts.push(Inst {
+                                        res: None,
+                                        op: Op::BoundsCheck {
+                                            addr: *dst,
+                                            end_off: end,
+                                        },
+                                    });
+                                }
+                                if !src_ok {
+                                    out_insts.push(Inst {
+                                        res: None,
+                                        op: Op::BoundsCheck {
+                                            addr: *src,
+                                            end_off: end,
+                                        },
+                                    });
+                                }
+                                st.record_checked(*dst, end);
+                                st.record_checked(*src, end);
+                                let (mut d_base, mut d_off) = st.try_fold_addr(*dst, 0);
+                                if u64::from(d_off) + end > i32::MAX as u64 {
+                                    d_base = *dst;
+                                    d_off = 0;
+                                }
+                                for &(lane_off, val, store_kind) in &forwarded_lanes[..n_lanes] {
+                                    let off = d_off + lane_off;
+                                    let sz = store_kind.bytes();
+                                    let ca = st.const32[d_base.0 as usize].map(|c| {
+                                        u64::from(c as u32).saturating_add(u64::from(off))
+                                    });
+                                    st.kill_aliasing_mem_facts(d_base, ca, off, sz);
+                                    st.push_mem_fact(MemFact {
+                                        addr: d_base,
+                                        const_addr: ca,
+                                        offset: off,
+                                        size: sz,
+                                        kind: MemFactKind::Store(store_kind),
+                                        val,
+                                        val_ty: ir.val_tys[val.0 as usize],
+                                    });
+                                    out_insts.push(Inst {
+                                        res: None,
+                                        op: Op::Store {
+                                            kind: store_kind,
+                                            addr: d_base,
+                                            val,
+                                            offset: off,
+                                            checked: true,
+                                        },
+                                    });
+                                }
+                                continue;
+                            }
+
+                            if dst_ok {
                                 *dst_checked = true;
                             }
-                            if *src_checked || st.is_checked(*src, end) {
+                            if src_ok {
                                 *src_checked = true;
                             }
                             st.record_checked(*dst, end);
@@ -5234,6 +5436,7 @@ fn version_checked_counted_loops(
             BoundsCheck,
         }
         let mut proven_ops: HashMap<(u32, usize), ProvenMemOp> = HashMap::new();
+        let mut fold_checked_ops: Vec<(u32, usize, u32)> = Vec::new();
         let mut max_safe_limit: u32 = signed_cap.unwrap_or(u32::MAX);
 
         let eval_cmp_select_bound = |kind: CmpBranchKind,
@@ -5596,6 +5799,32 @@ fn version_checked_counted_loops(
                             proven_ops.insert((bb_id, ii), ProvenMemOp::BoundsCheck);
                         }
                     }
+                    Op::Load {
+                        kind: _,
+                        addr,
+                        offset,
+                        checked: true,
+                    }
+                    | Op::Store {
+                        kind: _,
+                        addr,
+                        offset,
+                        checked: true,
+                        ..
+                    } if fold_add.contains_key(&addr) => {
+                        let bytes = match inst.op {
+                            Op::Load { kind, .. } => kind.bytes(),
+                            Op::Store { kind, .. } => kind.bytes(),
+                            _ => unreachable!(),
+                        };
+                        let end_off = u64::from(offset) + bytes;
+                        if let Some(bnd) = get_bound(addr, &bounds)
+                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            && lim >= 4
+                        {
+                            fold_checked_ops.push((bb_id, ii, lim));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -5603,6 +5832,12 @@ fn version_checked_counted_loops(
 
         if proven_ops.is_empty() || max_safe_limit < 4 {
             continue;
+        }
+        for (bb_id, ii, lim) in fold_checked_ops {
+            if max_safe_limit.min(lim) >= 4 {
+                max_safe_limit = max_safe_limit.min(lim);
+                proven_ops.insert((bb_id, ii), ProvenMemOp::LoadStore);
+            }
         }
 
         // Check outside uses of values defined inside `body_set`: because both `hdr` and
@@ -5997,6 +6232,446 @@ fn version_checked_counted_loops(
     Ok(versioned_any)
 }
 
+/// Loop rotation: converts top-tested counted natural loops whose empty header block branches
+/// via an integer `CmpBranch` into a single-pred `body_entry` and `exit_bb` into bottom-tested
+/// loops with `hdr` acting as the pre-loop entry guard and `body_entry` becoming the new
+/// `is_loop_header`. Eliminates the unconditional backedge `jmp` on every iteration.
+fn rotate_counted_loops(
+    ir: &mut IrFunc,
+    dom: &CfgDom,
+    budget: Option<&CompileBudget>,
+) -> Res<bool> {
+    if ir.blocks.len() <= 1 || dom.rpo.is_empty() {
+        return Ok(false);
+    }
+
+    // Discover natural loops by backedge `b -> s` where `dom.dominates(s, b)`.
+    let mut loops_by_hdr: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for &b in &dom.rpo {
+        for &s in &dom.succs[b as usize] {
+            if dom.dominates(s, b) {
+                let body = loops_by_hdr.entry(s).or_default();
+                body.insert(s);
+                if body.insert(b) {
+                    let mut wl = vec![b];
+                    while let Some(cur) = wl.pop() {
+                        for &p in &dom.preds[cur as usize] {
+                            if body.insert(p) {
+                                wl.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if loops_by_hdr.is_empty() {
+        return Ok(false);
+    }
+
+    let mut loops: Vec<(u32, Vec<u32>)> = loops_by_hdr
+        .into_iter()
+        .filter(|&(h, _)| h != 0)
+        .map(|(h, set)| {
+            let mut v: Vec<u32> = set.into_iter().collect();
+            v.sort_by_key(|&b| dom.rpo_pos[b as usize]);
+            (h, v)
+        })
+        .collect();
+    loops.sort_by_key(|(h, body)| (body.len(), *h));
+
+    let mut def_block = vec![u32::MAX; ir.val_tys.len()];
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        for &p in &bb.params {
+            def_block[p.0 as usize] = bi as u32;
+        }
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                def_block[r.0 as usize] = bi as u32;
+            }
+            match inst.op {
+                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                    for &rv in ir.pool_slice(rets) {
+                        def_block[rv.0 as usize] = bi as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut rotated_any = false;
+    let mut touched: HashSet<u32> = HashSet::new();
+    let mut scan_steps = 0usize;
+
+    for (hdr, body) in loops {
+        if let Some(bg) = budget {
+            bg.check_deadline()?;
+        }
+        if body.len() < 2 || body.iter().any(|b| touched.contains(b)) {
+            continue;
+        }
+        if !ir.blocks[hdr as usize].insts.is_empty() {
+            continue;
+        }
+        let Term::CmpBranch {
+            kind,
+            a,
+            b,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } = ir.blocks[hdr as usize].term
+        else {
+            continue;
+        };
+        if !matches!(
+            kind,
+            CmpBranchKind::I32(_)
+                | CmpBranchKind::I32Imm(_, _)
+                | CmpBranchKind::I64(_)
+                | CmpBranchKind::I64Imm(_, _)
+        ) {
+            continue;
+        }
+
+        let body_set: HashSet<u32> = body.iter().copied().collect();
+        let then_in = body_set.contains(&then_bb.0);
+        let else_in = body_set.contains(&else_bb.0);
+        if then_in == else_in {
+            continue;
+        }
+        let (body_entry, body_args, exit_bb, exit_args, eff_kind) = if then_in {
+            (then_bb.0, then_args, else_bb, else_args, kind)
+        } else {
+            let inv = match kind {
+                CmpBranchKind::I32(c) => CmpBranchKind::I32(c.invert_int()),
+                CmpBranchKind::I32Imm(c, imm) => CmpBranchKind::I32Imm(c.invert_int(), imm),
+                CmpBranchKind::I64(c) => CmpBranchKind::I64(c.invert_int()),
+                CmpBranchKind::I64Imm(c, imm) => CmpBranchKind::I64Imm(c.invert_int(), imm),
+                _ => unreachable!(),
+            };
+            (else_bb.0, else_args, then_bb, then_args, inv)
+        };
+        if body_entry == hdr
+            || exit_bb.0 == hdr
+            || exit_bb.0 == 0
+            || touched.contains(&exit_bb.0)
+            || body_args.len != 0
+            || !ir.blocks[body_entry as usize].params.is_empty()
+            || dom.preds[body_entry as usize].len() != 1
+            || dom.preds[body_entry as usize][0] != hdr
+        {
+            continue;
+        }
+
+        let outside_preds_any = dom.preds[hdr as usize]
+            .iter()
+            .any(|p| !body_set.contains(p));
+        if !outside_preds_any {
+            continue;
+        }
+        let back_preds: Vec<u32> = dom.preds[hdr as usize]
+            .iter()
+            .copied()
+            .filter(|p| body_set.contains(p))
+            .collect();
+        if back_preds.is_empty() || back_preds.len() > 2 || back_preds.contains(&hdr) {
+            continue;
+        }
+        let hdr_params_len = ir.blocks[hdr as usize].params.len();
+        let mut latches: Vec<(u32, ValRange)> = Vec::with_capacity(back_preds.len());
+        let mut latches_ok = true;
+        for &lp in &back_preds {
+            if let Term::Jump { target, args } = ir.blocks[lp as usize].term
+                && target.0 == hdr
+                && args.len as usize == hdr_params_len
+            {
+                latches.push((lp, args));
+            } else {
+                latches_ok = false;
+                break;
+            }
+        }
+        if !latches_ok {
+            continue;
+        }
+
+        // Check outside uses of values defined inside `body_set`:
+        // - If any value defined in `body \ {hdr}` escapes, skip.
+        // - Any escaping `hdr.params` value must be used only under `exit_bb` with `preds[exit_bb] == [hdr]`
+        //   so we can promote it to `exit_bb.params` (receiving `p_i` from `hdr` and `back_i` from each latch).
+        let mut promoted_hdr_vals: Vec<Val> = Vec::new();
+        let mut rewrite_blocks: Vec<usize> = Vec::new();
+        let mut outside_ok = true;
+        for b_idx in 0..ir.blocks.len() {
+            scan_steps += 1;
+            if let Some(bg) = budget
+                && scan_steps >= 4096
+            {
+                scan_steps = 0;
+                bg.check_deadline()?;
+            }
+            if body_set.contains(&(b_idx as u32)) {
+                continue;
+            }
+            let mut block_uses_body = false;
+            let check_one = |v: Val,
+                             outside_ok: &mut bool,
+                             block_uses_body: &mut bool,
+                             promoted: &mut Vec<Val>| {
+                if !*outside_ok {
+                    return;
+                }
+                let db = def_block[v.0 as usize];
+                if db != u32::MAX && body_set.contains(&db) {
+                    if db != hdr
+                        || dom.preds[exit_bb.0 as usize].len() != 1
+                        || dom.preds[exit_bb.0 as usize][0] != hdr
+                        || !dom.dominates(exit_bb.0, b_idx as u32)
+                    {
+                        *outside_ok = false;
+                        return;
+                    }
+                    *block_uses_body = true;
+                    if !promoted.contains(&v) {
+                        promoted.push(v);
+                    }
+                }
+            };
+            for inst in &ir.blocks[b_idx].insts {
+                inst.op.for_each_use(&ir.val_pool, |v| {
+                    check_one(
+                        v,
+                        &mut outside_ok,
+                        &mut block_uses_body,
+                        &mut promoted_hdr_vals,
+                    );
+                });
+                if !outside_ok {
+                    break;
+                }
+            }
+            if outside_ok {
+                ir.blocks[b_idx]
+                    .term
+                    .for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        check_one(
+                            v,
+                            &mut outside_ok,
+                            &mut block_uses_body,
+                            &mut promoted_hdr_vals,
+                        );
+                    });
+            }
+            if !outside_ok {
+                break;
+            }
+            if block_uses_body {
+                rewrite_blocks.push(b_idx);
+            }
+        }
+        if !outside_ok {
+            continue;
+        }
+
+        // Pre-check IR caps before allocating vals or pool slices.
+        let added_vals = hdr_params_len + promoted_hdr_vals.len();
+        let exit_extra_len = (exit_args.len as usize) + promoted_hdr_vals.len();
+        let needed_pool =
+            hdr_params_len * (1 + latches.len()) + exit_extra_len * (1 + latches.len());
+        if ir.val_tys.len() + added_vals > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + needed_pool > MAX_VAL_POOL_PER_FN
+        {
+            continue;
+        }
+
+        let hdr_params: Vec<Val> = ir.blocks[hdr as usize].params.clone();
+        let hdr_param_pos: HashMap<Val, usize> = hdr_params
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i))
+            .collect();
+        let old_exit_args: Vec<Val> = ir.pool_slice(exit_args).to_vec();
+        let old_latch_args: Vec<(u32, Vec<Val>)> = latches
+            .iter()
+            .map(|&(lp, r)| (lp, ir.pool_slice(r).to_vec()))
+            .collect();
+
+        // Create fresh `body_entry.params` mirroring `hdr.params`.
+        let mut body_params: Vec<Val> = Vec::with_capacity(hdr_params_len);
+        let mut body_val_map: HashMap<Val, Val> = HashMap::with_capacity(hdr_params_len);
+        for &hp in &hdr_params {
+            let bp = ir.push_val(ir.val_tys[hp.0 as usize]);
+            def_block.push(body_entry);
+            body_params.push(bp);
+            body_val_map.insert(hp, bp);
+        }
+
+        // Prepare pool slices for `hdr` and every `latch` before mutating blocks.
+        let hdr_then_args = if hdr_params.is_empty() {
+            ValRange::EMPTY
+        } else {
+            let Ok(r) = ir.push_pool(&hdr_params) else {
+                continue;
+            };
+            r
+        };
+        let hdr_else_args = if promoted_hdr_vals.is_empty() {
+            exit_args
+        } else {
+            let mut v = Vec::with_capacity(old_exit_args.len() + promoted_hdr_vals.len());
+            v.extend_from_slice(&old_exit_args);
+            v.extend_from_slice(&promoted_hdr_vals);
+            let Ok(r) = ir.push_pool(&v) else {
+                continue;
+            };
+            r
+        };
+
+        let mut latch_new_terms: Vec<(u32, Term)> = Vec::with_capacity(old_latch_args.len());
+        let mut pool_ok = true;
+        for (lp, orig_bargs) in &old_latch_args {
+            let rew_bargs: Vec<Val> = orig_bargs
+                .iter()
+                .map(|&v| body_val_map.get(&v).copied().unwrap_or(v))
+                .collect();
+            let subst_hdr = |v: Val| -> Val {
+                if let Some(&pos) = hdr_param_pos.get(&v) {
+                    rew_bargs[pos]
+                } else {
+                    v
+                }
+            };
+            let la = subst_hdr(a);
+            let lb = if matches!(
+                eff_kind,
+                CmpBranchKind::I32Imm(_, _) | CmpBranchKind::I64Imm(_, _)
+            ) {
+                la
+            } else {
+                subst_hdr(b)
+            };
+            let latch_then_args = if rew_bargs.is_empty() {
+                ValRange::EMPTY
+            } else {
+                match ir.push_pool(&rew_bargs) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        pool_ok = false;
+                        break;
+                    }
+                }
+            };
+            let latch_else_args = if old_exit_args.is_empty() && promoted_hdr_vals.is_empty() {
+                ValRange::EMPTY
+            } else {
+                let mut v = Vec::with_capacity(old_exit_args.len() + promoted_hdr_vals.len());
+                for &ev in &old_exit_args {
+                    v.push(subst_hdr(ev));
+                }
+                for &hp in &promoted_hdr_vals {
+                    v.push(subst_hdr(hp));
+                }
+                match ir.push_pool(&v) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        pool_ok = false;
+                        break;
+                    }
+                }
+            };
+            latch_new_terms.push((
+                *lp,
+                Term::CmpBranch {
+                    kind: eff_kind,
+                    a: la,
+                    b: lb,
+                    then_bb: BlockId(body_entry),
+                    then_args: latch_then_args,
+                    else_bb: exit_bb,
+                    else_args: latch_else_args,
+                },
+            ));
+        }
+        if !pool_ok {
+            continue;
+        }
+
+        // Rewrite all uses of `hdr.params` inside `body \ {hdr}` to `body_entry.params`.
+        if !hdr_params.is_empty() {
+            let mut subst: Vec<Val> = (0..ir.val_tys.len() as u32).map(Val).collect();
+            for (&hp, &bp) in hdr_params.iter().zip(&body_params) {
+                subst[hp.0 as usize] = bp;
+            }
+            let mut pool = std::mem::take(&mut ir.val_pool);
+            for &bb_id in &body {
+                if bb_id == hdr {
+                    continue;
+                }
+                for inst in &mut ir.blocks[bb_id as usize].insts {
+                    rewrite_op_uses(&mut inst.op, &mut pool, &subst);
+                }
+                rewrite_term_uses(
+                    &mut ir.blocks[bb_id as usize].term,
+                    &mut pool,
+                    &ir.br_tables,
+                    &subst,
+                );
+            }
+            ir.val_pool = pool;
+        }
+
+        // Install rotated `body_entry` header, entry guard `hdr`, and bottom-tested `latch`es.
+        ir.blocks[body_entry as usize].params = body_params;
+        ir.blocks[body_entry as usize].is_loop_header = true;
+        ir.blocks[hdr as usize].is_loop_header = false;
+        ir.blocks[hdr as usize].term = Term::CmpBranch {
+            kind: eff_kind,
+            a,
+            b,
+            then_bb: BlockId(body_entry),
+            then_args: hdr_then_args,
+            else_bb: exit_bb,
+            else_args: hdr_else_args,
+        };
+        for (lp, term) in latch_new_terms {
+            ir.blocks[lp as usize].term = term;
+        }
+
+        // Promote escaping `hdr.params` values to `exit_bb.params` and rewrite outside uses.
+        if !promoted_hdr_vals.is_empty() {
+            let mut subst: Vec<Val> = (0..ir.val_tys.len() as u32).map(Val).collect();
+            for &hp in &promoted_hdr_vals {
+                let np = ir.push_val(ir.val_tys[hp.0 as usize]);
+                def_block.push(exit_bb.0);
+                ir.blocks[exit_bb.0 as usize].params.push(np);
+                subst.push(np);
+                subst[hp.0 as usize] = np;
+            }
+            let mut pool = std::mem::take(&mut ir.val_pool);
+            for b_idx in rewrite_blocks {
+                for inst in &mut ir.blocks[b_idx].insts {
+                    rewrite_op_uses(&mut inst.op, &mut pool, &subst);
+                }
+                rewrite_term_uses(&mut ir.blocks[b_idx].term, &mut pool, &ir.br_tables, &subst);
+            }
+            ir.val_pool = pool;
+        }
+
+        for &bb_id in &body {
+            touched.insert(bb_id);
+        }
+        if !promoted_hdr_vals.is_empty() {
+            touched.insert(exit_bb.0);
+        }
+        rotated_any = true;
+    }
+
+    Ok(rotated_any)
+}
+
 /// Complete per-function Stage 2 IR optimization sequence (runs in parallel after inlining & effect analysis).
 pub fn optimize_func_stage2(
     ir: &mut IrFunc,
@@ -6031,6 +6706,12 @@ pub fn optimize_func_stage2(
     let _ = prune_block_params(ir, &dom, budget)?;
     // 5. Preheader-guarded counted-loop BCE versioning + post-version DCE/compaction.
     if version_checked_counted_loops(ir, &dom, module, budget)? {
+        optimize_ir_with_budget(ir, budget)?;
+        dom = rebuild_cfg_and_prune(ir, budget)?;
+        let _ = prune_block_params(ir, &dom, budget)?;
+    }
+    // 6. Loop rotation: convert top-tested counted loops into bottom-tested loops with entry guards.
+    if rotate_counted_loops(ir, &dom, budget)? {
         optimize_ir_with_budget(ir, budget)?;
         dom = rebuild_cfg_and_prune(ir, budget)?;
         let _ = prune_block_params(ir, &dom, budget)?;

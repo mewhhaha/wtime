@@ -37,79 +37,79 @@
 <text class="lg" x="290" y="73.5">wtime-aot rust (-O3)</text>
 <rect class="wt" x="434" y="64" width="11" height="11" rx="3"/>
 <text class="lg" x="450" y="73.5">Wasmtime 49.0.3 (Cranelift)</text>
-<line class="grid" x1="154.4" x2="154.4" y1="94" y2="486.0"/>
-<text class="tick" x="154.4" y="504.0" text-anchor="middle">1 ms</text>
-<line class="grid" x1="276.8" x2="276.8" y1="94" y2="486.0"/>
-<text class="tick" x="276.8" y="504.0" text-anchor="middle">10 ms</text>
-<line class="grid" x1="399.2" x2="399.2" y1="94" y2="486.0"/>
-<text class="tick" x="399.2" y="504.0" text-anchor="middle">100 ms</text>
-<line class="grid" x1="521.5" x2="521.5" y1="94" y2="486.0"/>
-<text class="tick" x="521.5" y="504.0" text-anchor="middle">1 s</text>
-<line class="grid" x1="643.9" x2="643.9" y1="94" y2="486.0"/>
-<text class="tick" x="643.9" y="504.0" text-anchor="middle">10 s</text>
+<line class="grid" x1="136.0" x2="136.0" y1="94" y2="486.0"/>
+<text class="tick" x="136.0" y="504.0" text-anchor="middle">1 ms</text>
+<line class="grid" x1="264.3" x2="264.3" y1="94" y2="486.0"/>
+<text class="tick" x="264.3" y="504.0" text-anchor="middle">10 ms</text>
+<line class="grid" x1="392.5" x2="392.5" y1="94" y2="486.0"/>
+<text class="tick" x="392.5" y="504.0" text-anchor="middle">100 ms</text>
+<line class="grid" x1="520.8" x2="520.8" y1="94" y2="486.0"/>
+<text class="tick" x="520.8" y="504.0" text-anchor="middle">1 s</text>
+<line class="grid" x1="649.0" x2="649.0" y1="94" y2="486.0"/>
+<text class="tick" x="649.0" y="504.0" text-anchor="middle">10 s</text>
 <line class="ax" x1="136.0" x2="136.0" y1="94" y2="486.0"/>
 <text class="grp" x="20" y="111.0">5,000-FN APPLICATION (3.75 MIB, 5,036 FUNCTIONS)</text>
 <text class="lb" x="124" y="148.0" text-anchor="end">5k-fn app</text>
-<g><title>5k-fn app — wtime-aot x64: 210 ms (1.5× vs WT, 39× vs c)</title>
-<path class="x64" d="M136.0,124.0H435.1Q438.6,124.0 438.6,127.5V131.5Q438.6,135.0 435.1,135.0H136.0Z"/>
-<text class="v-hi" x="445.6" y="133.5" text-anchor="start">210 ms (1.5× vs WT, 39× vs c)</text></g>
-<g><title>5k-fn app — wtime-aot c (-O2): 8.21 s</title>
-<path class="bc" d="M136.0,138.5H629.9Q633.4,138.5 633.4,142.0V146.0Q633.4,149.5 629.9,149.5H136.0Z"/>
-<text class="v" x="640.4" y="148.0" text-anchor="start">8.21 s</text></g>
-<g><title>5k-fn app — Wasmtime 49.0.3 (Cranelift): 318 ms</title>
-<path class="wt" d="M136.0,153.0H457.1Q460.6,153.0 460.6,156.5V160.5Q460.6,164.0 457.1,164.0H136.0Z"/>
-<text class="v" x="467.6" y="162.5" text-anchor="start">318 ms</text></g>
+<g><title>5k-fn app — wtime-aot x64: 195 ms (1.5× vs WT, 38× vs c)</title>
+<path class="x64" d="M136.0,124.0H426.3Q429.8,124.0 429.8,127.5V131.5Q429.8,135.0 426.3,135.0H136.0Z"/>
+<text class="v-hi" x="436.8" y="133.5" text-anchor="start">195 ms (1.5× vs WT, 38× vs c)</text></g>
+<g><title>5k-fn app — wtime-aot c (-O2): 7.38 s</title>
+<path class="bc" d="M136.0,138.5H628.6Q632.1,138.5 632.1,142.0V146.0Q632.1,149.5 628.6,149.5H136.0Z"/>
+<text class="v" x="639.1" y="148.0" text-anchor="start">7.38 s</text></g>
+<g><title>5k-fn app — Wasmtime 49.0.3 (Cranelift): 294 ms</title>
+<path class="wt" d="M136.0,153.0H449.0Q452.5,153.0 452.5,156.5V160.5Q452.5,164.0 449.0,164.0H136.0Z"/>
+<text class="v" x="459.5" y="162.5" text-anchor="start">294 ms</text></g>
 <text class="grp" x="20" y="191.0">SELF-CONTAINED KERNELS (0.3–1 KIB)</text>
 <text class="lb" x="124" y="235.2" text-anchor="end">graph_bfs</text>
-<g><title>graph_bfs — wtime-aot x64: 1.64 ms</title>
-<path class="x64" d="M136.0,204.0H177.1Q180.6,204.0 180.6,207.5V211.5Q180.6,215.0 177.1,215.0H136.0Z"/>
-<text class="v-hi" x="187.6" y="213.5" text-anchor="start">1.64 ms</text></g>
-<g><title>graph_bfs — wtime-aot c (-O2): 447 ms</title>
-<path class="bc" d="M136.0,218.5H475.2Q478.7,218.5 478.7,222.0V226.0Q478.7,229.5 475.2,229.5H136.0Z"/>
-<text class="v" x="485.7" y="228.0" text-anchor="start">447 ms</text></g>
-<g><title>graph_bfs — wtime-aot rust (-O3): 1.90 s</title>
-<path class="rust" d="M136.0,233.0H552.1Q555.6,233.0 555.6,236.5V240.5Q555.6,244.0 552.1,244.0H136.0Z"/>
-<text class="v" x="562.6" y="242.5" text-anchor="start">1.90 s</text></g>
-<g><title>graph_bfs — Wasmtime 49.0.3 (Cranelift): 1.63 ms</title>
-<path class="wt" d="M136.0,247.5H176.7Q180.2,247.5 180.2,251.0V255.0Q180.2,258.5 176.7,258.5H136.0Z"/>
-<text class="v-hi" x="187.2" y="257.0" text-anchor="start">1.63 ms</text></g>
+<g><title>graph_bfs — wtime-aot x64: 1.79 ms</title>
+<path class="x64" d="M136.0,204.0H164.8Q168.3,204.0 168.3,207.5V211.5Q168.3,215.0 164.8,215.0H136.0Z"/>
+<text class="v-hi" x="175.3" y="213.5" text-anchor="start">1.79 ms</text></g>
+<g><title>graph_bfs — wtime-aot c (-O2): 579 ms</title>
+<path class="bc" d="M136.0,218.5H486.8Q490.3,218.5 490.3,222.0V226.0Q490.3,229.5 486.8,229.5H136.0Z"/>
+<text class="v" x="497.3" y="228.0" text-anchor="start">579 ms</text></g>
+<g><title>graph_bfs — wtime-aot rust (-O3): 2.33 s</title>
+<path class="rust" d="M136.0,233.0H564.5Q568.0,233.0 568.0,236.5V240.5Q568.0,244.0 564.5,244.0H136.0Z"/>
+<text class="v" x="575.0" y="242.5" text-anchor="start">2.33 s</text></g>
+<g><title>graph_bfs — Wasmtime 49.0.3 (Cranelift): 1.82 ms</title>
+<path class="wt" d="M136.0,247.5H165.9Q169.4,247.5 169.4,251.0V255.0Q169.4,258.5 165.9,258.5H136.0Z"/>
+<text class="v" x="176.4" y="257.0" text-anchor="start">1.82 ms</text></g>
 <text class="lb" x="124" y="305.8" text-anchor="end">parser_hash</text>
-<g><title>parser_hash — wtime-aot x64: 1.34 ms</title>
-<path class="x64" d="M136.0,274.5H166.6Q170.1,274.5 170.1,278.0V282.0Q170.1,285.5 166.6,285.5H136.0Z"/>
-<text class="v-hi" x="177.1" y="284.0" text-anchor="start">1.34 ms</text></g>
-<g><title>parser_hash — wtime-aot c (-O2): 468 ms</title>
-<path class="bc" d="M136.0,289.0H477.7Q481.2,289.0 481.2,292.5V296.5Q481.2,300.0 477.7,300.0H136.0Z"/>
-<text class="v" x="488.2" y="298.5" text-anchor="start">468 ms</text></g>
+<g><title>parser_hash — wtime-aot x64: 1.69 ms</title>
+<path class="x64" d="M136.0,274.5H161.9Q165.4,274.5 165.4,278.0V282.0Q165.4,285.5 161.9,285.5H136.0Z"/>
+<text class="v-hi" x="172.4" y="284.0" text-anchor="start">1.69 ms</text></g>
+<g><title>parser_hash — wtime-aot c (-O2): 501 ms</title>
+<path class="bc" d="M136.0,289.0H478.7Q482.2,289.0 482.2,292.5V296.5Q482.2,300.0 478.7,300.0H136.0Z"/>
+<text class="v" x="489.2" y="298.5" text-anchor="start">501 ms</text></g>
 <g><title>parser_hash — wtime-aot rust (-O3): 2.00 s</title>
-<path class="rust" d="M136.0,303.5H554.8Q558.3,303.5 558.3,307.0V311.0Q558.3,314.5 554.8,314.5H136.0Z"/>
-<text class="v" x="565.3" y="313.0" text-anchor="start">2.00 s</text></g>
-<g><title>parser_hash — Wasmtime 49.0.3 (Cranelift): 1.64 ms</title>
-<path class="wt" d="M136.0,318.0H177.1Q180.6,318.0 180.6,321.5V325.5Q180.6,329.0 177.1,329.0H136.0Z"/>
-<text class="v" x="187.6" y="327.5" text-anchor="start">1.64 ms</text></g>
+<path class="rust" d="M136.0,303.5H555.8Q559.3,303.5 559.3,307.0V311.0Q559.3,314.5 555.8,314.5H136.0Z"/>
+<text class="v" x="566.3" y="313.0" text-anchor="start">2.00 s</text></g>
+<g><title>parser_hash — Wasmtime 49.0.3 (Cranelift): 1.78 ms</title>
+<path class="wt" d="M136.0,318.0H164.7Q168.2,318.0 168.2,321.5V325.5Q168.2,329.0 164.7,329.0H136.0Z"/>
+<text class="v" x="175.2" y="327.5" text-anchor="start">1.78 ms</text></g>
 <text class="lb" x="124" y="376.2" text-anchor="end">image_filter</text>
-<g><title>image_filter — wtime-aot x64: 1.41 ms</title>
-<path class="x64" d="M136.0,345.0H169.3Q172.8,345.0 172.8,348.5V352.5Q172.8,356.0 169.3,356.0H136.0Z"/>
-<text class="v-hi" x="179.8" y="354.5" text-anchor="start">1.41 ms</text></g>
-<g><title>image_filter — wtime-aot c (-O2): 504 ms</title>
-<path class="bc" d="M136.0,359.5H481.6Q485.1,359.5 485.1,363.0V367.0Q485.1,370.5 481.6,370.5H136.0Z"/>
-<text class="v" x="492.1" y="369.0" text-anchor="start">504 ms</text></g>
-<g><title>image_filter — wtime-aot rust (-O3): 2.00 s</title>
-<path class="rust" d="M136.0,374.0H554.8Q558.3,374.0 558.3,377.5V381.5Q558.3,385.0 554.8,385.0H136.0Z"/>
-<text class="v" x="565.3" y="383.5" text-anchor="start">2.00 s</text></g>
-<g><title>image_filter — Wasmtime 49.0.3 (Cranelift): 1.79 ms</title>
-<path class="wt" d="M136.0,388.5H181.8Q185.3,388.5 185.3,392.0V396.0Q185.3,399.5 181.8,399.5H136.0Z"/>
-<text class="v" x="192.3" y="398.0" text-anchor="start">1.79 ms</text></g>
+<g><title>image_filter — wtime-aot x64: 1.78 ms</title>
+<path class="x64" d="M136.0,345.0H164.7Q168.2,345.0 168.2,348.5V352.5Q168.2,356.0 164.7,356.0H136.0Z"/>
+<text class="v" x="175.2" y="354.5" text-anchor="start">1.78 ms</text></g>
+<g><title>image_filter — wtime-aot c (-O2): 532 ms</title>
+<path class="bc" d="M136.0,359.5H482.1Q485.6,359.5 485.6,363.0V367.0Q485.6,370.5 482.1,370.5H136.0Z"/>
+<text class="v" x="492.6" y="369.0" text-anchor="start">532 ms</text></g>
+<g><title>image_filter — wtime-aot rust (-O3): 2.17 s</title>
+<path class="rust" d="M136.0,374.0H560.4Q563.9,374.0 563.9,377.5V381.5Q563.9,385.0 560.4,385.0H136.0Z"/>
+<text class="v" x="570.9" y="383.5" text-anchor="start">2.17 s</text></g>
+<g><title>image_filter — Wasmtime 49.0.3 (Cranelift): 1.62 ms</title>
+<path class="wt" d="M136.0,388.5H159.4Q162.9,388.5 162.9,392.0V396.0Q162.9,399.5 159.4,399.5H136.0Z"/>
+<text class="v-hi" x="169.9" y="398.0" text-anchor="start">1.62 ms</text></g>
 <text class="lb" x="124" y="446.8" text-anchor="end">ecs_kernel</text>
-<g><title>ecs_kernel — wtime-aot x64: 1.76 ms</title>
-<path class="x64" d="M136.0,415.5H180.9Q184.4,415.5 184.4,419.0V423.0Q184.4,426.5 180.9,426.5H136.0Z"/>
-<text class="v-hi" x="191.4" y="425.0" text-anchor="start">1.76 ms</text></g>
-<g><title>ecs_kernel — wtime-aot c (-O2): 497 ms</title>
-<path class="bc" d="M136.0,430.0H480.8Q484.3,430.0 484.3,433.5V437.5Q484.3,441.0 480.8,441.0H136.0Z"/>
-<text class="v" x="491.3" y="439.5" text-anchor="start">497 ms</text></g>
-<g><title>ecs_kernel — wtime-aot rust (-O3): 2.21 s</title>
-<path class="rust" d="M136.0,444.5H560.1Q563.6,444.5 563.6,448.0V452.0Q563.6,455.5 560.1,455.5H136.0Z"/>
-<text class="v" x="570.6" y="454.0" text-anchor="start">2.21 s</text></g>
-<g><title>ecs_kernel — Wasmtime 49.0.3 (Cranelift): 5.41 ms</title>
-<path class="wt" d="M136.0,459.0H240.7Q244.2,459.0 244.2,462.5V466.5Q244.2,470.0 240.7,470.0H136.0Z"/>
-<text class="v" x="251.2" y="468.5" text-anchor="start">5.41 ms</text></g>
+<g><title>ecs_kernel — wtime-aot x64: 1.91 ms</title>
+<path class="x64" d="M136.0,415.5H168.5Q172.0,415.5 172.0,419.0V423.0Q172.0,426.5 168.5,426.5H136.0Z"/>
+<text class="v-hi" x="179.0" y="425.0" text-anchor="start">1.91 ms</text></g>
+<g><title>ecs_kernel — wtime-aot c (-O2): 451 ms</title>
+<path class="bc" d="M136.0,430.0H473.0Q476.5,430.0 476.5,433.5V437.5Q476.5,441.0 473.0,441.0H136.0Z"/>
+<text class="v" x="483.5" y="439.5" text-anchor="start">451 ms</text></g>
+<g><title>ecs_kernel — wtime-aot rust (-O3): 2.11 s</title>
+<path class="rust" d="M136.0,444.5H558.8Q562.3,444.5 562.3,448.0V452.0Q562.3,455.5 558.8,455.5H136.0Z"/>
+<text class="v" x="569.3" y="454.0" text-anchor="start">2.11 s</text></g>
+<g><title>ecs_kernel — Wasmtime 49.0.3 (Cranelift): 2.25 ms</title>
+<path class="wt" d="M136.0,459.0H177.6Q181.1,459.0 181.1,462.5V466.5Q181.1,470.0 177.6,470.0H136.0Z"/>
+<text class="v" x="188.1" y="468.5" text-anchor="start">2.25 ms</text></g>
 </svg>

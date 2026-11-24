@@ -2450,3 +2450,172 @@ fn oracle_stage4_hills_minmax_short_circuit_and_loop_bce() {
         &[(512, 64), (4096, 64), (32768, 128), (65472, 64)],
     );
 }
+
+#[test]
+fn oracle_stage5_wave2_rotation_memcopy_forward_and_layout() {
+    // f0(n: i32) -> i32: rotated loop with escaping accumulator (`sum = sum_0^n-1 (i * 7 + 3)`).
+    // Tests 0-iteration guard bypass, 1-iteration, and multi-iteration rotated latches.
+    let mut b_acc = Vec::new();
+    b_acc.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b_acc.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // if i >=u n break
+    b_acc.extend_from_slice(&[
+        0x20, 2, 0x20, 1, 0x41, 7, 0x6c, 0x41, 3, 0x6a, 0x6a, 0x21, 2, // sum += i*7 + 3
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // f1(n: i32) -> i32: rotated loop with parallel-copy backedge swap (`a, b = b, a + b`).
+    let mut b_swap = Vec::new();
+    b_swap.extend_from_slice(&[0x41, 0, 0x21, 2, 0x41, 1, 0x21, 3]); // a=0, b=1
+    b_swap.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b_swap.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]); // if i >=u n break
+    b_swap.extend_from_slice(&[
+        0x20, 2, 0x20, 3, 0x6a, 0x21, 4, // tmp = a + b
+        0x20, 3, 0x21, 2, // a = b
+        0x20, 4, 0x21, 3, // b = tmp
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // f2(n: i32) -> i32: rotated loop writing `mem[65530 + i] = i + 1` (traps OOB cleanly at iter 6
+    // when n > 6, or succeeds when n <= 6, verifying exact partial writes before trap!).
+    let mut b_trap = Vec::new();
+    b_trap.extend_from_slice(&[0x02, 0x40, 0x03, 0x40]);
+    b_trap.extend_from_slice(&[0x20, 1, 0x20, 0, 0x4f, 0x0d, 1]);
+    b_trap.extend_from_slice(&[0x20, 1, 0x41]);
+    leb_i32(&mut b_trap, 65530);
+    b_trap.extend_from_slice(&[0x6a, 0x20, 1, 0x41, 1, 0x6a, 0x3a, 0, 0]);
+    b_trap.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 1,
+    ]);
+
+    // f3(packed: i64) -> i64: unpacks `dst = packed as i32`, `src = (packed >> 32) as i32`,
+    // loads 4 f64 lanes from `[src + 0/8/16/24]` (including sNaN and -0.0!), stores updated
+    // `[src + 0/8]`, then `memory.copy(dst, src, 32)` (forwarded to BoundsCheck + 4 checked f64 stores!).
+    let mut b_mc32 = Vec::new();
+    b_mc32.extend_from_slice(&[
+        0x20, 0, 0xa7, 0x21, 1, // local 1 = dst
+        0x20, 0, 0x42, 32, 0x88, 0xa7, 0x21, 2, // local 2 = src
+        0x20, 2, 0x2b, 3, 0, 0x21, 3, // f0
+        0x20, 2, 0x2b, 3, 8, 0x21, 4, // f1
+        0x20, 2, 0x2b, 3, 16, 0x21, 5, // f2 (sNaN preserved bit-exact!)
+        0x20, 2, 0x2b, 3, 24, 0x21, 6, // f3 (-0.0 preserved bit-exact!)
+        0x20, 2, 0x20, 3, 0x44,
+    ]);
+    b_mc32.extend_from_slice(&(1.5f64).to_le_bytes());
+    b_mc32.extend_from_slice(&[
+        0xa0, 0x39, 3, 0, // store [src+0]
+        0x20, 2, 0x20, 4, 0x39, 3, 8, // store [src+8]
+        0x20, 1, 0x20, 2, 0x41, 32, 0xfc, 0x0a, 0, 0, // memory.copy(dst, src, 32)
+        0x20, 1, 0x29, 3, 0, 0x20, 1, 0x29, 3, 8, 0x85, 0x20, 1, 0x29, 3, 16, 0x85, 0x20, 1, 0x29,
+        3, 24, 0x85,
+    ]);
+
+    // f4(packed: i64) -> i32: mixed 8B i64 + 4B i32 + 4B f32 `memory.copy(dst, src, 16)`.
+    let b_mc16 = vec![
+        0x20, 0, 0xa7, 0x21, 1, // local 1 = dst
+        0x20, 0, 0x42, 32, 0x88, 0xa7, 0x21, 2, // local 2 = src
+        0x20, 2, 0x29, 3, 0, 0x21, 3, // local 3 = i64 at +0
+        0x20, 2, 0x28, 2, 8, 0x21, 4, // local 4 = i32 at +8
+        0x20, 2, 0x2a, 2, 12, 0x21, 5, // local 5 = f32 at +12
+        0x20, 2, 0x20, 3, 0x42, 1, 0x7c, 0x37, 3, 0, // store [src+0] = i64 + 1
+        0x20, 2, 0x20, 4, 0x41, 5, 0x6a, 0x36, 2, 8, // store [src+8] = i32 + 5
+        0x20, 2, 0x20, 5, 0x38, 2, 12, // store [src+12] = f32
+        0x20, 1, 0x20, 2, 0x41, 16, 0xfc, 0x0a, 0, 0, // memory.copy(dst, src, 16)
+        0x20, 1, 0x28, 2, 0, 0x20, 1, 0x28, 2, 4, 0x73, 0x20, 1, 0x28, 2, 8, 0x73, 0x20, 1, 0x28,
+        2, 12, 0x73,
+    ];
+
+    // Seed initial data at [64..128] (including sNaN payload 7 and -0.0!) and [65504..65536]
+    // (sentinel bytes to prove OOB `memory.copy` writes ZERO bytes before trapping!).
+    let seed_lanes: [u64; 8] = [
+        2.25f64.to_bits(),
+        (-42.5f64).to_bits(),
+        0x7ff0_0000_0000_0007, // sNaN payload 7
+        (-0.0f64).to_bits(),
+        0x0123_4567_89ab_cdef,
+        0xdead_beef_cafe_babe,
+        0x7f80_0003_1122_3344, // f32 sNaN in upper 32 bits
+        0x5566_7788_99aa_bbcc,
+    ];
+    let mut seed_bytes = Vec::with_capacity(64);
+    for w in seed_lanes {
+        seed_bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    let sentinel = [0xA5u8; 32];
+    let mut data_sec = vec![2u8];
+    data_sec.extend_from_slice(&[0x00, 0x41]);
+    leb_i32(&mut data_sec, 64);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, seed_bytes.len() as u32);
+    data_sec.extend_from_slice(&seed_bytes);
+    data_sec.extend_from_slice(&[0x00, 0x41]);
+    leb_i32(&mut data_sec, 65504);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, sentinel.len() as u32);
+    data_sec.extend_from_slice(&sentinel);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7e], &[0x7e]), (&[0x7e], &[0x7f])]),
+        func_sec(&[0, 0, 0, 1, 2]),
+        section(5, &[1, 0x01, 1, 1]), // fixed 64 KiB memory
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("rot_acc", 0, 0),
+            ("rot_swap", 0, 1),
+            ("rot_trap", 0, 2),
+            ("memcpy_fwd_32", 0, 3),
+            ("memcpy_fwd_16", 0, 4),
+        ]),
+        code_sec(&[
+            enc_body(&[(2, 0x7f)], &b_acc),
+            enc_body(&[(4, 0x7f)], &b_swap),
+            enc_body(&[(1, 0x7f)], &b_trap),
+            enc_body(&[(2, 0x7f), (4, 0x7c)], &b_mc32),
+            enc_body(&[(2, 0x7f), (1, 0x7e), (1, 0x7f), (1, 0x7d)], &b_mc16),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    let pack = |dst: i32, src: i32| -> ArgSpec {
+        ArgSpec::I64((u64::from(dst as u32) | (u64::from(src as u32) << 32)) as i64)
+    };
+    let mut calls = Vec::new();
+    for n in [0, 1, 2, 17, 100] {
+        calls.push(c("rot_acc", ArgSpec::I32(n)));
+    }
+    for n in [0, 1, 2, 10, 25] {
+        calls.push(c("rot_swap", ArgSpec::I32(n)));
+    }
+    for (dst, src) in [
+        (256, 64),     // disjoint
+        (72, 64),      // overlap dst > src (+8)
+        (80, 64),      // overlap dst > src (+16)
+        (56, 64),      // overlap dst < src (-8)
+        (48, 64),      // overlap dst < src (-16)
+        (64, 64),      // exact self-overlap
+        (65504, 64),   // exact in-bounds end boundary (65504 + 32 == 65536)
+        (65520, 64),   // OOB dst -> MUST trap with ZERO bytes modified at [65520..65536]!
+        (1024, 65520), // OOB src -> MUST trap with ZERO bytes modified at [1024..1056]!
+    ] {
+        calls.push(c("memcpy_fwd_32", pack(dst, src)));
+    }
+    for (dst, src) in [
+        (512, 96),
+        (104, 96),
+        (88, 96),
+        (96, 96),
+        (65520, 96),
+        (65528, 96),
+    ] {
+        calls.push(c("memcpy_fwd_16", pack(dst, src)));
+    }
+    for n in [0, 1, 6, 10] {
+        calls.push(c("rot_trap", ArgSpec::I32(n)));
+    }
+    assert_oracle_matrix(
+        "stage5_wave2",
+        &wasm,
+        &calls,
+        &[],
+        &[(48, 80), (256, 32), (512, 16), (1024, 32), (65504, 32)],
+    );
+}
