@@ -14,11 +14,11 @@
     "5"
   ],
   "cargo_version": "cargo 1.99.0 (5f94df478 2026-08-27)",
-  "clean_peak_rss_kib": 427364,
-  "clean_seconds": 2.5752759859897196,
+  "clean_peak_rss_kib": 424516,
+  "clean_seconds": 1.9311798060080037,
   "compile_environment": {},
-  "core_source_sha256": "d852893670ce91a2a84647982a537984c9ee3be3d2ed58032a7e18c9523f526c",
-  "core_source_sha256_after": "d852893670ce91a2a84647982a537984c9ee3be3d2ed58032a7e18c9523f526c",
+  "core_source_sha256": "53e64368e69d0411bdbdb9ac7789579e7ba23abcd26e93b55c54f9a4c26e8e4e",
+  "core_source_sha256_after": "53e64368e69d0411bdbdb9ac7789579e7ba23abcd26e93b55c54f9a4c26e8e4e",
   "cpu": "x86_64",
   "default_dependency_closure_pass": true,
   "default_dependency_violations": [],
@@ -26,8 +26,8 @@
   "feature_package": null,
   "features": [],
   "isolated_source_inputs_after": {
-    "Cargo.lock": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
-    "Cargo.toml": "1f1aa09c8c124600dbc21627e0787e89633f740057cc3f0a8115f6a7e97cc74c",
+    "Cargo.lock": "052421a0de8ced04c5c11a249963d9258ac01b6515d3aaafda6736af34a93c13",
+    "Cargo.toml": "aae43034a7e658f3e87b69f8f933e237ee4d51b156d3782e9e39be553e1dd862",
     "crates/wtime-cli/Cargo.toml": "769e2c4226ec8be46d06ed02807b2e367924501226ff57a6a7aeaeb36e93703a",
     "crates/wtime-cli/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "crates/wtime-cli/LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
@@ -46,7 +46,7 @@
     "crates/wtime-runtime/Cargo.toml": "d7b7c62f83994f35ed43482d49639a33dbb2ed53d00a617638f145c7e30910b5",
     "crates/wtime-runtime/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "crates/wtime-runtime/LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
-    "crates/wtime-runtime/README.md": "b1e694a113b00cb83a26001b7b27e5803885d71d0e4d644c5f72749a41dbc6c0",
+    "crates/wtime-runtime/README.md": "96535f35e29f3e6a920972d3a16933e29b2386d83e686ddd81ac0325de4e72c9",
     "crates/wtime-runtime/examples/embedding.rs": "d9baac3b51bacbee00c42a109831e8bd1a845158b5a0ceae46a911307d8b0907",
     "crates/wtime-runtime/examples/suspension.rs": "097175e5cbbcf1be4716d4c1b584702042558d299360392fa742a85ead331e1d",
     "crates/wtime-runtime/examples/suspension.wasm": "468832dbb3e8083aafc5b27f7c0a142904cef4272d4c86fc6e0bc9997f68f431",
@@ -718,13 +718,13 @@
     "tools/wtime-conformance/tests/p121_compact_counts.rs": "262dfd55b09c82886575a2bcac8a737e545ac9f8865336264a6bc197453cd14a"
   },
   "isolated_workspace": "workspace",
-  "isolated_workspace_source_sha256": "5c4e240cf4a8385044d16f42c3bb73f7816bcacd70ffdb513302c6ab524358b4",
+  "isolated_workspace_source_sha256": "be1f6ecaef22ea3798ed5c6d2d256c01ad132c2916bdf42d9e9212bd16c0d026",
   "jobs": 5,
-  "leaf_seconds": 0.09699849800381344,
-  "lock_sha256": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
+  "leaf_seconds": 0.09186902700457722,
+  "lock_sha256": "052421a0de8ced04c5c11a249963d9258ac01b6515d3aaafda6736af34a93c13",
   "logical_cpus": 16,
   "mode": "default",
-  "release_seconds": 6.566318192999461,
+  "release_seconds": 5.400860961002763,
   "resolved_graph": [
     {
       "dependencies": [
@@ -736,7 +736,7 @@
             }
           ],
           "name": "wtime_runtime",
-          "package": "path+file://./crates/wtime-runtime#0.1.0"
+          "package": "path+file://./crates/wtime-runtime#0.1.1"
         },
         {
           "kinds": [
@@ -746,13 +746,13 @@
             }
           ],
           "name": "wtime_types",
-          "package": "path+file://./crates/wtime-types#0.1.0"
+          "package": "path+file://./crates/wtime-types#0.1.1"
         }
       ],
       "features": [],
       "name": "wtime-cli",
-      "package": "path+file://./crates/wtime-cli#0.1.0",
-      "version": "0.1.0"
+      "package": "path+file://./crates/wtime-cli#0.1.1",
+      "version": "0.1.1"
     },
     {
       "dependencies": [
@@ -764,13 +764,13 @@
             }
           ],
           "name": "wtime_types",
-          "package": "path+file://./crates/wtime-types#0.1.0"
+          "package": "path+file://./crates/wtime-types#0.1.1"
         }
       ],
       "features": [],
       "name": "wtime-decode",
-      "package": "path+file://./crates/wtime-decode#0.1.0",
-      "version": "0.1.0"
+      "package": "path+file://./crates/wtime-decode#0.1.1",
+      "version": "0.1.1"
     },
     {
       "dependencies": [
@@ -782,7 +782,7 @@
             }
           ],
           "name": "wtime_types",
-          "package": "path+file://./crates/wtime-types#0.1.0"
+          "package": "path+file://./crates/wtime-types#0.1.1"
         },
         {
           "kinds": [
@@ -792,22 +792,22 @@
             }
           ],
           "name": "wtime_validate",
-          "package": "path+file://./crates/wtime-validate#0.1.0"
+          "package": "path+file://./crates/wtime-validate#0.1.1"
         }
       ],
       "features": [
         "default"
       ],
       "name": "wtime-runtime",
-      "package": "path+file://./crates/wtime-runtime#0.1.0",
-      "version": "0.1.0"
+      "package": "path+file://./crates/wtime-runtime#0.1.1",
+      "version": "0.1.1"
     },
     {
       "dependencies": [],
       "features": [],
       "name": "wtime-types",
-      "package": "path+file://./crates/wtime-types#0.1.0",
-      "version": "0.1.0"
+      "package": "path+file://./crates/wtime-types#0.1.1",
+      "version": "0.1.1"
     },
     {
       "dependencies": [
@@ -819,7 +819,7 @@
             }
           ],
           "name": "wtime_decode",
-          "package": "path+file://./crates/wtime-decode#0.1.0"
+          "package": "path+file://./crates/wtime-decode#0.1.1"
         },
         {
           "kinds": [
@@ -829,13 +829,13 @@
             }
           ],
           "name": "wtime_types",
-          "package": "path+file://./crates/wtime-types#0.1.0"
+          "package": "path+file://./crates/wtime-types#0.1.1"
         }
       ],
       "features": [],
       "name": "wtime-validate",
-      "package": "path+file://./crates/wtime-validate#0.1.0",
-      "version": "0.1.0"
+      "package": "path+file://./crates/wtime-validate#0.1.1",
+      "version": "0.1.1"
     },
     {
       "dependencies": [
@@ -847,7 +847,7 @@
             }
           ],
           "name": "wtime_decode",
-          "package": "path+file://./crates/wtime-decode#0.1.0"
+          "package": "path+file://./crates/wtime-decode#0.1.1"
         },
         {
           "kinds": [
@@ -857,7 +857,7 @@
             }
           ],
           "name": "wtime_runtime",
-          "package": "path+file://./crates/wtime-runtime#0.1.0"
+          "package": "path+file://./crates/wtime-runtime#0.1.1"
         },
         {
           "kinds": [
@@ -867,7 +867,7 @@
             }
           ],
           "name": "wtime_types",
-          "package": "path+file://./crates/wtime-types#0.1.0"
+          "package": "path+file://./crates/wtime-types#0.1.1"
         },
         {
           "kinds": [
@@ -898,8 +898,8 @@
         "default"
       ],
       "name": "wtime-conformance",
-      "package": "path+file://./tools/wtime-conformance#0.1.0",
-      "version": "0.1.0"
+      "package": "path+file://./tools/wtime-conformance#0.1.1",
+      "version": "0.1.1"
     },
     {
       "dependencies": [],
@@ -1343,12 +1343,12 @@
       "version": "261.0.0"
     }
   ],
-  "runtime_leaf_seconds": 0.32863862000522204,
+  "runtime_leaf_seconds": 0.28025659899867605,
   "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
   "schema_version": 2,
   "source_inputs": {
-    "Cargo.lock": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
-    "Cargo.toml": "1f1aa09c8c124600dbc21627e0787e89633f740057cc3f0a8115f6a7e97cc74c",
+    "Cargo.lock": "052421a0de8ced04c5c11a249963d9258ac01b6515d3aaafda6736af34a93c13",
+    "Cargo.toml": "aae43034a7e658f3e87b69f8f933e237ee4d51b156d3782e9e39be553e1dd862",
     "crates/wtime-cli/Cargo.toml": "769e2c4226ec8be46d06ed02807b2e367924501226ff57a6a7aeaeb36e93703a",
     "crates/wtime-cli/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "crates/wtime-cli/LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
@@ -1367,7 +1367,7 @@
     "crates/wtime-runtime/Cargo.toml": "d7b7c62f83994f35ed43482d49639a33dbb2ed53d00a617638f145c7e30910b5",
     "crates/wtime-runtime/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "crates/wtime-runtime/LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
-    "crates/wtime-runtime/README.md": "b1e694a113b00cb83a26001b7b27e5803885d71d0e4d644c5f72749a41dbc6c0",
+    "crates/wtime-runtime/README.md": "96535f35e29f3e6a920972d3a16933e29b2386d83e686ddd81ac0325de4e72c9",
     "crates/wtime-runtime/examples/embedding.rs": "d9baac3b51bacbee00c42a109831e8bd1a845158b5a0ceae46a911307d8b0907",
     "crates/wtime-runtime/examples/suspension.rs": "097175e5cbbcf1be4716d4c1b584702042558d299360392fa742a85ead331e1d",
     "crates/wtime-runtime/examples/suspension.wasm": "468832dbb3e8083aafc5b27f7c0a142904cef4272d4c86fc6e0bc9997f68f431",
@@ -2039,8 +2039,8 @@
     "tools/wtime-conformance/tests/p121_compact_counts.rs": "262dfd55b09c82886575a2bcac8a737e545ac9f8865336264a6bc197453cd14a"
   },
   "source_inputs_after": {
-    "Cargo.lock": "9d704c9854b30ca231109a54598c1c440a7d144b8ece5e21539971fead240820",
-    "Cargo.toml": "1f1aa09c8c124600dbc21627e0787e89633f740057cc3f0a8115f6a7e97cc74c",
+    "Cargo.lock": "052421a0de8ced04c5c11a249963d9258ac01b6515d3aaafda6736af34a93c13",
+    "Cargo.toml": "aae43034a7e658f3e87b69f8f933e237ee4d51b156d3782e9e39be553e1dd862",
     "crates/wtime-cli/Cargo.toml": "769e2c4226ec8be46d06ed02807b2e367924501226ff57a6a7aeaeb36e93703a",
     "crates/wtime-cli/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "crates/wtime-cli/LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
@@ -2059,7 +2059,7 @@
     "crates/wtime-runtime/Cargo.toml": "d7b7c62f83994f35ed43482d49639a33dbb2ed53d00a617638f145c7e30910b5",
     "crates/wtime-runtime/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "crates/wtime-runtime/LICENSE-MIT": "a43aeeeebe46eda1a6fea77337eb7f9f37341b94afe7251d1f6d14fe03e702c5",
-    "crates/wtime-runtime/README.md": "b1e694a113b00cb83a26001b7b27e5803885d71d0e4d644c5f72749a41dbc6c0",
+    "crates/wtime-runtime/README.md": "96535f35e29f3e6a920972d3a16933e29b2386d83e686ddd81ac0325de4e72c9",
     "crates/wtime-runtime/examples/embedding.rs": "d9baac3b51bacbee00c42a109831e8bd1a845158b5a0ceae46a911307d8b0907",
     "crates/wtime-runtime/examples/suspension.rs": "097175e5cbbcf1be4716d4c1b584702042558d299360392fa742a85ead331e1d",
     "crates/wtime-runtime/examples/suspension.wasm": "468832dbb3e8083aafc5b27f7c0a142904cef4272d4c86fc6e0bc9997f68f431",
@@ -2730,11 +2730,11 @@
     "tools/wtime-conformance/tests/interactions.rs": "fd36710c8cd2ef7f3a2883d3f0ab6cbfecace3ae80adf693095228e4f4641938",
     "tools/wtime-conformance/tests/p121_compact_counts.rs": "262dfd55b09c82886575a2bcac8a737e545ac9f8865336264a6bc197453cd14a"
   },
-  "source_sha256": "5c4e240cf4a8385044d16f42c3bb73f7816bcacd70ffdb513302c6ab524358b4",
-  "source_sha256_after": "5c4e240cf4a8385044d16f42c3bb73f7816bcacd70ffdb513302c6ab524358b4",
+  "source_sha256": "be1f6ecaef22ea3798ed5c6d2d256c01ad132c2916bdf42d9e9212bd16c0d026",
+  "source_sha256_after": "be1f6ecaef22ea3798ed5c6d2d256c01ad132c2916bdf42d9e9212bd16c0d026",
   "source_stable": true,
   "stripped_bytes": 2386560,
   "target_initially_empty": true,
-  "unchanged_peak_rss_kib": 28388,
-  "unchanged_seconds": 0.03366050400654785
+  "unchanged_peak_rss_kib": 29284,
+  "unchanged_seconds": 0.02702654799213633
 }
