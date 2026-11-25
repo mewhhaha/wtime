@@ -492,6 +492,9 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::GlobalGet(_)
         | Op::MemSize
         | Op::MemSizeIdx(_)
+        | Op::DataDrop(_)
+        | Op::ElemDrop(_)
+        | Op::TableSize(_)
         | Op::ExnGetActive
         | Op::ExnClearActive
         | Op::Trap(_) => {}
@@ -559,6 +562,9 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::F32Bin(_, a, b)
         | Op::F64Bin(_, a, b)
         | Op::TableSet { idx: a, val: b, .. }
+        | Op::TableGrow {
+            init: a, delta: b, ..
+        }
         | Op::Store {
             addr: a, val: b, ..
         }
@@ -632,12 +638,18 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
             r(tv);
             r(fv);
         }
-        Op::MemCopy { dst, src, len } | Op::MemCopyIdx { dst, src, len, .. } => {
+        Op::MemCopy { dst, src, len }
+        | Op::MemCopyIdx { dst, src, len, .. }
+        | Op::MemInit { dst, src, len, .. }
+        | Op::TableInit { dst, src, len, .. }
+        | Op::TableCopy { dst, src, len, .. } => {
             r(dst);
             r(src);
             r(len);
         }
-        Op::MemFill { dst, val, len } | Op::MemFillIdx { dst, val, len, .. } => {
+        Op::MemFill { dst, val, len }
+        | Op::MemFillIdx { dst, val, len, .. }
+        | Op::TableFill { dst, val, len, .. } => {
             r(dst);
             r(val);
             r(len);
@@ -2836,6 +2848,64 @@ fn clone_callee_into_caller(
                     val: map_v(val),
                     len: map_v(len),
                 },
+                Op::MemInit {
+                    data,
+                    mem,
+                    dst,
+                    src,
+                    len,
+                } => Op::MemInit {
+                    data,
+                    mem,
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::DataDrop(d) => Op::DataDrop(d),
+                Op::TableInit {
+                    elem,
+                    table,
+                    dst,
+                    src,
+                    len,
+                } => Op::TableInit {
+                    elem,
+                    table,
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::ElemDrop(e) => Op::ElemDrop(e),
+                Op::TableCopy {
+                    dst_table,
+                    src_table,
+                    dst,
+                    src,
+                    len,
+                } => Op::TableCopy {
+                    dst_table,
+                    src_table,
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
+                Op::TableGrow { table, init, delta } => Op::TableGrow {
+                    table,
+                    init: map_v(init),
+                    delta: map_v(delta),
+                },
+                Op::TableSize(t) => Op::TableSize(t),
+                Op::TableFill {
+                    table,
+                    dst,
+                    val,
+                    len,
+                } => Op::TableFill {
+                    table,
+                    dst: map_v(dst),
+                    val: map_v(val),
+                    len: map_v(len),
+                },
                 Op::MemCopyConst {
                     dst,
                     src,
@@ -4090,6 +4160,7 @@ pub fn try_compute_fn_own_effects(
                 | Op::MemCopyIdx { .. }
                 | Op::MemFill { .. }
                 | Op::MemFillIdx { .. }
+                | Op::MemInit { .. }
                 | Op::MemCopyConst { .. }
                 | Op::MemFillConst { .. }
                 | Op::MemByteBlur3Div { .. }
@@ -4105,7 +4176,13 @@ pub fn try_compute_fn_own_effects(
                         written_globals[gi >> 6] |= 1u64 << (gi & 63);
                     }
                 }
-                Op::TableSet { table, .. } => {
+                Op::TableSet { table, .. }
+                | Op::TableInit { table, .. }
+                | Op::TableCopy {
+                    dst_table: table, ..
+                }
+                | Op::TableGrow { table, .. }
+                | Op::TableFill { table, .. } => {
                     if table < 64 {
                         written_tables |= 1u64 << table;
                     } else {
@@ -5522,6 +5599,8 @@ pub struct Stage2Scratch {
     as_scaled_def: Vec<Option<(bool, Val, u8)>>,
     as_use_count: Vec<u32>,
     as_add_fold_uses: Vec<u32>,
+    bool01_stamp: Vec<u32>,
+    bool01_epoch: u32,
 }
 
 impl Default for Stage2Scratch {
@@ -5551,6 +5630,8 @@ impl Default for Stage2Scratch {
             as_scaled_def: Vec::new(),
             as_use_count: Vec::new(),
             as_add_fold_uses: Vec::new(),
+            bool01_stamp: Vec::new(),
+            bool01_epoch: 0,
         }
     }
 }
@@ -6088,6 +6169,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                 | Op::MemCopyIdx { .. }
                 | Op::MemFill { .. }
                 | Op::MemFillIdx { .. }
+                | Op::MemInit { .. }
                 | Op::StoreMem { .. }
                 | Op::V128StoreLaneMem { .. }
                 | Op::MemByteBlur3Div { .. }
@@ -6117,7 +6199,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                         fn_writes_any_global = true;
                     }
                 }
-                Op::TableSet { table, .. } => {
+                Op::TableSet { table, .. }
+                | Op::TableInit { table, .. }
+                | Op::TableCopy {
+                    dst_table: table, ..
+                }
+                | Op::TableGrow { table, .. }
+                | Op::TableFill { table, .. } => {
                     if table < 64 {
                         fn_written_tables |= 1u64 << table;
                     } else {
@@ -6722,6 +6810,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                         | Op::MemCopyIdx { .. }
                         | Op::MemFill { .. }
                         | Op::MemFillIdx { .. }
+                        | Op::MemInit { .. }
                         | Op::StoreMem { .. }
                         | Op::V128StoreLaneMem { .. }
                         | Op::MemByteBlur3Div { .. }
@@ -6819,8 +6908,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                             out_insts.push(inst);
                             continue;
                         }
-                        Op::TableSet { table, .. } => {
-                            let _ = table;
+                        Op::TableSet { .. }
+                        | Op::TableInit { .. }
+                        | Op::TableCopy { .. }
+                        | Op::TableGrow { .. }
+                        | Op::TableFill { .. } => {
                             st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
                             out_insts.push(inst);
                             continue;
@@ -8110,6 +8202,9 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::GlobalGet(_)
         | Op::MemSize
         | Op::MemSizeIdx(_)
+        | Op::DataDrop(_)
+        | Op::ElemDrop(_)
+        | Op::TableSize(_)
         | Op::ExnGetActive
         | Op::ExnClearActive
         | Op::Trap(_) => {}
@@ -8177,6 +8272,9 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::F32Bin(_, a, b)
         | Op::F64Bin(_, a, b)
         | Op::TableSet { idx: a, val: b, .. }
+        | Op::TableGrow {
+            init: a, delta: b, ..
+        }
         | Op::Store {
             addr: a, val: b, ..
         }
@@ -8250,12 +8348,18 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
             r(tv);
             r(fv);
         }
-        Op::MemCopy { dst, src, len } | Op::MemCopyIdx { dst, src, len, .. } => {
+        Op::MemCopy { dst, src, len }
+        | Op::MemCopyIdx { dst, src, len, .. }
+        | Op::MemInit { dst, src, len, .. }
+        | Op::TableInit { dst, src, len, .. }
+        | Op::TableCopy { dst, src, len, .. } => {
             r(dst);
             r(src);
             r(len);
         }
-        Op::MemFill { dst, val, len } | Op::MemFillIdx { dst, val, len, .. } => {
+        Op::MemFill { dst, val, len }
+        | Op::MemFillIdx { dst, val, len, .. }
+        | Op::TableFill { dst, val, len, .. } => {
             r(dst);
             r(val);
             r(len);
@@ -10472,10 +10576,11 @@ pub fn optimize_func_stage2_with_scratch(
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
         }
         if ir.blocks.len() == 1 {
+            let euclid_changed = fold_euclidean_pow2_rem(ir, scratch);
             let (_, gvn_changed) =
                 run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
             let op_flags = scratch.op_flags;
-            if gvn_changed || early_state != 2 {
+            if euclid_changed || gvn_changed || early_state != 2 {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
             let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
@@ -10499,6 +10604,7 @@ pub fn optimize_func_stage2_with_scratch(
         let mut cfg_or_ir_mutated = early_state != 2;
         if if_convert_trivial_diamonds(ir) {
             cfg_or_ir_mutated = true;
+            let _ = fold_euclidean_pow2_rem(ir, scratch);
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
             if ir.blocks.len() == 1 {
                 let _ =
@@ -10517,6 +10623,8 @@ pub fn optimize_func_stage2_with_scratch(
                 return Ok(());
             }
             let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+        } else if fold_euclidean_pow2_rem(ir, scratch) {
+            cfg_or_ir_mutated = true;
         }
         // 3. LICM (only when natural loops exist) + Dominator GVN/BCE/Store-to-Load + peephole/DCE.
         let mut has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
@@ -10547,14 +10655,26 @@ pub fn optimize_func_stage2_with_scratch(
         {
             let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
         }
-        // Re-run LICM ONLY when post-inlining constant reduction turned a trapping `Div`/`Rem`
-        // into a pure `BinImm` inside a loop (hoisting invariant ops like `(y + dy) % CONST`
-        // out of inner loops with zero cost on functions without reduced divisions).
-        if has_loops && scratch.reduced_div_rem && run_licm(ir, &dom, module, effects, budget)? {
-            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
-            has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+        // When post-inlining constant reduction turned a trapping `Div`/`Rem` into a pure `BinImm`,
+        // convert exposed Euclidean wrap diamonds (`if r < 0 { r + 2^k } else { r }` -> `v & (2^k - 1)`)
+        // and re-run LICM so invariant wrapped indices hoist out of inner loops (zero cost when no div reduced).
+        if scratch.reduced_div_rem {
+            let mut post_div_mut = if_convert_trivial_diamonds(ir);
+            post_div_mut |= fold_euclidean_pow2_rem(ir, scratch);
+            if post_div_mut {
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                    let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+                has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+            }
+            if has_loops && run_licm(ir, &dom, module, effects, budget)? {
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+            }
         }
-        // 5-7. Loop-only passes (BCE versioning, loop rotation, boundary-clamp peeling, byte-sum SIMD):
+        // 5-7. Loop-only passes (BCE versioning, loop rotation, constant-trip unrolling, boundary-clamp peeling, SIMD):
         //      skip completely on acyclic functions, and gate specialty passes in O(1) via `op_flags`!
         let mut post_rot_changed = false;
         let mut non_wrap_scaled: HashSet<Val> = fx_set();
@@ -10594,6 +10714,47 @@ pub fn optimize_func_stage2_with_scratch(
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
                 if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+            }
+            // Full unrolling for tiny innermost constant-trip counted loops (`1..=4` iterations),
+            // running up to 2 rounds so nested 3x3 stencil loops (e.g. `dy in -1..2 { dx in -1..2 }`)
+            // collapse completely into straight-line code with dead center/guard checks folded away.
+            for round in 0..2 {
+                let max_body = if round == 0 { 44 } else { 96 };
+                if !unroll_small_constant_loops(ir, &dom, max_body) {
+                    break;
+                }
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                    let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+                let (uf, um) =
+                    run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+                if uf || um {
+                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                    rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                    if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                        let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                    }
+                } else {
+                    optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                }
+                if round == 0 && ir.blocks.iter().any(|b| b.is_loop_header) {
+                    if run_licm(ir, &dom, module, effects, budget)? {
+                        rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                    }
+                    if rotate_counted_loops(ir, &dom, budget)? {
+                        optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                        rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                        if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                            let _ =
+                                prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                        }
+                    }
+                } else if ir.blocks.iter().any(|b| b.is_loop_header)
+                    && run_licm(ir, &dom, module, effects, budget)?
+                {
+                    rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
                 }
             }
             if narrow_equality_filtered_loops(ir, &dom) {
@@ -10955,6 +11116,1045 @@ fn fold_add_scaled(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
         }
     }
     changed
+}
+
+/// Collapses signed Euclidean modulo by a positive power of two:
+///   `r = v rem_s 2^k; (r < 0) ? (r + 2^k) : r`  ==>  `v & (2^k - 1)`
+/// (exact for every 32-bit and 64-bit signed integer including `MIN`, negatives, and multiples of `2^k`),
+/// and removes redundant `x & mask` on known 0/1 boolean results when `(mask & 1) == 1`.
+fn fold_euclidean_pow2_rem(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
+    let mut has_rem = false;
+    let mut has_sel = false;
+    let mut has_and = false;
+    let mut has_bool_cmp = false;
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            match inst.op {
+                Op::I32BinImm(IntBinOp::RemS, _, n) if n > 0 && (n as u32).is_power_of_two() => {
+                    has_rem = true;
+                }
+                Op::I64BinImm(IntBinOp::RemS, _, n) if n > 0 && (n as u32).is_power_of_two() => {
+                    has_rem = true;
+                }
+                Op::CmpSelect { .. } | Op::Select { .. } => has_sel = true,
+                Op::I32BinImm(IntBinOp::And, _, m) if (m & 1) == 1 => has_and = true,
+                Op::I32Cmp(..)
+                | Op::I32CmpImm(..)
+                | Op::I64Cmp(..)
+                | Op::I64CmpImm(..)
+                | Op::F32Cmp(..)
+                | Op::F64Cmp(..)
+                | Op::I32Eqz(_)
+                | Op::I64Eqz(_) => has_bool_cmp = true,
+                _ => {}
+            }
+        }
+    }
+    let do_euclid = has_rem && has_sel;
+    let do_bool_and = has_and && has_bool_cmp;
+    if !do_euclid && !do_bool_and {
+        return false;
+    }
+
+    let n_vals = ir.val_tys.len();
+    let mut changed = false;
+
+    // Fast, zero-allocation `bool01 & odd_mask` elision using worker-local epoch-stamped scratch.
+    if do_bool_and {
+        scratch.bool01_epoch = scratch.bool01_epoch.wrapping_add(1);
+        if scratch.bool01_epoch == 0 {
+            scratch.bool01_stamp.fill(0);
+            scratch.bool01_epoch = 1;
+        }
+        if scratch.bool01_stamp.len() < n_vals {
+            scratch.bool01_stamp.resize(n_vals, 0);
+        }
+        let ep = scratch.bool01_epoch;
+        let stamp = &mut scratch.bool01_stamp;
+        let mut any_hit = false;
+        for bb in &ir.blocks {
+            for inst in &bb.insts {
+                if let Some(res) = inst.res {
+                    match inst.op {
+                        Op::I32Cmp(..)
+                        | Op::I32CmpImm(..)
+                        | Op::I64Cmp(..)
+                        | Op::I64CmpImm(..)
+                        | Op::F32Cmp(..)
+                        | Op::F64Cmp(..)
+                        | Op::I32Eqz(_)
+                        | Op::I64Eqz(_) => {
+                            stamp[res.0 as usize] = ep;
+                        }
+                        Op::I32BinImm(IntBinOp::And, a, m)
+                            if (m & 1) == 1 && stamp[a.0 as usize] == ep =>
+                        {
+                            stamp[res.0 as usize] = ep;
+                            any_hit = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if any_hit {
+            scratch.subst.clear();
+            scratch.subst.extend((0..n_vals as u32).map(Val));
+            let subst = &mut scratch.subst;
+            let mut any_subst = false;
+            for bb in &ir.blocks {
+                for inst in &bb.insts {
+                    if let (Some(res), Op::I32BinImm(IntBinOp::And, a, m)) = (inst.res, inst.op)
+                        && (m & 1) == 1
+                        && stamp[a.0 as usize] == ep
+                    {
+                        subst[res.0 as usize] = subst[a.0 as usize];
+                        any_subst = true;
+                    }
+                }
+            }
+            if any_subst {
+                let mut pool = std::mem::take(&mut ir.val_pool);
+                for bb in &mut ir.blocks {
+                    for inst in &mut bb.insts {
+                        rewrite_op_uses(&mut inst.op, &mut pool, subst);
+                    }
+                    rewrite_term_uses(&mut bb.term, &mut pool, &ir.br_tables, subst);
+                }
+                ir.val_pool = pool;
+                changed = true;
+            }
+        }
+    }
+
+    if !do_euclid {
+        return changed;
+    }
+
+    let mut def_op: Vec<Option<Op>> = vec![None; n_vals];
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            if let Some(res) = inst.res {
+                def_op[res.0 as usize] = Some(inst.op);
+            }
+        }
+    }
+
+    let is_const32 = |v: Val, k: i32| -> bool {
+        matches!(def_op[v.0 as usize], Some(Op::ConstI32(c)) if c == k)
+    };
+    let is_const64 = |v: Val, k: i64| -> bool {
+        matches!(def_op[v.0 as usize], Some(Op::ConstI64(c)) if c == k)
+    };
+
+    let is_add_const32 = |v: Val, base: Val, k: i32| -> bool {
+        match def_op[v.0 as usize] {
+            Some(Op::I32BinImm(IntBinOp::Add, a, imm)) => a == base && imm == k,
+            Some(Op::I32Bin(IntBinOp::Add, a, b)) => {
+                (a == base && is_const32(b, k)) || (b == base && is_const32(a, k))
+            }
+            _ => false,
+        }
+    };
+    let is_add_const64 = |v: Val, base: Val, k: i64| -> bool {
+        match def_op[v.0 as usize] {
+            Some(Op::I64BinImm(IntBinOp::Add, a, imm)) => a == base && i64::from(imm) == k,
+            Some(Op::I64Bin(IntBinOp::Add, a, b)) => {
+                (a == base && is_const64(b, k)) || (b == base && is_const64(a, k))
+            }
+            _ => false,
+        }
+    };
+
+    for bb in &mut ir.blocks {
+        for inst in &mut bb.insts {
+            // Extract `(is64, cmp_op, cmp_lhs, tv, fv)` where `cmp_rhs == 0`.
+            let candidate = match inst.op {
+                Op::CmpSelect {
+                    kind: CmpBranchKind::I64Imm(cop, 0),
+                    a,
+                    tv,
+                    fv,
+                    ..
+                } => Some((true, cop, a, tv, fv)),
+                Op::CmpSelect {
+                    kind: CmpBranchKind::I64(cop),
+                    a,
+                    b,
+                    tv,
+                    fv,
+                } if is_const64(b, 0) => Some((true, cop, a, tv, fv)),
+                Op::CmpSelect {
+                    kind: CmpBranchKind::I32Imm(cop, 0),
+                    a,
+                    tv,
+                    fv,
+                    ..
+                } => Some((false, cop, a, tv, fv)),
+                Op::CmpSelect {
+                    kind: CmpBranchKind::I32(cop),
+                    a,
+                    b,
+                    tv,
+                    fv,
+                } if is_const32(b, 0) => Some((false, cop, a, tv, fv)),
+                Op::Select { cond, a: tv, b: fv } => match def_op[cond.0 as usize] {
+                    Some(Op::I64CmpImm(cop, a, 0)) => Some((true, cop, a, tv, fv)),
+                    Some(Op::I64Cmp(cop, a, b)) if is_const64(b, 0) => Some((true, cop, a, tv, fv)),
+                    Some(Op::I32CmpImm(cop, a, 0)) => Some((false, cop, a, tv, fv)),
+                    Some(Op::I32Cmp(cop, a, b)) if is_const32(b, 0) => {
+                        Some((false, cop, a, tv, fv))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some((is64, cop, r, tv, fv)) = candidate else {
+                continue;
+            };
+            let (neg_val, nonneg_val) = match cop {
+                CmpOp::LtS => (tv, fv),
+                CmpOp::GeS => (fv, tv),
+                _ => continue,
+            };
+            if nonneg_val != r {
+                continue;
+            }
+            if is64 {
+                if let Some(Op::I64BinImm(IntBinOp::RemS, v, n)) = def_op[r.0 as usize]
+                    && n > 0
+                    && (n as u32).is_power_of_two()
+                    && is_add_const64(neg_val, r, i64::from(n))
+                {
+                    inst.op = Op::I64BinImm(IntBinOp::And, v, n - 1);
+                    changed = true;
+                }
+            } else if let Some(Op::I32BinImm(IntBinOp::RemS, v, n)) = def_op[r.0 as usize]
+                && n > 0
+                && (n as u32).is_power_of_two()
+                && is_add_const32(neg_val, r, n)
+            {
+                inst.op = Op::I32BinImm(IntBinOp::And, v, n - 1);
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
+/// Full unrolling for tiny innermost bottom-tested constant-trip counted loops (`1..=4` iterations),
+/// e.g. 3x3 stencil loops `for dy in -1..2 { for dx in -1..2 { ... } }`.
+/// Strictly bounded in block/instruction/value count and verified SSA-safe (no escaping body defs).
+fn unroll_small_constant_loops(ir: &mut IrFunc, dom: &CfgDom, max_body_insts: usize) -> bool {
+    const MAX_TRIP: usize = 4;
+    const MAX_BODY_BLOCKS: usize = 12;
+    const MAX_FN_BLOCKS_FOR_UNROLL: usize = 1024;
+    const MAX_FN_INSTS_FOR_UNROLL: usize = 8192;
+
+    let orig_blocks = ir.blocks.len();
+    if !(2..=MAX_FN_BLOCKS_FOR_UNROLL).contains(&orig_blocks) {
+        return false;
+    }
+    // Zero-allocation pre-filter: require at least one loop header with non-empty params,
+    // exactly 2 preds (1 outside entry + 1 dominated CmpBranch latch), within the function cap.
+    let mut has_candidate_hdr = false;
+    let mut total_fn_insts = 0usize;
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        total_fn_insts += bb.insts.len();
+        if total_fn_insts > MAX_FN_INSTS_FOR_UNROLL {
+            return false;
+        }
+        if bi > 0 && bb.is_loop_header && !bb.params.is_empty() {
+            let hdr = bi as u32;
+            let ps = dom.preds(hdr);
+            if ps.len() == 2 {
+                let d0 = dom.dominates(hdr, ps[0]);
+                let d1 = dom.dominates(hdr, ps[1]);
+                if d0 != d1 {
+                    let latch = if d0 { ps[0] } else { ps[1] };
+                    if matches!(ir.blocks[latch as usize].term, Term::CmpBranch { .. }) {
+                        has_candidate_hdr = true;
+                    }
+                }
+            }
+        }
+    }
+    if !has_candidate_hdr {
+        return false;
+    }
+
+    let eval_cmp_i32 = |op: CmpOp, x: i32, y: i32| match op {
+        CmpOp::Eq => x == y,
+        CmpOp::Ne => x != y,
+        CmpOp::LtS => x < y,
+        CmpOp::LtU => (x as u32) < (y as u32),
+        CmpOp::GtS => x > y,
+        CmpOp::GtU => (x as u32) > (y as u32),
+        CmpOp::LeS => x <= y,
+        CmpOp::LeU => (x as u32) <= (y as u32),
+        CmpOp::GeS => x >= y,
+        CmpOp::GeU => (x as u32) >= (y as u32),
+    };
+    let eval_cmp_i64 = |op: CmpOp, x: i64, y: i64| match op {
+        CmpOp::Eq => x == y,
+        CmpOp::Ne => x != y,
+        CmpOp::LtS => x < y,
+        CmpOp::LtU => (x as u64) < (y as u64),
+        CmpOp::GtS => x > y,
+        CmpOp::GtU => (x as u64) > (y as u64),
+        CmpOp::LeS => x <= y,
+        CmpOp::LeU => (x as u64) <= (y as u64),
+        CmpOp::GeS => x >= y,
+        CmpOp::GeU => (x as u64) >= (y as u64),
+    };
+
+    // Lazily populated only if at least one candidate loop passes structural/size filters.
+    type DefTables = (Vec<Option<i32>>, HashMap<Val, i64>, Vec<Option<Op>>);
+    let mut def_tables: Option<DefTables> = None;
+    let mut touched = vec![false; orig_blocks];
+    let mut unrolled_any = false;
+
+    for hdr in 1..orig_blocks as u32 {
+        if !ir.blocks[hdr as usize].is_loop_header
+            || ir.blocks[hdr as usize].params.is_empty()
+            || touched[hdr as usize]
+        {
+            continue;
+        }
+        // Require exactly 1 backedge latch and 1 outside entry predecessor (via CSR `dom.preds`).
+        let ps = dom.preds(hdr);
+        if ps.len() != 2 {
+            continue;
+        }
+        let d0 = dom.dominates(hdr, ps[0]);
+        let d1 = dom.dominates(hdr, ps[1]);
+        if d0 == d1 {
+            continue;
+        }
+        let (latch, pre) = if d0 { (ps[0], ps[1]) } else { (ps[1], ps[0]) };
+        if touched[latch as usize]
+            || touched[pre as usize]
+            || !matches!(ir.blocks[latch as usize].term, Term::CmpBranch { .. })
+        {
+            continue;
+        }
+
+        // Collect natural loop body blocks.
+        let mut in_body = vec![false; orig_blocks];
+        let mut body: Vec<u32> = vec![hdr];
+        in_body[hdr as usize] = true;
+        if !in_body[latch as usize] {
+            in_body[latch as usize] = true;
+            body.push(latch);
+            let mut work = vec![latch];
+            while let Some(u) = work.pop() {
+                for &p in dom.preds(u) {
+                    if !in_body[p as usize] {
+                        in_body[p as usize] = true;
+                        body.push(p);
+                        work.push(p);
+                    }
+                }
+            }
+        }
+        if body.len() > MAX_BODY_BLOCKS {
+            continue;
+        }
+        // Must be an innermost loop (no nested loop header, no touched blocks, no br_table/EH).
+        let mut body_insts = 0usize;
+        let mut ok_body = true;
+        for &b in &body {
+            if touched[b as usize] || (b != hdr && ir.blocks[b as usize].is_loop_header) {
+                ok_body = false;
+                break;
+            }
+            let bb = &ir.blocks[b as usize];
+            body_insts += bb.insts.len();
+            if matches!(
+                bb.term,
+                Term::BrTable { .. }
+                    | Term::CallCatch { .. }
+                    | Term::CallIndirectCatch { .. }
+                    | Term::ThrowActive
+            ) || bb.insts.iter().any(|ins| {
+                matches!(
+                    ins.op,
+                    Op::ExnAlloc { .. }
+                        | Op::ExnSetActive(_)
+                        | Op::ExnGetActive
+                        | Op::ExnClearActive
+                        | Op::ExnGetTag(_)
+                        | Op::ExnGetPayload { .. }
+                )
+            }) {
+                ok_body = false;
+                break;
+            }
+            // No non-hdr body block may have an incoming edge from outside the loop.
+            if b != hdr && dom.preds(b).iter().any(|&p| !in_body[p as usize]) {
+                ok_body = false;
+                break;
+            }
+        }
+        if !ok_body || body_insts > max_body_insts {
+            continue;
+        }
+
+        // Extract the single outside entry edge `(pre -> hdr)` and verify `pre` only targets `hdr` once.
+        let mut pre_edge_count = 0usize;
+        let mut pre_args_opt: Option<ValRange> = None;
+        match ir.blocks[pre as usize].term {
+            Term::Jump { target, args } if target == BlockId(hdr) => {
+                pre_edge_count += 1;
+                pre_args_opt = Some(args);
+            }
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                if then_bb == BlockId(hdr) {
+                    pre_edge_count += 1;
+                    pre_args_opt = Some(then_args);
+                }
+                if else_bb == BlockId(hdr) {
+                    pre_edge_count += 1;
+                    pre_args_opt = Some(else_args);
+                }
+            }
+            _ => {}
+        }
+        let Some(pre_args_range) = pre_args_opt else {
+            continue;
+        };
+        if pre_edge_count != 1 {
+            continue;
+        }
+
+        // Latch must be a bottom-tested `Term::CmpBranch` with one edge to `hdr` and one edge outside `body`.
+        let Term::CmpBranch {
+            kind,
+            a,
+            b,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } = ir.blocks[latch as usize].term
+        else {
+            continue;
+        };
+        let (stay_on_then, back_args_range, exit_bb, exit_args_range) = if then_bb == BlockId(hdr)
+            && (else_bb.0 as usize) < orig_blocks
+            && !in_body[else_bb.0 as usize]
+        {
+            (true, then_args, else_bb, else_args)
+        } else if else_bb == BlockId(hdr)
+            && (then_bb.0 as usize) < orig_blocks
+            && !in_body[then_bb.0 as usize]
+        {
+            (false, else_args, then_bb, then_args)
+        } else {
+            continue;
+        };
+
+        let hdr_params = &ir.blocks[hdr as usize].params;
+        if hdr_params.is_empty()
+            || pre_args_range.len as usize != hdr_params.len()
+            || back_args_range.len as usize != hdr_params.len()
+        {
+            continue;
+        }
+
+        // Lazily populate constant/op lookup tables ONLY when a structurally eligible small loop exists.
+        let (const32, const64, def_op) = def_tables.get_or_insert_with(|| {
+            let n_vals = ir.val_tys.len();
+            let mut c32: Vec<Option<i32>> = vec![None; n_vals];
+            let mut c64: HashMap<Val, i64> = fx_map();
+            let mut d_op: Vec<Option<Op>> = vec![None; n_vals];
+            for bb in &ir.blocks[..orig_blocks] {
+                for inst in &bb.insts {
+                    if let Some(r) = inst.res {
+                        let ri = r.0 as usize;
+                        if ri < n_vals {
+                            d_op[ri] = Some(inst.op);
+                            match inst.op {
+                                Op::ConstI32(c) => c32[ri] = Some(c),
+                                Op::ConstI64(c) => {
+                                    c64.insert(r, c);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            (c32, c64, d_op)
+        });
+        let lookup_c32 = |v: Val| const32.get(v.0 as usize).copied().flatten();
+        let lookup_def = |v: Val| def_op.get(v.0 as usize).copied().flatten();
+
+        // Find induction variable `iv = hdr.params[pos]` with constant init, constant step, and constant bound.
+        let mut found_trip: Option<usize> = None;
+        for (pos, &iv) in hdr_params.iter().enumerate() {
+            let init_v = ir.pool_slice(pre_args_range)[pos];
+            let back_v = ir.pool_slice(back_args_range)[pos];
+            match ir.val_tys[iv.0 as usize] {
+                Ty::I32 => {
+                    let Some(init_c) = lookup_c32(init_v) else {
+                        continue;
+                    };
+                    let step_c = match lookup_def(back_v) {
+                        Some(Op::I32BinImm(IntBinOp::Add, x, s)) if x == iv => Some(s),
+                        Some(Op::I32BinImm(IntBinOp::Sub, x, s)) if x == iv => {
+                            Some(s.wrapping_neg())
+                        }
+                        Some(Op::I32Bin(IntBinOp::Add, x, y)) if x == iv => lookup_c32(y),
+                        Some(Op::I32Bin(IntBinOp::Add, x, y)) if y == iv => lookup_c32(x),
+                        Some(Op::I32Bin(IntBinOp::Sub, x, y)) if x == iv => {
+                            lookup_c32(y).map(|c| c.wrapping_neg())
+                        }
+                        _ => None,
+                    };
+                    let Some(step) = step_c.filter(|&s| s != 0) else {
+                        continue;
+                    };
+                    let cmp_info = match kind {
+                        CmpBranchKind::I32Imm(cop, imm) if a == back_v => Some((cop, imm)),
+                        CmpBranchKind::I32(cop) if a == back_v => lookup_c32(b).map(|c| (cop, c)),
+                        CmpBranchKind::I32(cop) if b == back_v => {
+                            lookup_c32(a).map(|c| (cop.swap(), c))
+                        }
+                        _ => None,
+                    };
+                    let Some((cop, bound)) = cmp_info else {
+                        continue;
+                    };
+                    let mut cur = init_c;
+                    for k in 1..=MAX_TRIP {
+                        let next = cur.wrapping_add(step);
+                        let cond_val = eval_cmp_i32(cop, next, bound);
+                        let stay = if stay_on_then { cond_val } else { !cond_val };
+                        if !stay {
+                            found_trip = Some(k);
+                            break;
+                        }
+                        cur = next;
+                    }
+                    if found_trip.is_some() {
+                        break;
+                    }
+                }
+                Ty::I64 => {
+                    let Some(&init_c) = const64.get(&init_v) else {
+                        continue;
+                    };
+                    let step_c = match lookup_def(back_v) {
+                        Some(Op::I64BinImm(IntBinOp::Add, x, s)) if x == iv => Some(i64::from(s)),
+                        Some(Op::I64BinImm(IntBinOp::Sub, x, s)) if x == iv => {
+                            Some(i64::from(s).wrapping_neg())
+                        }
+                        Some(Op::I64Bin(IntBinOp::Add, x, y)) if x == iv => {
+                            const64.get(&y).copied()
+                        }
+                        Some(Op::I64Bin(IntBinOp::Add, x, y)) if y == iv => {
+                            const64.get(&x).copied()
+                        }
+                        Some(Op::I64Bin(IntBinOp::Sub, x, y)) if x == iv => {
+                            const64.get(&y).copied().map(|c| c.wrapping_neg())
+                        }
+                        _ => None,
+                    };
+                    let Some(step) = step_c.filter(|&s| s != 0) else {
+                        continue;
+                    };
+                    let cmp_info = match kind {
+                        CmpBranchKind::I64Imm(cop, imm) if a == back_v => {
+                            Some((cop, i64::from(imm)))
+                        }
+                        CmpBranchKind::I64(cop) if a == back_v => {
+                            const64.get(&b).copied().map(|c| (cop, c))
+                        }
+                        CmpBranchKind::I64(cop) if b == back_v => {
+                            const64.get(&a).copied().map(|c| (cop.swap(), c))
+                        }
+                        _ => None,
+                    };
+                    let Some((cop, bound)) = cmp_info else {
+                        continue;
+                    };
+                    let mut cur = init_c;
+                    for k in 1..=MAX_TRIP {
+                        let next = cur.wrapping_add(step);
+                        let cond_val = eval_cmp_i64(cop, next, bound);
+                        let stay = if stay_on_then { cond_val } else { !cond_val };
+                        if !stay {
+                            found_trip = Some(k);
+                            break;
+                        }
+                        cur = next;
+                    }
+                    if found_trip.is_some() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(trip) = found_trip else {
+            continue;
+        };
+
+        // Check budgets & ensure NO value defined inside `body` is directly used outside `body`.
+        let mut defined_in_body = vec![false; ir.val_tys.len()];
+        let mut body_val_count = 0usize;
+        for &b in &body {
+            for &p in &ir.blocks[b as usize].params {
+                defined_in_body[p.0 as usize] = true;
+                body_val_count += 1;
+            }
+            for ins in &ir.blocks[b as usize].insts {
+                if let Some(r) = ins.res {
+                    defined_in_body[r.0 as usize] = true;
+                    body_val_count += 1;
+                }
+                if let Op::Call { rets, .. } | Op::CallIndirect { rets, .. } = ins.op {
+                    for &rv in ir.pool_slice(rets) {
+                        defined_in_body[rv.0 as usize] = true;
+                        body_val_count += 1;
+                    }
+                }
+            }
+        }
+        let body_pool_need: usize = body
+            .iter()
+            .map(|&b| {
+                let bb = &ir.blocks[b as usize];
+                let mut n = 16usize;
+                for ins in &bb.insts {
+                    if let Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } =
+                        ins.op
+                    {
+                        n += args.len as usize + rets.len as usize;
+                    }
+                }
+                match bb.term {
+                    Term::Jump { args, .. }
+                    | Term::ReturnCall { args, .. }
+                    | Term::ReturnCallIndirect { args, .. } => {
+                        n += args.len as usize;
+                    }
+                    Term::Return { vals } => n += vals.len as usize,
+                    Term::BranchIf {
+                        then_args,
+                        else_args,
+                        ..
+                    }
+                    | Term::CmpBranch {
+                        then_args,
+                        else_args,
+                        ..
+                    } => {
+                        n += then_args.len as usize + else_args.len as usize;
+                    }
+                    _ => {}
+                }
+                n
+            })
+            .sum();
+        if ir.blocks.len() + trip * body.len() > MAX_BLOCKS_PER_FN
+            || ir.val_tys.len() + trip * body_val_count > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + trip * (body_pool_need + hdr_params.len()) > MAX_VAL_POOL_PER_FN
+        {
+            continue;
+        }
+        let mut escapes = false;
+        for (bi, bb) in ir.blocks.iter().enumerate() {
+            if bi < orig_blocks && in_body[bi] {
+                continue;
+            }
+            for ins in &bb.insts {
+                ins.op.for_each_use(&ir.val_pool, |v| {
+                    if (v.0 as usize) < defined_in_body.len() && defined_in_body[v.0 as usize] {
+                        escapes = true;
+                    }
+                });
+                if escapes {
+                    break;
+                }
+            }
+            if escapes {
+                break;
+            }
+            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                if (v.0 as usize) < defined_in_body.len() && defined_in_body[v.0 as usize] {
+                    escapes = true;
+                }
+            });
+            if escapes {
+                break;
+            }
+        }
+        let mut single_exit = true;
+        for &b in &body {
+            if b != latch {
+                ir.blocks[b as usize]
+                    .term
+                    .for_each_succ(&ir.br_tables, |s| {
+                        if (s.0 as usize) >= orig_blocks || !in_body[s.0 as usize] {
+                            single_exit = false;
+                        }
+                    });
+            }
+        }
+        if escapes && !single_exit {
+            continue;
+        }
+
+        // Snapshot original body blocks & args before mutating `ir`.
+        let first_new_bb = ir.blocks.len();
+        let hdr_params_vec: Vec<Val> = ir.blocks[hdr as usize].params.clone();
+        let pre_args_vec: Vec<Val> = ir.pool_slice(pre_args_range).to_vec();
+        let back_args_vec: Vec<Val> = ir.pool_slice(back_args_range).to_vec();
+        let exit_args_vec: Vec<Val> = ir.pool_slice(exit_args_range).to_vec();
+
+        // Pre-allocate BlockIds for `trip` iterations of `body`.
+        let mut body_idx_of: Vec<Option<usize>> = vec![None; orig_blocks];
+        for (idx, &b) in body.iter().enumerate() {
+            body_idx_of[b as usize] = Some(idx);
+        }
+        let mut clone_bbs: Vec<Vec<BlockId>> = Vec::with_capacity(trip);
+        for _ in 0..trip {
+            let mut row = Vec::with_capacity(body.len());
+            for _ in 0..body.len() {
+                let id = BlockId(ir.blocks.len() as u32);
+                ir.blocks.push(Block {
+                    params: Vec::new(),
+                    insts: Vec::new(),
+                    term: Term::Unreachable,
+                    preds: 0,
+                    is_loop_header: false,
+                });
+                row.push(id);
+            }
+            clone_bbs.push(row);
+        }
+
+        let mut incoming_args = pre_args_vec;
+        let mut last_subst: Vec<Val> = Vec::new();
+        for k in 0..trip {
+            let base_nvals = ir.val_tys.len();
+            let mut subst: Vec<Val> = (0..base_nvals as u32).map(Val).collect();
+            for (&hp, &av) in hdr_params_vec.iter().zip(&incoming_args) {
+                subst[hp.0 as usize] = av;
+            }
+            // Allocate fresh Vals for every non-hdr param and every inst result in `body`.
+            for (bi_pos, &orig_b) in body.iter().enumerate() {
+                let new_bb = clone_bbs[k][bi_pos];
+                if orig_b != hdr {
+                    let orig_params = ir.blocks[orig_b as usize].params.clone();
+                    let mut new_params = Vec::with_capacity(orig_params.len());
+                    for p in orig_params {
+                        let nv = ir.push_val(ir.val_tys[p.0 as usize]);
+                        subst[p.0 as usize] = nv;
+                        new_params.push(nv);
+                    }
+                    ir.blocks[new_bb.0 as usize].params = new_params;
+                }
+                let orig_insts_res: Vec<Option<Val>> = ir.blocks[orig_b as usize]
+                    .insts
+                    .iter()
+                    .map(|ins| ins.res)
+                    .collect();
+                for r in orig_insts_res.into_iter().flatten() {
+                    let nv = ir.push_val(ir.val_tys[r.0 as usize]);
+                    subst[r.0 as usize] = nv;
+                }
+                let orig_call_rets: Vec<Val> = ir.blocks[orig_b as usize]
+                    .insts
+                    .iter()
+                    .flat_map(|ins| match ins.op {
+                        Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                            ir.pool_slice(rets).to_vec()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                for rv in orig_call_rets {
+                    let nv = ir.push_val(ir.val_tys[rv.0 as usize]);
+                    subst[rv.0 as usize] = nv;
+                }
+            }
+            while subst.len() < ir.val_tys.len() {
+                subst.push(Val(subst.len() as u32));
+            }
+
+            let map_bb = |t: BlockId| -> BlockId {
+                if (t.0 as usize) < orig_blocks
+                    && let Some(pos) = body_idx_of[t.0 as usize]
+                {
+                    clone_bbs[k][pos]
+                } else {
+                    t
+                }
+            };
+
+            // Clone instructions and terminators for iteration `k`.
+            for (bi_pos, &orig_b) in body.iter().enumerate() {
+                let new_bb = clone_bbs[k][bi_pos];
+                let orig_insts = ir.blocks[orig_b as usize].insts.clone();
+                let mut new_insts = Vec::with_capacity(orig_insts.len());
+                for ins in orig_insts {
+                    let new_res = ins.res.map(|r| subst[r.0 as usize]);
+                    let new_op = match ins.op {
+                        Op::Call { func, args, rets } => {
+                            let av: Vec<Val> = ir
+                                .pool_slice(args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            let rv: Vec<Val> = ir
+                                .pool_slice(rets)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Op::Call {
+                                func,
+                                args: ir.push_pool(&av).unwrap(),
+                                rets: ir.push_pool(&rv).unwrap(),
+                            }
+                        }
+                        Op::CallIndirect {
+                            ci_id,
+                            idx,
+                            args,
+                            rets,
+                        } => {
+                            let av: Vec<Val> = ir
+                                .pool_slice(args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            let rv: Vec<Val> = ir
+                                .pool_slice(rets)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Op::CallIndirect {
+                                ci_id,
+                                idx: subst[idx.0 as usize],
+                                args: ir.push_pool(&av).unwrap(),
+                                rets: ir.push_pool(&rv).unwrap(),
+                            }
+                        }
+                        mut op => {
+                            rewrite_op_uses(&mut op, &mut ir.val_pool, &subst);
+                            op
+                        }
+                    };
+                    new_insts.push(Inst {
+                        res: new_res,
+                        op: new_op,
+                    });
+                }
+                ir.blocks[new_bb.0 as usize].insts = new_insts;
+
+                let new_term = if orig_b == latch {
+                    if k + 1 < trip {
+                        Term::Jump {
+                            target: clone_bbs[k + 1][0],
+                            args: ValRange::EMPTY,
+                        }
+                    } else {
+                        let ev: Vec<Val> =
+                            exit_args_vec.iter().map(|&v| subst[v.0 as usize]).collect();
+                        Term::Jump {
+                            target: exit_bb,
+                            args: ir.push_pool(&ev).unwrap(),
+                        }
+                    }
+                } else {
+                    match ir.blocks[orig_b as usize].term {
+                        Term::Jump { target, args } => {
+                            let av: Vec<Val> = ir
+                                .pool_slice(args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Term::Jump {
+                                target: map_bb(target),
+                                args: ir.push_pool(&av).unwrap(),
+                            }
+                        }
+                        Term::BranchIf {
+                            cond,
+                            then_bb,
+                            then_args,
+                            else_bb,
+                            else_args,
+                        } => {
+                            let tv: Vec<Val> = ir
+                                .pool_slice(then_args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            let ev: Vec<Val> = ir
+                                .pool_slice(else_args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Term::BranchIf {
+                                cond: subst[cond.0 as usize],
+                                then_bb: map_bb(then_bb),
+                                then_args: ir.push_pool(&tv).unwrap(),
+                                else_bb: map_bb(else_bb),
+                                else_args: ir.push_pool(&ev).unwrap(),
+                            }
+                        }
+                        Term::CmpBranch {
+                            kind,
+                            a,
+                            b,
+                            then_bb,
+                            then_args,
+                            else_bb,
+                            else_args,
+                        } => {
+                            let tv: Vec<Val> = ir
+                                .pool_slice(then_args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            let ev: Vec<Val> = ir
+                                .pool_slice(else_args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Term::CmpBranch {
+                                kind,
+                                a: subst[a.0 as usize],
+                                b: subst[b.0 as usize],
+                                then_bb: map_bb(then_bb),
+                                then_args: ir.push_pool(&tv).unwrap(),
+                                else_bb: map_bb(else_bb),
+                                else_args: ir.push_pool(&ev).unwrap(),
+                            }
+                        }
+                        Term::Return { vals } => {
+                            let rv: Vec<Val> = ir
+                                .pool_slice(vals)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Term::Return {
+                                vals: ir.push_pool(&rv).unwrap(),
+                            }
+                        }
+                        Term::ReturnCall { func, args } => {
+                            let av: Vec<Val> = ir
+                                .pool_slice(args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Term::ReturnCall {
+                                func,
+                                args: ir.push_pool(&av).unwrap(),
+                            }
+                        }
+                        Term::ReturnCallIndirect { ci_id, idx, args } => {
+                            let av: Vec<Val> = ir
+                                .pool_slice(args)
+                                .iter()
+                                .map(|&v| subst[v.0 as usize])
+                                .collect();
+                            Term::ReturnCallIndirect {
+                                ci_id,
+                                idx: subst[idx.0 as usize],
+                                args: ir.push_pool(&av).unwrap(),
+                            }
+                        }
+                        Term::Unreachable => Term::Unreachable,
+                        Term::BrTable { .. }
+                        | Term::CallCatch { .. }
+                        | Term::CallIndirectCatch { .. }
+                        | Term::ThrowActive => unreachable!(),
+                    }
+                };
+                ir.blocks[new_bb.0 as usize].term = new_term;
+            }
+
+            incoming_args = back_args_vec.iter().map(|&v| subst[v.0 as usize]).collect();
+            if escapes && k + 1 == trip {
+                last_subst = subst;
+            }
+        }
+        if escapes {
+            while last_subst.len() < ir.val_tys.len() {
+                last_subst.push(Val(last_subst.len() as u32));
+            }
+            for (bi, bb) in ir.blocks.iter_mut().enumerate().take(first_new_bb) {
+                if bi < orig_blocks && in_body[bi] {
+                    continue;
+                }
+                for ins in &mut bb.insts {
+                    rewrite_op_uses(&mut ins.op, &mut ir.val_pool, &last_subst);
+                }
+                rewrite_term_uses(&mut bb.term, &mut ir.val_pool, &ir.br_tables, &last_subst);
+            }
+            const32.resize(ir.val_tys.len(), None);
+            def_op.resize(ir.val_tys.len(), None);
+        }
+
+        // Redirect `pre`'s single edge to `hdr` -> `clone_bbs[0][0]` with EMPTY args.
+        match &mut ir.blocks[pre as usize].term {
+            Term::Jump { target, args } if *target == BlockId(hdr) => {
+                *target = clone_bbs[0][0];
+                *args = ValRange::EMPTY;
+            }
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                if *then_bb == BlockId(hdr) {
+                    *then_bb = clone_bbs[0][0];
+                    *then_args = ValRange::EMPTY;
+                }
+                if *else_bb == BlockId(hdr) {
+                    *else_bb = clone_bbs[0][0];
+                    *else_args = ValRange::EMPTY;
+                }
+            }
+            _ => unreachable!(),
+        }
+        ir.blocks[hdr as usize].is_loop_header = false;
+        for &b in &body {
+            touched[b as usize] = true;
+        }
+        touched[pre as usize] = true;
+        unrolled_any = true;
+    }
+
+    unrolled_any
 }
 
 /// Narrows sparse equality-filtered counted `u32` loops (`for v in init..limit` with step `+1`)
@@ -15667,6 +16867,10 @@ fn op_may_trap_locally(op: &Op) -> bool {
         | Op::MemFill { .. }
         | Op::MemCopyIdx { .. }
         | Op::MemFillIdx { .. }
+        | Op::MemInit { .. }
+        | Op::TableInit { .. }
+        | Op::TableCopy { .. }
+        | Op::TableFill { .. }
         | Op::MemCopyConst {
             dst_checked: false, ..
         }
@@ -15757,7 +16961,12 @@ pub fn try_compute_fn_elide_input(
                 | Op::MemCopy { .. }
                 | Op::MemCopyIdx { .. }
                 | Op::MemFill { .. }
-                | Op::MemFillIdx { .. } => {
+                | Op::MemFillIdx { .. }
+                | Op::MemInit { .. }
+                | Op::TableInit { .. }
+                | Op::TableCopy { .. }
+                | Op::TableGrow { .. }
+                | Op::TableFill { .. } => {
                     max_helper_bytes = max_helper_bytes.max(PURE_HELPER_STACK_BYTES);
                 }
                 _ => {}

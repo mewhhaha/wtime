@@ -266,7 +266,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             for inst in &bb.insts {
                 if matches!(
                     inst.op,
-                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. }
+                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. } | Op::TableGrow { .. }
                 ) {
                     trap = true;
                     break;
@@ -356,7 +356,12 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                 | Op::MemCopy { .. }
                 | Op::MemCopyIdx { .. }
                 | Op::MemFill { .. }
-                | Op::MemFillIdx { .. } => {
+                | Op::MemFillIdx { .. }
+                | Op::MemInit { .. }
+                | Op::TableInit { .. }
+                | Op::TableCopy { .. }
+                | Op::TableGrow { .. }
+                | Op::TableFill { .. } => {
                     has_calls = true;
                     clobbers.push((pos, MASK_GP_CALLER, 0));
                 }

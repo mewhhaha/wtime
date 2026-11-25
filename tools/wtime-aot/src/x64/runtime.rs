@@ -11,7 +11,8 @@ use super::{
     CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
     GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_EXTRA_MEM_COPY,
     HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_GROW_CORE, HELPER_HOST_CALL,
-    HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_READ_GLOBAL,
+    HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT,
+    HELPER_READ_GLOBAL, HELPER_TABLE_COPY, HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT,
     HELPER_TRUNC_BASE, INTERNAL_EXN_SIGNAL, MAX_ACTIVE_REENTRY_DEPTH, OFF_ACTIVE_DEPTH,
     OFF_ACTIVE_GUEST_RSP, OFF_CPU_HAS_CET_SS, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
     OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX, OFF_IN_CALL,
@@ -153,6 +154,16 @@ pub struct RuntimeTables {
     pub data_segs: Vec<(u32, u64, u32, u32)>,
     /// V128 non-zero global initializers `(global_index, rodata_off)`.
     pub v128_global_inits: Vec<(usize, u32)>,
+    /// `.rodata` descriptor table of `data_seg_count` × 8B `(i32 rel_off, u32 byte_len)` for `memory.init`.
+    pub passive_data_table_off: u32,
+    /// `.rodata` descriptor table of `elem_segs.len()` × 8B `(i32 rel_off, u32 elem_len)` for `table.init`.
+    pub elem_seg_table_off: u32,
+    /// Active element initializers targeting dynamic tables `(table_idx, dst_off, rodata_off, elem_len)`.
+    pub active_dyn_elem_inits: Vec<(u32, u32, u32, u32)>,
+    /// `.rodata` offset of `u32 func_canon_sig[n_total]` for dynamic `call_indirect`.
+    pub func_sig_ro_off: u32,
+    /// `.rodata` offset of `i32 func_addr_rel[n_total]` for dynamic `call_indirect`.
+    pub func_addr_ro_off: u32,
 }
 
 /// Scalar/ref marshalling kind for `blot_aot_call_export` `.rodata` descriptors.
@@ -1061,6 +1072,10 @@ pub fn emit_helper_initialize(
                 a.xor_rr(false, Gp::Rax, Gp::Rax);
                 a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
             }
+            X64ConstVal::FuncRef(f) => {
+                a.mov_ri64(Gp::Rax, u64::from(f) + 1);
+                a.mov_mr(true, Mem::base_disp(Gp::R15, off), Gp::Rax);
+            }
             X64ConstVal::V128(bytes) => {
                 if bytes == [0u8; 16] {
                     a.xorps(Xmm::Xmm15, Xmm::Xmm15);
@@ -1083,6 +1098,46 @@ pub fn emit_helper_initialize(
         if end > u64::from(table_len) {
             need_table_oob = true;
             a.jmp(lbl_trap_table_oob);
+        }
+    }
+    // 3b. Active element segments targeting dynamic tables (bounds-checked + copied into `Ctx` table buffer).
+    for &(tbl, dst_off, ro_off, elem_len) in &tables.active_dyn_elem_inits {
+        let (desc_off, min_len, _) = layout.dyn_tables[&tbl];
+        let end = u64::from(dst_off) + u64::from(elem_len);
+        if end > u64::from(min_len) {
+            need_table_oob = true;
+            a.jmp(lbl_trap_table_oob);
+            continue;
+        }
+        if elem_len > 0 {
+            let lp = a.new_label();
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, desc_off));
+            if dst_off > 0 {
+                a.mov_ri64(Gp::Rax, u64::from(dst_off) * 8);
+                a.add_rr(true, Gp::Rdi, Gp::Rax);
+            }
+            a.lea_rip(Gp::Rsi, RelocTarget::Rodata(ro_off));
+            a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+            a.mov_ri32(Gp::Rdx, elem_len);
+            a.bind(lp);
+            a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 4, 0));
+            a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rcx, 8, 0), Gp::Rax);
+            a.add_ri(true, Gp::Rcx, 1);
+            a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+            a.jcc(Cond::B, lp);
+        }
+    }
+    // 3c. Mark active/declarative element & active data segments implicitly dropped per Wasm spec.
+    if let Some(elem_drop_off) = layout.elem_dropped_off {
+        for (ei, seg) in module.elem_segs.iter().enumerate() {
+            if !seg.is_passive {
+                a.mov_mi8(Mem::base_disp(Gp::R15, elem_drop_off + (ei as i32)), 1);
+            }
+        }
+    }
+    if let Some(data_drop_off) = layout.data_dropped_off {
+        for &(_, _, di) in &module.active_data_segs {
+            a.mov_mi8(Mem::base_disp(Gp::R15, data_drop_off + (di as i32)), 1);
         }
     }
 
@@ -1759,6 +1814,34 @@ fn emit_export_new(
         a.mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 24), Gp::Rax);
     }
 
+    // ---- Step C3d: Dynamic tables (demand-paged RW mmap, allocated ONLY when `dyn_tables` non-empty) ----
+    for &(desc_off, min_len, max_len) in layout.dyn_tables.values() {
+        let reserve_bytes = if max_len > 0 {
+            ((u64::from(max_len) * 8) + 4095) & !4095
+        } else {
+            0
+        };
+        if reserve_bytes > 0 {
+            a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+            a.mov_ri64(Gp::Rsi, reserve_bytes);
+            a.mov_ri32(Gp::Rdx, PROT_RW);
+            a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+            a.mov_ri64(Gp::R8, u64::MAX);
+            a.xor_rr(false, Gp::R9, Gp::R9);
+            a.mov_ri32(Gp::Rax, SYS_MMAP);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, -4095);
+            a.jcc(Cond::Ae, lbl_fail_alloc_cleanup);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off), Gp::Rax);
+            a.mov_ri32(Gp::Rax, min_len);
+            a.mov_mr(false, Mem::base_disp(Gp::R15, desc_off + 8), Gp::Rax);
+            a.mov_ri32(Gp::Rax, max_len);
+            a.mov_mr(false, Mem::base_disp(Gp::R15, desc_off + 12), Gp::Rax);
+            a.mov_ri64(Gp::Rax, reserve_bytes);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off + 16), Gp::Rax);
+        }
+    }
+
     // ---- Step D: Switch to guest stack and run wt_initialize ----
     a.mov_mi8(Mem::base_disp(Gp::R15, OFF_IN_CALL), 1);
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_HOST_RSP), Gp::Rsp);
@@ -1858,6 +1941,16 @@ fn emit_export_new(
         a.syscall();
         a.bind(lbl_skip);
     }
+    for &(desc_off, _, _) in layout.dyn_tables.values() {
+        let lbl_skip = a.new_label();
+        a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::R15, desc_off + 16));
+        a.test_rr(true, Gp::Rsi, Gp::Rsi);
+        a.jcc(Cond::E, lbl_skip);
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, desc_off));
+        a.mov_ri32(Gp::Rax, SYS_MUNMAP);
+        a.syscall();
+        a.bind(lbl_skip);
+    }
 
     // Load handle_alloc_bytes BEFORE final munmap(ctx) so Ctx is never read after unmapping!
     a.mov_rr(true, Gp::Rdi, Gp::R15);
@@ -1942,6 +2035,16 @@ fn emit_export_drop(layout: &CtxLayout) -> Result<Asm, String> {
         a.test_rr(true, Gp::Rdi, Gp::Rdi);
         a.jcc(Cond::E, lbl_skip);
         a.mov_ri64(Gp::Rsi, EXN_SLAB_BYTES as u64);
+        a.mov_ri32(Gp::Rax, SYS_MUNMAP);
+        a.syscall();
+        a.bind(lbl_skip);
+    }
+    for &(desc_off, _, _) in layout.dyn_tables.values() {
+        let lbl_skip = a.new_label();
+        a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rbx, desc_off + 16));
+        a.test_rr(true, Gp::Rsi, Gp::Rsi);
+        a.jcc(Cond::E, lbl_skip);
+        a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rbx, desc_off));
         a.mov_ri32(Gp::Rax, SYS_MUNMAP);
         a.syscall();
         a.bind(lbl_skip);
@@ -2925,6 +3028,76 @@ pub fn emit_all_helpers(
             helpers.push(stub);
         }
     }
+    debug_assert_eq!(helpers.len(), super::HELPER_STANDALONE_FS as usize);
+    let need_standalone_fs = module.target == super::module::X64Target::StandaloneExec
+        && module.imports.iter().any(|(m, f)| {
+            m == "env"
+                && matches!(
+                    f.as_str(),
+                    "gs_os_file_exists"
+                        | "gs_os_is_dir"
+                        | "gs_os_read_file"
+                        | "gs_os_write_file"
+                        | "gs_os_append_file"
+                )
+        });
+    if need_standalone_fs {
+        helpers.push(super::standalone_rt::emit_helper_standalone_fs()?);
+    } else {
+        let mut stub = Asm::with_capacity(4);
+        stub.ret();
+        helpers.push(stub);
+    }
+    debug_assert_eq!(
+        helpers.len(),
+        super::HELPER_STANDALONE_RESERVE_COPY as usize
+    );
+    let need_standalone_reserve = module.target == super::module::X64Target::StandaloneExec
+        && module.imports.iter().any(|(m, f)| {
+            m == "env" && matches!(f.as_str(), "gs_os_arg" | "gs_os_getenv" | "gs_os_read_file")
+        });
+    if need_standalone_reserve {
+        helpers.push(super::standalone_rt::emit_helper_standalone_reserve_copy(
+            module,
+        )?);
+    } else {
+        let mut stub = Asm::with_capacity(4);
+        stub.ret();
+        helpers.push(stub);
+    }
+    debug_assert_eq!(helpers.len(), HELPER_MEM_INIT as usize);
+    if let Some(drop_off) = layout.data_dropped_off {
+        helpers.push(emit_helper_mem_init(
+            tables.passive_data_table_off,
+            drop_off,
+        )?);
+    } else {
+        let mut stub = Asm::with_capacity(4);
+        stub.ret();
+        helpers.push(stub);
+    }
+    debug_assert_eq!(helpers.len(), HELPER_TABLE_INIT as usize);
+    if let Some(drop_off) = layout.elem_dropped_off {
+        helpers.push(emit_helper_table_init(tables.elem_seg_table_off, drop_off)?);
+    } else {
+        let mut stub = Asm::with_capacity(4);
+        stub.ret();
+        helpers.push(stub);
+    }
+    debug_assert_eq!(helpers.len(), HELPER_TABLE_COPY as usize);
+    if !layout.dyn_tables.is_empty() {
+        helpers.push(emit_helper_table_copy()?);
+        debug_assert_eq!(helpers.len(), HELPER_TABLE_GROW as usize);
+        helpers.push(emit_helper_table_grow()?);
+        debug_assert_eq!(helpers.len(), HELPER_TABLE_FILL as usize);
+        helpers.push(emit_helper_table_fill()?);
+    } else {
+        for _ in 0..3 {
+            let mut stub = Asm::with_capacity(4);
+            stub.ret();
+            helpers.push(stub);
+        }
+    }
     debug_assert_eq!(helpers.len(), super::NUM_HELPERS);
     Ok(helpers)
 }
@@ -3035,6 +3208,242 @@ fn emit_helper_extra_mem_fill() -> Result<Asm, String> {
     a.ret();
     a.bind(lbl_oob);
     a.mov_ri32(Gp::R11, u32::from(TRAP_OOB));
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Bulk `memory.init(Rdi = dst, Rsi = src, Rdx = len, Rcx = data_idx, R8 = mem_desc_off) -> R11d`.
+fn emit_helper_mem_init(passive_table_off: u32, drop_off: i32) -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(128);
+    let lbl_not_dropped = a.new_label();
+    let lbl_oob = a.new_label();
+    let lbl_ok = a.new_label();
+
+    a.lea_rip(Gp::R9, RelocTarget::Rodata(passive_table_off));
+    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R9, Gp::Rcx, 8, 4)); // seg_len
+    a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R15, Gp::Rcx, 1, drop_off));
+    a.test_rr(false, Gp::R10, Gp::R10);
+    a.jcc(Cond::E, lbl_not_dropped);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.bind(lbl_not_dropped);
+
+    // Check `src + len <= seg_len` (no u64 wrap).
+    a.mov_rr(true, Gp::R10, Gp::Rsi);
+    a.add_rr(true, Gp::R10, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rr(true, Gp::R10, Gp::Rax);
+    a.jcc(Cond::A, lbl_oob);
+
+    // Check `dst + len <= mem_len` (no u64 wrap).
+    a.mov_rr(true, Gp::R10, Gp::Rdi);
+    a.add_rr(true, Gp::R10, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rm(true, Gp::R10, Mem::indexed(Gp::R15, Gp::R8, 1, 8));
+    a.jcc(Cond::A, lbl_oob);
+
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_ok);
+
+    a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
+    a.add_rr(true, Gp::R9, Gp::R10);
+    a.add_rr(true, Gp::Rsi, Gp::R9);
+    a.add_rm(true, Gp::Rdi, Mem::indexed(Gp::R15, Gp::R8, 1, 0));
+    a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+    a.rep_movsb();
+
+    a.bind(lbl_ok);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+    a.bind(lbl_oob);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_OOB));
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Bulk `table.init(Rdi = dst, Rsi = src, Rdx = len, Rcx = elem_idx, R8 = tbl_desc_off) -> R11d`.
+fn emit_helper_table_init(elem_table_off: u32, drop_off: i32) -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(144);
+    let lbl_not_dropped = a.new_label();
+    let lbl_loop = a.new_label();
+    let lbl_oob = a.new_label();
+    let lbl_ok = a.new_label();
+
+    a.lea_rip(Gp::R9, RelocTarget::Rodata(elem_table_off));
+    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R9, Gp::Rcx, 8, 4)); // elem_len
+    a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R15, Gp::Rcx, 1, drop_off));
+    a.test_rr(false, Gp::R10, Gp::R10);
+    a.jcc(Cond::E, lbl_not_dropped);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.bind(lbl_not_dropped);
+
+    // Check `src + len <= elem_len`.
+    a.mov_rr(true, Gp::R10, Gp::Rsi);
+    a.add_rr(true, Gp::R10, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rr(true, Gp::R10, Gp::Rax);
+    a.jcc(Cond::A, lbl_oob);
+
+    // Check `dst + len <= tbl_cur_len`.
+    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 8));
+    a.mov_rr(true, Gp::R10, Gp::Rdi);
+    a.add_rr(true, Gp::R10, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rr(true, Gp::R10, Gp::Rax);
+    a.jcc(Cond::A, lbl_oob);
+
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_ok);
+
+    a.movsxd_rm(Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0));
+    a.add_rr(true, Gp::R9, Gp::R10); // seg_u32_base
+    a.lea(true, Gp::R9, Mem::indexed(Gp::R9, Gp::Rsi, 4, 0));
+    a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::R15, Gp::R8, 1, 0)); // tbl_u64_base
+    a.lea(true, Gp::Rax, Mem::indexed(Gp::Rax, Gp::Rdi, 8, 0));
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    a.bind(lbl_loop);
+    a.mov_rm(false, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 4, 0));
+    a.mov_mr(true, Mem::indexed(Gp::Rax, Gp::Rcx, 8, 0), Gp::R10);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+    a.jcc(Cond::B, lbl_loop);
+
+    a.bind(lbl_ok);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+    a.bind(lbl_oob);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_TABLE_OOB));
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Bulk `table.copy(Rdi = dst, Rsi = src, Rdx = len, Rcx = dst_desc_off, R8 = src_desc_off) -> R11d`.
+fn emit_helper_table_copy() -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(144);
+    let lbl_oob = a.new_label();
+    let lbl_ok = a.new_label();
+    let lbl_bwd = a.new_label();
+    let lbl_fwd = a.new_label();
+
+    a.mov_rm(false, Gp::R9, Mem::indexed(Gp::R15, Gp::Rcx, 1, 8));
+    a.mov_rr(true, Gp::Rax, Gp::Rdi);
+    a.add_rr(true, Gp::Rax, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rr(true, Gp::Rax, Gp::R9);
+    a.jcc(Cond::A, lbl_oob);
+
+    a.mov_rm(false, Gp::R9, Mem::indexed(Gp::R15, Gp::R8, 1, 8));
+    a.mov_rr(true, Gp::Rax, Gp::Rsi);
+    a.add_rr(true, Gp::Rax, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rr(true, Gp::Rax, Gp::R9);
+    a.jcc(Cond::A, lbl_oob);
+
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_ok);
+
+    a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::Rcx, 1, 0));
+    a.lea(true, Gp::Rdi, Mem::indexed(Gp::R9, Gp::Rdi, 8, 0));
+    a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::R8, 1, 0));
+    a.lea(true, Gp::Rsi, Mem::indexed(Gp::R9, Gp::Rsi, 8, 0));
+
+    a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
+    a.jcc(Cond::A, lbl_bwd);
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    a.bind(lbl_fwd);
+    a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 8, 0));
+    a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rcx, 8, 0), Gp::Rax);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+    a.jcc(Cond::B, lbl_fwd);
+    a.jmp(lbl_ok);
+
+    a.bind(lbl_bwd);
+    a.sub_ri(true, Gp::Rdx, 1);
+    a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rdx, 8, 0));
+    a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rdx, 8, 0), Gp::Rax);
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::Ne, lbl_bwd);
+
+    a.bind(lbl_ok);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+    a.bind(lbl_oob);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_TABLE_OOB));
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Bulk `table.grow(Rdi = init_val, Rsi = delta, Rdx = tbl_desc_off) -> Rax (old_len | 0xffff_ffff)`.
+fn emit_helper_table_grow() -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(96);
+    let lbl_fail = a.new_label();
+    let lbl_done = a.new_label();
+    let lbl_loop = a.new_label();
+
+    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R15, Gp::Rdx, 1, 8)); // old_len
+    a.mov_rm(false, Gp::Rcx, Mem::indexed(Gp::R15, Gp::Rdx, 1, 12)); // max_len
+    a.mov_rr(true, Gp::R8, Gp::Rax);
+    a.add_rr(true, Gp::R8, Gp::Rsi);
+    a.jcc(Cond::B, lbl_fail);
+    a.cmp_rr(true, Gp::R8, Gp::Rcx);
+    a.jcc(Cond::A, lbl_fail);
+
+    a.test_rr(true, Gp::Rsi, Gp::Rsi);
+    a.jcc(Cond::E, lbl_done);
+
+    a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::Rdx, 1, 0)); // tbl_ptr
+    a.mov_rr(true, Gp::Rcx, Gp::Rax);
+    a.bind(lbl_loop);
+    a.mov_mr(true, Mem::indexed(Gp::R9, Gp::Rcx, 8, 0), Gp::Rdi);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.cmp_rr(true, Gp::Rcx, Gp::R8);
+    a.jcc(Cond::B, lbl_loop);
+    a.mov_mr(false, Mem::indexed(Gp::R15, Gp::Rdx, 1, 8), Gp::R8);
+
+    a.bind(lbl_done);
+    a.ret();
+    a.bind(lbl_fail);
+    a.mov_ri32(Gp::Rax, u32::MAX);
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Bulk `table.fill(Rdi = dst, Rsi = val, Rdx = len, Rcx = tbl_desc_off) -> R11d`.
+fn emit_helper_table_fill() -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(96);
+    let lbl_oob = a.new_label();
+    let lbl_ok = a.new_label();
+    let lbl_loop = a.new_label();
+
+    a.mov_rm(false, Gp::Rax, Mem::indexed(Gp::R15, Gp::Rcx, 1, 8)); // cur_len
+    a.mov_rr(true, Gp::R8, Gp::Rdi);
+    a.add_rr(true, Gp::R8, Gp::Rdx);
+    a.jcc(Cond::B, lbl_oob);
+    a.cmp_rr(true, Gp::R8, Gp::Rax);
+    a.jcc(Cond::A, lbl_oob);
+
+    a.test_rr(true, Gp::Rdx, Gp::Rdx);
+    a.jcc(Cond::E, lbl_ok);
+
+    a.mov_rm(true, Gp::R9, Mem::indexed(Gp::R15, Gp::Rcx, 1, 0));
+    a.lea(true, Gp::R9, Mem::indexed(Gp::R9, Gp::Rdi, 8, 0));
+    a.xor_rr(false, Gp::R8, Gp::R8);
+    a.bind(lbl_loop);
+    a.mov_mr(true, Mem::indexed(Gp::R9, Gp::R8, 8, 0), Gp::Rsi);
+    a.add_ri(true, Gp::R8, 1);
+    a.cmp_rr(true, Gp::R8, Gp::Rdx);
+    a.jcc(Cond::B, lbl_loop);
+
+    a.bind(lbl_ok);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.ret();
+    a.bind(lbl_oob);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_TABLE_OOB));
     a.ret();
     a.finish_labels()?;
     Ok(a)

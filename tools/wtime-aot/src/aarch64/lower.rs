@@ -22,7 +22,8 @@ use crate::x64::ir::{
 };
 use crate::x64::{
     CtxLayout, HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW,
-    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, OFF_RET_SPILL_PTR, OFF_SCRATCH_TMP,
+    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT, HELPER_TABLE_COPY,
+    HELPER_TABLE_FILL, HELPER_TABLE_GROW, HELPER_TABLE_INIT, OFF_RET_SPILL_PTR, OFF_SCRATCH_TMP,
     OFF_SCRATCH_V128, OFF_STACK_FLOOR, TRAP_CALL_STACK, TRAP_DIV_ZERO, TRAP_INDIRECT_CALL,
     TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
@@ -890,6 +891,86 @@ impl<'a> LowerA64<'a> {
         }
     }
 
+    /// Resolves and dispatches `call_indirect` for `ci_id` (static `.rodata` OR dynamic `Ctx` table).
+    /// On `is_tail_jump`, leaves resolved target PC in `SGP1` (`X16`); otherwise emits `blr SGP1`.
+    /// Returns `false` if a statically empty table branched unconditionally to `TRAP_INDIRECT_CALL`.
+    fn emit_ci_dispatch(&mut self, ci_id: u32, is_tail_jump: bool) -> bool {
+        let ci = self.layout.ci_tables[ci_id as usize];
+        let toob = self.trap_table_oob_lbl();
+        let bad = self.trap_ci_lbl();
+        emit_load_off(
+            &mut self.asm,
+            Ty::I32,
+            Some(SGP2),
+            None,
+            CTX_REG,
+            OFF_SCRATCH_TMP,
+            SGP3,
+        );
+        if ci.dyn_table_desc_off >= 0 {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(SGP3),
+                None,
+                CTX_REG,
+                ci.dyn_table_desc_off + 8,
+                SGP1,
+            );
+            self.asm.cmp_r(false, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hs, toob);
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                ci.dyn_table_desc_off,
+                SGP3,
+            );
+            self.asm.ldr_reg_scaled(true, SGP2, SGP1, SGP2, true);
+            self.asm.cbz(true, SGP2, bad);
+            self.asm.sub_imm(true, SGP2, SGP2, 1);
+            self.asm
+                .adr_reloc(SGP1, A64RelocTarget::Rodata(self.layout.func_sig_ro_off));
+            self.asm.ldr_reg_scaled(false, SGP3, SGP1, SGP2, true);
+            self.asm.mov_imm32(SGP1, ci.canon_sig);
+            self.asm.cmp_r(false, SGP3, SGP1);
+            self.asm.b_cond(Cond::Ne, bad);
+            self.asm
+                .adr_reloc(SGP1, A64RelocTarget::Rodata(self.layout.func_addr_ro_off));
+            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+            self.asm.add_r(true, SGP1, SGP1, SGP3);
+            if !is_tail_jump {
+                self.asm.blr(SGP1);
+            }
+            return true;
+        }
+        self.asm.mov_imm32(SGP3, ci.table_len);
+        self.asm.cmp_r(false, SGP2, SGP3);
+        self.asm.b_cond(Cond::Hs, toob);
+        if ci.span == 0 {
+            self.asm.b(bad);
+            return false;
+        }
+        if ci.min_slot > 0 {
+            self.asm.mov_imm32(SGP3, ci.min_slot);
+            self.asm.sub_r(false, SGP2, SGP2, SGP3);
+        }
+        self.asm.mov_imm32(SGP3, ci.span);
+        self.asm.cmp_r(false, SGP2, SGP3);
+        self.asm.b_cond(Cond::Hs, bad);
+        self.asm
+            .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
+        self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+        self.asm.cbz(true, SGP3, bad);
+        self.asm.add_r(true, SGP1, SGP1, SGP3);
+        if !is_tail_jump {
+            self.asm.blr(SGP1);
+        }
+        true
+    }
+
     fn emit_call_abi(
         &mut self,
         args: ValRange,
@@ -944,40 +1025,10 @@ impl<'a> LowerA64<'a> {
 
         if let Some(f) = direct_func {
             self.asm.bl_reloc(A64RelocTarget::Func(f));
-        } else if let Some((ci_id, _)) = ci_idx {
-            let ci = &self.layout.ci_tables[ci_id as usize];
-            let toob = self.trap_table_oob_lbl();
-            let bad = self.trap_ci_lbl();
-            emit_load_off(
-                &mut self.asm,
-                Ty::I32,
-                Some(SGP2),
-                None,
-                CTX_REG,
-                OFF_SCRATCH_TMP,
-                SGP3,
-            );
-            self.asm.mov_imm32(SGP3, ci.table_len);
-            self.asm.cmp_r(false, SGP2, SGP3);
-            self.asm.b_cond(Cond::Hs, toob);
-            if ci.span == 0 {
-                self.asm.b(bad);
-                return Ok(());
-            }
-            if ci.min_slot > 0 {
-                self.asm.mov_imm32(SGP3, ci.min_slot);
-                self.asm.sub_r(false, SGP2, SGP2, SGP3);
-            }
-            self.asm.mov_imm32(SGP3, ci.span);
-            self.asm.cmp_r(false, SGP2, SGP3);
-            self.asm.b_cond(Cond::Hs, bad);
-            self.asm
-                .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
-            // Each entry in ci_table is signed 32-bit offset relative to `ci_table` start.
-            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
-            self.asm.cbz(true, SGP3, bad);
-            self.asm.add_r(true, SGP1, SGP1, SGP3);
-            self.asm.blr(SGP1);
+        } else if let Some((ci_id, _)) = ci_idx
+            && !self.emit_ci_dispatch(ci_id, false)
+        {
+            return Ok(());
         }
 
         // Check trap in W16.
@@ -1057,39 +1108,10 @@ impl<'a> LowerA64<'a> {
 
         if let Some(f) = direct_func {
             self.asm.bl_reloc(A64RelocTarget::Func(f));
-        } else if let Some((ci_id, _)) = ci_idx {
-            let ci = &self.layout.ci_tables[ci_id as usize];
-            let toob = self.trap_table_oob_lbl();
-            let bad = self.trap_ci_lbl();
-            emit_load_off(
-                &mut self.asm,
-                Ty::I32,
-                Some(SGP2),
-                None,
-                CTX_REG,
-                OFF_SCRATCH_TMP,
-                SGP3,
-            );
-            self.asm.mov_imm32(SGP3, ci.table_len);
-            self.asm.cmp_r(false, SGP2, SGP3);
-            self.asm.b_cond(Cond::Hs, toob);
-            if ci.span == 0 {
-                self.asm.b(bad);
-                return Ok(());
-            }
-            if ci.min_slot > 0 {
-                self.asm.mov_imm32(SGP3, ci.min_slot);
-                self.asm.sub_r(false, SGP2, SGP2, SGP3);
-            }
-            self.asm.mov_imm32(SGP3, ci.span);
-            self.asm.cmp_r(false, SGP2, SGP3);
-            self.asm.b_cond(Cond::Hs, bad);
-            self.asm
-                .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
-            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
-            self.asm.cbz(true, SGP3, bad);
-            self.asm.add_r(true, SGP1, SGP1, SGP3);
-            self.asm.blr(SGP1);
+        } else if let Some((ci_id, _)) = ci_idx
+            && !self.emit_ci_dispatch(ci_id, false)
+        {
+            return Ok(());
         }
 
         let lbl_ok = self.asm.new_label();
@@ -1162,38 +1184,10 @@ impl<'a> LowerA64<'a> {
                 }
                 emit_parallel_moves(&mut self.asm, &moves);
             }
-            if let Some((ci_id, _)) = ci_idx {
-                let ci = &self.layout.ci_tables[ci_id as usize];
-                let toob = self.trap_table_oob_lbl();
-                let bad = self.trap_ci_lbl();
-                emit_load_off(
-                    &mut self.asm,
-                    Ty::I32,
-                    Some(SGP2),
-                    None,
-                    CTX_REG,
-                    OFF_SCRATCH_TMP,
-                    SGP3,
-                );
-                self.asm.mov_imm32(SGP3, ci.table_len);
-                self.asm.cmp_r(false, SGP2, SGP3);
-                self.asm.b_cond(Cond::Hs, toob);
-                if ci.span == 0 {
-                    self.asm.b(bad);
-                    return Ok(());
-                }
-                if ci.min_slot > 0 {
-                    self.asm.mov_imm32(SGP3, ci.min_slot);
-                    self.asm.sub_r(false, SGP2, SGP2, SGP3);
-                }
-                self.asm.mov_imm32(SGP3, ci.span);
-                self.asm.cmp_r(false, SGP2, SGP3);
-                self.asm.b_cond(Cond::Hs, bad);
-                self.asm
-                    .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
-                self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
-                self.asm.cbz(true, SGP3, bad);
-                self.asm.add_r(true, SGP1, SGP1, SGP3);
+            if let Some((ci_id, _)) = ci_idx
+                && !self.emit_ci_dispatch(ci_id, true)
+            {
+                return Ok(());
             }
             if let Some(saved_off) = self.alloc.saved_ret_ptr_off {
                 emit_load_off(
@@ -1260,39 +1254,10 @@ impl<'a> LowerA64<'a> {
         }
         if let Some(f) = direct_func {
             self.asm.bl_reloc(A64RelocTarget::Func(f));
-        } else if let Some((ci_id, _)) = ci_idx {
-            let ci = &self.layout.ci_tables[ci_id as usize];
-            let toob = self.trap_table_oob_lbl();
-            let bad = self.trap_ci_lbl();
-            emit_load_off(
-                &mut self.asm,
-                Ty::I32,
-                Some(SGP2),
-                None,
-                CTX_REG,
-                OFF_SCRATCH_TMP,
-                SGP3,
-            );
-            self.asm.mov_imm32(SGP3, ci.table_len);
-            self.asm.cmp_r(false, SGP2, SGP3);
-            self.asm.b_cond(Cond::Hs, toob);
-            if ci.span == 0 {
-                self.asm.b(bad);
-                return Ok(());
-            }
-            if ci.min_slot > 0 {
-                self.asm.mov_imm32(SGP3, ci.min_slot);
-                self.asm.sub_r(false, SGP2, SGP2, SGP3);
-            }
-            self.asm.mov_imm32(SGP3, ci.span);
-            self.asm.cmp_r(false, SGP2, SGP3);
-            self.asm.b_cond(Cond::Hs, bad);
-            self.asm
-                .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
-            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
-            self.asm.cbz(true, SGP3, bad);
-            self.asm.add_r(true, SGP1, SGP1, SGP3);
-            self.asm.blr(SGP1);
+        } else if let Some((ci_id, _)) = ci_idx
+            && !self.emit_ci_dispatch(ci_id, false)
+        {
+            return Ok(());
         }
         // Return values & W16 trap status are already in exact ABI registers.
         let ep = *self.epilogue_ok.get_or_insert_with(|| self.asm.new_label());
@@ -2009,35 +1974,88 @@ impl<'a> LowerA64<'a> {
             }
             Op::TableGet { table, idx } => {
                 let r = res.unwrap();
-                let (off, len) = self.layout.extern_tables[&table];
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
-                self.asm.mov_imm32(SGP2, len);
-                self.asm.cmp_r(false, ir, SGP2);
-                self.asm.b_cond(Cond::Hs, toob);
-                self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP2);
-                let d = self.gp_write_reg(r);
-                self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
-                self.gp_commit(r, d);
+                if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
+                    self.asm.mov_imm32(SGP2, len);
+                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.b_cond(Cond::Hs, toob);
+                    self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP2);
+                    let d = self.gp_write_reg(r);
+                    self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
+                    self.gp_commit(r, d);
+                } else {
+                    let (desc_off, _, _) = self.layout.dyn_tables[&table];
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I32,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        desc_off + 8,
+                        SGP3,
+                    );
+                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.b_cond(Cond::Hs, toob);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        desc_off,
+                        SGP2,
+                    );
+                    let d = self.gp_write_reg(r);
+                    self.asm.ldr_reg_scaled(true, d, SGP3, ir, true);
+                    self.gp_commit(r, d);
+                }
             }
             Op::TableSet { table, idx, val } => {
-                let (off, len) = self.layout.extern_tables[&table];
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
-                self.asm.mov_imm32(SGP2, len);
-                self.asm.cmp_r(false, ir, SGP2);
-                self.asm.b_cond(Cond::Hs, toob);
-                let vr = self.gp_read(val, SGP1);
-                // Re-read idx safely if both spilled into SGP1!
-                let idx_r = if self.loc(idx) != A64Loc::Gp(ir) {
-                    self.asm.mov_r(true, SGP2, vr);
-                    let ii = self.gp_read(idx, SGP1);
-                    (ii, SGP2)
+                if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
+                    self.asm.mov_imm32(SGP2, len);
+                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.b_cond(Cond::Hs, toob);
+                    let vr = self.gp_read(val, SGP1);
+                    let idx_r = if self.loc(idx) != A64Loc::Gp(ir) {
+                        self.asm.mov_r(true, SGP2, vr);
+                        let ii = self.gp_read(idx, SGP1);
+                        (ii, SGP2)
+                    } else {
+                        (ir, vr)
+                    };
+                    self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP3);
+                    self.asm.str_reg_scaled(true, idx_r.1, SGP3, idx_r.0, true);
                 } else {
-                    (ir, vr)
-                };
-                self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP3);
-                self.asm.str_reg_scaled(true, idx_r.1, SGP3, idx_r.0, true);
+                    let (desc_off, _, _) = self.layout.dyn_tables[&table];
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I32,
+                        Some(SGP2),
+                        None,
+                        CTX_REG,
+                        desc_off + 8,
+                        SGP3,
+                    );
+                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.b_cond(Cond::Hs, toob);
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I64,
+                        Some(SGP3),
+                        None,
+                        CTX_REG,
+                        desc_off,
+                        SGP2,
+                    );
+                    self.asm.uxtw(SGP2, ir);
+                    self.asm.lsl_imm(true, SGP2, SGP2, 3);
+                    self.asm.add_r(true, SGP3, SGP3, SGP2);
+                    let vr = self.gp_read(val, SGP1);
+                    self.asm.str_uimm(true, vr, SGP3, 0);
+                }
             }
             Op::BoundsCheck {
                 addr,
@@ -3329,6 +3347,160 @@ impl<'a> LowerA64<'a> {
                     .mov_imm32(Reg::X3, self.layout.mem_desc_off(mem) as u32);
                 self.asm
                     .bl_reloc(A64RelocTarget::Helper(HELPER_EXTRA_MEM_FILL));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::MemInit {
+                data,
+                mem,
+                dst,
+                src,
+                len,
+            } => {
+                let d64 = self.layout.mem_is64(mem);
+                let moves = [
+                    (
+                        MoveLoc::Gp(Reg::X0),
+                        MoveLoc::from(self.loc(dst)),
+                        self.ty(dst),
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(src)),
+                        self.ty(src),
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X2),
+                        MoveLoc::from(self.loc(len)),
+                        self.ty(len),
+                    ),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                if !d64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                }
+                self.asm.uxtw(Reg::X1, Reg::X1);
+                self.asm.uxtw(Reg::X2, Reg::X2);
+                self.asm.mov_imm32(Reg::X3, data);
+                self.asm
+                    .mov_imm32(Reg::X4, self.layout.mem_desc_off(mem) as u32);
+                self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_MEM_INIT));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::DataDrop(data) => {
+                let off = self.layout.data_dropped_off.unwrap() + (data as i32);
+                self.asm.add_i32_checked(true, SGP2, CTX_REG, off, SGP3);
+                self.asm.mov_imm32(SGP1, 1);
+                self.asm.strb_uimm(SGP1, SGP2, 0);
+            }
+            Op::TableInit {
+                elem,
+                table,
+                dst,
+                src,
+                len,
+            } => {
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.uxtw(Reg::X0, Reg::X0);
+                self.asm.uxtw(Reg::X1, Reg::X1);
+                self.asm.uxtw(Reg::X2, Reg::X2);
+                self.asm.mov_imm32(Reg::X3, elem);
+                self.asm
+                    .mov_imm32(Reg::X4, self.layout.dyn_tables[&table].0 as u32);
+                self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_TABLE_INIT));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::ElemDrop(elem) => {
+                let off = self.layout.elem_dropped_off.unwrap() + (elem as i32);
+                self.asm.add_i32_checked(true, SGP2, CTX_REG, off, SGP3);
+                self.asm.mov_imm32(SGP1, 1);
+                self.asm.strb_uimm(SGP1, SGP2, 0);
+            }
+            Op::TableCopy {
+                dst_table,
+                src_table,
+                dst,
+                src,
+                len,
+            } => {
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.uxtw(Reg::X0, Reg::X0);
+                self.asm.uxtw(Reg::X1, Reg::X1);
+                self.asm.uxtw(Reg::X2, Reg::X2);
+                self.asm
+                    .mov_imm32(Reg::X3, self.layout.dyn_tables[&dst_table].0 as u32);
+                self.asm
+                    .mov_imm32(Reg::X4, self.layout.dyn_tables[&src_table].0 as u32);
+                self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_TABLE_COPY));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::TableGrow { table, init, delta } => {
+                let r = res.unwrap();
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(init)), Ty::I64),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(delta)),
+                        Ty::I32,
+                    ),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.uxtw(Reg::X1, Reg::X1);
+                self.asm
+                    .mov_imm32(Reg::X2, self.layout.dyn_tables[&table].0 as u32);
+                self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_TABLE_GROW));
+                self.asm.uxtw(Reg::X0, Reg::X0);
+                self.gp_commit(r, Reg::X0);
+            }
+            Op::TableSize(table) => {
+                let r = res.unwrap();
+                let d = self.gp_write_reg(r);
+                if let Some(&(desc_off, _, _)) = self.layout.dyn_tables.get(&table) {
+                    emit_load_off(
+                        &mut self.asm,
+                        Ty::I32,
+                        Some(d),
+                        None,
+                        CTX_REG,
+                        desc_off + 8,
+                        SGP3,
+                    );
+                } else {
+                    self.asm
+                        .mov_imm32(d, self.layout.table_lens[table as usize]);
+                }
+                self.gp_commit(r, d);
+            }
+            Op::TableFill {
+                table,
+                dst,
+                val,
+                len,
+            } => {
+                let moves = [
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(val)), Ty::I64),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), Ty::I32),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                self.asm.uxtw(Reg::X0, Reg::X0);
+                self.asm.uxtw(Reg::X2, Reg::X2);
+                self.asm
+                    .mov_imm32(Reg::X3, self.layout.dyn_tables[&table].0 as u32);
+                self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_TABLE_FILL));
                 let prop = self.trap_prop_lbl();
                 self.asm.cbnz(false, SGP1, prop);
             }

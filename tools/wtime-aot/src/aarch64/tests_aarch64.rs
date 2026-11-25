@@ -3961,4 +3961,26 @@ fn aarch64_oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
     let eh_wasm = build_exception_handling_test_wasm();
     let eh_calls: Vec<(&str, Value)> = (0..=13).map(|k| ("dispatch", Value::I32(k))).collect();
     assert_aarch64_oracle("a64_wasm3_exception_handling", &eh_wasm, &eh_calls, 0);
+
+    // 4. Stage 9 loop codegen optimizations (Euclidean pow2 rem, bool-mask elision, small-loop unrolling)
+    let s9_wasm = crate::x64::tests_oracle::build_stage9_loop_opt_test_wasm();
+    let mut s9_calls = Vec::new();
+    for x in [0, 1, -1, 7, 63, 64, -64, -65, i32::MIN, i32::MAX] {
+        s9_calls.push(("euclid32", Value::I32(x)));
+    }
+    for x in [0i64, 1, -1, 31, 32, -32, -64, i64::MIN, i64::MAX] {
+        s9_calls.push(("euclid64", Value::I64(x)));
+    }
+    for seed in [0, 1, 31, 63, 12345] {
+        s9_calls.push(("stencil3x3", Value::I32(seed)));
+    }
+    for x in [-1, 0, 1, 2, 3, 4, 99] {
+        s9_calls.push(("unroll_edge", Value::I32(x)));
+    }
+    assert_aarch64_oracle("a64_stage9_loop_opt", &s9_wasm, &s9_calls, 0);
+
+    // 5. Passive bulk memory (`memory.init`/`data.drop`) and bulk table ops (`table.init`/`elem.drop`/`table.copy`/`table.grow`/`table.size`/`table.fill`/dynamic `call_indirect`)
+    let bulk_wasm = crate::x64::tests_oracle::build_bulk_memory_and_table_ops_test_wasm();
+    let bulk_calls: Vec<(&str, Value)> = (0..=10).map(|k| ("dispatch", Value::I32(k))).collect();
+    assert_aarch64_oracle("a64_bulk_mem_table_ops", &bulk_wasm, &bulk_calls, 32);
 }

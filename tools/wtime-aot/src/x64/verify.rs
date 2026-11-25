@@ -989,9 +989,11 @@ fn verify_inst_types(
             expect_no_res(ir, bi, res, "GlobalSet")?;
         }
         Op::TableGet { table, idx } => {
-            if !module.mut_extern_tables.contains_key(&table) {
+            if !module.mut_extern_tables.contains_key(&table)
+                && !module.dyn_tables.contains_key(&table)
+            {
                 return Err(format!(
-                    "verify_ir fn {} bb{bi}: TableGet unknown extern table {table}",
+                    "verify_ir fn {} bb{bi}: TableGet unknown table {table}",
                     ir.func_index
                 ));
             }
@@ -999,9 +1001,11 @@ fn verify_inst_types(
             expect_res(ir, bi, res, Ty::I64, "TableGet")?;
         }
         Op::TableSet { table, idx, val } => {
-            if !module.mut_extern_tables.contains_key(&table) {
+            if !module.mut_extern_tables.contains_key(&table)
+                && !module.dyn_tables.contains_key(&table)
+            {
                 return Err(format!(
-                    "verify_ir fn {} bb{bi}: TableSet unknown extern table {table}",
+                    "verify_ir fn {} bb{bi}: TableSet unknown table {table}",
                     ir.func_index
                 ));
             }
@@ -1328,6 +1332,123 @@ fn verify_inst_types(
             expect_ty(ir, bi, val, Ty::I32, "MemFillIdx.val")?;
             expect_ty(ir, bi, len, mty, "MemFillIdx.len")?;
             expect_no_res(ir, bi, res, "MemFillIdx")?;
+        }
+        Op::MemInit {
+            data,
+            mem,
+            dst,
+            src,
+            len,
+        } => {
+            if (data as usize) >= module.data_seg_count || (mem as usize) >= module.num_memories() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad MemInit ({data}, {mem})",
+                    ir.func_index
+                ));
+            }
+            let dty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, dst, dty, "MemInit.dst")?;
+            expect_ty(ir, bi, src, Ty::I32, "MemInit.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "MemInit.len")?;
+            expect_no_res(ir, bi, res, "MemInit")?;
+        }
+        Op::DataDrop(data) => {
+            if (data as usize) >= module.data_seg_count {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad DataDrop {data}",
+                    ir.func_index
+                ));
+            }
+            expect_no_res(ir, bi, res, "DataDrop")?;
+        }
+        Op::TableInit {
+            elem,
+            table,
+            dst,
+            src,
+            len,
+        } => {
+            if (elem as usize) >= module.elem_segs.len() || !module.dyn_tables.contains_key(&table)
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad TableInit ({elem}, {table})",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, dst, Ty::I32, "TableInit.dst")?;
+            expect_ty(ir, bi, src, Ty::I32, "TableInit.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "TableInit.len")?;
+            expect_no_res(ir, bi, res, "TableInit")?;
+        }
+        Op::ElemDrop(elem) => {
+            if (elem as usize) >= module.elem_segs.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad ElemDrop {elem}",
+                    ir.func_index
+                ));
+            }
+            expect_no_res(ir, bi, res, "ElemDrop")?;
+        }
+        Op::TableCopy {
+            dst_table,
+            src_table,
+            dst,
+            src,
+            len,
+        } => {
+            if !module.dyn_tables.contains_key(&dst_table)
+                || !module.dyn_tables.contains_key(&src_table)
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad TableCopy ({dst_table}, {src_table})",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, dst, Ty::I32, "TableCopy.dst")?;
+            expect_ty(ir, bi, src, Ty::I32, "TableCopy.src")?;
+            expect_ty(ir, bi, len, Ty::I32, "TableCopy.len")?;
+            expect_no_res(ir, bi, res, "TableCopy")?;
+        }
+        Op::TableGrow { table, init, delta } => {
+            if !module.dyn_tables.contains_key(&table) {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad TableGrow {table}",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, init, Ty::I64, "TableGrow.init")?;
+            expect_ty(ir, bi, delta, Ty::I32, "TableGrow.delta")?;
+            expect_res(ir, bi, res, Ty::I32, "TableGrow")?;
+        }
+        Op::TableSize(table) => {
+            if (table as usize) >= module.table_lens.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad TableSize {table}",
+                    ir.func_index
+                ));
+            }
+            expect_res(ir, bi, res, Ty::I32, "TableSize")?;
+        }
+        Op::TableFill {
+            table,
+            dst,
+            val,
+            len,
+        } => {
+            if !module.dyn_tables.contains_key(&table) {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad TableFill {table}",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, dst, Ty::I32, "TableFill.dst")?;
+            expect_ty(ir, bi, val, Ty::I64, "TableFill.val")?;
+            expect_ty(ir, bi, len, Ty::I32, "TableFill.len")?;
+            expect_no_res(ir, bi, res, "TableFill")?;
         }
         Op::MemCopyConst { dst, src, len, .. } => {
             if len > 64 {
@@ -1817,6 +1938,11 @@ pub fn verify_alloc_with_config(
                 | Op::MemFillIdx { .. }
                 | Op::MemGrow(_)
                 | Op::MemGrowIdx { .. }
+                | Op::MemInit { .. }
+                | Op::TableInit { .. }
+                | Op::TableCopy { .. }
+                | Op::TableGrow { .. }
+                | Op::TableFill { .. }
                 | Op::Trunc(_, _) => {
                     has_any_clobber_or_call = true;
                 }
@@ -2305,7 +2431,13 @@ pub fn verify_alloc_with_config(
             // Now `tracker` holds the EXACT set of values live strictly ACROSS `inst`: check clobbers in O(1)!
             let (gp_clob, xmm_clob) = match inst.op {
                 Op::Call { .. } | Op::CallIndirect { .. } => (MASK_GP_CALLER, MASK_XMM_CALLER),
-                Op::MemCopy { .. } | Op::MemCopyIdx { .. } => helper_clobbers(HelperKind::MemCopy),
+                Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemInit { .. }
+                | Op::TableInit { .. }
+                | Op::TableCopy { .. }
+                | Op::TableGrow { .. }
+                | Op::TableFill { .. } => helper_clobbers(HelperKind::MemCopy),
                 Op::MemFill { .. } | Op::MemFillIdx { .. } => helper_clobbers(HelperKind::MemFill),
                 Op::MemGrow(_) | Op::MemGrowIdx { .. } => helper_clobbers(HelperKind::MemGrow),
                 Op::Trunc(_, _) => helper_clobbers(HelperKind::Trunc),

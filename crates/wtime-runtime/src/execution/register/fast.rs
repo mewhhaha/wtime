@@ -14,8 +14,8 @@ use crate::{
 use std::ops::Range;
 use std::sync::{Arc, atomic::Ordering};
 
-const MAX_FN_INSNS: usize = 65_535;
-const MAX_FN_SLOTS: usize = 4_096;
+const MAX_FN_INSNS: usize = 262_144;
+const MAX_FN_SLOTS: usize = 32_768;
 const MAX_BLOCK_OPS: usize = 64;
 const BLOCK_META_NONE: u32 = u32::MAX;
 const PAGE_BITS: u32 = 16;
@@ -648,7 +648,9 @@ enum RegOp {
         len: u16,
         src_off: u8,
     },
-    /// General bulk memory op (`kind=0`: `memory.copy`, `kind=1`: `memory.fill`).
+    /// General bulk memory/table op:
+    /// `0=memory.copy`, `1=memory.fill`, `2=memory.init`, `3=data.drop`,
+    /// `4=table.init`, `5=elem.drop`, `6=table.copy`.
     MemBulkGen {
         kind: u8,
         src_off: u8,
@@ -656,6 +658,11 @@ enum RegOp {
         src_or_val: u16,
         len: u16,
         arg_idx: u16,
+    },
+    /// `table.size table` -> `reg[dst] = len`.
+    TableSize {
+        dst: u16,
+        table: u32,
     },
 
     // ---- Superinstructions: fused compare-and-branch & counted loop step ----
@@ -1169,6 +1176,19 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
             };
             declared_memory(module, mem).is_some_and(|m| !m.shared)
         }
+        0xfc08 => {
+            let Immediate::Pair(seg, mem) = insn.immediate else {
+                return false;
+            };
+            (seg as usize) < module.data.inner.decoded().data.len()
+                && declared_memory(module, mem).is_some()
+        }
+        0xfc09 => {
+            let Immediate::Index(seg) = insn.immediate else {
+                return false;
+            };
+            (seg as usize) < module.data.inner.decoded().data.len()
+        }
         0xfc0a => {
             let Immediate::Pair(dst_mem, src_mem) = insn.immediate else {
                 return false;
@@ -1180,6 +1200,31 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
                 return false;
             };
             declared_memory(module, mem).is_some()
+        }
+        0xfc0c => {
+            let Immediate::Pair(elem, tbl) = insn.immediate else {
+                return false;
+            };
+            (elem as usize) < module.data.inner.decoded().elements.len()
+                && declared_table(module, tbl).is_some()
+        }
+        0xfc0d => {
+            let Immediate::Index(elem) = insn.immediate else {
+                return false;
+            };
+            (elem as usize) < module.data.inner.decoded().elements.len()
+        }
+        0xfc0e => {
+            let Immediate::Pair(dst_tbl, src_tbl) = insn.immediate else {
+                return false;
+            };
+            declared_table(module, dst_tbl).is_some() && declared_table(module, src_tbl).is_some()
+        }
+        0xfc10 => {
+            let Immediate::Index(tbl) = insn.immediate else {
+                return false;
+            };
+            declared_table(module, tbl).is_some()
         }
         0xfd00..=0xfd0b | 0xfd54..=0xfd5d => match insn.immediate {
             Immediate::MemArg { memory, .. } | Immediate::MemLane { memory, .. } => {
@@ -2941,6 +2986,63 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut pc,
                 );
             }
+            0xfc08 => {
+                // memory.init data_seg mem
+                let Immediate::Pair(seg, mem) = insn.immediate else {
+                    return None;
+                };
+                let len_v = vstack.pop()?;
+                let src_v = vstack.pop()?;
+                let dst_v = vstack.pop()?;
+                let base_tmp = slot_top(&vstack);
+                let r_dst = mat(dst_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                let r_src = mat(
+                    src_v.src,
+                    base_tmp + 1,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let r_len = mat(
+                    len_v.src,
+                    base_tmp + 2,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let arg_idx = u16::try_from(bulk_args.len()).ok()?;
+                bulk_args.push(BulkMemArg {
+                    dst_mem: mem,
+                    src_mem: seg,
+                });
+                ops.push(RegOp::MemBulkGen {
+                    kind: 2,
+                    src_off,
+                    dst: r_dst,
+                    src_or_val: r_src,
+                    len: r_len,
+                    arg_idx,
+                });
+            }
+            0xfc09 => {
+                // data.drop data_seg
+                let Immediate::Index(seg) = insn.immediate else {
+                    return None;
+                };
+                let arg_idx = u16::try_from(bulk_args.len()).ok()?;
+                bulk_args.push(BulkMemArg {
+                    dst_mem: seg,
+                    src_mem: 0,
+                });
+                ops.push(RegOp::MemBulkGen {
+                    kind: 3,
+                    src_off,
+                    dst: 0,
+                    src_or_val: 0,
+                    len: 0,
+                    arg_idx,
+                });
+            }
             0xfc0a => {
                 // memory.copy dst_mem src_mem
                 let Immediate::Pair(dst_mem, src_mem) = insn.immediate else {
@@ -3031,6 +3133,122 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         arg_idx,
                     });
                 }
+            }
+            0xfc0c => {
+                // table.init elem_seg table
+                let Immediate::Pair(elem, tbl) = insn.immediate else {
+                    return None;
+                };
+                let len_v = vstack.pop()?;
+                let src_v = vstack.pop()?;
+                let dst_v = vstack.pop()?;
+                let base_tmp = slot_top(&vstack);
+                let r_dst = mat(dst_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                let r_src = mat(
+                    src_v.src,
+                    base_tmp + 1,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let r_len = mat(
+                    len_v.src,
+                    base_tmp + 2,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let arg_idx = u16::try_from(bulk_args.len()).ok()?;
+                bulk_args.push(BulkMemArg {
+                    dst_mem: tbl,
+                    src_mem: elem,
+                });
+                ops.push(RegOp::MemBulkGen {
+                    kind: 4,
+                    src_off,
+                    dst: r_dst,
+                    src_or_val: r_src,
+                    len: r_len,
+                    arg_idx,
+                });
+            }
+            0xfc0d => {
+                // elem.drop elem_seg
+                let Immediate::Index(elem) = insn.immediate else {
+                    return None;
+                };
+                let arg_idx = u16::try_from(bulk_args.len()).ok()?;
+                bulk_args.push(BulkMemArg {
+                    dst_mem: elem,
+                    src_mem: 0,
+                });
+                ops.push(RegOp::MemBulkGen {
+                    kind: 5,
+                    src_off,
+                    dst: 0,
+                    src_or_val: 0,
+                    len: 0,
+                    arg_idx,
+                });
+            }
+            0xfc0e => {
+                // table.copy dst_tbl src_tbl
+                let Immediate::Pair(dst_tbl, src_tbl) = insn.immediate else {
+                    return None;
+                };
+                let len_v = vstack.pop()?;
+                let src_v = vstack.pop()?;
+                let dst_v = vstack.pop()?;
+                let base_tmp = slot_top(&vstack);
+                let r_dst = mat(dst_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                let r_src = mat(
+                    src_v.src,
+                    base_tmp + 1,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let r_len = mat(
+                    len_v.src,
+                    base_tmp + 2,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let arg_idx = u16::try_from(bulk_args.len()).ok()?;
+                bulk_args.push(BulkMemArg {
+                    dst_mem: dst_tbl,
+                    src_mem: src_tbl,
+                });
+                ops.push(RegOp::MemBulkGen {
+                    kind: 6,
+                    src_off,
+                    dst: r_dst,
+                    src_or_val: r_src,
+                    len: r_len,
+                    arg_idx,
+                });
+            }
+            0xfc10 => {
+                // table.size table
+                let Immediate::Index(table) = insn.immediate else {
+                    return None;
+                };
+                let is64 = declared_table(module, table)?.index_type == IndexType::I64;
+                let ty = if is64 { FastType::I64 } else { FastType::I32 };
+                let (dst, consumed, is_tee) =
+                    try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
+                ops.push(RegOp::TableSize { dst, table });
+                finish_dst(
+                    dst,
+                    consumed,
+                    is_tee,
+                    ty,
+                    &mut vstack,
+                    &mut max_slots,
+                    &mut cur_block_ops,
+                    &mut pc,
+                );
             }
             0xfc13..=0xfc16 => {
                 // wide-arithmetic: i64.add128, i64.sub128, i64.mul_wide_s, i64.mul_wide_u
@@ -5278,6 +5496,40 @@ enum InnerExit {
         len: u64,
         src_off: u8,
     },
+    MemInit {
+        mem: u32,
+        seg: u32,
+        dst: u64,
+        src: u64,
+        len: u64,
+        src_off: u8,
+    },
+    DataDrop {
+        seg: u32,
+    },
+    TableInit {
+        table: u32,
+        seg: u32,
+        dst: u64,
+        src: u64,
+        len: u64,
+        src_off: u8,
+    },
+    ElemDrop {
+        seg: u32,
+    },
+    TableCopy {
+        dst_table: u32,
+        src_table: u32,
+        dst: u64,
+        src: u64,
+        len: u64,
+        src_off: u8,
+    },
+    TableSize {
+        dst: u16,
+        table: u32,
+    },
 }
 
 /// Inner register dispatch loop specialized on `FUEL` and `DENSE` memory backing.
@@ -6717,30 +6969,72 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     arg_idx,
                 } => {
                     let arg = cur_func.bulk_args[arg_idx as usize];
-                    let d_raw = regs[dst as usize];
-                    let sv_raw = regs[src_or_val as usize];
-                    let n_raw = regs[len as usize];
                     if FUEL {
                         *fuel = Some(remaining_fuel);
                     }
-                    if kind == 0 {
-                        break InnerExit::MemCopy {
-                            dst_mem: arg.dst_mem,
-                            src_mem: arg.src_mem,
-                            dst: d_raw,
-                            src: sv_raw,
-                            len: n_raw,
-                            src_off,
-                        };
-                    } else {
-                        break InnerExit::MemFill {
-                            mem: arg.dst_mem,
-                            dst: d_raw,
-                            val: sv_raw,
-                            len: n_raw,
-                            src_off,
-                        };
+                    match kind {
+                        0 => {
+                            break InnerExit::MemCopy {
+                                dst_mem: arg.dst_mem,
+                                src_mem: arg.src_mem,
+                                dst: regs[dst as usize],
+                                src: regs[src_or_val as usize],
+                                len: regs[len as usize],
+                                src_off,
+                            };
+                        }
+                        1 => {
+                            break InnerExit::MemFill {
+                                mem: arg.dst_mem,
+                                dst: regs[dst as usize],
+                                val: regs[src_or_val as usize],
+                                len: regs[len as usize],
+                                src_off,
+                            };
+                        }
+                        2 => {
+                            break InnerExit::MemInit {
+                                mem: arg.dst_mem,
+                                seg: arg.src_mem,
+                                dst: regs[dst as usize],
+                                src: regs[src_or_val as usize],
+                                len: regs[len as usize],
+                                src_off,
+                            };
+                        }
+                        3 => {
+                            break InnerExit::DataDrop { seg: arg.dst_mem };
+                        }
+                        4 => {
+                            break InnerExit::TableInit {
+                                table: arg.dst_mem,
+                                seg: arg.src_mem,
+                                dst: regs[dst as usize],
+                                src: regs[src_or_val as usize],
+                                len: regs[len as usize],
+                                src_off,
+                            };
+                        }
+                        5 => {
+                            break InnerExit::ElemDrop { seg: arg.dst_mem };
+                        }
+                        _ => {
+                            break InnerExit::TableCopy {
+                                dst_table: arg.dst_mem,
+                                src_table: arg.src_mem,
+                                dst: regs[dst as usize],
+                                src: regs[src_or_val as usize],
+                                len: regs[len as usize],
+                                src_off,
+                            };
+                        }
                     }
+                }
+                RegOp::TableSize { dst, table } => {
+                    if FUEL {
+                        *fuel = Some(remaining_fuel);
+                    }
+                    break InnerExit::TableSize { dst, table };
                 }
 
                 // ---- Superinstructions: compare + branch & counted loop ----
@@ -7685,6 +7979,110 @@ fn run_loop<const FUEL: bool>(
                 {
                     store.mems[i].bytes.try_promote_dense();
                 }
+            }
+            InnerExit::MemInit {
+                mem,
+                seg,
+                dst,
+                src,
+                len,
+                src_off,
+            } => {
+                let res: Result<()> = (|| {
+                    let n = usize::try_from(len).map_err(|_| trap("length overflow"))?;
+                    let dest = store.instances[cur_inst].mems[mem as usize].0.index;
+                    range(dst, n, store.mems[dest].len()?)?;
+                    let data = store.instances[cur_inst]
+                        .data_segment(seg as usize)
+                        .unwrap_or(&[]);
+                    let r = range(src, n, data.len())?;
+                    store.mems[dest].write(dst, &data[r])?;
+                    Ok(())
+                })();
+                if let Err(e) = res {
+                    refund_on_trap!(src_off);
+                    return Err(e);
+                }
+                if mem == 0
+                    && let Some(i) = cur_mem0
+                {
+                    store.mems[i].bytes.try_promote_dense();
+                }
+            }
+            InnerExit::DataDrop { seg } => {
+                store.instances[cur_inst].data[seg as usize] = false;
+            }
+            InnerExit::TableInit {
+                table,
+                seg,
+                dst,
+                src,
+                len,
+                src_off,
+            } => {
+                let res: Result<()> = (|| {
+                    let n = usize::try_from(len).map_err(|_| trap("length overflow"))?;
+                    let target = store.instances[cur_inst].tabs[table as usize].0.index;
+                    let out = crate::table_range(dst, n, store.tabs[target].values.len())?;
+                    let values = store.instances[cur_inst].elems[seg as usize]
+                        .as_deref()
+                        .unwrap_or(&[]);
+                    let r = crate::table_range(src, n, values.len())?;
+                    store.tabs[target].values[out].copy_from_slice(&values[r]);
+                    Ok(())
+                })();
+                if let Err(e) = res {
+                    refund_on_trap!(src_off);
+                    return Err(e);
+                }
+            }
+            InnerExit::ElemDrop { seg } => {
+                store.instances[cur_inst].elems[seg as usize] = None;
+            }
+            InnerExit::TableCopy {
+                dst_table,
+                src_table,
+                dst,
+                src,
+                len,
+                src_off,
+            } => {
+                let res: Result<()> = (|| {
+                    let n = usize::try_from(len).map_err(|_| trap("length overflow"))?;
+                    let target = store.instances[cur_inst].tabs[dst_table as usize].0.index;
+                    crate::table_range(dst, n, store.tabs[target].values.len())?;
+                    let source = store.instances[cur_inst].tabs[src_table as usize].0.index;
+                    crate::table_range(src, n, store.tabs[source].values.len())?;
+                    if target == source {
+                        store.tabs[target]
+                            .values
+                            .copy_within(src as usize..src as usize + n, dst as usize);
+                    } else {
+                        let mut done = 0usize;
+                        while done < n {
+                            if store.cancellation.is_cancelled() {
+                                return Err(err(ErrorKind::ResourceLimit, "execution cancelled"));
+                            }
+                            let count = (n - done).min(4096);
+                            let vals = store.tabs[source].values
+                                [src as usize + done..src as usize + done + count]
+                                .to_vec();
+                            store.tabs[target].values
+                                [dst as usize + done..dst as usize + done + count]
+                                .copy_from_slice(&vals);
+                            done += count;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = res {
+                    refund_on_trap!(src_off);
+                    return Err(e);
+                }
+            }
+            InnerExit::TableSize { dst, table } => {
+                let t = &store.tabs[store.instances[cur_inst].tabs[table as usize].0.index];
+                reg_bank[cur_reg_base + dst as usize] = t.values.len() as u64;
             }
             InnerExit::Bail { meta } => {
                 do_bail!(meta);
@@ -10003,6 +10401,388 @@ mod tests {
                 assert_eq!(
                     res[0], res[1],
                     "differential fuzz mismatch on seed {seed_idx} (fuel={fuel:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_register_hardened_features_differential_fuzzer() {
+        // Fixed-seed deterministic differential fuzzer over exception handling (`try_table`,
+        // `throw`, `catch`, `catch_all`), multi-memory (mem0 32-bit, mem1 32-bit, mem2 64-bit),
+        // passive `memory.init` / `data.drop`, tail calls (`return_call` / `return_call_indirect`),
+        // bulk table ops (`table.size`, `table.init`, `elem.drop`, `table.copy`, `table.grow`,
+        // `table.fill`), and large-slot (> 4,096 locals) functions against `Decoded`.
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn pick(&mut self, n: usize) -> usize {
+                (self.next() as usize) % n
+            }
+        }
+        fn push_sleb(out: &mut Vec<u8>, mut v: i32) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if (v == 0 && (b & 0x40) == 0) || (v == -1 && (b & 0x40) != 0) {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        let mut features = FeatureSet::all_phase3_core();
+        features.tail_call = true;
+        features.multi_memory = true;
+        features.memory64 = true;
+        features.exception_handling = true;
+
+        // 1. Verify large-slot (> 4,096 locals) admission + exact `max_local_slots` enforcement!
+        {
+            let types = vec![1, 0x60, 1, 0x7f, 1, 0x7f];
+            let funcs = vec![1, 0];
+            let mut exps = vec![1];
+            leb_u32(&mut exps, 4);
+            exps.extend_from_slice(b"bigf");
+            exps.extend_from_slice(&[0x00, 0]);
+            // 5,000 i32 locals + optional recursive call:
+            //   if p0 > 0 { return bigf(p0 - 1) + 1 } else { local[4999] = 18; return local[4999] * 3 }
+            let mut bf = Vec::new();
+            bf.extend_from_slice(&[
+                0x20, 0, 0x41, 0, 0x4a, 0x04, 0x40, // if p0 > 0
+                0x20, 0, 0x41, 1, 0x6b, 0x10, 0, 0x41, 1, 0x6a,
+                0x0f, // return bigf(p0 - 1) + 1
+                0x0b, // end if
+                0x41, 18, 0x22,
+            ]);
+            leb_u32(&mut bf, 4999);
+            bf.extend_from_slice(&[0x41, 3, 0x6c]);
+            let mut code = vec![1];
+            code.extend_from_slice(&body(&[(5000, 0x7f)], &bf));
+            let big_wasm = wasm_mod(&[
+                sec(1, &types),
+                sec(3, &funcs),
+                sec(7, &exps),
+                sec(10, &code),
+            ]);
+            // Call with depth=0 (5,001 slots -> succeeds) and depth=1 under max_total_locals=8000 (10,002 slots -> traps!).
+            for (depth, max_slots_opt) in [(0i32, None), (1i32, Some(8_000usize))] {
+                let mut outs = Vec::new();
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut cfg = Config {
+                        features,
+                        ..Config::default()
+                    };
+                    if let Some(lim) = max_slots_opt {
+                        cfg.limits.max_locals = 6_000;
+                        cfg.limits.max_total_locals = lim;
+                    }
+                    let engine = Engine::with_execution_policy(cfg, policy).unwrap();
+                    let module = engine.compile(&big_wasm).unwrap();
+                    if policy == ExecutionPolicy::Register && max_slots_opt.is_none() {
+                        assert!(
+                            is_admitted(&module, 0),
+                            "5,000-local function must be admitted by raised MAX_FN_SLOTS"
+                        );
+                    }
+                    let mut store = Store::new(&engine);
+                    let inst = Linker::new(&engine)
+                        .instantiate(&mut store, &module)
+                        .unwrap();
+                    let External::Func(f) = inst.export(&store, "bigf").unwrap() else {
+                        panic!()
+                    };
+                    let r = store.invoke(f, &[Value::I32(depth)]);
+                    assert_eq!(store.active_local_slots, 0);
+                    outs.push(r.map_err(|e| (e.kind, e.trap_code, e.message)));
+                }
+                assert_eq!(outs[0], outs[1], "bigf mismatch (limit={max_slots_opt:?})");
+                if max_slots_opt.is_none() {
+                    assert_eq!(
+                        outs[0],
+                        Ok(crate::RunOutcome::Returned(vec![Value::I32(54)]))
+                    );
+                } else {
+                    assert!(outs[0].is_err());
+                }
+            }
+        }
+
+        // 2. Deterministic 60-seed differential fuzzing over EH, multi-memory+mem64, passive data,
+        //    tail calls, and bulk table ops.
+        let mut rng = Rng(0x243f_6a88_85a3_08d3);
+        for seed_idx in 0..60usize {
+            // Types:
+            //   0: (i32) -> (i32)
+            //   1: (i32) -> ()        (tag 0 payload: i32)
+            //   2: (i32, i32) -> (i32)
+            let types = vec![
+                3, 0x60, 1, 0x7f, 1, 0x7f, // 0
+                0x60, 1, 0x7f, 0, // 1 (tag 0)
+                0x60, 2, 0x7f, 0x7f, 1, 0x7f, // 2
+            ];
+            let funcs = vec![6, 0, 0, 2, 0, 0, 0];
+            // Tables: t0 funcref min=4 max=8, t1 funcref min=4 max=8
+            let tbls = vec![2, 0x70, 0x01, 4, 8, 0x70, 0x01, 4, 8];
+            // Memories: m0 (32-bit, min=1, max=2), m1 (32-bit, min=1, max=2), m2 (64-bit, min=1, max=2)
+            let mems = vec![3, 0x01, 1, 2, 0x01, 1, 2, 0x05, 1, 2];
+            // Tag 0: type 1 (i32)
+            let tags = vec![1, 0x00, 1];
+            let mut exps = vec![5];
+            for (name, kind, idx) in [
+                ("main", 0u8, 3u32),
+                ("bulk_fast", 0, 4),
+                ("m0", 2, 0),
+                ("m1", 2, 1),
+                ("m2", 2, 2),
+            ] {
+                leb_u32(&mut exps, name.len() as u32);
+                exps.extend_from_slice(name.as_bytes());
+                exps.push(kind);
+                leb_u32(&mut exps, idx);
+            }
+            // Elem 0 (active on t0 @ 0): [f0, f5], Elem 1 (passive funcref): [f5, f0, f0, f5]
+            // (Both f0 and f5 are non-recursive leaves so arbitrary table.init/copy/call_indirect never cycle!)
+            let elems = vec![
+                2, 0x00, 0x41, 0x00, 0x0b, 2, 0, 5, // active elem 0
+                0x01, 0x00, 4, 5, 0, 0, 5, // passive elem 1
+            ];
+            let data_count = vec![1];
+            // Passive data seg 0: 32 deterministic bytes
+            let mut data_sec = vec![1, 0x01, 32];
+            for _ in 0..32 {
+                data_sec.push(rng.next() as u8);
+            }
+
+            // f0(x): if (x & 7) == 5 { throw 0 (x ^ 0x55) } else { return x * 3 + 1 }
+            let f0 = vec![
+                0x20, 0, 0x41, 7, 0x71, 0x41, 5, 0x46, 0x04, 0x40, 0x20, 0, 0x41, 0xd5, 0x00, 0x08,
+                0, 0x0b, 0x20, 0, 0x41, 3, 0x6c, 0x41, 1, 0x6a,
+            ];
+            // f5(x): pure non-recursive leaf returning (x ^ 0x2a) + 5
+            let f5 = vec![0x20, 0, 0x41, 0x2a, 0x73, 0x41, 5, 0x6a];
+            // f1(x): return_call f2(x, 3)
+            let f1 = vec![0x20, 0, 0x41, 3, 0x12, 2];
+            // f2(x, k): if k == 0 { return_call_indirect t0 type 0 (x, slot = x & 1) }
+            //           else { return_call f2(x + k, k - 1) }
+            let f2 = vec![
+                0x20, 1, 0x45, 0x04, 0x40, 0x20, 0, 0x20, 0, 0x41, 1, 0x71, 0x13, 0, 0, 0x0b, 0x20,
+                0, 0x20, 1, 0x6a, 0x20, 1, 0x41, 1, 0x6b, 0x12, 2,
+            ];
+
+            // f4(x): 100% natively admitted fast-register function exercising memory.init, data.drop,
+            //        multi-memory copy/fill/mem64, table.size, table.init, elem.drop, table.copy!
+            let mut f4 = Vec::new();
+            for _ in 0..(6 + rng.pick(5)) {
+                match rng.pick(7) {
+                    0 => {
+                        let mi = rng.pick(3) as u8;
+                        let dst = (rng.pick(16) * 8) as i32;
+                        let src = rng.pick(20) as i32;
+                        let len = rng.pick(12) as i32;
+                        if mi == 2 {
+                            f4.push(0x42);
+                            push_sleb(&mut f4, dst);
+                        } else {
+                            f4.push(0x41);
+                            push_sleb(&mut f4, dst);
+                        }
+                        f4.push(0x41);
+                        push_sleb(&mut f4, src);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, len);
+                        f4.extend_from_slice(&[0xfc, 0x08, 0, mi]);
+                    }
+                    1 => {
+                        let dm = rng.pick(2) as u8;
+                        let sm = 1 - dm;
+                        let dst = (rng.pick(16) * 4) as i32;
+                        let src = (rng.pick(16) * 4) as i32;
+                        f4.push(0x41);
+                        push_sleb(&mut f4, dst);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, src);
+                        f4.extend_from_slice(&[0x41, 8, 0xfc, 0x0a, dm, sm]);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, dst);
+                        f4.extend_from_slice(&[0x28, 0x42, dm, 0, 0x20, 0, 0x73, 0x21, 0]);
+                    }
+                    2 => {
+                        let dst = (rng.pick(16) * 8) as i32;
+                        f4.push(0x42);
+                        push_sleb(&mut f4, dst);
+                        f4.extend_from_slice(&[0x20, 0, 0x42, 8, 0xfc, 0x0b, 2]);
+                        f4.push(0x42);
+                        push_sleb(&mut f4, dst);
+                        f4.extend_from_slice(&[0x28, 0x42, 2, 0, 0x20, 0, 0x6a, 0x21, 0]);
+                    }
+                    3 => {
+                        if rng.pick(4) == 0 {
+                            f4.extend_from_slice(&[0xfc, 0x09, 0]);
+                        }
+                    }
+                    4 => {
+                        f4.extend_from_slice(&[
+                            0xfc, 0x10, 0, 0xfc, 0x10, 1, 0x6a, 0x20, 0, 0x6a, 0x21, 0,
+                        ]);
+                    }
+                    5 => {
+                        let ti = rng.pick(2) as u8;
+                        let dst = rng.pick(3) as i32;
+                        let src = rng.pick(2) as i32;
+                        let len = rng.pick(3) as i32;
+                        f4.push(0x41);
+                        push_sleb(&mut f4, dst);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, src);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, len);
+                        f4.extend_from_slice(&[0xfc, 0x0c, 1, ti]);
+                    }
+                    _ => {
+                        let dt = rng.pick(2) as u8;
+                        let st = rng.pick(2) as u8;
+                        let dst = rng.pick(3) as i32;
+                        let src = rng.pick(3) as i32;
+                        let len = rng.pick(3) as i32;
+                        f4.push(0x41);
+                        push_sleb(&mut f4, dst);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, src);
+                        f4.push(0x41);
+                        push_sleb(&mut f4, len);
+                        f4.extend_from_slice(&[0xfc, 0x0e, dt, st]);
+                        if rng.pick(5) == 0 {
+                            f4.extend_from_slice(&[0xfc, 0x0d, 1]);
+                        }
+                    }
+                }
+            }
+            f4.extend_from_slice(&[0x20, 0]);
+
+            // f3(x): mixes calls into fast f4, table.grow/fill, and try_table catch/catch_all across
+            //        fast tail-call chains (f1 -> return_call f2 -> return_call_indirect f0 -> throw 0)!
+            let mut f3 = Vec::new();
+            let steps = 8 + rng.pick(6);
+            for _ in 0..steps {
+                match rng.pick(4) {
+                    0 => {
+                        // Call natively-admitted bulk_fast (f4)
+                        f3.extend_from_slice(&[0x20, 0, 0x10, 4, 0x21, 0]);
+                    }
+                    1 => {
+                        // table.grow t1 (ref.null func, 1) + table.fill t1 (dst=0, ref.func 0, len=2)
+                        f3.extend_from_slice(&[
+                            0xd0, 0x70, 0x41, 1, 0xfc, 0x0f, 1, 0x20, 0, 0x6a, 0x21, 0, 0x41, 0,
+                            0xd2, 0, 0x41, 2, 0xfc, 0x11, 1,
+                        ]);
+                    }
+                    2 => {
+                        // try_table catching tag 0 from f0 or f1 (which tail-calls f2 -> call_indirect!)
+                        let target_fn = rng.pick(2) as u8;
+                        f3.extend_from_slice(&[
+                            0x02, 0x7f, // block (result i32)
+                            0x1f, 0x7f, 1, 0x00, 0,
+                            0, // try_table (result i32) (catch tag=0 label=0)
+                            0x20, 0, 0x10, target_fn, // call f0 or f1 (may throw!)
+                            0x0b,      // end try_table
+                            0x0b,      // end block
+                            0x21, 0,
+                        ]);
+                    }
+                    _ => {
+                        // Direct call_indirect through t0 or t1 inside try_table catch_all
+                        let ti = rng.pick(2) as u8;
+                        let slot = rng.pick(2) as u8;
+                        f3.extend_from_slice(&[
+                            0x02, 0x40, // block ()
+                            0x1f, 0x40, 1, 0x02, 0, // try_table () (catch_all label=0)
+                            0x20, 0, 0x41, slot, 0x11, 0, ti, // call_indirect type 0 table ti
+                            0x21, 0, 0x0b, // end try_table
+                            0x0b, // end block
+                        ]);
+                    }
+                }
+            }
+            f3.extend_from_slice(&[0x20, 0]);
+
+            let mut code = vec![6];
+            code.extend_from_slice(&body(&[], &f0));
+            code.extend_from_slice(&body(&[], &f1));
+            code.extend_from_slice(&body(&[], &f2));
+            code.extend_from_slice(&body(&[], &f3));
+            code.extend_from_slice(&body(&[], &f4));
+            code.extend_from_slice(&body(&[], &f5));
+
+            let wasm = wasm_mod(&[
+                sec(1, &types),
+                sec(3, &funcs),
+                sec(4, &tbls),
+                sec(5, &mems),
+                sec(13, &tags),
+                sec(7, &exps),
+                sec(9, &elems),
+                sec(12, &data_count),
+                sec(10, &code),
+                sec(11, &data_sec),
+            ]);
+
+            let x_in = (rng.next() as i32) & 0x7fff;
+            for fuel in [None, Some(1), Some(9), Some(35), Some(90)] {
+                let mut res = Vec::new();
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut cfg = Config {
+                        features,
+                        ..Config::default()
+                    };
+                    cfg.limits.fuel = fuel;
+                    let engine = Engine::with_execution_policy(cfg, policy).unwrap();
+                    let module = engine.compile(&wasm).unwrap();
+                    if policy == ExecutionPolicy::Register {
+                        // f1, f2 (tail-call chain) and f4 (all new bulk mem/table ops!) MUST be natively admitted!
+                        for bi in [1usize, 2, 4] {
+                            assert!(
+                                is_admitted(&module, bi),
+                                "hardened fuzz seed {seed_idx} body {bi} must be admitted"
+                            );
+                        }
+                    }
+                    let mut store = Store::new(&engine);
+                    let inst = Linker::new(&engine)
+                        .instantiate(&mut store, &module)
+                        .unwrap();
+                    let External::Func(fm) = inst.export(&store, "main").unwrap() else {
+                        panic!()
+                    };
+                    let External::Memory(m0) = inst.export(&store, "m0").unwrap() else {
+                        panic!()
+                    };
+                    let External::Memory(m1) = inst.export(&store, "m1").unwrap() else {
+                        panic!()
+                    };
+                    let External::Memory(m2) = inst.export(&store, "m2").unwrap() else {
+                        panic!()
+                    };
+                    let out = store.invoke(fm, &[Value::I32(x_in)]);
+                    assert_eq!(store.active_local_slots, 0);
+                    res.push((
+                        out.map_err(|e| (e.kind, e.trap_code, e.message)),
+                        store.current_fuel,
+                        store.read_memory(m0, 0, 160).unwrap(),
+                        store.read_memory(m1, 0, 160).unwrap(),
+                        store.read_memory(m2, 0, 160).unwrap(),
+                    ));
+                }
+                assert_eq!(
+                    res[0], res[1],
+                    "hardened differential fuzz mismatch on seed {seed_idx} (fuel={fuel:?})"
                 );
             }
         }

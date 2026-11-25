@@ -2,6 +2,86 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.4] - 2026-11-25
+
+Full passive & declarative bulk memory/table support (`memory.init`, `data.drop`,
+`table.init`, `elem.drop`, `table.copy`, `table.grow`, `table.size`, `table.fill`,
+`ref.func`, dynamic `funcref`/`externref` tables & dynamic `call_indirect`),
+standalone Goose compiler OS/search sandbox imports (`env::gs_os_*`, `env::gs_find_*`,
+`openat2` + `RESOLVE_BENEATH` + `O_NOFOLLOW`), Euclidean power-of-two remainder
+folding & constant-trip loop unrolling, cold-compile pipeline speedups, native
+ARM64 CI verification (`ubuntu-24.04-arm`), and hardened `register-executor`
+admission & differential fuzzing. Core crate `#![forbid(unsafe_code)]`, zero
+external production dependencies, public APIs, and `x86_64-unknown-linux-gnu`
+release scope remain unchanged.
+
+### Core interpreter (`crates/wtime-runtime`)
+- **Opt-in lazy register tier (`--features register-executor`)**:
+  - Raised per-function admission ceilings (`MAX_FN_INSNS = 262_144`,
+    `MAX_FN_SLOTS = 32_768`) while preserving exact `u16` slot packing and
+    runtime `max_total_locals` / `max_stack_height` limits, raising lazy
+    admission on the 4,513-function SIMD app (`gdev`) to **99.98%**
+    (`4,512 / 4,513` functions).
+  - Added native fast-register lowering for `memory.init` (`0xfc08`),
+    `data.drop` (`0xfc09`), `table.init` (`0xfc0c`), `elem.drop` (`0xfc0d`),
+    `table.copy` (`0xfc0e`), and `table.size` (`0xfc10`) while keeping
+    `size_of::<RegOp>() <= 12`.
+  - Added a 60-seed deterministic differential fuzzer (`fast_register_hardened_features_differential_fuzzer`)
+    covering `exception_handling` (`try_table`, `throw`, `catch`, `catch_all`),
+    `multi-memory` + `memory64`, passive `memory.init`/`data.drop`, `tail_call`
+    (`return_call`/`return_call_indirect`), bulk table ops (`table.size`/
+    `table.init`/`elem.drop`/`table.copy`/`table.grow`/`table.fill`), and
+    5,000-local functions across 5 fuel budgets verified bit-exact against `Decoded`.
+
+### Ahead-of-time compiler (`tools/wtime-aot`, standalone tool)
+- **Passive/declarative bulk memory & table ops on BOTH `--backend x64` and `--backend aarch64`**:
+  - Full support for `memory.init` (`0xfc08`), `data.drop` (`0xfc09`),
+    `table.init` (`0xfc0c`), `elem.drop` (`0xfc0d`), `table.copy` (`0xfc0e`),
+    `table.grow` (`0xfc0f`), `table.size` (`0xfc10`), `table.fill` (`0xfc11`),
+    `ref.func` (`0xd2`), `ref.null func` (`0xd0 0x70`), `funcref` block/value/global
+    types, growable `funcref`/`externref` tables (`<= 131_072` slots/table,
+    demand-paged `mmap` backing), and dynamic `call_indirect` /
+    `return_call_indirect` / `call_indirect` inside `try_table` — with **zero
+    overhead** on static modules (static `funcref` tables stay in `.rodata`
+    `ci_tables`, fixed `externref` tables stay inline in `Ctx`, and unused bulk
+    helpers emit 1-byte `ret` stubs).
+- **Standalone self-hosting Goose compiler imports & sandbox on BOTH `--backend x64` and `--backend aarch64`**:
+  - Added direct-syscall `env::gs_os_{arg_count,arg,getenv,file_exists,is_dir,
+    read_file,write_file,append_file,resource_dir}` and `env::gs_find_{any,pair}`
+    imports, `goose.reserve` host-to-guest allocation callbacks with re-entrancy
+    guards, 256 GiB `MAP_NORESERVE` default cap for standalone `memory64`, and
+    sandbox CLI flags (`--allow-files`, `--allow-env`, `--output-limit`,
+    `--memory-limit-pages`, `--timing-json`, `--time-limit`, `--stack-limit-mib`,
+    `--`) enforced via Linux `openat2` (`RESOLVE_BENEATH | O_NOFOLLOW`).
+  - Compiles and executes the real 5.38 MiB `memory64` self-hosting Goose
+    compiler (`compiler-64.wasm`) with byte-for-byte identical Wasm output on
+    both `examples/sorting.goose` and self-compiling `selfhost/main.goose`
+    (with `0` `<unknown>` AArch64 encodings under `llvm-objdump`).
+- **Loop codegen & cold-compile pipeline**:
+  - Added signed Euclidean power-of-two remainder folding (`r = v rem_s 2^k;
+    (r < 0) ? r + 2^k : r` -> `v & (2^k - 1)`), zero-allocation epoch-stamped
+    `bool01 & odd_mask` elision, immediate `Loc::Remat` folding in
+    `emit_int_cmp_flags_reusing`, constant `Term::CmpBranch` folding, and
+    bounded 2-round innermost constant-trip (`1..=4`) loop unrolling with
+    escaping SSA value rewrite — cutting `suite2/life.wasm` by **>2×**
+    (`6.59 ms` -> **`3.08 ms`** median / `2.47 ms` uncontended, beating Rust `-O3`)
+    and raising the 6-kernel `--backend x64` geomean speedup over Wasmtime
+    `49.0.3` to **`7.18×`** (**`5.36×`** vs. V8, **`6.15×`** vs. Clang `-O2`,
+    **`3.70×`** vs. Rust `-O3`, beating Rust `-O3` on all 6 kernels).
+  - Eliminated per-function heap allocations in `fold_euclidean_pow2_rem` and
+    `unroll_small_constant_loops`, added instruction-weighted chunking for
+    parallel admission, and tuned parallel validation threads — cutting cold
+    compile on the 5.90 MiB / 4,513-function `gdev` app to **`123.5 ms`**
+    uncontended (`263.7 ms` vs. Wasmtime `609.5 ms` = **`2.31×`** in paired
+    5-round `bench.py`, **`34.2 ms`** vs. `556.4 ms` = **`16.3×`** on 1-fn edit,
+    **`0.031 ms`** vs. `1.78 ms` = **`57×`** warm `.so` load, **`17.1%`** smaller).
+- **Native ARM64 CI verification**:
+  - Gated x86-64-only native `dlopen` oracle/fault tests on `target_arch = "x86_64"`,
+    added `tools/wtime-aot/tests/aarch64_native.rs` covering native ARM64 Blot
+    ABI 8 `dlopen` + standalone static `ET_EXEC` WASI/Goose/sandbox execution,
+    and expanded `.github/workflows/ci.yml`'s `wtime-aot` job to the
+    `[ubuntu-24.04, ubuntu-24.04-arm]` matrix with `WTIME_AOT_REQUIRE_NATIVE_TESTS=1`.
+
 ## [0.1.3] - 2026-11-25
 
 Major Wasm 3.0 AOT feature-completeness (`wide-arithmetic`, `multi-memory`,

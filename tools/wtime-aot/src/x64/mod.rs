@@ -12,7 +12,7 @@ pub mod regalloc;
 pub mod runtime;
 pub mod simd_lower;
 pub mod standalone_rt;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod tests_abi_faults;
 #[cfg(test)]
 pub(crate) mod tests_oracle;
@@ -91,7 +91,13 @@ pub const OFF_EXEC_CLOCK_ORIGIN: i32 = 160;
 pub const OFF_EXEC_EXIT_CODE: i32 = 168;
 pub const OFF_EXEC_TIMING_PATH: i32 = 176;
 pub const OFF_EXEC_MEM_LIMIT: i32 = 184;
-pub const CTX_HEADER_BYTES: usize = 192;
+pub const OFF_EXEC_ENVP: i32 = 192;
+pub const OFF_EXEC_PROG_NAME: i32 = 200;
+pub const OFF_EXEC_OUTPUT_LIMIT: i32 = 208;
+pub const OFF_EXEC_WRITTEN: i32 = 216;
+pub const OFF_EXEC_RESERVING: i32 = 224;
+pub const OFF_EXEC_POLICY_PTR: i32 = 232;
+pub const CTX_HEADER_BYTES: usize = 240;
 
 // ---- Canonical trap codes `1..=22` ----
 pub const TRAP_UNREACHABLE: u8 = 1;
@@ -133,15 +139,26 @@ pub(crate) const HELPER_GOOSE_FMT_FLOAT: u32 = 23;
 pub const HELPER_EXTRA_MEM_GROW: u32 = 24;
 pub const HELPER_EXTRA_MEM_COPY: u32 = 25;
 pub const HELPER_EXTRA_MEM_FILL: u32 = 26;
-pub(crate) const NUM_HELPERS: usize = 27;
+pub(crate) const HELPER_STANDALONE_FS: u32 = 27;
+pub(crate) const HELPER_STANDALONE_RESERVE_COPY: u32 = 28;
+pub const HELPER_MEM_INIT: u32 = 29;
+pub const HELPER_TABLE_INIT: u32 = 30;
+pub const HELPER_TABLE_COPY: u32 = 31;
+pub const HELPER_TABLE_GROW: u32 = 32;
+pub const HELPER_TABLE_FILL: u32 = 33;
+pub(crate) const NUM_HELPERS: usize = 34;
 
-/// Per-signature `call_indirect` dispatch table metadata in `.rodata`.
+/// Per-signature `call_indirect` dispatch table metadata in `.rodata` (or dynamic `Ctx` table).
 #[derive(Clone, Copy, Debug)]
 pub struct CiTableLayout {
     pub table_len: u32,
     pub min_slot: u32,
     pub span: u32,
     pub rodata_off: u32,
+    /// `Ctx` descriptor offset for dynamic `funcref` tables (`-1` for static `.rodata` tables).
+    pub dyn_table_desc_off: i32,
+    /// Canonical deduplicated signature ID (used when `dyn_table_desc_off >= 0`).
+    pub canon_sig: u32,
 }
 
 /// Checked `Ctx` layout consumed by `lower.rs` and `runtime.rs`.
@@ -158,7 +175,19 @@ pub struct CtxLayout {
     /// a `SIGSEGV` handler for `memory32` (NEVER enabled for `--blot-cdylib` `.so`).
     pub use_guard_pages: bool,
     pub global_offs: Vec<i32>,
+    pub table_lens: Vec<u32>,
     pub extern_tables: BTreeMap<u32, (i32, u32)>,
+    /// Dynamically mutable/growable tables: `table_idx -> (ctx_desc_off, min_len, eff_max_len)`.
+    /// Each 24-byte `Ctx` descriptor holds `+0: ptr (u64), +8: cur_len (u32), +12: max_len (u32), +16: reserve_bytes (u64)`.
+    pub dyn_tables: BTreeMap<u32, (i32, u32, u32)>,
+    /// `Some(off)` when module uses `memory.init`/`data.drop`: 1 byte per data segment (`1` = dropped).
+    pub data_dropped_off: Option<i32>,
+    /// `Some(off)` when module uses `table.init`/`elem.drop`: 1 byte per elem segment (`1` = dropped).
+    pub elem_dropped_off: Option<i32>,
+    /// `.rodata` offset of `u32 func_canon_sig[n_total]` (non-zero iff `module.uses_dyn_ci`).
+    pub func_sig_ro_off: u32,
+    /// `.rodata` offset of `i32 func_addr_rel[n_total]` (non-zero iff `module.uses_dyn_ci`).
+    pub func_addr_ro_off: u32,
     /// Byte offsets into `Ctx` for 32-byte descriptors `(base, len, max_pages, reserve_bytes)`
     /// of additional linear memories `1..N` (empty for 0/1-memory modules).
     pub extra_mem_offs: Vec<i32>,
@@ -233,6 +262,18 @@ impl CtxLayout {
             }
             extern_tables.insert(tbl, (off, len));
         }
+        let mut dyn_tables = BTreeMap::new();
+        for (&tbl, meta) in &module.dyn_tables {
+            cur = align_up_checked(cur, 8)?;
+            let off = i32::try_from(cur).map_err(|_| "x64: Ctx dyn table offset exceeds i32")?;
+            cur = cur.checked_add(24).ok_or("x64: Ctx size overflow")?;
+            if cur > MAX_CTX_BYTES {
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
+            }
+            dyn_tables.insert(tbl, (off, meta.min_len, meta.eff_max_len));
+        }
         let mut extra_mem_offs = Vec::with_capacity(module.extra_memories.len());
         let mut extra_mem_is64 = Vec::with_capacity(module.extra_memories.len());
         for em in &module.extra_memories {
@@ -260,6 +301,43 @@ impl CtxLayout {
         } else {
             None
         };
+        let data_dropped_off = if module.uses_bulk_data {
+            cur = align_up_checked(cur, 8)?;
+            let off = i32::try_from(cur).map_err(|_| "x64: Ctx data_dropped offset exceeds i32")?;
+            cur = cur
+                .checked_add(module.data_seg_count.max(1))
+                .ok_or("x64: Ctx size overflow")?;
+            if cur > MAX_CTX_BYTES {
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
+            }
+            Some(off)
+        } else {
+            None
+        };
+        let elem_dropped_off = if module.uses_bulk_elem {
+            cur = align_up_checked(cur, 8)?;
+            let off = i32::try_from(cur).map_err(|_| "x64: Ctx elem_dropped offset exceeds i32")?;
+            cur = cur
+                .checked_add(module.elem_segs.len().max(1))
+                .ok_or("x64: Ctx size overflow")?;
+            if cur > MAX_CTX_BYTES {
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
+            }
+            Some(off)
+        } else {
+            None
+        };
+        let mut ci_tables = ci_tables;
+        for (ci_sig, ci_lay) in module.ci_sigs.iter().zip(&mut ci_tables) {
+            if ci_sig.is_dynamic {
+                ci_lay.dyn_table_desc_off = dyn_tables[&ci_sig.table].0;
+                ci_lay.canon_sig = ci_sig.canon_sig;
+            }
+        }
         let tag_layouts = (0..module.tags.len() as u32)
             .map(|t| module.tag_payload_layout(t))
             .collect();
@@ -280,7 +358,13 @@ impl CtxLayout {
                 && !module.memory64
                 && module.memory.is_some(),
             global_offs,
+            table_lens: module.table_lens.clone(),
             extern_tables,
+            dyn_tables,
+            data_dropped_off,
+            elem_dropped_off,
+            func_sig_ro_off: 0,
+            func_addr_ro_off: 0,
             extra_mem_offs,
             extra_mem_is64,
             exn_state_off,
@@ -714,6 +798,7 @@ fn build_shared_rodata(
                     X64ConstVal::F32(b) => u64::from(b),
                     X64ConstVal::F64(b) => b,
                     X64ConstVal::RefNull => 0,
+                    X64ConstVal::FuncRef(f) => u64::from(f) + 1,
                     X64ConstVal::V128(_) => continue,
                 };
                 get_global_items.push((noff, nlen, kind, 1u8, 0i32, bits));
@@ -771,9 +856,13 @@ fn build_shared_rodata(
     //    lengths do not shift `ci_tables` offsets or invalidate incremental function caches).
     let mut ci_tables = Vec::with_capacity(module.ci_sigs.len());
     for ci in &module.ci_sigs {
-        let bytes = (ci.span as usize)
-            .checked_mul(4)
-            .ok_or("x64: call_indirect table size overflow")?;
+        let bytes = if ci.is_dynamic {
+            0
+        } else {
+            (ci.span as usize)
+                .checked_mul(4)
+                .ok_or("x64: call_indirect table size overflow")?
+        };
         let ro_off = if bytes == 0 {
             0
         } else {
@@ -784,10 +873,25 @@ fn build_shared_rodata(
             min_slot: ci.min_slot,
             span: ci.span,
             rodata_off: ro_off,
+            dyn_table_desc_off: -1,
+            canon_sig: ci.canon_sig,
         });
     }
 
-    // 9. Active data segment payloads (`WT_DATA`), counted in `MAX_TOTAL_RODATA_BYTES`.
+    // 8b. Dynamic funcref `call_indirect` function signature & address tables (only when `uses_dyn_ci`).
+    let (func_sig_ro_off, func_addr_ro_off) = if module.uses_dyn_ci {
+        let n_funcs = module.func_canon_sig.len();
+        let sig_off = rb.align(4)?;
+        for &cs in &module.func_canon_sig {
+            rb.push_u32(cs)?;
+        }
+        let addr_off = rb.push_zeros(4, n_funcs * 4)?;
+        (sig_off, addr_off)
+    } else {
+        (0, 0)
+    };
+
+    // 9. Active & passive data segment payloads (`WT_DATA`), counted in `MAX_TOTAL_RODATA_BYTES`.
     let mut data_segs = Vec::with_capacity(module.active_data_segs.len());
     for (i, &(mem_idx, mem_off, di)) in module.active_data_segs.iter().enumerate() {
         if (i & 1023) == 1023 {
@@ -804,6 +908,81 @@ fn build_shared_rodata(
         data_segs.push((mem_idx, mem_off, ro_off, len));
     }
 
+    // 9b. Passive data descriptor table (8 bytes per data segment: `i32 rel_off, u32 byte_len`).
+    let passive_data_table_off = if module.uses_bulk_data && module.data_seg_count > 0 {
+        let mut passive_entries: Vec<(u32, u32)> = vec![(empty_str_off, 0); module.data_seg_count];
+        for (i, &di) in module.passive_data_segs.iter().enumerate() {
+            if (i & 1023) == 1023 {
+                budget.check_deadline()?;
+            }
+            let seg = &decoded.data[di];
+            let payload = &decoded.bytes[seg.bytes.start..seg.bytes.end];
+            let len = u32::try_from(payload.len()).map_err(|_| "x64: data segment exceeds u32")?;
+            let ro_off = if payload.is_empty() {
+                empty_str_off
+            } else {
+                rb.push_bytes(1, payload)?
+            };
+            passive_entries[di] = (ro_off, len);
+        }
+        let tbl_off = rb.align(8)?;
+        for &(ro_off, len) in &passive_entries {
+            let rel = (ro_off as i64 - tbl_off as i64) as i32;
+            rb.push_u32(rel as u32)?;
+            rb.push_u32(len)?;
+        }
+        tbl_off
+    } else {
+        0
+    };
+
+    // 9c. Active dynamic-table element initializers & passive element descriptor table
+    //     (8 bytes per element segment: `i32 rel_off, u32 elem_len`, payloads stored as `u32`).
+    let mut active_dyn_elem_inits = Vec::new();
+    let mut passive_elem_entries: Vec<(u32, u32)> = if module.uses_bulk_elem {
+        vec![(empty_str_off, 0); module.elem_segs.len()]
+    } else {
+        Vec::new()
+    };
+    for (ei, seg) in module.elem_segs.iter().enumerate() {
+        let need_active_dyn = seg
+            .active_target
+            .is_some_and(|(tbl, _)| module.dyn_tables.contains_key(&tbl));
+        let need_passive = module.uses_bulk_elem && seg.is_passive;
+        if !need_active_dyn && !need_passive {
+            continue;
+        }
+        let len = u32::try_from(seg.entries.len()).map_err(|_| "x64: elem segment exceeds u32")?;
+        let ro_off = if seg.entries.is_empty() {
+            empty_str_off
+        } else {
+            let off = rb.align(4)?;
+            for &enc in &seg.entries {
+                rb.push_u32(enc)?;
+            }
+            off
+        };
+        if let Some((tbl, dst_off)) = seg.active_target
+            && need_active_dyn
+        {
+            active_dyn_elem_inits.push((tbl, dst_off, ro_off, len));
+        }
+        if need_passive {
+            passive_elem_entries[ei] = (ro_off, len);
+        }
+    }
+    let elem_seg_table_off = if module.uses_bulk_elem && !module.elem_segs.is_empty() {
+        let tbl_off = rb.align(8)?;
+        for &(ro_off, len) in &passive_elem_entries {
+            let rel = (ro_off as i64 - tbl_off as i64) as i32;
+            rb.push_u32(rel as u32)?;
+            rb.push_u32(len)?;
+        }
+        tbl_off
+    } else {
+        0
+    };
+
     budget.charge_rodata(rb.buf.len())?;
 
     let tables = RuntimeTables {
@@ -818,6 +997,11 @@ fn build_shared_rodata(
         set_global_count,
         data_segs,
         v128_global_inits,
+        passive_data_table_off,
+        elem_seg_table_off,
+        active_dyn_elem_inits,
+        func_sig_ro_off,
+        func_addr_ro_off,
     };
 
     Ok(SharedRodata {
@@ -1142,6 +1326,9 @@ fn val_body_entry_from_summary(
         imm_elems: admit.imm_elems,
         saw_data_count_op: admit.saw_data_count_op,
         uses_exceptions: admit.uses_exceptions,
+        uses_bulk_data: admit.uses_bulk_data,
+        uses_bulk_elem: admit.uses_bulk_elem,
+        dyn_table_ops: admit.dyn_table_ops,
         sig_arity: admit.sig_arity as u32,
         br_table_entries: admit.br_table_entries as u32,
         g_reads: admit.g_reads,
@@ -1173,7 +1360,7 @@ fn compile_wasm_to_x64_so_inner(
     let t0 = Instant::now();
     let mut vlimits = x64_validate_limits();
     vlimits.compile_threads = if wasm.len() >= 256 * 1024 {
-        resolve_jobs(opts.jobs).min(16)
+        resolve_jobs(opts.jobs).min(8)
     } else {
         1
     };
@@ -1359,8 +1546,17 @@ fn compile_wasm_to_x64_so_inner(
             X64CompileError::AdmissionRejected(e)
         }
     })?;
+    let mut ci_tables = ci_tables;
+    for (ci_sig, ci_lay) in module.ci_sigs.iter().zip(&mut ci_tables) {
+        if ci_sig.is_dynamic {
+            ci_lay.dyn_table_desc_off = preliminary_layout.dyn_tables[&ci_sig.table].0;
+            ci_lay.canon_sig = ci_sig.canon_sig;
+        }
+    }
     let layout = CtxLayout {
         ci_tables,
+        func_sig_ro_off: tables.func_sig_ro_off,
+        func_addr_ro_off: tables.func_addr_ro_off,
         ..preliminary_layout
     };
 
@@ -1670,6 +1866,9 @@ fn compile_wasm_to_x64_so_inner(
                                 imm_elems: 0,
                                 saw_data_count_op: false,
                                 uses_exceptions: false,
+                                uses_bulk_data: false,
+                                uses_bulk_elem: false,
+                                dyn_table_ops: Vec::new(),
                                 sig_arity: 0,
                                 br_table_entries: 0,
                                 g_reads: Vec::new(),
@@ -2768,7 +2967,7 @@ fn compile_wasm_to_x64_so_inner(
 
         // 6e. Patch `call_indirect` dispatch tables (`target_vaddr - table_base_vaddr`).
         for (ci_sig, ci_lay) in module.ci_sigs.iter().zip(&layout.ci_tables) {
-            if ci_lay.span == 0 {
+            if ci_lay.dyn_table_desc_off >= 0 || ci_lay.span == 0 {
                 continue;
             }
             let table_base_vaddr = ro_vaddr
@@ -2798,6 +2997,21 @@ fn compile_wasm_to_x64_so_inner(
                     "call_indirect target disp cannot collide with 0 sentinel"
                 );
                 rodata[entry_off..entry_off + 4].copy_from_slice(&disp.to_le_bytes());
+            }
+        }
+        // 6e2. Patch dynamic `call_indirect` function address table (`target_vaddr - func_addr_base_vaddr`).
+        if module.uses_dyn_ci {
+            let base_va = ro_vaddr
+                .checked_add(u64::from(layout.func_addr_ro_off))
+                .ok_or_else(|| X64CompileError::Failed("x64: func_addr vaddr overflow".into()))?;
+            for (fi, &target_off) in func_text_offs.iter().enumerate() {
+                let target_va = tx_vaddr.checked_add(target_off).ok_or_else(|| {
+                    X64CompileError::Failed("x64: func_addr target vaddr overflow".into())
+                })?;
+                let disp = i32::try_from(i128::from(target_va) - i128::from(base_va))
+                    .map_err(|_| X64CompileError::Failed("x64: func_addr rel32 overflow".into()))?;
+                let pos = (layout.func_addr_ro_off as usize) + fi * 4;
+                rodata[pos..pos + 4].copy_from_slice(&disp.to_le_bytes());
             }
         }
 

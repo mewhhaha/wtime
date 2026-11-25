@@ -24,27 +24,34 @@ validator and compiles it ahead of time through one of four backends:
   with zero external compilers, zero subprocesses, and zero `libc`/`DT_NEEDED`
   runtime dependencies. Supports `memory32`, `memory64` (with 1-branch
   wrap-proof bounds checks), `multi-memory` (up to 64 extra memories),
+  full passive/declarative bulk memory & table ops (`memory.init`, `data.drop`,
+  `table.init`, `elem.drop`, `table.copy`, `table.grow`, `table.size`,
+  `table.fill`, `ref.func`, `ref.null func`, dynamic `call_indirect` & growable
+  `funcref`/`externref` tables with zero overhead on static modules),
   `wide-arithmetic` (`0xfc13..=0xfc16`), `exception_handling` (`try_table`/
   `throw`/`throw_ref`/`exnref`), `tail_call` (`return_call` / `return_call_indirect`
   with O(1) frame reuse), all 236 fixed-width 128-bit Wasm SIMD opcodes + all
   20 `relaxed_simd` opcodes, `.delta` incremental cache sidecars, and
-  standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE + Goose Ryū float/bench
-  imports (with zero signal handlers in `--blot-cdylib`). See
+  standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE + Goose Ryū float/OS/search
+  sandbox imports (`env::gs_os_*`, `env::gs_find_*`, `--allow-files`, `--allow-env`,
+  `openat2` + `RESOLVE_BENEATH` + `O_NOFOLLOW`, zero signal handlers in
+  `--blot-cdylib`). See
   [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md)
   for the exact admission, ABI, stack, signal, and CET `rdsspq` contract.
 - **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) multi-core
-  ARMv8-A backend (`--jobs`) with full 236+20 NEON SIMD, `wide-arithmetic`,
-  `multi-memory`, `exception_handling`, O(1)-stack `tail_call`,
-  and `memory64` parity, per-function incremental caching (`<cache>/a64-inc/` +
-  companion `.vidx` incremental validation, byte-for-byte ELF identical to cold
-  builds), standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE (`memory32`
-  only, zero signal handlers in `--blot-cdylib`) + WASI/Goose/Ryū float runtime
-  parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]` addressing,
-  `val_upper32_zero` redundant-`uxtw` elision, shifted-`ADD`/`SUB` multiply
-  strength reduction, cold-block sinking, and `madd`/`msub` fusion, emitting
-  Linux AArch64 ELF64 shared libraries (Blot ABI 8) and static executables with
-  zero external compilers or cross-toolchains.
+  ARMv8-A backend (`--jobs`) with full 236+20 NEON SIMD, passive/declarative
+  bulk memory & table ops, `wide-arithmetic`, `multi-memory`, `exception_handling`,
+  O(1)-stack `tail_call`, and `memory64` parity, per-function incremental caching
+  (`<cache>/a64-inc/` + companion `.vidx` incremental validation, byte-for-byte
+  ELF identical to cold builds), standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page
+  BCE (`memory32` only, zero signal handlers in `--blot-cdylib`) + WASI/Goose/Ryū/
+  OS-sandbox runtime parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]`
+  addressing, `val_upper32_zero` redundant-`uxtw` elision, shifted-`ADD`/`SUB`
+  multiply strength reduction, cold-block sinking, and `madd`/`msub` fusion,
+  emitting Linux AArch64 ELF64 shared libraries (Blot ABI 8) and static
+  executables with zero external compilers or cross-toolchains (tested natively
+  on `ubuntu-24.04-arm` in CI).
 
 Nothing is JIT-compiled at run time.
 

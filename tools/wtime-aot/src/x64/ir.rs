@@ -589,6 +589,49 @@ pub enum Op {
         val: Val,
         len: Val,
     },
+    /// `memory.init data mem` (`0xfc08`).
+    MemInit {
+        data: u32,
+        mem: u32,
+        dst: Val,
+        src: Val,
+        len: Val,
+    },
+    /// `data.drop data` (`0xfc09`).
+    DataDrop(u32),
+    /// `table.init elem table` (`0xfc0c`).
+    TableInit {
+        elem: u32,
+        table: u32,
+        dst: Val,
+        src: Val,
+        len: Val,
+    },
+    /// `elem.drop elem` (`0xfc0d`).
+    ElemDrop(u32),
+    /// `table.copy dst_table src_table` (`0xfc0e`).
+    TableCopy {
+        dst_table: u32,
+        src_table: u32,
+        dst: Val,
+        src: Val,
+        len: Val,
+    },
+    /// `table.grow table` (`0xfc0f`): `(init_val: i64, delta: i32) -> i32`.
+    TableGrow {
+        table: u32,
+        init: Val,
+        delta: Val,
+    },
+    /// `table.size table` (`0xfc10`) -> `i32`.
+    TableSize(u32),
+    /// `table.fill table` (`0xfc11`): `(dst: i32, val: i64, len: i32)`.
+    TableFill {
+        table: u32,
+        dst: Val,
+        val: Val,
+        len: Val,
+    },
     /// Inline small constant-length bulk copy (`len <= 64`, zero GP clobbers).
     MemCopyConst {
         dst: Val,
@@ -766,6 +809,13 @@ impl Op {
             | Op::MemGrowIdx { .. }
             | Op::MemCopyIdx { .. }
             | Op::MemFillIdx { .. }
+            | Op::MemInit { .. }
+            | Op::DataDrop(_)
+            | Op::TableInit { .. }
+            | Op::ElemDrop(_)
+            | Op::TableCopy { .. }
+            | Op::TableGrow { .. }
+            | Op::TableFill { .. }
             | Op::MemCopyConst { .. }
             | Op::MemFillConst { .. }
             | Op::MemByteBlur3Div { .. }
@@ -794,6 +844,9 @@ impl Op {
             | Op::GlobalGet(_)
             | Op::MemSize
             | Op::MemSizeIdx(_)
+            | Op::DataDrop(_)
+            | Op::ElemDrop(_)
+            | Op::TableSize(_)
             | Op::ExnGetActive
             | Op::ExnClearActive
             | Op::Trap(_) => {}
@@ -861,6 +914,9 @@ impl Op {
             | Op::F32Bin(_, a, b)
             | Op::F64Bin(_, a, b)
             | Op::TableSet { idx: a, val: b, .. }
+            | Op::TableGrow {
+                init: a, delta: b, ..
+            }
             | Op::Store {
                 addr: a, val: b, ..
             }
@@ -907,12 +963,18 @@ impl Op {
                 f(tv);
                 f(fv);
             }
-            Op::MemCopy { dst, src, len } | Op::MemCopyIdx { dst, src, len, .. } => {
+            Op::MemCopy { dst, src, len }
+            | Op::MemCopyIdx { dst, src, len, .. }
+            | Op::MemInit { dst, src, len, .. }
+            | Op::TableInit { dst, src, len, .. }
+            | Op::TableCopy { dst, src, len, .. } => {
                 f(dst);
                 f(src);
                 f(len);
             }
-            Op::MemFill { dst, val, len } | Op::MemFillIdx { dst, val, len, .. } => {
+            Op::MemFill { dst, val, len }
+            | Op::MemFillIdx { dst, val, len, .. }
+            | Op::TableFill { dst, val, len, .. } => {
                 f(dst);
                 f(val);
                 f(len);
@@ -1877,7 +1939,9 @@ fn block_type_tys(module: &X64Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)
         Immediate::Block(-3) => (vec![], vec![Ty::F32]),
         Immediate::Block(-4) => (vec![], vec![Ty::F64]),
         Immediate::Block(-5) => (vec![], vec![Ty::V128]),
-        Immediate::Block(-17) | Immediate::Block(-23) => (vec![], vec![Ty::I64]),
+        Immediate::Block(-16) | Immediate::Block(-17) | Immediate::Block(-23) => {
+            (vec![], vec![Ty::I64])
+        }
         Immediate::BlockType(t) => (vec![], vec![Ty::from_val(*t)]),
         Immediate::Block(i) if *i >= 0 => {
             let t = module
@@ -2944,6 +3008,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                             b.emit(Ty::V128, Op::ConstV128(idx))
                         }
                         X64ConstVal::RefNull => b.const_i64(0),
+                        X64ConstVal::FuncRef(f) => b.const_i64(i64::from(f) + 1),
                     }
                 } else {
                     b.emit(Ty::from_val(vt), Op::GlobalGet(x as u32))
@@ -2964,7 +3029,8 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
             }
             0x25 => {
                 let t = imm_idx()?;
-                if !module.mut_extern_tables.contains_key(&t) {
+                if !module.mut_extern_tables.contains_key(&t) && !module.dyn_tables.contains_key(&t)
+                {
                     return Err(format!("table.get on unsupported table {t}"));
                 }
                 let idx = stack.pop().ok_or("table.get idx")?;
@@ -2973,7 +3039,8 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
             }
             0x26 => {
                 let t = imm_idx()?;
-                if !module.mut_extern_tables.contains_key(&t) {
+                if !module.mut_extern_tables.contains_key(&t) && !module.dyn_tables.contains_key(&t)
+                {
                     return Err(format!("table.set on unsupported table {t}"));
                 }
                 let val = stack.pop().ok_or("table.set val")?;
@@ -2988,6 +3055,11 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 let v = stack.pop().ok_or("ref.is_null")?;
                 let r = b.emit(Ty::I32, Op::I64Eqz(v));
                 stack.push(r);
+            }
+            0xd2 => {
+                let f = imm_idx()?;
+                let v = b.const_i64(i64::from(f) + 1);
+                stack.push(v);
             }
             0x28..=0x35 | 0xfd00..=0xfd0a | 0xfd5c | 0xfd5d => {
                 let Immediate::MemArg { memory, offset, .. } = insn.immediate else {
@@ -3248,6 +3320,25 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 let r = b.emit(Ty::F64, Op::ConstF64(v));
                 stack.push(r);
             }
+            0xfc08 => {
+                let Immediate::Pair(data, mem) = insn.immediate else {
+                    return Err("memory.init immediate".into());
+                };
+                let len = stack.pop().ok_or("minit len")?;
+                let src = stack.pop().ok_or("minit src")?;
+                let dst = stack.pop().ok_or("minit dst")?;
+                b.emit_void(Op::MemInit {
+                    data,
+                    mem,
+                    dst,
+                    src,
+                    len,
+                });
+            }
+            0xfc09 => {
+                let data = imm_idx()?;
+                b.emit_void(Op::DataDrop(data));
+            }
             0xfc0a => {
                 let (dst_mem, src_mem) = match insn.immediate {
                     Immediate::Pair(d, s) => (d, s),
@@ -3316,6 +3407,72 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 } else {
                     b.emit_void(Op::MemFillIdx { mem, dst, val, len });
                 }
+            }
+            0xfc0c => {
+                let Immediate::Pair(elem, table) = insn.immediate else {
+                    return Err("table.init immediate".into());
+                };
+                let len = stack.pop().ok_or("tinit len")?;
+                let src = stack.pop().ok_or("tinit src")?;
+                let dst = stack.pop().ok_or("tinit dst")?;
+                b.emit_void(Op::TableInit {
+                    elem,
+                    table,
+                    dst,
+                    src,
+                    len,
+                });
+            }
+            0xfc0d => {
+                let elem = imm_idx()?;
+                b.emit_void(Op::ElemDrop(elem));
+            }
+            0xfc0e => {
+                let Immediate::Pair(dst_table, src_table) = insn.immediate else {
+                    return Err("table.copy immediate".into());
+                };
+                let len = stack.pop().ok_or("tcopy len")?;
+                let src = stack.pop().ok_or("tcopy src")?;
+                let dst = stack.pop().ok_or("tcopy dst")?;
+                b.emit_void(Op::TableCopy {
+                    dst_table,
+                    src_table,
+                    dst,
+                    src,
+                    len,
+                });
+            }
+            0xfc0f => {
+                let table = imm_idx()?;
+                let delta = stack.pop().ok_or("tgrow delta")?;
+                let init = stack.pop().ok_or("tgrow init")?;
+                let r = b.emit(Ty::I32, Op::TableGrow { table, init, delta });
+                stack.push(r);
+            }
+            0xfc10 => {
+                let table = imm_idx()?;
+                let r = if b.const_fold && !module.dyn_tables.contains_key(&table) {
+                    let len = *module
+                        .table_lens
+                        .get(table as usize)
+                        .ok_or("table.size index")?;
+                    b.const_i32(len as i32)
+                } else {
+                    b.emit(Ty::I32, Op::TableSize(table))
+                };
+                stack.push(r);
+            }
+            0xfc11 => {
+                let table = imm_idx()?;
+                let len = stack.pop().ok_or("tfill len")?;
+                let val = stack.pop().ok_or("tfill val")?;
+                let dst = stack.pop().ok_or("tfill dst")?;
+                b.emit_void(Op::TableFill {
+                    table,
+                    dst,
+                    val,
+                    len,
+                });
             }
             0xfc13 => {
                 // i64.add128(a_lo, a_hi, b_lo, b_hi) -> (lo, hi)
@@ -4321,6 +4478,88 @@ pub fn optimize_ir_with_budget_and_scratch(
             }
             if let Some(t) = fused {
                 bb.term = t;
+            }
+        }
+        // Pass 1c: Fold constant `Term::CmpBranch` (e.g. rotated loop entry guard `cmp $-1, 2`) -> `Jump`.
+        if let Term::CmpBranch {
+            kind,
+            a,
+            b,
+            then_bb,
+            then_args,
+            else_bb,
+            else_args,
+        } = bb.term
+        {
+            let (ep_a, idx_a) = def_stamp[a.0 as usize];
+            let ca = (ep_a == cur_epoch).then(|| bb.insts[idx_a as usize].op);
+            let eval_cmp_i32 = |op: CmpOp, x: i32, y: i32| match op {
+                CmpOp::Eq => x == y,
+                CmpOp::Ne => x != y,
+                CmpOp::LtS => x < y,
+                CmpOp::LtU => (x as u32) < (y as u32),
+                CmpOp::GtS => x > y,
+                CmpOp::GtU => (x as u32) > (y as u32),
+                CmpOp::LeS => x <= y,
+                CmpOp::LeU => (x as u32) <= (y as u32),
+                CmpOp::GeS => x >= y,
+                CmpOp::GeU => (x as u32) >= (y as u32),
+            };
+            let eval_cmp_i64 = |op: CmpOp, x: i64, y: i64| match op {
+                CmpOp::Eq => x == y,
+                CmpOp::Ne => x != y,
+                CmpOp::LtS => x < y,
+                CmpOp::LtU => (x as u64) < (y as u64),
+                CmpOp::GtS => x > y,
+                CmpOp::GtU => (x as u64) > (y as u64),
+                CmpOp::LeS => x <= y,
+                CmpOp::LeU => (x as u64) <= (y as u64),
+                CmpOp::GeS => x >= y,
+                CmpOp::GeU => (x as u64) >= (y as u64),
+            };
+            let known = match (kind, ca) {
+                (CmpBranchKind::I32Imm(op, imm), Some(Op::ConstI32(x))) => {
+                    Some(eval_cmp_i32(op, x, imm))
+                }
+                (CmpBranchKind::I64Imm(op, imm), Some(Op::ConstI64(x))) => {
+                    Some(eval_cmp_i64(op, x, i64::from(imm)))
+                }
+                (CmpBranchKind::I32(op), Some(Op::ConstI32(x))) => {
+                    let (ep_b, idx_b) = def_stamp[b.0 as usize];
+                    if ep_b == cur_epoch
+                        && let Op::ConstI32(y) = bb.insts[idx_b as usize].op
+                    {
+                        Some(eval_cmp_i32(op, x, y))
+                    } else {
+                        None
+                    }
+                }
+                (CmpBranchKind::I64(op), Some(Op::ConstI64(x))) => {
+                    let (ep_b, idx_b) = def_stamp[b.0 as usize];
+                    if ep_b == cur_epoch
+                        && let Op::ConstI64(y) = bb.insts[idx_b as usize].op
+                    {
+                        Some(eval_cmp_i64(op, x, y))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(take_then) = known {
+                bb.term = if take_then {
+                    dropped_preds.push(else_bb);
+                    Term::Jump {
+                        target: then_bb,
+                        args: then_args,
+                    }
+                } else {
+                    dropped_preds.push(then_bb);
+                    Term::Jump {
+                        target: else_bb,
+                        args: else_args,
+                    }
+                };
             }
         }
     }

@@ -10,8 +10,10 @@ use super::runtime::{RuntimeTables, RuntimeTestHooks};
 use super::{
     CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
     GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE,
-    INTERNAL_EXN_SIGNAL, OFF_EXEC_ARGC, OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_EXIT_CODE,
-    OFF_EXEC_MEM_LIMIT, OFF_EXEC_TIMING_PATH, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
+    HELPER_STANDALONE_FS, HELPER_STANDALONE_RESERVE_COPY, INTERNAL_EXN_SIGNAL, OFF_EXEC_ARGC,
+    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_ENVP, OFF_EXEC_EXIT_CODE, OFF_EXEC_MEM_LIMIT,
+    OFF_EXEC_OUTPUT_LIMIT, OFF_EXEC_POLICY_PTR, OFF_EXEC_PROG_NAME, OFF_EXEC_RESERVING,
+    OFF_EXEC_TIMING_PATH, OFF_EXEC_WRITTEN, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
     OFF_HANDLE_ALLOC_BYTES, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES,
     OFF_STACK_FLOOR, RodataConsts, TRAP_EXIT, TRAP_HOST, TRAP_MESSAGES, TRAP_OOB,
     TRAP_UNSUPPORTED_ISA,
@@ -20,13 +22,50 @@ use super::{
 const SYS_READ: u32 = 0;
 const SYS_WRITE: u32 = 1;
 const SYS_CLOSE: u32 = 3;
+const SYS_FSTAT: u32 = 5;
 const SYS_MMAP: u32 = 9;
 const SYS_MPROTECT: u32 = 10;
+const SYS_MUNMAP: u32 = 11;
 const SYS_RT_SIGACTION: u32 = 13;
 const SYS_RT_SIGRETURN: u32 = 15;
+const SYS_GETCWD: u32 = 79;
 const SYS_CLOCK_GETTIME: u32 = 228;
 const SYS_EXIT_GROUP: u32 = 231;
 const SYS_OPENAT: u32 = 257;
+const SYS_READLINKAT: u32 = 267;
+const SYS_OPENAT2: u32 = 437;
+
+const AT_FDCWD: i64 = -100;
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 1;
+const O_CREAT: u32 = 0x40;
+const O_TRUNC: u32 = 0x200;
+const O_APPEND: u32 = 0x400;
+const O_DIRECTORY_X64: u32 = 0x10000;
+const O_NOFOLLOW_X64: u32 = 0x20000;
+const O_CLOEXEC: u32 = 0x80000;
+const O_PATH: u32 = 0x200000;
+const RESOLVE_BENEATH: u64 = 0x08;
+const X64_STAT_OFF_MODE: i32 = 24;
+const X64_STAT_OFF_SIZE: i32 = 48;
+
+/// Shared standalone policy slab layout (`64 KiB` mmap'd once when `--allow-files` or `--allow-env` is given).
+pub(crate) const POLICY_SLAB_BYTES: u64 = 65_536;
+pub(crate) const POLICY_MAX_ENV: u64 = 64;
+pub(crate) const POLICY_MAX_DIRS: u64 = 32;
+pub(crate) const POLICY_OFF_ALLOW_ALL_ENV: i32 = 0;
+pub(crate) const POLICY_OFF_ENV_COUNT: i32 = 8;
+pub(crate) const POLICY_OFF_DIR_COUNT: i32 = 16;
+pub(crate) const POLICY_OFF_CWD_LEN: i32 = 24;
+pub(crate) const POLICY_OFF_ENV_PTRS: i32 = 32;
+pub(crate) const POLICY_OFF_DIR_FDS: i32 = 544;
+pub(crate) const POLICY_OFF_DIR_PATH_LENS: i32 = 800;
+pub(crate) const POLICY_OFF_CWD_BUF: i32 = 1056;
+pub(crate) const POLICY_OFF_DIR_PATHS: i32 = 5152;
+pub(crate) const POLICY_OFF_SCRATCH_PATH: i32 = 37_920;
+pub(crate) const POLICY_OFF_OPEN_HOW: i32 = 42_016;
+pub(crate) const POLICY_OFF_STAT_BUF: i32 = 42_048;
+pub(crate) const DEFAULT_OUTPUT_LIMIT: u64 = 256 << 20;
 
 const SIGSEGV: u32 = 11;
 const SA_SIGINFO_RESTORER: u64 = 0x0400_0004; // SA_SIGINFO (0x4) | SA_RESTORER (0x0400_0000)
@@ -182,44 +221,108 @@ pub fn emit_standalone_entry(
     // Save `R12 = argc`, `R13 = argv` before aligning `Rsp`!
     a.mov_rm(true, Gp::R12, Mem::base(Gp::Rsp));
     a.lea(true, Gp::R13, Mem::base_disp(Gp::Rsp, 8));
-    // Align Rsp down to 16 bytes and reserve 160 bytes of local host frame:
-    //   [rsp + 0..16]   = timespec scratch
-    //   [rsp + 16..24]  = t0_ns
-    //   [rsp + 24..32]  = t1_ns
-    //   [rsp + 32..40]  = t2_ns
-    //   [rsp + 40..48]  = timing_path (ptr or 0)
-    //   [rsp + 48..56]  = mem_limit_pages (0 = default)
-    //   [rsp + 56..64]  = guest_argc
-    //   [rsp + 64..72]  = guest_argv
-    //   [rsp + 72..80]  = host_mxcsr
-    //   [rsp + 80..112] = decimal formatting scratch (32 B)
+    // Align Rsp down to 16 bytes and reserve 256 bytes of local host frame:
+    //   [rsp + 0..16]    = timespec scratch
+    //   [rsp + 16..24]   = t0_ns
+    //   [rsp + 24..32]   = t1_ns
+    //   [rsp + 32..40]   = t2_ns
+    //   [rsp + 40..48]   = timing_path (ptr or 0)
+    //   [rsp + 48..56]   = mem_limit_pages (0 = default)
+    //   [rsp + 56..64]   = guest_argc
+    //   [rsp + 64..72]   = guest_argv
+    //   [rsp + 72..80]   = host_mxcsr
+    //   [rsp + 80..112]  = sigaction / decimal formatting scratch (32 B)
+    //   [rsp + 112..120] = envp
+    //   [rsp + 120..128] = prog_name (argv[0] or "program")
+    //   [rsp + 128..136] = output_limit (default 256 MiB)
+    //   [rsp + 136..144] = policy_ptr (0 until --allow-files / --allow-env)
+    //   [rsp + 144..224] = /proc/self/fd/<fd> formatting scratch (80 B)
     a.and_ri(true, Gp::Rsp, -16);
-    a.sub_ri(true, Gp::Rsp, 160);
+    a.sub_ri(true, Gp::Rsp, 256);
     a.stmxcsr(Mem::base_disp(Gp::Rsp, 72));
     a.xor_rr(false, Gp::Rax, Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 40), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 48), Gp::Rax);
-    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 56), Gp::R12);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 56), Gp::Rax);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 64), Gp::R13);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 136), Gp::Rax);
+    a.mov_ri64(Gp::Rax, DEFAULT_OUTPUT_LIMIT);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 128), Gp::Rax);
+    // envp = &argv[argc + 1]
+    a.lea(true, Gp::Rax, Mem::indexed(Gp::R13, Gp::R12, 8, 8));
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 112), Gp::Rax);
+    // prog_name = argc > 0 ? argv[0] : "program"
+    let prog_fallback = a.add_local_rodata(1, b"program\0");
+    let lbl_have_prog = a.new_label();
+    let lbl_prog_set = a.new_label();
+    a.test_rr(true, Gp::R12, Gp::R12);
+    a.jcc(Cond::Ne, lbl_have_prog);
+    a.lea_rip(Gp::Rax, RelocTarget::LocalRodata(prog_fallback));
+    a.jmp(lbl_prog_set);
+    a.bind(lbl_have_prog);
+    a.mov_rm(true, Gp::Rax, Mem::base(Gp::R13));
+    a.bind(lbl_prog_set);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 120), Gp::Rax);
 
     // ---- Step 0: Parse optional host CLI flags before `--` ----
     // Recognizes `--timing-json PATH`, `--memory-limit-pages N`, `--allow-files DIR`,
-    // `--allow-env VAL`, `--time-limit S`, `--output-limit N`, `--stack-limit-mib N`, and `--`.
+    // `--allow-env NAME|*`, `--output-limit N`, `--time-limit S`, `--stack-limit-mib N`, and `--`.
     let lbl_arg_loop = a.new_label();
+    let lbl_arg_rest = a.new_label();
     let lbl_arg_done = a.new_label();
+    let lbl_fail_usage = a.new_label();
+    let lbl_fail_alloc = a.new_label();
+
+    let emit_ensure_policy = |a: &mut Asm| {
+        let lbl_have = a.new_label();
+        let lbl_cwd_lp = a.new_label();
+        let lbl_cwd_done = a.new_label();
+        a.mov_rm(true, Gp::Rbp, Mem::base_disp(Gp::Rsp, 136));
+        a.test_rr(true, Gp::Rbp, Gp::Rbp);
+        a.jcc(Cond::Ne, lbl_have);
+        a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_ri64(Gp::Rsi, POLICY_SLAB_BYTES);
+        a.mov_ri32(Gp::Rdx, PROT_RW);
+        a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+        a.mov_ri64(Gp::R8, u64::MAX);
+        a.xor_rr(false, Gp::R9, Gp::R9);
+        a.mov_ri32(Gp::Rax, SYS_MMAP);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_fail_alloc);
+        a.mov_rr(true, Gp::Rbp, Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::Rsp, 136), Gp::Rbp);
+        // Populate canonical CWD in policy.cwd_buf
+        a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rbp, POLICY_OFF_CWD_BUF));
+        a.mov_ri32(Gp::Rsi, 4096);
+        a.mov_ri32(Gp::Rax, SYS_GETCWD);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, 1);
+        a.jcc(Cond::L, lbl_have);
+        a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+        a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rbp, POLICY_OFF_CWD_BUF));
+        a.bind(lbl_cwd_lp);
+        a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0));
+        a.test_rr(false, Gp::Rax, Gp::Rax);
+        a.jcc(Cond::E, lbl_cwd_done);
+        a.add_ri(true, Gp::Rcx, 1);
+        a.cmp_ri(true, Gp::Rcx, 4095);
+        a.jcc(Cond::B, lbl_cwd_lp);
+        a.bind(lbl_cwd_done);
+        a.mov_mr(true, Mem::base_disp(Gp::Rbp, POLICY_OFF_CWD_LEN), Gp::Rcx);
+        a.bind(lbl_have);
+    };
+
     a.mov_ri64(Gp::Rbx, 1); // arg index = 1 (skip argv[0])
     a.bind(lbl_arg_loop);
     a.cmp_rr(true, Gp::Rbx, Gp::R12);
-    a.jcc(Cond::Ae, lbl_arg_done);
+    a.jcc(Cond::Ae, lbl_arg_rest);
     a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
     // Check "--"
     emit_streq_const(&mut a, b"--");
     let lbl_not_sep = a.new_label();
     a.test_rr(false, Gp::Rax, Gp::Rax);
     a.jcc(Cond::E, lbl_not_sep);
-    // Guest args start at argv[rbx+1], guest argc = argc - (rbx + 1), or keep argv[0] slot:
-    // Point guest_argv to &argv[rbx] (overwrite argv[rbx] with argv[0]? No, don't mutate argv;
-    // simply set guest_argc = argc - (rbx + 1), guest_argv = &argv[rbx + 1]).
     a.add_ri(true, Gp::Rbx, 1);
     a.mov_rr(true, Gp::Rax, Gp::R12);
     a.sub_rr(true, Gp::Rax, Gp::Rbx);
@@ -236,7 +339,7 @@ pub fn emit_standalone_entry(
     a.jcc(Cond::E, lbl_not_tj);
     a.add_ri(true, Gp::Rbx, 1);
     a.cmp_rr(true, Gp::Rbx, Gp::R12);
-    a.jcc(Cond::Ae, lbl_arg_done);
+    a.jcc(Cond::Ae, lbl_fail_usage);
     a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 40), Gp::Rax);
     a.add_ri(true, Gp::Rbx, 1);
@@ -250,7 +353,7 @@ pub fn emit_standalone_entry(
     a.jcc(Cond::E, lbl_not_ml);
     a.add_ri(true, Gp::Rbx, 1);
     a.cmp_rr(true, Gp::Rbx, Gp::R12);
-    a.jcc(Cond::Ae, lbl_arg_done);
+    a.jcc(Cond::Ae, lbl_fail_usage);
     a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
     emit_parse_u64(&mut a);
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 48), Gp::Rax);
@@ -258,14 +361,156 @@ pub fn emit_standalone_entry(
     a.jmp(lbl_arg_loop);
 
     a.bind(lbl_not_ml);
-    // Skip known 2-token runner flags (`--allow-files`, `--allow-env`, `--time-limit`, `--output-limit`, `--stack-limit-mib`)
-    for flag in [
-        b"--allow-files".as_slice(),
-        b"--allow-env",
-        b"--time-limit",
-        b"--output-limit",
-        b"--stack-limit-mib",
-    ] {
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_streq_const(&mut a, b"--output-limit");
+    let lbl_not_ol = a.new_label();
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_not_ol);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.cmp_rr(true, Gp::Rbx, Gp::R12);
+    a.jcc(Cond::Ae, lbl_fail_usage);
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_parse_u64(&mut a);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 128), Gp::Rax);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.jmp(lbl_arg_loop);
+
+    a.bind(lbl_not_ol);
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_streq_const(&mut a, b"--allow-files");
+    let lbl_not_af = a.new_label();
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_not_af);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.cmp_rr(true, Gp::Rbx, Gp::R12);
+    a.jcc(Cond::Ae, lbl_fail_usage);
+    emit_ensure_policy(&mut a); // Rbp = policy_ptr
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rbp, POLICY_OFF_DIR_COUNT));
+    a.cmp_ri(true, Gp::Rax, POLICY_MAX_DIRS as i32);
+    a.jcc(Cond::Ae, lbl_fail_usage);
+    // openat(AT_FDCWD, argv[Rbx], O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)
+    a.mov_ri64(Gp::Rdi, AT_FDCWD as u64);
+    a.mov_rm(true, Gp::Rsi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    a.mov_ri32(Gp::Rdx, O_RDONLY | O_DIRECTORY_X64 | O_CLOEXEC);
+    a.xor_rr(false, Gp::R10, Gp::R10);
+    a.mov_ri32(Gp::Rax, SYS_OPENAT);
+    a.syscall();
+    a.cmp_ri(true, Gp::Rax, 0);
+    a.jcc(Cond::L, lbl_fail_usage);
+    a.mov_rr(true, Gp::R14, Gp::Rax); // dirfd in R14
+    // Build "/proc/self/fd/<dirfd>\0" at [rsp + 144..]
+    let pfd_prefix = a.add_local_rodata(1, b"/proc/self/fd/");
+    a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(pfd_prefix));
+    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 144));
+    for i in 0..14i32 {
+        a.movzx_rm8(false, Gp::Rax, Mem::base_disp(Gp::Rsi, i));
+        a.mov_mr8(Mem::base_disp(Gp::Rdi, i), Gp::Rax);
+    }
+    emit_fmt_u64_to_buf(&mut a, Gp::R14, 224); // Rsi = digits ptr, Rdx = digits len
+    a.lea(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 158));
+    let lbl_cp_fd = a.new_label();
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    a.bind(lbl_cp_fd);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rcx, 1, 0));
+    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+    a.jcc(Cond::B, lbl_cp_fd);
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    a.mov_mr8(Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0), Gp::Rax);
+    // dst_buf = Rbp + POLICY_OFF_DIR_PATHS + (dir_count << 10)
+    a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rbp, POLICY_OFF_DIR_COUNT));
+    a.mov_rr(true, Gp::R9, Gp::R8);
+    a.shl_imm(true, Gp::R9, 10);
+    a.lea(
+        true,
+        Gp::Rdx,
+        Mem::indexed(Gp::Rbp, Gp::R9, 1, POLICY_OFF_DIR_PATHS),
+    );
+    a.mov_ri64(Gp::Rdi, AT_FDCWD as u64);
+    a.lea(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 144));
+    a.mov_ri32(Gp::R10, 1023);
+    a.mov_ri32(Gp::Rax, SYS_READLINKAT);
+    a.syscall();
+    a.cmp_ri(true, Gp::Rax, 1);
+    a.jcc(Cond::L, lbl_fail_usage);
+    // Recompute idx (R8) & dst_buf (Rdx)
+    a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rbp, POLICY_OFF_DIR_COUNT));
+    a.mov_rr(true, Gp::R9, Gp::R8);
+    a.shl_imm(true, Gp::R9, 10);
+    a.lea(
+        true,
+        Gp::Rdx,
+        Mem::indexed(Gp::Rbp, Gp::R9, 1, POLICY_OFF_DIR_PATHS),
+    );
+    // Strip trailing '/' if len > 1 && dst[len - 1] == '/'
+    let lbl_no_trim = a.new_label();
+    a.cmp_ri(true, Gp::Rax, 1);
+    a.jcc(Cond::Le, lbl_no_trim);
+    a.movzx_rm8(false, Gp::Rcx, Mem::indexed(Gp::Rdx, Gp::Rax, 1, -1));
+    a.cmp_ri(false, Gp::Rcx, i32::from(b'/'));
+    a.jcc(Cond::Ne, lbl_no_trim);
+    a.sub_ri(true, Gp::Rax, 1);
+    a.bind(lbl_no_trim);
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    a.mov_mr8(Mem::indexed(Gp::Rdx, Gp::Rax, 1, 0), Gp::Rcx);
+    a.mov_mr(
+        true,
+        Mem::indexed(Gp::Rbp, Gp::R8, 8, POLICY_OFF_DIR_FDS),
+        Gp::R14,
+    );
+    a.mov_mr(
+        true,
+        Mem::indexed(Gp::Rbp, Gp::R8, 8, POLICY_OFF_DIR_PATH_LENS),
+        Gp::Rax,
+    );
+    a.add_ri(true, Gp::R8, 1);
+    a.mov_mr(true, Mem::base_disp(Gp::Rbp, POLICY_OFF_DIR_COUNT), Gp::R8);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.jmp(lbl_arg_loop);
+
+    a.bind(lbl_not_af);
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_streq_const(&mut a, b"--allow-env");
+    let lbl_not_ae = a.new_label();
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_not_ae);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.cmp_rr(true, Gp::Rbx, Gp::R12);
+    a.jcc(Cond::Ae, lbl_fail_usage);
+    emit_ensure_policy(&mut a); // Rbp = policy_ptr
+    a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    emit_streq_const(&mut a, b"*");
+    let lbl_env_one = a.new_label();
+    let lbl_env_done = a.new_label();
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_env_one);
+    a.mov_ri64(Gp::Rax, 1);
+    a.mov_mr(
+        true,
+        Mem::base_disp(Gp::Rbp, POLICY_OFF_ALLOW_ALL_ENV),
+        Gp::Rax,
+    );
+    a.jmp(lbl_env_done);
+    a.bind(lbl_env_one);
+    a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rbp, POLICY_OFF_ENV_COUNT));
+    a.cmp_ri(true, Gp::Rcx, POLICY_MAX_ENV as i32);
+    a.jcc(Cond::Ae, lbl_env_done);
+    a.mov_rm(true, Gp::Rax, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    a.mov_mr(
+        true,
+        Mem::indexed(Gp::Rbp, Gp::Rcx, 8, POLICY_OFF_ENV_PTRS),
+        Gp::Rax,
+    );
+    a.add_ri(true, Gp::Rcx, 1);
+    a.mov_mr(true, Mem::base_disp(Gp::Rbp, POLICY_OFF_ENV_COUNT), Gp::Rcx);
+    a.bind(lbl_env_done);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.jmp(lbl_arg_loop);
+
+    a.bind(lbl_not_ae);
+    // Skip known 2-token runner flags (`--time-limit`, `--stack-limit-mib`)
+    for flag in [b"--time-limit".as_slice(), b"--stack-limit-mib"] {
         a.mov_rm(true, Gp::Rdi, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
         emit_streq_const(&mut a, flag);
         let lbl_next = a.new_label();
@@ -275,6 +520,16 @@ pub fn emit_standalone_entry(
         a.jmp(lbl_arg_loop);
         a.bind(lbl_next);
     }
+
+    a.bind(lbl_arg_rest);
+    // Remaining non-flag args (or 0 if all tokens were host flags).
+    a.cmp_rr(true, Gp::Rbx, Gp::R12);
+    a.cmovcc(Cond::A, true, Gp::Rbx, Gp::R12);
+    a.mov_rr(true, Gp::Rax, Gp::R12);
+    a.sub_rr(true, Gp::Rax, Gp::Rbx);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 56), Gp::Rax);
+    a.lea(true, Gp::Rax, Mem::indexed(Gp::R13, Gp::Rbx, 8, 0));
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 64), Gp::Rax);
     a.bind(lbl_arg_done);
 
     // ---- Step 1: CPUID ISA check (x86-64-v2 + optional x64-v3) ----
@@ -339,7 +594,6 @@ pub fn emit_standalone_entry(
     a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rax);
 
     // ---- Step 3: Allocate Ctx + Guest Stack + Linear Memory ----
-    let lbl_fail_alloc = a.new_label();
     a.xor_rr(false, Gp::Rdi, Gp::Rdi);
     a.mov_ri64(Gp::Rsi, layout.total_bytes as u64);
     a.mov_ri32(Gp::Rdx, PROT_RW);
@@ -373,6 +627,18 @@ pub fn emit_standalone_entry(
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_TIMING_PATH), Gp::Rax);
     a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 48));
     a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_MEM_LIMIT), Gp::Rax);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 112));
+    a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_ENVP), Gp::Rax);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 120));
+    a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_PROG_NAME), Gp::Rax);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 128));
+    a.mov_mr(
+        true,
+        Mem::base_disp(Gp::R15, OFF_EXEC_OUTPUT_LIMIT),
+        Gp::Rax,
+    );
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 136));
+    a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_POLICY_PTR), Gp::Rax);
 
     // Guest stack: 64 KiB guard + 8 MiB RW
     a.xor_rr(false, Gp::Rdi, Gp::Rdi);
@@ -423,7 +689,7 @@ pub fn emit_standalone_entry(
         let lbl_have_lim = a.new_label();
         let lbl_mem_done = a.new_label();
         let default_lim = if module.memory64 {
-            mem_min.max(131_072) // 8 GiB default for memory64
+            mem_min.max(1 << 22) // 256 GiB virtual cap (MAP_NORESERVE; 0 physical RAM until touched)
         } else {
             65_536
         };
@@ -546,6 +812,34 @@ pub fn emit_standalone_entry(
         a.mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 16), Gp::Rax);
         a.mov_ri64(Gp::Rax, EXN_SLAB_BYTES as u64);
         a.mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 24), Gp::Rax);
+    }
+
+    // ---- Step 3a4: Dynamic tables (demand-paged RW mmap, allocated ONLY when `dyn_tables` non-empty) ----
+    for &(desc_off, min_len, max_len) in layout.dyn_tables.values() {
+        let reserve_bytes = if max_len > 0 {
+            ((u64::from(max_len) * 8) + 4095) & !4095
+        } else {
+            0
+        };
+        if reserve_bytes > 0 {
+            a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+            a.mov_ri64(Gp::Rsi, reserve_bytes);
+            a.mov_ri32(Gp::Rdx, PROT_RW);
+            a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+            a.mov_ri64(Gp::R8, u64::MAX);
+            a.xor_rr(false, Gp::R9, Gp::R9);
+            a.mov_ri32(Gp::Rax, SYS_MMAP);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, -4095);
+            a.jcc(Cond::Ae, lbl_fail_alloc);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off), Gp::Rax);
+            a.mov_ri32(Gp::Rax, min_len);
+            a.mov_mr(false, Mem::base_disp(Gp::R15, desc_off + 8), Gp::Rax);
+            a.mov_ri32(Gp::Rax, max_len);
+            a.mov_mr(false, Mem::base_disp(Gp::R15, desc_off + 12), Gp::Rax);
+            a.mov_ri64(Gp::Rax, reserve_bytes);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off + 16), Gp::Rax);
+        }
     }
 
     // ---- Step 3b: Install SIGSEGV guard-page handler (standalone memory32 ONLY) ----
@@ -702,6 +996,18 @@ pub fn emit_standalone_entry(
 
     a.bind(lbl_normal_exit);
     a.mov_rm(false, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_EXEC_EXIT_CODE));
+    a.mov_ri32(Gp::Rax, SYS_EXIT_GROUP);
+    a.syscall();
+    a.ud2();
+
+    a.bind(lbl_fail_usage);
+    let usage_msg = b"invalid standalone runner option or --allow-files directory\n";
+    let usage_off = a.add_local_rodata(1, usage_msg);
+    a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(usage_off));
+    a.mov_ri32(Gp::Rdx, usage_msg.len() as u32);
+    a.mov_ri32(Gp::R8, 2);
+    emit_write_all(&mut a, Gp::R8);
+    a.mov_ri32(Gp::Rdi, 2);
     a.mov_ri32(Gp::Rax, SYS_EXIT_GROUP);
     a.syscall();
     a.ud2();
@@ -1396,7 +1702,608 @@ pub fn emit_standalone_import_trampoline(module: &X64Module, k: usize) -> Result
         }
         ("env", "gs_os_arg_count") => {
             a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_EXEC_ARGC));
+            a.add_ri(true, Gp::Rax, 1); // arg 0 = prog_name, args 1.. = guest argv
             a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+        }
+        ("env", "gs_os_arg") => {
+            // (index: Rdi, control: Rsi) -> ()
+            if ty.params[0] == ValType::I32 {
+                a.movsxd_rr(Gp::Rdi, Gp::Rdi);
+            }
+            zext_param(&mut a, Gp::Rsi, 1);
+            let lbl_noop = a.new_label();
+            let lbl_use_prog = a.new_label();
+            let lbl_got_ptr = a.new_label();
+            let lbl_strlen = a.new_label();
+            let lbl_strlen_done = a.new_label();
+            a.test_rr(true, Gp::Rdi, Gp::Rdi);
+            a.jcc(Cond::L, lbl_noop);
+            a.jcc(Cond::E, lbl_use_prog);
+            a.sub_ri(true, Gp::Rdi, 1);
+            a.cmp_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, OFF_EXEC_ARGC));
+            a.jcc(Cond::Ae, lbl_noop);
+            a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_EXEC_ARGV));
+            a.mov_rm(true, Gp::R8, Mem::indexed(Gp::Rax, Gp::Rdi, 8, 0));
+            a.jmp(lbl_got_ptr);
+            a.bind(lbl_use_prog);
+            a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::R15, OFF_EXEC_PROG_NAME));
+            a.bind(lbl_got_ptr);
+            // strlen(R8) -> Rdx
+            a.xor_rr(false, Gp::Rdx, Gp::Rdx);
+            a.bind(lbl_strlen);
+            a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rdx, 1, 0));
+            a.test_rr(false, Gp::Rax, Gp::Rax);
+            a.jcc(Cond::E, lbl_strlen_done);
+            a.add_ri(true, Gp::Rdx, 1);
+            a.jmp(lbl_strlen);
+            a.bind(lbl_strlen_done);
+            // Call HELPER_STANDALONE_RESERVE_COPY(Rdi=control, Rsi=host_ptr, Rdx=len)
+            a.sub_ri(true, Gp::Rsp, 8);
+            a.mov_rr(true, Gp::Rdi, Gp::Rsi);
+            a.mov_rr(true, Gp::Rsi, Gp::R8);
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.add_ri(true, Gp::Rsp, 8);
+            a.ret();
+            a.bind(lbl_noop);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+        }
+        ("env", "gs_os_getenv") => {
+            // Packed (slice, control) or wide (ptr, len, control) -> i32/i64 (0/1)
+            if ty.params.len() == 2 {
+                // Rdi = packed, Rsi = control -> Rdi=ptr, Rsi=len, Rdx=control
+                zext_param(&mut a, Gp::Rsi, 1);
+                a.mov_rr(true, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+                zext_param(&mut a, Gp::Rdx, 2);
+            }
+            a.push(Gp::Rbx);
+            a.push(Gp::Rbp);
+            a.sub_ri(true, Gp::Rsp, 24); // [rsp+0]=name_host_ptr, [rsp+8]=name_len, [rsp+16]=control (16B aligned!)
+            let lbl_oob = a.new_label();
+            let lbl_ret0 = a.new_label();
+            emit_check_range(&mut a, Gp::Rdi, Gp::Rsi, fixed_mem, lbl_oob);
+            a.lea(true, Gp::R8, Mem::indexed(Gp::R14, Gp::Rdi, 1, 0));
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::R8);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::Rsi);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rdx);
+            // Check policy allowlist
+            a.mov_rm(true, Gp::Rbx, Mem::base_disp(Gp::R15, OFF_EXEC_POLICY_PTR));
+            a.test_rr(true, Gp::Rbx, Gp::Rbx);
+            a.jcc(Cond::E, lbl_ret0);
+            let lbl_allowed = a.new_label();
+            a.mov_rm(
+                true,
+                Gp::Rax,
+                Mem::base_disp(Gp::Rbx, POLICY_OFF_ALLOW_ALL_ENV),
+            );
+            a.test_rr(true, Gp::Rax, Gp::Rax);
+            a.jcc(Cond::Ne, lbl_allowed);
+            a.mov_rm(true, Gp::Rbp, Mem::base_disp(Gp::Rbx, POLICY_OFF_ENV_COUNT));
+            a.xor_rr(false, Gp::R9, Gp::R9); // i = 0
+            let lbl_env_chk = a.new_label();
+            let lbl_env_cmp = a.new_label();
+            let lbl_env_next = a.new_label();
+            a.bind(lbl_env_chk);
+            a.cmp_rr(true, Gp::R9, Gp::Rbp);
+            a.jcc(Cond::Ae, lbl_ret0);
+            a.mov_rm(
+                true,
+                Gp::Rdi,
+                Mem::indexed(Gp::Rbx, Gp::R9, 8, POLICY_OFF_ENV_PTRS),
+            );
+            a.xor_rr(false, Gp::Rcx, Gp::Rcx); // k = 0
+            a.bind(lbl_env_cmp);
+            a.cmp_rr(true, Gp::Rcx, Gp::Rsi);
+            let lbl_env_end = a.new_label();
+            a.jcc(Cond::Ae, lbl_env_end);
+            a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0));
+            a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R8, Gp::Rcx, 1, 0));
+            a.cmp_rr(false, Gp::Rax, Gp::R10);
+            a.jcc(Cond::Ne, lbl_env_next);
+            a.add_ri(true, Gp::Rcx, 1);
+            a.jmp(lbl_env_cmp);
+            a.bind(lbl_env_end);
+            a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0));
+            a.test_rr(false, Gp::Rax, Gp::Rax);
+            a.jcc(Cond::E, lbl_allowed);
+            a.bind(lbl_env_next);
+            a.add_ri(true, Gp::R9, 1);
+            a.jmp(lbl_env_chk);
+
+            // Scan Linux envp for "NAME=VALUE"
+            a.bind(lbl_allowed);
+            a.mov_rm(true, Gp::Rbx, Mem::base_disp(Gp::R15, OFF_EXEC_ENVP));
+            a.test_rr(true, Gp::Rbx, Gp::Rbx);
+            a.jcc(Cond::E, lbl_ret0);
+            a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rsp, 0)); // name_ptr
+            a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 8)); // name_len
+            let lbl_ep_lp = a.new_label();
+            let lbl_ep_cmp = a.new_label();
+            let lbl_ep_next = a.new_label();
+            let lbl_ep_hit = a.new_label();
+            a.bind(lbl_ep_lp);
+            a.mov_rm(true, Gp::Rdi, Mem::base(Gp::Rbx));
+            a.test_rr(true, Gp::Rdi, Gp::Rdi);
+            a.jcc(Cond::E, lbl_ret0);
+            a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+            a.bind(lbl_ep_cmp);
+            a.cmp_rr(true, Gp::Rcx, Gp::Rsi);
+            a.jcc(Cond::Ae, lbl_ep_hit);
+            a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0));
+            a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R8, Gp::Rcx, 1, 0));
+            a.cmp_rr(false, Gp::Rax, Gp::R10);
+            a.jcc(Cond::Ne, lbl_ep_next);
+            a.add_ri(true, Gp::Rcx, 1);
+            a.jmp(lbl_ep_cmp);
+            a.bind(lbl_ep_hit);
+            a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0));
+            a.cmp_ri(false, Gp::Rax, i32::from(b'='));
+            a.jcc(Cond::Ne, lbl_ep_next);
+            // Match! val_ptr = Rdi + Rsi + 1; compute strlen(val_ptr) -> Rdx
+            a.lea(true, Gp::Rsi, Mem::indexed(Gp::Rdi, Gp::Rsi, 1, 1));
+            a.xor_rr(false, Gp::Rdx, Gp::Rdx);
+            let lbl_vlen = a.new_label();
+            let lbl_vlen_done = a.new_label();
+            a.bind(lbl_vlen);
+            a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rsi, Gp::Rdx, 1, 0));
+            a.test_rr(false, Gp::Rax, Gp::Rax);
+            a.jcc(Cond::E, lbl_vlen_done);
+            a.add_ri(true, Gp::Rdx, 1);
+            a.jmp(lbl_vlen);
+            a.bind(lbl_vlen_done);
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 16)); // control
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.mov_ri32(Gp::Rax, 1);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.ret();
+
+            a.bind(lbl_ep_next);
+            a.add_ri(true, Gp::Rbx, 8);
+            a.jmp(lbl_ep_lp);
+
+            a.bind(lbl_ret0);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+
+            a.bind(lbl_oob);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_file_exists") | ("env", "gs_os_is_dir") => {
+            let mode = if fname == "gs_os_file_exists" {
+                0u32
+            } else {
+                1u32
+            };
+            if ty.params.len() == 1 {
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+            }
+            let lbl_oob = a.new_label();
+            emit_check_range(&mut a, Gp::Rdi, Gp::Rsi, fixed_mem, lbl_oob);
+            a.sub_ri(true, Gp::Rsp, 8);
+            a.mov_ri32(Gp::Rdx, mode);
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_FS));
+            a.add_ri(true, Gp::Rsp, 8);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_read_file") => {
+            if ty.params.len() == 2 {
+                zext_param(&mut a, Gp::Rsi, 1);
+                a.mov_rr(true, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+                zext_param(&mut a, Gp::Rdx, 2);
+            }
+            a.push(Gp::Rbx);
+            a.push(Gp::Rbp);
+            // [rsp+0]=control, [rsp+8]=fd, [rsp+16]=buf_ptr, [rsp+24]=buf_cap, [rsp+32]=total, [rsp+40..184]=stat
+            a.sub_ri(true, Gp::Rsp, 200);
+            let lbl_oob = a.new_label();
+            let lbl_ret0 = a.new_label();
+            let lbl_close_ret0 = a.new_label();
+            let lbl_unmap_close_ret0 = a.new_label();
+            emit_check_range(&mut a, Gp::Rdi, Gp::Rsi, fixed_mem, lbl_oob);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rdx); // control
+            // Check re-entrancy after path check (matches goose.rs order: NUL check happens inside FS helper).
+            a.mov_ri32(Gp::Rdx, 2); // mode = open_read
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_FS));
+            let lbl_fs_ok = a.new_label();
+            a.test_rr(false, Gp::R11, Gp::R11);
+            a.jcc(Cond::E, lbl_fs_ok);
+            a.add_ri(true, Gp::Rsp, 200);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.ret();
+            a.bind(lbl_fs_ok);
+            // Re-entrancy guard check (must trap even if file missing, matching goose.rs:577)
+            a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::R15, OFF_EXEC_RESERVING));
+            a.test_rr(true, Gp::Rcx, Gp::Rcx);
+            let lbl_not_res = a.new_label();
+            a.jcc(Cond::E, lbl_not_res);
+            // Close fd if opened before trapping
+            let lbl_skip_cl = a.new_label();
+            a.cmp_ri(true, Gp::Rax, 0);
+            a.jcc(Cond::L, lbl_skip_cl);
+            a.mov_rr(false, Gp::Rdi, Gp::Rax);
+            a.mov_ri32(Gp::Rax, SYS_CLOSE);
+            a.syscall();
+            a.bind(lbl_skip_cl);
+            a.jmp(lbl_oob);
+
+            a.bind(lbl_not_res);
+            a.cmp_ri(true, Gp::Rax, 0);
+            a.jcc(Cond::L, lbl_ret0);
+            a.mov_rr(true, Gp::Rbx, Gp::Rax); // fd in Rbx
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::Rbx);
+
+            // fstat(fd, &stat_buf)
+            a.mov_rr(false, Gp::Rdi, Gp::Rbx);
+            a.lea(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 40));
+            a.mov_ri32(Gp::Rax, SYS_FSTAT);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, 0);
+            a.jcc(Cond::L, lbl_close_ret0);
+            // Reject directories (S_IFDIR = 0x4000)
+            a.mov_rm(
+                false,
+                Gp::Rax,
+                Mem::base_disp(Gp::Rsp, 40 + X64_STAT_OFF_MODE),
+            );
+            a.and_ri(false, Gp::Rax, 0xf000);
+            a.cmp_ri(false, Gp::Rax, 0x4000);
+            a.jcc(Cond::E, lbl_close_ret0);
+            // Check st_size <= output_limit
+            a.mov_rm(
+                true,
+                Gp::Rbp,
+                Mem::base_disp(Gp::Rsp, 40 + X64_STAT_OFF_SIZE),
+            );
+            a.cmp_ri(true, Gp::Rbp, 0);
+            a.jcc(Cond::L, lbl_close_ret0);
+            a.cmp_rm(
+                true,
+                Gp::Rbp,
+                Mem::base_disp(Gp::R15, OFF_EXEC_OUTPUT_LIMIT),
+            );
+            a.jcc(Cond::A, lbl_close_ret0);
+            // Empty regular file fast path
+            let lbl_nonempty = a.new_label();
+            a.test_rr(true, Gp::Rbp, Gp::Rbp);
+            a.jcc(Cond::Ne, lbl_nonempty);
+            a.mov_rr(false, Gp::Rdi, Gp::Rbx);
+            a.mov_ri32(Gp::Rax, SYS_CLOSE);
+            a.syscall();
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 0));
+            a.lea(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 40));
+            a.xor_rr(false, Gp::Rdx, Gp::Rdx);
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.mov_ri32(Gp::Rax, 1);
+            a.add_ri(true, Gp::Rsp, 200);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.ret();
+
+            // Allocate mmap buffer of size `((st_size + 4096) & !4095).max(4096)`
+            a.bind(lbl_nonempty);
+            a.add_ri(true, Gp::Rbp, 4096);
+            a.and_ri(true, Gp::Rbp, -4096);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 24), Gp::Rbp); // buf_cap
+            a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+            a.mov_rr(true, Gp::Rsi, Gp::Rbp);
+            a.mov_ri32(Gp::Rdx, PROT_RW);
+            a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+            a.mov_ri64(Gp::R8, u64::MAX);
+            a.xor_rr(false, Gp::R9, Gp::R9);
+            a.mov_ri32(Gp::Rax, SYS_MMAP);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, -4095);
+            a.jcc(Cond::Ae, lbl_close_ret0);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rax); // buf_ptr
+            a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 32), Gp::Rcx); // total = 0
+
+            // Read loop until EOF (0) or error/limit exceeded
+            let lbl_rlp = a.new_label();
+            let lbl_reof = a.new_label();
+            a.bind(lbl_rlp);
+            a.mov_rm(true, Gp::R8, Mem::base_disp(Gp::Rsp, 32)); // total
+            a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, 24)); // buf_cap
+            a.sub_rr(true, Gp::Rdx, Gp::R8); // rem = buf_cap - total
+            a.jcc(Cond::Be, lbl_unmap_close_ret0); // file grew past cap
+            a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 16));
+            a.add_rr(true, Gp::Rsi, Gp::R8);
+            a.mov_rm(false, Gp::Rdi, Mem::base_disp(Gp::Rsp, 8));
+            a.mov_ri32(Gp::Rax, SYS_READ);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, -4); // -EINTR
+            a.jcc(Cond::E, lbl_rlp);
+            a.cmp_ri(true, Gp::Rax, 0);
+            a.jcc(Cond::L, lbl_unmap_close_ret0);
+            a.jcc(Cond::E, lbl_reof);
+            a.add_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 32));
+            a.cmp_rm(
+                true,
+                Gp::Rax,
+                Mem::base_disp(Gp::R15, OFF_EXEC_OUTPUT_LIMIT),
+            );
+            a.jcc(Cond::A, lbl_unmap_close_ret0);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 32), Gp::Rax);
+            a.jmp(lbl_rlp);
+
+            a.bind(lbl_reof);
+            a.mov_rm(false, Gp::Rdi, Mem::base_disp(Gp::Rsp, 8));
+            a.mov_ri32(Gp::Rax, SYS_CLOSE);
+            a.syscall();
+            // Copy into guest via goose.reserve
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 0)); // control
+            a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 16)); // buf_ptr
+            a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, 32)); // total
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_RESERVE_COPY));
+            a.mov_rr(false, Gp::Rbx, Gp::R11); // save trap code
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 16));
+            a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 24));
+            a.mov_ri32(Gp::Rax, SYS_MUNMAP);
+            a.syscall();
+            a.mov_rr(false, Gp::R11, Gp::Rbx);
+            a.mov_ri32(Gp::Rax, 1);
+            a.add_ri(true, Gp::Rsp, 200);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.ret();
+
+            a.bind(lbl_unmap_close_ret0);
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::Rsp, 16));
+            a.mov_rm(true, Gp::Rsi, Mem::base_disp(Gp::Rsp, 24));
+            a.mov_ri32(Gp::Rax, SYS_MUNMAP);
+            a.syscall();
+            a.bind(lbl_close_ret0);
+            a.mov_rm(false, Gp::Rdi, Mem::base_disp(Gp::Rsp, 8));
+            a.mov_ri32(Gp::Rax, SYS_CLOSE);
+            a.syscall();
+            a.bind(lbl_ret0);
+            a.add_ri(true, Gp::Rsp, 200);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+
+            a.bind(lbl_oob);
+            a.add_ri(true, Gp::Rsp, 200);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_os_write_file") | ("env", "gs_os_append_file") => {
+            let mode = if fname == "gs_os_write_file" {
+                3u32
+            } else {
+                4u32
+            };
+            if ty.params.len() == 2 {
+                // Rdi = packed_path, Rsi = packed_content -> Rdi=p_ptr, Rsi=p_len, Rdx=c_ptr, Rcx=c_len
+                a.mov_rr(true, Gp::Rcx, Gp::Rsi);
+                a.shr_imm(true, Gp::Rcx, 32);
+                a.mov_rr(false, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+                zext_param(&mut a, Gp::Rdx, 2);
+                zext_param(&mut a, Gp::Rcx, 3);
+            }
+            a.push(Gp::Rbx);
+            a.push(Gp::Rbp);
+            a.sub_ri(true, Gp::Rsp, 24); // [rsp+0]=c_ptr, [rsp+8]=c_len, [rsp+16]=fd
+            let lbl_oob = a.new_label();
+            let lbl_ret0 = a.new_label();
+            emit_check_range(&mut a, Gp::Rdi, Gp::Rsi, fixed_mem, lbl_oob);
+            emit_check_range(&mut a, Gp::Rdx, Gp::Rcx, fixed_mem, lbl_oob);
+            // Charge c_len against output_limit
+            a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_EXEC_WRITTEN));
+            a.add_rr(true, Gp::Rax, Gp::Rcx);
+            a.jcc(Cond::B, lbl_oob);
+            a.cmp_rm(
+                true,
+                Gp::Rax,
+                Mem::base_disp(Gp::R15, OFF_EXEC_OUTPUT_LIMIT),
+            );
+            a.jcc(Cond::A, lbl_oob);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_WRITTEN), Gp::Rax);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rdx);
+            a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::Rcx);
+            a.mov_ri32(Gp::Rdx, mode);
+            a.call_reloc(RelocTarget::Helper(HELPER_STANDALONE_FS));
+            let lbl_fs_ok = a.new_label();
+            a.test_rr(false, Gp::R11, Gp::R11);
+            a.jcc(Cond::E, lbl_fs_ok);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.ret();
+            a.bind(lbl_fs_ok);
+            a.cmp_ri(true, Gp::Rax, 0);
+            a.jcc(Cond::L, lbl_ret0);
+            a.mov_rr(true, Gp::Rbx, Gp::Rax); // fd in Rbx
+            a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 0));
+            a.lea(true, Gp::Rsi, Mem::indexed(Gp::R14, Gp::Rax, 1, 0));
+            a.mov_rm(true, Gp::Rdx, Mem::base_disp(Gp::Rsp, 8));
+            emit_write_all(&mut a, Gp::Rbx);
+            // Rdx == 0 iff all bytes were written cleanly.
+            a.mov_rr(true, Gp::Rbp, Gp::Rdx);
+            a.mov_rr(false, Gp::Rdi, Gp::Rbx);
+            a.mov_ri32(Gp::Rax, SYS_CLOSE);
+            a.syscall();
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
+            a.test_rr(true, Gp::Rbp, Gp::Rbp);
+            let lbl_wr_done = a.new_label();
+            a.jcc(Cond::Ne, lbl_wr_done);
+            a.mov_ri32(Gp::Rax, 1);
+            a.bind(lbl_wr_done);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+
+            a.bind(lbl_ret0);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.xor_rr(false, Gp::Rax, Gp::Rax);
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+
+            a.bind(lbl_oob);
+            a.add_ri(true, Gp::Rsp, 24);
+            a.pop(Gp::Rbp);
+            a.pop(Gp::Rbx);
+            a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_find_any") => {
+            // Packed (slice, members) or wide (ptr, len, members) -> i64/i32 (-1 or idx)
+            if ty.params.len() == 2 {
+                zext_param(&mut a, Gp::Rsi, 1);
+                a.mov_rr(true, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+                zext_param(&mut a, Gp::Rdx, 2);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_lp = a.new_label();
+            let lbl_nf = a.new_label();
+            let lbl_found = a.new_label();
+            emit_check_range(&mut a, Gp::Rdi, Gp::Rsi, fixed_mem, lbl_oob);
+            a.mov_ri64(Gp::R8, 256);
+            emit_check_range(&mut a, Gp::Rdx, Gp::R8, fixed_mem, lbl_oob);
+            a.lea(true, Gp::R8, Mem::indexed(Gp::R14, Gp::Rdi, 1, 0)); // text_base
+            a.lea(true, Gp::R9, Mem::indexed(Gp::R14, Gp::Rdx, 1, 0)); // members_base
+            a.xor_rr(false, Gp::Rax, Gp::Rax); // i = 0
+            a.bind(lbl_lp);
+            a.cmp_rr(true, Gp::Rax, Gp::Rsi);
+            a.jcc(Cond::Ae, lbl_nf);
+            a.movzx_rm8(false, Gp::Rcx, Mem::indexed(Gp::R8, Gp::Rax, 1, 0));
+            a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R9, Gp::Rcx, 1, 0));
+            a.test_rr(false, Gp::R10, Gp::R10);
+            a.jcc(Cond::Ne, lbl_found);
+            a.add_ri(true, Gp::Rax, 1);
+            a.jmp(lbl_lp);
+            a.bind(lbl_nf);
+            a.mov_ri64(Gp::Rax, u64::MAX);
+            a.bind(lbl_found);
+            if ty.results[0] == ValType::I32 {
+                a.mov_rr(false, Gp::Rax, Gp::Rax);
+            }
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+            a.ret();
+        }
+        ("env", "gs_find_pair") => {
+            // Packed (slice, first, dist, second) or wide (ptr, len, first, dist, second) -> i64/i32
+            if ty.params.len() == 4 {
+                // Rdi=packed, Rsi=first, Rdx=dist, Rcx=second -> Rdi=ptr, Rsi=len, Rdx=first, Rcx=dist, R8=second
+                zext_param(&mut a, Gp::Rcx, 3);
+                a.mov_rr(true, Gp::R8, Gp::Rcx);
+                if ty.params[2] == ValType::I32 {
+                    a.movsxd_rr(Gp::Rdx, Gp::Rdx);
+                }
+                a.mov_rr(true, Gp::Rcx, Gp::Rdx);
+                zext_param(&mut a, Gp::Rsi, 1);
+                a.mov_rr(true, Gp::Rdx, Gp::Rsi);
+                a.mov_rr(true, Gp::Rsi, Gp::Rdi);
+                a.shr_imm(true, Gp::Rsi, 32);
+                a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+            } else {
+                zext_param(&mut a, Gp::Rdi, 0);
+                zext_param(&mut a, Gp::Rsi, 1);
+                zext_param(&mut a, Gp::Rdx, 2);
+                if ty.params[3] == ValType::I32 {
+                    a.movsxd_rr(Gp::Rcx, Gp::Rcx);
+                }
+                zext_param(&mut a, Gp::R8, 4);
+            }
+            let lbl_oob = a.new_label();
+            let lbl_nf = a.new_label();
+            let lbl_lp = a.new_label();
+            let lbl_step = a.new_label();
+            let lbl_found = a.new_label();
+            emit_check_range(&mut a, Gp::Rdi, Gp::Rsi, fixed_mem, lbl_oob);
+            a.mov_ri64(Gp::R9, 256);
+            emit_check_range(&mut a, Gp::Rdx, Gp::R9, fixed_mem, lbl_oob);
+            emit_check_range(&mut a, Gp::R8, Gp::R9, fixed_mem, lbl_oob);
+            // Reject negative distance
+            a.test_rr(true, Gp::Rcx, Gp::Rcx);
+            a.jcc(Cond::L, lbl_oob);
+            // limit = len.saturating_sub(distance); if distance >= len -> -1
+            a.cmp_rr(true, Gp::Rcx, Gp::Rsi);
+            a.jcc(Cond::Ae, lbl_nf);
+            a.sub_rr(true, Gp::Rsi, Gp::Rcx); // Rsi = limit > 0
+            a.lea(true, Gp::R9, Mem::indexed(Gp::R14, Gp::Rdi, 1, 0)); // text1 = mem + ptr
+            a.add_rr(true, Gp::Rcx, Gp::R9); // text2 = text1 + dist
+            a.lea(true, Gp::Rdx, Mem::indexed(Gp::R14, Gp::Rdx, 1, 0)); // first_tbl
+            a.lea(true, Gp::R8, Mem::indexed(Gp::R14, Gp::R8, 1, 0)); // second_tbl
+            a.xor_rr(false, Gp::Rax, Gp::Rax); // i = 0
+            a.bind(lbl_lp);
+            a.movzx_rm8(false, Gp::Rdi, Mem::indexed(Gp::R9, Gp::Rax, 1, 0));
+            a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::Rdx, Gp::Rdi, 1, 0));
+            a.test_rr(false, Gp::R10, Gp::R10);
+            a.jcc(Cond::E, lbl_step);
+            a.movzx_rm8(false, Gp::Rdi, Mem::indexed(Gp::Rcx, Gp::Rax, 1, 0));
+            a.movzx_rm8(false, Gp::R10, Mem::indexed(Gp::R8, Gp::Rdi, 1, 0));
+            a.test_rr(false, Gp::R10, Gp::R10);
+            a.jcc(Cond::Ne, lbl_found);
+            a.bind(lbl_step);
+            a.add_ri(true, Gp::Rax, 1);
+            a.cmp_rr(true, Gp::Rax, Gp::Rsi);
+            a.jcc(Cond::B, lbl_lp);
+            a.bind(lbl_nf);
+            a.mov_ri64(Gp::Rax, u64::MAX);
+            a.bind(lbl_found);
+            if ty.results[0] == ValType::I32 {
+                a.mov_rr(false, Gp::Rax, Gp::Rax);
+            }
+            a.xor_rr(false, Gp::R11, Gp::R11);
+            a.ret();
+            a.bind(lbl_oob);
+            a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
             a.ret();
         }
         ("env", "gs_os_resource_dir") => {
@@ -2559,6 +3466,482 @@ pub fn emit_helper_goose_fmt_float() -> Result<Asm, String> {
     a.pop(Gp::R12);
     a.pop(Gp::Rbp);
     a.pop(Gp::Rbx);
+    a.ret();
+
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Emits `HELPER_STANDALONE_RESERVE_COPY`: invokes exported `goose.reserve(control, len) -> dst`
+/// with re-entrancy protection, bounds-checks `(dst, len)` against post-reserve linear memory,
+/// and copies `[host_src..+len]` into `[mem_base + dst..+len]`.
+///
+/// ABI: `Rdi = control`, `Rsi = host_src_ptr`, `Rdx = byte_len` -> `R11d = 0 | trap`.
+/// Preserves `Rbx, Rbp, R14, R15`; lets `goose.reserve` update `R12` (pinned global) and `R13` (mem_len).
+pub fn emit_helper_standalone_reserve_copy(module: &X64Module) -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(256);
+    let Some((reserve_fi, is_i64)) = module.standalone_goose_reserve else {
+        a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+        a.ret();
+        return Ok(a);
+    };
+    let fixed_mem = module.fixed32.is_some();
+    a.push(Gp::Rbx);
+    a.push(Gp::Rbp);
+    a.sub_ri(true, Gp::Rsp, 8); // 16-byte aligned for guest call
+    let lbl_trap_host = a.new_label();
+    let lbl_ret = a.new_label();
+    // Re-entrancy guard
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::R15, OFF_EXEC_RESERVING));
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::Ne, lbl_trap_host);
+    a.mov_ri64(Gp::Rax, 1);
+    a.mov_mr(true, Mem::base_disp(Gp::R15, OFF_EXEC_RESERVING), Gp::Rax);
+    a.mov_rr(true, Gp::Rbx, Gp::Rsi); // host_src
+    a.mov_rr(true, Gp::Rbp, Gp::Rdx); // byte_len
+    a.mov_rr(true, Gp::Rsi, Gp::Rdx);
+    if !is_i64 {
+        a.mov_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_rr(false, Gp::Rsi, Gp::Rsi);
+    }
+    a.call_reloc(RelocTarget::Func(reserve_fi));
+    a.mov_mi32(true, Mem::base_disp(Gp::R15, OFF_EXEC_RESERVING), 0);
+    a.test_rr(false, Gp::R11, Gp::R11);
+    a.jcc(Cond::Ne, lbl_ret);
+    if !is_i64 {
+        a.mov_rr(false, Gp::Rax, Gp::Rax);
+    }
+    a.mov_rr(true, Gp::Rdi, Gp::Rax); // dst_off
+    emit_check_range(&mut a, Gp::Rdi, Gp::Rbp, fixed_mem, lbl_trap_host);
+    a.lea(true, Gp::R8, Mem::indexed(Gp::R14, Gp::Rdi, 1, 0)); // dst_host
+    // 8-byte word copy loop + 1-byte tail
+    let lbl_qloop = a.new_label();
+    let lbl_bloop = a.new_label();
+    let lbl_done = a.new_label();
+    a.bind(lbl_qloop);
+    a.cmp_ri(true, Gp::Rbp, 8);
+    a.jcc(Cond::B, lbl_bloop);
+    a.mov_rm(true, Gp::Rax, Mem::base(Gp::Rbx));
+    a.mov_mr(true, Mem::base(Gp::R8), Gp::Rax);
+    a.add_ri(true, Gp::Rbx, 8);
+    a.add_ri(true, Gp::R8, 8);
+    a.sub_ri(true, Gp::Rbp, 8);
+    a.jmp(lbl_qloop);
+    a.bind(lbl_bloop);
+    a.test_rr(true, Gp::Rbp, Gp::Rbp);
+    a.jcc(Cond::E, lbl_done);
+    a.movzx_rm8(false, Gp::Rax, Mem::base(Gp::Rbx));
+    a.mov_mr8(Mem::base(Gp::R8), Gp::Rax);
+    a.add_ri(true, Gp::Rbx, 1);
+    a.add_ri(true, Gp::R8, 1);
+    a.sub_ri(true, Gp::Rbp, 1);
+    a.jmp(lbl_bloop);
+    a.bind(lbl_done);
+    a.xor_rr(false, Gp::R11, Gp::R11);
+    a.jmp(lbl_ret);
+    a.bind(lbl_trap_host);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+    a.bind(lbl_ret);
+    a.add_ri(true, Gp::Rsp, 8);
+    a.pop(Gp::Rbp);
+    a.pop(Gp::Rbx);
+    a.ret();
+    a.finish_labels()?;
+    Ok(a)
+}
+
+/// Emits `HELPER_STANDALONE_FS`: enforces `--allow-files` lexical + kernel `openat2(RESOLVE_BENEATH)`
+/// path sandboxing for `file_exists` (0), `is_dir` (1), `read_file` (2), `write_file` (3), and `append_file` (4).
+///
+/// ABI: `Rdi = path_off` (bounds-checked), `Rsi = path_len`, `Rdx = mode`
+/// -> `Rax = 0/1 (stat) or fd/-1 (open)`, `R11d = 0 | TRAP_HOST` (embedded NUL for mode >= 2).
+/// Preserves `Rbx, Rbp, R12, R13, R14, R15`.
+pub fn emit_helper_standalone_fs() -> Result<Asm, String> {
+    let mut a = Asm::with_capacity(1024);
+    let dot_off = a.add_local_rodata(1, b".\0");
+    a.push(Gp::Rbx);
+    a.push(Gp::Rbp);
+    // [rsp+0]=mode, [rsp+8]=path_host, [rsp+16]=path_len, [rsp+24]=norm_len
+    a.sub_ri(true, Gp::Rsp, 40);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 0), Gp::Rdx);
+    a.lea(true, Gp::R8, Mem::indexed(Gp::R14, Gp::Rdi, 1, 0));
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 8), Gp::R8);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 16), Gp::Rsi);
+
+    let lbl_deny = a.new_label();
+    let lbl_trap_nul = a.new_label();
+    let lbl_ret_ok = a.new_label();
+
+    // 1. Scan for embedded NUL byte.
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    let lbl_nul_lp = a.new_label();
+    let lbl_nul_ok = a.new_label();
+    a.bind(lbl_nul_lp);
+    a.cmp_rr(true, Gp::Rcx, Gp::Rsi);
+    a.jcc(Cond::Ae, lbl_nul_ok);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rcx, 1, 0));
+    a.test_rr(false, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_trap_nul);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.jmp(lbl_nul_lp);
+    a.bind(lbl_nul_ok);
+
+    // 2. Policy & non-empty check.
+    a.mov_rm(true, Gp::Rbx, Mem::base_disp(Gp::R15, OFF_EXEC_POLICY_PTR));
+    a.test_rr(true, Gp::Rbx, Gp::Rbx);
+    a.jcc(Cond::E, lbl_deny);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rbx, POLICY_OFF_DIR_COUNT));
+    a.test_rr(true, Gp::Rax, Gp::Rax);
+    a.jcc(Cond::E, lbl_deny);
+    a.test_rr(true, Gp::Rsi, Gp::Rsi);
+    a.jcc(Cond::E, lbl_deny);
+
+    // 3. Trailing '/' or '/.' check: disallowed for file_exists (0), write (3), append (4).
+    let lbl_trail_ok = a.new_label();
+    let lbl_is_trail = a.new_label();
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rsi, 1, -1));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::E, lbl_is_trail);
+    a.cmp_ri(false, Gp::Rax, i32::from(b'.'));
+    a.jcc(Cond::Ne, lbl_trail_ok);
+    a.cmp_ri(true, Gp::Rsi, 2);
+    a.jcc(Cond::B, lbl_trail_ok);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rsi, 1, -2));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::Ne, lbl_trail_ok);
+    a.bind(lbl_is_trail);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 0));
+    a.cmp_ri(true, Gp::Rax, 0);
+    a.jcc(Cond::E, lbl_deny);
+    a.cmp_ri(true, Gp::Rax, 3);
+    a.jcc(Cond::Ae, lbl_deny);
+    a.bind(lbl_trail_ok);
+
+    // 4. Lexical normalization into `policy + POLICY_OFF_SCRATCH_PATH` (cap 4095); reject any `..`.
+    // R10 = dst_buf, R9 = out_len, Rdi = src_idx, R8 = path_host, Rsi = path_len
+    a.lea(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::Rbx, POLICY_OFF_SCRATCH_PATH),
+    );
+    a.xor_rr(false, Gp::R9, Gp::R9);
+    a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+    let lbl_abs_start = a.new_label();
+    a.movzx_rm8(false, Gp::Rax, Mem::base(Gp::R8));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::E, lbl_abs_start);
+    // Relative path: prepend canonical CWD
+    a.mov_rm(true, Gp::R9, Mem::base_disp(Gp::Rbx, POLICY_OFF_CWD_LEN));
+    a.test_rr(true, Gp::R9, Gp::R9);
+    a.jcc(Cond::E, lbl_deny);
+    a.cmp_ri(true, Gp::R9, 4095);
+    a.jcc(Cond::Ae, lbl_deny);
+    a.lea(true, Gp::Rdx, Mem::base_disp(Gp::Rbx, POLICY_OFF_CWD_BUF));
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    let lbl_cp_cwd = a.new_label();
+    a.bind(lbl_cp_cwd);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::Rdx, Gp::Rcx, 1, 0));
+    a.mov_mr8(Mem::indexed(Gp::R10, Gp::Rcx, 1, 0), Gp::Rax);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.cmp_rr(true, Gp::Rcx, Gp::R9);
+    a.jcc(Cond::B, lbl_cp_cwd);
+    let lbl_cwd_notrim = a.new_label();
+    a.cmp_ri(true, Gp::R9, 1);
+    a.jcc(Cond::Le, lbl_cwd_notrim);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R10, Gp::R9, 1, -1));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::Ne, lbl_cwd_notrim);
+    a.sub_ri(true, Gp::R9, 1);
+    a.bind(lbl_cwd_notrim);
+
+    a.bind(lbl_abs_start);
+    let lbl_comp_lp = a.new_label();
+    let lbl_skip_sl = a.new_label();
+    let lbl_scan_c = a.new_label();
+    let lbl_scan_c_done = a.new_label();
+    let lbl_norm_done = a.new_label();
+    a.bind(lbl_comp_lp);
+    a.bind(lbl_skip_sl);
+    a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
+    a.jcc(Cond::Ae, lbl_norm_done);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rdi, 1, 0));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::Ne, lbl_scan_c);
+    a.add_ri(true, Gp::Rdi, 1);
+    a.jmp(lbl_skip_sl);
+
+    a.bind(lbl_scan_c);
+    a.mov_rr(true, Gp::Rcx, Gp::Rdi); // comp_start
+    let lbl_sc_lp = a.new_label();
+    a.bind(lbl_sc_lp);
+    a.cmp_rr(true, Gp::Rdi, Gp::Rsi);
+    a.jcc(Cond::Ae, lbl_scan_c_done);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rdi, 1, 0));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::E, lbl_scan_c_done);
+    a.add_ri(true, Gp::Rdi, 1);
+    a.jmp(lbl_sc_lp);
+
+    a.bind(lbl_scan_c_done);
+    a.mov_rr(true, Gp::Rdx, Gp::Rdi);
+    a.sub_rr(true, Gp::Rdx, Gp::Rcx); // clen
+    // Skip "."
+    let lbl_not_dot = a.new_label();
+    a.cmp_ri(true, Gp::Rdx, 1);
+    a.jcc(Cond::Ne, lbl_not_dot);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rcx, 1, 0));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'.'));
+    a.jcc(Cond::E, lbl_comp_lp);
+    a.bind(lbl_not_dot);
+    // Reject ".."
+    let lbl_not_dotdot = a.new_label();
+    a.cmp_ri(true, Gp::Rdx, 2);
+    a.jcc(Cond::Ne, lbl_not_dotdot);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rcx, 1, 0));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'.'));
+    a.jcc(Cond::Ne, lbl_not_dotdot);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rcx, 1, 1));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'.'));
+    a.jcc(Cond::E, lbl_deny);
+    a.bind(lbl_not_dotdot);
+
+    // Append '/' unless dst already ends with '/'
+    let lbl_no_sep = a.new_label();
+    a.test_rr(true, Gp::R9, Gp::R9);
+    let lbl_put_sep = a.new_label();
+    a.jcc(Cond::E, lbl_put_sep);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R10, Gp::R9, 1, -1));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::E, lbl_no_sep);
+    a.bind(lbl_put_sep);
+    a.cmp_ri(true, Gp::R9, 4094);
+    a.jcc(Cond::Ae, lbl_deny);
+    a.mov_mi8(Mem::indexed(Gp::R10, Gp::R9, 1, 0), b'/');
+    a.add_ri(true, Gp::R9, 1);
+    a.bind(lbl_no_sep);
+
+    // Bounds-check `R9 + Rdx < 4095`
+    a.mov_rr(true, Gp::Rax, Gp::R9);
+    a.add_rr(true, Gp::Rax, Gp::Rdx);
+    a.cmp_ri(true, Gp::Rax, 4095);
+    a.jcc(Cond::Ae, lbl_deny);
+    let lbl_cp_c = a.new_label();
+    a.bind(lbl_cp_c);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R8, Gp::Rcx, 1, 0));
+    a.mov_mr8(Mem::indexed(Gp::R10, Gp::R9, 1, 0), Gp::Rax);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.add_ri(true, Gp::R9, 1);
+    a.sub_ri(true, Gp::Rdx, 1);
+    a.jcc(Cond::Ne, lbl_cp_c);
+    a.jmp(lbl_comp_lp);
+
+    a.bind(lbl_norm_done);
+    let lbl_not_root_empty = a.new_label();
+    a.test_rr(true, Gp::R9, Gp::R9);
+    a.jcc(Cond::Ne, lbl_not_root_empty);
+    a.mov_mi8(Mem::base(Gp::R10), b'/');
+    a.mov_ri64(Gp::R9, 1);
+    a.bind(lbl_not_root_empty);
+    a.mov_mi8(Mem::indexed(Gp::R10, Gp::R9, 1, 0), 0);
+    a.mov_mr(true, Mem::base_disp(Gp::Rsp, 24), Gp::R9); // norm_len
+
+    // 5. Try each granted directory `di = 0..dir_count` via prefix match + `openat2(RESOLVE_BENEATH)`.
+    a.xor_rr(false, Gp::Rbp, Gp::Rbp); // di = 0
+    let lbl_dir_lp = a.new_label();
+    let lbl_dir_next = a.new_label();
+    let lbl_dir_matched = a.new_label();
+    a.bind(lbl_dir_lp);
+    a.cmp_rm(true, Gp::Rbp, Mem::base_disp(Gp::Rbx, POLICY_OFF_DIR_COUNT));
+    a.jcc(Cond::Ae, lbl_deny);
+    a.mov_rm(
+        true,
+        Gp::Rdx,
+        Mem::indexed(Gp::Rbx, Gp::Rbp, 8, POLICY_OFF_DIR_PATH_LENS),
+    ); // dlen
+    a.mov_rr(true, Gp::R8, Gp::Rbp);
+    a.shl_imm(true, Gp::R8, 10);
+    a.lea(
+        true,
+        Gp::Rdi,
+        Mem::indexed(Gp::Rbx, Gp::R8, 1, POLICY_OFF_DIR_PATHS),
+    ); // dpath
+    a.lea(
+        true,
+        Gp::R10,
+        Mem::base_disp(Gp::Rbx, POLICY_OFF_SCRATCH_PATH),
+    );
+    a.mov_rm(true, Gp::R9, Mem::base_disp(Gp::Rsp, 24)); // norm_len
+
+    // Root directory "/" special case
+    let lbl_not_root_dir = a.new_label();
+    a.cmp_ri(true, Gp::Rdx, 1);
+    a.jcc(Cond::Ne, lbl_not_root_dir);
+    a.movzx_rm8(false, Gp::Rax, Mem::base(Gp::Rdi));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::Ne, lbl_not_root_dir);
+    let lbl_root_sub = a.new_label();
+    a.cmp_ri(true, Gp::R9, 1);
+    a.jcc(Cond::A, lbl_root_sub);
+    a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(dot_off));
+    a.jmp(lbl_dir_matched);
+    a.bind(lbl_root_sub);
+    a.lea(true, Gp::Rsi, Mem::base_disp(Gp::R10, 1));
+    a.jmp(lbl_dir_matched);
+
+    a.bind(lbl_not_root_dir);
+    a.cmp_rr(true, Gp::R9, Gp::Rdx);
+    a.jcc(Cond::B, lbl_dir_next);
+    a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+    let lbl_pref_lp = a.new_label();
+    let lbl_pref_eq = a.new_label();
+    a.bind(lbl_pref_lp);
+    a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+    a.jcc(Cond::Ae, lbl_pref_eq);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R10, Gp::Rcx, 1, 0));
+    a.movzx_rm8(false, Gp::R8, Mem::indexed(Gp::Rdi, Gp::Rcx, 1, 0));
+    a.cmp_rr(false, Gp::Rax, Gp::R8);
+    a.jcc(Cond::Ne, lbl_dir_next);
+    a.add_ri(true, Gp::Rcx, 1);
+    a.jmp(lbl_pref_lp);
+    a.bind(lbl_pref_eq);
+    let lbl_pref_sub = a.new_label();
+    a.cmp_rr(true, Gp::R9, Gp::Rdx);
+    a.jcc(Cond::A, lbl_pref_sub);
+    a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(dot_off));
+    a.jmp(lbl_dir_matched);
+    a.bind(lbl_pref_sub);
+    a.movzx_rm8(false, Gp::Rax, Mem::indexed(Gp::R10, Gp::Rdx, 1, 0));
+    a.cmp_ri(false, Gp::Rax, i32::from(b'/'));
+    a.jcc(Cond::Ne, lbl_dir_next);
+    a.lea(true, Gp::Rsi, Mem::indexed(Gp::R10, Gp::Rdx, 1, 1));
+
+    // Matched! Rsi = rel_path (NUL-terminated). Build struct open_how at [Rbx + POLICY_OFF_OPEN_HOW].
+    a.bind(lbl_dir_matched);
+    a.mov_rm(true, Gp::Rax, Mem::base_disp(Gp::Rsp, 0)); // mode
+    let lbl_m2 = a.new_label();
+    let lbl_m3 = a.new_label();
+    let lbl_m4 = a.new_label();
+    let lbl_how_ready = a.new_label();
+    a.cmp_ri(true, Gp::Rax, 2);
+    a.jcc(Cond::E, lbl_m2);
+    a.cmp_ri(true, Gp::Rax, 3);
+    a.jcc(Cond::E, lbl_m3);
+    a.cmp_ri(true, Gp::Rax, 4);
+    a.jcc(Cond::E, lbl_m4);
+    // mode 0/1: O_PATH | O_CLOEXEC
+    a.mov_ri64(Gp::Rcx, u64::from(O_PATH | O_CLOEXEC));
+    a.xor_rr(false, Gp::R8, Gp::R8);
+    a.jmp(lbl_how_ready);
+    a.bind(lbl_m2);
+    a.mov_ri64(Gp::Rcx, u64::from(O_RDONLY | O_CLOEXEC));
+    a.xor_rr(false, Gp::R8, Gp::R8);
+    a.jmp(lbl_how_ready);
+    a.bind(lbl_m3);
+    a.mov_ri64(
+        Gp::Rcx,
+        u64::from(O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW_X64 | O_CLOEXEC),
+    );
+    a.mov_ri64(Gp::R8, 0o644);
+    a.jmp(lbl_how_ready);
+    a.bind(lbl_m4);
+    a.mov_ri64(
+        Gp::Rcx,
+        u64::from(O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW_X64 | O_CLOEXEC),
+    );
+    a.mov_ri64(Gp::R8, 0o644);
+
+    a.bind(lbl_how_ready);
+    a.mov_mr(true, Mem::base_disp(Gp::Rbx, POLICY_OFF_OPEN_HOW), Gp::Rcx);
+    a.mov_mr(
+        true,
+        Mem::base_disp(Gp::Rbx, POLICY_OFF_OPEN_HOW + 8),
+        Gp::R8,
+    );
+    a.mov_ri64(Gp::R9, RESOLVE_BENEATH);
+    a.mov_mr(
+        true,
+        Mem::base_disp(Gp::Rbx, POLICY_OFF_OPEN_HOW + 16),
+        Gp::R9,
+    );
+    // openat2(dir_fds[di], rel_path, &open_how, 24)
+    a.mov_rm(
+        true,
+        Gp::Rdi,
+        Mem::indexed(Gp::Rbx, Gp::Rbp, 8, POLICY_OFF_DIR_FDS),
+    );
+    a.lea(true, Gp::Rdx, Mem::base_disp(Gp::Rbx, POLICY_OFF_OPEN_HOW));
+    a.mov_ri32(Gp::R10, 24);
+    a.mov_ri32(Gp::Rax, SYS_OPENAT2);
+    a.syscall();
+    a.cmp_ri(true, Gp::Rax, 0);
+    a.jcc(Cond::L, lbl_dir_next);
+
+    // Opened! If mode >= 2, return fd directly.
+    a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
+    a.cmp_ri(true, Gp::Rcx, 2);
+    a.jcc(Cond::Ae, lbl_ret_ok);
+
+    // mode 0/1: fstat(fd, &stat_buf), close(fd), test S_IFREG / S_IFDIR
+    a.mov_rr(true, Gp::Rbp, Gp::Rax); // fd
+    a.mov_rr(false, Gp::Rdi, Gp::Rbp);
+    a.lea(true, Gp::Rsi, Mem::base_disp(Gp::Rbx, POLICY_OFF_STAT_BUF));
+    a.mov_ri32(Gp::Rax, SYS_FSTAT);
+    a.syscall();
+    a.mov_rr(true, Gp::R8, Gp::Rax);
+    a.mov_rr(false, Gp::Rdi, Gp::Rbp);
+    a.mov_ri32(Gp::Rax, SYS_CLOSE);
+    a.syscall();
+    a.cmp_ri(true, Gp::R8, 0);
+    a.jcc(Cond::L, lbl_deny);
+    a.mov_rm(
+        false,
+        Gp::Rax,
+        Mem::base_disp(Gp::Rbx, POLICY_OFF_STAT_BUF + X64_STAT_OFF_MODE),
+    );
+    a.and_ri(false, Gp::Rax, 0xf000);
+    a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
+    let lbl_want_dir = a.new_label();
+    a.test_rr(true, Gp::Rcx, Gp::Rcx);
+    a.jcc(Cond::Ne, lbl_want_dir);
+    a.cmp_ri(false, Gp::Rax, 0x8000); // S_IFREG
+    let lbl_stat_yes = a.new_label();
+    a.jcc(Cond::E, lbl_stat_yes);
+    a.jmp(lbl_deny);
+    a.bind(lbl_want_dir);
+    a.cmp_ri(false, Gp::Rax, 0x4000); // S_IFDIR
+    a.jcc(Cond::Ne, lbl_deny);
+    a.bind(lbl_stat_yes);
+    a.mov_ri32(Gp::Rax, 1);
+    a.jmp(lbl_ret_ok);
+
+    a.bind(lbl_dir_next);
+    a.add_ri(true, Gp::Rbp, 1);
+    a.jmp(lbl_dir_lp);
+
+    a.bind(lbl_trap_nul);
+    a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
+    a.cmp_ri(true, Gp::Rcx, 2);
+    a.jcc(Cond::B, lbl_deny);
+    a.add_ri(true, Gp::Rsp, 40);
+    a.pop(Gp::Rbp);
+    a.pop(Gp::Rbx);
+    a.mov_ri32(Gp::R11, u32::from(TRAP_HOST));
+    a.ret();
+
+    a.bind(lbl_deny);
+    a.mov_rm(true, Gp::Rcx, Mem::base_disp(Gp::Rsp, 0));
+    a.xor_rr(false, Gp::Rax, Gp::Rax);
+    let lbl_deny_ret = a.new_label();
+    a.cmp_ri(true, Gp::Rcx, 2);
+    a.jcc(Cond::B, lbl_deny_ret);
+    a.mov_ri64(Gp::Rax, u64::MAX);
+    a.bind(lbl_deny_ret);
+
+    a.bind(lbl_ret_ok);
+    a.add_ri(true, Gp::Rsp, 40);
+    a.pop(Gp::Rbp);
+    a.pop(Gp::Rbx);
+    a.xor_rr(false, Gp::R11, Gp::R11);
     a.ret();
 
     a.finish_labels()?;

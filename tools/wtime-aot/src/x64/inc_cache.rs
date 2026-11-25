@@ -318,6 +318,10 @@ pub fn compute_abi_hash(
                 h.update(&[6]);
                 h.update(&bytes);
             }
+            Some(X64ConstVal::FuncRef(f)) => {
+                h.update(&[7]);
+                hash_u32(&mut h, f);
+            }
         }
     }
     match layout.pinned_global {
@@ -334,6 +338,17 @@ pub fn compute_abi_hash(
         hash_i32(&mut h, off);
         hash_u32(&mut h, len);
     }
+    hash_u32(&mut h, layout.dyn_tables.len() as u32);
+    for (&tbl, &(off, min_l, max_l)) in &layout.dyn_tables {
+        hash_u32(&mut h, tbl);
+        hash_i32(&mut h, off);
+        hash_u32(&mut h, min_l);
+        hash_u32(&mut h, max_l);
+    }
+    hash_i32(&mut h, layout.data_dropped_off.unwrap_or(-1));
+    hash_i32(&mut h, layout.elem_dropped_off.unwrap_or(-1));
+    hash_u32(&mut h, layout.func_sig_ro_off);
+    hash_u32(&mut h, layout.func_addr_ro_off);
 
     hash_u32(&mut h, layout.ci_tables.len() as u32);
     for (ci_sig, ci_lay) in module.ci_sigs.iter().zip(&layout.ci_tables) {
@@ -343,6 +358,8 @@ pub fn compute_abi_hash(
         hash_u32(&mut h, ci_lay.min_slot);
         hash_u32(&mut h, ci_lay.span);
         hash_u32(&mut h, ci_lay.rodata_off);
+        hash_i32(&mut h, ci_lay.dyn_table_desc_off);
+        hash_u32(&mut h, ci_lay.canon_sig);
         hash_u32(&mut h, ci_sig.targets.len() as u32);
         for &(slot, fi) in &ci_sig.targets {
             hash_u32(&mut h, slot);
@@ -1718,7 +1735,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
 // ============================================================================
 
 const VIDX_MAGIC: &[u8; 8] = b"WTX64VID";
-const VIDX_VERSION: u32 = 3;
+const VIDX_VERSION: u32 = 4;
 const MAX_VIDX_FILE_BYTES: usize = 32 << 20;
 
 /// Per-body cached validation and `x64` admission summary for incremental validation skip.
@@ -1730,6 +1747,9 @@ pub struct ValBodyEntry {
     pub imm_elems: u32,
     pub saw_data_count_op: bool,
     pub uses_exceptions: bool,
+    pub uses_bulk_data: bool,
+    pub uses_bulk_elem: bool,
+    pub dyn_table_ops: Vec<u32>,
     pub sig_arity: u32,
     pub br_table_entries: u32,
     pub g_reads: Vec<(u32, u32)>,
@@ -1946,6 +1966,17 @@ pub fn load_val_index(
         let imm_elems = r.read_u32()?;
         let saw_data_count_op = r.read_u8()? != 0;
         let uses_exceptions = r.read_u8()? != 0;
+        let uses_bulk_data = r.read_u8()? != 0;
+        let uses_bulk_elem = r.read_u8()? != 0;
+        let n_dyn = r.read_u32()? as usize;
+        if n_dyn > 65_536 {
+            return None;
+        }
+        r.check_remaining(n_dyn, 4)?;
+        let mut dyn_table_ops = try_vec_with_capacity(n_dyn)?;
+        for _ in 0..n_dyn {
+            dyn_table_ops.push(r.read_u32()?);
+        }
         let sig_arity = r.read_u32()?;
         let br_table_entries = r.read_u32()?;
         let read_pairs = |r: &mut Reader<'_>| -> Option<Vec<(u32, u32)>> {
@@ -1970,6 +2001,9 @@ pub fn load_val_index(
             imm_elems,
             saw_data_count_op,
             uses_exceptions,
+            uses_bulk_data,
+            uses_bulk_elem,
+            dyn_table_ops,
             sig_arity,
             br_table_entries,
             g_reads,
@@ -2031,6 +2065,12 @@ pub fn save_val_index(cache_dir: &Path, data: &ValIndexData) {
         out.extend_from_slice(&b.imm_elems.to_le_bytes());
         out.push(u8::from(b.saw_data_count_op));
         out.push(u8::from(b.uses_exceptions));
+        out.push(u8::from(b.uses_bulk_data));
+        out.push(u8::from(b.uses_bulk_elem));
+        out.extend_from_slice(&(b.dyn_table_ops.len() as u32).to_le_bytes());
+        for &t in &b.dyn_table_ops {
+            out.extend_from_slice(&t.to_le_bytes());
+        }
         out.extend_from_slice(&b.sig_arity.to_le_bytes());
         out.extend_from_slice(&b.br_table_entries.to_le_bytes());
         for pairs in [&b.g_reads, &b.g_writes, &b.ci_pairs] {

@@ -35,7 +35,8 @@ use lower::lower_ir_to_aarch64;
 use regalloc::allocate;
 use runtime::{emit_a64_exports, emit_a64_helpers};
 use standalone_rt::{
-    emit_a64_helper_goose_fmt_float, emit_a64_standalone_import_trampoline,
+    emit_a64_helper_goose_fmt_float, emit_a64_helper_standalone_fs,
+    emit_a64_helper_standalone_reserve_copy, emit_a64_standalone_import_trampoline,
     emit_a64_standalone_start,
 };
 
@@ -58,8 +59,8 @@ use crate::x64::opt::{
 use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables, TRAP_MESSAGES};
 use crate::x64::verify::verify_ir;
 use crate::x64::{
-    CiTableLayout, CtxLayout, HELPER_GOOSE_FMT_FLOAT, MAX_WASM_BYTES_X64, NUM_HELPERS,
-    X64CompileError,
+    CiTableLayout, CtxLayout, HELPER_GOOSE_FMT_FLOAT, HELPER_STANDALONE_FS,
+    HELPER_STANDALONE_RESERVE_COPY, MAX_WASM_BYTES_X64, NUM_HELPERS, X64CompileError,
 };
 
 /// Compilation options for `--backend aarch64`.
@@ -247,6 +248,9 @@ fn build_val_body_entry(raw_body_hash: [u8; 32], admit: BodyAdmitSummary) -> Val
         imm_elems: admit.imm_elems,
         saw_data_count_op: admit.saw_data_count_op,
         uses_exceptions: admit.uses_exceptions,
+        uses_bulk_data: admit.uses_bulk_data,
+        uses_bulk_elem: admit.uses_bulk_elem,
+        dyn_table_ops: admit.dyn_table_ops,
         sig_arity: admit.sig_arity as u32,
         br_table_entries: admit.br_table_entries as u32,
         g_reads: admit.g_reads,
@@ -787,7 +791,7 @@ fn compile_wasm_to_aarch64_detailed(
     let mut ci_tables = Vec::with_capacity(module.ci_sigs.len());
     let mut ci_patch_info: Vec<(u32, Vec<Option<u32>>)> = Vec::with_capacity(module.ci_sigs.len());
     for sig in &module.ci_sigs {
-        let (roff, slice) = if sig.span == 0 {
+        let (roff, slice) = if sig.is_dynamic || sig.span == 0 {
             (0, Vec::new())
         } else {
             let mut sl = vec![None; sig.span as usize];
@@ -803,17 +807,109 @@ fn compile_wasm_to_aarch64_detailed(
             min_slot: sig.min_slot,
             span: sig.span,
             rodata_off: roff,
+            dyn_table_desc_off: -1,
+            canon_sig: sig.canon_sig,
         });
         ci_patch_info.push((roff, slice));
     }
 
+    let (func_sig_ro_off, func_addr_ro_off) = if module.uses_dyn_ci {
+        let mut sig_bytes = Vec::with_capacity(module.func_canon_sig.len() * 4);
+        for &cs in &module.func_canon_sig {
+            sig_bytes.extend_from_slice(&cs.to_le_bytes());
+        }
+        let sig_off = append_rodata(&mut rodata, 4, &sig_bytes).map_err(X64CompileError::Failed)?;
+        let addr_off = append_rodata(&mut rodata, 4, &vec![0u8; module.func_canon_sig.len() * 4])
+            .map_err(X64CompileError::Failed)?;
+        (sig_off, addr_off)
+    } else {
+        (0, 0)
+    };
+
+    let empty_off = append_rodata(&mut rodata, 1, &[0]).map_err(X64CompileError::Failed)?;
     let mut data_segs = Vec::with_capacity(module.active_data_segs.len());
     for &(mem_idx, mem_off, data_idx) in &module.active_data_segs {
         let span = validated.decoded().data[data_idx].bytes;
         let bytes = &wasm[span.start..span.end];
-        let roff = append_rodata(&mut rodata, 1, bytes).map_err(X64CompileError::Failed)?;
+        let roff = if bytes.is_empty() {
+            empty_off
+        } else {
+            append_rodata(&mut rodata, 1, bytes).map_err(X64CompileError::Failed)?
+        };
         data_segs.push((mem_idx, mem_off, roff, bytes.len() as u32));
     }
+
+    let passive_data_table_off = if module.uses_bulk_data && module.data_seg_count > 0 {
+        let mut entries = vec![(empty_off, 0u32); module.data_seg_count];
+        for &di in &module.passive_data_segs {
+            let span = validated.decoded().data[di].bytes;
+            let bytes = &wasm[span.start..span.end];
+            let roff = if bytes.is_empty() {
+                empty_off
+            } else {
+                append_rodata(&mut rodata, 1, bytes).map_err(X64CompileError::Failed)?
+            };
+            entries[di] = (roff, bytes.len() as u32);
+        }
+        let tbl_off = append_rodata(&mut rodata, 8, &vec![0u8; entries.len() * 8])
+            .map_err(X64CompileError::Failed)?;
+        for (i, &(roff, len)) in entries.iter().enumerate() {
+            let rel = (roff as i64 - tbl_off as i64) as i32;
+            let pos = (tbl_off as usize) + i * 8;
+            rodata[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
+            rodata[pos + 4..pos + 8].copy_from_slice(&len.to_le_bytes());
+        }
+        tbl_off
+    } else {
+        0
+    };
+
+    let mut active_dyn_elem_inits = Vec::new();
+    let mut passive_elem_entries = if module.uses_bulk_elem {
+        vec![(empty_off, 0u32); module.elem_segs.len()]
+    } else {
+        Vec::new()
+    };
+    for (ei, seg) in module.elem_segs.iter().enumerate() {
+        let need_active_dyn = seg
+            .active_target
+            .is_some_and(|(tbl, _)| module.dyn_tables.contains_key(&tbl));
+        let need_passive = module.uses_bulk_elem && seg.is_passive;
+        if !need_active_dyn && !need_passive {
+            continue;
+        }
+        let len = seg.entries.len() as u32;
+        let roff = if seg.entries.is_empty() {
+            empty_off
+        } else {
+            let mut buf = Vec::with_capacity(seg.entries.len() * 4);
+            for &enc in &seg.entries {
+                buf.extend_from_slice(&enc.to_le_bytes());
+            }
+            append_rodata(&mut rodata, 4, &buf).map_err(X64CompileError::Failed)?
+        };
+        if let Some((tbl, dst_off)) = seg.active_target
+            && need_active_dyn
+        {
+            active_dyn_elem_inits.push((tbl, dst_off, roff, len));
+        }
+        if need_passive {
+            passive_elem_entries[ei] = (roff, len);
+        }
+    }
+    let elem_seg_table_off = if module.uses_bulk_elem && !module.elem_segs.is_empty() {
+        let tbl_off = append_rodata(&mut rodata, 8, &vec![0u8; passive_elem_entries.len() * 8])
+            .map_err(X64CompileError::Failed)?;
+        for (i, &(roff, len)) in passive_elem_entries.iter().enumerate() {
+            let rel = (roff as i64 - tbl_off as i64) as i32;
+            let pos = (tbl_off as usize) + i * 8;
+            rodata[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
+            rodata[pos + 4..pos + 8].copy_from_slice(&len.to_le_bytes());
+        }
+        tbl_off
+    } else {
+        0
+    };
 
     let tables = RuntimeTables {
         trap_table_off,
@@ -827,9 +923,16 @@ fn compile_wasm_to_aarch64_detailed(
         set_global_count: 0,
         data_segs,
         v128_global_inits: Vec::new(),
+        passive_data_table_off,
+        elem_seg_table_off,
+        active_dyn_elem_inits,
+        func_sig_ro_off,
+        func_addr_ro_off,
     };
-    let layout =
+    let mut layout =
         CtxLayout::compute(&module, ci_tables).map_err(X64CompileError::AdmissionRejected)?;
+    layout.func_sig_ro_off = func_sig_ro_off;
+    layout.func_addr_ro_off = func_addr_ro_off;
 
     // 2. Try incremental compilation against `a64-inc`, falling back cleanly to full parallel cold compile.
     let n_defs = validated.decoded().code.len();
@@ -904,6 +1007,9 @@ fn compile_wasm_to_aarch64_detailed(
                             imm_elems: 0,
                             saw_data_count_op: false,
                             uses_exceptions: false,
+                            uses_bulk_data: false,
+                            uses_bulk_elem: false,
+                            dyn_table_ops: Vec::new(),
                             sig_arity: 0,
                             br_table_entries: 0,
                             g_reads: Vec::new(),
@@ -1276,6 +1382,9 @@ fn compile_wasm_to_aarch64_detailed(
                                     imm_elems: 0,
                                     saw_data_count_op: false,
                                     uses_exceptions: false,
+                                    uses_bulk_data: false,
+                                    uses_bulk_elem: false,
+                                    dyn_table_ops: Vec::new(),
                                     sig_arity: 0,
                                     br_table_entries: 0,
                                     g_reads: Vec::new(),
@@ -1319,6 +1428,34 @@ fn compile_wasm_to_aarch64_detailed(
         helper_asms.push((
             HELPER_GOOSE_FMT_FLOAT,
             emit_a64_helper_goose_fmt_float().map_err(X64CompileError::Failed)?,
+        ));
+    }
+    let needs_standalone_fs = opts.target == X64Target::StandaloneExec
+        && module.imports.iter().any(|(m, f)| {
+            m == "env"
+                && matches!(
+                    f.as_str(),
+                    "gs_os_file_exists"
+                        | "gs_os_is_dir"
+                        | "gs_os_read_file"
+                        | "gs_os_write_file"
+                        | "gs_os_append_file"
+                )
+        });
+    if needs_standalone_fs {
+        helper_asms.push((
+            HELPER_STANDALONE_FS,
+            emit_a64_helper_standalone_fs().map_err(X64CompileError::Failed)?,
+        ));
+    }
+    let needs_standalone_reserve = opts.target == X64Target::StandaloneExec
+        && module.imports.iter().any(|(m, f)| {
+            m == "env" && matches!(f.as_str(), "gs_os_arg" | "gs_os_getenv" | "gs_os_read_file")
+        });
+    if needs_standalone_reserve {
+        helper_asms.push((
+            HELPER_STANDALONE_RESERVE_COPY,
+            emit_a64_helper_standalone_reserve_copy(&module).map_err(X64CompileError::Failed)?,
         ));
     }
 
@@ -1479,6 +1616,9 @@ fn compile_wasm_to_aarch64_detailed(
         }
     }
     for (roff, slots) in &ci_patch_info {
+        if slots.is_empty() {
+            continue;
+        }
         let base_va = rodata_vaddr + u64::from(*roff);
         for (i, opt_f) in slots.iter().enumerate() {
             if let Some(fidx) = *opt_f {
@@ -1489,6 +1629,17 @@ fn compile_wasm_to_aarch64_detailed(
                 let pos = (*roff as usize) + i * 4;
                 rodata[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
             }
+        }
+    }
+    if module.uses_dyn_ci {
+        let base_va = rodata_vaddr + u64::from(layout.func_addr_ro_off);
+        for (fi, &target_off) in func_offs.iter().enumerate() {
+            let target_va = text_vaddr + target_off as u64;
+            let rel = i32::try_from((target_va as i64) - (base_va as i64)).map_err(|_| {
+                X64CompileError::Failed("aarch64: func_addr offset overflow".into())
+            })?;
+            let pos = (layout.func_addr_ro_off as usize) + fi * 4;
+            rodata[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
         }
     }
 

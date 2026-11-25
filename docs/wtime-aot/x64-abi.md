@@ -79,21 +79,37 @@ Admitted constructs:
   pages (memory 0 pinned in `R14`/`R13`, up to 64 extra memories backed by
   per-memory descriptors in `Ctx` with zero overhead when unused; Wasm32
   `max <= 65_536`; `memory64` validated up to `2^48` pages and bounded at
-  runtime by `mem_limit_pages` / 8 GiB default reservation ceiling).
+  runtime by `mem_limit_pages` / 8 GiB default reservation ceiling in
+  `--blot-cdylib` and 256 GiB `MAP_NORESERVE` default ceiling in standalone
+  `ET_EXEC` executables).
 - Static 32-bit nullable `funcref` tables (`min <= 1_048_576`, aggregate
-  `<= 2_097_152` slots) and mutable 32-bit nullable `externref` tables
-  (`min == max <= 65_536`).
-- Active data segments targeting memory `0` or extra memories `1..=64` with
-  constant `i32` (Wasm32) or `i64` (`memory64`) offsets.
+  `<= 2_097_152` slots, zero-overhead `.rodata` `ci_tables` when unmodified),
+  fixed inline mutable 32-bit nullable `externref` tables (`min == max <= 65_536`),
+  AND dynamic growable/mutable `funcref`/`externref` tables (`<= 131_072` slots
+  per table, demand-paged `mmap` backing with dynamic `call_indirect` /
+  `return_call_indirect` / `call_indirect` inside `try_table`, `table.get`/`set`,
+  `table.size`/`grow`/`fill`/`copy`/`init`, `elem.drop`, `ref.func`, `ref.null func`).
+- Active, passive, and declarative data & element segments (`memory.init`,
+  `data.drop`, `table.init`, `elem.drop`, `DataCountSection`) targeting memory
+  `0` or extra memories `1..=64` with constant `i32` (Wasm32) or `i64`
+  (`memory64`) offsets.
 - Plain function imports with Blot ABI-compatible signatures (for
   `--blot-cdylib`) or direct-syscall WASI Preview 1 / Goose (`goose::*`
-  including pure-x86-64 Ryū shortest round-trip `print_f64`/`print_f32`/
-  `format_f64`/`format_f32`) / benchmark `env::{bench_input, bench_input_f64}`
-  imports (for standalone static `ET_EXEC` executables), and globals of `i32`,
-  `i64`, `f32`, `f64`, `v128`, or nullable `externref`/`exnref`.
-- MVP opcodes, saturating float-to-int truncations, `memory.copy`/`memory.fill`
-  (including cross-memory `memory.copy dst_mem src_mem`), `memory64` 64-bit
-  addressing (with 1-branch wrap-proof bounds checks when
+  including pure-assembly Ryū shortest round-trip `print_f64`/`print_f32`/
+  `format_f64`/`format_f32`) / standalone Goose compiler OS & search imports
+  (`env::gs_os_{arg_count,arg,getenv,file_exists,is_dir,read_file,write_file,
+  append_file,resource_dir}`, `env::gs_find_{any,pair}`, `goose.reserve`
+  callbacks, and sandbox CLI flags `--allow-files`, `--allow-env`,
+  `--output-limit`, `--memory-limit-pages`, `--timing-json`, `--time-limit`,
+  `--stack-limit-mib`, `--` enforced via `openat2` + `RESOLVE_BENEATH` +
+  `O_NOFOLLOW`) / benchmark `env::{bench_input, bench_input_f64}` imports (for
+  standalone static `ET_EXEC` executables), and globals of `i32`, `i64`, `f32`,
+  `f64`, `v128`, or nullable `funcref`/`externref`/`exnref`.
+- MVP opcodes, saturating float-to-int truncations, full bulk memory & table
+  ops (`memory.init`, `data.drop`, `memory.copy` including cross-memory,
+  `memory.fill`, `table.init`, `elem.drop`, `table.copy`, `table.grow`,
+  `table.size`, `table.fill`, `ref.func`, `ref.null`, `ref.is_null`),
+  `memory64` 64-bit addressing (with 1-branch wrap-proof bounds checks when
   `end_off <= mem_min_bytes`), `wide-arithmetic` (`i64.add128`, `i64.sub128`,
   `i64.mul_wide_s`, `i64.mul_wide_u`), `exception_handling` (`TagSection`,
   `try_table` with `catch`/`catch_ref`/`catch_all`/`catch_all_ref`, `throw`,
@@ -105,10 +121,10 @@ Admitted constructs:
   with O(1)-stack frame reuse whenever `callee_arg_stack <= caller_param_stack`,
   and overflow return-buffer pointer forwarding), all 236 fixed-width 128-bit Wasm
   SIMD opcodes (`0xfd00..=0xfdff`), and all 20 `relaxed_simd` opcodes
-  (`0xfd 0x100..=0x113`, bit-exact with `wtime-runtime`) — mirrored with
-  multi-core parallel compilation (`--jobs`) and full NEON + `tail_call` +
-  `wide-arithmetic` + `multi-memory` + `exception_handling` parity on
-  `--backend aarch64`.
+  (`0xfd 0x100..=0xfd 0x113`, bit-exact with `wtime-runtime`) — mirrored with
+  multi-core parallel compilation (`--jobs`) and full NEON + bulk memory/table +
+  `tail_call` + `wide-arithmetic` + `multi-memory` + `exception_handling` parity
+  on `--backend aarch64` (verified on native `ubuntu-24.04-arm` hardware in CI).
 
 Unsupported modules are rejected cleanly before codegen with CLI exit code `4`
 (`X64_ADMISSION_REJECTED_EXIT_CODE`), distinct from exit code `1` for I/O,

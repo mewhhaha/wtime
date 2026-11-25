@@ -87,8 +87,11 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
         section(7, &[1, 3, b'i', b'n', b'c', 0, 0]),
         section(10, &[1, 7, 0, 0x20, 0, 0x41, 1, 0x6a, 0x0b]),
     ]);
-    // Admission-rejected module (passive data segment -> exit code 4!).
-    let rej_bytes = wasm_module(&[section(12, &[1]), section(11, &[1, 1, 1, 0x42])]);
+    // Admission-rejected module (exported table -> exit code 4!).
+    let rej_bytes = wasm_module(&[
+        section(4, &[1, 0x70, 0x00, 1]),
+        section(7, &[1, 1, b't', 1, 0]),
+    ]);
     fs::write(&ok_wasm, &ok_bytes).unwrap();
     fs::write(&rej_wasm, &rej_bytes).unwrap();
     fs::write(&bad_wasm, b"corrupt-not-wasm").unwrap();
@@ -967,4 +970,466 @@ fn cli_and_cached_build_aarch64_cdylib_and_standalone_exec() {
     assert_static_elf64_exec(&direct_exe);
     let exe_bytes = fs::read(&direct_exe).unwrap();
     assert_eq!(u16::from_le_bytes([exe_bytes[18], exe_bytes[19]]), 183); // EM_AARCH64
+}
+
+#[test]
+fn standalone_goose_os_search_and_sandbox_security_x64_and_aarch64() {
+    use std::os::unix::fs::symlink;
+
+    let bin = Path::new(env!("CARGO_BIN_EXE_wtime-aot"));
+    let root = TempRoot::new("wtime-aot-goose-os");
+    let sandbox = root.path("sandbox");
+    let outside = root.path("outside");
+    fs::create_dir_all(&sandbox).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let secret = outside.join("secret.txt");
+    fs::write(&secret, b"TOP_SECRET").unwrap();
+    let escape_link = sandbox.join("escape.txt");
+    symlink(&secret, &escape_link).unwrap();
+
+    // Build a memory64 module exercising all compiler-64 Goose OS + byte-set search imports:
+    //   0: goose::print_i64(i64) -> ()                 (type 0)
+    //   1: goose::write(i64, i32) -> ()                (type 1)
+    //   2: goose::newline() -> ()                      (type 2)
+    //   3: env::gs_os_arg_count() -> i64               (type 3)
+    //   4: env::gs_os_arg(i64, i64) -> ()              (type 4)
+    //   5: env::gs_os_getenv(i64, i64, i64) -> i32     (type 5)
+    //   6: env::gs_os_file_exists(i64, i64) -> i32     (type 6)
+    //   7: env::gs_os_is_dir(i64, i64) -> i32          (type 6)
+    //   8: env::gs_os_read_file(i64, i64, i64) -> i32  (type 5)
+    //   9: env::gs_os_write_file(i64,i64,i64,i64)->i32 (type 7)
+    //  10: env::gs_os_append_file(i64,i64,i64,i64)->i32(type 7)
+    //  11: env::gs_os_resource_dir(i64) -> i32         (type 8)
+    //  12: env::gs_find_any(i64, i64, i64) -> i64      (type 9)
+    //  13: env::gs_find_pair(i64,i64,i64,i64,i64)->i64 (type 10)
+    // Defined funcs:
+    //  14: goose.reserve(control: i64, count: i64) -> i64 (type 11)
+    //      control layout: [control+0] = base_ptr (i64), [control+8] = cur_len (i64)
+    //      appends at base_ptr + cur_len, updates cur_len += count, returns old_end!
+    //  15: _start() -> () (type 2)
+    let mut imp = vec![14];
+    let specs: &[(&str, &str, u32)] = &[
+        ("goose", "print_i64", 0),
+        ("goose", "write", 1),
+        ("goose", "newline", 2),
+        ("env", "gs_os_arg_count", 3),
+        ("env", "gs_os_arg", 4),
+        ("env", "gs_os_getenv", 5),
+        ("env", "gs_os_file_exists", 6),
+        ("env", "gs_os_is_dir", 6),
+        ("env", "gs_os_read_file", 5),
+        ("env", "gs_os_write_file", 7),
+        ("env", "gs_os_append_file", 7),
+        ("env", "gs_os_resource_dir", 8),
+        ("env", "gs_find_any", 9),
+        ("env", "gs_find_pair", 10),
+    ];
+    for &(m, n, ti) in specs {
+        enc_str(&mut imp, m);
+        enc_str(&mut imp, n);
+        imp.push(0x00);
+        leb_u32(&mut imp, ti);
+    }
+
+    let push_i64 = |b: &mut Vec<u8>, v: i64| {
+        b.push(0x42);
+        leb_i64(b, v);
+    };
+    let push_i32 = |b: &mut Vec<u8>, v: i32| {
+        b.push(0x41);
+        leb_i64(b, i64::from(v));
+    };
+
+    // goose.reserve(control=local0, count=local1) -> i64 (local2 = dst)
+    let mut res_body = Vec::new();
+    // dst = [control+0] + [control+8]
+    res_body.extend_from_slice(&[0x20, 0, 0x29, 3, 0]); // base
+    res_body.extend_from_slice(&[0x20, 0, 0x29, 3, 8]); // cur_len
+    res_body.extend_from_slice(&[0x7c, 0x21, 2]); // local.set 2 (dst)
+    // [control+8] = cur_len + count
+    res_body.extend_from_slice(&[0x20, 0]);
+    res_body.extend_from_slice(&[0x20, 0, 0x29, 3, 8, 0x20, 1, 0x7c]);
+    res_body.extend_from_slice(&[0x37, 3, 8]);
+    // Ensure memory is large enough: if (dst + count) > (memory.size << 16) { memory.grow(1); }
+    res_body.extend_from_slice(&[0x20, 2, 0x20, 1, 0x7c]);
+    res_body.extend_from_slice(&[0x3f, 0, 0x42, 16, 0x86, 0x56]); // i64.gt_u
+    res_body.extend_from_slice(&[0x04, 0x40, 0x42, 1, 0x40, 0, 0x1a, 0x0b]);
+    res_body.extend_from_slice(&[0x20, 2]); // return dst
+
+    // Static strings placed in memory64 at fixed offsets:
+    //   256: "FOO" (3), 264: "BAR" (3), 272: "hello world!" (12)
+    //   512: first_set (256B, 'w' = 1), 768: second_set (256B, 'r' = 1), 1024: any_set (256B, 'o' = 1)
+    //   2048: "abc" (3), 2056: "def" (3)
+    //   4096: control struct (base=8192, len=0)
+    //   16384: control2 (arg[1] -> sandbox dir path!)
+    //   20480: control3 (arg[2] -> hello.txt path!)
+    //   24576: control4 (arg[3] -> escape.txt symlink path!)
+    //   28672: control5 (arg[4] -> ../outside/secret.txt traversal path!)
+    let mut data_sec = vec![6];
+    let add_data64 = |ds: &mut Vec<u8>, off: i64, bytes: &[u8]| {
+        ds.push(0x00);
+        ds.push(0x42);
+        leb_i64(ds, off);
+        ds.push(0x0b);
+        leb_u32(ds, bytes.len() as u32);
+        ds.extend_from_slice(bytes);
+    };
+    add_data64(&mut data_sec, 256, b"FOO");
+    add_data64(&mut data_sec, 264, b"BAR");
+    add_data64(&mut data_sec, 272, b"hello world!");
+    let mut s_any = [0u8; 256];
+    s_any[b'o' as usize] = 1;
+    let mut s_first = [0u8; 256];
+    s_first[b'w' as usize] = 1;
+    let mut s_second = [0u8; 256];
+    s_second[b'r' as usize] = 1;
+    add_data64(&mut data_sec, 512, &s_first);
+    add_data64(&mut data_sec, 768, &s_second);
+    add_data64(&mut data_sec, 1024, &s_any);
+    // Re-pack data count = 7 (add "abcdef")
+    data_sec[0] = 7;
+    add_data64(&mut data_sec, 2048, b"abcdef");
+
+    // Helper in _start: init control at `ctrl` with `base` and len 0
+    let mut sb = Vec::new();
+    let init_ctrl = |b: &mut Vec<u8>, ctrl: i64, base: i64| {
+        push_i64(b, ctrl);
+        push_i64(b, base);
+        b.extend_from_slice(&[0x37, 3, 0]);
+        push_i64(b, ctrl);
+        push_i64(b, 0);
+        b.extend_from_slice(&[0x37, 3, 8]);
+    };
+    let print_ctrl_line = |b: &mut Vec<u8>, ctrl: i64| {
+        push_i64(b, ctrl);
+        b.extend_from_slice(&[0x29, 3, 0]);
+        push_i64(b, ctrl);
+        b.extend_from_slice(&[0x29, 3, 8, 0xa7]); // i32.wrap_i64
+        b.extend_from_slice(&[0x10, 1, 0x10, 2]); // write + newline
+    };
+    let print_i64_line = |b: &mut Vec<u8>| {
+        b.extend_from_slice(&[0x10, 0, 0x10, 2]);
+    };
+    let print_i32_line = |b: &mut Vec<u8>| {
+        b.extend_from_slice(&[0xac, 0x10, 0, 0x10, 2]); // i64.extend_i32_s + print_i64 + nl
+    };
+
+    // 1. gs_find_any("hello world!", any('o')) -> 4; gs_find_pair("hello world!", 'w', 2, 'r') -> 6; no-match -> -1
+    push_i64(&mut sb, 272);
+    push_i64(&mut sb, 12);
+    push_i64(&mut sb, 1024);
+    sb.extend_from_slice(&[0x10, 12]);
+    print_i64_line(&mut sb);
+    push_i64(&mut sb, 272);
+    push_i64(&mut sb, 12);
+    push_i64(&mut sb, 512);
+    push_i64(&mut sb, 2);
+    push_i64(&mut sb, 768);
+    sb.extend_from_slice(&[0x10, 13]);
+    print_i64_line(&mut sb);
+    push_i64(&mut sb, 272);
+    push_i64(&mut sb, 12);
+    push_i64(&mut sb, 512);
+    push_i64(&mut sb, 3);
+    push_i64(&mut sb, 768);
+    sb.extend_from_slice(&[0x10, 13]);
+    print_i64_line(&mut sb);
+
+    // 2. gs_os_arg_count -> 5 (prog + 4 paths), gs_os_resource_dir(4096) -> 0
+    sb.extend_from_slice(&[0x10, 3]);
+    print_i64_line(&mut sb);
+    push_i64(&mut sb, 4096);
+    sb.extend_from_slice(&[0x10, 11]);
+    print_i32_line(&mut sb);
+
+    // 3. Load args 1..=4 into ctrl2..ctrl5
+    for (i, (ctrl, base)) in [
+        (1i64, (16384i64, 16400i64)),
+        (2, (20480, 20496)),
+        (3, (24576, 24592)),
+        (4, (28672, 28688)),
+    ] {
+        init_ctrl(&mut sb, ctrl, base);
+        push_i64(&mut sb, i);
+        push_i64(&mut sb, ctrl);
+        sb.extend_from_slice(&[0x10, 4]); // gs_os_arg
+    }
+
+    // 4. getenv("FOO") and getenv("BAR")
+    init_ctrl(&mut sb, 4096, 8192);
+    push_i64(&mut sb, 256);
+    push_i64(&mut sb, 3);
+    push_i64(&mut sb, 4096);
+    sb.extend_from_slice(&[0x10, 5]);
+    print_i32_line(&mut sb);
+    print_ctrl_line(&mut sb, 4096);
+
+    init_ctrl(&mut sb, 4096, 8192);
+    push_i64(&mut sb, 264);
+    push_i64(&mut sb, 3);
+    push_i64(&mut sb, 4096);
+    sb.extend_from_slice(&[0x10, 5]);
+    print_i32_line(&mut sb);
+
+    // 5. is_dir(sandbox) & file_exists(sandbox)
+    push_i64(&mut sb, 16384);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 16384);
+    sb.extend_from_slice(&[0x29, 3, 8, 0x10, 7]);
+    print_i32_line(&mut sb);
+    push_i64(&mut sb, 16384);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 16384);
+    sb.extend_from_slice(&[0x29, 3, 8, 0x10, 6]);
+    print_i32_line(&mut sb);
+
+    // 6. write_file(hello.txt, "abc"), append_file(hello.txt, "def"), file_exists, read_file
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 8]);
+    push_i64(&mut sb, 2048);
+    push_i64(&mut sb, 3);
+    sb.extend_from_slice(&[0x10, 9]);
+    print_i32_line(&mut sb);
+
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 8]);
+    push_i64(&mut sb, 2051);
+    push_i64(&mut sb, 3);
+    sb.extend_from_slice(&[0x10, 10]);
+    print_i32_line(&mut sb);
+
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 8, 0x10, 6]);
+    print_i32_line(&mut sb);
+
+    init_ctrl(&mut sb, 4096, 8192);
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 20480);
+    sb.extend_from_slice(&[0x29, 3, 8]);
+    push_i64(&mut sb, 4096);
+    sb.extend_from_slice(&[0x10, 8]);
+    print_i32_line(&mut sb);
+    print_ctrl_line(&mut sb, 4096);
+
+    // 7. Symlink escape (escape.txt -> ../outside/secret.txt): MUST be denied (0) for exists, read, AND write!
+    push_i64(&mut sb, 24576);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 24576);
+    sb.extend_from_slice(&[0x29, 3, 8, 0x10, 6]);
+    print_i32_line(&mut sb);
+
+    init_ctrl(&mut sb, 4096, 8192);
+    push_i64(&mut sb, 24576);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 24576);
+    sb.extend_from_slice(&[0x29, 3, 8]);
+    push_i64(&mut sb, 4096);
+    sb.extend_from_slice(&[0x10, 8]);
+    print_i32_line(&mut sb);
+
+    push_i64(&mut sb, 24576);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 24576);
+    sb.extend_from_slice(&[0x29, 3, 8]);
+    push_i64(&mut sb, 2048);
+    push_i64(&mut sb, 3);
+    sb.extend_from_slice(&[0x10, 9]);
+    print_i32_line(&mut sb);
+
+    // 8. Lexical `..` traversal path: MUST be denied (0) for read!
+    init_ctrl(&mut sb, 4096, 8192);
+    push_i64(&mut sb, 28672);
+    sb.extend_from_slice(&[0x29, 3, 0]);
+    push_i64(&mut sb, 28672);
+    sb.extend_from_slice(&[0x29, 3, 8]);
+    push_i64(&mut sb, 4096);
+    sb.extend_from_slice(&[0x10, 8]);
+    print_i32_line(&mut sb);
+
+    let _ = push_i32;
+
+    let types_p = vec![
+        12, // 12 types
+        0x60, 1, 0x7e, 0, // 0: (i64)->()
+        0x60, 2, 0x7e, 0x7f, 0, // 1: (i64,i32)->()
+        0x60, 0, 0, // 2: ()->()
+        0x60, 0, 1, 0x7e, // 3: ()->i64
+        0x60, 2, 0x7e, 0x7e, 0, // 4: (i64,i64)->()
+        0x60, 3, 0x7e, 0x7e, 0x7e, 1, 0x7f, // 5: (i64,i64,i64)->i32
+        0x60, 2, 0x7e, 0x7e, 1, 0x7f, // 6: (i64,i64)->i32
+        0x60, 4, 0x7e, 0x7e, 0x7e, 0x7e, 1, 0x7f, // 7: (i64,i64,i64,i64)->i32
+        0x60, 1, 0x7e, 1, 0x7f, // 8: (i64)->i32
+        0x60, 3, 0x7e, 0x7e, 0x7e, 1, 0x7e, // 9: (i64,i64,i64)->i64
+        0x60, 5, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 1, 0x7e, // 10: (5*i64)->i64
+        0x60, 2, 0x7e, 0x7e, 1, 0x7e, // 11: (i64,i64)->i64
+    ];
+    let mut exp_p = vec![3];
+    enc_str(&mut exp_p, "_start");
+    exp_p.extend_from_slice(&[0x00, 15]);
+    enc_str(&mut exp_p, "goose.reserve");
+    exp_p.extend_from_slice(&[0x00, 14]);
+    enc_str(&mut exp_p, "memory");
+    exp_p.extend_from_slice(&[0x02, 0]);
+
+    let mod_bytes = wasm_module(&[
+        section(1, &types_p),
+        section(2, &imp),
+        section(3, &[2, 11, 2]),
+        section(5, &[1, 0x05, 1, 4]), // memory64 min=1 max=4
+        section(7, &exp_p),
+        section(
+            10,
+            &[2].into_iter()
+                .chain(enc_body(&[(1, 0x7e)], &res_body))
+                .chain(enc_body(&[], &sb))
+                .collect::<Vec<_>>(),
+        ),
+        section(11, &data_sec),
+    ]);
+
+    let wasm_path = root.path("goose_os.wasm");
+    let exe_x64 = root.path("goose_os_x64");
+    let exe_a64 = root.path("goose_os_a64");
+    fs::write(&wasm_path, &mod_bytes).unwrap();
+
+    // Compile for BOTH x64 and aarch64!
+    for (backend, out_path, e_mach) in [("x64", &exe_x64, 62u16), ("aarch64", &exe_a64, 183u16)] {
+        let st = Command::new(bin)
+            .arg(&wasm_path)
+            .args(["-o"])
+            .arg(out_path)
+            .args(["--backend", backend])
+            .output()
+            .unwrap();
+        assert!(
+            st.status.success(),
+            "goose_os {backend} compile failed: {}",
+            String::from_utf8_lossy(&st.stderr)
+        );
+        assert_static_elf64_exec(out_path);
+        let b = fs::read(out_path).unwrap();
+        assert_eq!(u16::from_le_bytes([b[18], b[19]]), e_mach);
+    }
+
+    let hello_file = sandbox.join("hello.txt");
+    let dotdot_path = format!("{}/../outside/secret.txt", sandbox.display());
+
+    // Run 1: `--allow-files sandbox --allow-env FOO` -> FOO allowed, BAR denied, sandbox RW ok, symlink & `..` denied!
+    let out1 = Command::new(&exe_x64)
+        .env("FOO", "hello_env")
+        .env("BAR", "hidden_env")
+        .args(["--allow-files"])
+        .arg(&sandbox)
+        .args(["--allow-env", "FOO", "--"])
+        .arg(&sandbox)
+        .arg(&hello_file)
+        .arg(&escape_link)
+        .arg(&dotdot_path)
+        .output()
+        .unwrap();
+    assert!(
+        out1.status.success(),
+        "run1 failed: code={:?} stderr={}",
+        out1.status.code(),
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out1.stdout),
+        "4\n6\n-1\n5\n0\n1\nhello_env\n0\n1\n0\n1\n1\n1\n1\nabcdef\n0\n0\n0\n0\n"
+    );
+    assert_eq!(fs::read(&hello_file).unwrap(), b"abcdef");
+    assert_eq!(fs::read(&secret).unwrap(), b"TOP_SECRET");
+
+    // Run 2: no `--allow-files` and no `--allow-env` -> default deny-all for both env AND files!
+    let out2 = Command::new(&exe_x64)
+        .env("FOO", "hello_env")
+        .env("BAR", "hidden_env")
+        .args(["--"])
+        .arg(&sandbox)
+        .arg(&hello_file)
+        .arg(&escape_link)
+        .arg(&dotdot_path)
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out2.stdout),
+        "4\n6\n-1\n5\n0\n0\n\n0\n0\n0\n0\n0\n0\n0\n\n0\n0\n0\n0\n"
+    );
+
+    // Run 3: `--allow-env *` -> both FOO and BAR allowed!
+    let out3 = Command::new(&exe_x64)
+        .env("FOO", "hello_env")
+        .env("BAR", "visible_bar")
+        .args(["--allow-env", "*", "--"])
+        .arg(&sandbox)
+        .arg(&hello_file)
+        .arg(&escape_link)
+        .arg(&dotdot_path)
+        .output()
+        .unwrap();
+    assert!(out3.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out3.stdout),
+        "4\n6\n-1\n5\n0\n1\nhello_env\n1\n0\n0\n0\n0\n0\n0\n\n0\n0\n0\n0\n"
+    );
+
+    // Run 4: re-entrancy guard (goose.reserve calling back into gs_os_arg MUST trap with non-zero exit!).
+    let mut reent_imp = vec![1];
+    enc_str(&mut reent_imp, "env");
+    enc_str(&mut reent_imp, "gs_os_arg");
+    reent_imp.extend_from_slice(&[0x00, 0]);
+    let reent_wasm = wasm_module(&[
+        section(
+            1,
+            &[
+                3, 0x60, 2, 0x7e, 0x7e, 0, // 0: gs_os_arg(i64,i64)->()
+                0x60, 2, 0x7e, 0x7e, 1, 0x7e, // 1: goose.reserve(i64,i64)->i64
+                0x60, 0, 0, // 2: _start
+            ],
+        ),
+        section(2, &reent_imp),
+        section(3, &[2, 1, 2]),
+        section(5, &[1, 0x05, 1, 1]),
+        section(
+            7,
+            &[
+                3, 6, b'_', b's', b't', b'a', b'r', b't', 0, 2, 13, b'g', b'o', b'o', b's', b'e',
+                b'.', b'r', b'e', b's', b'e', b'r', b'v', b'e', 0, 1, 6, b'm', b'e', b'm', b'o',
+                b'r', b'y', 2, 0,
+            ],
+        ),
+        section(
+            10,
+            &[2].into_iter()
+                // goose.reserve: calls gs_os_arg(0, 0) -> MUST trap!
+                .chain(enc_body(&[], &[0x42, 0, 0x42, 0, 0x10, 0, 0x42, 0]))
+                // _start: calls gs_os_arg(0, 0)
+                .chain(enc_body(&[], &[0x42, 0, 0x42, 0, 0x10, 0]))
+                .collect::<Vec<_>>(),
+        ),
+    ]);
+    let reent_path = root.path("reent.wasm");
+    let reent_exe = root.path("reent_exe");
+    fs::write(&reent_path, &reent_wasm).unwrap();
+    let st_r = Command::new(bin)
+        .arg(&reent_path)
+        .args(["-o"])
+        .arg(&reent_exe)
+        .args(["--backend", "x64"])
+        .output()
+        .unwrap();
+    assert!(st_r.status.success());
+    let out_r = Command::new(&reent_exe).output().unwrap();
+    assert!(
+        !out_r.status.success(),
+        "expected goose.reserve re-entrancy to trap!"
+    );
 }

@@ -17,11 +17,12 @@ use crate::x64::{
     CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
     GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_EXTRA_MEM_COPY,
     HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_INITIALIZE, HELPER_MEM_COPY,
-    HELPER_MEM_FILL, HELPER_MEM_GROW, INTERNAL_EXN_SIGNAL, OFF_GUEST_STACK_BASE,
+    HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_MEM_INIT, HELPER_TABLE_COPY, HELPER_TABLE_FILL,
+    HELPER_TABLE_GROW, HELPER_TABLE_INIT, INTERNAL_EXN_SIGNAL, OFF_GUEST_STACK_BASE,
     OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX,
     OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES,
     OFF_STACK_FLOOR, TRAP_ALLOC_FAILED, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB,
-    TRAP_UNREACHABLE,
+    TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
 use wtime_types::ValType;
 
@@ -181,6 +182,8 @@ pub fn emit_a64_helpers(
     {
         let mut a = A64Asm::new();
         let oob = a.new_label();
+        let table_oob = a.new_label();
+        let mut need_table_oob = false;
         a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -16);
         for (idx, &init) in module.global_inits.iter().enumerate() {
             let off = layout.global_offs[idx];
@@ -200,6 +203,10 @@ pub fn emit_a64_helpers(
                     a.movz(true, SGP1, 0, 0);
                     emit_store_off(&mut a, Ty::I64, Some(SGP1), None, CTX_REG, off, SGP3);
                 }
+                X64ConstVal::FuncRef(f) => {
+                    a.mov_imm64(SGP1, u64::from(f) + 1);
+                    emit_store_off(&mut a, Ty::I64, Some(SGP1), None, CTX_REG, off, SGP3);
+                }
                 X64ConstVal::F32(bits) => {
                     a.mov_imm32(SGP1, bits);
                     emit_store_off(&mut a, Ty::I32, Some(SGP1), None, CTX_REG, off, SGP3);
@@ -216,6 +223,62 @@ pub fn emit_a64_helpers(
                     a.mov_imm64(SGP1, hi);
                     emit_store_off(&mut a, Ty::I64, Some(SGP1), None, CTX_REG, off + 8, SGP3);
                 }
+            }
+        }
+        // Static active element bounds checks + dynamic active element copies + implicit drops.
+        for &(table_len, base_u32, elem_len) in &module.active_elem_checks {
+            if u64::from(base_u32) + u64::from(elem_len) > u64::from(table_len) {
+                need_table_oob = true;
+                a.b(table_oob);
+            }
+        }
+        for &(tbl, dst_off, rodata_off, elem_len) in &tables.active_dyn_elem_inits {
+            let (desc_off, min_len, _) = layout.dyn_tables[&tbl];
+            if u64::from(dst_off) + u64::from(elem_len) > u64::from(min_len) {
+                need_table_oob = true;
+                a.b(table_oob);
+                continue;
+            }
+            if elem_len > 0 {
+                let lp = a.new_label();
+                emit_load_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                if dst_off > 0 {
+                    a.mov_imm64(Reg::X5, u64::from(dst_off) * 8);
+                    a.add_r(true, Reg::X0, Reg::X0, Reg::X5);
+                }
+                a.adr_reloc(Reg::X1, A64RelocTarget::Rodata(rodata_off));
+                a.mov_imm32(Reg::X2, elem_len);
+                a.movz(true, Reg::X3, 0, 0);
+                a.bind(lp);
+                a.ldr_reg_scaled(false, Reg::X4, Reg::X1, Reg::X3, true);
+                a.str_reg_scaled(true, Reg::X4, Reg::X0, Reg::X3, true);
+                a.add_imm(true, Reg::X3, Reg::X3, 1);
+                a.cmp_r(true, Reg::X3, Reg::X2);
+                a.b_cond(Cond::Lo, lp);
+            }
+        }
+        if let Some(elem_drop_off) = layout.elem_dropped_off {
+            a.mov_imm32(Reg::X4, 1);
+            for (ei, seg) in module.elem_segs.iter().enumerate() {
+                if !seg.is_passive {
+                    a.add_i32_checked(true, Reg::X5, CTX_REG, elem_drop_off + (ei as i32), SGP3);
+                    a.strb_uimm(Reg::X4, Reg::X5, 0);
+                }
+            }
+        }
+        if let Some(data_drop_off) = layout.data_dropped_off {
+            a.mov_imm32(Reg::X4, 1);
+            for &(_, _, di) in &module.active_data_segs {
+                a.add_i32_checked(true, Reg::X5, CTX_REG, data_drop_off + (di as i32), SGP3);
+                a.strb_uimm(Reg::X4, Reg::X5, 0);
             }
         }
         // Copy active data segments from `.rodata` into target linear memory.
@@ -300,6 +363,12 @@ pub fn emit_a64_helpers(
         a.mov_imm32(SGP1, u32::from(TRAP_OOB));
         a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 16);
         a.ret();
+        if need_table_oob {
+            a.bind(table_oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_TABLE_OOB));
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 16);
+            a.ret();
+        }
         a.finish()?;
         out.push((HELPER_INITIALIZE, a));
     }
@@ -424,6 +493,229 @@ pub fn emit_a64_helpers(
             a.ret();
             a.finish()?;
             out.push((HELPER_EXTRA_MEM_FILL, a));
+        }
+    }
+
+    // 8. HELPER_MEM_INIT: X0 = dst, X1 = src, X2 = len, X3 = data_idx, X4 = mem_desc_off -> W16.
+    if let Some(drop_off) = layout.data_dropped_off {
+        let mut a = A64Asm::new();
+        let not_dropped = a.new_label();
+        let oob = a.new_label();
+        let done = a.new_label();
+        let lp = a.new_label();
+        a.adr_reloc(
+            Reg::X9,
+            A64RelocTarget::Rodata(tables.passive_data_table_off),
+        );
+        a.lsl_imm(true, Reg::X10, Reg::X3, 3);
+        a.add_r(true, Reg::X10, Reg::X9, Reg::X10);
+        a.ldr_uimm(false, Reg::X11, Reg::X10, 4); // seg_len
+        a.add_i32_checked(true, Reg::X12, CTX_REG, drop_off, SGP3);
+        a.ldrb_reg(Reg::X12, Reg::X12, Reg::X3, false);
+        a.cbz(false, Reg::X12, not_dropped);
+        a.movz(true, Reg::X11, 0, 0);
+        a.bind(not_dropped);
+        // Check src + len <= seg_len
+        a.adds_r(true, Reg::X5, Reg::X1, Reg::X2);
+        a.b_cond(Cond::Hs, oob);
+        a.cmp_r(true, Reg::X5, Reg::X11);
+        a.b_cond(Cond::Hi, oob);
+        // Check dst + len <= mem_len
+        a.add_r(true, Reg::X12, CTX_REG, Reg::X4);
+        a.ldr_uimm(true, Reg::X11, Reg::X12, 8);
+        a.adds_r(true, Reg::X5, Reg::X0, Reg::X2);
+        a.b_cond(Cond::Hs, oob);
+        a.cmp_r(true, Reg::X5, Reg::X11);
+        a.b_cond(Cond::Hi, oob);
+        a.cbz(true, Reg::X2, done);
+        a.ldrsw_uimm(Reg::X5, Reg::X10, 0);
+        a.add_r(true, Reg::X9, Reg::X9, Reg::X5);
+        a.add_r(true, Reg::X1, Reg::X9, Reg::X1); // src_ptr
+        a.ldr_uimm(true, Reg::X11, Reg::X12, 0);
+        a.add_r(true, Reg::X0, Reg::X11, Reg::X0); // dst_ptr
+        a.movz(true, Reg::X5, 0, 0);
+        a.bind(lp);
+        a.ldrb_reg(Reg::X6, Reg::X1, Reg::X5, false);
+        a.strb_reg(Reg::X6, Reg::X0, Reg::X5, false);
+        a.add_imm(true, Reg::X5, Reg::X5, 1);
+        a.cmp_r(true, Reg::X5, Reg::X2);
+        a.b_cond(Cond::Lo, lp);
+        a.bind(done);
+        a.movz(false, SGP1, 0, 0);
+        a.ret();
+        a.bind(oob);
+        a.mov_imm32(SGP1, u32::from(TRAP_OOB));
+        a.ret();
+        a.finish()?;
+        out.push((HELPER_MEM_INIT, a));
+    }
+
+    // 9. HELPER_TABLE_INIT: X0 = dst, X1 = src, X2 = len, X3 = elem_idx, X4 = tbl_desc_off -> W16.
+    if let Some(drop_off) = layout.elem_dropped_off {
+        let mut a = A64Asm::new();
+        let not_dropped = a.new_label();
+        let oob = a.new_label();
+        let done = a.new_label();
+        let lp = a.new_label();
+        a.adr_reloc(Reg::X9, A64RelocTarget::Rodata(tables.elem_seg_table_off));
+        a.lsl_imm(true, Reg::X10, Reg::X3, 3);
+        a.add_r(true, Reg::X10, Reg::X9, Reg::X10);
+        a.ldr_uimm(false, Reg::X11, Reg::X10, 4); // elem_len
+        a.add_i32_checked(true, Reg::X12, CTX_REG, drop_off, SGP3);
+        a.ldrb_reg(Reg::X12, Reg::X12, Reg::X3, false);
+        a.cbz(false, Reg::X12, not_dropped);
+        a.movz(true, Reg::X11, 0, 0);
+        a.bind(not_dropped);
+        a.adds_r(true, Reg::X5, Reg::X1, Reg::X2);
+        a.b_cond(Cond::Hs, oob);
+        a.cmp_r(true, Reg::X5, Reg::X11);
+        a.b_cond(Cond::Hi, oob);
+        a.add_r(true, Reg::X12, CTX_REG, Reg::X4);
+        a.ldr_uimm(false, Reg::X11, Reg::X12, 8); // tbl_cur_len
+        a.adds_r(true, Reg::X5, Reg::X0, Reg::X2);
+        a.b_cond(Cond::Hs, oob);
+        a.cmp_r(true, Reg::X5, Reg::X11);
+        a.b_cond(Cond::Hi, oob);
+        a.cbz(true, Reg::X2, done);
+        a.ldrsw_uimm(Reg::X5, Reg::X10, 0);
+        a.add_r(true, Reg::X9, Reg::X9, Reg::X5);
+        a.lsl_imm(true, Reg::X5, Reg::X1, 2);
+        a.add_r(true, Reg::X1, Reg::X9, Reg::X5); // src u32 ptr
+        a.ldr_uimm(true, Reg::X11, Reg::X12, 0);
+        a.lsl_imm(true, Reg::X5, Reg::X0, 3);
+        a.add_r(true, Reg::X0, Reg::X11, Reg::X5); // dst u64 ptr
+        a.movz(true, Reg::X5, 0, 0);
+        a.bind(lp);
+        a.ldr_reg_scaled(false, Reg::X6, Reg::X1, Reg::X5, true);
+        a.str_reg_scaled(true, Reg::X6, Reg::X0, Reg::X5, true);
+        a.add_imm(true, Reg::X5, Reg::X5, 1);
+        a.cmp_r(true, Reg::X5, Reg::X2);
+        a.b_cond(Cond::Lo, lp);
+        a.bind(done);
+        a.movz(false, SGP1, 0, 0);
+        a.ret();
+        a.bind(oob);
+        a.mov_imm32(SGP1, u32::from(TRAP_TABLE_OOB));
+        a.ret();
+        a.finish()?;
+        out.push((HELPER_TABLE_INIT, a));
+    }
+
+    // 10-12. Dynamic table helpers (`HELPER_TABLE_COPY`, `HELPER_TABLE_GROW`, `HELPER_TABLE_FILL`).
+    if !layout.dyn_tables.is_empty() {
+        // HELPER_TABLE_COPY: X0 = dst, X1 = src, X2 = len, X3 = dst_desc_off, X4 = src_desc_off -> W16.
+        {
+            let mut a = A64Asm::new();
+            let oob = a.new_label();
+            let done = a.new_label();
+            let bwd = a.new_label();
+            let fwd_lp = a.new_label();
+            let bwd_lp = a.new_label();
+            a.add_r(true, Reg::X9, CTX_REG, Reg::X3);
+            a.add_r(true, Reg::X10, CTX_REG, Reg::X4);
+            a.ldr_uimm(false, Reg::X11, Reg::X9, 8);
+            a.adds_r(true, Reg::X5, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Hs, oob);
+            a.cmp_r(true, Reg::X5, Reg::X11);
+            a.b_cond(Cond::Hi, oob);
+            a.ldr_uimm(false, Reg::X12, Reg::X10, 8);
+            a.adds_r(true, Reg::X5, Reg::X1, Reg::X2);
+            a.b_cond(Cond::Hs, oob);
+            a.cmp_r(true, Reg::X5, Reg::X12);
+            a.b_cond(Cond::Hi, oob);
+            a.cbz(true, Reg::X2, done);
+            a.ldr_uimm(true, Reg::X11, Reg::X9, 0);
+            a.lsl_imm(true, Reg::X5, Reg::X0, 3);
+            a.add_r(true, Reg::X0, Reg::X11, Reg::X5);
+            a.ldr_uimm(true, Reg::X12, Reg::X10, 0);
+            a.lsl_imm(true, Reg::X5, Reg::X1, 3);
+            a.add_r(true, Reg::X1, Reg::X12, Reg::X5);
+            a.cmp_r(true, Reg::X0, Reg::X1);
+            a.b_cond(Cond::Hi, bwd);
+            a.movz(true, Reg::X5, 0, 0);
+            a.bind(fwd_lp);
+            a.ldr_reg_scaled(true, Reg::X6, Reg::X1, Reg::X5, true);
+            a.str_reg_scaled(true, Reg::X6, Reg::X0, Reg::X5, true);
+            a.add_imm(true, Reg::X5, Reg::X5, 1);
+            a.cmp_r(true, Reg::X5, Reg::X2);
+            a.b_cond(Cond::Lo, fwd_lp);
+            a.b(done);
+            a.bind(bwd);
+            a.bind(bwd_lp);
+            a.sub_imm(true, Reg::X2, Reg::X2, 1);
+            a.ldr_reg_scaled(true, Reg::X6, Reg::X1, Reg::X2, true);
+            a.str_reg_scaled(true, Reg::X6, Reg::X0, Reg::X2, true);
+            a.cbnz(true, Reg::X2, bwd_lp);
+            a.bind(done);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_TABLE_OOB));
+            a.ret();
+            a.finish()?;
+            out.push((HELPER_TABLE_COPY, a));
+        }
+        // HELPER_TABLE_GROW: X0 = init_val, X1 = delta, X2 = tbl_desc_off -> X0 = old_len | 0xffff_ffff.
+        {
+            let mut a = A64Asm::new();
+            let fail = a.new_label();
+            let done = a.new_label();
+            let lp = a.new_label();
+            a.add_r(true, Reg::X9, CTX_REG, Reg::X2);
+            a.ldr_uimm(false, Reg::X10, Reg::X9, 8); // old_len
+            a.ldr_uimm(false, Reg::X11, Reg::X9, 12); // max_len
+            a.adds_r(true, Reg::X12, Reg::X10, Reg::X1);
+            a.b_cond(Cond::Hs, fail);
+            a.cmp_r(true, Reg::X12, Reg::X11);
+            a.b_cond(Cond::Hi, fail);
+            a.cbz(true, Reg::X1, done);
+            a.ldr_uimm(true, Reg::X11, Reg::X9, 0); // ptr
+            a.mov_r(true, Reg::X5, Reg::X10);
+            a.bind(lp);
+            a.str_reg_scaled(true, Reg::X0, Reg::X11, Reg::X5, true);
+            a.add_imm(true, Reg::X5, Reg::X5, 1);
+            a.cmp_r(true, Reg::X5, Reg::X12);
+            a.b_cond(Cond::Lo, lp);
+            a.str_uimm(false, Reg::X12, Reg::X9, 8);
+            a.bind(done);
+            a.mov_r(true, Reg::X0, Reg::X10);
+            a.ret();
+            a.bind(fail);
+            a.mov_imm32(Reg::X0, u32::MAX);
+            a.ret();
+            a.finish()?;
+            out.push((HELPER_TABLE_GROW, a));
+        }
+        // HELPER_TABLE_FILL: X0 = dst, X1 = val, X2 = len, X3 = tbl_desc_off -> W16.
+        {
+            let mut a = A64Asm::new();
+            let oob = a.new_label();
+            let done = a.new_label();
+            let lp = a.new_label();
+            a.add_r(true, Reg::X9, CTX_REG, Reg::X3);
+            a.ldr_uimm(false, Reg::X10, Reg::X9, 8);
+            a.adds_r(true, Reg::X5, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Hs, oob);
+            a.cmp_r(true, Reg::X5, Reg::X10);
+            a.b_cond(Cond::Hi, oob);
+            a.cbz(true, Reg::X2, done);
+            a.ldr_uimm(true, Reg::X10, Reg::X9, 0);
+            a.lsl_imm(true, Reg::X5, Reg::X0, 3);
+            a.add_r(true, Reg::X0, Reg::X10, Reg::X5);
+            a.movz(true, Reg::X5, 0, 0);
+            a.bind(lp);
+            a.str_reg_scaled(true, Reg::X1, Reg::X0, Reg::X5, true);
+            a.add_imm(true, Reg::X5, Reg::X5, 1);
+            a.cmp_r(true, Reg::X5, Reg::X2);
+            a.b_cond(Cond::Lo, lp);
+            a.bind(done);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_TABLE_OOB));
+            a.ret();
+            a.finish()?;
+            out.push((HELPER_TABLE_FILL, a));
         }
     }
 
@@ -803,6 +1095,66 @@ pub fn emit_a64_exports(
             );
         }
 
+        // Dynamic tables (demand-paged RW mmap, allocated ONLY when `dyn_tables` non-empty).
+        for &(desc_off, min_len, max_len) in layout.dyn_tables.values() {
+            let reserve_bytes = if max_len > 0 {
+                ((u64::from(max_len) * 8) + 4095) & !4095
+            } else {
+                0
+            };
+            if reserve_bytes > 0 {
+                a.movz(true, Reg::X0, 0, 0);
+                a.mov_imm64(Reg::X1, reserve_bytes);
+                a.mov_imm32(Reg::X2, 3);
+                a.mov_imm32(Reg::X3, 0x22);
+                a.mov_imm64(Reg::X4, u64::MAX);
+                a.movz(true, Reg::X5, 0, 0);
+                emit_syscall(&mut a, SYS_MMAP);
+                a.mov_imm64(Reg::X4, (-4095i64) as u64);
+                a.cmp_r(true, Reg::X0, Reg::X4);
+                a.b_cond(Cond::Hs, fail_alloc);
+                emit_store_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                a.mov_imm32(Reg::X4, min_len);
+                emit_store_off(
+                    &mut a,
+                    Ty::I32,
+                    Some(Reg::X4),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                a.mov_imm32(Reg::X4, max_len);
+                emit_store_off(
+                    &mut a,
+                    Ty::I32,
+                    Some(Reg::X4),
+                    None,
+                    CTX_REG,
+                    desc_off + 12,
+                    SGP3,
+                );
+                a.mov_imm64(Reg::X4, reserve_bytes);
+                emit_store_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X4),
+                    None,
+                    CTX_REG,
+                    desc_off + 16,
+                    SGP3,
+                );
+            }
+        }
+
         // Initialize globals, data segments, and optional start function.
         a.bl_reloc(A64RelocTarget::Helper(HELPER_INITIALIZE));
         a.cbnz(false, SGP1, fail_trap);
@@ -914,6 +1266,30 @@ pub fn emit_a64_exports(
             a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
             emit_syscall(&mut a, SYS_MUNMAP);
             a.bind(skip_exn);
+        }
+        for &(desc_off, _, _) in layout.dyn_tables.values() {
+            let skip_dt = a.new_label();
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                Reg::X19,
+                desc_off,
+                SGP3,
+            );
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X1),
+                None,
+                Reg::X19,
+                desc_off + 16,
+                SGP3,
+            );
+            a.cbz(true, Reg::X1, skip_dt);
+            emit_syscall(&mut a, SYS_MUNMAP);
+            a.bind(skip_dt);
         }
         emit_load_off(
             &mut a,

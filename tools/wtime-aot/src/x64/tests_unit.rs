@@ -354,6 +354,7 @@ fn ctx_layout_enforces_16_mib_cap() {
     let make_mod = |n_v128_globals: usize, extern_len: u32| X64Module {
         imports: Vec::new(),
         func_type_idx: Vec::new(),
+        func_canon_sig: Vec::new(),
         module_types: Vec::new(),
         globals: vec![(ValType::V128, true); n_v128_globals],
         global_inits: vec![X64ConstVal::V128([0; 16]); n_v128_globals],
@@ -363,11 +364,18 @@ fn ctx_layout_enforces_16_mib_cap() {
         exported_funcs: Vec::new(),
         ci_index: Default::default(),
         ci_sigs: Vec::new(),
+        uses_dyn_ci: false,
+        table_lens: if extern_len > 0 {
+            vec![extern_len]
+        } else {
+            Vec::new()
+        },
         mut_extern_tables: if extern_len > 0 {
             [(0, extern_len)].into_iter().collect()
         } else {
             Default::default()
         },
+        dyn_tables: Default::default(),
         memory: None,
         memory64: false,
         extra_memories: Vec::new(),
@@ -376,9 +384,15 @@ fn ctx_layout_enforces_16_mib_cap() {
         fixed32: None,
         active_elem_checks: Vec::new(),
         active_data_segs: Vec::new(),
+        data_seg_count: 0,
+        passive_data_segs: Vec::new(),
+        uses_bulk_data: false,
+        elem_segs: Vec::new(),
+        uses_bulk_elem: false,
         start: None,
         target: super::module::X64Target::BlotCdylib,
         standalone_start: None,
+        standalone_goose_reserve: None,
     };
 
     // Exact boundary: CTX_HEADER_BYTES header + remaining 16-byte V128 globals = exactly 16 MiB.
@@ -490,6 +504,7 @@ fn verifiers_catch_invalid_ir_and_alloc() {
     let empty_mod = X64Module {
         imports: Vec::new(),
         func_type_idx: vec![0],
+        func_canon_sig: vec![0],
         module_types: vec![FuncType {
             params: vec![ValType::I32],
             results: vec![ValType::I32],
@@ -502,7 +517,10 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         exported_funcs: Vec::new(),
         ci_index: Default::default(),
         ci_sigs: Vec::new(),
+        uses_dyn_ci: false,
+        table_lens: Vec::new(),
         mut_extern_tables: Default::default(),
+        dyn_tables: Default::default(),
         memory: None,
         memory64: false,
         extra_memories: Vec::new(),
@@ -511,9 +529,15 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         fixed32: None,
         active_elem_checks: Vec::new(),
         active_data_segs: Vec::new(),
+        data_seg_count: 0,
+        passive_data_segs: Vec::new(),
+        uses_bulk_data: false,
+        elem_segs: Vec::new(),
+        uses_bulk_elem: false,
         start: None,
         target: super::module::X64Target::BlotCdylib,
         standalone_start: None,
+        standalone_goose_reserve: None,
     };
 
     // Valid simple IR: bb0(v0: I32) -> v1 = v0 + v0 -> Return(v1).
@@ -713,14 +737,30 @@ fn isa_profile_syntax_matches_pen_contract() {
     assert!(parse_x64_target_cpu_syntax("znver4a").is_err());
     assert!(parse_x64_target_cpu_syntax("pentium4").is_err());
     assert!(parse_x64_target_cpu_syntax("").is_err());
-    let (tag, isa) = resolve_x64_isa("x86-64-v2").unwrap();
-    assert_eq!(tag, "x64-v2");
-    assert!(!isa.has_abm_bmi1);
-    assert!(!isa.has_bmi2);
-    let (tag3, isa3) = resolve_x64_isa("znver4").unwrap();
-    assert_eq!(tag3, "x64-v3");
-    assert!(isa3.has_abm_bmi1);
-    assert!(isa3.has_bmi2);
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ))]
+    {
+        let (tag, isa) = resolve_x64_isa("x86-64-v2").unwrap();
+        assert_eq!(tag, "x64-v2");
+        assert!(!isa.has_abm_bmi1);
+        assert!(!isa.has_bmi2);
+        let (tag3, isa3) = resolve_x64_isa("znver4").unwrap();
+        assert_eq!(tag3, "x64-v3");
+        assert!(isa3.has_abm_bmi1);
+        assert!(isa3.has_bmi2);
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    )))]
+    {
+        assert!(resolve_x64_isa("x86-64-v2").is_err());
+        assert!(resolve_x64_isa("znver4").is_err());
+    }
 }
 
 // ---- 8. Admission acceptance vs rejection suite (§4.3.3) ----
@@ -788,35 +828,26 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     );
 
     // 2. Rejected: funcref block type (-16 / 0x70) in LIVE code AND in DEAD (unreachable) code.
+    // 2-3. Admitted: funcref blocks and `ref.null func` (0xd0 0x70) in live and dead code.
     let dead_funcref_block = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0x02, 0x70, 0x00, 0x0b, 0x1a])]), // unreachable; block funcref; unreachable; end; drop
     ]);
-    assert!(matches!(
-        compile_admit_only(&dead_funcref_block),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&dead_funcref_block).is_ok());
     let live_funcref_block = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x02, 0x70, 0xd0, 0x70, 0x0b, 0x1a])]),
     ]);
-    assert!(matches!(
-        compile_admit_only(&live_funcref_block),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&live_funcref_block).is_ok());
 
-    // 3. Rejected: ref.null func (0xd0 0x70) in LIVE and DEAD code.
     let dead_ref_null_func = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0xd0, 0x70, 0x1a])]),
     ]);
-    assert!(matches!(
-        compile_admit_only(&dead_ref_null_func),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&dead_ref_null_func).is_ok());
 
     // 4. Rejected: explicit table initializer (`0x40 0x00`) rejected at BOTH front-door validate AND admit_x64_module!
     let explicit_tbl_init = wasm_module(&[
@@ -857,23 +888,17 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         Err(X64CompileError::AdmissionRejected(_))
     ));
 
-    // 7. Rejected: unbounded externref table (min != max).
+    // 7. Admitted: growable externref table (min != max) backed by dynamic table descriptor.
     let unb_ext = wasm_module(&[section(4, &[1, 0x6f, 0x00, 4])]);
-    assert!(matches!(
-        compile_admit_only(&unb_ext),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&unb_ext).is_ok());
 
-    // 8. Rejected: passive data segment.
+    // 8. Admitted: passive data segment.
     let passive_data = wasm_module(&[
         section(5, &[1, 0x00, 1]),
         section(12, &[1]),
         section(11, &[1, 0x01, 2, 0xaa, 0xbb]),
     ]);
-    assert!(matches!(
-        compile_admit_only(&passive_data),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&passive_data).is_ok());
 
     // 9. Admitted: full 128-bit Wasm SIMD (e.g. i32x4.add = 0xfd 0xae 0x01) and memory64!
     let simd_mod = wasm_module(&[
@@ -4179,5 +4204,120 @@ fn stage8_add_scaled_const64_pow2_rem_s_and_const_div_inline() {
     assert!(
         f3_has_imm_rem,
         "f3 must fold inlined i64.rem_s(..., 64) into I64BinImm(RemS, _, 64)"
+    );
+}
+
+#[test]
+fn stage9_euclid_rem_bool_mask_and_loop_unroll() {
+    // f0(x: i32) -> i32: r = x % 64; if r < 0 { r + 64 } else { r } -> x & 63
+    let f0 = vec![
+        0x20, 0, 0x41, 0xc0, 0x00, 0x6f, 0x21, 1, // r = x rem_s 64
+        0x20, 1, 0x41, 0xc0, 0x00, 0x6a, // r + 64
+        0x20, 1, // r
+        0x20, 1, 0x41, 0, 0x48, // r <s 0
+        0x1b, // select
+    ];
+    // f1(x: i64) -> i64: r = x % 32; if r < 0 { r + 32 } else { r } -> x & 31
+    let f1 = vec![
+        0x20, 0, 0x42, 32, 0x81, 0x21, 1, // r = x rem_s 32
+        0x20, 1, 0x42, 32, 0x7c, // r + 32
+        0x20, 1, // r
+        0x20, 1, 0x42, 0, 0x53, // r <s 0
+        0x1b, // select
+    ];
+    // f2(a: i32, b: i32) -> i32: (a == b) & 0xff -> a == b
+    let f2 = vec![0x20, 0, 0x20, 1, 0x46, 0x41, 0xff, 0x01, 0x71];
+    // f3(x: i32) -> i32: bottom-tested 3-iter loop `d = -1; do { acc += x * d + d; d += 1; } while d <= 1;`
+    let f3 = vec![
+        0x41, 0, 0x21, 1, // acc = 0
+        0x41, 0x7f, 0x21, 2, // d = -1
+        0x03, 0x40, // loop
+        0x20, 1, 0x20, 0, 0x20, 2, 0x6c, 0x20, 2, 0x6a, 0x6a, 0x21, 1, // acc += x*d + d
+        0x20, 2, 0x41, 1, 0x6a, 0x22, 2, // d += 1
+        0x41, 1, 0x4c, // d <=s 1
+        0x0d, 0,    // br_if 0
+        0x0b, // end loop
+        0x20, 1,
+    ];
+    let wasm = wasm_module(&[
+        type_sec(&[
+            (&[0x7f], &[0x7f]),
+            (&[0x7e], &[0x7e]),
+            (&[0x7f, 0x7f], &[0x7f]),
+        ]),
+        func_sec(&[0, 1, 2, 0]),
+        export_sec(&[("f0", 0, 0), ("f1", 0, 1), ("f2", 0, 2), ("f3", 0, 3)]),
+        code_sec(&[
+            enc_body(&[(1, 0x7f)], &f0),
+            enc_body(&[(1, 0x7e)], &f1),
+            enc_body(&[], &f2),
+            enc_body(&[(2, 0x7f)], &f3),
+        ]),
+    ]);
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::x64_validate_features(),
+        &super::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<IrFunc> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    let effects = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2(ir, &module, &effects, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+        let alloc = super::regalloc::allocate(ir).unwrap();
+        super::verify::verify_alloc(ir, &alloc).unwrap();
+    }
+    assert!(
+        irs[0].blocks.iter().any(|b| b
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::I32BinImm(super::ir::IntBinOp::And, _, 63))))
+            && !irs[0]
+                .blocks
+                .iter()
+                .any(|b| b.insts.iter().any(|i| matches!(
+                    i.op,
+                    Op::I32BinImm(super::ir::IntBinOp::RemS, _, _) | Op::CmpSelect { .. }
+                ))),
+        "f0 must fold signed Euclidean mod 64 into `x & 63`"
+    );
+    assert!(
+        irs[1].blocks.iter().any(|b| b
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::I64BinImm(super::ir::IntBinOp::And, _, 31))))
+            && !irs[1]
+                .blocks
+                .iter()
+                .any(|b| b.insts.iter().any(|i| matches!(
+                    i.op,
+                    Op::I64BinImm(super::ir::IntBinOp::RemS, _, _) | Op::CmpSelect { .. }
+                ))),
+        "f1 must fold signed Euclidean mod 32 into `x & 31`"
+    );
+    assert!(
+        !irs[2].blocks.iter().any(|b| b
+            .insts
+            .iter()
+            .any(|i| matches!(i.op, Op::I32BinImm(super::ir::IntBinOp::And, _, 255)))),
+        "f2 must eliminate redundant `And(_, 0xff)` on 0/1 comparison result"
+    );
+    let f3_has_backedge = irs[3].blocks.iter().enumerate().any(|(bi, b)| {
+        let mut any = false;
+        b.term
+            .for_each_succ(&irs[3].br_tables, |s: super::ir::BlockId| {
+                if s.0 as usize <= bi {
+                    any = true;
+                }
+            });
+        any
+    });
+    assert!(
+        !f3_has_backedge,
+        "f3 3-iter constant-trip loop must be fully unrolled with zero backedges"
     );
 }

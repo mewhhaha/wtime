@@ -1,6 +1,10 @@
 //! Stage 1 Differential Oracle (`wtime-runtime` vs `--backend x64`) across all 4 matrix cells:
 //! `(opt=false, v2)`, `(opt=false, v3)`, `(opt=true, v2)`, `(opt=true, v3)`,
 //! running `verify_ir` + `verify_alloc` on every single function.
+#![cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code, unused_imports)
+)]
 
 use std::fs;
 use std::io::Write as _;
@@ -613,6 +617,7 @@ fn c(export: &str, arg: ArgSpec) -> OracleCall {
 
 // ---- Suite 1: Integer arithmetic, bit ops, shifts/rotates (RCX dying + spilled), div/rem, sign-ext ----
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_int_arith_bits_shifts_div_rem_and_sign_ext() {
     // f0: i32 bitops (clz, ctz, popcnt, extend8_s, extend16_s) -> packed checksum
@@ -741,6 +746,7 @@ fn oracle_int_arith_bits_shifts_div_rem_and_sign_ext() {
 
 // ---- Suite 2: All 16 float-to-int truncations + spilled u64->fp + FP min/max/cmp + NaN sets ----
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_all_16_truncs_spilled_u64_to_fp_and_nan_semantics() {
     let mut sigs: Vec<(&[u8], &[u8])> = vec![
@@ -1003,6 +1009,7 @@ fn oracle_all_16_truncs_spilled_u64_to_fp_and_nan_semantics() {
 // ---- Suite 3: Multi-value ABI (10 GP args, 10 V128 args, 24 i64 overflow returns, recursive),
 //               V128 subset, br_table, implicit-else + loop-carried locals, live Xmm0 across helpers ----
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_multivalue_v128_cfg_and_live_xmm_across_helpers() {
     // Type 0: (i32) -> (i32)
@@ -1173,6 +1180,7 @@ fn oracle_multivalue_v128_cfg_and_live_xmm_across_helpers() {
 // ---- Suite 4: Memory (overlap copy, len==0 OOB & 0-cap NULL, offset > i32::MAX spilled store,
 //               load-run trap ordering), externref tables, call_indirect, post-trap state parity ----
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_memory_tables_indirect_and_post_trap_parity() {
     // 2 host imports: idx 0 = ok_cb(i32)->(i32), idx 1 = fail_cb(i32)->(i32) (returns host error!)
@@ -1329,6 +1337,7 @@ fn oracle_memory_tables_indirect_and_post_trap_parity() {
 
 // ---- Suite 5: 0-capacity memory (`min=0, max=0`, `R14 == NULL`) len==0 safety ----
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_zero_capacity_memory_null_base_safety() {
     // Active 0-length data segment at offset 0 on 0-capacity memory (`R14 == NULL`) MUST succeed,
@@ -1370,6 +1379,7 @@ fn oracle_zero_capacity_memory_null_base_safety() {
 // ---- Suite 6: Stage 2 optimizations differential oracle (magic div/rem, inline <=64B copy/fill,
 //               CmpSelect GP+FP+NaN, 10 live f64 across direct + host calls, inlining, wrap safety) ----
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage2_magic_div_inline_copy_fill_cmpselect_callee_xmm_and_wrap() {
     // Host import 0: env::bump(i32) -> (i32) (returns arg + 10 via oracle harness)
@@ -1670,6 +1680,7 @@ fn oracle_stage2_magic_div_inline_copy_fill_cmpselect_callee_xmm_and_wrap() {
     assert_oracle_matrix("stage2_opt", &wasm, &calls, &[], &[(0, 256)]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage2_audit_regressions_magic64_rem_deep_blocks_and_dead_br_table() {
     // 1. f0: (i64)->(i64): `(x + 1) rem_u 10` where `x + 1` dies in Rax (clobbered by `mul`)!
@@ -1743,6 +1754,7 @@ fn oracle_stage2_audit_regressions_magic64_rem_deep_blocks_and_dead_br_table() {
     assert_oracle_matrix("stage2_audit_regressions", &wasm, &calls, &[], &[]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage25_remat_fixed_mem_r13_self_nan_and_dynamic_memcopy_fill() {
     // Fixed 1-page memory (`min=1, max=1`) frees R13 as a 4th callee-saved GP register, and no
@@ -1956,6 +1968,7 @@ fn oracle_stage25_remat_fixed_mem_r13_self_nan_and_dynamic_memcopy_fill() {
     assert_oracle_matrix("stage25_features", &wasm, &calls, &[], &[(0, 32)]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage3_undo_if_forwarding_guarded_licm_bmi2_and_holes() {
     // f0(x: i32) -> i32: nested if/else, implicit else, loop-inside-if, unreachable-arm-in-if
@@ -2104,6 +2117,7 @@ fn oracle_stage3_undo_if_forwarding_guarded_licm_bmi2_and_holes() {
     assert_oracle_matrix("stage3_features", &wasm, &calls, &[], &[(0, 48)]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage3_council_round1_regressions() {
     // f0(x: i32) -> i32: conditional infinite self-loop (`if x == 0 { loop { br 0 } } else { x + 41 }`)
@@ -2202,6 +2216,7 @@ fn oracle_stage3_council_round1_regressions() {
     assert_oracle_matrix("stage3_r1_regressions", &wasm, &calls, &[], &[(0, 32)]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage4_hills_minmax_short_circuit_and_loop_bce() {
     // f0(bits_a: i64, bits_b: i64) -> i64: tests bit-exact FP `CmpSelect` lowering across:
@@ -2454,6 +2469,7 @@ fn oracle_stage4_hills_minmax_short_circuit_and_loop_bce() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage5_wave2_rotation_memcopy_forward_and_layout() {
     // f0(n: i32) -> i32: rotated loop with escaping accumulator (`sum = sum_0^n-1 (i * 7 + 3)`).
@@ -2635,6 +2651,7 @@ fn push_v128_const(out: &mut Vec<u8>, bytes: [u8; 16]) {
     out.extend_from_slice(&bytes);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_hill1_all_236_simd_opcodes() {
     // Track EVERY valid 0xfd00..=0xfdff opcode we emit and assert total == 236!
@@ -3055,6 +3072,7 @@ fn oracle_hill1_all_236_simd_opcodes() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_hill1_memory64() {
     // Active data segment with i64.const offset = 16
@@ -3131,6 +3149,7 @@ fn oracle_hill1_memory64() {
     assert_oracle_matrix("hill1_memory64", &wasm, &calls, &[], &[(0, 256)]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_hill3_autovec_psadbw_slp_f64x2_and_boundary_peel() {
     // 1. Byte-sum reduction (`psadbw` + scalar tail) with non-zero init, non-zero offset,
@@ -3288,6 +3307,7 @@ fn oracle_hill3_autovec_psadbw_slp_f64x2_and_boundary_peel() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_step3_avx2_blur3_magic_hoist_and_f64x4() {
     // Seed 0..256 with bytes including [255, 255, 255] extremes, plus f64 test vectors at
@@ -3586,6 +3606,7 @@ fn oracle_step3_avx2_blur3_magic_hoist_and_f64x4() {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage6_narrow_eq_loops_mul_strength_and_upper32_zero() {
     // 1. `narrow_equality_filtered_loops` exhaustive edge-case matrix:
@@ -3857,6 +3878,7 @@ fn oracle_stage6_narrow_eq_loops_mul_strength_and_upper32_zero() {
     assert_oracle_matrix("stage6_graph_bfs_fixture", &bfs_wasm, &bfs_calls, &[], &[]);
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_stage7_relaxed_simd_tail_call_axpy_mem64_and_fixtures() {
     use super::tests_unit::{
@@ -4447,6 +4469,7 @@ pub(crate) fn build_exception_handling_test_wasm() -> Vec<u8> {
     ])
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
     let c = |export: &str, arg: ArgSpec| OracleCall {
@@ -4497,4 +4520,357 @@ fn oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
     let eh_wasm = build_exception_handling_test_wasm();
     let eh_calls: Vec<OracleCall> = (0..=13).map(|k| c("dispatch", ArgSpec::I32(k))).collect();
     assert_oracle_matrix("wasm3_exception_handling", &eh_wasm, &eh_calls, &[], &[]);
+}
+
+pub(crate) fn build_stage9_loop_opt_test_wasm() -> Vec<u8> {
+    // f0(x: i32) -> i32: Euclidean mod 64 + mod 2 + mod 1 + bool-mask checks
+    let mut f0 = vec![
+        // r1 = euclid(x, 64) via select
+        0x20, 0, 0x41, 0xc0, 0x00, 0x6f, 0x21, 1, 0x20, 1, 0x41, 0xc0, 0x00, 0x6a, 0x20, 1, 0x20, 1,
+        0x41, 0, 0x48, 0x1b, 0x21, 2,
+        // r2 = euclid(x, 2) via if/else (diamond -> CmpSelect -> And 1)
+        0x20, 0, 0x41, 2, 0x6f, 0x22, 1, 0x41, 0, 0x48, 0x04, 0x7f, 0x20, 1, 0x41, 2, 0x6a, 0x05,
+        0x20, 1, 0x0b, 0x21, 3, // b1 = (x == 7) & 0xff  (redundant mask -> elided)
+        0x20, 0, 0x41, 7, 0x46, 0x41, 0xff, 0x01, 0x71,
+        // b2 = (x != 0) & 2     (mask bit 0 is 0 -> MUST NOT be elided, always 0!)
+        0x20, 0, 0x41, 0, 0x47, 0x41, 2, 0x71, 0x6a,
+        // combine: (r1 << 8) ^ (r2 << 4) ^ (b1 + b2)
+        0x20, 2, 0x41, 8, 0x74, 0x73, 0x20, 3, 0x41, 4, 0x74, 0x73,
+    ];
+    let _ = &mut f0;
+
+    // f1(x: i64) -> i64: Euclidean mod 32 + mod 64 (reversed select arm order `r >= 0 ? r : r + 64`)
+    let f1 = vec![
+        0x20, 0, 0x42, 32, 0x81, 0x21, 1, 0x20, 1, 0x42, 32, 0x7c, 0x20, 1, 0x20, 1, 0x42, 0, 0x53,
+        0x1b, 0x21, 2, // r1 = euclid64(x, 32)
+        0x20, 0, 0x42, 0xc0, 0x00, 0x81, 0x21, 1, 0x20, 1, 0x20, 1, 0x42, 0xc0, 0x00, 0x7c, 0x20,
+        1, 0x42, 0, 0x57, 0x1b, // r2 = (r >= 0) ? r : r + 64
+        0x20, 2, 0x42, 16, 0x86, 0x85,
+    ];
+
+    // f2(seed: i32) -> i32: seeds a 32x64 grid in memory[0..2048] and runs a 2D 3x3 nested
+    // constant-trip stencil loop (`dy in -1..=1`, `dx in -1..=1`) with Euclidean wraparound
+    // `(y + dy) mod 32`, `(x + dx) mod 64` (identical shape to Conway's Game of Life!).
+    let mut f2 = Vec::new();
+    // Seed memory[0..2048]: for i in 0..2048: mem[i] = ((i * 13 + seed) >> 2) & 1
+    f2.extend_from_slice(&[0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x41]);
+    leb_i32(&mut f2, 2048);
+    f2.extend_from_slice(&[
+        0x4f, 0x0d, 1, 0x20, 1, 0x20, 1, 0x41, 13, 0x6c, 0x20, 0, 0x6a, 0x41, 2, 0x76, 0x41, 1,
+        0x71, 0x3a, 0, 0, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+    ]);
+    // Sum 3x3 stencil around (y = seed & 31, x = (seed >> 5) & 63):
+    // local 2 = y, local 3 = x, local 4 = dy, local 5 = dx, local 6 = acc, local 7 = ny, local 8 = nx
+    f2.extend_from_slice(&[
+        0x20, 0, 0x41, 31, 0x71, 0x21, 2, // y
+        0x20, 0, 0x41, 5, 0x76, 0x41, 63, 0x71, 0x21, 3, // x
+        0x41, 0, 0x21, 6, // acc = 0
+        0x41, 0x7f, 0x21, 4, // dy = -1
+        0x03, 0x40, // loop dy
+        // ny = euclid(y + dy, 32)
+        0x20, 2, 0x20, 4, 0x6a, 0x41, 32, 0x6f, 0x21, 7, 0x20, 7, 0x41, 32, 0x6a, 0x20, 7, 0x20, 7,
+        0x41, 0, 0x48, 0x1b, 0x21, 7, // dx = -1
+        0x41, 0x7f, 0x21, 5, 0x03, 0x40, // loop dx
+        // nx = euclid(x + dx, 64)
+        0x20, 3, 0x20, 5, 0x6a, 0x41, 0xc0, 0x00, 0x6f, 0x21, 8, 0x20, 8, 0x41, 0xc0, 0x00, 0x6a,
+        0x20, 8, 0x20, 8, 0x41, 0, 0x48, 0x1b, 0x21, 8,
+        // acc = acc * 3 + mem[(ny << 6) + nx] + ((dy == 0 && dx == 0) & 0xff)
+        0x20, 6, 0x41, 3, 0x6c, 0x20, 7, 0x41, 6, 0x74, 0x20, 8, 0x6a, 0x2d, 0, 0, 0x6a, 0x20, 4,
+        0x45, 0x20, 5, 0x45, 0x71, 0x41, 0xff, 0x01, 0x71, 0x6a, 0x21,
+        6, // dx += 1; while dx <= 1
+        0x20, 5, 0x41, 1, 0x6a, 0x22, 5, 0x41, 1, 0x4c, 0x0d, 0, 0x0b, // end dx
+        // dy += 1; while dy <= 1
+        0x20, 4, 0x41, 1, 0x6a, 0x22, 4, 0x41, 1, 0x4c, 0x0d, 0, 0x0b, // end dy
+        0x20, 6,
+    ]);
+
+    // f3(x: i32) -> i32: countdown 4-iter loop (`i = 4; do { ...; i -= 1; } while i > 0`)
+    // PLUS a 4-iter loop with conditional early exit (`if x == i { break }`).
+    let f3 = vec![
+        0x41, 0, 0x21, 1, // acc = 0
+        0x41, 4, 0x21, 2, // i = 4
+        0x03, 0x40, // loop 1
+        0x20, 1, 0x41, 5, 0x6c, 0x20, 0, 0x20, 2, 0x6a, 0x73, 0x21, 1, // acc = acc*5 ^ (x+i)
+        0x20, 2, 0x41, 1, 0x6b, 0x22, 2, // i -= 1
+        0x41, 0, 0x4a, 0x0d, 0, 0x0b, // while i >s 0
+        // loop 2 with early exit
+        0x41, 0, 0x21, 2, // i = 0
+        0x02, 0x40, 0x03, 0x40, 0x20, 2, 0x20, 0, 0x46, 0x0d, 1, // if i == x break
+        0x20, 1, 0x20, 2, 0x41, 17, 0x6c, 0x6a, 0x21, 1, // acc += i * 17
+        0x20, 2, 0x41, 1, 0x6a, 0x22, 2, 0x41, 4, 0x48, 0x0d, 0, 0x0b, 0x0b, // while i <s 4
+        0x20, 1,
+    ];
+
+    wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7e], &[0x7e])]),
+        func_sec(&[0, 1, 0, 0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("euclid32", 0, 0),
+            ("euclid64", 0, 1),
+            ("stencil3x3", 0, 2),
+            ("unroll_edge", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[(3, 0x7f)], &f0),
+            enc_body(&[(2, 0x7e)], &f1),
+            enc_body(&[(8, 0x7f)], &f2),
+            enc_body(&[(2, 0x7f)], &f3),
+        ]),
+    ])
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_stage9_euclid_rem_bool_mask_and_loop_unroll() {
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    let wasm = build_stage9_loop_opt_test_wasm();
+    let mut calls = Vec::new();
+    for x in [
+        0,
+        1,
+        -1,
+        2,
+        -2,
+        7,
+        63,
+        64,
+        65,
+        -63,
+        -64,
+        -65,
+        -128,
+        i32::MIN,
+        i32::MAX,
+    ] {
+        calls.push(c("euclid32", ArgSpec::I32(x)));
+    }
+    for x in [0i64, 1, -1, 31, 32, -32, -33, 64, -64, i64::MIN, i64::MAX] {
+        calls.push(c("euclid64", ArgSpec::I64(x)));
+    }
+    for seed in [0, 1, 31, 63, 12345, -777] {
+        calls.push(c("stencil3x3", ArgSpec::I32(seed)));
+    }
+    for x in [-1, 0, 1, 2, 3, 4, 99] {
+        calls.push(c("unroll_edge", ArgSpec::I32(x)));
+    }
+    assert_oracle_matrix("stage9_loop_opt", &wasm, &calls, &[], &[]);
+}
+
+pub(crate) fn build_bulk_memory_and_table_ops_test_wasm() -> Vec<u8> {
+    // Types:
+    //   0: (i32) -> (i32)
+    //   1: (i32, i32) -> (i32)   (mismatched signature for call_indirect trap check)
+    // Functions:
+    //   f0 (type 0): x + 10
+    //   f1 (type 0): x * 3
+    //   f2 (type 0): x - 7
+    //   f3 (type 1): a + b
+    //   f4 (type 0): dispatch(case: i32) -> i32
+    let f0 = vec![0x20, 0, 0x41, 10, 0x6a];
+    let f1 = vec![0x20, 0, 0x41, 3, 0x6c];
+    let f2 = vec![0x20, 0, 0x41, 7, 0x6b];
+    let f3 = vec![0x20, 0, 0x20, 1, 0x6a];
+
+    // Memories:
+    //   mem 0: mem32 min=1 max=1
+    //   mem 1: mem64 min=1 max=1
+    let mem_sec = section(5, &[2, 0x01, 1, 1, 0x05, 1, 1]);
+    // Tables:
+    //   tbl 0: funcref min=2 max=8
+    //   tbl 1: funcref min=3 max=6
+    //   tbl 2: externref min=1 max=4
+    let tbl_sec = section(
+        4,
+        &[
+            3, 0x70, 0x01, 2, 8, // tbl 0
+            0x70, 0x01, 3, 6, // tbl 1
+            0x6f, 0x01, 1, 4, // tbl 2
+        ],
+    );
+    // DataCount = 3 (data 0 = active on mem0, data 1 = passive [0x11..0x18], data 2 = passive [0x21..0x24])
+    let datacount_sec = section(12, &[3]);
+    let data_sec = section(
+        11,
+        &[
+            3, // active seg 0 on mem0 @ 0: [0xaa, 0xbb]
+            0x00, 0x41, 0, 0x0b, 2, 0xaa, 0xbb, // passive seg 1 (8 bytes)
+            0x01, 8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            // passive seg 2 (4 bytes)
+            0x01, 4, 0x21, 0x22, 0x23, 0x24,
+        ],
+    );
+    // Element segments:
+    //   elem 0: active tbl 0 @ 0 = [f0, f1]
+    //   elem 1: passive funcref = [f2, f0, f3, f1] (using flags=0x05 with exprs so we can include ref.null!)
+    //   elem 2: declarative funcref = [f0, f1, f2, f3]
+    let elem_sec = section(
+        9,
+        &[
+            3, // elem 0: active tbl 0 @ 0: [f0, f1]
+            0x00, 0x41, 0, 0x0b, 2, 0, 1,
+            // elem 1: passive (flags=5, elemtype=0x70, 5 exprs: f2, f0, null, f3, f1)
+            0x05, 0x70, 5, 0xd2, 2, 0x0b, 0xd2, 0, 0x0b, 0xd0, 0x70, 0x0b, 0xd2, 3, 0x0b, 0xd2, 1,
+            0x0b, // elem 2: declarative (flags=3, elemkind=0x00, [0, 1, 2, 3])
+            0x03, 0x00, 4, 0, 1, 2, 3,
+        ],
+    );
+
+    let mut f4 = Vec::new();
+    let case_branch = |out: &mut Vec<u8>, k: i32, body: &[u8]| {
+        out.extend_from_slice(&[0x20, 0, 0x41]);
+        leb_i32(out, k);
+        out.extend_from_slice(&[0x46, 0x04, 0x40]);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&[0x0f, 0x0b]);
+    };
+    // Case 0: passive memory.init into mem0 & mem1 (mem64), check exact bytes + len==0 at exact end.
+    case_branch(
+        &mut f4,
+        0,
+        &[
+            // memory.init data=1 mem=0 (dst=16, src=2, len=4) -> [0x33, 0x44, 0x55, 0x66]
+            0x41, 16, 0x41, 2, 0x41, 4, 0xfc, 0x08, 1, 0,
+            // memory.init data=1 mem=1 (mem64: dst=32i64, src=0, len=8)
+            0x42, 32, 0x41, 0, 0x41, 8, 0xfc, 0x08, 1, 1,
+            // zero-len at exact end of seg 1 (src=8, len=0) -> ok!
+            0x41, 0, 0x41, 8, 0x41, 0, 0xfc, 0x08, 1, 0,
+            // zero-len on active seg 0 (implicitly dropped!) at src=0 -> ok!
+            0x41, 0, 0x41, 0, 0x41, 0, 0xfc, 0x08, 0, 0,
+            // return i32.load[mem0:16] ^ i32.load[mem1:36] ^ i32.load8_u[mem0:0]
+            0x41, 16, 0x28, 2, 0, 0x42, 36, 0x28, 0x42, 1, 0, 0x73, 0x41, 0, 0x2d, 0, 0, 0x73,
+        ],
+    );
+    // Case 1: memory.init on active seg 0 with len=1 -> MUST TRAP OOB!
+    case_branch(
+        &mut f4,
+        1,
+        &[0x41, 0, 0x41, 0, 0x41, 1, 0xfc, 0x08, 0, 0, 0x41, 1],
+    );
+    // Case 2: data.drop 2 (twice, idempotent), then len==0 ok, return 42.
+    case_branch(
+        &mut f4,
+        2,
+        &[
+            0xfc, 0x09, 2, 0xfc, 0x09, 2, 0x41, 0, 0x41, 0, 0x41, 0, 0xfc, 0x08, 2, 0, 0x41, 42,
+        ],
+    );
+    // Case 3: memory.init on dropped seg 2 with len=1 -> MUST TRAP OOB!
+    case_branch(
+        &mut f4,
+        3,
+        &[0x41, 0, 0x41, 0, 0x41, 1, 0xfc, 0x08, 2, 0, 0x41, 1],
+    );
+    // Case 4: memory.init src OOB (src=9, len=0 on 8-byte seg 1) -> MUST TRAP OOB!
+    case_branch(
+        &mut f4,
+        4,
+        &[0x41, 0, 0x41, 9, 0x41, 0, 0xfc, 0x08, 1, 0, 0x41, 1],
+    );
+    // Case 5: table.size, table.grow (success + overflow -1), table.init, table.copy (overlap fwd & bwd),
+    //         table.fill, table.get/set, ref.is_null, and dynamic call_indirect!
+    case_branch(
+        &mut f4,
+        5,
+        &[
+            // local 1 = acc
+            // Initial call_indirect on tbl 0 slots 0 (f0: 5+10=15) and 1 (f1: 5*3=15) + table.size 0 (=2)
+            0x41, 5, 0x41, 0, 0x11, 0, 0, 0x41, 5, 0x41, 1, 0x11, 0, 0, 0x6a, 0xfc, 0x10, 0, 0x6a,
+            0x21, 1, // grow tbl 0 by 4 with ref.func f2 -> old_len=2, new_len=6
+            0xd2, 2, 0x41, 4, 0xfc, 0x0f, 0, 0x20, 1, 0x6a, 0x21, 1,
+            // grow tbl 0 by 5 (exceeds max 8!) -> -1, size stays 6
+            0xd0, 0x70, 0x41, 5, 0xfc, 0x0f, 0, 0x20, 1, 0x6a, 0xfc, 0x10, 0, 0x6a, 0x21, 1,
+            // call_indirect tbl 0 slot 4 (f2: 20-7=13)
+            0x41, 20, 0x41, 4, 0x11, 0, 0, 0x20, 1, 0x6a, 0x21, 1,
+            // table.init elem=1 tbl=0 (dst=1, src=0, len=5): tbl0 = [f0, f2, f0, null, f3, f1]
+            0x41, 1, 0x41, 0, 0x41, 5, 0xfc, 0x0c, 1, 0,
+            // check ref.is_null(table.get 0 (3)) == 1 and ref.is_null(table.get 0 (1)) == 0
+            0x41, 3, 0x25, 0, 0xd1, 0x41, 1, 0x25, 0, 0xd1, 0x6a, 0x20, 1, 0x6a, 0x21, 1,
+            // table.copy tbl1 <- tbl0 (dst=0, src=0, len=3): tbl1 = [f0, f2, f0]
+            0x41, 0, 0x41, 0, 0x41, 3, 0xfc, 0x0e, 1, 0,
+            // overlapping backward copy on tbl0: dst=2, src=0, len=3 -> tbl0 = [f0, f2, f0, f2, f0, f1]
+            0x41, 2, 0x41, 0, 0x41, 3, 0xfc, 0x0e, 0, 0,
+            // overlapping forward copy on tbl0: dst=0, src=1, len=4 -> tbl0 = [f2, f0, f2, f0, f0, f1]
+            0x41, 0, 0x41, 1, 0x41, 4, 0xfc, 0x0e, 0, 0,
+            // call_indirect across tbl0[0..6] and tbl1[1]:
+            0x41, 10, 0x41, 0, 0x11, 0, 0, // f2(10)=3
+            0x41, 10, 0x41, 1, 0x11, 0, 0, 0x6a, // f0(10)=20
+            0x41, 10, 0x41, 5, 0x11, 0, 0, 0x6a, // f1(10)=30
+            0x41, 10, 0x41, 1, 0x11, 0, 1, 0x6a, // tbl1[1]=f2(10)=3
+            0x20, 1, 0x6a, 0x21, 1, // table.fill tbl0 (dst=2, val=ref.func f1, len=2)
+            0x41, 2, 0xd2, 1, 0x41, 2, 0xfc, 0x11, 0,
+            // call_indirect tbl0[3] -> f1(7)=21
+            0x41, 7, 0x41, 3, 0x11, 0, 0, 0x20, 1, 0x6a, 0x21, 1,
+            // table.set tbl0[4] = ref.func f3 (type 1), call_indirect type 1 (11, 22) -> 33!
+            0x41, 4, 0xd2, 3, 0x26, 0, 0x41, 11, 0x41, 22, 0x41, 4, 0x11, 1, 0, 0x20, 1, 0x6a, 0x21,
+            1, // externref tbl 2: grow(null, 2) -> 1, size -> 3, grow(null, 5) -> -1, fill & copy
+            0xd0, 0x6f, 0x41, 2, 0xfc, 0x0f, 2, 0xfc, 0x10, 2, 0x6a, 0xd0, 0x6f, 0x41, 5, 0xfc,
+            0x0f, 2, 0x6a, 0x41, 0, 0xd0, 0x6f, 0x41, 3, 0xfc, 0x11, 2, 0x41, 1, 0x41, 0, 0x41, 2,
+            0xfc, 0x0e, 2, 2, 0x41, 2, 0x25, 2, 0xd1, 0x6a, 0x20, 1, 0x6a,
+        ],
+    );
+    // Case 6: call_indirect type mismatch on dynamic table (tbl0[4] = f3 (type 1), called as type 0) -> TRAP!
+    case_branch(&mut f4, 6, &[0x41, 1, 0x41, 4, 0x11, 0, 0]);
+    // Case 7: call_indirect on ref.null slot in dynamic table -> TRAP!
+    case_branch(
+        &mut f4,
+        7,
+        &[0x41, 0, 0xd0, 0x70, 0x26, 0, 0x41, 1, 0x41, 0, 0x11, 0, 0],
+    );
+    // Case 8: elem.drop 1 then table.init len=1 -> TRAP TABLE OOB!
+    case_branch(
+        &mut f4,
+        8,
+        &[
+            0xfc, 0x0d, 1, 0x41, 0, 0x41, 0, 0x41, 1, 0xfc, 0x0c, 1, 0, 0x41, 1,
+        ],
+    );
+    // Case 9: table.fill OOB -> TRAP TABLE OOB!
+    case_branch(
+        &mut f4,
+        9,
+        &[0x41, 5, 0xd0, 0x70, 0x41, 2, 0xfc, 0x11, 0, 0x41, 1],
+    );
+    // Case 10: table.copy OOB -> TRAP TABLE OOB!
+    case_branch(
+        &mut f4,
+        10,
+        &[0x41, 0, 0x41, 2, 0x41, 2, 0xfc, 0x0e, 0, 1, 0x41, 1],
+    );
+    f4.extend_from_slice(&[0x41, 0]);
+
+    wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7f, 0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 1, 0]),
+        tbl_sec,
+        mem_sec,
+        export_sec(&[("blot:memory", 2, 0), ("dispatch", 0, 4)]),
+        elem_sec,
+        datacount_sec,
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[], &f2),
+            enc_body(&[], &f3),
+            enc_body(&[(1, 0x7f)], &f4),
+        ]),
+        data_sec,
+    ])
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_bulk_memory_and_table_ops() {
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    let wasm = build_bulk_memory_and_table_ops_test_wasm();
+    let calls: Vec<OracleCall> = (0..=10).map(|k| c("dispatch", ArgSpec::I32(k))).collect();
+    assert_oracle_matrix("bulk_mem_table_ops", &wasm, &calls, &[], &[(0, 32)]);
 }

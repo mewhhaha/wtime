@@ -689,7 +689,9 @@ pub fn allocate_with_config_and_scratch(
             let mut unchecked_mem = false;
             for inst in &bb.insts {
                 match inst.op {
-                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. } => trap = true,
+                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. } | Op::TableGrow { .. } => {
+                        trap = true
+                    }
                     Op::Call { .. } | Op::CallIndirect { .. } => call = true,
                     Op::Store { checked, .. } | Op::V128StoreLane { checked, .. } => {
                         store = true;
@@ -713,6 +715,10 @@ pub fn allocate_with_config_and_scratch(
                     | Op::MemCopyIdx { .. }
                     | Op::MemFill { .. }
                     | Op::MemFillIdx { .. }
+                    | Op::MemInit { .. }
+                    | Op::TableInit { .. }
+                    | Op::TableCopy { .. }
+                    | Op::TableFill { .. }
                     | Op::MemCopyConst {
                         dst_checked: false, ..
                     }
@@ -985,7 +991,13 @@ pub fn allocate_with_config_and_scratch(
                         max_ret_buf_bytes = ret_stack_bytes;
                     }
                 }
-                Op::MemCopy { .. } | Op::MemCopyIdx { .. } => {
+                Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemInit { .. }
+                | Op::TableInit { .. }
+                | Op::TableCopy { .. }
+                | Op::TableGrow { .. }
+                | Op::TableFill { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemCopy);
                     clobbers.push(Clobber {
                         pos: pos_use,

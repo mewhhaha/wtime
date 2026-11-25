@@ -69,6 +69,8 @@ pub const MAX_FUNCREF_TABLE_SLOTS: u32 = 1_048_576;
 pub const MAX_TOTAL_FUNCREF_SLOTS: usize = 2_097_152;
 pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
 pub const MAX_TOTAL_EXTERN_SLOTS: usize = 65_536;
+pub const MAX_DYN_TABLE_SLOTS: u32 = 131_072;
+pub const MAX_ELEM_SEG_ENTRIES: usize = 2_097_152;
 pub const MAX_GLOBALS: usize = 65_536;
 pub const MAX_EXPORTS: usize = 65_536;
 pub const MAX_MODULE_TYPES: usize = 100_000;
@@ -259,20 +261,41 @@ pub enum X64ConstVal {
     F64(u64),
     V128([u8; 16]),
     RefNull,
+    FuncRef(u32),
 }
 
-/// Static `call_indirect` dispatch metadata for one canonical `(table, canonical_sig_id)` pair.
+/// Static or dynamic `call_indirect` dispatch metadata for one canonical `(table, canonical_sig_id)` pair.
 #[derive(Clone, Debug)]
 pub struct X64CiSig {
-    #[allow(dead_code)]
     pub table: u32,
     pub table_len: u32,
     /// Representative index into `X64Module::module_types` (zero `FuncType` duplication).
     pub type_idx: u32,
+    /// Canonical deduplicated signature ID (for dynamic funcref table `call_indirect` checks).
+    pub canon_sig: u32,
+    /// `true` iff `table` is dynamically mutable/growable (`dyn_tables`).
+    pub is_dynamic: bool,
     pub min_slot: u32,
     pub span: u32,
     /// Sorted `(table_slot, func_index)` entries whose function signature equals `module_types[type_idx]`.
     pub targets: Vec<(u32, u32)>,
+}
+
+/// Metadata for a dynamically mutable/growable table stored via a 24-byte `Ctx` descriptor
+/// `(ptr: u64, cur_len: u32, max_len: u32, reserve_bytes: u64)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DynTableMeta {
+    pub min_len: u32,
+    pub eff_max_len: u32,
+    pub is_funcref: bool,
+}
+
+/// Decoded element segment initializer (`0` = null, `f + 1` = `ref.func f`).
+#[derive(Clone, Debug)]
+pub struct ElemSegInit {
+    pub is_passive: bool,
+    pub active_target: Option<(u32, u32)>,
+    pub entries: Vec<u32>,
 }
 
 /// Metadata for an additional linear memory (`memory_index >= 1`, Wasm `multi-memory`).
@@ -289,6 +312,8 @@ pub struct X64Module {
     pub imports: Vec<(String, String)>,
     /// Index into `module_types` for every function (`0..imports.len() + code.len()`) — zero per-function signature cloning.
     pub func_type_idx: Vec<u32>,
+    /// Canonical structural signature ID for every function (`0..imports.len() + code.len()`).
+    pub func_canon_sig: Vec<u32>,
     /// All declared module types (referenced by `func_type_idx`, `X64CiSig::type_idx`, and `Immediate::Block(idx)`).
     pub module_types: Vec<FuncType>,
     /// Globals: `(ValType, mutable)` for every global index.
@@ -308,8 +333,14 @@ pub struct X64Module {
     pub ci_index: BTreeMap<(u32, u32), usize>,
     /// Deduplicated `call_indirect` dispatch descriptors.
     pub ci_sigs: Vec<X64CiSig>,
-    /// Mutable `externref` tables: `table_idx -> exact_len`.
+    /// `true` iff any `call_indirect` targets a dynamic `funcref` table (`dyn_tables`).
+    pub uses_dyn_ci: bool,
+    /// Declared initial (`min`) length for every table `0..n_tables`.
+    pub table_lens: Vec<u32>,
+    /// Fixed-size inline mutable `externref` tables: `table_idx -> exact_len`.
     pub mut_extern_tables: BTreeMap<u32, u32>,
+    /// Dynamically mutable/growable (`funcref` or `externref`) tables backed by `Ctx` descriptors + mmap.
+    pub dyn_tables: BTreeMap<u32, DynTableMeta>,
     /// Memory 0 declared limits: `Some((min_pages, declared_max_pages))` or `None` if 0 memories.
     pub memory: Option<(u64, u64)>,
     /// `true` iff memory 0 uses 64-bit (`i64`) addressing (`memory64`).
@@ -326,10 +357,22 @@ pub struct X64Module {
     pub target: X64Target,
     /// Exported `_start` function for `StandaloneExec`: `Some((func_idx, returns_i32))`.
     pub standalone_start: Option<(u32, bool)>,
-    /// Active element segment bounds checks `(table_len, base_off, elem_len)` for `wt_initialize`.
+    /// Exported `goose.reserve(control, count) -> ptr` for `StandaloneExec`: `Some((func_idx, is_i64))`.
+    pub standalone_goose_reserve: Option<(u32, bool)>,
+    /// Active element segment bounds checks `(table_len, base_off, elem_len)` for static funcref tables.
     pub active_elem_checks: Vec<(u32, u32, u32)>,
     /// Active data segments `(mem_idx, mem_off, decoded.data index)` for `wt_initialize` (in declaration order).
     pub active_data_segs: Vec<(u32, u64, usize)>,
+    /// Total declared data segments (`decoded.data.len()`).
+    pub data_seg_count: usize,
+    /// Indices of passive data segments (`decoded.data` indices).
+    pub passive_data_segs: Vec<usize>,
+    /// `true` iff any function uses `memory.init` or `data.drop`.
+    pub uses_bulk_data: bool,
+    /// All declared element segments `0..decoded.elements.len()`.
+    pub elem_segs: Vec<ElemSegInit>,
+    /// `true` iff any function uses `table.init` or `elem.drop`.
+    pub uses_bulk_elem: bool,
     /// Optional start function index.
     pub start: Option<u32>,
 }
@@ -400,6 +443,7 @@ fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstV
                 X64ConstVal::V128(arr)
             }
             (0xd0, _) => X64ConstVal::RefNull,
+            (0xd2, Immediate::Index(f)) => X64ConstVal::FuncRef(*f),
             (0x23, Immediate::Index(g)) => *prior
                 .get(*g as usize)
                 .ok_or("const global.get out of range")?,
@@ -436,7 +480,9 @@ fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstV
 fn check_val_type(vt: ValType) -> Res<()> {
     match vt {
         ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => Ok(()),
-        ValType::Ref(rt) if rt.nullable && matches!(rt.heap, HeapType::Extern) => Ok(()),
+        ValType::Ref(rt) if rt.nullable && matches!(rt.heap, HeapType::Extern | HeapType::Func) => {
+            Ok(())
+        }
         ValType::Ref(rt) if matches!(rt.heap, HeapType::Exn) => Ok(()),
         other => Err(format!("x64: unsupported value type {other:?}")),
     }
@@ -449,7 +495,7 @@ fn check_block_imm(
     total_sig_arity: &mut usize,
 ) -> Res<()> {
     match imm {
-        Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17 | -23) => Ok(()),
+        Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -16 | -17 | -23) => Ok(()),
         Immediate::Block(i) if *i >= 0 => {
             let idx = *i as usize;
             if !*type_admitted
@@ -493,7 +539,8 @@ fn check_supported_opcode(
         | 0x20..=0x26
         | 0x41..=0x44
         | 0x45..=0xc4
-        | 0xd1 => Ok(()),
+        | 0xd1
+        | 0xd2 => Ok(()),
         0x08 => match imm {
             Immediate::Index(ti) => {
                 let &fty = tag_type_idx
@@ -580,7 +627,7 @@ fn check_supported_opcode(
             _ => Err("x64: malformed memory.size/grow immediate".into()),
         },
         0xd0 => match imm {
-            Immediate::Heap(HeapType::Extern | HeapType::Exn) => Ok(()),
+            Immediate::Heap(HeapType::Extern | HeapType::Exn | HeapType::Func) => Ok(()),
             other => Err(format!("x64: unsupported ref.null heap type {other:?}")),
         },
         0x28..=0x3e | 0xfd00..=0xfd0b | 0xfd5c | 0xfd5d => match imm {
@@ -593,6 +640,14 @@ fn check_supported_opcode(
             _ => Err("x64: malformed SIMD lane load/store immediate".into()),
         },
         0xfc00..=0xfc07 | 0xfc13..=0xfc16 => Ok(()),
+        0xfc08 | 0xfc0c | 0xfc0e => match imm {
+            Immediate::Pair(_, _) => Ok(()),
+            _ => Err("x64: malformed bulk memory/table pair immediate".into()),
+        },
+        0xfc09 | 0xfc0d | 0xfc0f..=0xfc11 => match imm {
+            Immediate::Index(_) => Ok(()),
+            _ => Err("x64: malformed bulk memory/table index immediate".into()),
+        },
         0xfc0a => match imm {
             Immediate::Pair(_, _) | Immediate::None => Ok(()),
             _ => Err("x64: malformed memory.copy immediate".into()),
@@ -715,9 +770,41 @@ pub fn check_standalone_import_sig(
         }
         (
             "env",
-            "gs_os_clock_ns" | "bench_clock" | "bench_input" | "gs_os_time_ns" | "gs_os_arg_count"
-            | "gs_os_resource_dir",
+            "gs_os_clock_ns" | "bench_clock" | "bench_input" | "gs_os_time_ns" | "gs_os_arg_count",
         ) => ty.params.is_empty() && ty.results.len() == 1 && is_int(ty.results[0]),
+        ("env", "gs_os_resource_dir") => {
+            ty.params.len() <= 1
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "gs_os_arg") => {
+            ty.params.len() == 2 && ty.params.iter().all(|&t| is_int(t)) && ty.results.is_empty()
+        }
+        ("env", "gs_os_file_exists" | "gs_os_is_dir") => {
+            matches!(ty.params.len(), 1 | 2)
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "gs_os_read_file" | "gs_os_getenv" | "gs_find_any") => {
+            matches!(ty.params.len(), 2 | 3)
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "gs_os_write_file" | "gs_os_append_file") => {
+            matches!(ty.params.len(), 2 | 4)
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
+        ("env", "gs_find_pair") => {
+            matches!(ty.params.len(), 4 | 5)
+                && ty.params.iter().all(|&t| is_int(t))
+                && ty.results.len() == 1
+                && is_int(ty.results[0])
+        }
         ("env", "bench_input_f64") => {
             ty.params.is_empty() && ty.results.len() == 1 && matches!(ty.results[0], F64 | F32)
         }
@@ -760,6 +847,9 @@ pub struct BodyAdmitSummary {
     pub imm_elems: u32,
     pub saw_data_count_op: bool,
     pub uses_exceptions: bool,
+    pub uses_bulk_data: bool,
+    pub uses_bulk_elem: bool,
+    pub dyn_table_ops: Vec<u32>,
     pub sig_arity: usize,
     pub br_table_entries: usize,
     pub g_reads: Vec<(u32, u32)>,
@@ -1057,13 +1147,22 @@ pub fn admit_x64_module_for_target_with_summaries(
         func_canon_sig.push(type_canon[ti_u]);
     }
 
-    // Tables: static funcref tables + mutable externref tables (32-bit only, aggregate-capped).
-    let mut funcref_tables: BTreeMap<u32, Vec<Option<u32>>> = BTreeMap::new();
-    let mut mut_extern_tables: BTreeMap<u32, u32> = BTreeMap::new();
+    // Tables: classify metadata first (32-bit nullable funcref & externref tables);
+    // partitioning into static funcref, inline fixed externref, and dynamic mmap-backed tables
+    // happens right after scanning function bodies so modules without dynamic table ops keep
+    // 100% of the zero-overhead static fast path.
+    struct RawTableMeta {
+        min_len: u32,
+        eff_max_len: u32,
+        is_funcref: bool,
+        fixed_inline_extern_eligible: bool,
+    }
+    let mut raw_tables: Vec<RawTableMeta> = Vec::with_capacity(decoded.tables.len());
+    let mut table_lens: Vec<u32> = Vec::with_capacity(decoded.tables.len());
     let mut total_funcref_slots: usize = 0;
     let mut total_extern_slots: usize = 0;
     for (ti, tt) in decoded.tables.iter().enumerate() {
-        let ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
+        let _ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
         if tt.index_type != IndexType::I32 {
             return Err(format!("x64: table64 (table {ti}) is not supported"));
         }
@@ -1089,23 +1188,47 @@ pub fn admit_x64_module_for_target_with_summaries(
                         "x64: aggregate funcref table slots ({total_funcref_slots}) exceed cap {MAX_TOTAL_FUNCREF_SLOTS}"
                     ));
                 }
-                funcref_tables.insert(ti_u32, vec![None; len as usize]);
+                let eff_max = tt
+                    .limits
+                    .max
+                    .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
+                    .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
+                table_lens.push(len);
+                raw_tables.push(RawTableMeta {
+                    min_len: len,
+                    eff_max_len: eff_max,
+                    is_funcref: true,
+                    fixed_inline_extern_eligible: false,
+                });
             }
             HeapType::Extern if tt.element.nullable => {
-                let max = tt.limits.max.unwrap_or(u64::MAX);
-                if tt.limits.min != max || tt.limits.min > u64::from(MAX_EXTERN_TABLE_SLOTS) {
-                    return Err(format!(
-                        "x64: externref table {ti} must be fixed-size <= {MAX_EXTERN_TABLE_SLOTS} (min={}, max={:?})",
-                        tt.limits.min, tt.limits.max
-                    ));
+                let len = u32::try_from(tt.limits.min)
+                    .ok()
+                    .filter(|&n| n <= MAX_DYN_TABLE_SLOTS)
+                    .ok_or_else(|| {
+                        format!(
+                            "x64: externref table {ti} min ({}) exceeds cap {MAX_DYN_TABLE_SLOTS}",
+                            tt.limits.min
+                        )
+                    })?;
+                let fixed_inline_ok = tt.limits.max == Some(tt.limits.min)
+                    && tt.limits.min <= u64::from(MAX_EXTERN_TABLE_SLOTS);
+                if fixed_inline_ok {
+                    total_extern_slots = total_extern_slots.saturating_add(len as usize);
                 }
-                total_extern_slots = total_extern_slots.saturating_add(tt.limits.min as usize);
-                if total_extern_slots > MAX_TOTAL_EXTERN_SLOTS {
-                    return Err(format!(
-                        "x64: aggregate externref table slots ({total_extern_slots}) exceed cap {MAX_TOTAL_EXTERN_SLOTS}"
-                    ));
-                }
-                mut_extern_tables.insert(ti_u32, tt.limits.min as u32);
+                let eff_max = tt
+                    .limits
+                    .max
+                    .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
+                    .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
+                table_lens.push(len);
+                raw_tables.push(RawTableMeta {
+                    min_len: len,
+                    eff_max_len: eff_max,
+                    is_funcref: false,
+                    fixed_inline_extern_eligible: fixed_inline_ok
+                        && total_extern_slots <= MAX_TOTAL_EXTERN_SLOTS,
+                });
             }
             other => {
                 return Err(format!(
@@ -1119,16 +1242,6 @@ pub fn admit_x64_module_for_target_with_summaries(
         return Err(format!(
             "x64: module global count ({}) exceeds cap {MAX_GLOBALS}",
             decoded.globals.len()
-        ));
-    }
-    let worst_ctx_bytes = super::CTX_HEADER_BYTES
-        .saturating_add(decoded.globals.len().saturating_mul(16))
-        .saturating_add(total_extern_slots.saturating_mul(8))
-        .saturating_add(extra_memories.len().saturating_mul(32))
-        .saturating_add(32);
-    if worst_ctx_bytes > MAX_CTX_BYTES {
-        return Err(format!(
-            "x64: Ctx storage ({worst_ctx_bytes} B) exceeds cap {MAX_CTX_BYTES} B"
         ));
     }
 
@@ -1196,10 +1309,39 @@ pub fn admit_x64_module_for_target_with_summaries(
         }
     }
 
-    // Active element segments: validate forms and populate static funcref tables (recording bounds
-    // checks so `wt_initialize` reports `TRAP_TABLE_OOB` at instantiation time per Wasm spec).
-    let mut active_elem_checks = Vec::new();
+    // Element segments: admit active, passive, and declarative segments.
+    let mut elem_segs: Vec<ElemSegInit> = Vec::with_capacity(decoded.elements.len());
+    let mut table_has_active_elem = vec![false; raw_tables.len()];
     let mut elem_steps: usize = 0;
+    let mut total_elem_entries: usize = 0;
+    let parse_elem_entries =
+        |inits: &[Vec<Instruction>], steps: &mut usize, total: &mut usize| -> Res<Vec<u32>> {
+            let mut entries = Vec::with_capacity(inits.len());
+            for expr in inits {
+                *steps += 1;
+                if let Some(b) = budget
+                    && (*steps & 4095) == 0
+                {
+                    b.check_deadline()?;
+                }
+                let v = eval_const_expr(expr, &global_inits)?;
+                let enc = match v {
+                    X64ConstVal::RefNull => 0u32,
+                    X64ConstVal::FuncRef(f) => f
+                        .checked_add(1)
+                        .ok_or("x64: element funcref index overflow")?,
+                    _ => return Err("x64: unsupported element init expression".into()),
+                };
+                entries.push(enc);
+            }
+            *total = total.saturating_add(entries.len());
+            if *total > MAX_ELEM_SEG_ENTRIES {
+                return Err(format!(
+                    "x64: aggregate element entries ({total}) exceed cap {MAX_ELEM_SEG_ENTRIES}"
+                ));
+            }
+            Ok(entries)
+        };
     for elem in &decoded.elements {
         match &elem.mode {
             SegmentMode::Active { index, offset } => {
@@ -1207,57 +1349,43 @@ pub fn admit_x64_module_for_target_with_summaries(
                 let X64ConstVal::I32(off_i32) = off_val else {
                     return Err("x64: active element offset must be i32".into());
                 };
-                let Some(slots) = funcref_tables.get_mut(index) else {
+                if (*index as usize) >= raw_tables.len() {
                     return Err(format!(
-                        "x64: active element segment targets non-funcref table {index}"
+                        "x64: active element segment targets out-of-range table {index}"
                     ));
-                };
-                let mut entries = Vec::with_capacity(elem.init.len());
-                for expr in &elem.init {
-                    elem_steps += 1;
-                    if let Some(b) = budget
-                        && (elem_steps & 4095) == 0
-                    {
-                        b.check_deadline()?;
-                    }
-                    match expr.as_slice() {
-                        [
-                            Instruction {
-                                opcode: 0xd2,
-                                immediate: Immediate::Index(f),
-                            },
-                            Instruction { opcode: 0x0b, .. },
-                        ] => {
-                            entries.push(Some(*f));
-                        }
-                        [
-                            Instruction { opcode: 0xd0, .. },
-                            Instruction { opcode: 0x0b, .. },
-                        ] => {
-                            entries.push(None);
-                        }
-                        _ => return Err("x64: unsupported active element init expression".into()),
-                    }
                 }
-                let base_u32 = off_i32 as u32;
-                let elem_len =
-                    u32::try_from(entries.len()).map_err(|_| "active element segment too large")?;
-                active_elem_checks.push((slots.len() as u32, base_u32, elem_len));
-                let base = base_u32 as usize;
-                if let Some(end) = base.checked_add(entries.len())
-                    && end <= slots.len()
-                {
-                    slots[base..end].copy_from_slice(&entries);
-                }
+                let entries =
+                    parse_elem_entries(&elem.init, &mut elem_steps, &mut total_elem_entries)?;
+                table_has_active_elem[*index as usize] = true;
+                elem_segs.push(ElemSegInit {
+                    is_passive: false,
+                    active_target: Some((*index, off_i32 as u32)),
+                    entries,
+                });
             }
-            SegmentMode::Passive | SegmentMode::Declarative => {
-                return Err("x64: passive/declarative element segments are not supported".into());
+            SegmentMode::Passive => {
+                let entries =
+                    parse_elem_entries(&elem.init, &mut elem_steps, &mut total_elem_entries)?;
+                elem_segs.push(ElemSegInit {
+                    is_passive: true,
+                    active_target: None,
+                    entries,
+                });
+            }
+            SegmentMode::Declarative => {
+                elem_segs.push(ElemSegInit {
+                    is_passive: false,
+                    active_target: None,
+                    entries: Vec::new(),
+                });
             }
         }
     }
 
-    // Active data segments only (passive segments rejected).
+    // Data segments: admit both active and passive data segments.
     let mut active_data_segs = Vec::new();
+    let mut passive_data_segs = Vec::new();
+    let data_seg_count = decoded.data.len();
     for (di, seg) in decoded.data.iter().enumerate() {
         if let Some(b) = budget
             && (di & 4095) == 4095
@@ -1290,34 +1418,10 @@ pub fn admit_x64_module_for_target_with_summaries(
                 };
                 active_data_segs.push((*index, off_u64, di));
             }
-            SegmentMode::Passive | SegmentMode::Declarative => {
-                return Err("x64: passive data segments are not supported".into());
+            SegmentMode::Passive => {
+                passive_data_segs.push(di);
             }
-        }
-    }
-
-    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, canon_sig_id)`
-    // (zero `FuncType` cloning/hashing per slot); `ci_index` uses deterministic `O(log N)` `BTreeMap` lookups.
-    let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut funcref_by_sig: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
-    let mut slot_steps: usize = 0;
-    for (tbl, slots) in funcref_tables {
-        funcref_table_lens.insert(tbl, slots.len() as u32);
-        for (slot, entry) in slots.into_iter().enumerate() {
-            slot_steps += 1;
-            if let Some(b) = budget
-                && (slot_steps & 4095) == 0
-            {
-                b.check_deadline()?;
-            }
-            if let Some(f) = entry
-                && let Some(&csig) = func_canon_sig.get(f as usize)
-            {
-                funcref_by_sig
-                    .entry((tbl, csig))
-                    .or_default()
-                    .push((slot as u32, f));
-            }
+            SegmentMode::Declarative => {}
         }
     }
 
@@ -1330,6 +1434,9 @@ pub fn admit_x64_module_for_target_with_summaries(
         sig_arity: usize,
         br_table_entries: usize,
         uses_exceptions: bool,
+        uses_bulk_data: bool,
+        uses_bulk_elem: bool,
+        dyn_table_ops: Vec<u32>,
         global_reads: Vec<usize>,
         global_writes: Vec<usize>,
         ci_pairs: Vec<(u32, u32)>,
@@ -1337,10 +1444,19 @@ pub fn admit_x64_module_for_target_with_summaries(
     }
 
     let n_globals = globals.len();
+    let raw_table_is_funcref: Vec<bool> = raw_tables.iter().map(|t| t.is_funcref).collect();
+    let raw_table_fixed_inline: Vec<bool> = raw_tables
+        .iter()
+        .map(|t| t.fixed_inline_extern_eligible)
+        .collect();
     let scan_chunk = |base_bi: usize, bodies: &[wtime_validate::FunctionBody]| -> Res<ChunkScan> {
         let mut sig_arity = 0usize;
         let mut br_table_entries = 0usize;
         let mut chunk_uses_exceptions = false;
+        let mut chunk_uses_bulk_data = false;
+        let mut chunk_uses_bulk_elem = false;
+        let mut chunk_dyn_seen: HashSet<u32> = HashSet::new();
+        let mut chunk_dyn_tables: Vec<u32> = Vec::new();
         let mut g_reads = vec![0usize; n_globals];
         let mut g_writes = vec![0usize; n_globals];
         let mut ci_seen: HashSet<(u32, u32)> = HashSet::new();
@@ -1376,6 +1492,13 @@ pub fn admit_x64_module_for_target_with_summaries(
                 sig_arity = sig_arity.saturating_add(pre.sig_arity as usize);
                 br_table_entries = br_table_entries.saturating_add(pre.br_table_entries as usize);
                 chunk_uses_exceptions |= pre.uses_exceptions;
+                chunk_uses_bulk_data |= pre.uses_bulk_data;
+                chunk_uses_bulk_elem |= pre.uses_bulk_elem;
+                for &t in &pre.dyn_table_ops {
+                    if chunk_dyn_seen.insert(t) {
+                        chunk_dyn_tables.push(t);
+                    }
+                }
                 if br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
                     return Err(format!(
                         "x64: aggregate br_table entries ({br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
@@ -1406,9 +1529,24 @@ pub fn admit_x64_module_for_target_with_summaries(
             let b_sig_before = sig_arity;
             let b_br_before = br_table_entries;
             let mut b_ci: Vec<(u32, u32)> = Vec::new();
+            let mut b_dyn_tables: Vec<u32> = Vec::new();
             let mut b_imm_elems = 0usize;
             let mut b_saw_data_count_op = false;
             let mut b_uses_exceptions = false;
+            let mut b_uses_bulk_data = false;
+            let mut b_uses_bulk_elem = false;
+            let mut mark_dyn_table = |t: u32| -> Res<()> {
+                if (t as usize) >= raw_table_is_funcref.len() {
+                    return Err(format!("x64: table index {t} out of range"));
+                }
+                if chunk_dyn_seen.insert(t) {
+                    chunk_dyn_tables.push(t);
+                }
+                if collect_summaries && !b_dyn_tables.contains(&t) {
+                    b_dyn_tables.push(t);
+                }
+                Ok(())
+            };
             for &vt in &body.locals {
                 check_val_type(vt)?;
                 if matches!(vt, ValType::Ref(rt) if rt.heap == HeapType::Exn) {
@@ -1492,10 +1630,39 @@ pub fn admit_x64_module_for_target_with_summaries(
                         }
                     }
                     0x25 | 0x26 => {
-                        if let Immediate::Index(t) = insn.immediate
-                            && !mut_extern_tables.contains_key(&t)
-                        {
-                            return Err(format!("x64: table.get/set on unsupported table {t}"));
+                        if let Immediate::Index(t) = insn.immediate {
+                            let ti = t as usize;
+                            if ti >= raw_table_is_funcref.len() {
+                                return Err(format!(
+                                    "x64: table.get/set on out-of-range table {t}"
+                                ));
+                            }
+                            if raw_table_is_funcref[ti] || !raw_table_fixed_inline[ti] {
+                                mark_dyn_table(t)?;
+                            }
+                        }
+                    }
+                    0xfc08 | 0xfc09 => {
+                        b_uses_bulk_data = true;
+                    }
+                    0xfc0c => {
+                        b_uses_bulk_elem = true;
+                        if let Immediate::Pair(_, t) = insn.immediate {
+                            mark_dyn_table(t)?;
+                        }
+                    }
+                    0xfc0d => {
+                        b_uses_bulk_elem = true;
+                    }
+                    0xfc0e => {
+                        if let Immediate::Pair(dt, st) = insn.immediate {
+                            mark_dyn_table(dt)?;
+                            mark_dyn_table(st)?;
+                        }
+                    }
+                    0xfc0f | 0xfc11 => {
+                        if let Immediate::Index(t) = insn.immediate {
+                            mark_dyn_table(t)?;
                         }
                     }
                     0x11 | 0x13 => {
@@ -1513,6 +1680,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                 }
             }
             chunk_uses_exceptions |= b_uses_exceptions;
+            chunk_uses_bulk_data |= b_uses_bulk_data;
+            chunk_uses_bulk_elem |= b_uses_bulk_elem;
             if collect_summaries {
                 let mut gr = Vec::with_capacity(touched_reads.len());
                 for g in touched_reads.drain(..) {
@@ -1532,6 +1701,9 @@ pub fn admit_x64_module_for_target_with_summaries(
                     imm_elems: b_imm_elems as u32,
                     saw_data_count_op: b_saw_data_count_op,
                     uses_exceptions: b_uses_exceptions,
+                    uses_bulk_data: b_uses_bulk_data,
+                    uses_bulk_elem: b_uses_bulk_elem,
+                    dyn_table_ops: b_dyn_tables,
                     sig_arity: sig_arity - b_sig_before,
                     br_table_entries: br_table_entries - b_br_before,
                     g_reads: gr,
@@ -1544,6 +1716,9 @@ pub fn admit_x64_module_for_target_with_summaries(
             sig_arity,
             br_table_entries,
             uses_exceptions: chunk_uses_exceptions,
+            uses_bulk_data: chunk_uses_bulk_data,
+            uses_bulk_elem: chunk_uses_bulk_elem,
+            dyn_table_ops: chunk_dyn_tables,
             global_reads: g_reads,
             global_writes: g_writes,
             ci_pairs,
@@ -1555,7 +1730,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     let n_chunks = if n_bodies >= 256 && pre_vidx.is_none() {
         std::thread::available_parallelism()
             .map_or(1, |n| n.get())
-            .min(16)
+            .min(8)
             .min(n_bodies / 64)
             .max(1)
     } else {
@@ -1564,13 +1739,30 @@ pub fn admit_x64_module_for_target_with_summaries(
     let chunk_results: Vec<Res<ChunkScan>> = if n_chunks <= 1 {
         vec![scan_chunk(0, &decoded.code)]
     } else {
-        let per = n_bodies.div_ceil(n_chunks);
-        let slices: Vec<(usize, &[wtime_validate::FunctionBody])> = decoded
+        // Partition by cumulative instruction weight so giant functions do not create straggler chunks.
+        let total_weight: usize = decoded
             .code
-            .chunks(per)
-            .enumerate()
-            .map(|(i, sl)| (i * per, sl))
-            .collect();
+            .iter()
+            .map(|b| b.instructions.len().saturating_add(16))
+            .sum();
+        let target_weight = total_weight.div_ceil(n_chunks).max(1);
+        let mut slices: Vec<(usize, &[wtime_validate::FunctionBody])> =
+            Vec::with_capacity(n_chunks);
+        let mut start = 0usize;
+        while start < n_bodies {
+            let mut end = start;
+            if slices.len() + 1 == n_chunks {
+                end = n_bodies;
+            } else {
+                let mut acc = 0usize;
+                while end < n_bodies && (end == start || acc < target_weight) {
+                    acc += decoded.code[end].instructions.len().saturating_add(16);
+                    end += 1;
+                }
+            }
+            slices.push((start, &decoded.code[start..end]));
+            start = end;
+        }
         let mut slots: Vec<Option<Res<ChunkScan>>> = (0..slices.len()).map(|_| None).collect();
         let mut unspawned: Vec<usize> = Vec::new();
         std::thread::scope(|s| {
@@ -1599,12 +1791,13 @@ pub fn admit_x64_module_for_target_with_summaries(
 
     let mut total_br_table_entries = 0usize;
     let mut uses_exceptions = !tags.is_empty();
+    let mut uses_bulk_data = false;
+    let mut uses_bulk_elem = false;
+    let mut dyn_table_touched: HashSet<u32> = HashSet::new();
     let mut global_reads = vec![0usize; n_globals];
     let mut global_writes = vec![0usize; n_globals];
-    let mut ci_canon: HashMap<(u32, u32), usize> = HashMap::new();
-    let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
-    let mut ci_sigs: Vec<X64CiSig> = Vec::new();
-    let mut total_ci_bytes = 0usize;
+    let mut merged_ci_pairs: Vec<(u32, u32)> = Vec::new();
+    let mut merged_ci_seen: HashSet<(u32, u32)> = HashSet::new();
     let mut all_body_summaries = if collect_summaries {
         Vec::with_capacity(n_bodies)
     } else {
@@ -1614,6 +1807,11 @@ pub fn admit_x64_module_for_target_with_summaries(
     for chunk_res in chunk_results {
         let chunk = chunk_res?;
         uses_exceptions |= chunk.uses_exceptions;
+        uses_bulk_data |= chunk.uses_bulk_data;
+        uses_bulk_elem |= chunk.uses_bulk_elem;
+        for t in chunk.dyn_table_ops {
+            dyn_table_touched.insert(t);
+        }
         if collect_summaries {
             all_body_summaries.extend(chunk.body_summaries);
         }
@@ -1635,48 +1833,178 @@ pub fn admit_x64_module_for_target_with_summaries(
         for (dst, src) in global_writes.iter_mut().zip(&chunk.global_writes) {
             *dst += *src;
         }
-        for (tbl, ti) in chunk.ci_pairs {
-            if ci_index.contains_key(&(tbl, ti)) {
-                continue;
+        for pair in chunk.ci_pairs {
+            if merged_ci_seen.insert(pair) {
+                merged_ci_pairs.push(pair);
             }
-            let &csig = type_canon
-                .get(ti as usize)
-                .ok_or("call_indirect type index")?;
-            let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
-                existing
+        }
+    }
+
+    // Partition tables into static funcref, inline fixed externref, and dynamic mmap-backed tables.
+    let mut funcref_tables: BTreeMap<u32, Vec<Option<u32>>> = BTreeMap::new();
+    let mut mut_extern_tables: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut dyn_tables: BTreeMap<u32, DynTableMeta> = BTreeMap::new();
+    let mut inline_extern_slots: usize = 0;
+    for (ti, rt) in raw_tables.iter().enumerate() {
+        let t = ti as u32;
+        if rt.is_funcref {
+            if dyn_table_touched.contains(&t) {
+                if rt.min_len > MAX_DYN_TABLE_SLOTS {
+                    return Err(format!(
+                        "x64: dynamic funcref table {t} min ({}) exceeds cap {MAX_DYN_TABLE_SLOTS}",
+                        rt.min_len
+                    ));
+                }
+                dyn_tables.insert(
+                    t,
+                    DynTableMeta {
+                        min_len: rt.min_len,
+                        eff_max_len: rt.eff_max_len.max(rt.min_len),
+                        is_funcref: true,
+                    },
+                );
             } else {
-                let &table_len = funcref_table_lens
-                    .get(&tbl)
-                    .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
-                let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
-                let (min_slot, span) = if let (Some(&(first, _)), Some(&(last, _))) =
-                    (targets.first(), targets.last())
-                {
+                funcref_tables.insert(t, vec![None; rt.min_len as usize]);
+            }
+        } else if dyn_table_touched.contains(&t)
+            || !rt.fixed_inline_extern_eligible
+            || table_has_active_elem[ti]
+        {
+            dyn_tables.insert(
+                t,
+                DynTableMeta {
+                    min_len: rt.min_len,
+                    eff_max_len: rt.eff_max_len.max(rt.min_len),
+                    is_funcref: false,
+                },
+            );
+        } else {
+            inline_extern_slots = inline_extern_slots.saturating_add(rt.min_len as usize);
+            mut_extern_tables.insert(t, rt.min_len);
+        }
+    }
+
+    let worst_ctx_bytes = super::CTX_HEADER_BYTES
+        .saturating_add(decoded.globals.len().saturating_mul(16))
+        .saturating_add(inline_extern_slots.saturating_mul(8))
+        .saturating_add(dyn_tables.len().saturating_mul(24))
+        .saturating_add(extra_memories.len().saturating_mul(32))
+        .saturating_add(if uses_bulk_data { data_seg_count } else { 0 })
+        .saturating_add(if uses_bulk_elem { elem_segs.len() } else { 0 })
+        .saturating_add(64);
+    if worst_ctx_bytes > MAX_CTX_BYTES {
+        return Err(format!(
+            "x64: Ctx storage ({worst_ctx_bytes} B) exceeds cap {MAX_CTX_BYTES} B"
+        ));
+    }
+
+    // Apply active element segments targeting static funcref tables at compile time
+    // (dynamic table active element segments are applied at runtime in `wt_initialize`).
+    let mut active_elem_checks = Vec::new();
+    for seg in &elem_segs {
+        if let Some((tbl, base_u32)) = seg.active_target
+            && let Some(slots) = funcref_tables.get_mut(&tbl)
+        {
+            let elem_len =
+                u32::try_from(seg.entries.len()).map_err(|_| "active element segment too large")?;
+            active_elem_checks.push((slots.len() as u32, base_u32, elem_len));
+            let base = base_u32 as usize;
+            if let Some(end) = base.checked_add(seg.entries.len())
+                && end <= slots.len()
+            {
+                for (dst, &enc) in slots[base..end].iter_mut().zip(&seg.entries) {
+                    *dst = if enc == 0 { None } else { Some(enc - 1) };
+                }
+            }
+        }
+    }
+
+    // Pre-index all static funcref table entries ONCE in O(total_slots) by `(table, canon_sig_id)`.
+    let mut funcref_table_lens: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut funcref_by_sig: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+    let mut slot_steps: usize = 0;
+    for (tbl, slots) in funcref_tables {
+        funcref_table_lens.insert(tbl, slots.len() as u32);
+        for (slot, entry) in slots.into_iter().enumerate() {
+            slot_steps += 1;
+            if let Some(b) = budget
+                && (slot_steps & 4095) == 0
+            {
+                b.check_deadline()?;
+            }
+            if let Some(f) = entry
+                && let Some(&csig) = func_canon_sig.get(f as usize)
+            {
+                funcref_by_sig
+                    .entry((tbl, csig))
+                    .or_default()
+                    .push((slot as u32, f));
+            }
+        }
+    }
+
+    let mut ci_canon: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+    let mut ci_sigs: Vec<X64CiSig> = Vec::new();
+    let mut uses_dyn_ci = false;
+    let mut total_ci_bytes = 0usize;
+    for (tbl, ti) in merged_ci_pairs {
+        if ci_index.contains_key(&(tbl, ti)) {
+            continue;
+        }
+        let &csig = type_canon
+            .get(ti as usize)
+            .ok_or("call_indirect type index")?;
+        let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
+            existing
+        } else if dyn_tables.get(&tbl).is_some_and(|m| m.is_funcref) {
+            uses_dyn_ci = true;
+            let id = ci_sigs.len();
+            ci_sigs.push(X64CiSig {
+                table: tbl,
+                table_len: 0,
+                type_idx: ti,
+                canon_sig: csig,
+                is_dynamic: true,
+                min_slot: 0,
+                span: 0,
+                targets: Vec::new(),
+            });
+            ci_canon.insert((tbl, csig), id);
+            id
+        } else {
+            let &table_len = funcref_table_lens
+                .get(&tbl)
+                .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
+            let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
+            let (min_slot, span) =
+                if let (Some(&(first, _)), Some(&(last, _))) = (targets.first(), targets.last()) {
                     (first, last - first + 1)
                 } else {
                     (0, 0)
                 };
-                let bytes = (span as usize).saturating_mul(4);
-                total_ci_bytes = total_ci_bytes.saturating_add(bytes);
-                if total_ci_bytes > MAX_AGGREGATE_CI_TABLE_BYTES {
-                    return Err(format!(
-                        "x64: aggregate call_indirect dispatch tables ({total_ci_bytes} B) exceed cap {MAX_AGGREGATE_CI_TABLE_BYTES} B"
-                    ));
-                }
-                let id = ci_sigs.len();
-                ci_sigs.push(X64CiSig {
-                    table: tbl,
-                    table_len,
-                    type_idx: ti,
-                    min_slot,
-                    span,
-                    targets,
-                });
-                ci_canon.insert((tbl, csig), id);
-                id
-            };
-            ci_index.insert((tbl, ti), ci_id);
-        }
+            let bytes = (span as usize).saturating_mul(4);
+            total_ci_bytes = total_ci_bytes.saturating_add(bytes);
+            if total_ci_bytes > MAX_AGGREGATE_CI_TABLE_BYTES {
+                return Err(format!(
+                    "x64: aggregate call_indirect dispatch tables ({total_ci_bytes} B) exceed cap {MAX_AGGREGATE_CI_TABLE_BYTES} B"
+                ));
+            }
+            let id = ci_sigs.len();
+            ci_sigs.push(X64CiSig {
+                table: tbl,
+                table_len,
+                type_idx: ti,
+                canon_sig: csig,
+                is_dynamic: false,
+                min_slot,
+                span,
+                targets,
+            });
+            ci_canon.insert((tbl, csig), id);
+            id
+        };
+        ci_index.insert((tbl, ti), ci_id);
     }
 
     // Fold globals that are immutable OR never written by Wasm AND not exported-mutable.
@@ -1750,10 +2078,30 @@ pub fn admit_x64_module_for_target_with_summaries(
         None
     };
 
+    let standalone_goose_reserve = if target == X64Target::StandaloneExec {
+        if let Some((_, fi)) = exported_funcs
+            .iter()
+            .find(|(name, _)| name == "goose.reserve")
+        {
+            let ti = func_type_idx[*fi] as usize;
+            let fty = &decoded.types[ti];
+            match (fty.params.as_slice(), fty.results.as_slice()) {
+                ([ValType::I64, ValType::I64], [ValType::I64]) => Some((*fi as u32, true)),
+                ([ValType::I32, ValType::I32], [ValType::I32]) => Some((*fi as u32, false)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok((
         X64Module {
             imports,
             func_type_idx,
+            func_canon_sig,
             module_types: decoded.types.clone(),
             globals,
             global_inits,
@@ -1763,7 +2111,10 @@ pub fn admit_x64_module_for_target_with_summaries(
             exported_funcs,
             ci_index,
             ci_sigs,
+            uses_dyn_ci,
+            table_lens,
             mut_extern_tables,
+            dyn_tables,
             memory,
             memory64,
             fixed32,
@@ -1772,8 +2123,14 @@ pub fn admit_x64_module_for_target_with_summaries(
             uses_exceptions,
             target,
             standalone_start,
+            standalone_goose_reserve,
             active_elem_checks,
             active_data_segs,
+            data_seg_count,
+            passive_data_segs,
+            uses_bulk_data,
+            elem_segs,
+            uses_bulk_elem,
             start,
         },
         all_body_summaries,
