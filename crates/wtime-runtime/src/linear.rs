@@ -24,14 +24,63 @@ const PAGE_BITS: u32 = 16;
 const PAGE: usize = 1 << PAGE_BITS;
 const MASK: usize = PAGE - 1;
 
+/// Maximum unshared linear memory length (16 MiB) eligible for contiguous dense backing.
+/// Larger memories (e.g. sparse 4 GiB / `memory64` arenas) stay 64 KiB page-sparse.
+pub(crate) const DENSE_MAX_BYTES: usize = 16 << 20;
+
 /// The host could not allocate storage for the memory.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AllocationFailed;
 
 #[derive(Default)]
 pub(crate) struct LinearBytes {
+    /// Contiguous dense backing when promoted (`buf.len() == self.len`).
+    /// `None` while sparse (`pages` holds lazily allocated 64 KiB chunks).
+    dense: Option<Vec<u8>>,
     pages: Vec<Option<Box<[u8]>>>,
     len: usize,
+}
+
+/// Iterator over non-zero written chunks of a [`LinearBytes`] backing.
+pub(crate) enum WrittenPages<'a> {
+    Dense {
+        buf: &'a [u8],
+        pos: usize,
+    },
+    Sparse {
+        pages: std::iter::Enumerate<std::slice::Iter<'a, Option<Box<[u8]>>>>,
+        len: usize,
+    },
+}
+
+impl<'a> Iterator for WrittenPages<'a> {
+    type Item = (usize, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            WrittenPages::Dense { buf, pos } => {
+                while *pos < buf.len() {
+                    let start = *pos;
+                    let end = (start + PAGE).min(buf.len());
+                    *pos = end;
+                    let chunk = &buf[start..end];
+                    if chunk.iter().any(|&b| b != 0) {
+                        return Some((start, chunk));
+                    }
+                }
+                None
+            }
+            WrittenPages::Sparse { pages, len } => {
+                for (index, page) in pages.by_ref() {
+                    if let Some(bytes) = page.as_deref() {
+                        let start = index * PAGE;
+                        return Some((start, &bytes[..bytes.len().min(*len - start)]));
+                    }
+                }
+                None
+            }
+        }
+    }
 }
 
 fn page_count(len: usize) -> usize {
@@ -64,11 +113,132 @@ impl LinearBytes {
         (self.len - index * PAGE).min(PAGE)
     }
 
+    /// Returns `true` if any storage has already been materialized (dense or at least one page).
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    #[inline]
+    pub(crate) fn has_written_storage(&self) -> bool {
+        self.dense.is_some() || self.pages.iter().any(Option::is_some)
+    }
+
+    /// Fallibly promotes a sparse memory of size `1..=DENSE_MAX_BYTES` into a single contiguous
+    /// `Vec<u8>` buffer so hot interpreter loops can index directly with a single bounds check.
+    /// Returns `true` if the memory is now dense, or `false` on OOM / empty / `> DENSE_MAX_BYTES`
+    /// without mutating existing sparse pages.
+    #[cfg(any(
+        test,
+        all(
+            feature = "register-executor",
+            not(any(
+                feature = "execution-reference",
+                feature = "performance-counters",
+                feature = "opcode-coverage"
+            ))
+        )
+    ))]
+    pub(crate) fn try_promote_dense(&mut self) -> bool {
+        if self.dense.is_some() {
+            return true;
+        }
+        if self.len == 0 || self.len > DENSE_MAX_BYTES {
+            return false;
+        }
+        let mut buf = Vec::new();
+        if buf.try_reserve_exact(self.len).is_err() {
+            return false;
+        }
+        buf.resize(self.len, 0);
+        for (index, page) in self.pages.iter().enumerate() {
+            if let Some(bytes) = page.as_deref() {
+                let start = index * PAGE;
+                let valid = bytes.len().min(self.len - start);
+                buf[start..start + valid].copy_from_slice(&bytes[..valid]);
+            }
+        }
+        self.pages = Vec::new();
+        self.dense = Some(buf);
+        true
+    }
+
+    /// Returns `true` when contiguous dense backing is currently active.
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    #[inline(always)]
+    pub(crate) fn is_dense(&self) -> bool {
+        self.dense.is_some()
+    }
+
+    /// Returns the entire linear memory as a single mutable slice when dense backing is active.
+    #[cfg(all(
+        feature = "register-executor",
+        not(any(
+            feature = "execution-reference",
+            feature = "performance-counters",
+            feature = "opcode-coverage"
+        ))
+    ))]
+    #[inline(always)]
+    pub(crate) fn dense_slice_mut(&mut self) -> Option<&mut [u8]> {
+        self.dense.as_deref_mut()
+    }
+
+    /// Fallibly demotes dense storage back to sparse 64 KiB pages when growing past
+    /// `DENSE_MAX_BYTES`. All-or-nothing: leaves `self.dense` and `self.len` untouched on OOM.
+    fn demote_to_sparse(&mut self, new_len: usize) -> bool {
+        let Some(buf) = self.dense.as_deref() else {
+            return false;
+        };
+        let pages_len = page_count(new_len);
+        let mut pages: Vec<Option<Box<[u8]>>> = Vec::new();
+        if pages.try_reserve_exact(pages_len).is_err() {
+            return false;
+        }
+        pages.resize_with(pages_len, || None);
+        for (index, chunk) in buf.chunks(PAGE).enumerate() {
+            if chunk.iter().any(|&b| b != 0) {
+                let size = (new_len - index * PAGE).min(PAGE);
+                let Ok(mut p) = zeroed_page(size) else {
+                    return false;
+                };
+                p[..chunk.len()].copy_from_slice(chunk);
+                pages[index] = Some(p);
+            }
+        }
+        self.dense = None;
+        self.pages = pages;
+        self.len = new_len;
+        true
+    }
+
     /// Grows the memory to `new_len` zero-extended bytes. Returns false without
     /// changing the memory when storage cannot be allocated.
     pub(crate) fn grow_to(&mut self, new_len: usize) -> bool {
         if new_len <= self.len {
             return true;
+        }
+        if self.dense.is_some() {
+            if new_len <= DENSE_MAX_BYTES {
+                let buf = self.dense.as_mut().expect("checked above");
+                if buf.try_reserve(new_len - buf.len()).is_err() {
+                    return false;
+                }
+                buf.resize(new_len, 0);
+                self.len = new_len;
+                return true;
+            }
+            return self.demote_to_sparse(new_len);
         }
         let pages = page_count(new_len);
         if self
@@ -103,6 +273,9 @@ impl LinearBytes {
     /// Single-byte fast load when in bounds; `None` only when out of bounds.
     #[inline(always)]
     pub(crate) fn read_u8_fast(&self, at: usize) -> Option<u8> {
+        if let Some(buf) = &self.dense {
+            return buf.get(at).copied();
+        }
         if at >= self.len {
             return None;
         }
@@ -112,9 +285,12 @@ impl LinearBytes {
         }
     }
     /// The `N` bytes at `at` when the access is in bounds and within one
-    /// page; `None` leaves the access to the general path.
+    /// page (or anywhere in dense storage); `None` leaves the access to the general path.
     #[inline(always)]
     pub(crate) fn read_array<const N: usize>(&self, at: usize) -> Option<[u8; N]> {
+        if let Some(buf) = &self.dense {
+            return buf.get(at..).and_then(|s| s.first_chunk::<N>()).copied();
+        }
         let end = at.checked_add(N)?;
         if end > self.len {
             return None;
@@ -126,9 +302,16 @@ impl LinearBytes {
         }
     }
     /// Writes `data` at `at` when the access is in bounds, within one page
-    /// and the page is allocated; false leaves it to the general path.
+    /// and the page is allocated (or anywhere in dense storage); false leaves it to the general path.
     #[inline(always)]
     pub(crate) fn write_array<const N: usize>(&mut self, at: usize, data: [u8; N]) -> bool {
+        if let Some(buf) = &mut self.dense {
+            if let Some(slot) = buf.get_mut(at..).and_then(|s| s.first_chunk_mut::<N>()) {
+                *slot = data;
+                return true;
+            }
+            return false;
+        }
         let Some(end) = at.checked_add(N) else {
             return false;
         };
@@ -202,6 +385,10 @@ impl LinearBytes {
     pub(crate) fn read(&self, at: usize, out: &mut [u8]) {
         // An empty access may sit at the very end of memory, past every page.
         if out.is_empty() {
+            return;
+        }
+        if let Some(buf) = &self.dense {
+            out.copy_from_slice(&buf[at..at + out.len()]);
             return;
         }
         let offset = at & MASK;
@@ -281,6 +468,10 @@ impl LinearBytes {
         if data.is_empty() {
             return Ok(());
         }
+        if let Some(buf) = &mut self.dense {
+            buf[at..at + data.len()].copy_from_slice(data);
+            return Ok(());
+        }
         let offset = at & MASK;
         if offset + data.len() <= PAGE {
             let index = at >> PAGE_BITS;
@@ -319,6 +510,13 @@ impl LinearBytes {
         count: usize,
         byte: u8,
     ) -> Result<(), AllocationFailed> {
+        if count == 0 {
+            return Ok(());
+        }
+        if let Some(buf) = &mut self.dense {
+            buf[at..at + count].fill(byte);
+            return Ok(());
+        }
         let pieces = |mut at: usize, mut count: usize| {
             std::iter::from_fn(move || {
                 (count > 0).then(|| {
@@ -357,6 +555,13 @@ impl LinearBytes {
         count: usize,
         scratch: &mut Vec<u8>,
     ) -> Result<(), AllocationFailed> {
+        if count == 0 {
+            return Ok(());
+        }
+        if let Some(buf) = &mut self.dense {
+            buf.copy_within(source..source + count, destination);
+            return Ok(());
+        }
         scratch
             .try_reserve(count.saturating_sub(scratch.len()))
             .map_err(|_| AllocationFailed)?;
@@ -367,19 +572,20 @@ impl LinearBytes {
 
     /// The written pages, as their byte offsets and the contents within the
     /// memory's length (a grown last page may hold more).
-    pub(crate) fn written_pages(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        self.pages.iter().enumerate().filter_map(|(index, page)| {
-            page.as_deref().map(|bytes| {
-                (
-                    index * PAGE,
-                    &bytes[..bytes.len().min(self.len - index * PAGE)],
-                )
-            })
-        })
+    pub(crate) fn written_pages(&self) -> WrittenPages<'_> {
+        if let Some(buf) = &self.dense {
+            WrittenPages::Dense { buf, pos: 0 }
+        } else {
+            WrittenPages::Sparse {
+                pages: self.pages.iter().enumerate(),
+                len: self.len,
+            }
+        }
     }
 
     /// Releases the storage; the memory becomes empty.
     pub(crate) fn clear(&mut self) {
+        self.dense = None;
         self.pages = Vec::new();
         self.len = 0;
     }
@@ -403,13 +609,21 @@ impl LinearBytes {
     /// Pages that hold storage; for tests of sparseness.
     #[cfg(test)]
     fn allocated_pages(&self) -> usize {
-        self.pages.iter().filter(|page| page.is_some()).count()
+        if let Some(buf) = &self.dense {
+            buf.len().div_ceil(PAGE)
+        } else {
+            self.pages.iter().filter(|page| page.is_some()).count()
+        }
     }
 
     /// Bytes of page storage; for tests of accounting.
     #[cfg(test)]
     fn allocated_bytes(&self) -> usize {
-        self.pages.iter().flatten().map(|page| page.len()).sum()
+        if let Some(buf) = &self.dense {
+            buf.len()
+        } else {
+            self.pages.iter().flatten().map(|page| page.len()).sum()
+        }
     }
 }
 
@@ -418,6 +632,9 @@ impl std::ops::Index<usize> for LinearBytes {
     type Output = u8;
     fn index(&self, at: usize) -> &u8 {
         assert!(at < self.len, "linear memory index out of range");
+        if let Some(buf) = &self.dense {
+            return &buf[at];
+        }
         match &self.pages[at >> PAGE_BITS] {
             Some(page) => &page[at & MASK],
             None => &0,
@@ -429,9 +646,17 @@ impl std::ops::Index<usize> for LinearBytes {
 impl std::ops::IndexMut<usize> for LinearBytes {
     fn index_mut(&mut self, at: usize) -> &mut u8 {
         assert!(at < self.len, "linear memory index out of range");
-        &mut self
-            .page_mut(at >> PAGE_BITS)
-            .expect("test memory allocation")[at & MASK]
+        if self.dense.is_none() {
+            let _ = self
+                .page_mut(at >> PAGE_BITS)
+                .expect("test memory allocation");
+        }
+        match &mut self.dense {
+            Some(buf) => &mut buf[at],
+            None => &mut self.pages[at >> PAGE_BITS]
+                .as_deref_mut()
+                .expect("allocated above")[at & MASK],
+        }
     }
 }
 
@@ -613,5 +838,48 @@ mod tests {
         assert!(!memory.grow_to(usize::MAX));
         assert_eq!(memory.len(), 4);
         assert_eq!(bytes(&memory, 0, 4), [0; 4]);
+    }
+
+    #[test]
+    fn dense_promotion_preserves_bytes_growth_copy_fill_and_demotion_past_cap() {
+        let mut memory = LinearBytes::zeroed(3 * PAGE).unwrap();
+        memory.write(7, &[1, 2, 3, 4]).unwrap();
+        memory.write(2 * PAGE - 2, &[9, 8, 7, 6]).unwrap();
+        assert!(memory.try_promote_dense());
+        assert_eq!(memory.allocated_bytes(), 3 * PAGE);
+        assert_eq!(memory.read_array::<4>(7), Some([1, 2, 3, 4]));
+        // Cross-page read_array & write_array succeed in O(1) once dense!
+        assert_eq!(memory.read_array::<4>(2 * PAGE - 2), Some([9, 8, 7, 6]));
+        assert!(memory.write_array::<4>(PAGE - 2, [0xaa, 0xbb, 0xcc, 0xdd]));
+        assert_eq!(
+            memory.read_array::<4>(PAGE - 2),
+            Some([0xaa, 0xbb, 0xcc, 0xdd])
+        );
+        // Overlapping copy_within works in-place without touching scratch.
+        let mut scratch = Vec::new();
+        memory
+            .copy_within(PAGE - 2, PAGE - 1, 4, &mut scratch)
+            .unwrap();
+        assert!(scratch.is_empty());
+        assert_eq!(
+            memory.read_array::<5>(PAGE - 2),
+            Some([0xaa, 0xaa, 0xbb, 0xcc, 0xdd])
+        );
+        // Fill and grow within DENSE_MAX_BYTES keep dense backing.
+        memory.fill(100, 16, 0x55).unwrap();
+        assert_eq!(bytes(&memory, 100, 4), [0x55; 4]);
+        assert!(memory.grow_to(4 * PAGE));
+        assert_eq!(memory.allocated_bytes(), 4 * PAGE);
+        assert_eq!(memory.read_u8_fast(3 * PAGE), Some(0));
+        // Growing past DENSE_MAX_BYTES demotes cleanly back to sparse pages.
+        assert!(memory.grow_to(DENSE_MAX_BYTES + PAGE));
+        assert_eq!(memory.len(), DENSE_MAX_BYTES + PAGE);
+        assert_eq!(memory.read_array::<4>(7), Some([1, 2, 3, 4]));
+        assert_eq!(bytes(&memory, PAGE - 2, 5), [0xaa, 0xaa, 0xbb, 0xcc, 0xdd]);
+        assert_eq!(bytes(&memory, 2 * PAGE - 2, 4), [9, 8, 7, 6]);
+        assert_eq!(memory.read_u8_fast(DENSE_MAX_BYTES), Some(0));
+        // Only the 3 non-zero pages were materialized on demotion!
+        assert_eq!(memory.allocated_pages(), 3);
+        assert!(!memory.try_promote_dense());
     }
 }

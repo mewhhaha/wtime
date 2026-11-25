@@ -35,7 +35,7 @@ use ir::{IrFunc, OptIrScratch, lower_wasm_to_ir_with_budget_and_scratch};
 use lower::{TargetIsa, lower_ir_to_x64_with_budget};
 use module::{
     CompileBudget, MAX_CTX_BYTES, MAX_TOTAL_CODE_BYTES, MAX_TOTAL_RODATA_BYTES, X64ConstVal,
-    X64Module, X64Target, admit_x64_module_for_target, x64_validate_features, x64_validate_limits,
+    X64Module, X64Target, x64_validate_features, x64_validate_limits,
 };
 use regalloc::{AllocConfig, AllocResult, RegallocScratch, allocate_with_config_and_scratch};
 use runtime::{
@@ -218,7 +218,7 @@ impl CtxLayout {
 ///
 /// Invariant: `f32_abs`, `f32_neg`, `f64_abs`, `f64_neg` are each 16-byte aligned and 16 bytes
 /// wide because `lower.rs` emits 128-bit RIP-relative `andps`/`xorps`/`andpd`/`xorpd` operands.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RodataConsts {
     pub f32_abs: u32,
     pub f32_neg: u32,
@@ -960,6 +960,98 @@ fn parallel_try_map<T: Send, F: Fn(usize) -> Option<T> + Sync>(
     Some(out)
 }
 
+enum ValidatedBacking {
+    Full(wtime_validate::ValidatedModule),
+    Incremental(wtime_validate::IncrementalModule),
+}
+
+impl ValidatedBacking {
+    #[inline]
+    fn decoded(&self) -> &DecodedModule {
+        match self {
+            ValidatedBacking::Full(v) => v.decoded(),
+            ValidatedBacking::Incremental(v) => v.decoded(),
+        }
+    }
+
+    #[inline]
+    fn is_incremental(&self) -> bool {
+        matches!(self, ValidatedBacking::Incremental(_))
+    }
+
+    fn ensure_body_validated(&mut self, bi: usize) -> Result<(), wtime_types::Error> {
+        match self {
+            ValidatedBacking::Full(_) => Ok(()),
+            ValidatedBacking::Incremental(v) => v.ensure_body_validated(bi),
+        }
+    }
+}
+
+fn hash_raw_spans_parallel(
+    wasm: &[u8],
+    spans: &[(usize, usize)],
+    n_workers: usize,
+) -> Option<Vec<[u8; 32]>> {
+    let n_defs = spans.len();
+    let mut body_hashes = inc_cache::try_vec_with_capacity::<[u8; 32]>(n_defs)?;
+    body_hashes.resize(n_defs, [0u8; 32]);
+    if n_defs == 0 {
+        return Some(body_hashes);
+    }
+    let hash_slice = |start_bi: usize, dst: &mut [[u8; 32]]| {
+        for (j, slot) in dst.iter_mut().enumerate() {
+            let (s, e) = spans[start_bi + j];
+            *slot = crate::sha256::digest(&wasm[s..e]);
+        }
+    };
+    let workers = n_workers.min(16).min(n_defs);
+    let per_worker = n_defs.div_ceil(workers);
+    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
+    let mut n_unspawned = 0usize;
+    std::thread::scope(|hs| {
+        let mut rem = body_hashes.as_mut_slice();
+        let mut bi = 0usize;
+        while !rem.is_empty() {
+            let take = per_worker.min(rem.len());
+            let (slice, rest) = rem.split_at_mut(take);
+            let start_bi = bi;
+            rem = rest;
+            bi += take;
+            if rem.is_empty() {
+                hash_slice(start_bi, slice);
+            } else if std::thread::Builder::new()
+                .spawn_scoped(hs, move || hash_slice(start_bi, slice))
+                .is_err()
+            {
+                unspawned[n_unspawned] = Some((start_bi, take));
+                n_unspawned += 1;
+            }
+        }
+    });
+    for &(start_bi, take) in unspawned[..n_unspawned].iter().flatten() {
+        hash_slice(start_bi, &mut body_hashes[start_bi..start_bi + take]);
+    }
+    Some(body_hashes)
+}
+
+fn val_body_entry_from_summary(
+    admit: module::BodyAdmitSummary,
+    raw_body_hash: [u8; 32],
+) -> inc_cache::ValBodyEntry {
+    inc_cache::ValBodyEntry {
+        raw_body_hash,
+        total_locals: admit.total_locals,
+        insn_count: admit.insn_count,
+        imm_elems: admit.imm_elems,
+        saw_data_count_op: admit.saw_data_count_op,
+        sig_arity: admit.sig_arity as u32,
+        br_table_entries: admit.br_table_entries as u32,
+        g_reads: admit.g_reads,
+        g_writes: admit.g_writes,
+        ci_pairs: admit.ci_pairs,
+    }
+}
+
 fn compile_wasm_to_x64_so_inner(
     wasm: &[u8],
     opts: &X64CompileOptions,
@@ -969,8 +1061,17 @@ fn compile_wasm_to_x64_so_inner(
     let check_dl = || budget.check_deadline().map_err(X64CompileError::Failed);
     check_dl()?;
 
+    let default_hooks = matches!(opts.hooks.cpuid, runtime::CpuidSource::Real)
+        && matches!(opts.hooks.rdssp, runtime::RdsspSource::Real)
+        && matches!(opts.hooks.syscall_fault, runtime::SyscallFault::None);
+    let inc_enabled =
+        opts.inc_cache_dir.is_some() && opts.cache_key_salt.is_some() && opts.opt && default_hooks;
+
     // 1. Validate Wasm under Stage 1's strict feature profile and resource limits.
     //    Unlock up to 16 parallel decode/validate workers for large modules (>= 256 KiB).
+    //    When a Merkle-verified companion `.vidx` cache matches the module shell (`shell_hash`)
+    //    and <= 50% of bodies changed, skip decoding/validating unchanged bodies and overlap
+    //    loading the `x64-inc` `.bin` file with shell validation + admission!
     let t0 = Instant::now();
     let mut vlimits = x64_validate_limits();
     vlimits.compile_threads = if wasm.len() >= 256 * 1024 {
@@ -978,21 +1079,157 @@ fn compile_wasm_to_x64_so_inner(
     } else {
         1
     };
-    let validated = wtime_validate::validate(wasm, &x64_validate_features(), &vlimits).map_err(
-        |e| match e.kind {
-            ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
-                X64CompileError::AdmissionRejected(format!("x64: {e}"))
+    let mut shell_hash_opt: Option<[u8; 32]> = None;
+    let mut body_spans_opt: Option<Vec<(usize, usize)>> = None;
+    let mut pre_body_hashes: Option<std::sync::Arc<Vec<[u8; 32]>>> = None;
+    let mut pre_vidx: Option<inc_cache::ValIndexData> = None;
+    type PreRawWait = std::sync::Arc<(Mutex<Option<Option<Vec<u8>>>>, std::sync::Condvar)>;
+    let mut pre_raw_state: Option<([u8; 32], PreRawWait)> = None;
+    let mut pre_admit_summaries: Option<Vec<Option<module::BodyAdmitSummary>>> = None;
+
+    if inc_enabled
+        && let (Some(cache_dir), Some(salt)) = (opts.inc_cache_dir.as_deref(), opts.cache_key_salt)
+        && let Some((sh, spans)) = inc_cache::scan_wasm_shell_and_body_spans(
+            wasm,
+            &salt,
+            opts.isa,
+            opts.opt,
+            opts.verify,
+            opts.target,
+        )
+    {
+        shell_hash_opt = Some(sh);
+        let n_defs_hint = spans.len();
+        if n_defs_hint > 0 && inc_cache::has_val_index(cache_dir, &sh) {
+            let n_hash_workers = resolve_jobs(opts.jobs).min(n_defs_hint);
+            // Overlap `.vidx` load + Merkle verify with parallel body hashing!
+            let (vidx_opt, hashes_opt) = std::thread::scope(|s| {
+                let dir_ref = cache_dir;
+                let h_vidx = std::thread::Builder::new()
+                    .spawn_scoped(s, move || {
+                        inc_cache::load_val_index(dir_ref, &sh, n_defs_hint)
+                    })
+                    .ok();
+                let hashes = hash_raw_spans_parallel(wasm, &spans, n_hash_workers);
+                let vidx = h_vidx
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_else(|| inc_cache::load_val_index(cache_dir, &sh, n_defs_hint));
+                (vidx, hashes)
+            });
+            if let Some(hashes) = hashes_opt {
+                if let Some(vidx) = vidx_opt {
+                    let changed_cnt = hashes
+                        .iter()
+                        .zip(&vidx.bodies)
+                        .filter(|(bh, vb)| *bh != &vb.raw_body_hash)
+                        .count();
+                    if changed_cnt <= n_defs_hint / 2 {
+                        // Start loading the 9 MiB `x64-inc` `.bin` cache in the background NOW!
+                        let raw_wait = opts.deadline.map(|dl| {
+                            dl.saturating_duration_since(Instant::now())
+                                .saturating_sub(std::time::Duration::from_millis(250))
+                                .min(std::time::Duration::from_millis(250))
+                        });
+                        if raw_wait.is_none_or(|w| !w.is_zero()) {
+                            let st = std::sync::Arc::new((
+                                Mutex::new(None::<Option<Vec<u8>>>),
+                                std::sync::Condvar::new(),
+                            ));
+                            let st_bg = std::sync::Arc::clone(&st);
+                            let dir_buf = cache_dir.to_path_buf();
+                            let abi_hint = vidx.abi_hash;
+                            if std::thread::Builder::new()
+                                .spawn(move || {
+                                    let raw = inc_cache::load_inc_cache_raw(&dir_buf, &abi_hint);
+                                    let (lk, cv) = &*st_bg;
+                                    *lk.lock().unwrap_or_else(|g| g.into_inner()) = Some(raw);
+                                    cv.notify_all();
+                                })
+                                .is_ok()
+                            {
+                                pre_raw_state = Some((abi_hint, st));
+                            }
+                        }
+                        pre_vidx = Some(vidx);
+                    }
+                }
+                pre_body_hashes = Some(std::sync::Arc::new(hashes));
             }
-            _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
-        },
-    )?;
-    let decoded = validated.decoded();
+        } else if n_defs_hint > 0 {
+            // Cold cache (no `.vidx`): defer body hashing so it never blocks validation!
+            body_spans_opt = Some(spans);
+        }
+    }
+
+    let map_val_err = |e: wtime_types::Error| match e.kind {
+        ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
+            X64CompileError::AdmissionRejected(format!("x64: {e}"))
+        }
+        _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
+    };
+
+    let mut validated: ValidatedBacking =
+        if let (Some(vidx), Some(bhs)) = (pre_vidx.as_ref(), pre_body_hashes.as_ref()) {
+            let bhs_slice = bhs.as_slice();
+            let bodies_ref = &vidx.bodies;
+            let inc_mod = wtime_validate::validate_incremental(
+                wasm,
+                &x64_validate_features(),
+                &vlimits,
+                |idx, _slice| {
+                    let vb = bodies_ref.get(idx)?;
+                    if bhs_slice.get(idx)? == &vb.raw_body_hash {
+                        Some(wtime_validate::CachedBodyMetrics {
+                            total_locals: vb.total_locals,
+                            insn_count: vb.insn_count as usize,
+                            imm_elems: vb.imm_elems as usize,
+                            saw_data_count_op: vb.saw_data_count_op,
+                        })
+                    } else {
+                        None
+                    }
+                },
+            )
+            .map_err(map_val_err)?;
+            let mut summaries = Vec::with_capacity(bodies_ref.len());
+            for (idx, vb) in bodies_ref.iter().enumerate() {
+                if !inc_mod.is_body_validated(idx) {
+                    summaries.push(Some(module::BodyAdmitSummary {
+                        total_locals: vb.total_locals,
+                        insn_count: vb.insn_count,
+                        imm_elems: vb.imm_elems,
+                        saw_data_count_op: vb.saw_data_count_op,
+                        sig_arity: vb.sig_arity as usize,
+                        br_table_entries: vb.br_table_entries as usize,
+                        g_reads: vb.g_reads.clone(),
+                        g_writes: vb.g_writes.clone(),
+                        ci_pairs: vb.ci_pairs.clone(),
+                    }));
+                } else {
+                    summaries.push(None);
+                }
+            }
+            pre_admit_summaries = Some(summaries);
+            ValidatedBacking::Incremental(inc_mod)
+        } else {
+            ValidatedBacking::Full(
+                wtime_validate::validate(wasm, &x64_validate_features(), &vlimits)
+                    .map_err(map_val_err)?,
+            )
+        };
     let d_validate = t0.elapsed();
     check_dl()?;
 
     // 2. Enforce admission contract & build lean X64Module metadata.
     let t0 = Instant::now();
-    let module = admit_x64_module_for_target(decoded, opts.target, Some(&budget)).map_err(|e| {
+    let (mut module, mut admit_summaries) = module::admit_x64_module_for_target_with_summaries(
+        validated.decoded(),
+        opts.target,
+        Some(&budget),
+        pre_admit_summaries.as_deref(),
+        inc_enabled,
+    )
+    .map_err(|e| {
         if budget.check_deadline().is_err() {
             X64CompileError::Failed(e)
         } else {
@@ -1012,15 +1249,19 @@ fn compile_wasm_to_x64_so_inner(
         tables,
         ci_tables,
         call_export_patches,
-    } = build_shared_rodata(decoded, &module, &preliminary_layout.global_offs, &budget).map_err(
-        |e| {
-            if budget.check_deadline().is_err() {
-                X64CompileError::Failed(e)
-            } else {
-                X64CompileError::AdmissionRejected(e)
-            }
-        },
-    )?;
+    } = build_shared_rodata(
+        validated.decoded(),
+        &module,
+        &preliminary_layout.global_offs,
+        &budget,
+    )
+    .map_err(|e| {
+        if budget.check_deadline().is_err() {
+            X64CompileError::Failed(e)
+        } else {
+            X64CompileError::AdmissionRejected(e)
+        }
+    })?;
     let layout = CtxLayout {
         ci_tables,
         ..preliminary_layout
@@ -1064,7 +1305,7 @@ fn compile_wasm_to_x64_so_inner(
     //    coupled Step 8a/8b stack & trap-check elision -> parallel x64 codegen) into an indexed
     //    `Vec<Option<Asm>>` for 100% deterministic `.text`/`.rodata` layout.
     let n_imports = module.imports.len();
-    let n_defs = decoded.code.len();
+    let n_defs = validated.decoded().code.len();
     let n_workers = resolve_jobs(opts.jobs).min(n_defs.max(1));
     let ns_ssa_opt = AtomicU64::new(0);
     let ns_regalloc = AtomicU64::new(0);
@@ -1074,8 +1315,20 @@ fn compile_wasm_to_x64_so_inner(
 
     let mut compiled: Vec<Option<Asm>> = (0..n_defs).map(|_| None).collect();
     let mut new_inc_cache: Option<std::sync::Arc<inc_cache::IncCacheData>> = None;
+    let mut new_val_index: Option<inc_cache::ValIndexData> = None;
+    type DeferredValIndex = (
+        [u8; 32],
+        [u8; 32],
+        Vec<usize>,
+        Vec<bool>,
+        Vec<module::BodyAdmitSummary>,
+        std::sync::Arc<Vec<[u8; 32]>>,
+    );
+    type DeferredExtraDrop = (Vec<Vec<(u32, u32)>>, Option<opt::ModuleEffects>);
+    let mut deferred_val_index: Option<DeferredValIndex> = None;
     let mut inc_reused_count: usize = 0;
     let mut deferred_cold_drop: Option<(Vec<IrFunc>, Vec<AllocResult>)> = None;
+    let mut deferred_extra_drop: Option<DeferredExtraDrop> = None;
 
     let map_worker_err = |err: String| -> X64CompileError {
         if budget.check_deadline().is_ok()
@@ -1093,12 +1346,9 @@ fn compile_wasm_to_x64_so_inner(
         has_bmi2: opts.isa.has_bmi2,
     };
 
-    let default_hooks = matches!(opts.hooks.cpuid, runtime::CpuidSource::Real)
-        && matches!(opts.hooks.rdssp, runtime::RdsspSource::Real)
-        && matches!(opts.hooks.syscall_fault, runtime::SyscallFault::None);
     type IncCtx = (
         [u8; 32],
-        std::sync::Arc<Vec<[u8; 32]>>,
+        Option<std::sync::Arc<Vec<[u8; 32]>>>,
         Option<inc_cache::IncCacheData>,
     );
     let mut inc_ctx: Option<IncCtx> = if let (Some(cache_dir), Some(salt)) =
@@ -1119,21 +1369,62 @@ fn compile_wasm_to_x64_so_inner(
         );
         let global_words = module.globals.len().div_ceil(64);
         let shared_rodata_len = rodata.len();
-        // Hash raw function bodies in parallel WHILE overlapping raw incremental cache file read +
-        // Merkle SHA-256 verification on a background thread!
-        if let Some(mut body_hashes) = inc_cache::try_vec_with_capacity(n_defs) {
-            body_hashes.resize(n_defs, [0u8; 32]);
-            let raw_wait = opts.deadline.map(|dl| {
-                dl.saturating_duration_since(Instant::now())
-                    .saturating_sub(std::time::Duration::from_millis(250))
-                    .min(std::time::Duration::from_millis(250))
+        let raw_wait = opts.deadline.map(|dl| {
+            dl.saturating_duration_since(Instant::now())
+                .saturating_sub(std::time::Duration::from_millis(250))
+                .min(std::time::Duration::from_millis(250))
+        });
+        let can_read_cache = raw_wait.is_none_or(|w| !w.is_zero());
+
+        // Reuse pre-computed `body_hashes` and pre-spawned `load_inc_cache_raw` when available!
+        // On a cold cache miss where neither `.vidx` nor `.bin` exists on disk, defer body hashing
+        // to overlap with Phase 5b instead of blocking Phase 5a!
+        if let Some(bhs) = pre_body_hashes.take() {
+            let raw = if let Some((hint_abi, st)) = pre_raw_state.take()
+                && hint_abi == abi_hash
+            {
+                let (lk, cv) = &*st;
+                let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
+                match raw_wait {
+                    None => {
+                        let mut g = cv
+                            .wait_while(guard, |opt| opt.is_none())
+                            .unwrap_or_else(|e| e.into_inner());
+                        g.take().flatten()
+                    }
+                    Some(wait) => {
+                        let (mut g, _) = cv
+                            .wait_timeout_while(guard, wait, |opt| opt.is_none())
+                            .unwrap_or_else(|e| e.into_inner());
+                        g.take().flatten()
+                    }
+                }
+            } else if can_read_cache {
+                inc_cache::load_inc_cache_raw(cache_dir, &abi_hash)
+            } else {
+                None
+            };
+            let loaded = raw.and_then(|bytes| {
+                inc_cache::decode_verified_inc_cache(
+                    std::sync::Arc::new(bytes),
+                    &abi_hash,
+                    n_imports,
+                    n_defs,
+                    global_words,
+                    shared_rodata_len,
+                    &bhs,
+                )
             });
-            let can_read_cache = raw_wait.is_none_or(|w| !w.is_zero());
+            Some((abi_hash, Some(bhs), loaded))
+        } else if !can_read_cache || !inc_cache::has_inc_cache(cache_dir, &abi_hash) {
+            Some((abi_hash, None, None))
+        } else if let Some(mut body_hashes) = inc_cache::try_vec_with_capacity(n_defs) {
+            body_hashes.resize(n_defs, [0u8; 32]);
             let raw_state = std::sync::Arc::new((
                 Mutex::new(None::<Option<Vec<u8>>>),
                 std::sync::Condvar::new(),
             ));
-            let spawned_raw = if can_read_cache {
+            let spawned_raw = {
                 let dir_buf = cache_dir.to_path_buf();
                 let st_bg = std::sync::Arc::clone(&raw_state);
                 std::thread::Builder::new()
@@ -1144,14 +1435,13 @@ fn compile_wasm_to_x64_so_inner(
                         cv.notify_all();
                     })
                     .is_ok()
-            } else {
-                false
             };
 
+            let dec_ref = validated.decoded();
             let hash_slice = |start_bi: usize, dst: &mut [[u8; 32]]| {
                 for (j, slot) in dst.iter_mut().enumerate() {
-                    let sp = decoded.code[start_bi + j].span;
-                    *slot = crate::sha256::digest(&decoded.bytes[sp.start..sp.end]);
+                    let sp = dec_ref.code[start_bi + j].span;
+                    *slot = crate::sha256::digest(&dec_ref.bytes[sp.start..sp.end]);
                 }
             };
             let workers = n_workers.min(16).min(n_defs);
@@ -1181,7 +1471,7 @@ fn compile_wasm_to_x64_so_inner(
             for &(start_bi, take) in unspawned[..n_unspawned].iter().flatten() {
                 hash_slice(start_bi, &mut body_hashes[start_bi..start_bi + take]);
             }
-            let raw_bytes: Option<Vec<u8>> = if spawned_raw {
+            let raw = if spawned_raw {
                 let (lk, cv) = &*raw_state;
                 let guard = lk.lock().unwrap_or_else(|g| g.into_inner());
                 match raw_wait {
@@ -1198,15 +1488,15 @@ fn compile_wasm_to_x64_so_inner(
                         g.take().flatten()
                     }
                 }
-            } else if can_read_cache && raw_wait.is_none() {
+            } else if raw_wait.is_none() {
                 inc_cache::load_inc_cache_raw(cache_dir, &abi_hash)
             } else {
                 None
             };
             let body_hashes = std::sync::Arc::new(body_hashes);
-            let loaded = raw_bytes.and_then(|bytes| {
+            let loaded = raw.and_then(|bytes| {
                 inc_cache::decode_verified_inc_cache(
-                    &bytes,
+                    std::sync::Arc::new(bytes),
                     &abi_hash,
                     n_imports,
                     n_defs,
@@ -1215,7 +1505,7 @@ fn compile_wasm_to_x64_so_inner(
                     &body_hashes,
                 )
             });
-            Some((abi_hash, body_hashes, loaded))
+            Some((abi_hash, Some(body_hashes), loaded))
         } else {
             None
         }
@@ -1225,7 +1515,7 @@ fn compile_wasm_to_x64_so_inner(
     check_dl()?;
 
     let mut used_incremental = false;
-    if let Some((abi_hash, ref body_hashes, ref mut prev_opt)) = inc_ctx
+    if let Some((abi_hash, Some(ref body_hashes), ref mut prev_opt)) = inc_ctx
         && let Some(prev_cache) = prev_opt.take()
     {
         // Run speculative incremental compilation on a forked `CompileBudget` inheriting
@@ -1233,28 +1523,71 @@ fn compile_wasm_to_x64_so_inner(
         // combined pre-relaxation caps while any fallback (`Ok(None)`) discards warm-only
         // charges cleanly before cold retry.
         let warm_budget = budget.fork_snapshot();
-        if let Some((inc_asms, updated_cache, reused)) = try_compile_defs_incremental(
-            decoded,
-            &module,
-            &layout,
-            &ro,
-            opts,
-            alloc_cfg,
-            n_workers,
-            abi_hash,
-            body_hashes.as_slice(),
-            prev_cache,
-            &warm_budget,
-            &ns_ssa_opt,
-            &ns_regalloc,
-            &ns_emit,
-            &mut d_inline_effects,
-            &mut d_elide,
-        )? {
+        let prev_topo_cycle = pre_vidx.as_ref().and_then(|v| {
+            (v.topo_bottom_up.len() == n_defs && v.in_cycle.len() == n_defs)
+                .then_some((v.topo_bottom_up.as_slice(), v.in_cycle.as_slice()))
+        });
+        if let Some((inc_asms, updated_cache, reused, topo_cycle_opt)) =
+            try_compile_defs_incremental(
+                &mut validated,
+                &module,
+                &layout,
+                &ro,
+                opts,
+                alloc_cfg,
+                n_workers,
+                abi_hash,
+                body_hashes.as_slice(),
+                prev_cache,
+                prev_topo_cycle,
+                &warm_budget,
+                &ns_ssa_opt,
+                &ns_regalloc,
+                &ns_emit,
+                &mut d_inline_effects,
+                &mut d_elide,
+            )?
+        {
             if let Some(asms) = inc_asms {
                 for (bi, asm) in asms.into_iter().enumerate() {
                     compiled[bi] = Some(asm);
                 }
+            }
+            if let (Some(sh), Some((topo_bu, in_cyc))) = (shell_hash_opt, topo_cycle_opt)
+                && admit_summaries.len() == n_defs
+            {
+                let mut v_bodies = Vec::with_capacity(n_defs);
+                let mut prev_bodies = pre_vidx.take().map(|v| v.bodies);
+                for (bi, admit) in admit_summaries.drain(..).enumerate() {
+                    if let Some(ref mut pbs) = prev_bodies
+                        && pbs[bi].raw_body_hash == body_hashes[bi]
+                    {
+                        v_bodies.push(std::mem::replace(
+                            &mut pbs[bi],
+                            inc_cache::ValBodyEntry {
+                                raw_body_hash: [0u8; 32],
+                                total_locals: 0,
+                                insn_count: 0,
+                                imm_elems: 0,
+                                saw_data_count_op: false,
+                                sig_arity: 0,
+                                br_table_entries: 0,
+                                g_reads: Vec::new(),
+                                g_writes: Vec::new(),
+                                ci_pairs: Vec::new(),
+                            },
+                        ));
+                    } else {
+                        v_bodies.push(val_body_entry_from_summary(admit, body_hashes[bi]));
+                    }
+                }
+                new_val_index = Some(inc_cache::ValIndexData {
+                    shell_hash: sh,
+                    abi_hash,
+                    topo_bottom_up: topo_bu,
+                    in_cycle: in_cyc,
+                    bodies: v_bodies,
+                });
             }
             new_inc_cache = updated_cache;
             inc_reused_count = reused;
@@ -1263,7 +1596,33 @@ fn compile_wasm_to_x64_so_inner(
     }
 
     if n_defs > 0 && !used_incremental {
-        // Phase 5a (parallel, LPT-ordered biggest bodies first): Wasm -> initial SSA IR.
+        // If incremental validation skipped bodies and the warm path fell back, perform full
+        // validation + admission cleanly before cold compilation so every body is decoded.
+        if validated.is_incremental() {
+            validated = ValidatedBacking::Full(
+                wtime_validate::validate(wasm, &x64_validate_features(), &vlimits)
+                    .map_err(map_val_err)?,
+            );
+            let (m_full, sums_full) = module::admit_x64_module_for_target_with_summaries(
+                validated.decoded(),
+                opts.target,
+                Some(&budget),
+                None,
+                inc_enabled,
+            )
+            .map_err(|e| {
+                if budget.check_deadline().is_err() {
+                    X64CompileError::Failed(e)
+                } else {
+                    X64CompileError::AdmissionRejected(e)
+                }
+            })?;
+            module = m_full;
+            admit_summaries = sums_full;
+        }
+        let decoded = validated.decoded();
+        // Phase 5a (parallel, LPT-ordered biggest bodies first): Wasm -> initial SSA IR,
+        // fused with scratch-reused early block-param pruning AND L1-hot pre-inline summary collection.
         let mut order_5a: Vec<usize> = (0..n_defs).collect();
         order_5a.sort_unstable_by(|&a, &b| {
             decoded.code[b]
@@ -1275,11 +1634,14 @@ fn compile_wasm_to_x64_so_inner(
         let next_pos = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
-        let worker_irs: Mutex<Vec<Vec<(usize, IrFunc)>>> =
-            Mutex::new(Vec::with_capacity(n_workers));
+        type Phase5aItem = (usize, IrFunc, Option<(usize, bool, Vec<(u32, u32)>)>);
+        let worker_irs: Mutex<Vec<Vec<Phase5aItem>>> = Mutex::new(Vec::with_capacity(n_workers));
         let run_5a = || {
-            let mut local_out: Vec<(usize, IrFunc)> = Vec::new();
+            let mut local_out: Vec<Phase5aItem> = Vec::new();
             let mut opt_scratch = OptIrScratch::default();
+            let mut cfg_dom = opt::CfgDom::default();
+            let mut cfg_sc = opt::CfgScratch::default();
+            let mut prune_sc = opt::PruneScratch::default();
             let mut loc_ssa = 0u64;
             loop {
                 if failed.load(Ordering::Acquire) {
@@ -1302,13 +1664,24 @@ fn compile_wasm_to_x64_so_inner(
                 )
                 .and_then(|mut ir| {
                     if opts.opt {
-                        opt::prune_early_block_params(&mut ir, Some(&budget))?;
+                        opt::prune_early_block_params_with_scratch(
+                            &mut ir,
+                            Some(&budget),
+                            &mut cfg_dom,
+                            &mut cfg_sc,
+                            &mut prune_sc,
+                        )?;
                     }
-                    Ok(ir)
+                    let pre = if opts.opt {
+                        opt::try_collect_pre_inline_summary(&ir, n_imports, n_defs)
+                    } else {
+                        None
+                    };
+                    Ok((ir, pre))
                 });
                 loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
                 match res {
-                    Ok(ir) => local_out.push((bi, ir)),
+                    Ok((ir, pre)) => local_out.push((bi, ir, pre)),
                     Err(e) => {
                         failed.store(true, Ordering::Release);
                         let mut guard = first_err.lock().unwrap_or_else(|g| g.into_inner());
@@ -1335,9 +1708,34 @@ fn compile_wasm_to_x64_so_inner(
             return Err(map_worker_err(err));
         }
         let mut ir_slots: Vec<Option<IrFunc>> = (0..n_defs).map(|_| None).collect();
+        let mut pre_inline_callees: Vec<Vec<(u32, u32)>> = if opts.opt {
+            vec![Vec::new(); n_defs]
+        } else {
+            Vec::new()
+        };
+        let mut pre_inst_counts: Vec<usize> = if opts.opt {
+            vec![0usize; n_defs]
+        } else {
+            Vec::new()
+        };
+        let mut pre_was_inlinable: Vec<bool> = if opts.opt {
+            vec![false; n_defs]
+        } else {
+            Vec::new()
+        };
+        let mut pre_summary_complete = opts.opt;
         for batch in worker_irs.into_inner().unwrap_or_else(|g| g.into_inner()) {
-            for (bi, ir) in batch {
+            for (bi, ir, pre) in batch {
                 ir_slots[bi] = Some(ir);
+                if opts.opt {
+                    if let Some((ic, inl, cs)) = pre {
+                        pre_inst_counts[bi] = ic;
+                        pre_was_inlinable[bi] = inl;
+                        pre_inline_callees[bi] = cs;
+                    } else {
+                        pre_summary_complete = false;
+                    }
+                }
             }
         }
         let mut irs: Vec<IrFunc> = ir_slots
@@ -1349,166 +1747,210 @@ fn compile_wasm_to_x64_so_inner(
             .collect::<Result<Vec<_>, _>>()?;
         check_dl()?;
 
-        let mut capture_cache = inc_ctx.is_some();
-        let mut pre_inline_callees: Vec<Vec<(u32, u32)>> = if capture_cache {
-            match parallel_try_map(n_defs, n_workers, |bi| {
-                opt::try_collect_pre_inline_callees(&irs[bi], n_imports, n_defs)
-            }) {
-                Some(collected) => collected,
-                None => {
-                    capture_cache = false;
-                    inc_ctx = None;
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
+        let mut capture_cache = inc_ctx.is_some() && pre_summary_complete;
+        if !capture_cache {
+            inc_ctx = None;
+        }
 
         // Phase 5b (module-wide, only when `opts.opt`): budgeted small-leaf inlining + interprocedural effects.
+        // Overlap deferred cold `body_hashes` computation (when `.vidx`/`.bin` were absent) with Phase 5b!
+        let need_deferred_hashes = matches!(&inc_ctx, Some((_, None, _)));
         let mut inline_track: Option<opt::InlineTrack> = None;
         let mut own_effects_vec: Vec<opt::FnOwnEffects> = Vec::new();
-        let effects = if opts.opt {
-            let ti = Instant::now();
-            let cache_prep = if capture_cache {
-                (|| {
-                    let mut counts = inc_cache::try_vec_with_capacity(n_defs)?;
-                    counts.resize(n_defs, 0u32);
-                    let mut edges = inc_cache::try_vec_with_capacity(n_defs)?;
-                    for cs in &pre_inline_callees {
-                        let mut row = inc_cache::try_vec_with_capacity(cs.len())?;
-                        for &(c, cnt) in cs {
-                            row.push(c as usize);
-                            counts[c as usize] = counts[c as usize].saturating_add(cnt);
+        let mut cold_topo_cycle: Option<(Vec<usize>, Vec<bool>)> = None;
+        let (effects, deferred_hashes_res) = std::thread::scope(|s_5b| {
+            let h_hashes = if need_deferred_hashes {
+                let spans_ref = body_spans_opt.as_deref();
+                let dec_ref = validated.decoded();
+                let n_hw = n_workers.clamp(1, 4);
+                std::thread::Builder::new()
+                    .spawn_scoped(s_5b, move || {
+                        if let Some(spans) = spans_ref
+                            && spans.len() == n_defs
+                        {
+                            hash_raw_spans_parallel(wasm, spans, n_hw)
+                        } else {
+                            let mut out = inc_cache::try_vec_with_capacity(n_defs)?;
+                            out.resize(n_defs, [0u8; 32]);
+                            for (bi, slot) in out.iter_mut().enumerate() {
+                                let sp = dec_ref.code[bi].span;
+                                *slot = crate::sha256::digest(&dec_ref.bytes[sp.start..sp.end]);
+                            }
+                            Some(out)
                         }
-                        edges.push(row);
-                    }
-                    let (in_cycle, topo) = opt::try_call_graph_sccs_from_edges(&edges)?;
-                    let opt_irs: Vec<Option<IrFunc>> = inc_cache::try_vec_with_capacity(n_defs)?;
-                    Some((counts, in_cycle, topo, opt_irs))
-                })()
+                    })
+                    .ok()
             } else {
                 None
             };
-            if let Some((total_call_counts, in_cycle, topo, mut opt_irs)) = cache_prep {
-                for ir in irs {
-                    opt_irs.push(Some(ir));
-                }
-                let tr = opt::inline_small_helpers_subset_parallel(
-                    &mut opt_irs,
-                    &in_cycle,
-                    &topo,
-                    &total_call_counts,
-                    &module,
-                    0,
-                    opt::InlineMode::ColdCaptureCache,
-                    n_workers,
-                    Some(&budget),
-                )
-                .map_err(map_worker_err)?
-                .ok_or_else(|| {
-                    X64CompileError::Failed("x64: out of memory during inlining".into())
-                })?;
-                irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
-                if tr.tracking_complete {
-                    inline_track = Some(tr);
-                } else {
-                    capture_cache = false;
-                    inc_ctx = None;
-                }
-                let n_total = n_imports + n_defs;
-                let mut eff_opt: Option<opt::ModuleEffects> = None;
-                if capture_cache
-                    && let Some(own_eff) = parallel_try_map(n_defs, n_workers, |bi| {
-                        opt::try_compute_fn_own_effects(&irs[bi], &module, n_total)
-                    })
-                    && let Some(eff) = opt::try_compute_module_effects_from_lookup(
-                        own_eff.len(),
-                        |i| &own_eff[i],
-                        Some(&topo),
-                        &module,
-                        Some(&budget),
-                    )
-                    .map_err(map_worker_err)?
-                {
-                    own_effects_vec = own_eff;
-                    eff_opt = Some(eff);
-                }
-                if let Some(eff) = eff_opt {
-                    d_inline_effects = ti.elapsed();
-                    Some(eff)
-                } else {
-                    capture_cache = false;
-                    inc_ctx = None;
-                    let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
-                        .map_err(map_worker_err)?;
-                    d_inline_effects = ti.elapsed();
-                    Some(eff)
-                }
-            } else {
-                capture_cache = false;
-                inc_ctx = None;
-                // Parallel cold inlining even without incremental cache!
-                let pre_all = parallel_try_map(n_defs, n_workers, |bi| {
-                    opt::try_collect_pre_inline_callees(&irs[bi], n_imports, n_defs)
-                });
-                if let Some(pre_all) = pre_all {
-                    let mut counts = vec![0u32; n_defs];
-                    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
-                    for cs in &pre_all {
-                        edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
-                        for &(c, cnt) in cs {
-                            counts[c as usize] = counts[c as usize].saturating_add(cnt);
+
+            let eff_res: Result<Option<opt::ModuleEffects>, X64CompileError> = (|| {
+                if opts.opt {
+                    let ti = Instant::now();
+                    let cache_prep = if capture_cache {
+                        (|| {
+                            let mut counts = inc_cache::try_vec_with_capacity(n_defs)?;
+                            counts.resize(n_defs, 0u32);
+                            let mut edges = inc_cache::try_vec_with_capacity(n_defs)?;
+                            for cs in &pre_inline_callees {
+                                let mut row = inc_cache::try_vec_with_capacity(cs.len())?;
+                                for &(c, cnt) in cs {
+                                    row.push(c as usize);
+                                    counts[c as usize] = counts[c as usize].saturating_add(cnt);
+                                }
+                                edges.push(row);
+                            }
+                            let (in_cycle, topo) = opt::try_call_graph_sccs_from_edges(&edges)?;
+                            let opt_irs: Vec<Option<IrFunc>> =
+                                inc_cache::try_vec_with_capacity(n_defs)?;
+                            Some((counts, in_cycle, topo, opt_irs))
+                        })()
+                    } else {
+                        None
+                    };
+                    if let Some((total_call_counts, in_cycle, topo, mut opt_irs)) = cache_prep {
+                        for ir in std::mem::take(&mut irs) {
+                            opt_irs.push(Some(ir));
                         }
-                    }
-                    let (in_cycle, topo) = opt::call_graph_sccs_from_edges(&edges);
-                    let mut opt_irs: Vec<Option<IrFunc>> = irs.into_iter().map(Some).collect();
-                    opt::inline_small_helpers_subset_parallel(
-                        &mut opt_irs,
-                        &in_cycle,
-                        &topo,
-                        &counts,
-                        &module,
-                        0,
-                        opt::InlineMode::ColdNoCache,
-                        n_workers,
-                        Some(&budget),
-                    )
-                    .map_err(map_worker_err)?;
-                    irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
-                    let n_total = n_imports + n_defs;
-                    let own_eff = parallel_try_map(n_defs, n_workers, |bi| {
-                        opt::try_compute_fn_own_effects(&irs[bi], &module, n_total)
-                    });
-                    let eff = if let Some(ref own_eff) = own_eff
-                        && let Some(e) = opt::try_compute_module_effects_from_lookup(
-                            own_eff.len(),
-                            |i| &own_eff[i],
-                            Some(&topo),
+                        let tr = opt::inline_small_helpers_subset_parallel_with_pre(
+                            &mut opt_irs,
+                            &in_cycle,
+                            &topo,
+                            &total_call_counts,
                             &module,
+                            0,
+                            opt::InlineMode::ColdCaptureCache,
+                            n_workers,
+                            Some(&pre_inline_callees),
+                            Some(&pre_inst_counts),
+                            Some(&pre_was_inlinable),
                             Some(&budget),
                         )
                         .map_err(map_worker_err)?
-                    {
-                        e
-                    } else {
-                        opt::compute_module_effects(&irs, &module, Some(&budget))
+                        .ok_or_else(|| {
+                            X64CompileError::Failed("x64: out of memory during inlining".into())
+                        })?;
+                        irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
+                        if tr.tracking_complete {
+                            inline_track = Some(tr);
+                        } else {
+                            capture_cache = false;
+                            inc_ctx = None;
+                        }
+                        let n_total = n_imports + n_defs;
+                        let mut eff_opt: Option<opt::ModuleEffects> = None;
+                        if capture_cache
+                            && let Some(own_eff) = parallel_try_map(n_defs, n_workers, |bi| {
+                                opt::try_compute_fn_own_effects(&irs[bi], &module, n_total)
+                            })
+                            && let Some(eff) = opt::try_compute_module_effects_from_lookup(
+                                own_eff.len(),
+                                |i| &own_eff[i],
+                                Some(&topo),
+                                &module,
+                                Some(&budget),
+                            )
                             .map_err(map_worker_err)?
-                    };
-                    d_inline_effects = ti.elapsed();
-                    Some(eff)
+                        {
+                            own_effects_vec = own_eff;
+                            eff_opt = Some(eff);
+                        }
+                        if let Some(eff) = eff_opt {
+                            cold_topo_cycle = Some((topo, in_cycle));
+                            d_inline_effects = ti.elapsed();
+                            Ok(Some(eff))
+                        } else {
+                            capture_cache = false;
+                            inc_ctx = None;
+                            let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
+                                .map_err(map_worker_err)?;
+                            d_inline_effects = ti.elapsed();
+                            Ok(Some(eff))
+                        }
+                    } else {
+                        capture_cache = false;
+                        inc_ctx = None;
+                        if pre_summary_complete {
+                            let mut counts = vec![0u32; n_defs];
+                            let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
+                            for cs in &pre_inline_callees {
+                                edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
+                                for &(c, cnt) in cs {
+                                    counts[c as usize] = counts[c as usize].saturating_add(cnt);
+                                }
+                            }
+                            let (in_cycle, topo) = opt::call_graph_sccs_from_edges(&edges);
+                            let mut opt_irs: Vec<Option<IrFunc>> =
+                                std::mem::take(&mut irs).into_iter().map(Some).collect();
+                            opt::inline_small_helpers_subset_parallel_with_pre(
+                                &mut opt_irs,
+                                &in_cycle,
+                                &topo,
+                                &counts,
+                                &module,
+                                0,
+                                opt::InlineMode::ColdNoCache,
+                                n_workers,
+                                Some(&pre_inline_callees),
+                                Some(&pre_inst_counts),
+                                Some(&pre_was_inlinable),
+                                Some(&budget),
+                            )
+                            .map_err(map_worker_err)?;
+                            irs = opt_irs.into_iter().map(|o| o.unwrap()).collect();
+                            let n_total = n_imports + n_defs;
+                            let own_eff = parallel_try_map(n_defs, n_workers, |bi| {
+                                opt::try_compute_fn_own_effects(&irs[bi], &module, n_total)
+                            });
+                            let eff = if let Some(ref own_eff) = own_eff
+                                && let Some(e) = opt::try_compute_module_effects_from_lookup(
+                                    own_eff.len(),
+                                    |i| &own_eff[i],
+                                    Some(&topo),
+                                    &module,
+                                    Some(&budget),
+                                )
+                                .map_err(map_worker_err)?
+                            {
+                                e
+                            } else {
+                                opt::compute_module_effects(&irs, &module, Some(&budget))
+                                    .map_err(map_worker_err)?
+                            };
+                            d_inline_effects = ti.elapsed();
+                            Ok(Some(eff))
+                        } else {
+                            opt::inline_small_helpers(&mut irs, &module, Some(&budget))
+                                .map_err(map_worker_err)?;
+                            let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
+                                .map_err(map_worker_err)?;
+                            d_inline_effects = ti.elapsed();
+                            Ok(Some(eff))
+                        }
+                    }
                 } else {
-                    opt::inline_small_helpers(&mut irs, &module, Some(&budget))
-                        .map_err(map_worker_err)?;
-                    let eff = opt::compute_module_effects(&irs, &module, Some(&budget))
-                        .map_err(map_worker_err)?;
-                    d_inline_effects = ti.elapsed();
-                    Some(eff)
+                    Ok(None)
                 }
+            })();
+
+            let deferred = h_hashes.and_then(|h| h.join().ok()).flatten();
+            (eff_res, deferred)
+        });
+        let effects = effects?;
+        if let Some((_, ref mut bhs_slot, _)) = inc_ctx
+            && bhs_slot.is_none()
+        {
+            if let Some(dh) = deferred_hashes_res {
+                *bhs_slot = Some(std::sync::Arc::new(dh));
+            } else if let Some(spans) = body_spans_opt.as_deref()
+                && spans.len() == n_defs
+                && let Some(dh) = hash_raw_spans_parallel(wasm, spans, n_workers)
+            {
+                *bhs_slot = Some(std::sync::Arc::new(dh));
+            } else {
+                inc_ctx = None;
             }
-        } else {
-            None
-        };
+        }
         check_dl()?;
 
         // Phase 5c (parallel, LPT-ordered + chunked batching for small fns): per-function Stage 2 IR opt,
@@ -1524,10 +1966,11 @@ fn compile_wasm_to_x64_so_inner(
         let work_queue: Mutex<Vec<(usize, IrFunc)>> = Mutex::new(queue_vec);
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
-        let worker_allocs: Mutex<Vec<Vec<(usize, IrFunc, AllocResult)>>> =
-            Mutex::new(Vec::with_capacity(n_workers));
+        type Phase5cItem = (usize, IrFunc, AllocResult, Option<opt::FnElideInput>);
+        let worker_allocs: Mutex<Vec<Vec<Phase5cItem>>> = Mutex::new(Vec::with_capacity(n_workers));
+        let want_elide_in = opts.opt;
         let run_5c = || {
-            let mut local_out: Vec<(usize, IrFunc, AllocResult)> = Vec::new();
+            let mut local_out: Vec<Phase5cItem> = Vec::new();
             let mut local_batch: Vec<(usize, IrFunc)> = Vec::with_capacity(16);
             let mut scratch = opt::Stage2Scratch::default();
             let mut ra_scratch = RegallocScratch::default();
@@ -1555,36 +1998,42 @@ fn compile_wasm_to_x64_so_inner(
                     if failed.load(Ordering::Acquire) {
                         break 'outer;
                     }
-                    let step_res: Result<AllocResult, String> = (|| {
-                        if let Some(ref eff) = effects {
-                            let ts = Instant::now();
-                            opt::optimize_func_stage2_with_scratch(
-                                &mut ir,
-                                &module,
-                                eff,
+                    let step_res: Result<(AllocResult, Option<opt::FnElideInput>), String> =
+                        (|| {
+                            if let Some(ref eff) = effects {
+                                let ts = Instant::now();
+                                opt::optimize_func_stage2_with_scratch(
+                                    &mut ir,
+                                    &module,
+                                    eff,
+                                    Some(&budget),
+                                    &mut scratch,
+                                )?;
+                                loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
+                            }
+                            if opts.verify {
+                                verify_ir(&ir, &module)?;
+                            }
+                            let tr = Instant::now();
+                            let alloc = allocate_with_config_and_scratch(
+                                &ir,
+                                alloc_cfg,
                                 Some(&budget),
-                                &mut scratch,
+                                &mut ra_scratch,
                             )?;
-                            loc_ssa = loc_ssa.saturating_add(ts.elapsed().as_nanos() as u64);
-                        }
-                        if opts.verify {
-                            verify_ir(&ir, &module)?;
-                        }
-                        let tr = Instant::now();
-                        let alloc = allocate_with_config_and_scratch(
-                            &ir,
-                            alloc_cfg,
-                            Some(&budget),
-                            &mut ra_scratch,
-                        )?;
-                        loc_ra = loc_ra.saturating_add(tr.elapsed().as_nanos() as u64);
-                        if opts.verify {
-                            verify_alloc_with_config(&ir, &alloc, alloc_cfg)?;
-                        }
-                        Ok(alloc)
-                    })();
+                            loc_ra = loc_ra.saturating_add(tr.elapsed().as_nanos() as u64);
+                            if opts.verify {
+                                verify_alloc_with_config(&ir, &alloc, alloc_cfg)?;
+                            }
+                            let elide_in = if want_elide_in {
+                                opt::try_compute_fn_elide_input(&ir, &alloc, n_imports, n_defs)
+                            } else {
+                                None
+                            };
+                            Ok((alloc, elide_in))
+                        })();
                     match step_res {
-                        Ok(alloc) => local_out.push((bi, ir, alloc)),
+                        Ok((alloc, elide_in)) => local_out.push((bi, ir, alloc, elide_in)),
                         Err(e) => {
                             failed.store(true, Ordering::Release);
                             let mut guard = first_err.lock().unwrap_or_else(|g| g.into_inner());
@@ -1614,13 +2063,26 @@ fn compile_wasm_to_x64_so_inner(
         }
         let mut ir_slots: Vec<Option<IrFunc>> = (0..n_defs).map(|_| None).collect();
         let mut alloc_slots: Vec<Option<AllocResult>> = (0..n_defs).map(|_| None).collect();
+        let mut elide_slots: Vec<Option<opt::FnElideInput>> = if want_elide_in {
+            (0..n_defs).map(|_| None).collect()
+        } else {
+            Vec::new()
+        };
+        let mut all_elide_ok = want_elide_in;
         for batch in worker_allocs
             .into_inner()
             .unwrap_or_else(|g| g.into_inner())
         {
-            for (bi, ir, alloc) in batch {
+            for (bi, ir, alloc, elide_in) in batch {
                 ir_slots[bi] = Some(ir);
                 alloc_slots[bi] = Some(alloc);
+                if want_elide_in {
+                    if let Some(ei) = elide_in {
+                        elide_slots[bi] = Some(ei);
+                    } else {
+                        all_elide_ok = false;
+                    }
+                }
             }
         }
         let mut irs: Vec<IrFunc> = ir_slots
@@ -1644,23 +2106,23 @@ fn compile_wasm_to_x64_so_inner(
         let fn_can_trap: Option<Vec<bool>> = if opts.opt {
             let te = Instant::now();
             let mut cached_elide: Option<Vec<bool>> = None;
-            if capture_cache
-                && let Some(elide_in) = parallel_try_map(n_defs, n_workers, |bi| {
-                    opt::try_compute_fn_elide_input(&irs[bi], &allocs[bi], n_imports, n_defs)
-                })
-                && let Some(out) = opt::try_run_stack_and_trap_elision_from_summaries(
+            if all_elide_ok {
+                let elide_in: Vec<opt::FnElideInput> =
+                    elide_slots.into_iter().map(|o| o.unwrap()).collect();
+                if let Some(out) = opt::try_run_stack_and_trap_elision_from_summaries(
                     &elide_in,
                     &module,
                     Some(&budget),
                 )
                 .map_err(map_worker_err)?
-            {
-                elide_inputs_vec = elide_in;
-                for (bi, ir) in irs.iter_mut().enumerate() {
-                    ir.needs_stack_check = out.needs_stack_check[bi];
-                    ir.elided_callee_stack_bytes = out.elided_callee_stack_bytes[bi];
+                {
+                    elide_inputs_vec = elide_in;
+                    for (bi, ir) in irs.iter_mut().enumerate() {
+                        ir.needs_stack_check = out.needs_stack_check[bi];
+                        ir.elided_callee_stack_bytes = out.elided_callee_stack_bytes[bi];
+                    }
+                    cached_elide = Some(out.fn_can_trap);
                 }
-                cached_elide = Some(out.fn_can_trap);
             }
             let res = if let Some(v) = cached_elide {
                 v
@@ -1676,7 +2138,8 @@ fn compile_wasm_to_x64_so_inner(
         };
         check_dl()?;
 
-        // Phase 5e (parallel, LPT-ordered): x86-64 machine code lowering.
+        // Phase 5e (parallel, LPT-ordered): x86-64 machine code lowering fused with L1-hot
+        // incremental metadata hashing when capturing `IncCacheData`.
         let mut order_5e: Vec<usize> = (0..n_defs).collect();
         order_5e.sort_unstable_by(|&a, &b| {
             irs[b]
@@ -1688,11 +2151,19 @@ fn compile_wasm_to_x64_so_inner(
         let next_pos = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
-        let worker_results: Mutex<Vec<Vec<(usize, Asm)>>> =
-            Mutex::new(Vec::with_capacity(n_workers));
+        type MetaSnap = (Vec<(u32, u32, u32)>, [u8; 32], [u8; 32], u32);
+        type EmitWorkerBatch = Vec<(usize, Asm, Option<MetaSnap>)>;
+        let worker_results: Mutex<Vec<EmitWorkerBatch>> = Mutex::new(Vec::with_capacity(n_workers));
         let fn_can_trap_ref = fn_can_trap.as_deref();
+        let want_meta_snap = inc_ctx.is_some()
+            && inline_track.is_some()
+            && effects.is_some()
+            && fn_can_trap.is_some();
+        let eff_ref = effects.as_ref();
+        let own_ref = &own_effects_vec;
+        let elide_ref = &elide_inputs_vec;
         let run_5e = || {
-            let mut local_out: Vec<(usize, Asm)> = Vec::new();
+            let mut local_out: Vec<(usize, Asm, Option<MetaSnap>)> = Vec::new();
             let mut loc_em = 0u64;
             loop {
                 if failed.load(Ordering::Acquire) {
@@ -1715,7 +2186,34 @@ fn compile_wasm_to_x64_so_inner(
                 );
                 loc_em = loc_em.saturating_add(te.elapsed().as_nanos() as u64);
                 match res {
-                    Ok(asm) => local_out.push((bi, asm)),
+                    Ok(asm) => {
+                        let snap = if want_meta_snap
+                            && let (Some(eff), Some(can_trap)) = (eff_ref, fn_can_trap_ref)
+                        {
+                            asm.try_export_jt_entries().map(|jt_entries| {
+                                let callee_effects_hash = inc_cache::hash_callee_effects(
+                                    &own_ref[bi].direct_callees,
+                                    eff,
+                                );
+                                let callee_trap_hash = inc_cache::hash_callee_traps(
+                                    &elide_ref[bi].direct_def_callees,
+                                    n_imports,
+                                    can_trap,
+                                );
+                                let pre_relax_code_len =
+                                    asm.pre_relax_code_len.max(asm.code.len() as u32);
+                                (
+                                    jt_entries,
+                                    callee_effects_hash,
+                                    callee_trap_hash,
+                                    pre_relax_code_len,
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        local_out.push((bi, asm, snap));
+                    }
                     Err(e) => {
                         failed.store(true, Ordering::Release);
                         let mut guard = first_err.lock().unwrap_or_else(|g| g.into_inner());
@@ -1741,88 +2239,97 @@ fn compile_wasm_to_x64_so_inner(
         if let Some((_, err)) = first_err.into_inner().unwrap_or_else(|g| g.into_inner()) {
             return Err(map_worker_err(err));
         }
+        let mut meta_slots: Vec<Option<MetaSnap>> = if want_meta_snap {
+            (0..n_defs).map(|_| None).collect()
+        } else {
+            Vec::new()
+        };
+        let mut all_meta_ok = want_meta_snap;
         for batch in worker_results
             .into_inner()
             .unwrap_or_else(|g| g.into_inner())
         {
-            for (bi, asm) in batch {
+            for (bi, asm, snap) in batch {
                 compiled[bi] = Some(asm);
+                if want_meta_snap {
+                    if let Some(sn) = snap {
+                        meta_slots[bi] = Some(sn);
+                    } else {
+                        all_meta_ok = false;
+                    }
+                }
             }
         }
 
         // Build zero-copy `Arc<IncCacheData>` by moving `code`/`relocs`/`local_rodata` straight
         // out of `compiled` (zero 7+ MiB cloning!), so Phase 6 linking and background
         // `save_inc_cache` share the exact same immutable `Arc<IncCacheData>`.
-        if let (Some((abi_hash, body_hashes, _)), Some(mut track), Some(eff), Some(can_trap)) = (
-            &inc_ctx,
-            inline_track,
-            effects.as_ref(),
-            fn_can_trap.as_ref(),
-        ) {
-            let compiled_ref = &compiled;
-            let own_ref = &own_effects_vec;
-            let elide_ref = &elide_inputs_vec;
-            let meta_snaps = parallel_try_map(n_defs, n_workers, |bi| {
-                let asm = compiled_ref[bi].as_ref().unwrap();
-                let jt_entries = asm.try_export_jt_entries()?;
-                let callee_effects_hash =
-                    inc_cache::hash_callee_effects(&own_ref[bi].direct_callees, eff);
-                let callee_trap_hash = inc_cache::hash_callee_traps(
-                    &elide_ref[bi].direct_def_callees,
-                    n_imports,
-                    can_trap,
-                );
-                let pre_relax_code_len = asm.pre_relax_code_len.max(asm.code.len() as u32);
-                Some((
-                    jt_entries,
+        let mut bg_val_index_inputs: Option<DeferredValIndex> = None;
+        if all_meta_ok
+            && let (Some((abi_hash, Some(body_hashes), _)), Some(mut track)) =
+                (&inc_ctx, inline_track)
+            && let Some(mut cached_funcs) = inc_cache::try_vec_with_capacity(n_defs)
+        {
+            for (bi, ((own_eff, elide_in), snap_opt)) in own_effects_vec
+                .into_iter()
+                .zip(elide_inputs_vec)
+                .zip(meta_slots)
+                .enumerate()
+            {
+                let (jt_entries, callee_effects_hash, callee_trap_hash, pre_relax_code_len) =
+                    snap_opt.unwrap();
+                let asm = compiled[bi].take().unwrap();
+                cached_funcs.push(inc_cache::CachedFn {
+                    raw_body_hash: body_hashes[bi],
+                    was_inlinable: track.was_inlinable[bi],
+                    pre_inline_callees: std::mem::take(&mut pre_inline_callees[bi]),
+                    inlined_callees: std::mem::take(&mut track.inlined_callees[bi]),
+                    inline_added_insts: track.added_insts[bi],
+                    own_effects: own_eff,
+                    elide_input: elide_in,
                     callee_effects_hash,
+                    needs_stack_check: irs[bi].needs_stack_check,
+                    elided_callee_stack_bytes: irs[bi].elided_callee_stack_bytes,
                     callee_trap_hash,
                     pre_relax_code_len,
-                ))
-            });
-            if let Some(meta_snaps) = meta_snaps
-                && let Some(mut cached_funcs) = inc_cache::try_vec_with_capacity(n_defs)
-            {
-                for (bi, ((own_eff, elide_in), snap)) in own_effects_vec
-                    .into_iter()
-                    .zip(elide_inputs_vec)
-                    .zip(meta_snaps)
-                    .enumerate()
-                {
-                    let (jt_entries, callee_effects_hash, callee_trap_hash, pre_relax_code_len) =
-                        snap;
-                    let asm = compiled[bi].take().unwrap();
-                    cached_funcs.push(inc_cache::CachedFn {
-                        raw_body_hash: body_hashes[bi],
-                        was_inlinable: track.was_inlinable[bi],
-                        pre_inline_callees: std::mem::take(&mut pre_inline_callees[bi]),
-                        inlined_callees: std::mem::take(&mut track.inlined_callees[bi]),
-                        inline_added_insts: track.added_insts[bi],
-                        own_effects: own_eff,
-                        elide_input: elide_in,
-                        callee_effects_hash,
-                        needs_stack_check: irs[bi].needs_stack_check,
-                        elided_callee_stack_bytes: irs[bi].elided_callee_stack_bytes,
-                        callee_trap_hash,
-                        pre_relax_code_len,
-                        code: asm.code,
-                        relocs: asm.relocs,
-                        local_rodata: asm.local_rodata,
-                        jt_entries,
-                        jt_labels: Vec::new(),
-                        jt_patches: Vec::new(),
-                    });
-                }
-                new_inc_cache = Some(std::sync::Arc::new(inc_cache::IncCacheData {
-                    abi_hash: *abi_hash,
-                    global_words: module.globals.len().div_ceil(64),
-                    hit_inline_cap: track.hit_module_cap,
-                    funcs: cached_funcs,
-                }));
+                    code: inc_cache::CachedBytes::Owned(asm.code),
+                    relocs: asm.relocs,
+                    local_rodata: inc_cache::CachedBytes::Owned(asm.local_rodata),
+                    jt_entries,
+                    jt_labels: Vec::new(),
+                    jt_patches: Vec::new(),
+                });
             }
+            if let (Some(sh), Some((topo_bu, in_cyc))) = (shell_hash_opt, cold_topo_cycle.take())
+                && admit_summaries.len() == n_defs
+            {
+                // Assemble `ValIndexData` off the critical path in the background save thread!
+                bg_val_index_inputs = Some((
+                    sh,
+                    *abi_hash,
+                    topo_bu,
+                    in_cyc,
+                    std::mem::take(&mut admit_summaries),
+                    std::sync::Arc::clone(body_hashes),
+                ));
+            }
+            new_inc_cache = Some(std::sync::Arc::new(inc_cache::IncCacheData {
+                abi_hash: *abi_hash,
+                global_words: module.globals.len().div_ceil(64),
+                hit_inline_cap: track.hit_module_cap,
+                funcs: cached_funcs,
+                backing: None,
+            }));
         }
         if n_defs >= 256 {
             deferred_cold_drop = Some((irs, allocs));
+        }
+        // Pass deferred `ValIndexData` build inputs into Phase 6 background save.
+        if let Some((sh, abi_h, topo_bu, in_cyc, sums, bhs)) = bg_val_index_inputs {
+            deferred_val_index = Some((sh, abi_h, topo_bu, in_cyc, sums, bhs));
+        }
+        if n_defs >= 256 {
+            deferred_extra_drop = Some((pre_inline_callees, effects));
         }
     }
     check_dl()?;
@@ -1831,6 +2338,9 @@ fn compile_wasm_to_x64_so_inner(
     //    present, overlapped with best-effort incremental cache write and background deallocation).
     let t_link = Instant::now();
     let link_cache: Option<std::sync::Arc<inc_cache::IncCacheData>> = new_inc_cache.take();
+    let save_val_idx = new_val_index.take();
+    let save_deferred_vidx = deferred_val_index.take();
+    let bg_extra_drop = deferred_extra_drop.take();
     let save_done: Option<std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>> =
         if let (Some(dir), Some(data_arc)) = (opts.inc_cache_dir.as_deref(), link_cache.as_ref()) {
             let dir_buf = dir.to_path_buf();
@@ -1841,10 +2351,42 @@ fn compile_wasm_to_x64_so_inner(
             let bg_cold_drop = deferred_cold_drop.take();
             if std::thread::Builder::new()
                 .spawn(move || {
-                    inc_cache::save_inc_cache(&dir_buf, &data_bg);
+                    // Save `.bin` and `.vidx` concurrently so both finish well before ELF publish!
+                    let dir_ref = &dir_buf;
+                    let data_ref = &*data_bg;
+                    std::thread::scope(|ss| {
+                        let h_vidx = std::thread::Builder::new()
+                            .spawn_scoped(ss, move || {
+                                if let Some(ref vidx) = save_val_idx {
+                                    inc_cache::save_val_index(dir_ref, vidx);
+                                } else if let Some((sh, abi_h, topo_bu, in_cyc, sums, bhs)) =
+                                    save_deferred_vidx
+                                {
+                                    let bodies: Vec<inc_cache::ValBodyEntry> = sums
+                                        .into_iter()
+                                        .zip(bhs.iter())
+                                        .map(|(a, &bh)| val_body_entry_from_summary(a, bh))
+                                        .collect();
+                                    let vidx = inc_cache::ValIndexData {
+                                        shell_hash: sh,
+                                        abi_hash: abi_h,
+                                        topo_bottom_up: topo_bu,
+                                        in_cycle: in_cyc,
+                                        bodies,
+                                    };
+                                    inc_cache::save_val_index(dir_ref, &vidx);
+                                }
+                            })
+                            .ok();
+                        inc_cache::save_inc_cache(dir_ref, data_ref);
+                        if let Some(h) = h_vidx {
+                            let _ = h.join();
+                        }
+                    });
                     let (lk, cv) = &*done_bg;
                     *lk.lock().unwrap_or_else(|g| g.into_inner()) = true;
                     cv.notify_all();
+                    drop(bg_extra_drop);
                     drop(bg_cold_drop);
                     drop(bg_validated);
                 })
@@ -1855,6 +2397,15 @@ fn compile_wasm_to_x64_so_inner(
                 None
             }
         } else {
+            if n_defs >= 256 {
+                let bg_validated = validated;
+                let bg_cold_drop = deferred_cold_drop.take();
+                let _ = std::thread::Builder::new().spawn(move || {
+                    drop(bg_extra_drop);
+                    drop(bg_cold_drop);
+                    drop(bg_validated);
+                });
+            }
             None
         };
 
@@ -1983,11 +2534,12 @@ fn compile_wasm_to_x64_so_inner(
             func_text_offs.push(push_text(&mut text, &asm.code)?);
         }
         if let Some(ref cache_arc) = link_cache {
+            let backing = cache_arc.backing.as_deref().map(Vec::as_slice);
             for (bi, cf) in cache_arc.funcs.iter().enumerate() {
                 if (bi & 1023) == 1023 {
                     check_dl()?;
                 }
-                func_text_offs.push(push_text(&mut text, &cf.code)?);
+                func_text_offs.push(push_text(&mut text, cf.code.as_slice(backing))?);
             }
         } else {
             for (bi, asm) in def_asms.iter().enumerate() {
@@ -2042,6 +2594,7 @@ fn compile_wasm_to_x64_so_inner(
             }
         }
         if let Some(ref cache_arc) = link_cache {
+            let backing = cache_arc.backing.as_deref().map(Vec::as_slice);
             for (bi, cf) in cache_arc.funcs.iter().enumerate() {
                 if (bi & 1023) == 1023 {
                     check_dl()?;
@@ -2050,7 +2603,7 @@ fn compile_wasm_to_x64_so_inner(
                     let target_off = fn_local_rodata_offs[bi] as usize;
                     debug_assert!(target_off >= rodata.len());
                     rodata.resize(target_off, 0);
-                    rodata.extend_from_slice(&cf.local_rodata);
+                    rodata.extend_from_slice(cf.local_rodata.as_slice(backing));
                     if !cf.jt_entries.is_empty() {
                         let fn_vaddr = tx_vaddr
                             .checked_add(func_text_offs[n_imports + bi])
@@ -2256,7 +2809,7 @@ fn compile_wasm_to_x64_so_inner(
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn try_compile_defs_incremental(
-    decoded: &DecodedModule,
+    validated: &mut ValidatedBacking,
     module: &X64Module,
     layout: &CtxLayout,
     ro: &RodataConsts,
@@ -2266,6 +2819,7 @@ fn try_compile_defs_incremental(
     abi_hash: [u8; 32],
     body_hashes: &[[u8; 32]],
     mut prev_cache: inc_cache::IncCacheData,
+    prev_topo_cycle: Option<(&[usize], &[bool])>,
     budget: &CompileBudget,
     ns_ssa_opt: &AtomicU64,
     ns_regalloc: &AtomicU64,
@@ -2277,11 +2831,12 @@ fn try_compile_defs_incremental(
         Option<Vec<Asm>>,
         Option<std::sync::Arc<inc_cache::IncCacheData>>,
         usize,
+        Option<(Vec<usize>, Vec<bool>)>,
     )>,
     X64CompileError,
 > {
     let n_imports = module.imports.len();
-    let n_defs = decoded.code.len();
+    let n_defs = validated.decoded().code.len();
     let n_total = n_imports + n_defs;
     let map_worker_err = |err: String| -> X64CompileError {
         if budget.check_deadline().is_ok()
@@ -2313,14 +2868,26 @@ fn try_compile_defs_incremental(
         return Ok(None);
     }
 
-    // Helper: lower a list of function indices into `raw_irs` in parallel with preallocated
-    // fallible output slots and `spawn_scoped` fallback so warm-only OOM or `EAGAIN` degrades cleanly.
-    let lower_subset = |indices: &[usize],
+    // Helper: ensure any skipped bodies in `indices` are decoded & validated on demand, then
+    // lower them into `raw_irs` in parallel with preallocated fallible output slots.
+    let lower_subset = |validated: &mut ValidatedBacking,
+                        indices: &[usize],
                         raw_irs: &mut [Option<IrFunc>]|
      -> Result<bool, X64CompileError> {
         if indices.is_empty() {
             return Ok(true);
         }
+        for &bi in indices {
+            validated
+                .ensure_body_validated(bi)
+                .map_err(|e| match e.kind {
+                    ErrorKind::DisabledFeature | ErrorKind::ResourceLimit => {
+                        X64CompileError::AdmissionRejected(format!("x64: {e}"))
+                    }
+                    _ => X64CompileError::Failed(format!("invalid wasm: {e}")),
+                })?;
+        }
+        let decoded = validated.decoded();
         let Some(mut slots_vec) =
             inc_cache::try_vec_with_capacity::<Option<(usize, IrFunc)>>(indices.len())
         else {
@@ -2403,25 +2970,19 @@ fn try_compile_defs_incremental(
     for _ in 0..n_defs {
         raw_irs.push(None);
     }
-    if !lower_subset(&changed_indices, &mut raw_irs)? {
+    if !lower_subset(validated, &changed_indices, &mut raw_irs)? {
         return Ok(None);
     }
 
-    // Recompute exact module pre-inline call graph & SCCs using cached edges for unchanged functions
-    // WITHOUT cloning `pre_inline_callees` for unchanged functions.
+    // Recompute exact module pre-inline call graph & SCCs using cached edges for unchanged
+    // functions, skipping both `cur_edges` allocation and Tarjan SCC when `!any_callees_changed`
+    // and cached `(topo_bottom_up, in_cycle)` is available!
     let ti = Instant::now();
-    let (
-        Some(mut pre_callees_changed),
-        Some(mut new_inlinable),
-        Some(mut cur_edges),
-        Some(mut cur_call_counts),
-    ) = (
+    let (Some(mut pre_callees_changed), Some(mut new_inlinable), Some(mut cur_call_counts)) = (
         inc_cache::try_vec_with_capacity::<Option<Vec<(u32, u32)>>>(n_defs),
         inc_cache::try_vec_with_capacity::<bool>(n_defs),
-        inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
         inc_cache::try_vec_with_capacity::<u32>(n_defs),
-    )
-    else {
+    ) else {
         return Ok(None);
     };
     new_inlinable.resize(n_defs, false);
@@ -2446,30 +3007,29 @@ fn try_compile_defs_incremental(
             pre_callees_changed.push(None);
             prev_cs.as_slice()
         };
-        let Some(mut cur_row) = inc_cache::try_vec_with_capacity(cur_cs.len()) else {
-            return Ok(None);
-        };
         for &(c, cnt) in cur_cs {
-            cur_row.push(c as usize);
             cur_call_counts[c as usize] = cur_call_counts[c as usize].saturating_add(cnt);
         }
-        cur_edges.push(cur_row);
     }
 
     let mut rev_callers_opt: Option<Vec<Vec<usize>>> = None;
     fn ensure_rev_callers<'a>(
         slot: &'a mut Option<Vec<Vec<usize>>>,
-        edges: &[Vec<usize>],
+        prev_funcs: &[inc_cache::CachedFn],
+        changed_callees: &[Option<Vec<(u32, u32)>>],
     ) -> Option<&'a [Vec<usize>]> {
         if slot.is_none() {
-            let n_defs = edges.len();
+            let n_defs = prev_funcs.len();
             let mut rev = inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs)?;
             for _ in 0..n_defs {
                 rev.push(Vec::new());
             }
-            for (bi, row) in edges.iter().enumerate() {
-                for &c in row {
-                    let r = &mut rev[c];
+            for bi in 0..n_defs {
+                let row: &[(u32, u32)] = changed_callees[bi]
+                    .as_deref()
+                    .unwrap_or(&prev_funcs[bi].pre_inline_callees);
+                for &(c, _) in row {
+                    let r = &mut rev[c as usize];
                     if r.len() == r.capacity() && r.try_reserve(1).is_err() {
                         return None;
                     }
@@ -2481,9 +3041,36 @@ fn try_compile_defs_incremental(
         slot.as_deref()
     }
 
-    let Some((in_cycle, topo_bottom_up)) = opt::try_call_graph_sccs_from_edges(&cur_edges) else {
-        return Ok(None);
-    };
+    let (in_cycle, topo_bottom_up) =
+        if !any_callees_changed && let Some((prev_topo, prev_cyc)) = prev_topo_cycle {
+            let Some(t) = inc_cache::try_copy_slice(prev_topo) else {
+                return Ok(None);
+            };
+            let Some(c) = inc_cache::try_copy_slice(prev_cyc) else {
+                return Ok(None);
+            };
+            (c, t)
+        } else {
+            let Some(mut cur_edges) = inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs) else {
+                return Ok(None);
+            };
+            for (bi, changed_row) in pre_callees_changed.iter().enumerate() {
+                let row: &[(u32, u32)] = changed_row
+                    .as_deref()
+                    .unwrap_or(&prev_cache.funcs[bi].pre_inline_callees);
+                let Some(mut cur_row) = inc_cache::try_vec_with_capacity(row.len()) else {
+                    return Ok(None);
+                };
+                for &(c, _) in row {
+                    cur_row.push(c as usize);
+                }
+                cur_edges.push(cur_row);
+            }
+            let Some(pair) = opt::try_call_graph_sccs_from_edges(&cur_edges) else {
+                return Ok(None);
+            };
+            pair
+        };
 
     // Seed initial dirty set from changed bodies, cycle transitions, single-site transitions, and inlined-callee deps.
     let (Some(mut dirty), Some(mut cycle_or_body_changed)) = (
@@ -2557,7 +3144,11 @@ fn try_compile_defs_incremental(
         .iter()
         .any(|&c| prev_cache.funcs[c].was_inlinable || new_inlinable[c])
     {
-        let Some(rev_callers) = ensure_rev_callers(&mut rev_callers_opt, &cur_edges) else {
+        let Some(rev_callers) = ensure_rev_callers(
+            &mut rev_callers_opt,
+            &prev_cache.funcs,
+            &pre_callees_changed,
+        ) else {
             return Ok(None);
         };
         while let Some(c) = queue.pop() {
@@ -2631,7 +3222,11 @@ fn try_compile_defs_incremental(
         }
         // Pull transitive inlinable callees needed as read-only inputs for newly dirty callers.
         while let Some(u) = cone_q.pop() {
-            for &c in &cur_edges[u] {
+            let row: &[(u32, u32)] = pre_callees_changed[u]
+                .as_deref()
+                .unwrap_or(&prev_cache.funcs[u].pre_inline_callees);
+            for &(c_u32, _) in row {
+                let c = c_u32 as usize;
                 if !need_lower[c] && (prev_cache.funcs[c].was_inlinable || new_inlinable[c]) {
                     need_lower[c] = true;
                     cone_q.push(c);
@@ -2647,7 +3242,7 @@ fn try_compile_defs_incremental(
                 to_lower.push(bi);
             }
         }
-        if !lower_subset(&to_lower, &mut raw_irs)? {
+        if !lower_subset(validated, &to_lower, &mut raw_irs)? {
             return Ok(None);
         }
 
@@ -2723,7 +3318,11 @@ fn try_compile_defs_incremental(
         }
         let mut promoted = false;
         if !newly_inlinable.is_empty() {
-            let Some(rev_callers) = ensure_rev_callers(&mut rev_callers_opt, &cur_edges) else {
+            let Some(rev_callers) = ensure_rev_callers(
+                &mut rev_callers_opt,
+                &prev_cache.funcs,
+                &pre_callees_changed,
+            ) else {
                 return Ok(None);
             };
             let (Some(mut seen_promo), Some(mut promo_q)) = (
@@ -3065,16 +3664,18 @@ fn try_compile_defs_incremental(
             reused += 1;
         }
     }
+    let prev_backing = prev_cache.backing.take();
+    let prev_backing_slice = prev_backing.as_deref().map(Vec::as_slice);
     let Some(mut updated_funcs) = inc_cache::try_vec_with_capacity::<inc_cache::CachedFn>(n_defs)
     else {
         for (bi, prev_cached) in prev_cache.funcs.drain(..).enumerate() {
             if dirty[bi] {
                 final_asms.push(dirty_asms[bi].take().unwrap());
             } else {
-                final_asms.push(prev_cached.into_asm());
+                final_asms.push(prev_cached.into_asm(prev_backing_slice));
             }
         }
-        return Ok(Some((Some(final_asms), None, reused)));
+        return Ok(Some((Some(final_asms), None, reused, None)));
     };
     let mut save_ok = true;
     for (bi, prev_cached) in prev_cache.funcs.drain(..).enumerate() {
@@ -3096,7 +3697,7 @@ fn try_compile_defs_incremental(
                     save_ok = false;
                     // Recover already-moved clean/dirty entries into `final_asms`!
                     for prev_u in updated_funcs.drain(..) {
-                        final_asms.push(prev_u.into_asm());
+                        final_asms.push(prev_u.into_asm(prev_backing_slice));
                     }
                     final_asms.push(asm);
                     continue;
@@ -3122,9 +3723,9 @@ fn try_compile_defs_incremental(
                     elided_callee_stack_bytes: elide_out.elided_callee_stack_bytes[bi],
                     callee_trap_hash,
                     pre_relax_code_len,
-                    code: asm.code,
+                    code: inc_cache::CachedBytes::Owned(asm.code),
                     relocs: asm.relocs,
-                    local_rodata: asm.local_rodata,
+                    local_rodata: inc_cache::CachedBytes::Owned(asm.local_rodata),
                     jt_entries,
                     jt_labels: Vec::new(),
                     jt_patches: Vec::new(),
@@ -3135,7 +3736,7 @@ fn try_compile_defs_incremental(
         } else if save_ok {
             updated_funcs.push(prev_cached);
         } else {
-            final_asms.push(prev_cached.into_asm());
+            final_asms.push(prev_cached.into_asm(prev_backing_slice));
         }
     }
 
@@ -3145,9 +3746,15 @@ fn try_compile_defs_incremental(
             global_words: module.globals.len().div_ceil(64),
             hit_inline_cap: false,
             funcs: updated_funcs,
+            backing: prev_backing,
         });
-        Ok(Some((None, Some(updated), reused)))
+        Ok(Some((
+            None,
+            Some(updated),
+            reused,
+            Some((topo_bottom_up, in_cycle)),
+        )))
     } else {
-        Ok(Some((Some(final_asms), None, reused)))
+        Ok(Some((Some(final_asms), None, reused, None)))
     }
 }

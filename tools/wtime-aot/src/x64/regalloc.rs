@@ -419,9 +419,34 @@ pub fn allocate_with_budget(
 }
 
 /// Reusable per-worker scratch buffers for `allocate_with_config_and_scratch`, eliminating
-/// ~20 per-function heap allocations per compiled function.
+/// per-function CFG, liveness-helper, and interval heap allocations.
 #[derive(Default)]
 pub struct RegallocScratch {
+    succ_offs: Vec<u32>,
+    succ_data: Vec<u32>,
+    succ_seen: Vec<u32>,
+    visited: Vec<bool>,
+    postorder: Vec<u32>,
+    dfs: Vec<(u32, usize)>,
+    rpo_pos: Vec<u32>,
+    is_trap_blk: Vec<bool>,
+    has_call_blk: Vec<bool>,
+    has_store_blk: Vec<bool>,
+    has_unchecked_mem_blk: Vec<bool>,
+    placed: Vec<bool>,
+    block_pos_in_order: Vec<u32>,
+    block_start: Vec<u32>,
+    block_end: Vec<u32>,
+    loop_depth: Vec<u8>,
+    rpo_pred_counts: Vec<u32>,
+    rpo_pred_offs: Vec<u32>,
+    rpo_pred_data: Vec<u32>,
+    backedges: Vec<(u32, u32)>,
+    rpo_depth: Vec<u8>,
+    loop_seen: Vec<u32>,
+    loop_wl: Vec<u32>,
+    cb_hull: Vec<(u32, u32)>,
+    last_use_in_blk: Vec<(u32, u32)>,
     def_pos: Vec<u32>,
     def_block: Vec<u32>,
     last_use: Vec<u32>,
@@ -433,6 +458,7 @@ pub struct RegallocScratch {
     cb_id: Vec<u32>,
     cb_vals: Vec<u32>,
     val_weight: Vec<u32>,
+    val_non_trap: Vec<bool>,
     hint_gp: Vec<Option<Gp>>,
     hint_xmm: Vec<Option<Xmm>>,
     hint_peers: Vec<[u32; 4]>,
@@ -487,24 +513,32 @@ pub fn allocate_with_config_and_scratch(
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
-    // 1. Compute reachable block order (RPO) and hot-fallthrough trace layout.
-    //    Single-block functions bypass DFS, successor dedup, and trace-layout heuristics completely.
-    let (succs, rpo, rpo_pos, block_order, block_pos_in_order) = if n_blocks == 1 {
-        let mut s0 = Vec::new();
+    // 1. Compute reachable block order (RPO) and hot-fallthrough trace layout using flat CSR
+    //    `succ_offs`/`succ_data` and worker-local scratch buffers (zero per-block `Vec`s).
+    scratch.succ_offs.clear();
+    scratch.succ_data.clear();
+    scratch.postorder.clear();
+    let block_order: Vec<u32> = if n_blocks == 1 {
         let mut has_self = false;
         ir.blocks[0].term.for_each_succ(&ir.br_tables, |s| {
-            if s.0 == 0 && !has_self {
+            if s.0 == 0 {
                 has_self = true;
-                s0.push(0);
             }
         });
-        (vec![s0], vec![0u32], vec![0u32], vec![0u32], vec![0u32])
+        scratch
+            .succ_offs
+            .extend_from_slice(&[0, u32::from(has_self)]);
+        if has_self {
+            scratch.succ_data.push(0);
+        }
+        scratch.postorder.push(0);
+        reset_fill(&mut scratch.rpo_pos, 1, 0u32);
+        reset_fill(&mut scratch.block_pos_in_order, 1, 0u32);
+        vec![0u32]
     } else {
-        let mut visited = vec![false; n_blocks];
-        let mut postorder = Vec::with_capacity(n_blocks);
-        let mut dfs: Vec<(u32, usize)> = vec![(0, 0)];
-        let mut succs: Vec<Vec<u32>> = vec![Vec::new(); n_blocks];
-        let mut succ_seen = vec![u32::MAX; n_blocks];
+        reset_fill(&mut scratch.succ_seen, n_blocks, u32::MAX);
+        scratch.succ_offs.reserve(n_blocks + 1);
+        scratch.succ_offs.push(0);
         for (bi, bb) in ir.blocks.iter().enumerate() {
             if let Some(b) = budget
                 && (bi & 4095) == 4095
@@ -514,15 +548,19 @@ pub fn allocate_with_config_and_scratch(
             let stamp = bi as u32;
             bb.term.for_each_succ(&ir.br_tables, |s| {
                 let sid = s.0 as usize;
-                if succ_seen[sid] != stamp {
-                    succ_seen[sid] = stamp;
-                    succs[bi].push(s.0);
+                if scratch.succ_seen[sid] != stamp {
+                    scratch.succ_seen[sid] = stamp;
+                    scratch.succ_data.push(s.0);
                 }
             });
+            scratch.succ_offs.push(scratch.succ_data.len() as u32);
         }
-        visited[0] = true;
+        reset_fill(&mut scratch.visited, n_blocks, false);
+        scratch.dfs.clear();
+        scratch.dfs.push((0, 0));
+        scratch.visited[0] = true;
         let mut dfs_steps: usize = 0;
-        while let Some((b, si)) = dfs.last_mut() {
+        while let Some((b, si)) = scratch.dfs.last_mut() {
             dfs_steps += 1;
             if let Some(bg) = budget
                 && (dfs_steps & 4095) == 0
@@ -530,32 +568,33 @@ pub fn allocate_with_config_and_scratch(
                 bg.check_deadline()?;
             }
             let cur = *b as usize;
-            if *si < succs[cur].len() {
-                let nxt = succs[cur][*si];
+            let ss = scratch.succ_offs[cur] as usize;
+            let se = scratch.succ_offs[cur + 1] as usize;
+            if *si < se - ss {
+                let nxt = scratch.succ_data[ss + *si];
                 *si += 1;
-                if !visited[nxt as usize] {
-                    visited[nxt as usize] = true;
-                    dfs.push((nxt, 0));
+                if !scratch.visited[nxt as usize] {
+                    scratch.visited[nxt as usize] = true;
+                    scratch.dfs.push((nxt, 0));
                 }
             } else {
-                postorder.push(*b);
-                dfs.pop();
+                scratch.postorder.push(*b);
+                scratch.dfs.pop();
             }
         }
-        postorder.reverse();
-        let rpo = postorder;
-        let n_ord = rpo.len();
-        let mut rpo_pos = vec![u32::MAX; n_blocks];
-        for (ri, &b) in rpo.iter().enumerate() {
-            rpo_pos[b as usize] = ri as u32;
+        scratch.postorder.reverse();
+        let n_ord = scratch.postorder.len();
+        reset_fill(&mut scratch.rpo_pos, n_blocks, u32::MAX);
+        for (ri, &b) in scratch.postorder.iter().enumerate() {
+            scratch.rpo_pos[b as usize] = ri as u32;
         }
 
         // 1b. Hot-fallthrough trace layout over reachable blocks (always starts with bb0).
-        let mut is_trap_blk = vec![false; n_blocks];
-        let mut has_call_blk = vec![false; n_blocks];
-        let mut has_store_blk = vec![false; n_blocks];
-        let mut has_unchecked_mem_blk = vec![false; n_blocks];
-        for &b in &rpo {
+        reset_fill(&mut scratch.is_trap_blk, n_blocks, false);
+        reset_fill(&mut scratch.has_call_blk, n_blocks, false);
+        reset_fill(&mut scratch.has_store_blk, n_blocks, false);
+        reset_fill(&mut scratch.has_unchecked_mem_blk, n_blocks, false);
+        for &b in &scratch.postorder {
             let bb = &ir.blocks[b as usize];
             let mut trap = matches!(bb.term, Term::Unreachable);
             let mut call = false;
@@ -589,12 +628,18 @@ pub fn allocate_with_config_and_scratch(
                     _ => {}
                 }
             }
-            is_trap_blk[b as usize] = trap;
-            has_call_blk[b as usize] = call;
-            has_store_blk[b as usize] = store;
-            has_unchecked_mem_blk[b as usize] = unchecked_mem;
+            scratch.is_trap_blk[b as usize] = trap;
+            scratch.has_call_blk[b as usize] = call;
+            scratch.has_store_blk[b as usize] = store;
+            scratch.has_unchecked_mem_blk[b as usize] = unchecked_mem;
         }
 
+        let succ_offs_ro = &scratch.succ_offs;
+        let succ_data_ro = &scratch.succ_data;
+        let is_trap_blk = &scratch.is_trap_blk;
+        let has_call_blk = &scratch.has_call_blk;
+        let has_store_blk = &scratch.has_store_blk;
+        let has_unchecked_mem_blk = &scratch.has_unchecked_mem_blk;
         let cand_score = |cur: u32, cand: u32, is_then: bool, placed: &[bool]| -> i32 {
             let mut s = 0i32;
             if is_trap_blk[cand as usize] {
@@ -611,7 +656,9 @@ pub fn allocate_with_config_and_scratch(
                 s += 500;
             }
             let cbb = &ir.blocks[cand as usize];
-            let backedges_to_placed_hdr = succs[cand as usize]
+            let ss = succ_offs_ro[cand as usize] as usize;
+            let se = succ_offs_ro[cand as usize + 1] as usize;
+            let backedges_to_placed_hdr = succ_data_ro[ss..se]
                 .iter()
                 .any(|&x| placed[x as usize] && ir.blocks[x as usize].is_loop_header);
             if cbb.is_loop_header || backedges_to_placed_hdr {
@@ -640,8 +687,10 @@ pub fn allocate_with_config_and_scratch(
         };
 
         let mut block_order = Vec::with_capacity(n_ord);
-        let mut placed = vec![false; n_blocks];
-        for &seed in &rpo {
+        reset_fill(&mut scratch.placed, n_blocks, false);
+        let placed = &mut scratch.placed;
+        let rpo_pos_ro = &scratch.rpo_pos;
+        for &seed in &scratch.postorder {
             if placed[seed as usize] {
                 continue;
             }
@@ -663,10 +712,10 @@ pub fn allocate_with_config_and_scratch(
                         let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
                         match (t_ok, e_ok) {
                             (true, true) => {
-                                let ts = cand_score(cur, then_bb.0, true, &placed);
-                                let es = cand_score(cur, else_bb.0, false, &placed);
-                                let best = if (ts, rpo_pos[then_bb.0 as usize])
-                                    <= (es, rpo_pos[else_bb.0 as usize])
+                                let ts = cand_score(cur, then_bb.0, true, placed);
+                                let es = cand_score(cur, else_bb.0, false, placed);
+                                let best = if (ts, rpo_pos_ro[then_bb.0 as usize])
+                                    <= (es, rpo_pos_ro[else_bb.0 as usize])
                                 {
                                     then_bb.0
                                 } else {
@@ -691,17 +740,19 @@ pub fn allocate_with_config_and_scratch(
                 }
             }
         }
-        let mut block_pos_in_order = vec![u32::MAX; n_blocks];
+        reset_fill(&mut scratch.block_pos_in_order, n_blocks, u32::MAX);
         for (oi, &b) in block_order.iter().enumerate() {
-            block_pos_in_order[b as usize] = oi as u32;
+            scratch.block_pos_in_order[b as usize] = oi as u32;
         }
-        (succs, rpo, rpo_pos, block_order, block_pos_in_order)
+        block_order
     };
-    let n_ord = rpo.len();
+    let n_ord = scratch.postorder.len();
 
     // 2. Assign linear program positions (2 ticks per instruction: even=use, odd=def).
-    let mut block_start = vec![0u32; n_ord];
-    let mut block_end = vec![0u32; n_ord];
+    reset_fill(&mut scratch.block_start, n_ord, 0u32);
+    reset_fill(&mut scratch.block_end, n_ord, 0u32);
+    let block_start = &mut scratch.block_start;
+    let block_end = &mut scratch.block_end;
     reset_fill(&mut scratch.def_pos, n_vals, u32::MAX);
     reset_fill(&mut scratch.def_block, n_vals, u32::MAX);
     reset_fill(&mut scratch.last_use, n_vals, 0u32);
@@ -901,9 +952,16 @@ pub fn allocate_with_config_and_scratch(
         }
     }
     let n_cb = cb_vals.len();
+    let rpo = &scratch.postorder;
+    let rpo_pos = &scratch.rpo_pos;
+    let block_pos_in_order = &scratch.block_pos_in_order;
+    let succ_offs = &scratch.succ_offs;
+    let succ_data = &scratch.succ_data;
     let has_backedge = n_cb > 0
         && rpo.iter().enumerate().any(|(ri, &bid)| {
-            succs[bid as usize].iter().any(|&sid| {
+            let ss = succ_offs[bid as usize] as usize;
+            let se = succ_offs[bid as usize + 1] as usize;
+            succ_data[ss..se].iter().any(|&sid| {
                 let sri = rpo_pos[sid as usize];
                 sri != u32::MAX && sri <= ri as u32
             })
@@ -913,7 +971,6 @@ pub fn allocate_with_config_and_scratch(
     // Declare `_liveness_guard` BEFORE `cb_*` and `segs_pool` so Rust's LIFO drop order
     // guarantees all liveness buffers drop BEFORE releasing the reservation even on early return.
     let mut _liveness_guard = None;
-    let mut cb_hull: Vec<(u32, u32)> = Vec::new();
     let mut cb_segs: Vec<Vec<(u32, u32)>> = Vec::new();
     let mut cb_seg_overflow: Vec<bool> = Vec::new();
     let mut saved_live_in: Vec<u64> = Vec::new();
@@ -941,12 +998,11 @@ pub fn allocate_with_config_and_scratch(
         // remaining `MAX_LIVENESS_BYTES` headroom (at most 2 MiB) so parallel workers can never
         // exceed the documented 16 MiB/fn or 256 MiB aggregate liveness caps. Values exceeding
         // per-value or per-function segment budgets cleanly collapse to their exact `[start, end)` hull.
+        // For `n_ord <= 2`, disjoint multi-block holes cannot exist, so skip `cb_segs` completely!
         let vec_hdr_bytes = n_cb.saturating_mul(std::mem::size_of::<Vec<(u32, u32)>>() + 1);
         let remaining_cap = MAX_LIVENESS_BYTES.saturating_sub(base_bytes).min(2 << 20);
-        // Adjacent RPO blocks (e.g. consecutive Return leaves ending at `pos_term = block_end - 1`)
-        // can each start a disjoint live segment, so per-value segment count can reach `n_ord`.
         let max_cap_per_val = n_ord.min(MAX_SEGS_PER_VAL).next_power_of_two().max(4);
-        let seg_cap_slots = if remaining_cap > vec_hdr_bytes {
+        let seg_cap_slots = if n_ord > 2 && remaining_cap > vec_hdr_bytes {
             // 16 B per slot covers 8 B in `cb_segs` (exact via `reserve_exact`) + 8 B in `segs_pool`.
             ((remaining_cap - vec_hdr_bytes) / 16)
                 .min(n_cb.saturating_mul(max_cap_per_val))
@@ -1037,7 +1093,9 @@ pub fn allocate_with_config_and_scratch(
             for &bid_u32 in rpo.iter().rev() {
                 let bid = bid_u32 as usize;
                 let oi = block_pos_in_order[bid] as usize;
-                for &sid in &succs[bid] {
+                let ss = succ_offs[bid] as usize;
+                let se = succ_offs[bid + 1] as usize;
+                for &sid in &succ_data[ss..se] {
                     let soi = block_pos_in_order[sid as usize];
                     if soi == u32::MAX {
                         continue;
@@ -1082,13 +1140,15 @@ pub fn allocate_with_config_and_scratch(
 
         // Build exact sorted, merged per-block live-range segments within the budgeted `seg_cap_slots`
         // (preserving live-range holes while falling back any overflowing value to its exact hull).
-        cb_hull = vec![(u32::MAX, 0u32); n_cb];
+        reset_fill(&mut scratch.cb_hull, n_cb, (u32::MAX, 0u32));
         if seg_cap_slots > 0 {
             cb_segs = vec![Vec::new(); n_cb];
             cb_seg_overflow = vec![false; n_cb];
         }
         let mut total_seg_cap_slots = 0usize;
-        let mut last_use_in_blk = vec![(u32::MAX, 0u32); n_cb];
+        reset_fill(&mut scratch.last_use_in_blk, n_cb, (u32::MAX, 0u32));
+        let cb_hull = &mut scratch.cb_hull;
+        let last_use_in_blk = &mut scratch.last_use_in_blk;
         for (oi, &bid) in block_order.iter().enumerate() {
             if let Some(bg) = budget
                 && (oi & 4095) == 4095
@@ -1221,53 +1281,91 @@ pub fn allocate_with_config_and_scratch(
 
     // 4b. Compute loop-depth weighting (strictly in RPO so hot-fallthrough block layout
     // never turns a cold rejoin edge into a false backedge) and ABI / phi / two-address hints.
-    let mut loop_depth = vec![0u8; n_ord];
-    if n_ord > 1 || !succs[0].is_empty() {
-        let mut rpo_preds: Vec<Vec<u32>> = vec![Vec::new(); n_ord];
-        let mut backedges: Vec<(u32, u32)> = Vec::new();
-        for (ri, &bid) in rpo.iter().enumerate() {
-            for &sid in &succs[bid as usize] {
-                let sri = rpo_pos[sid as usize];
-                if sri == u32::MAX {
-                    continue;
-                }
-                rpo_preds[sri as usize].push(ri as u32);
-                if sri <= ri as u32 {
-                    backedges.push((ri as u32, sri));
+    // Only build flat CSR `rpo_preds` when backedges actually exist!
+    reset_fill(&mut scratch.loop_depth, n_ord, 0u8);
+    if n_ord > 1 || scratch.succ_offs[1] > 0 {
+        scratch.backedges.clear();
+        for (ri, &bid) in scratch.postorder.iter().enumerate() {
+            let ss = scratch.succ_offs[bid as usize] as usize;
+            let se = scratch.succ_offs[bid as usize + 1] as usize;
+            for &sid in &scratch.succ_data[ss..se] {
+                let sri = scratch.rpo_pos[sid as usize];
+                if sri != u32::MAX && sri <= ri as u32 {
+                    scratch.backedges.push((ri as u32, sri));
                 }
             }
         }
-        if !backedges.is_empty() {
-            let mut rpo_depth = vec![0u8; n_ord];
-            let mut loop_seen = vec![u32::MAX; n_ord];
-            let mut worklist: Vec<u32> = Vec::new();
-            for (li, &(latch, header)) in backedges.iter().take(512).enumerate() {
+        if !scratch.backedges.is_empty() {
+            reset_fill(&mut scratch.rpo_pred_counts, n_ord, 0u32);
+            let mut total_rp = 0usize;
+            for &bid in &scratch.postorder {
+                let ss = scratch.succ_offs[bid as usize] as usize;
+                let se = scratch.succ_offs[bid as usize + 1] as usize;
+                for &sid in &scratch.succ_data[ss..se] {
+                    let sri = scratch.rpo_pos[sid as usize];
+                    if sri != u32::MAX {
+                        scratch.rpo_pred_counts[sri as usize] += 1;
+                        total_rp += 1;
+                    }
+                }
+            }
+            scratch.rpo_pred_offs.clear();
+            scratch.rpo_pred_offs.reserve(n_ord + 1);
+            let mut off = 0u32;
+            for ri in 0..n_ord {
+                scratch.rpo_pred_offs.push(off);
+                off += scratch.rpo_pred_counts[ri];
+                scratch.rpo_pred_counts[ri] = scratch.rpo_pred_offs[ri];
+            }
+            scratch.rpo_pred_offs.push(off);
+            scratch.rpo_pred_data.clear();
+            scratch.rpo_pred_data.resize(total_rp, 0u32);
+            for (ri, &bid) in scratch.postorder.iter().enumerate() {
+                let ss = scratch.succ_offs[bid as usize] as usize;
+                let se = scratch.succ_offs[bid as usize + 1] as usize;
+                for &sid in &scratch.succ_data[ss..se] {
+                    let sri = scratch.rpo_pos[sid as usize];
+                    if sri != u32::MAX {
+                        let pos = scratch.rpo_pred_counts[sri as usize] as usize;
+                        scratch.rpo_pred_counts[sri as usize] = (pos + 1) as u32;
+                        scratch.rpo_pred_data[pos] = ri as u32;
+                    }
+                }
+            }
+            reset_fill(&mut scratch.rpo_depth, n_ord, 0u8);
+            reset_fill(&mut scratch.loop_seen, n_ord, u32::MAX);
+            for (li, &(latch, header)) in scratch.backedges.iter().take(512).enumerate() {
                 let stamp = li as u32;
-                loop_seen[header as usize] = stamp;
-                rpo_depth[header as usize] = rpo_depth[header as usize].saturating_add(1).min(4);
+                scratch.loop_seen[header as usize] = stamp;
+                scratch.rpo_depth[header as usize] =
+                    scratch.rpo_depth[header as usize].saturating_add(1).min(4);
                 if latch != header {
-                    loop_seen[latch as usize] = stamp;
-                    rpo_depth[latch as usize] = rpo_depth[latch as usize].saturating_add(1).min(4);
-                    worklist.clear();
-                    worklist.push(latch);
-                    while let Some(cur) = worklist.pop() {
-                        for &p in &rpo_preds[cur as usize] {
-                            if p > header && loop_seen[p as usize] != stamp {
-                                loop_seen[p as usize] = stamp;
-                                rpo_depth[p as usize] =
-                                    rpo_depth[p as usize].saturating_add(1).min(4);
-                                worklist.push(p);
+                    scratch.loop_seen[latch as usize] = stamp;
+                    scratch.rpo_depth[latch as usize] =
+                        scratch.rpo_depth[latch as usize].saturating_add(1).min(4);
+                    scratch.loop_wl.clear();
+                    scratch.loop_wl.push(latch);
+                    while let Some(cur) = scratch.loop_wl.pop() {
+                        let ps = scratch.rpo_pred_offs[cur as usize] as usize;
+                        let pe = scratch.rpo_pred_offs[cur as usize + 1] as usize;
+                        for &p in &scratch.rpo_pred_data[ps..pe] {
+                            if p > header && scratch.loop_seen[p as usize] != stamp {
+                                scratch.loop_seen[p as usize] = stamp;
+                                scratch.rpo_depth[p as usize] =
+                                    scratch.rpo_depth[p as usize].saturating_add(1).min(4);
+                                scratch.loop_wl.push(p);
                             }
                         }
                     }
                 }
             }
-            for (ri, &bid) in rpo.iter().enumerate() {
-                let oi = block_pos_in_order[bid as usize] as usize;
-                loop_depth[oi] = rpo_depth[ri];
+            for (ri, &bid) in scratch.postorder.iter().enumerate() {
+                let oi = scratch.block_pos_in_order[bid as usize] as usize;
+                scratch.loop_depth[oi] = scratch.rpo_depth[ri];
             }
         }
     }
+    let loop_depth = &scratch.loop_depth;
 
     reset_fill(&mut scratch.val_weight, n_vals, 0u32);
     reset_fill(&mut scratch.hint_gp, n_vals, None);
@@ -1314,17 +1412,29 @@ pub fn allocate_with_config_and_scratch(
     }
 
     let mut hint_steps: usize = 0;
+    let is_trap_blk_ref = &scratch.is_trap_blk;
+    reset_fill(&mut scratch.val_non_trap, n_vals, false);
+    let val_non_trap = &mut scratch.val_non_trap;
     for (oi, &bid) in block_order.iter().enumerate() {
         let bb = &ir.blocks[bid as usize];
-        let w = match loop_depth[oi] {
-            0 => 1u32,
-            1 => 10,
-            2 => 100,
-            3 => 1000,
-            _ => 10_000,
+        let is_cold_trap =
+            n_blocks > 1 && is_trap_blk_ref.get(bid as usize).copied().unwrap_or(false);
+        let w = if is_cold_trap {
+            1u32
+        } else {
+            match loop_depth[oi] {
+                0 => 4u32,
+                1 => 64,
+                2 => 1024,
+                3 => 16_384,
+                _ => 131_072,
+            }
         };
         for &p in &bb.params {
             val_weight[p.0 as usize] = val_weight[p.0 as usize].saturating_add(w);
+            if !is_cold_trap {
+                val_non_trap[p.0 as usize] = true;
+            }
         }
         for inst in &bb.insts {
             hint_steps += 1;
@@ -1335,9 +1445,15 @@ pub fn allocate_with_config_and_scratch(
             }
             inst.op.for_each_use(&ir.val_pool, |v| {
                 val_weight[v.0 as usize] = val_weight[v.0 as usize].saturating_add(w);
+                if !is_cold_trap {
+                    val_non_trap[v.0 as usize] = true;
+                }
             });
             if let Some(r) = inst.res {
                 val_weight[r.0 as usize] = val_weight[r.0 as usize].saturating_add(w);
+                if !is_cold_trap {
+                    val_non_trap[r.0 as usize] = true;
+                }
                 match inst.op {
                     Op::I32Bin(bop, a, b) | Op::I64Bin(bop, a, b) => {
                         add_peer(hint_peers, r.0, a.0);
@@ -1394,6 +1510,9 @@ pub fn allocate_with_config_and_scratch(
                     scratch_tys.clear();
                     for &rv in ir.pool_slice(rets) {
                         val_weight[rv.0 as usize] = val_weight[rv.0 as usize].saturating_add(w);
+                        if !is_cold_trap {
+                            val_non_trap[rv.0 as usize] = true;
+                        }
                         scratch_tys.push(ir.val_tys[rv.0 as usize]);
                     }
                     if let Ok(rl) = layout_rets(scratch_tys) {
@@ -1411,6 +1530,9 @@ pub fn allocate_with_config_and_scratch(
         }
         bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
             val_weight[v.0 as usize] = val_weight[v.0 as usize].saturating_add(w);
+            if !is_cold_trap {
+                val_non_trap[v.0 as usize] = true;
+            }
         });
         let mut wire_edge = |target_bb: u32, args: super::ir::ValRange| {
             let params = &ir.blocks[target_bb as usize].params;
@@ -1495,6 +1617,14 @@ pub fn allocate_with_config_and_scratch(
     let val_clob_xmm = &mut scratch.val_clob_xmm;
     let gp_intervals = &mut scratch.gp_intervals;
     let fp_intervals = &mut scratch.fp_intervals;
+    let def_pos = &scratch.def_pos;
+    let last_use = &scratch.last_use;
+    let cb_id = &scratch.cb_id;
+    let cb_hull = &scratch.cb_hull;
+    let val_remat = &scratch.val_remat;
+    let val_weight = &scratch.val_weight;
+    let val_non_trap = &scratch.val_non_trap;
+    let clobbers = &scratch.clobbers;
     for vi in 0..n_vals {
         if let Some(bg) = budget
             && (vi & 4095) == 4095
@@ -1565,11 +1695,11 @@ pub fn allocate_with_config_and_scratch(
             // non-loop constants (`val_weight <= 2`). Hot non-zero loop constants without calls may still
             // occupy a free caller-saved register (never callee-saved, never spilling).
             let crosses_clobber = if ty.is_fp() {
-                clob_xmm != 0
+                (clob_xmm & MASK_XMM_CALLER) == MASK_XMM_CALLER
             } else {
-                clob_gp != 0
+                (clob_gp & MASK_GP_CALLER) == MASK_GP_CALLER
             };
-            if rc.is_zero() || crosses_clobber || val_weight[vi] <= 2 {
+            if rc.is_zero() || crosses_clobber || val_weight[vi] <= 8 {
                 locs[vi] = Loc::Remat(rc);
                 assigned[vi] = true;
                 continue;
@@ -1578,8 +1708,11 @@ pub fn allocate_with_config_and_scratch(
         let score = if val_remat[vi].is_some() {
             // Rematerializable constants are always preferred eviction victims over real values.
             0
+        } else if !val_non_trap[vi] {
+            // Cold trap-only values never evict hot normal or loop-carried values!
+            1
         } else {
-            ((u64::from(val_weight[vi].max(1)) << 12) / active_len).max(1)
+            ((u64::from(val_weight[vi].max(1)) << 12) / active_len).max(2)
         };
         let iv = Interval {
             val: vi as u32,
@@ -1600,17 +1733,28 @@ pub fn allocate_with_config_and_scratch(
         }
     }
     drop(cb_segs);
-    drop(cb_hull);
     drop(cb_seg_overflow);
 
     if let Some(bg) = budget {
         bg.check_deadline()?;
     }
-    gp_intervals.sort_by_key(|iv| (iv.start, iv.end));
+    if gp_intervals.len() > 1
+        && !gp_intervals
+            .windows(2)
+            .all(|w| (w[0].start, w[0].end) <= (w[1].start, w[1].end))
+    {
+        gp_intervals.sort_unstable_by_key(|iv| (iv.start, iv.end, iv.val));
+    }
     if let Some(bg) = budget {
         bg.check_deadline()?;
     }
-    fp_intervals.sort_by_key(|iv| (iv.start, iv.end));
+    if fp_intervals.len() > 1
+        && !fp_intervals
+            .windows(2)
+            .all(|w| (w[0].start, w[0].end) <= (w[1].start, w[1].end))
+    {
+        fp_intervals.sort_unstable_by_key(|iv| (iv.start, iv.end, iv.val));
+    }
 
     let mut next_spill_off: i32 = 0;
     // Exact current max `end` for each 8-byte spill slot (`idx = off / 8`); `u32::MAX` marks non-8B/padding slots.

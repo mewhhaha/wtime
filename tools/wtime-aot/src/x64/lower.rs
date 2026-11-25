@@ -360,7 +360,7 @@ pub fn emit_parallel_moves(asm: &mut Asm, raw_moves: &[(MoveLoc, MoveLoc, Ty)]) 
 /// Returns `(magic, shift, add)`:
 /// - `!add`: `q = mulhi_u(n, magic) >> shift`
 /// - `add`:  `t = mulhi_u(n, magic); q = (((n - t) >> 1) + t) >> (shift - 1)`
-pub(super) fn magic_u(w: u32, d: u64) -> (u64, u32, bool) {
+pub(crate) fn magic_u(w: u32, d: u64) -> (u64, u32, bool) {
     let two_w_1: u128 = 1u128 << (w - 1);
     let max_u: u128 = (two_w_1 << 1) - 1;
     let d128 = d as u128;
@@ -2119,6 +2119,17 @@ impl<'a> Lower<'a> {
                     }
                     let ar = self.fp_read(a, SCRATCH_FP1);
                     let br = self.fp_read(b, SCRATCH_FP2);
+                    if self.isa.has_avx2 {
+                        match bop {
+                            FloatBinOp::Add => self.asm.vaddss_xxx(d, ar, br),
+                            FloatBinOp::Sub => self.asm.vsubss_xxx(d, ar, br),
+                            FloatBinOp::Mul => self.asm.vmulss_xxx(d, ar, br),
+                            FloatBinOp::Div => self.asm.vdivss_xxx(d, ar, br),
+                            _ => unreachable!(),
+                        }
+                        self.fp_commit(r, d);
+                        return Ok(());
+                    }
                     let (dest, rhs) = if d == br && d != ar {
                         if is_comm {
                             (d, ar)
@@ -2235,6 +2246,17 @@ impl<'a> Lower<'a> {
                     }
                     let ar = self.fp_read(a, SCRATCH_FP1);
                     let br = self.fp_read(b, SCRATCH_FP2);
+                    if self.isa.has_avx2 {
+                        match bop {
+                            FloatBinOp::Add => self.asm.vaddsd_xxx(d, ar, br),
+                            FloatBinOp::Sub => self.asm.vsubsd_xxx(d, ar, br),
+                            FloatBinOp::Mul => self.asm.vmulsd_xxx(d, ar, br),
+                            FloatBinOp::Div => self.asm.vdivsd_xxx(d, ar, br),
+                            _ => unreachable!(),
+                        }
+                        self.fp_commit(r, d);
+                        return Ok(());
+                    }
                     let (dest, rhs) = if d == br && d != ar {
                         if is_comm {
                             (d, ar)
@@ -3528,9 +3550,9 @@ impl<'a> Lower<'a> {
                 self.asm.add_rr(true, SCRATCH_GP1, Gp::R14);
                 self.asm.add_rr(true, SCRATCH_GP2, SCRATCH_GP1);
 
-                // Preserve `Xmm0` in `ctx->scratch_tmp` (16B) so we have a dedicated zero vector register.
+                // Preserve `Xmm0` in `ctx->scratch_v128` (16B) so we have a dedicated zero vector register.
                 self.asm
-                    .movdqu_mx(Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), Xmm::Xmm0);
+                    .movdqu_mx(Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128), Xmm::Xmm0);
 
                 if self.isa.has_avx2 {
                     self.asm.vpxor_yyy(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm0);
@@ -3596,7 +3618,7 @@ impl<'a> Lower<'a> {
 
                 // Restore `Xmm0` and horizontally sum both 64-bit lanes mod `2^32`.
                 self.asm
-                    .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+                    .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128));
                 self.asm.pshufd(SCRATCH_FP2, SCRATCH_FP1, 0xee);
                 self.asm.paddd(SCRATCH_FP1, SCRATCH_FP2);
                 self.asm.movd_rx(d, SCRATCH_FP1);
@@ -3606,6 +3628,265 @@ impl<'a> Lower<'a> {
                 self.asm.xor_rr(false, d, d);
                 self.asm.bind(lbl_done);
                 self.gp_commit(r, d);
+            }
+            Op::MemByteBlur3Div {
+                base,
+                count,
+                src_off,
+                dst_off,
+                divisor,
+            } => {
+                let delta = i32::try_from(dst_off as i128 - src_off as i128)
+                    .map_err(|_| "x64: MemByteBlur3Div delta exceeds i32")?;
+                let br = self.gp_read(base, SCRATCH_GP1);
+                if br != SCRATCH_GP1 {
+                    self.asm.mov_rr(false, SCRATCH_GP1, br);
+                }
+                let cr = self.gp_read(count, SCRATCH_GP2);
+                if cr != SCRATCH_GP2 {
+                    self.asm.mov_rr(false, SCRATCH_GP2, cr);
+                }
+                let lbl_done = self.asm.new_label();
+                self.asm.test_rr(false, SCRATCH_GP2, SCRATCH_GP2);
+                self.asm.jcc(Cond::E, lbl_done);
+
+                // `SCRATCH_GP1 = R14 + base + src_off`, `SCRATCH_GP2 = SCRATCH_GP1 + count`.
+                if src_off != 0 {
+                    if let Ok(disp) = i32::try_from(src_off) {
+                        self.asm
+                            .lea(true, SCRATCH_GP1, Mem::base_disp(SCRATCH_GP1, disp));
+                    } else {
+                        self.asm.movq_xr(SCRATCH_FP1, SCRATCH_GP2);
+                        self.asm.mov_ri64(SCRATCH_GP2, src_off);
+                        self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                        self.asm.movq_rx(SCRATCH_GP2, SCRATCH_FP1);
+                    }
+                }
+                self.asm.add_rr(true, SCRATCH_GP1, Gp::R14);
+                self.asm.add_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+
+                let is_pow2 = divisor.is_power_of_two();
+                let (magic16, shift16) = if is_pow2 {
+                    (0u16, divisor.trailing_zeros() as u8)
+                } else {
+                    let (m, sh, add) = magic_u(16, u64::from(divisor));
+                    debug_assert!(!add);
+                    (m as u16, sh as u8)
+                };
+
+                // Preserve `Xmm0` in `ctx->scratch_v128` for splatted magic constant.
+                if !is_pow2 {
+                    self.asm
+                        .movdqu_mx(Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128), Xmm::Xmm0);
+                    let mut splat = [0u8; 16];
+                    for chunk in splat.as_chunks_mut::<2>().0 {
+                        *chunk = magic16.to_le_bytes();
+                    }
+                    let loff = self.asm.add_local_rodata(16, &splat);
+                    self.asm
+                        .movdqu_rip(Xmm::Xmm0, RelocTarget::LocalRodata(loff));
+                }
+
+                if self.isa.has_avx2 {
+                    if !is_pow2 {
+                        self.asm.vpbroadcastw_yx(Xmm::Xmm0, Xmm::Xmm0);
+                    }
+                    let lbl_loop16 = self.asm.new_label();
+                    self.asm.mark_align16(lbl_loop16);
+                    self.asm.bind(lbl_loop16);
+                    self.asm.vpmovzxbw_ym(SCRATCH_FP1, Mem::base(SCRATCH_GP1));
+                    self.asm
+                        .vpmovzxbw_ym(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, 1));
+                    self.asm.vpaddw_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+                    self.asm
+                        .vpmovzxbw_ym(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, 2));
+                    self.asm.vpaddw_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2);
+                    if !is_pow2 {
+                        self.asm.vpmulhuw_yyy(SCRATCH_FP1, SCRATCH_FP1, Xmm::Xmm0);
+                    }
+                    if shift16 > 0 {
+                        self.asm.vpsrlw_yyi(SCRATCH_FP1, SCRATCH_FP1, shift16);
+                    }
+                    self.asm
+                        .vpackuswb_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP1);
+                    self.asm.vpermq_yyi(SCRATCH_FP1, SCRATCH_FP1, 0xd8);
+                    self.asm
+                        .vmovdqu_mx(Mem::base_disp(SCRATCH_GP1, delta), SCRATCH_FP1);
+                    self.asm.add_ri(true, SCRATCH_GP1, 16);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::B, lbl_loop16);
+                    self.asm.vzeroupper();
+                } else {
+                    // Portable SSE4.1 (x86-64-v2) 8 output bytes/iter fallback!
+                    let lbl_loop8 = self.asm.new_label();
+                    self.asm.mark_align16(lbl_loop8);
+                    self.asm.bind(lbl_loop8);
+                    self.asm.pmovzxbw_xm(SCRATCH_FP1, Mem::base(SCRATCH_GP1));
+                    self.asm
+                        .pmovzxbw_xm(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, 1));
+                    self.asm.paddw(SCRATCH_FP1, SCRATCH_FP2);
+                    self.asm
+                        .pmovzxbw_xm(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, 2));
+                    self.asm.paddw(SCRATCH_FP1, SCRATCH_FP2);
+                    if !is_pow2 {
+                        self.asm.pmulhuw(SCRATCH_FP1, Xmm::Xmm0);
+                    }
+                    if shift16 > 0 {
+                        self.asm.psrlw_imm(SCRATCH_FP1, shift16);
+                    }
+                    self.asm.packuswb(SCRATCH_FP1, SCRATCH_FP1);
+                    self.asm
+                        .movsd_mx(Mem::base_disp(SCRATCH_GP1, delta), SCRATCH_FP1);
+                    self.asm.add_ri(true, SCRATCH_GP1, 8);
+                    self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    self.asm.jcc(Cond::B, lbl_loop8);
+                }
+
+                if !is_pow2 {
+                    self.asm
+                        .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128));
+                }
+                self.asm.bind(lbl_done);
+            }
+            Op::F64x4BinMem {
+                op,
+                dst,
+                dst_off,
+                lhs,
+                lhs_off,
+                rhs,
+                rhs_off,
+                rhs_is_splat,
+            } => {
+                // Compute effective memory operands cleanly using `SCRATCH_GP1` (lhs/dst) and `SCRATCH_GP2` (rhs).
+                let load_addr_reg = |this: &mut Self, addr_v: Val, dst_reg: Gp| {
+                    let ar = this.gp_read(addr_v, dst_reg);
+                    if ar != dst_reg {
+                        this.asm.mov_rr(this.ir.memory64, dst_reg, ar);
+                    } else if !this.ir.memory64 {
+                        this.asm.mov_rr(false, dst_reg, dst_reg);
+                    }
+                };
+                let mem_pair = |off: u64, reg: Gp| -> Result<(Mem, Mem), String> {
+                    let d0 = i32::try_from(off).map_err(|_| "x64: F64x4BinMem offset > i32")?;
+                    let d1 = off
+                        .checked_add(16)
+                        .and_then(|v| i32::try_from(v).ok())
+                        .ok_or_else(|| "x64: F64x4BinMem offset+16 > i32".to_string())?;
+                    Ok((
+                        Mem::indexed(Gp::R14, reg, 1, d0),
+                        Mem::indexed(Gp::R14, reg, 1, d1),
+                    ))
+                };
+
+                if self.isa.has_avx2 {
+                    load_addr_reg(self, lhs, SCRATCH_GP1);
+                    let (lhs_m0, _) = mem_pair(lhs_off, SCRATCH_GP1)?;
+                    self.asm.vmovupd_ym(SCRATCH_FP1, lhs_m0);
+                    if rhs_is_splat {
+                        let rr = self.fp_read(rhs, SCRATCH_FP2);
+                        self.asm.vbroadcastsd_yx(SCRATCH_FP2, rr);
+                        match op {
+                            FloatBinOp::Add => {
+                                self.asm.vaddpd_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2)
+                            }
+                            FloatBinOp::Sub => {
+                                self.asm.vsubpd_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2)
+                            }
+                            FloatBinOp::Mul => {
+                                self.asm.vmulpd_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2)
+                            }
+                            FloatBinOp::Div => {
+                                self.asm.vdivpd_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP2)
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        load_addr_reg(self, rhs, SCRATCH_GP2);
+                        let (rhs_m0, _) = mem_pair(rhs_off, SCRATCH_GP2)?;
+                        match op {
+                            FloatBinOp::Add => {
+                                self.asm.vaddpd_yym(SCRATCH_FP1, SCRATCH_FP1, rhs_m0)
+                            }
+                            FloatBinOp::Sub => {
+                                self.asm.vsubpd_yym(SCRATCH_FP1, SCRATCH_FP1, rhs_m0)
+                            }
+                            FloatBinOp::Mul => {
+                                self.asm.vmulpd_yym(SCRATCH_FP1, SCRATCH_FP1, rhs_m0)
+                            }
+                            FloatBinOp::Div => {
+                                self.asm.vdivpd_yym(SCRATCH_FP1, SCRATCH_FP1, rhs_m0)
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    load_addr_reg(self, dst, SCRATCH_GP1);
+                    let (dst_m0, _) = mem_pair(dst_off, SCRATCH_GP1)?;
+                    self.asm.vmovupd_my(dst_m0, SCRATCH_FP1);
+                    self.asm.vzeroupper();
+                } else {
+                    // Portable 2×128-bit SSE2 fallback (exact same load-all-before-store order).
+                    // If `rhs_is_splat`, read `rhs` into `SCRATCH_FP2` BEFORE clobbering `Xmm0`
+                    // (in case `rhs` itself is allocated to `Xmm0`!).
+                    if rhs_is_splat {
+                        let rr = self.fp_read(rhs, SCRATCH_FP2);
+                        self.asm.movaps_rr(SCRATCH_FP2, rr);
+                        self.asm.unpcklpd(SCRATCH_FP2, SCRATCH_FP2);
+                    }
+                    load_addr_reg(self, lhs, SCRATCH_GP1);
+                    let (lhs_m0, lhs_m1) = mem_pair(lhs_off, SCRATCH_GP1)?;
+                    self.asm.movdqu_xm(SCRATCH_FP1, lhs_m0);
+                    // Preserve `Xmm0` in `ctx->scratch_v128` to hold hi half while computing lo half.
+                    self.asm
+                        .movdqu_mx(Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128), Xmm::Xmm0);
+                    self.asm.movdqu_xm(Xmm::Xmm0, lhs_m1);
+                    if rhs_is_splat {
+                        match op {
+                            FloatBinOp::Add => {
+                                self.asm.addpd(SCRATCH_FP1, SCRATCH_FP2);
+                                self.asm.addpd(Xmm::Xmm0, SCRATCH_FP2);
+                            }
+                            FloatBinOp::Sub => {
+                                self.asm.subpd(SCRATCH_FP1, SCRATCH_FP2);
+                                self.asm.subpd(Xmm::Xmm0, SCRATCH_FP2);
+                            }
+                            FloatBinOp::Mul => {
+                                self.asm.mulpd(SCRATCH_FP1, SCRATCH_FP2);
+                                self.asm.mulpd(Xmm::Xmm0, SCRATCH_FP2);
+                            }
+                            FloatBinOp::Div => {
+                                self.asm.divpd(SCRATCH_FP1, SCRATCH_FP2);
+                                self.asm.divpd(Xmm::Xmm0, SCRATCH_FP2);
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        load_addr_reg(self, rhs, SCRATCH_GP2);
+                        let (rhs_m0, rhs_m1) = mem_pair(rhs_off, SCRATCH_GP2)?;
+                        self.asm.movdqu_xm(SCRATCH_FP2, rhs_m0);
+                        match op {
+                            FloatBinOp::Add => self.asm.addpd(SCRATCH_FP1, SCRATCH_FP2),
+                            FloatBinOp::Sub => self.asm.subpd(SCRATCH_FP1, SCRATCH_FP2),
+                            FloatBinOp::Mul => self.asm.mulpd(SCRATCH_FP1, SCRATCH_FP2),
+                            FloatBinOp::Div => self.asm.divpd(SCRATCH_FP1, SCRATCH_FP2),
+                            _ => unreachable!(),
+                        }
+                        self.asm.movdqu_xm(SCRATCH_FP2, rhs_m1);
+                        match op {
+                            FloatBinOp::Add => self.asm.addpd(Xmm::Xmm0, SCRATCH_FP2),
+                            FloatBinOp::Sub => self.asm.subpd(Xmm::Xmm0, SCRATCH_FP2),
+                            FloatBinOp::Mul => self.asm.mulpd(Xmm::Xmm0, SCRATCH_FP2),
+                            FloatBinOp::Div => self.asm.divpd(Xmm::Xmm0, SCRATCH_FP2),
+                            _ => unreachable!(),
+                        }
+                    }
+                    load_addr_reg(self, dst, SCRATCH_GP1);
+                    let (dst_m0, dst_m1) = mem_pair(dst_off, SCRATCH_GP1)?;
+                    self.asm.movdqu_mx(dst_m0, SCRATCH_FP1);
+                    self.asm.movdqu_mx(dst_m1, Xmm::Xmm0);
+                    self.asm
+                        .movdqu_xm(Xmm::Xmm0, Mem::base_disp(Gp::R15, super::OFF_SCRATCH_V128));
+                }
             }
             Op::V128Splat { kind, val } => {
                 let r = res.unwrap();
@@ -3697,6 +3978,43 @@ impl<'a> Lower<'a> {
                 let ar = self.fp_read(a, SCRATCH_FP1);
                 let br = self.fp_read(b, SCRATCH_FP2);
                 let d = self.fp_write_reg(r);
+                if self.isa.has_avx2 {
+                    match op {
+                        0xfdf0 => {
+                            self.asm.vaddpd_xxx(d, ar, br);
+                            self.fp_commit(r, d);
+                            return Ok(());
+                        }
+                        0xfdf1 => {
+                            self.asm.vsubpd_xxx(d, ar, br);
+                            self.fp_commit(r, d);
+                            return Ok(());
+                        }
+                        0xfdf2 => {
+                            self.asm.vmulpd_xxx(d, ar, br);
+                            self.fp_commit(r, d);
+                            return Ok(());
+                        }
+                        0xfdf3 => {
+                            self.asm.vdivpd_xxx(d, ar, br);
+                            self.fp_commit(r, d);
+                            return Ok(());
+                        }
+                        0xfdf6 => {
+                            // Wasm f64x2.pmin(a, b) == x86 minpd(b, a): if b < a ? b : a!
+                            self.asm.vminpd_xxx(d, br, ar);
+                            self.fp_commit(r, d);
+                            return Ok(());
+                        }
+                        0xfdf7 => {
+                            // Wasm f64x2.pmax(a, b) == x86 maxpd(b, a): if a < b ? b : a!
+                            self.asm.vmaxpd_xxx(d, br, ar);
+                            self.fp_commit(r, d);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
                 super::simd_lower::emit_v128_bin_full(&mut self.asm, op, d, ar, br)?;
                 self.fp_commit(r, d);
             }

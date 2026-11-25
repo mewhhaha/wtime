@@ -26,10 +26,14 @@ shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
     `lzcnt`/`tzcnt` for `clz`/`ctz`, BMI2 `shlx`/`shrx`/`sarx` for variable
     shifts (eliminating `RCX` clobbers and extra copies on `shl`/`shr_s`/
     `shr_u`), 3-operand `rorx` for immediate rotates (variable `rotl`/`rotr`
-    still use `CL`/`RCX`), and 256-bit AVX2 VEX loops (`vmovdqu`,
-    `vpbroadcastb`, `vpxor`, `vpsadbw`, `vpaddq`, `vextracti128`) for bulk
-    memory copy/fill and byte-sum reductions, with mandatory `vzeroupper`
-    before every external/helper call and return boundary.
+    still use `CL`/`RCX`), 3-operand 128-bit VEX scalar/SIMD FP ops
+    (`v{add,sub,mul,div}{ss,sd,pd}`, `v{min,max}pd`), and 256-bit AVX2 VEX
+    loops (`vmovdqu`, `vmovupd`, `vbroadcastsd`, `vpbroadcastb`, `vpmovzxbw`,
+    `vpaddw`, `vpmulhuw`, `vpsrlw`, `vpackuswb`, `vpermq`, `vpxor`, `vpsadbw`,
+    `vpaddq`, `vextracti128`) for bulk memory copy/fill, byte-sum reductions,
+    3-tap byte blur+divide loops, and bit-exact 256-bit `f64x4` SLP (strictly
+    no FMA contraction), with mandatory `vzeroupper` before every
+    external/helper call and return boundary.
   - `x64-v2` (`has_abm_bmi1 = false, has_bmi2 = false, has_avx2 = false`):
     emits branchless `bsr`/`bsf` + `cmovz`, legacy `shl`/`shr`/`sar`/`rol`/
     `ror`, and 128-bit SSE2 memory/reduction loops.
@@ -101,9 +105,11 @@ and debug builds; deliberately disabled by default in release cached
 `wtime-aot build --cache` invocations unless `WTIME_AOT_VERIFY=1` or `true` is
 set, which binds its own cache key so unverified hits never bypass verification;
 individual tests use `X64CompileOptions::default()` unless explicitly exercising
-the cached CLI default or setting `verify: false`). Cached `build --cache` invocations
-also maintain a SHA-256-integrity-checked per-function incremental cache under
-`<cache>/x64-inc/` that preserves bit-for-bit `.so` parity with cold builds.
+the cached CLI default or setting `verify: false`). - Cached `build --cache` invocations also maintain a Merkle-verified
+  per-function incremental cache and companion `.vidx` incremental validation
+  index under `<cache>/x64-inc/` (and `<cache>/a64-inc/` for `--backend aarch64`)
+  that preserves bit-for-bit ELF parity with cold builds, plus parallel 256 KiB
+  Merkle payload digests for artifact sidecars.
 
 ## 3. Runtime Stack, Memory & Blot ABI 8 Contract
 
@@ -129,13 +135,14 @@ also maintain a SHA-256-integrity-checked per-function incremental cache under
 - **Zero signal handlers in `--blot-cdylib`; guard-page BCE strictly in standalone `ET_EXEC`**:
   - `--blot-cdylib` `.so` shared libraries NEVER install process-wide signal
     handlers and always enforce explicit software memory bounds checks.
-  - Standalone static `ET_EXEC` binaries targeting `memory32` reserve an
-    `8 GiB + 64 KiB` `PROT_NONE` virtual guard region around linear memory 0
-    (enabling zero-branch hardware bounds checks for constant offsets
-    `< 4 GiB`), backed by a scoped `rt_sigaction(SIGSEGV, SA_SIGINFO | SA_RESTORER)`
-    handler that redirects faults inside `[mem_base, mem_base + 8 GiB + 64 KiB)`
-    to the standard `"Trap: out of bounds"` exit-1 / `--timing-json` landing
-    pad and re-raises any fault outside that window with `SIG_DFL`.
+  - Standalone static `ET_EXEC` binaries targeting `memory32` (on both
+    `--backend x64` and `--backend aarch64`) reserve an `8 GiB + 64 KiB`
+    `PROT_NONE` virtual guard region around linear memory 0 (enabling
+    zero-branch hardware bounds checks for constant offsets `< 4 GiB`), backed
+    by a scoped `rt_sigaction(SIGSEGV, SA_SIGINFO)` handler that redirects
+    faults inside `[mem_base, mem_base + 8 GiB + 64 KiB)` to the standard
+    out-of-bounds exit-1 landing pad and re-raises any fault outside that window
+    with `SIG_DFL`.
 
 ### Blot ABI 8 Exports (18 Symbols)
 All four Blot backends (`x64`, `aarch64`, `c`, `rust`) expose the same 18 C-ABI symbols:

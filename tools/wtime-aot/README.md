@@ -30,17 +30,20 @@ validator and compiles it ahead of time through one of four backends:
 - **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) multi-core
   ARMv8-A backend (`--jobs`) with full 236-opcode NEON 128-bit SIMD and
-  `memory64` parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]`
-  addressing, and `madd`/`msub` fusion, emitting Linux AArch64 ELF64 shared
-  libraries (Blot ABI 8) and static executables with zero external compilers or
-  cross-toolchains.
+  `memory64` parity, per-function incremental caching (`<cache>/a64-inc/` +
+  companion `.vidx` incremental validation, byte-for-byte ELF identical to cold
+  builds), standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE (`memory32`
+  only, zero signal handlers in `--blot-cdylib`) + WASI/Goose/Ryū float runtime
+  parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]` addressing, and
+  `madd`/`msub` fusion, emitting Linux AArch64 ELF64 shared libraries (Blot ABI
+  8) and static executables with zero external compilers or cross-toolchains.
 
 Nothing is JIT-compiled at run time.
 
 ## Backends and benchmarks
 
 Measured on AMD Ryzen 7 7800X3D (8C/16T), Linux 7.3.5, Clang 23.1.5, Rust 1.99.0,
-Wasmtime 49.0.3, and Node v26.5.0 (`2026-11-24`) with exact output parity
+Wasmtime 49.0.3, and Node v26.5.0 (`2026-11-25`) with exact output parity
 verified across every engine (`tools/wtime-aot/charts/results.json`; full tables
 and methodology in [docs/benchmarks.md](../../docs/benchmarks.md)).
 
@@ -116,9 +119,11 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     function imports (including byte-exact embedded NUL names), exported globals
     (including `externref`), and all 18 Blot ABI 8 C exports with identical
     MXCSR (`0x1f80`) isolation, `in_call` reentry/drop guards, and null-handle
-    defensive behavior. Standalone `--backend x64` `ET_EXEC` binaries also
-    support Goose stdout/Ryū float formatting (`goose::*`), `env::bench_input*`,
-    and `8 GiB + 64 KiB` guard-page memory32 bounds checks.
+    defensive behavior. Standalone `--backend x64` and `--backend aarch64`
+    `ET_EXEC` binaries also support direct-syscall WASI Preview 1, Goose
+    stdout/Ryū shortest round-trip float formatting (`goose::*`),
+    `env::bench_input*`, and `8 GiB + 64 KiB` guard-page `memory32` bounds
+    checks (zero signal handlers in `--blot-cdylib`).
 
 Unsupported constructs are rejected before codegen (`--backend x64` uses exit
 code `4` for admission rejections vs. exit code `1` for I/O, timeout, or

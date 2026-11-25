@@ -646,6 +646,22 @@ pub fn check_standalone_import_sig(
     Ok(())
 }
 
+/// Per-body admission summary cached in `ValIndexData` so incremental builds skip scanning
+/// unchanged function bodies while producing bit-for-bit identical `pinned_global`,
+/// `global_consts`, `ci_sigs`, and aggregate caps.
+#[derive(Clone, Debug, Default)]
+pub struct BodyAdmitSummary {
+    pub total_locals: u32,
+    pub insn_count: u32,
+    pub imm_elems: u32,
+    pub saw_data_count_op: bool,
+    pub sig_arity: usize,
+    pub br_table_entries: usize,
+    pub g_reads: Vec<(u32, u32)>,
+    pub g_writes: Vec<(u32, u32)>,
+    pub ci_pairs: Vec<(u32, u32)>,
+}
+
 /// Enforces the admission contract and builds lean `X64Module` metadata (Blot cdylib target).
 #[allow(dead_code)]
 pub fn admit_x64_module(decoded: &DecodedModule) -> Res<X64Module> {
@@ -658,6 +674,18 @@ pub fn admit_x64_module_for_target(
     target: X64Target,
     budget: Option<&CompileBudget>,
 ) -> Res<X64Module> {
+    admit_x64_module_for_target_with_summaries(decoded, target, budget, None, false).map(|(m, _)| m)
+}
+
+/// Enforces the admission contract for `target`, optionally reusing per-body summaries for
+/// unchanged bodies and/or collecting per-body summaries for caching.
+pub fn admit_x64_module_for_target_with_summaries(
+    decoded: &DecodedModule,
+    target: X64Target,
+    budget: Option<&CompileBudget>,
+    pre_summaries: Option<&[Option<BodyAdmitSummary>]>,
+    collect_summaries: bool,
+) -> Res<(X64Module, Vec<BodyAdmitSummary>)> {
     if let Some(b) = budget {
         b.check_deadline()?;
     }
@@ -794,7 +822,11 @@ pub fn admit_x64_module_for_target(
             .types
             .get(ti)
             .ok_or("function type index out of range")?;
-        let n_locals = fty.params.len().saturating_add(body.locals.len());
+        let body_locals = pre_summaries
+            .and_then(|s| s.get(bi))
+            .and_then(|o| o.as_ref())
+            .map_or(body.locals.len(), |pre| pre.total_locals as usize);
+        let n_locals = fty.params.len().saturating_add(body_locals);
         if n_locals > MAX_LOCALS_PER_FN {
             return Err(format!(
                 "x64: function body {bi} has {n_locals} locals (cap {MAX_LOCALS_PER_FN})"
@@ -1147,22 +1179,76 @@ pub fn admit_x64_module_for_target(
         global_reads: Vec<usize>,
         global_writes: Vec<usize>,
         ci_pairs: Vec<(u32, u32)>,
+        body_summaries: Vec<BodyAdmitSummary>,
     }
 
     let n_globals = globals.len();
-    let scan_chunk = |bodies: &[wtime_validate::FunctionBody]| -> Res<ChunkScan> {
+    let scan_chunk = |base_bi: usize, bodies: &[wtime_validate::FunctionBody]| -> Res<ChunkScan> {
         let mut sig_arity = 0usize;
         let mut br_table_entries = 0usize;
         let mut g_reads = vec![0usize; n_globals];
         let mut g_writes = vec![0usize; n_globals];
         let mut ci_seen: HashSet<(u32, u32)> = HashSet::new();
         let mut ci_pairs: Vec<(u32, u32)> = Vec::new();
-        for (bi, body) in bodies.iter().enumerate() {
+        let mut body_summaries = if collect_summaries {
+            Vec::with_capacity(bodies.len())
+        } else {
+            Vec::new()
+        };
+        let mut touched_reads: Vec<u32> = Vec::new();
+        let mut touched_writes: Vec<u32> = Vec::new();
+        let mut body_g_reads = if collect_summaries {
+            vec![0u32; n_globals]
+        } else {
+            Vec::new()
+        };
+        let mut body_g_writes = if collect_summaries {
+            vec![0u32; n_globals]
+        } else {
+            Vec::new()
+        };
+        for (local_bi, body) in bodies.iter().enumerate() {
+            let bi = base_bi + local_bi;
             if let Some(b) = budget
-                && (bi & 63) == 0
+                && (local_bi & 63) == 0
             {
                 b.check_deadline()?;
             }
+            if let Some(Some(pre)) = pre_summaries.and_then(|s| s.get(bi)) {
+                sig_arity = sig_arity.saturating_add(pre.sig_arity);
+                br_table_entries = br_table_entries.saturating_add(pre.br_table_entries);
+                if br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
+                    return Err(format!(
+                        "x64: aggregate br_table entries ({br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
+                    ));
+                }
+                for &(g, cnt) in &pre.g_reads {
+                    let slot = g_reads
+                        .get_mut(g as usize)
+                        .ok_or_else(|| format!("x64: global.get index {g} out of range"))?;
+                    *slot += cnt as usize;
+                }
+                for &(g, cnt) in &pre.g_writes {
+                    let slot = g_writes
+                        .get_mut(g as usize)
+                        .ok_or_else(|| format!("x64: global.set index {g} out of range"))?;
+                    *slot += cnt as usize;
+                }
+                for &pair in &pre.ci_pairs {
+                    if ci_seen.insert(pair) {
+                        ci_pairs.push(pair);
+                    }
+                }
+                if collect_summaries {
+                    body_summaries.push(pre.clone());
+                }
+                continue;
+            }
+            let b_sig_before = sig_arity;
+            let b_br_before = br_table_entries;
+            let mut b_ci: Vec<(u32, u32)> = Vec::new();
+            let mut b_imm_elems = 0usize;
+            let mut b_saw_data_count_op = false;
             for &vt in &body.locals {
                 check_val_type(vt)?;
             }
@@ -1180,6 +1266,21 @@ pub fn admit_x64_module_for_target(
                     &type_admitted,
                     &mut sig_arity,
                 )?;
+                if collect_summaries {
+                    match &insn.immediate {
+                        Immediate::BrTable(targets, _) => {
+                            b_imm_elems =
+                                b_imm_elems.saturating_add(targets.len().saturating_add(1));
+                        }
+                        Immediate::TryTable(tt) => {
+                            b_imm_elems = b_imm_elems.saturating_add(tt.catches.len());
+                        }
+                        _ => {}
+                    }
+                    if matches!(insn.opcode, 0xfc08 | 0xfc09 | 0xfb09 | 0xfb12) {
+                        b_saw_data_count_op = true;
+                    }
+                }
                 match insn.opcode {
                     0x0e => {
                         if let Immediate::BrTable(ref raw_targets, _) = insn.immediate {
@@ -1197,6 +1298,13 @@ pub fn admit_x64_module_for_target(
                                 .get_mut(g as usize)
                                 .ok_or_else(|| format!("x64: global.get index {g} out of range"))?;
                             *slot += 1;
+                            if collect_summaries {
+                                let bs = &mut body_g_reads[g as usize];
+                                if *bs == 0 {
+                                    touched_reads.push(g);
+                                }
+                                *bs = bs.saturating_add(1);
+                            }
                         }
                     }
                     0x24 => {
@@ -1205,6 +1313,13 @@ pub fn admit_x64_module_for_target(
                                 .get_mut(g as usize)
                                 .ok_or_else(|| format!("x64: global.set index {g} out of range"))?;
                             *slot += 1;
+                            if collect_summaries {
+                                let bs = &mut body_g_writes[g as usize];
+                                if *bs == 0 {
+                                    touched_writes.push(g);
+                                }
+                                *bs = bs.saturating_add(1);
+                            }
                         }
                     }
                     0x25 | 0x26 => {
@@ -1221,9 +1336,37 @@ pub fn admit_x64_module_for_target(
                         if ci_seen.insert((tbl, ti)) {
                             ci_pairs.push((tbl, ti));
                         }
+                        if collect_summaries && !b_ci.contains(&(tbl, ti)) {
+                            b_ci.push((tbl, ti));
+                        }
                     }
                     _ => {}
                 }
+            }
+            if collect_summaries {
+                let mut gr = Vec::with_capacity(touched_reads.len());
+                for g in touched_reads.drain(..) {
+                    let c = body_g_reads[g as usize];
+                    body_g_reads[g as usize] = 0;
+                    gr.push((g, c));
+                }
+                let mut gw = Vec::with_capacity(touched_writes.len());
+                for g in touched_writes.drain(..) {
+                    let c = body_g_writes[g as usize];
+                    body_g_writes[g as usize] = 0;
+                    gw.push((g, c));
+                }
+                body_summaries.push(BodyAdmitSummary {
+                    total_locals: body.locals.len() as u32,
+                    insn_count: body.instructions.len() as u32,
+                    imm_elems: b_imm_elems as u32,
+                    saw_data_count_op: b_saw_data_count_op,
+                    sig_arity: sig_arity - b_sig_before,
+                    br_table_entries: br_table_entries - b_br_before,
+                    g_reads: gr,
+                    g_writes: gw,
+                    ci_pairs: b_ci,
+                });
             }
         }
         Ok(ChunkScan {
@@ -1232,11 +1375,12 @@ pub fn admit_x64_module_for_target(
             global_reads: g_reads,
             global_writes: g_writes,
             ci_pairs,
+            body_summaries,
         })
     };
 
     let n_bodies = decoded.code.len();
-    let n_chunks = if n_bodies >= 256 {
+    let n_chunks = if n_bodies >= 256 && pre_summaries.is_none() {
         std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(16)
@@ -1246,22 +1390,27 @@ pub fn admit_x64_module_for_target(
         1
     };
     let chunk_results: Vec<Res<ChunkScan>> = if n_chunks <= 1 {
-        vec![scan_chunk(&decoded.code)]
+        vec![scan_chunk(0, &decoded.code)]
     } else {
         let per = n_bodies.div_ceil(n_chunks);
-        let slices: Vec<&[wtime_validate::FunctionBody]> = decoded.code.chunks(per).collect();
+        let slices: Vec<(usize, &[wtime_validate::FunctionBody])> = decoded
+            .code
+            .chunks(per)
+            .enumerate()
+            .map(|(i, sl)| (i * per, sl))
+            .collect();
         let mut slots: Vec<Option<Res<ChunkScan>>> = (0..slices.len()).map(|_| None).collect();
         let mut unspawned: Vec<usize> = Vec::new();
         std::thread::scope(|s| {
             let mut rem = slots.as_mut_slice();
-            for (ci, &sl) in slices.iter().enumerate() {
+            for (ci, &(base_bi, sl)) in slices.iter().enumerate() {
                 let (head, tail) = rem.split_first_mut().unwrap();
                 rem = tail;
                 if ci + 1 == slices.len() {
-                    *head = Some(scan_chunk(sl));
+                    *head = Some(scan_chunk(base_bi, sl));
                 } else if std::thread::Builder::new()
                     .spawn_scoped(s, move || {
-                        *head = Some(scan_chunk(sl));
+                        *head = Some(scan_chunk(base_bi, sl));
                     })
                     .is_err()
                 {
@@ -1270,7 +1419,8 @@ pub fn admit_x64_module_for_target(
             }
         });
         for ci in unspawned {
-            slots[ci] = Some(scan_chunk(slices[ci]));
+            let (base_bi, sl) = slices[ci];
+            slots[ci] = Some(scan_chunk(base_bi, sl));
         }
         slots.into_iter().map(|o| o.unwrap()).collect()
     };
@@ -1282,9 +1432,17 @@ pub fn admit_x64_module_for_target(
     let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     let mut ci_sigs: Vec<X64CiSig> = Vec::new();
     let mut total_ci_bytes = 0usize;
+    let mut all_body_summaries = if collect_summaries {
+        Vec::with_capacity(n_bodies)
+    } else {
+        Vec::new()
+    };
 
     for chunk_res in chunk_results {
         let chunk = chunk_res?;
+        if collect_summaries {
+            all_body_summaries.extend(chunk.body_summaries);
+        }
         total_sig_arity = total_sig_arity.saturating_add(chunk.sig_arity);
         if total_sig_arity > MAX_TOTAL_SIG_ARITY {
             return Err(format!(
@@ -1418,26 +1576,29 @@ pub fn admit_x64_module_for_target(
         None
     };
 
-    Ok(X64Module {
-        imports,
-        func_type_idx,
-        module_types: decoded.types.clone(),
-        globals,
-        global_inits,
-        global_consts,
-        pinned_global,
-        exported_globals,
-        exported_funcs,
-        ci_index,
-        ci_sigs,
-        mut_extern_tables,
-        memory,
-        memory64,
-        fixed32,
-        target,
-        standalone_start,
-        active_elem_checks,
-        active_data_segs,
-        start,
-    })
+    Ok((
+        X64Module {
+            imports,
+            func_type_idx,
+            module_types: decoded.types.clone(),
+            globals,
+            global_inits,
+            global_consts,
+            pinned_global,
+            exported_globals,
+            exported_funcs,
+            ci_index,
+            ci_sigs,
+            mut_extern_tables,
+            memory,
+            memory64,
+            fixed32,
+            target,
+            standalone_start,
+            active_elem_checks,
+            active_data_segs,
+            start,
+        },
+        all_body_summaries,
+    ))
 }

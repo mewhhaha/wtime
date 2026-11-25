@@ -928,9 +928,10 @@ def main() -> None:
                 f"{large_fns:,} fns, {args.cold_rounds} rounds) ===",
                 flush=True,
             )
-            large_cold: dict[str, list[float]] = {"x64": [], "c": []}
+            large_cold: dict[str, list[float]] = {"x64": []}
             if wt_driver is not None:
                 large_cold["wasmtime"] = []
+            c_supported = True
             last_x64_cache = last_c_cache = None
             last_x64_so = last_c_so = last_cwasm = None
             for cr in range(args.cold_rounds):
@@ -951,22 +952,32 @@ def main() -> None:
                     last_cwasm = cw
                     dt_wt_str = f"  wasmtime={dt_wt:.1f}ms"
 
-                cc = td / f"large_cold_c_{cr}"; cc.mkdir(mode=0o700)
-                dt_c, c_out = time_cmd_ms([
-                    str(wtime_aot_bin), "build", str(large_wasm),
-                    "--cache", str(cc), "--blot-cdylib", "--backend", "c",
-                    "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
-                ])
-                large_cold["c"].append(dt_c)
-                last_c_cache, last_c_so = cc, Path(c_out)
-                print(f"  round {cr+1}: x64={dt_x64:.1f}ms{dt_wt_str}  c={dt_c:.1f}ms", flush=True)
+                dt_c_str = ""
+                if c_supported:
+                    cc = td / f"large_cold_c_{cr}"; cc.mkdir(mode=0o700)
+                    try:
+                        dt_c, c_out = time_cmd_ms([
+                            str(wtime_aot_bin), "build", str(large_wasm),
+                            "--cache", str(cc), "--blot-cdylib", "--backend", "c",
+                            "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+                        ])
+                        large_cold.setdefault("c", []).append(dt_c)
+                        last_c_cache, last_c_so = cc, Path(c_out)
+                        dt_c_str = f"  c={dt_c:.1f}ms"
+                    except RuntimeError as e:
+                        if cr == 0 and "unsupported instruction" in str(e):
+                            c_supported = False
+                            dt_c_str = "  c=(skipped: unsupported op)"
+                        else:
+                            raise
+                print(f"  round {cr+1}: x64={dt_x64:.1f}ms{dt_wt_str}{dt_c_str}", flush=True)
 
-            assert last_x64_cache is not None and last_c_cache is not None
-            assert last_x64_so is not None and last_c_so is not None
+            assert last_x64_cache is not None and last_x64_so is not None
             artifact_bytes = {
                 "x64": last_x64_so.stat().st_size,
-                "c": last_c_so.stat().st_size,
             }
+            if c_supported and last_c_so is not None:
+                artifact_bytes["c"] = last_c_so.stat().st_size
             if last_cwasm is not None:
                 artifact_bytes["wasmtime_cwasm"] = last_cwasm.stat().st_size
             results["large_module"] = {
@@ -985,7 +996,9 @@ def main() -> None:
             }
 
             print("\n=== [4/4] Incremental 1-fn edit, warm artifact load, & warm cache hit ===", flush=True)
-            inc_samples: dict[str, list[float]] = {"x64": [], "c": []}
+            inc_samples: dict[str, list[float]] = {"x64": []}
+            if c_supported:
+                inc_samples["c"] = []
             if wt_driver is not None:
                 inc_samples["wasmtime"] = []
             for ir in range(args.cold_rounds):
@@ -997,36 +1010,44 @@ def main() -> None:
                     "--target-cpu", "native", "--jobs", "0",
                 ])
                 inc_samples["x64"].append(dt_x64)
-                dt_c, _ = time_cmd_ms([
-                    str(wtime_aot_bin), "build", str(ed_wasm),
-                    "--cache", str(last_c_cache), "--blot-cdylib", "--backend", "c",
-                    "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
-                ])
-                inc_samples["c"].append(dt_c)
+                dt_c_str = ""
+                if c_supported and last_c_cache is not None:
+                    dt_c, _ = time_cmd_ms([
+                        str(wtime_aot_bin), "build", str(ed_wasm),
+                        "--cache", str(last_c_cache), "--blot-cdylib", "--backend", "c",
+                        "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+                    ])
+                    inc_samples["c"].append(dt_c)
+                    dt_c_str = f"  c={dt_c:.1f}ms"
                 dt_wt_str = ""
                 if wt_driver is not None:
                     cw_ed = td / f"large_edit_{ir}.cwasm"
                     dt_wt, _ = time_cmd_ms([str(wt_driver), "compile", str(ed_wasm), str(cw_ed)])
                     inc_samples["wasmtime"].append(dt_wt)
                     dt_wt_str = f"  wasmtime={dt_wt:.1f}ms"
-                print(f"  1-fn edit r{ir+1}: x64={dt_x64:.1f}ms  c={dt_c:.1f}ms{dt_wt_str}", flush=True)
+                print(f"  1-fn edit r{ir+1}: x64={dt_x64:.1f}ms{dt_c_str}{dt_wt_str}", flush=True)
 
-            warm_load: dict[str, list[float]] = {"x64": [], "c": []}
+            warm_load: dict[str, list[float]] = {"x64": []}
+            if c_supported:
+                warm_load["c"] = []
             if wt_driver is not None:
                 warm_load["wasmtime"] = []
             for _ in range(args.hot_rounds):
                 _, x64_lms = time_cmd_ms([str(driver_bin), "--load", str(last_x64_so)])
                 warm_load["x64"].append(float(x64_lms))
-                _, c_lms = time_cmd_ms([str(driver_bin), "--load", str(last_c_so)])
-                warm_load["c"].append(float(c_lms))
+                if c_supported and last_c_so is not None:
+                    _, c_lms = time_cmd_ms([str(driver_bin), "--load", str(last_c_so)])
+                    warm_load["c"].append(float(c_lms))
                 if wt_driver is not None and last_cwasm is not None:
                     _, wt_lms = time_cmd_ms([str(wt_driver), "load", str(last_cwasm)])
                     warm_load["wasmtime"].append(float(wt_lms))
+            c_l_str = f"  c(.so)={statistics.median(warm_load['c']):.2f}ms" if "c" in warm_load else ""
             wt_l_str = f"  wasmtime(.cwasm)={statistics.median(warm_load['wasmtime']):.2f}ms" if "wasmtime" in warm_load else ""
-            print(f"  warm artifact load: x64(.so)={statistics.median(warm_load['x64']):.2f}ms  "
-                  f"c(.so)={statistics.median(warm_load['c']):.2f}ms{wt_l_str}", flush=True)
+            print(f"  warm artifact load: x64(.so)={statistics.median(warm_load['x64']):.2f}ms{c_l_str}{wt_l_str}", flush=True)
 
-            large_hit: dict[str, list[float]] = {"x64": [], "c": []}
+            large_hit: dict[str, list[float]] = {"x64": []}
+            if c_supported:
+                large_hit["c"] = []
             for _ in range(args.hot_rounds):
                 dt_x64, _ = time_cmd_ms([
                     str(wtime_aot_bin), "build", str(large_wasm),
@@ -1034,14 +1055,15 @@ def main() -> None:
                     "--target-cpu", "native", "--jobs", "0",
                 ])
                 large_hit["x64"].append(dt_x64)
-                dt_c, _ = time_cmd_ms([
-                    str(wtime_aot_bin), "build", str(large_wasm),
-                    "--cache", str(last_c_cache), "--blot-cdylib", "--backend", "c",
-                    "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
-                ])
-                large_hit["c"].append(dt_c)
-            print(f"  warm build --cache hit: x64={statistics.median(large_hit['x64']):.2f}ms  "
-                  f"c={statistics.median(large_hit['c']):.2f}ms", flush=True)
+                if c_supported and last_c_cache is not None:
+                    dt_c, _ = time_cmd_ms([
+                        str(wtime_aot_bin), "build", str(large_wasm),
+                        "--cache", str(last_c_cache), "--blot-cdylib", "--backend", "c",
+                        "--c-opt", "auto", "--target-cpu", "native", "--jobs", "0",
+                    ])
+                    large_hit["c"].append(dt_c)
+            c_h_str = f"  c={statistics.median(large_hit['c']):.2f}ms" if "c" in large_hit else ""
+            print(f"  warm build --cache hit: x64={statistics.median(large_hit['x64']):.2f}ms{c_h_str}", flush=True)
 
             results["compile_hot"] = {
                 "edit_rounds": args.cold_rounds,

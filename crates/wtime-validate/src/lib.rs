@@ -470,6 +470,512 @@ impl Stack {
         })
     }
 }
+/// A partially validated WebAssembly module used by ahead-of-time incremental compilers.
+///
+/// All non-code module sections, code-body framing, aggregate limits, and every non-skipped
+/// function body are fully validated upon construction. Function bodies skipped via
+/// [`validate_incremental`] can be decoded and validated on demand via
+/// [`IncrementalModule::ensure_body_validated`].
+///
+/// Unlike [`ValidatedModule`], an `IncrementalModule` cannot be passed directly to
+/// `wtime-runtime`, preserving [`validate`] as the sole constructor of executable runtime modules.
+pub struct IncrementalModule {
+    decoded: DecodedModule,
+    body_validated: Vec<bool>,
+    features: FeatureSet,
+    limits: ResourceLimits,
+    tags: Vec<usize>,
+    type_data: std::sync::Arc<types::TypeDeclData>,
+    type_work_used: usize,
+    funcs: Vec<usize>,
+    imported_funcs: usize,
+    exact_func_imports: std::sync::Arc<Vec<bool>>,
+    declared_funcs: std::sync::Arc<HashSet<u32>>,
+    globals: Vec<GlobalType>,
+    tables: Vec<TableType>,
+    memories: Vec<MemoryType>,
+    imported_globals: usize,
+}
+
+impl IncrementalModule {
+    /// Returns the decoded module payload (skipped bodies have empty `locals`/`instructions`
+    /// until [`Self::ensure_body_validated`] is called).
+    pub fn decoded(&self) -> &DecodedModule {
+        &self.decoded
+    }
+
+    /// Returns whether defined function body `body_index` has been decoded and validated.
+    pub fn is_body_validated(&self, body_index: usize) -> bool {
+        self.body_validated
+            .get(body_index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Ensures defined function body `body_index` is decoded from its original byte span and
+    /// validated under this module's exact feature and resource policy.
+    pub fn ensure_body_validated(&mut self, body_index: usize) -> Result<()> {
+        let Some(&already) = self.body_validated.get(body_index) else {
+            return Err(invalid("function body index out of bounds"));
+        };
+        if already {
+            return Ok(());
+        }
+        let span = self.decoded.code[body_index].span;
+        let body =
+            decode_single_function_body(&self.decoded.bytes, span, &self.features, &self.limits)?;
+        let ti = self.decoded.functions[body_index].0 as usize;
+        let remaining_work = self
+            .limits
+            .max_type_work
+            .saturating_sub(self.type_work_used);
+        let types_env = Rc::new(types::TypeEnvironment::from_shared(
+            std::sync::Arc::clone(&self.type_data),
+            remaining_work,
+        ));
+        let mut scratch = BodyScratch::new(types_env.clone(), self.limits.max_stack_height);
+        let ctx = Context {
+            tags: Cow::Borrowed(&self.tags),
+            types: types_env,
+            m: &self.decoded,
+            funcs: Cow::Borrowed(&self.funcs),
+            imported_funcs: self.imported_funcs,
+            exact_func_imports: std::sync::Arc::clone(&self.exact_func_imports),
+            declared_funcs: std::sync::Arc::clone(&self.declared_funcs),
+            globals: Cow::Borrowed(&self.globals),
+            tables: Cow::Borrowed(&self.tables),
+            memories: Cow::Borrowed(&self.memories),
+            imported_globals: self.imported_globals,
+            features: &self.features,
+            limits: &self.limits,
+        };
+        ctx.ty(ti)?;
+        ctx.body_with_scratch(ti, &body, &mut scratch)?;
+        self.type_work_used = self.type_work_used.saturating_add(ctx.types.work());
+        if ctx.types.exhausted() {
+            return Err(Error::new(
+                ErrorKind::ResourceLimit,
+                "type validation work budget exhausted",
+            ));
+        }
+        self.decoded.code[body_index] = body;
+        self.body_validated[body_index] = true;
+        Ok(())
+    }
+}
+
+fn validate_module_shell<'a>(c: &mut Context<'a>) -> Result<()> {
+    let m = c.m;
+    let features = c.features;
+    let limits = c.limits;
+    types::validate_types(c)?;
+    for t in &m.types {
+        c.enabled(features.multi_value || t.results.len() <= 1)?;
+        for v in t.params.iter().chain(&t.results) {
+            c.valtype(*v)?
+        }
+    }
+    let mut exact_imports = Vec::new();
+    for im in &m.imports {
+        match &im.kind {
+            ImportKind::Func(t) => {
+                let ti = t.0 as usize;
+                c.ty(ti)?;
+                c.funcs.to_mut().push(ti);
+                exact_imports.push(false);
+            }
+            ImportKind::ExactFunc(t) => {
+                c.enabled(features.custom_descriptors)?;
+                let ti = t.0 as usize;
+                c.ty(ti)?;
+                c.funcs.to_mut().push(ti);
+                exact_imports.push(true);
+            }
+            ImportKind::Global(t) => {
+                c.enabled(!t.mutable || features.mutable_globals)?;
+                c.globals.to_mut().push(*t);
+                c.imported_globals += 1
+            }
+            ImportKind::Table(t) => c.tables.to_mut().push(*t),
+            ImportKind::Memory(t) => c.memories.to_mut().push(*t),
+            ImportKind::Tag(t) => c.add_tag(*t)?,
+        }
+    }
+    c.imported_funcs = exact_imports.len();
+    c.exact_func_imports = std::sync::Arc::new(exact_imports);
+    for t in &m.tags {
+        c.add_tag(*t)?;
+    }
+    for t in &m.functions {
+        let ti = t.0 as usize;
+        c.ty(ti)?;
+        c.funcs.to_mut().push(ti);
+    }
+    c.tables.to_mut().extend(&m.tables);
+    c.memories.to_mut().extend(&m.memories);
+    c.enabled(features.multi_memory || c.memories.len() <= 1)?;
+    c.enabled(features.reference_types || c.tables.len() <= 1)?;
+    budget(
+        c.funcs.len() <= limits.max_functions
+            && c.globals.len() + m.globals.len() <= limits.max_globals
+            && c.tables.len() <= limits.max_tables
+            && c.memories.len() <= limits.max_memories
+            && c.tags.len() <= limits.max_tags,
+        "imported declaration limits exceeded",
+    )?;
+    for t in c.memories.iter() {
+        c.enabled(t.index_type == IndexType::I32 || features.memory64)?;
+        c.enabled(!t.shared || features.threads)?;
+        c.enabled(t.page_size_log2 == 16 || features.custom_page_sizes)?;
+        check(t.limits.is_valid(), "invalid memory limits")?;
+        check(
+            t.page_size_log2 == 0 || t.page_size_log2 == 16,
+            "invalid page size",
+        )?;
+        let max = if t.index_type == IndexType::I32 {
+            (1u64 << (32 - t.page_size_log2)).min(u32::MAX as u64)
+        } else if t.page_size_log2 == 0 {
+            u64::MAX
+        } else {
+            1u64 << (64 - t.page_size_log2)
+        };
+        check(
+            t.limits.min <= max && t.limits.max.is_none_or(|v| v <= max),
+            "memory exceeds address space",
+        )?;
+        check(
+            !t.shared || t.limits.max.is_some(),
+            "shared memory requires maximum",
+        )?;
+    }
+    for t in c.tables.iter() {
+        c.enabled(t.index_type == IndexType::I32 || features.memory64)?;
+        check(
+            t.index_type != IndexType::I32
+                || (t.limits.min <= u32::MAX as u64
+                    && t.limits.max.is_none_or(|n| n <= u32::MAX as u64)),
+            "table limits overflow",
+        )?;
+        check(t.limits.is_valid(), "invalid table limits")?;
+        if t.element != RefType::FUNCREF {
+            c.valtype(ValType::Ref(t.element))?;
+        }
+    }
+    for t in c.globals.iter() {
+        c.valtype(t.value)?;
+    }
+    // Precompute declared function references ONCE before validating constant expressions
+    // and function bodies so `0xd2` (`ref.func`) is O(1) everywhere.
+    let mut declared = HashSet::new();
+    for e in &m.exports {
+        if e.kind == ExternalKind::Func {
+            declared.insert(e.index);
+        }
+    }
+    for j in m
+        .elements
+        .iter()
+        .flat_map(|e| e.init.iter().flatten())
+        .chain(m.globals.iter().flat_map(|g| g.init.iter()))
+        .chain(m.table_inits.iter().filter_map(|v| v.as_ref()).flatten())
+    {
+        if j.opcode == 0xd2
+            && let Immediate::Index(x) = j.immediate
+        {
+            declared.insert(x);
+        }
+    }
+    c.declared_funcs = std::sync::Arc::new(declared);
+    for (n, init) in m.table_inits.iter().enumerate() {
+        if let Some(init) = init {
+            c.constant(init, ValType::Ref(m.tables[n].element))?
+        } else {
+            check(
+                m.tables[n].element.nullable,
+                "nonnullable table requires initializer",
+            )?;
+        }
+    }
+    for g in &m.globals {
+        c.valtype(g.ty.value)?;
+        c.constant(&g.init, g.ty.value)?;
+        c.globals.to_mut().push(g.ty)
+    }
+    let mut names = HashSet::new();
+    for e in &m.exports {
+        if e.kind == ExternalKind::Global
+            && let Some(g) = c.globals.get(e.index as usize)
+        {
+            c.enabled(!g.mutable || features.mutable_globals)?;
+        }
+        check(names.insert(&e.name), "duplicate export")?;
+        let n = match e.kind {
+            ExternalKind::Func => c.funcs.len(),
+            ExternalKind::Table => c.tables.len(),
+            ExternalKind::Memory => c.memories.len(),
+            ExternalKind::Global => c.globals.len(),
+            ExternalKind::Tag => c.tags.len(),
+        };
+        check((e.index as usize) < n, "export index out of bounds")?;
+    }
+    if let Some(s) = m.start {
+        let ti = *c
+            .funcs
+            .get(s.0 as usize)
+            .ok_or_else(|| invalid("start index out of bounds"))?;
+        let t = c.ty(ti)?;
+        check(
+            t.params.is_empty() && t.results.is_empty(),
+            "start function must have empty signature",
+        )?
+    }
+    c.enabled(m.data_count.is_none() || features.bulk_memory)?;
+    for d in &m.data {
+        c.enabled(matches!(d.mode, SegmentMode::Active { .. }) || features.bulk_memory)?;
+        if let SegmentMode::Active { index, offset } = &d.mode {
+            let t = c
+                .memories
+                .get(*index as usize)
+                .ok_or_else(|| invalid("data memory index out of bounds"))?;
+            c.constant(offset, t.index_type.val_type())?
+        }
+    }
+    for e in &m.elements {
+        if features.reference_types {
+            c.valtype(ValType::Ref(e.ty))?;
+        }
+        c.enabled(matches!(e.mode, SegmentMode::Active { .. }) || features.bulk_memory)?;
+        if let SegmentMode::Active { index, offset } = &e.mode {
+            let t = c
+                .tables
+                .get(*index as usize)
+                .ok_or_else(|| invalid("element table index out of bounds"))?;
+            check(
+                value_subtype(ValType::Ref(e.ty), ValType::Ref(t.element), &c.types),
+                "element table type mismatch",
+            )?;
+            c.constant(offset, t.index_type.val_type())?
+        }
+        for x in &e.init {
+            if !features.reference_types
+                && x.len() == 2
+                && x[0].opcode == 0xd2
+                && x[1].opcode == 0x0b
+            {
+                check(
+                    index(&x[0])? < c.funcs.len(),
+                    "element function index out of bounds",
+                )?;
+            } else {
+                c.constant(x, ValType::Ref(e.ty))?;
+            }
+        }
+    }
+    check(
+        m.functions.len() == m.code.len(),
+        "function/code count mismatch",
+    )?;
+    Ok(())
+}
+
+/// Decodes and incrementally validates a WebAssembly module, skipping instruction decoding and
+/// validation only for function bodies where `skip_body` returns cached metrics from a trusted
+/// prior validation under an identical module shell, feature policy, and resource policy.
+pub fn validate_incremental<F>(
+    bytes: &[u8],
+    features: &FeatureSet,
+    limits: &ResourceLimits,
+    skip_body: F,
+) -> Result<IncrementalModule>
+where
+    F: Fn(usize, &[u8]) -> Option<CachedBodyMetrics> + Sync,
+{
+    features.validate()?;
+    let (m, skipped) = decode_with_body_filter(bytes, features, limits, skip_body)?;
+    let (
+        tags,
+        type_data,
+        type_work_used,
+        funcs,
+        imported_funcs,
+        exact_func_imports,
+        declared_funcs,
+        globals,
+        tables,
+        memories,
+        imported_globals,
+        body_validated,
+    ) = {
+        let mut c = Context {
+            tags: Cow::Owned(vec![]),
+            types: Rc::new(types::TypeEnvironment::new(
+                &m.type_groups,
+                limits.max_type_work,
+            )),
+            m: &m,
+            funcs: Cow::Owned(vec![]),
+            imported_funcs: 0,
+            exact_func_imports: std::sync::Arc::new(vec![]),
+            declared_funcs: std::sync::Arc::new(HashSet::new()),
+            globals: Cow::Owned(vec![]),
+            tables: Cow::Owned(vec![]),
+            memories: Cow::Owned(vec![]),
+            imported_globals: 0,
+            features,
+            limits,
+        };
+        let mut body_validated = vec![false; m.code.len()];
+        let validation = (|| -> Result<()> {
+            validate_module_shell(&mut c)?;
+            let mut total_fn_locals = 0usize;
+            let mut active_indices: Vec<(usize, u32, &FunctionBody)> = Vec::new();
+            let mut active_bytes = 0usize;
+            for (idx, (t, b)) in m.functions.iter().zip(&m.code).enumerate() {
+                let ft = c.ty(t.0 as usize)?;
+                let body_locals = match skipped.get(idx).copied().flatten() {
+                    Some(cm) => cm.total_locals as usize,
+                    None => {
+                        active_indices.push((idx, t.0, b));
+                        active_bytes =
+                            active_bytes.saturating_add(b.span.end.saturating_sub(b.span.start));
+                        b.locals.len()
+                    }
+                };
+                let n_locals = ft.params.len().saturating_add(body_locals);
+                budget(n_locals <= limits.max_locals, "too many locals")?;
+                total_fn_locals = total_fn_locals.saturating_add(n_locals);
+                budget(
+                    total_fn_locals <= limits.max_total_locals,
+                    "too many module locals",
+                )?;
+            }
+            let threads = limits.body_threads(active_bytes);
+            if threads <= 1 || active_indices.len() <= 2 {
+                let mut scratch = BodyScratch::new(c.types.clone(), limits.max_stack_height);
+                for &(idx, t, b) in &active_indices {
+                    let ti = t as usize;
+                    c.ty(ti)?;
+                    c.body_with_scratch(ti, b, &mut scratch)?;
+                    body_validated[idx] = true;
+                }
+            } else {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                let stop_at = AtomicUsize::new(active_indices.len());
+                let type_data = c.types.shared_data();
+                let tags_ref: &[usize] = &c.tags;
+                let funcs_ref: &[usize] = &c.funcs;
+                let globals_ref: &[GlobalType] = &c.globals;
+                let tables_ref: &[TableType] = &c.tables;
+                let memories_ref: &[MemoryType] = &c.memories;
+                let exact_ref = &c.exact_func_imports;
+                let declared_ref = &c.declared_funcs;
+                let imported_funcs = c.imported_funcs;
+                let imported_globals = c.imported_globals;
+                let indexed: Vec<(usize, usize, u32, &FunctionBody)> = active_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, &(idx, t, b))| (pos, idx, t, b))
+                    .collect();
+                let validated = wtime_types::parallel::map_ordered(
+                    &indexed,
+                    threads,
+                    || {
+                        let types = Rc::new(types::TypeEnvironment::from_shared(
+                            std::sync::Arc::clone(&type_data),
+                            limits.max_type_work,
+                        ));
+                        let scratch = BodyScratch::new(types.clone(), limits.max_stack_height);
+                        let ctx = Context {
+                            tags: Cow::Borrowed(tags_ref),
+                            types,
+                            m: &m,
+                            funcs: Cow::Borrowed(funcs_ref),
+                            imported_funcs,
+                            exact_func_imports: exact_ref.clone(),
+                            declared_funcs: declared_ref.clone(),
+                            globals: Cow::Borrowed(globals_ref),
+                            tables: Cow::Borrowed(tables_ref),
+                            memories: Cow::Borrowed(memories_ref),
+                            imported_globals,
+                            features,
+                            limits,
+                        };
+                        (ctx, scratch)
+                    },
+                    |(worker, scratch), &(pos, idx, t, b)| {
+                        if worker.types.exhausted() || pos >= stop_at.load(Ordering::Relaxed) {
+                            return (idx, None, 0);
+                        }
+                        let before = worker.types.work();
+                        let ti = t as usize;
+                        let result = worker
+                            .ty(ti)
+                            .and_then(|_| worker.body_with_scratch(ti, b, scratch));
+                        let delta = worker.types.work().saturating_sub(before);
+                        if worker.types.exhausted() || result.is_err() {
+                            stop_at.fetch_min(pos + 1, Ordering::Relaxed);
+                        }
+                        (idx, Some(result), delta)
+                    },
+                );
+                for (idx, opt_result, work) in validated {
+                    let Some(result) = opt_result else {
+                        return Err(Error::new(
+                            ErrorKind::ResourceLimit,
+                            "parallel validation aborted before completing all bodies",
+                        ));
+                    };
+                    c.types.charge(work);
+                    if c.types.exhausted() {
+                        return result.map(|_| ());
+                    }
+                    result?;
+                    body_validated[idx] = true;
+                }
+            }
+            Ok(())
+        })();
+        if c.types.exhausted() {
+            return Err(Error::new(
+                ErrorKind::ResourceLimit,
+                "type validation work budget exhausted",
+            ));
+        }
+        validation?;
+        (
+            c.tags.into_owned(),
+            c.types.shared_data(),
+            c.types.work(),
+            c.funcs.into_owned(),
+            c.imported_funcs,
+            c.exact_func_imports,
+            c.declared_funcs,
+            c.globals.into_owned(),
+            c.tables.into_owned(),
+            c.memories.into_owned(),
+            c.imported_globals,
+            body_validated,
+        )
+    };
+    Ok(IncrementalModule {
+        decoded: m,
+        body_validated,
+        features: *features,
+        limits: limits.clone(),
+        tags,
+        type_data,
+        type_work_used,
+        funcs,
+        imported_funcs,
+        exact_func_imports,
+        declared_funcs,
+        globals,
+        tables,
+        memories,
+        imported_globals,
+    })
+}
+
 /// Decodes and validates a WebAssembly binary module under `features` and `limits`.
 pub fn validate(
     bytes: &[u8],
@@ -507,215 +1013,7 @@ pub fn validate(
             )
         })?;
     let validation = (|| -> Result<()> {
-        types::validate_types(&c)?;
-        for t in &m.types {
-            c.enabled(features.multi_value || t.results.len() <= 1)?;
-            for v in t.params.iter().chain(&t.results) {
-                c.valtype(*v)?
-            }
-        }
-        let mut exact_imports = Vec::new();
-        for im in &m.imports {
-            match &im.kind {
-                ImportKind::Func(t) => {
-                    let ti = t.0 as usize;
-                    c.ty(ti)?;
-                    c.funcs.to_mut().push(ti);
-                    exact_imports.push(false);
-                }
-                ImportKind::ExactFunc(t) => {
-                    c.enabled(features.custom_descriptors)?;
-                    let ti = t.0 as usize;
-                    c.ty(ti)?;
-                    c.funcs.to_mut().push(ti);
-                    exact_imports.push(true);
-                }
-                ImportKind::Global(t) => {
-                    c.enabled(!t.mutable || features.mutable_globals)?;
-                    c.globals.to_mut().push(*t);
-                    c.imported_globals += 1
-                }
-                ImportKind::Table(t) => c.tables.to_mut().push(*t),
-                ImportKind::Memory(t) => c.memories.to_mut().push(*t),
-                ImportKind::Tag(t) => c.add_tag(*t)?,
-            }
-        }
-        c.imported_funcs = exact_imports.len();
-        c.exact_func_imports = std::sync::Arc::new(exact_imports);
-        for t in &m.tags {
-            c.add_tag(*t)?;
-        }
-        for t in &m.functions {
-            let ti = t.0 as usize;
-            c.ty(ti)?;
-            c.funcs.to_mut().push(ti);
-        }
-        c.tables.to_mut().extend(&m.tables);
-        c.memories.to_mut().extend(&m.memories);
-        c.enabled(features.multi_memory || c.memories.len() <= 1)?;
-        c.enabled(features.reference_types || c.tables.len() <= 1)?;
-        budget(
-            c.funcs.len() <= limits.max_functions
-                && c.globals.len() + m.globals.len() <= limits.max_globals
-                && c.tables.len() <= limits.max_tables
-                && c.memories.len() <= limits.max_memories
-                && c.tags.len() <= limits.max_tags,
-            "imported declaration limits exceeded",
-        )?;
-        for t in c.memories.iter() {
-            c.enabled(t.index_type == IndexType::I32 || features.memory64)?;
-            c.enabled(!t.shared || features.threads)?;
-            c.enabled(t.page_size_log2 == 16 || features.custom_page_sizes)?;
-            check(t.limits.is_valid(), "invalid memory limits")?;
-            check(
-                t.page_size_log2 == 0 || t.page_size_log2 == 16,
-                "invalid page size",
-            )?;
-            let max = if t.index_type == IndexType::I32 {
-                (1u64 << (32 - t.page_size_log2)).min(u32::MAX as u64)
-            } else {
-                if t.page_size_log2 == 0 {
-                    u64::MAX
-                } else {
-                    1u64 << (64 - t.page_size_log2)
-                }
-            };
-            check(
-                t.limits.min <= max && t.limits.max.is_none_or(|v| v <= max),
-                "memory exceeds address space",
-            )?;
-            check(
-                !t.shared || t.limits.max.is_some(),
-                "shared memory requires maximum",
-            )?;
-        }
-        for t in c.tables.iter() {
-            c.enabled(t.index_type == IndexType::I32 || features.memory64)?;
-            check(
-                t.index_type != IndexType::I32
-                    || (t.limits.min <= u32::MAX as u64
-                        && t.limits.max.is_none_or(|n| n <= u32::MAX as u64)),
-                "table limits overflow",
-            )?;
-            check(t.limits.is_valid(), "invalid table limits")?;
-            if t.element != RefType::FUNCREF {
-                c.valtype(ValType::Ref(t.element))?;
-            }
-        }
-        for t in c.globals.iter() {
-            c.valtype(t.value)?;
-        }
-        // Precompute declared function references ONCE before validating constant expressions
-        // and function bodies so `0xd2` (`ref.func`) is O(1) everywhere.
-        let mut declared = HashSet::new();
-        for e in &m.exports {
-            if e.kind == ExternalKind::Func {
-                declared.insert(e.index);
-            }
-        }
-        for j in m
-            .elements
-            .iter()
-            .flat_map(|e| e.init.iter().flatten())
-            .chain(m.globals.iter().flat_map(|g| g.init.iter()))
-            .chain(m.table_inits.iter().filter_map(|v| v.as_ref()).flatten())
-        {
-            if j.opcode == 0xd2
-                && let Immediate::Index(x) = j.immediate
-            {
-                declared.insert(x);
-            }
-        }
-        c.declared_funcs = std::sync::Arc::new(declared);
-        for (n, init) in m.table_inits.iter().enumerate() {
-            if let Some(init) = init {
-                c.constant(init, ValType::Ref(m.tables[n].element))?
-            } else {
-                check(
-                    m.tables[n].element.nullable,
-                    "nonnullable table requires initializer",
-                )?;
-            }
-        }
-        for g in &m.globals {
-            c.valtype(g.ty.value)?;
-            c.constant(&g.init, g.ty.value)?;
-            c.globals.to_mut().push(g.ty)
-        }
-        let mut names = HashSet::new();
-        for e in &m.exports {
-            if e.kind == ExternalKind::Global
-                && let Some(g) = c.globals.get(e.index as usize)
-            {
-                c.enabled(!g.mutable || features.mutable_globals)?;
-            }
-            check(names.insert(&e.name), "duplicate export")?;
-            let n = match e.kind {
-                ExternalKind::Func => c.funcs.len(),
-                ExternalKind::Table => c.tables.len(),
-                ExternalKind::Memory => c.memories.len(),
-                ExternalKind::Global => c.globals.len(),
-                ExternalKind::Tag => c.tags.len(),
-            };
-            check((e.index as usize) < n, "export index out of bounds")?;
-        }
-        if let Some(s) = m.start {
-            let ti = *c
-                .funcs
-                .get(s.0 as usize)
-                .ok_or_else(|| invalid("start index out of bounds"))?;
-            let t = c.ty(ti)?;
-            check(
-                t.params.is_empty() && t.results.is_empty(),
-                "start function must have empty signature",
-            )?
-        }
-        c.enabled(m.data_count.is_none() || features.bulk_memory)?;
-        for d in &m.data {
-            c.enabled(matches!(d.mode, SegmentMode::Active { .. }) || features.bulk_memory)?;
-            if let SegmentMode::Active { index, offset } = &d.mode {
-                let t = c
-                    .memories
-                    .get(*index as usize)
-                    .ok_or_else(|| invalid("data memory index out of bounds"))?;
-                c.constant(offset, t.index_type.val_type())?
-            }
-        }
-        for e in &m.elements {
-            if features.reference_types {
-                c.valtype(ValType::Ref(e.ty))?;
-            }
-            c.enabled(matches!(e.mode, SegmentMode::Active { .. }) || features.bulk_memory)?;
-            if let SegmentMode::Active { index, offset } = &e.mode {
-                let t = c
-                    .tables
-                    .get(*index as usize)
-                    .ok_or_else(|| invalid("element table index out of bounds"))?;
-                check(
-                    value_subtype(ValType::Ref(e.ty), ValType::Ref(t.element), &c.types),
-                    "element table type mismatch",
-                )?;
-                c.constant(offset, t.index_type.val_type())?
-            }
-            for x in &e.init {
-                if !features.reference_types
-                    && x.len() == 2
-                    && x[0].opcode == 0xd2
-                    && x[1].opcode == 0x0b
-                {
-                    check(
-                        index(&x[0])? < c.funcs.len(),
-                        "element function index out of bounds",
-                    )?;
-                } else {
-                    c.constant(x, ValType::Ref(e.ty))?;
-                }
-            }
-        }
-        check(
-            m.functions.len() == m.code.len(),
-            "function/code count mismatch",
-        )?;
+        validate_module_shell(&mut c)?;
         // Pre-check aggregate `(params + declared locals)` across all functions BEFORE allocating
         // per-body local vectors or launching parallel validation workers.
         let mut total_fn_locals = 0usize;

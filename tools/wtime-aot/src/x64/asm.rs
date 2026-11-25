@@ -2254,6 +2254,9 @@ impl Asm {
     pub fn pmuludq(&mut self, d: Xmm, s: Xmm) {
         self.sse_rr(Some(0x66), 0xf4, d, s);
     }
+    pub fn pmulhuw(&mut self, d: Xmm, s: Xmm) {
+        self.sse_rr(Some(0x66), 0xe4, d, s);
+    }
     pub fn pmulhrsw(&mut self, d: Xmm, s: Xmm) {
         self.sse_38_rr(Some(0x66), 0x0b, d, s);
     }
@@ -2732,6 +2735,183 @@ impl Asm {
     pub fn vextracti128_xy(&mut self, dst: Xmm, src: Xmm, imm: u8) {
         self.vex3_ymm_rr(3, 1, false, src, None, dst, 0x39);
         self.emit_u8(imm & 1);
+    }
+
+    /// Emits a 3-byte VEX prefix (`0xC4`) for 128-bit (`L=0`) register-register instructions.
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_xmm_rr(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        rm: Xmm,
+        op: u8,
+    ) {
+        let r_inv = u8::from(reg.hi() == 0);
+        let b_inv = u8::from(rm.hi() == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (1 << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (pp & 0x03));
+        self.emit_u8(op);
+        self.modrm_reg(reg.lo(), rm.lo());
+    }
+
+    /// Emits a 3-byte VEX prefix (`0xC4`) for 128-bit (`L=0`) register-memory instructions.
+    #[allow(clippy::too_many_arguments)]
+    fn vex3_xmm_mem(
+        &mut self,
+        map: u8,
+        pp: u8,
+        w: bool,
+        reg: Xmm,
+        vvvv: Option<Xmm>,
+        mem: Mem,
+        op: u8,
+    ) {
+        let (x_hi, b_hi) = match mem {
+            Mem::BaseDisp { base, .. } => (0, base.hi()),
+            Mem::BaseIndexDisp { base, index, .. } => (index.hi(), base.hi()),
+        };
+        let r_inv = u8::from(reg.hi() == 0);
+        let x_inv = u8::from(x_hi == 0);
+        let b_inv = u8::from(b_hi == 0);
+        let v = vvvv.map_or(0x0f, |x| (!x.id()) & 0x0f);
+        self.emit_u8(0xc4);
+        self.emit_u8((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (map & 0x1f));
+        self.emit_u8((u8::from(w) << 7) | (v << 3) | (pp & 0x03));
+        self.emit_u8(op);
+        self.modrm_mem(reg.lo(), mem);
+    }
+
+    /// Emits a 3-byte VEX 256-bit immediate shift (`VEX.256.66.0F.WIG op /reg_ext ib`).
+    fn vex3_ymm_shift_imm(&mut self, op: u8, reg_ext: u8, dst: Xmm, src: Xmm, imm: u8) {
+        let b_inv = u8::from(src.hi() == 0);
+        let v = (!dst.id()) & 0x0f;
+        self.emit_u8(0xc4);
+        self.emit_u8((1 << 7) | (1 << 6) | (b_inv << 5) | 1);
+        self.emit_u8((v << 3) | (1 << 2) | 1);
+        self.emit_u8(op);
+        self.modrm_reg(reg_ext, src.lo());
+        self.emit_u8(imm);
+    }
+
+    // ---- AVX 128-bit 3-operand FP / SIMD instructions (L=0, zero upper YMM cleanly) ----
+
+    pub fn vmovdqu_mx(&mut self, mem: Mem, src: Xmm) {
+        self.vex3_xmm_mem(1, 2, false, src, None, mem, 0x7f);
+    }
+    pub fn vaddss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x58);
+    }
+    pub fn vsubss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x5c);
+    }
+    pub fn vmulss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x59);
+    }
+    pub fn vdivss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x5e);
+    }
+    pub fn vaddsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x58);
+    }
+    pub fn vsubsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x5c);
+    }
+    pub fn vmulsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x59);
+    }
+    pub fn vdivsd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 3, false, d, Some(a), b, 0x5e);
+    }
+    pub fn vaddpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x58);
+    }
+    pub fn vsubpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5c);
+    }
+    pub fn vmulpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x59);
+    }
+    pub fn vdivpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5e);
+    }
+    pub fn vminpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5d);
+    }
+    pub fn vmaxpd_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_xmm_rr(1, 1, false, d, Some(a), b, 0x5f);
+    }
+
+    // ---- AVX2 256-bit YMM byte-stencil & f64x4 instructions ----
+
+    /// `vpbroadcastw ymm, xmm` (`VEX.256.66.0F38.W0 79 /r`).
+    pub fn vpbroadcastw_yx(&mut self, dst: Xmm, src: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, dst, None, src, 0x79);
+    }
+    /// `vpmovzxbw ymm, m128` (`VEX.256.66.0F38.WIG 30 /r`).
+    pub fn vpmovzxbw_ym(&mut self, dst: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(2, 1, false, dst, None, mem, 0x30);
+    }
+    /// `vpaddw ymm, ymm, ymm` (`VEX.256.66.0F.WIG FD /r`).
+    pub fn vpaddw_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0xfd);
+    }
+    /// `vpmulhuw ymm, ymm, ymm` (`VEX.256.66.0F.WIG E4 /r`).
+    pub fn vpmulhuw_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0xe4);
+    }
+    /// `vpsrlw ymm, ymm, imm8` (`VEX.256.66.0F.WIG 71 /2 ib`).
+    pub fn vpsrlw_yyi(&mut self, dst: Xmm, src: Xmm, imm: u8) {
+        self.vex3_ymm_shift_imm(0x71, 2, dst, src, imm);
+    }
+    /// `vpackuswb ymm, ymm, ymm` (`VEX.256.66.0F.WIG 67 /r`).
+    pub fn vpackuswb_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0x67);
+    }
+    /// `vpermq ymm, ymm, imm8` (`VEX.256.66.0F3A.W1 00 /r ib`).
+    pub fn vpermq_yyi(&mut self, dst: Xmm, src: Xmm, imm: u8) {
+        self.vex3_ymm_rr(3, 1, true, dst, None, src, 0x00);
+        self.emit_u8(imm);
+    }
+    /// `vbroadcastsd ymm, xmm` (`VEX.256.66.0F38.W0 19 /r`).
+    pub fn vbroadcastsd_yx(&mut self, dst: Xmm, src: Xmm) {
+        self.vex3_ymm_rr(2, 1, false, dst, None, src, 0x19);
+    }
+    /// `vmovupd ymm, m256` (`VEX.256.66.0F.WIG 10 /r`).
+    pub fn vmovupd_ym(&mut self, dst: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 1, false, dst, None, mem, 0x10);
+    }
+    /// `vmovupd m256, ymm` (`VEX.256.66.0F.WIG 11 /r`).
+    pub fn vmovupd_my(&mut self, mem: Mem, src: Xmm) {
+        self.vex3_ymm_mem(1, 1, false, src, None, mem, 0x11);
+    }
+    pub fn vaddpd_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 1, false, dst, Some(a), mem, 0x58);
+    }
+    pub fn vsubpd_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 1, false, dst, Some(a), mem, 0x5c);
+    }
+    pub fn vmulpd_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 1, false, dst, Some(a), mem, 0x59);
+    }
+    pub fn vdivpd_yym(&mut self, dst: Xmm, a: Xmm, mem: Mem) {
+        self.vex3_ymm_mem(1, 1, false, dst, Some(a), mem, 0x5e);
+    }
+    pub fn vaddpd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0x58);
+    }
+    pub fn vsubpd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0x5c);
+    }
+    pub fn vmulpd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0x59);
+    }
+    pub fn vdivpd_yyy(&mut self, dst: Xmm, a: Xmm, b: Xmm) {
+        self.vex3_ymm_rr(1, 1, false, dst, Some(a), b, 0x5e);
     }
 
     /// `vzeroupper` (`C5 F8 77`): clears upper 128 bits of all YMM0..YMM15, eliminating AVX-SSE stalls.

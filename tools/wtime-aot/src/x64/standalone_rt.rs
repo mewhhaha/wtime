@@ -1752,7 +1752,7 @@ impl U1024 {
     }
 }
 
-fn build_ryu_pow5_tables() -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn build_ryu_pow5_tables() -> (Vec<u8>, Vec<u8>) {
     const DOUBLE_POW5_BITCOUNT: u32 = 125;
     const INV_COUNT: usize = 292;
     const POW_COUNT: usize = 326;

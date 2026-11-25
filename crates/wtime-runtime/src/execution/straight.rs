@@ -83,7 +83,8 @@ impl Store {
         self.current_fuel = local_fuel;
         result
     }
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    #[cfg_attr(debug_assertions, inline(never))]
     #[allow(clippy::too_many_arguments)]
     fn run_straight_inner<const FUEL: bool>(
         &mut self,

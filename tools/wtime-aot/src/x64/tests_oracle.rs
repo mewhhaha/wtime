@@ -3286,3 +3286,301 @@ fn oracle_hill3_autovec_psadbw_slp_f64x2_and_boundary_peel() {
         &[(256, 320), (1024, 1152)],
     );
 }
+
+#[test]
+fn oracle_step3_avx2_blur3_magic_hoist_and_f64x4() {
+    // Seed 0..256 with bytes including [255, 255, 255] extremes, plus f64 test vectors at
+    // 4096 (vals_a), 4128 (vals_b), and 4224 (vals_splat) via active data segments so
+    // store-to-load forwarding does not constant-fold away the memory loads we want SLP-fused!
+    let mut seed = vec![0u8; 256];
+    for (i, b) in seed.iter_mut().enumerate() {
+        *b = if i < 6 {
+            255
+        } else {
+            ((i.wrapping_mul(37).wrapping_add(11)) & 0xff) as u8
+        };
+    }
+    let vals_a: [f64; 4] = [1.5, -0.0, f64::INFINITY, f64::NAN];
+    let vals_b: [f64; 4] = [2.25, 0.0, -3.5, 4.0];
+    let vals_splat: [f64; 4] = [1.25, -2.5, 0.0, -0.0];
+    let mut f64_seg = Vec::new();
+    for v in vals_a.iter().chain(vals_b.iter()) {
+        f64_seg.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut splat_seg = Vec::new();
+    for v in &vals_splat {
+        splat_seg.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut data_sec = vec![3]; // 3 active segments
+    // seg 0: @0
+    data_sec.extend_from_slice(&[0, 0x41, 0, 0x0b]);
+    leb_u32(&mut data_sec, seed.len() as u32);
+    data_sec.extend_from_slice(&seed);
+    // seg 1: @4096 (vals_a @4096, vals_b @4128)
+    data_sec.extend_from_slice(&[0, 0x41]);
+    leb_i32(&mut data_sec, 4096);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, f64_seg.len() as u32);
+    data_sec.extend_from_slice(&f64_seg);
+    // seg 2: @4224 (vals_splat @4224)
+    data_sec.extend_from_slice(&[0, 0x41]);
+    leb_i32(&mut data_sec, 4224);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, splat_seg.len() as u32);
+    data_sec.extend_from_slice(&splat_seg);
+
+    // Helper: emit a boundary-clamped 3-tap stencil loop `[0..n)` writing to `dst_off`
+    // with `(b0 + b1 + b2)` divided by `div_op` (`0x6e` DivU / `0x76` ShrU) and `div_imm`,
+    // then returning a rolling hash of `dst[0..n)`.
+    let make_blur3 = |dst_off: u32, div_op: u8, div_imm: i32| -> Vec<u8> {
+        let mut b = vec![
+            0x41, 0, 0x21, 1, // i = 0
+            0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // if i >=u n break
+            // left = select(i - 1, 0, i)  (direct Op::Select on iv!)
+            0x20, 1, 0x41, 1, 0x6b, 0x41, 0, 0x20, 1, 0x1b, 0x21, 2,
+            // right = select(n - 1, i + 1, i + 1 >=u n)
+            0x20, 0, 0x41, 1, 0x6b, 0x20, 1, 0x41, 1, 0x6a, 0x20, 1, 0x41, 1, 0x6a, 0x20, 0, 0x4f,
+            0x1b, 0x21, 3,
+            // dst[i + dst_off] = (src[left] + src[i] + src[right]) <div_op> <div_imm>
+            0x20, 1, 0x20, 2, 0x2d, 0, 0, 0x20, 1, 0x2d, 0, 0, 0x6a, 0x20, 3, 0x2d, 0, 0, 0x6a,
+            0x41,
+        ];
+        leb_i32(&mut b, div_imm);
+        b.extend_from_slice(&[div_op, 0x3a, 0]);
+        leb_u32(&mut b, dst_off);
+        b.extend_from_slice(&[
+            0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b,
+            // rolling hash h = h * 31 + dst[i + dst_off]
+            0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f,
+            0x0d, 1, 0x20, 2, 0x41, 31, 0x6c, 0x20, 1, 0x2d, 0,
+        ]);
+        leb_u32(&mut b, dst_off);
+        b.extend_from_slice(&[
+            0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+        ]);
+        b
+    };
+
+    let b_blur3_d3 = make_blur3(512, 0x6e, 3); // triggers MemByteBlur3Div (d=3)
+    let b_blur3_shr2 = make_blur3(1024, 0x76, 2); // triggers MemByteBlur3Div (pow2 d=4 via ShrU 2)
+    let b_blur3_d2 = make_blur3(1536, 0x6e, 2); // MUST stay scalar (765/2 = 382 -> 126, NOT 255!)
+    let b_blur3_overlap = make_blur3(10, 0x6e, 3); // overlapping dst=10 (disjoint for n<=10, scalar for n>10)
+
+    // f4(n: i32) -> i32: loop exercising hoisted magic DivU & RemU for d = 3, 5, 7, 10, 13
+    // across edge values (0, 1, d-1, d, 0x7fffffff, 0x80000000, 0xffffffff).
+    let mut b_magic = vec![
+        0x41, 0, 0x21, 1, // i = 0
+        0x41, 0, 0x21, 2, // acc = 0
+        0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, // if i >=u n break
+        // x = i * 0x1234567 + 0x7ffffffc (hits wrap around 0x80000000 and 0xffffffff!)
+        0x20, 1, 0x41,
+    ];
+    leb_i32(&mut b_magic, 0x0123_4567);
+    b_magic.extend_from_slice(&[0x6c, 0x41]);
+    leb_i32(&mut b_magic, 0x7fff_fffc);
+    b_magic.extend_from_slice(&[0x6a, 0x21, 3]); // local 3 = x
+    for &(op, d) in &[
+        (0x6e, 3),
+        (0x70, 3),
+        (0x6e, 5),
+        (0x70, 5),
+        (0x6e, 7),
+        (0x70, 7),
+        (0x6e, 10),
+        (0x70, 10),
+        (0x6e, 13),
+        (0x70, 13),
+    ] {
+        b_magic.extend_from_slice(&[0x20, 2, 0x41, 31, 0x6c, 0x20, 3, 0x41]);
+        leb_i32(&mut b_magic, d);
+        b_magic.extend_from_slice(&[op, 0x73, 0x21, 2]);
+    }
+    b_magic.extend_from_slice(&[
+        0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2,
+    ]);
+
+    // f5(mode: i32) -> i64: exercises 256-bit `Op::F64x4BinMem` (memory rhs, both overlapping
+    // `dst = 4104 = lhs + 8` when mode==0 and disjoint `dst = 4168` when mode==1, with NaN/-0.0/+0.0/+Inf)
+    // and returns XOR of 4 result f64 bits.
+    let mut b_f64x4_mem = Vec::new();
+    // `dst = ((mode & 1) << 6) + 4104`: proven in-bounds (`<= 4168 + 32 <= 65536`) by dominator BCE!
+    b_f64x4_mem.extend_from_slice(&[0x20, 0, 0x41, 1, 0x71, 0x41, 6, 0x74, 0x41]);
+    leb_i32(&mut b_f64x4_mem, 4104);
+    b_f64x4_mem.extend_from_slice(&[0x6a, 0x21, 1]); // local 1 = dst
+    // Load all 4 from A (local 10 = 4096) and all 4 from B (local 11 = 4128), add, store 4 to dst.
+    b_f64x4_mem.push(0x41);
+    leb_i32(&mut b_f64x4_mem, 4096);
+    b_f64x4_mem.extend_from_slice(&[0x21, 10, 0x41]);
+    leb_i32(&mut b_f64x4_mem, 4128);
+    b_f64x4_mem.extend_from_slice(&[0x21, 11]);
+    for k in 0..4usize {
+        b_f64x4_mem.extend_from_slice(&[0x20, 10, 0x2b, 3, (k * 8) as u8, 0x21, (2 + k) as u8]);
+    }
+    for k in 0..4usize {
+        b_f64x4_mem.extend_from_slice(&[0x20, 11, 0x2b, 3, (k * 8) as u8, 0x21, (6 + k) as u8]);
+    }
+    for k in 0..4usize {
+        b_f64x4_mem.extend_from_slice(&[
+            0x20,
+            1,
+            0x20,
+            (2 + k) as u8,
+            0x20,
+            (6 + k) as u8,
+            0xa0, // f64.add
+            0x39,
+            3,
+            (k * 8) as u8,
+        ]);
+    }
+    // Return XOR of all 4 stored f64 bit patterns.
+    b_f64x4_mem.extend_from_slice(&[0x20, 1, 0x29, 3, 0]);
+    for k in 1..4usize {
+        b_f64x4_mem.extend_from_slice(&[0x20, 1, 0x29, 3, (k * 8) as u8, 0x85]);
+    }
+
+    // f6(scale: f64) -> i64: `scale` enters in `Xmm0`! In-place interleaved 4-wide `a[0..4] *= scale`,
+    // exercising `Op::F64x4BinMem { rhs_is_splat: true }` and verifying `Xmm0` preservation on SSE2!
+    let mut b_f64x4_splat = Vec::new();
+    // Interleaved in-place `a[k] = a[k] * scale` (k = 0..4) using local 1 = base (4224).
+    b_f64x4_splat.push(0x41);
+    leb_i32(&mut b_f64x4_splat, 4224);
+    b_f64x4_splat.extend_from_slice(&[0x21, 1]);
+    for k in 0..4usize {
+        b_f64x4_splat.extend_from_slice(&[
+            0x20,
+            1,
+            0x20,
+            1,
+            0x2b,
+            3,
+            (k * 8) as u8,
+            0x20,
+            0,    // scale (in Xmm0!)
+            0xa2, // f64.mul
+            0x39,
+            3,
+            (k * 8) as u8,
+        ]);
+    }
+    // Also use `scale` AFTER the F64x4BinMem to verify Xmm0 was restored intact!
+    b_f64x4_splat.extend_from_slice(&[0x20, 0, 0xbd]); // i64.reinterpret(scale)
+    for k in 0..4usize {
+        b_f64x4_splat.extend_from_slice(&[0x20, 1, 0x29, 3, (k * 8) as u8, 0x85]);
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7f], &[0x7e]), (&[0x7c], &[0x7e])]),
+        func_sec(&[0, 0, 0, 0, 0, 1, 2]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("blur3_d3", 0, 0),
+            ("blur3_shr2", 0, 1),
+            ("blur3_d2", 0, 2),
+            ("blur3_overlap", 0, 3),
+            ("magic_div_loop", 0, 4),
+            ("f64x4_mem", 0, 5),
+            ("f64x4_splat", 0, 6),
+        ]),
+        code_sec(&[
+            enc_body(&[(3, 0x7f)], &b_blur3_d3),
+            enc_body(&[(3, 0x7f)], &b_blur3_shr2),
+            enc_body(&[(3, 0x7f)], &b_blur3_d2),
+            enc_body(&[(3, 0x7f)], &b_blur3_overlap),
+            enc_body(&[(3, 0x7f)], &b_magic),
+            enc_body(&[(1, 0x7f), (8, 0x7c), (2, 0x7f)], &b_f64x4_mem),
+            enc_body(&[(1, 0x7f)], &b_f64x4_splat),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    // Verify IR passes actually emitted `MemByteBlur3Div` (for d=3 & shr2, NOT d=2) and `F64x4BinMem`!
+    {
+        let validated = wtime_validate::validate(
+            &wasm,
+            &super::module::x64_validate_features(),
+            &super::module::x64_validate_limits(),
+        )
+        .unwrap();
+        let decoded = validated.decoded();
+        let module = super::module::admit_x64_module(decoded).unwrap();
+        let mut irs = Vec::new();
+        for di in 0..decoded.code.len() {
+            irs.push(super::ir::lower_wasm_to_ir(decoded, &module, di).unwrap());
+        }
+        let effects = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+        for ir in &mut irs {
+            super::opt::optimize_func_stage2(ir, &module, &effects, None).unwrap();
+            super::verify::verify_ir(ir, &module).unwrap();
+        }
+        let has_blur = |fi: usize| {
+            irs[fi].blocks.iter().any(|bb| {
+                bb.insts
+                    .iter()
+                    .any(|ins| matches!(ins.op, super::ir::Op::MemByteBlur3Div { .. }))
+            })
+        };
+        let has_f64x4 = |fi: usize| {
+            irs[fi].blocks.iter().any(|bb| {
+                bb.insts
+                    .iter()
+                    .any(|ins| matches!(ins.op, super::ir::Op::F64x4BinMem { .. }))
+            })
+        };
+        assert!(has_blur(0), "blur3_d3 should emit Op::MemByteBlur3Div");
+        assert!(has_blur(1), "blur3_shr2 should emit Op::MemByteBlur3Div");
+        assert!(
+            !has_blur(2),
+            "blur3_d2 must NOT emit Op::MemByteBlur3Div (saturation hazard)"
+        );
+        let fmt_ops = |fi: usize| {
+            irs[fi]
+                .blocks
+                .iter()
+                .map(|b| b.insts.iter().map(|i| (i.res, i.op)).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            has_f64x4(5),
+            "f64x4_mem should emit Op::F64x4BinMem; ir={:?}",
+            fmt_ops(5)
+        );
+        assert!(
+            has_f64x4(6),
+            "f64x4_splat should emit Op::F64x4BinMem; ir={:?}",
+            fmt_ops(6)
+        );
+    }
+
+    let calls = vec![
+        c("blur3_d3", ArgSpec::I32(0)),
+        c("blur3_d3", ArgSpec::I32(1)),
+        c("blur3_d3", ArgSpec::I32(2)),
+        c("blur3_d3", ArgSpec::I32(3)),
+        c("blur3_d3", ArgSpec::I32(16)),
+        c("blur3_d3", ArgSpec::I32(17)),
+        c("blur3_d3", ArgSpec::I32(18)),
+        c("blur3_d3", ArgSpec::I32(31)),
+        c("blur3_d3", ArgSpec::I32(32)),
+        c("blur3_d3", ArgSpec::I32(67)),
+        c("blur3_d3", ArgSpec::I32(130)),
+        c("blur3_shr2", ArgSpec::I32(67)),
+        c("blur3_d2", ArgSpec::I32(64)),
+        c("blur3_overlap", ArgSpec::I32(8)),
+        c("blur3_overlap", ArgSpec::I32(40)),
+        c("magic_div_loop", ArgSpec::I32(0)),
+        c("magic_div_loop", ArgSpec::I32(64)),
+        c("f64x4_mem", ArgSpec::I32(0)),
+        c("f64x4_mem", ArgSpec::I32(1)),
+        c("f64x4_splat", ArgSpec::F64((-3.5f64).to_bits())),
+        c("f64x4_splat", ArgSpec::F64((-0.0f64).to_bits())),
+    ];
+    assert_oracle_matrix(
+        "step3_avx2_blur3_magic_f64x4",
+        &wasm,
+        &calls,
+        &[],
+        &[(512, 130), (1024, 67), (1536, 64), (4096, 160)],
+    );
+}

@@ -525,6 +525,31 @@ pub enum Op {
         count: Val,
         offset: u64,
     },
+    /// Bounds-checked-by-caller, non-overlapping 3-tap unsigned byte blur + constant unsigned
+    /// division over `k in 0..count` (`count` is a multiple of 16):
+    /// `mem[base + dst_off + k] = ((u32(mem[base + src_off + k]) + u32(mem[base + src_off + k + 1]) + u32(mem[base + src_off + k + 2])) /u divisor) as u8`.
+    /// Lowered to 16B/iter AVX2 `vpmovzxbw`/`vpaddw`/`vpmulhuw`/`vpackuswb` (or 8B/iter SSE2).
+    MemByteBlur3Div {
+        base: Val,
+        count: Val,
+        src_off: u64,
+        dst_off: u64,
+        divisor: u16,
+    },
+    /// Bounds-checked-by-caller 4×`f64` (256-bit) strictly bit-exact IEEE-754 elementwise map
+    /// (`mem[dst + dst_off .. +32] = op(mem[lhs + lhs_off .. +32], rhs_mem_or_splat)`).
+    /// Lowered to 256-bit AVX2 `vmovupd`/`v{add,sub,mul,div}pd` (`ymm`) + `vzeroupper` when
+    /// `isa.has_avx2`, or 2×128-bit SSE2 / NEON otherwise (zero FMA contraction).
+    F64x4BinMem {
+        op: FloatBinOp,
+        dst: Val,
+        dst_off: u64,
+        lhs: Val,
+        lhs_off: u64,
+        rhs: Val,
+        rhs_off: u64,
+        rhs_is_splat: bool,
+    },
 
     V128Splat {
         kind: SimdSplatKind,
@@ -615,6 +640,8 @@ impl Op {
             | Op::MemFill { .. }
             | Op::MemCopyConst { .. }
             | Op::MemFillConst { .. }
+            | Op::MemByteBlur3Div { .. }
+            | Op::F64x4BinMem { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
             | Op::Trap(_) => true,
@@ -739,9 +766,14 @@ impl Op {
                 f(dst);
                 f(val);
             }
-            Op::MemByteSum { base, count, .. } => {
+            Op::MemByteSum { base, count, .. } | Op::MemByteBlur3Div { base, count, .. } => {
                 f(base);
                 f(count);
+            }
+            Op::F64x4BinMem { dst, lhs, rhs, .. } => {
+                f(dst);
+                f(lhs);
+                f(rhs);
             }
             Op::Call { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {

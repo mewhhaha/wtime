@@ -21,6 +21,18 @@ impl<'a> Reader<'a> {
             features: FeatureSet::all_phase3_core(),
         }
     }
+    pub(crate) fn slice_with_offset(bytes: &'a [u8], base: usize) -> Self {
+        Self {
+            bytes,
+            pos: 0,
+            base,
+            memory64: true,
+            features: FeatureSet::all_phase3_core(),
+        }
+    }
+    pub(crate) fn remaining_slice(&self) -> &'a [u8] {
+        &self.bytes[self.pos..]
+    }
     /// Configures the feature policy (including `memory64` offset width) used while decoding.
     pub fn with_features(mut self, features: FeatureSet) -> Self {
         self.memory64 = features.memory64;

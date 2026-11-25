@@ -259,6 +259,95 @@ pub fn hex(bytes: &[u8]) -> String {
     to_hex(&digest(bytes))
 }
 
+/// Chunk size for parallel 256 KiB Merkle SHA-256 artifact sidecars (`merkle256k:<64-hex>`).
+pub const MERKLE_CHUNK_BYTES: usize = 256 << 10;
+const MERKLE_PREFIX: &str = "merkle256k:";
+
+/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 16
+/// threads. Uses fallible allocation and `spawn_scoped` with inline fallback.
+pub fn parallel_merkle_digest(bytes: &[u8]) -> Option<[u8; 32]> {
+    if bytes.len() <= MERKLE_CHUNK_BYTES {
+        let mut h = Sha256::new();
+        h.update(b"WTIME-MERKLE256K-1");
+        h.update(&(bytes.len() as u64).to_le_bytes());
+        h.update(&digest(bytes));
+        return Some(h.finish());
+    }
+    let n_chunks = bytes.len().div_ceil(MERKLE_CHUNK_BYTES);
+    let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
+    leaf_hashes.try_reserve_exact(n_chunks).ok()?;
+    leaf_hashes.resize(n_chunks, [0u8; 32]);
+    let n_threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(16)
+        .min(n_chunks);
+    let per_worker = n_chunks.div_ceil(n_threads);
+    let hash_range = |start_idx: usize, slice: &mut [[u8; 32]]| {
+        for (j, slot) in slice.iter_mut().enumerate() {
+            let off = (start_idx + j) * MERKLE_CHUNK_BYTES;
+            let end = (off + MERKLE_CHUNK_BYTES).min(bytes.len());
+            *slot = digest(&bytes[off..end]);
+        }
+    };
+    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
+    let mut n_unspawned = 0usize;
+    std::thread::scope(|s| {
+        let mut rem_leaves = leaf_hashes.as_mut_slice();
+        let mut chunk_idx = 0usize;
+        while !rem_leaves.is_empty() {
+            let take = per_worker.min(rem_leaves.len());
+            let (slice, rest) = rem_leaves.split_at_mut(take);
+            let start_idx = chunk_idx;
+            rem_leaves = rest;
+            chunk_idx += take;
+            if rem_leaves.is_empty() {
+                hash_range(start_idx, slice);
+            } else if std::thread::Builder::new()
+                .spawn_scoped(s, move || hash_range(start_idx, slice))
+                .is_err()
+            {
+                unspawned[n_unspawned] = Some((start_idx, take));
+                n_unspawned += 1;
+            }
+        }
+    });
+    for &(start_idx, take) in unspawned[..n_unspawned].iter().flatten() {
+        hash_range(start_idx, &mut leaf_hashes[start_idx..start_idx + take]);
+    }
+    let mut root = Sha256::new();
+    root.update(b"WTIME-MERKLE256K-1");
+    root.update(&(bytes.len() as u64).to_le_bytes());
+    for leaf in &leaf_hashes {
+        root.update(leaf);
+    }
+    Some(root.finish())
+}
+
+/// Computes the integrity sidecar digest for a cached build artifact.
+///
+/// Small artifacts (`<= 256 KiB`) emit plain 64-hex standard FIPS 180-4 SHA-256 (matching
+/// `sha256sum`); large artifacts (`> 256 KiB`) emit a self-describing `merkle256k:<64-hex>`
+/// parallel SHA-256 Merkle root so multi-MiB `.so` publication and cache-hit verification scale
+/// across cores.
+pub fn artifact_sidecar_digest(bytes: &[u8]) -> String {
+    if bytes.len() > MERKLE_CHUNK_BYTES
+        && let Some(root) = parallel_merkle_digest(bytes)
+    {
+        return format!("{MERKLE_PREFIX}{}", to_hex(&root));
+    }
+    hex(bytes)
+}
+
+/// Verifies `bytes` against an integrity sidecar line (plain 64-hex SHA-256 or `merkle256k:<64-hex>`).
+pub fn verify_artifact_sidecar(bytes: &[u8], expected_trimmed: &str) -> bool {
+    if let Some(expected_hex) = expected_trimmed.strip_prefix(MERKLE_PREFIX) {
+        expected_hex.len() == 64
+            && parallel_merkle_digest(bytes).is_some_and(|root| to_hex(&root) == expected_hex)
+    } else {
+        expected_trimmed.len() == 64 && hex(bytes) == expected_trimmed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +384,21 @@ mod tests {
             }
             assert_eq!(one_shot, inc.hex(), "mismatch at len {len}");
         }
+        // Verify sidecar helper on both small (plain 64-hex) and large (>256 KiB merkle256k) payloads.
+        let small_dig = artifact_sidecar_digest(b"hello-small");
+        assert_eq!(small_dig.len(), 64);
+        assert!(verify_artifact_sidecar(b"hello-small", &small_dig));
+        assert!(!verify_artifact_sidecar(b"hello-smalL", &small_dig));
+
+        let mut big = vec![0x5au8; MERKLE_CHUNK_BYTES * 2 + 17];
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(131) ^ (i >> 8)) as u8;
+        }
+        let big_dig = artifact_sidecar_digest(&big);
+        assert!(big_dig.starts_with(MERKLE_PREFIX));
+        assert!(verify_artifact_sidecar(&big, &big_dig));
+        // Flip a byte in the middle chunk and confirm tamper detection.
+        big[MERKLE_CHUNK_BYTES + 5] ^= 0x01;
+        assert!(!verify_artifact_sidecar(&big, &big_dig));
     }
 }

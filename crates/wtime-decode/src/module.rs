@@ -383,12 +383,86 @@ fn field(r: &mut Reader) -> Result<FieldType> {
         mutable: boolean(r)?,
     })
 }
+/// Pre-validated structural metrics for a function body skipped during incremental decoding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CachedBodyMetrics {
+    /// Total declared local slots in the body (excluding function parameters).
+    pub total_locals: u32,
+    /// Number of decoded instructions in the body (including terminating `end`).
+    pub insn_count: usize,
+    /// Number of variable-length immediate elements (`br_table`, `try_table`) in the body.
+    pub imm_elems: usize,
+    /// Whether the body contains a bulk memory/data instruction requiring a DataCount section.
+    pub saw_data_count_op: bool,
+}
+
+/// Decodes a single function body from `bytes[span.start..span.end]` under `features` and `policy`.
+pub fn decode_single_function_body(
+    bytes: &[u8],
+    span: Span,
+    features: &FeatureSet,
+    policy: &ResourceLimits,
+) -> Result<FunctionBody> {
+    let slice = bytes
+        .get(span.start..span.end)
+        .ok_or_else(|| Error::new(ErrorKind::Decode, "function body span out of bounds"))?;
+    let reader = Reader::slice_with_offset(slice, span.start).with_features(*features);
+    let parsed = parse_function_body(reader, policy, None, true)?;
+    if parsed.total_locals as usize > policy.max_locals {
+        return Err(Error::new(ErrorKind::ResourceLimit, "local limit"));
+    }
+    if parsed.insn_count > policy.max_instructions
+        || parsed.imm_limit_exceeded
+        || parsed.imm_elems > policy.max_instructions
+    {
+        return Err(Error::new(
+            ErrorKind::ResourceLimit,
+            "module instruction limit",
+        ));
+    }
+    Ok(FunctionBody {
+        locals: parsed.locals,
+        instructions: parsed.instructions,
+        offsets: parsed.offsets,
+        span: parsed.span,
+    })
+}
+
 /// Decodes a WebAssembly binary module under the given feature policy and resource limits.
 pub fn decode(
     bytes: &[u8],
-    _features: &FeatureSet,
+    features: &FeatureSet,
     policy: &ResourceLimits,
 ) -> Result<DecodedModule> {
+    decode_inner(bytes, features, policy, None).map(|(m, _)| m)
+}
+
+/// Decodes a WebAssembly binary module while allowing callers with a trusted prior validation cache
+/// to skip decoding instructions for unchanged function bodies via `skip_body`.
+///
+/// Every non-code section, code body framing/size, and aggregate module limit is still enforced
+/// identically to [`decode`]. Skipped bodies have empty `locals`/`instructions`/`offsets` with
+/// their exact `span` preserved, and the returned `Vec` records `Some(metrics)` for each skipped
+/// body index.
+pub fn decode_with_body_filter<F>(
+    bytes: &[u8],
+    features: &FeatureSet,
+    policy: &ResourceLimits,
+    skip_body: F,
+) -> Result<(DecodedModule, Vec<Option<CachedBodyMetrics>>)>
+where
+    F: Fn(usize, &[u8]) -> Option<CachedBodyMetrics> + Sync,
+{
+    decode_inner(bytes, features, policy, Some(&skip_body))
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_inner(
+    bytes: &[u8],
+    _features: &FeatureSet,
+    policy: &ResourceLimits,
+    skip_body: Option<&(dyn Fn(usize, &[u8]) -> Option<CachedBodyMetrics> + Sync)>,
+) -> Result<(DecodedModule, Vec<Option<CachedBodyMetrics>>)> {
     if bytes.len() > policy.max_module_bytes {
         return Err(Error::new(ErrorKind::ResourceLimit, "module byte limit"));
     }
@@ -423,6 +497,7 @@ pub fn decode(
     let mut decoded_func_count: usize = 0;
     let mut decoded_code_count: usize = 0;
     let mut decoded_data_count: usize = 0;
+    let mut skipped_metrics: Vec<Option<CachedBodyMetrics>> = Vec::new();
     let mut saw_data_count_op = false;
     let mut decl_limit_exceeded = false;
     let mut rec_group_limit_exceeded = false;
@@ -880,17 +955,34 @@ pub fn decode(
                             }
                         }
                     }
-                    let threads = policy.body_threads(bodies.iter().map(|b| b.remaining()).sum());
                     let keep_bodies =
                         !decl_limit_exceeded && !rec_group_limit_exceeded && !expr_limit_exceeded;
+                    let indexed_bodies: Vec<(usize, &Reader<'_>)> =
+                        bodies.iter().enumerate().collect();
+                    let active_bytes: usize = if let Some(filter) = skip_body {
+                        skipped_metrics = Vec::with_capacity(bodies.len());
+                        let mut sum = 0usize;
+                        for &(idx, b) in &indexed_bodies {
+                            let m_opt = filter(idx, b.remaining_slice());
+                            if m_opt.is_none() {
+                                sum = sum.saturating_add(b.remaining());
+                            }
+                            skipped_metrics.push(m_opt);
+                        }
+                        sum
+                    } else {
+                        bodies.iter().map(|b| b.remaining()).sum()
+                    };
+                    let threads = policy.body_threads(active_bytes);
                     // Share cache-line-isolated module-wide pre-reserved budgets across all workers
                     // via per-worker batched banks so parallel decoding never retains past `policy`
                     // limits while avoiding per-body atomic contention.
                     let shared_insns = AlignedAtomicUsize::new(expr_insns);
                     let shared_imm_elems = AlignedAtomicUsize::new(expr_imm_elems);
                     let shared_locals = AlignedAtomicUsize::new(0);
+                    let skipped_ref = &skipped_metrics;
                     let decoded = wtime_types::parallel::map_ordered(
-                        &bodies,
+                        &indexed_bodies,
                         threads,
                         || {
                             DecodeWorkerBudget::new(
@@ -902,7 +994,26 @@ pub fn decode(
                                 threads,
                             )
                         },
-                        |wb, b| parse_function_body(b.clone(), policy, Some(wb), keep_bodies),
+                        |wb, &(idx, b)| {
+                            if let Some(Some(cm)) = skipped_ref.get(idx) {
+                                let start = b.offset();
+                                let end = start + b.remaining();
+                                Ok(ParsedBody {
+                                    locals: Vec::new(),
+                                    total_locals: cm.total_locals,
+                                    insn_count: cm.insn_count,
+                                    imm_elems: cm.imm_elems,
+                                    dropped: false,
+                                    imm_limit_exceeded: cm.imm_elems > policy.max_instructions,
+                                    saw_data_count_op: cm.saw_data_count_op,
+                                    instructions: Vec::new(),
+                                    offsets: Vec::new(),
+                                    span: Span::new(start, end),
+                                })
+                            } else {
+                                parse_function_body(b.clone(), policy, Some(wb), keep_bodies)
+                            }
+                        },
                     );
                     let mut parsed_bodies = Vec::with_capacity(decoded.len());
                     let mut total_decoded_locals: usize = 0;
@@ -1118,7 +1229,7 @@ pub fn decode(
             "module declaration limit",
         ));
     }
-    Ok(m)
+    Ok((m, skipped_metrics))
 }
 struct ParsedBody {
     locals: Vec<ValType>,

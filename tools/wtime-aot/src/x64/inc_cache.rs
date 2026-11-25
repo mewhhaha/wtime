@@ -108,6 +108,52 @@ pub fn try_copy_slice<T: Copy>(src: &[T]) -> Option<Vec<T>> {
     Some(v)
 }
 
+/// Zero-copy byte buffer for cached machine code and local rodata: either newly emitted
+/// (`Owned`) or borrowed by byte range from `IncCacheData::backing` (`Slice`).
+#[derive(Clone)]
+pub enum CachedBytes {
+    Owned(Vec<u8>),
+    Slice { start: u32, len: u32 },
+}
+
+impl CachedBytes {
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            CachedBytes::Owned(v) => v.len(),
+            CachedBytes::Slice { len, .. } => *len as usize,
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn as_slice<'a>(&'a self, backing: Option<&'a [u8]>) -> &'a [u8] {
+        match self {
+            CachedBytes::Owned(v) => v.as_slice(),
+            CachedBytes::Slice { start, len } => {
+                let s = *start as usize;
+                let e = s + (*len as usize);
+                &backing.expect("inc_cache backing missing for Slice")[s..e]
+            }
+        }
+    }
+
+    pub fn into_vec(self, backing: Option<&[u8]>) -> Vec<u8> {
+        match self {
+            CachedBytes::Owned(v) => v,
+            CachedBytes::Slice { start, len } => {
+                let s = start as usize;
+                let e = s + (len as usize);
+                backing.expect("inc_cache backing missing for Slice")[s..e].to_vec()
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CachedFn {
     pub raw_body_hash: [u8; 32],
@@ -123,9 +169,9 @@ pub struct CachedFn {
     pub callee_trap_hash: [u8; 32],
     /// Pre-relaxation byte count charged to `CompileBudget` during emission.
     pub pre_relax_code_len: u32,
-    pub code: Vec<u8>,
+    pub code: CachedBytes,
     pub relocs: Vec<Reloc>,
-    pub local_rodata: Vec<u8>,
+    pub local_rodata: CachedBytes,
     pub jt_entries: Vec<(u32, u32, u32)>,
     /// Pre-built jump-table metadata so `into_asm` moves in O(1) with zero heap allocations.
     pub jt_labels: Vec<Option<u32>>,
@@ -133,17 +179,17 @@ pub struct CachedFn {
 }
 
 impl CachedFn {
-    pub fn into_asm(self) -> Asm {
+    pub fn into_asm(self, backing: Option<&[u8]>) -> Asm {
         let (jt_labels, jt_patches) = if self.jt_labels.is_empty() && !self.jt_entries.is_empty() {
             Asm::try_build_cached_jt(&self.jt_entries).unwrap_or_default()
         } else {
             (self.jt_labels, self.jt_patches)
         };
         Asm::from_cached_parts(
-            self.code,
+            self.code.into_vec(backing),
             self.pre_relax_code_len,
             self.relocs,
-            self.local_rodata,
+            self.local_rodata.into_vec(backing),
             jt_labels,
             jt_patches,
         )
@@ -155,6 +201,8 @@ pub struct IncCacheData {
     pub global_words: usize,
     pub hit_inline_cap: bool,
     pub funcs: Vec<CachedFn>,
+    /// Shared read-only backing buffer for `CachedBytes::Slice` entries loaded from disk.
+    pub backing: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 fn hash_u32(h: &mut Sha256, v: u32) {
@@ -381,7 +429,7 @@ pub fn hash_callee_effects(callees: &[u32], effects: &ModuleEffects) -> [u8; 32]
             | (u8::from(effects.writes_all_globals[f]) << 2)
             | (u8::from(effects.writes_all_tables[f]) << 3);
         h.update(&[flags]);
-        for &w in &effects.written_globals[f] {
+        for &w in effects.written_globals_slice(f) {
             hash_u64(&mut h, w);
         }
         hash_u64(&mut h, effects.written_tables[f]);
@@ -407,6 +455,13 @@ pub fn hash_callee_traps(
 fn cache_file_name(abi_hash: &[u8; 32]) -> String {
     let hex = to_hex(abi_hash);
     format!("{}.bin", &hex[..32])
+}
+
+/// Fast O(1) existence check for `<cache_dir>/x64-inc/<abi_hash>.bin` so cold builds avoid
+/// hashing all function bodies synchronously before validation/compilation.
+pub fn has_inc_cache(cache_dir: &Path, abi_hash: &[u8; 32]) -> bool {
+    let path = cache_dir.join("x64-inc").join(cache_file_name(abi_hash));
+    fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file())
 }
 
 #[cfg(unix)]
@@ -581,8 +636,10 @@ impl<'a> Reader<'a> {
 
 /// Decodes and validates a single `CachedFn` entry slice, returning `(entry, code_len,
 /// pre_relax_code_len, ro_len)`. Requires exact slice consumption (`r.pos == slice.len()`).
+/// Borrows `code` and `local_rodata` zero-copy via `CachedBytes::Slice` into `backing`.
 fn decode_cached_fn(
     slice: &[u8],
+    entry_abs_base: usize,
     expected_bh: &[u8; 32],
     n_defs: usize,
     n_total: usize,
@@ -654,11 +711,17 @@ fn decode_cached_fn(
     {
         return None;
     }
-    let code_slice = r.read_bytes(code_len)?;
-    let code = if is_changed {
-        Vec::new()
+    let code_rel_pos = r.pos;
+    let _code_slice = r.read_bytes(code_len)?;
+    let code = if is_changed || code_len == 0 {
+        CachedBytes::Owned(Vec::new())
     } else {
-        try_copy_slice(code_slice)?
+        let abs_start = u32::try_from(entry_abs_base.checked_add(code_rel_pos)?).ok()?;
+        let len_u32 = u32::try_from(code_len).ok()?;
+        CachedBytes::Slice {
+            start: abs_start,
+            len: len_u32,
+        }
     };
 
     let n_relocs = r.read_u32()? as usize;
@@ -719,16 +782,22 @@ fn decode_cached_fn(
     if ro_len > MAX_FN_LOCAL_RODATA_BYTES {
         return None;
     }
-    let ro_slice = r.read_bytes(ro_len)?;
+    let ro_rel_pos = r.pos;
+    let _ro_slice = r.read_bytes(ro_len)?;
     if let Some(max_off) = max_local_rodata_off
         && (ro_len == 0 || (max_off as usize) >= ro_len)
     {
         return None;
     }
-    let local_rodata = if is_changed {
-        Vec::new()
+    let local_rodata = if is_changed || ro_len == 0 {
+        CachedBytes::Owned(Vec::new())
     } else {
-        try_copy_slice(ro_slice)?
+        let abs_start = u32::try_from(entry_abs_base.checked_add(ro_rel_pos)?).ok()?;
+        let len_u32 = u32::try_from(ro_len).ok()?;
+        CachedBytes::Slice {
+            start: abs_start,
+            len: len_u32,
+        }
     };
 
     let n_jt = r.read_u32()? as usize;
@@ -841,7 +910,7 @@ pub fn load_inc_cache(
     }
     let bytes = load_inc_cache_raw(cache_dir, expected_abi_hash)?;
     decode_verified_inc_cache(
-        &bytes,
+        std::sync::Arc::new(bytes),
         expected_abi_hash,
         expected_n_imports,
         expected_n_defs,
@@ -852,8 +921,9 @@ pub fn load_inc_cache(
 }
 
 /// Decodes an already Merkle-verified incremental cache buffer from `load_inc_cache_raw`.
+/// Retains `bytes` as an immutable `Arc<Vec<u8>>` backing for zero-copy `CachedBytes::Slice`s.
 pub fn decode_verified_inc_cache(
-    bytes: &[u8],
+    bytes: std::sync::Arc<Vec<u8>>,
     expected_abi_hash: &[u8; 32],
     expected_n_imports: usize,
     expected_n_defs: usize,
@@ -900,7 +970,8 @@ pub fn decode_verified_inc_cache(
     // Format v6 offset table: `(n_defs + 1)` little-endian `u32` byte offsets relative to `entries`.
     let n_offs = n_defs.checked_add(1)?;
     let off_raw = r.read_bytes(n_offs.checked_mul(4)?)?;
-    let entries = &payload[r.pos..];
+    let entries_abs_base = r.pos;
+    let entries = &payload[entries_abs_base..];
     if entries.len() < n_defs.checked_mul(min_fn_wire)? {
         return None;
     }
@@ -939,9 +1010,11 @@ pub fn decode_verified_inc_cache(
 
     if n_defs < PARALLEL_INC_MIN_FUNCS {
         for (i, expected_bh) in expected_body_hashes.iter().enumerate() {
-            let slice = &entries[offsets[i] as usize..offsets[i + 1] as usize];
+            let off_i = offsets[i] as usize;
+            let slice = &entries[off_i..offsets[i + 1] as usize];
             let (cfn, code_len, pre_len, ro_len) = decode_cached_fn(
                 slice,
+                entries_abs_base + off_i,
                 expected_bh,
                 n_defs,
                 n_total,
@@ -978,9 +1051,11 @@ pub fn decode_verified_inc_cache(
                     return;
                 }
                 let i = start_idx + j;
-                let slice = &entries[offsets_ref[i] as usize..offsets_ref[i + 1] as usize];
+                let off_i = offsets_ref[i] as usize;
+                let slice = &entries[off_i..offsets_ref[i + 1] as usize];
                 match decode_cached_fn(
                     slice,
+                    entries_abs_base + off_i,
                     &expected_body_hashes[i],
                     n_defs,
                     n_total,
@@ -1043,6 +1118,7 @@ pub fn decode_verified_inc_cache(
         global_words,
         hit_inline_cap,
         funcs,
+        backing: Some(bytes),
     })
 }
 
@@ -1149,7 +1225,12 @@ fn fn_wire_len(f: &CachedFn, fixed_fn: usize) -> Option<usize> {
         .checked_add(f.jt_entries.len().checked_mul(12)?)
 }
 
-fn write_cached_fn(w: &mut SliceWriter<'_>, f: &CachedFn, global_words: usize) {
+fn write_cached_fn(
+    w: &mut SliceWriter<'_>,
+    f: &CachedFn,
+    global_words: usize,
+    backing: Option<&[u8]>,
+) {
     w.write_bytes(&f.raw_body_hash);
     let flags = u8::from(f.was_inlinable)
         | (u8::from(f.own_effects.writes_mem) << 1)
@@ -1195,8 +1276,9 @@ fn write_cached_fn(w: &mut SliceWriter<'_>, f: &CachedFn, global_words: usize) {
     w.write_bytes(&f.callee_trap_hash);
 
     w.write_u32(f.pre_relax_code_len);
-    w.write_u32(f.code.len() as u32);
-    w.write_bytes(&f.code);
+    let code_bytes = f.code.as_slice(backing);
+    w.write_u32(code_bytes.len() as u32);
+    w.write_bytes(code_bytes);
 
     w.write_u32(f.relocs.len() as u32);
     for r in &f.relocs {
@@ -1212,8 +1294,9 @@ fn write_cached_fn(w: &mut SliceWriter<'_>, f: &CachedFn, global_words: usize) {
         w.write_u32(val);
     }
 
-    w.write_u32(f.local_rodata.len() as u32);
-    w.write_bytes(&f.local_rodata);
+    let ro_bytes = f.local_rodata.as_slice(backing);
+    w.write_u32(ro_bytes.len() as u32);
+    w.write_bytes(ro_bytes);
 
     w.write_u32(f.jt_entries.len() as u32);
     for &(ro_off, tbl_off, lbl_off) in &f.jt_entries {
@@ -1284,6 +1367,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
 
     let global_words = data.global_words;
     let funcs = &data.funcs;
+    let backing = data.backing.as_deref().map(Vec::as_slice);
     let entries_buf = &mut out[entries_base..payload_len];
     if n_defs < PARALLEL_INC_MIN_FUNCS {
         let mut w = SliceWriter {
@@ -1291,7 +1375,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
             pos: 0,
         };
         for f in funcs {
-            write_cached_fn(&mut w, f, global_words);
+            write_cached_fn(&mut w, f, global_words, backing);
         }
         debug_assert_eq!(w.pos, entries_buf.len());
     } else {
@@ -1303,7 +1387,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
         let write_range = |start_idx: usize, end_idx: usize, slice: &mut [u8]| {
             let mut w = SliceWriter { buf: slice, pos: 0 };
             for f in &funcs[start_idx..end_idx] {
-                write_cached_fn(&mut w, f, global_words);
+                write_cached_fn(&mut w, f, global_words, backing);
             }
             debug_assert_eq!(w.pos, slice.len());
         };
@@ -1347,6 +1431,362 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
     out.extend_from_slice(&checksum);
 
     let target = dir.join(cache_file_name(&data.abi_hash));
+    for _ in 0..16 {
+        let seq = NEXT_INC_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!("tmp.{}.{seq}", std::process::id()));
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+            let nf = unix_nofollow_flag();
+            if nf != 0 {
+                opts.custom_flags(nf);
+            }
+        }
+        match opts.open(&tmp) {
+            Ok(mut f) => {
+                let ok = f
+                    .write_all(&out)
+                    .and_then(|()| fs::rename(&tmp, &target))
+                    .is_ok();
+                if !ok {
+                    let _ = fs::remove_file(&tmp);
+                }
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+// ============================================================================
+// Companion Validation & Admission Index (`v.<shell_hash>.vidx`)
+// ============================================================================
+
+const VIDX_MAGIC: &[u8; 8] = b"WTX64VID";
+const VIDX_VERSION: u32 = 1;
+const MAX_VIDX_FILE_BYTES: usize = 32 << 20;
+
+/// Per-body cached validation and `x64` admission summary for incremental validation skip.
+#[derive(Clone)]
+pub struct ValBodyEntry {
+    pub raw_body_hash: [u8; 32],
+    pub total_locals: u32,
+    pub insn_count: u32,
+    pub imm_elems: u32,
+    pub saw_data_count_op: bool,
+    pub sig_arity: u32,
+    pub br_table_entries: u32,
+    pub g_reads: Vec<(u32, u32)>,
+    pub g_writes: Vec<(u32, u32)>,
+    pub ci_pairs: Vec<(u32, u32)>,
+}
+
+/// Merkle-verified validation/admission/call-graph index keyed by `shell_hash`.
+pub struct ValIndexData {
+    pub shell_hash: [u8; 32],
+    pub abi_hash: [u8; 32],
+    pub topo_bottom_up: Vec<usize>,
+    pub in_cycle: Vec<bool>,
+    pub bodies: Vec<ValBodyEntry>,
+}
+
+fn read_uleb32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let mut out = 0u32;
+    let mut shift = 0u32;
+    for _ in 0..5 {
+        let b = *bytes.get(*pos)?;
+        *pos += 1;
+        let low = u32::from(b & 0x7f);
+        if shift == 28 && (b & 0xf0) != 0 {
+            return None;
+        }
+        out |= low << shift;
+        if (b & 0x80) == 0 {
+            return Some(out);
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// Shell digest and raw function-body byte spans `(start, end)` from [`scan_wasm_shell_and_body_spans`].
+pub type WasmShellAndSpans = ([u8; 32], Vec<(usize, usize)>);
+
+/// Quickly scans Wasm section headers to compute `shell_hash` (cryptographic hash of every
+/// non-custom, non-code section + compiler salt + ISA/target/opt/verify + body count) and
+/// exact raw byte spans `(start, end)` of every function body in the code section.
+///
+/// Returns `None` on any structural anomaly so callers fall back to full `wtime_validate::validate`.
+pub fn scan_wasm_shell_and_body_spans(
+    wasm: &[u8],
+    salt: &[u8; 32],
+    isa: TargetIsa,
+    opt: bool,
+    verify: bool,
+    target: super::module::X64Target,
+) -> Option<WasmShellAndSpans> {
+    if wasm.len() < 8 || &wasm[..8] != b"\0asm\x01\0\0\0" {
+        return None;
+    }
+    let mut h = Sha256::new();
+    h.update(VIDX_MAGIC);
+    hash_u32(&mut h, VIDX_VERSION);
+    h.update(salt);
+    h.update(&[
+        u8::from(isa.has_abm_bmi1),
+        u8::from(isa.has_bmi2),
+        u8::from(isa.has_avx2),
+        u8::from(opt),
+        u8::from(verify),
+        match target {
+            super::module::X64Target::BlotCdylib => 0,
+            super::module::X64Target::StandaloneExec => 1,
+        },
+    ]);
+    let mut pos = 8usize;
+    let mut last_rank = 0u8;
+    let mut seen_mask = 0u16;
+    let mut spans: Option<Vec<(usize, usize)>> = None;
+    while pos < wasm.len() {
+        let id = *wasm.get(pos)?;
+        pos += 1;
+        let len = read_uleb32(wasm, &mut pos)? as usize;
+        let end = pos.checked_add(len)?;
+        if end > wasm.len() {
+            return None;
+        }
+        if id == 0 {
+            pos = end;
+            continue;
+        }
+        let rank = match id {
+            1..=5 => id,
+            13 => 6,
+            6..=9 => id + 1,
+            12 => 11,
+            10 => 12,
+            11 => 13,
+            _ => return None,
+        };
+        if rank < last_rank || (seen_mask & (1u16 << id)) != 0 {
+            return None;
+        }
+        last_rank = rank;
+        seen_mask |= 1u16 << id;
+        if id == 10 {
+            let mut p = pos;
+            let n_defs = read_uleb32(wasm, &mut p)? as usize;
+            if n_defs > 200_000 {
+                return None;
+            }
+            let mut body_spans = try_vec_with_capacity::<(usize, usize)>(n_defs)?;
+            for _ in 0..n_defs {
+                let sz = read_uleb32(wasm, &mut p)? as usize;
+                let b_end = p.checked_add(sz)?;
+                if b_end > end {
+                    return None;
+                }
+                body_spans.push((p, b_end));
+                p = b_end;
+            }
+            if p != end {
+                return None;
+            }
+            h.update(&[10]);
+            hash_u32(&mut h, n_defs as u32);
+            spans = Some(body_spans);
+        } else {
+            h.update(&[id]);
+            hash_u32(&mut h, len as u32);
+            h.update(&wasm[pos..end]);
+        }
+        pos = end;
+    }
+    let body_spans = spans?;
+    Some((h.finish(), body_spans))
+}
+
+fn vidx_file_name(shell_hash: &[u8; 32]) -> String {
+    format!("v.{}.vidx", to_hex(shell_hash))
+}
+
+/// Fast O(1) existence check for `<cache_dir>/x64-inc/v.<shell_hash>.vidx`.
+pub fn has_val_index(cache_dir: &Path, shell_hash: &[u8; 32]) -> bool {
+    let path = cache_dir.join("x64-inc").join(vidx_file_name(shell_hash));
+    fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// Loads and Merkle-verifies `<cache_dir>/x64-inc/v.<shell_hash>.vidx`.
+pub fn load_val_index(
+    cache_dir: &Path,
+    expected_shell_hash: &[u8; 32],
+    expected_n_defs: usize,
+) -> Option<ValIndexData> {
+    let inc_dir = cache_dir.join("x64-inc");
+    let dir_meta = fs::symlink_metadata(&inc_dir).ok()?;
+    if dir_meta.file_type().is_symlink() || !dir_meta.file_type().is_dir() {
+        return None;
+    }
+    let canon_dir = crate::build::ensure_private_dir(&inc_dir).ok()?;
+    let path = canon_dir.join(vidx_file_name(expected_shell_hash));
+    let bytes = read_private_cache_file(&path)?;
+    if bytes.len() > MAX_VIDX_FILE_BYTES || bytes.len() < 120 {
+        return None;
+    }
+    let (payload, trailer) = bytes.split_at(bytes.len() - 32);
+    if parallel_payload_digest(payload)? != trailer {
+        return None;
+    }
+    let mut r = Reader {
+        buf: payload,
+        pos: 0,
+    };
+    if r.read_bytes(8)? != VIDX_MAGIC || r.read_u32()? != VIDX_VERSION {
+        return None;
+    }
+    let shell_hash = r.read_hash()?;
+    if &shell_hash != expected_shell_hash {
+        return None;
+    }
+    let abi_hash = r.read_hash()?;
+    let n_defs = r.read_u32()? as usize;
+    if n_defs != expected_n_defs {
+        return None;
+    }
+    let has_topo = r.read_u8()? != 0;
+    let (topo_bottom_up, in_cycle) = if has_topo {
+        r.check_remaining(n_defs, 4)?;
+        let mut topo = try_vec_with_capacity::<usize>(n_defs)?;
+        let raw_topo = r.read_bytes(n_defs.checked_mul(4)?)?;
+        for &ch in raw_topo.as_chunks::<4>().0 {
+            let idx = u32::from_le_bytes(ch) as usize;
+            if idx >= n_defs {
+                return None;
+            }
+            topo.push(idx);
+        }
+        let cyc_bytes = r.read_bytes(n_defs.div_ceil(8))?;
+        let mut cyc = try_vec_with_capacity::<bool>(n_defs)?;
+        for i in 0..n_defs {
+            cyc.push((cyc_bytes[i >> 3] & (1u8 << (i & 7))) != 0);
+        }
+        (topo, cyc)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut bodies = try_vec_with_capacity::<ValBodyEntry>(n_defs)?;
+    for _ in 0..n_defs {
+        let raw_body_hash = r.read_hash()?;
+        let total_locals = r.read_u32()?;
+        let insn_count = r.read_u32()?;
+        let imm_elems = r.read_u32()?;
+        let saw_data_count_op = r.read_u8()? != 0;
+        let sig_arity = r.read_u32()?;
+        let br_table_entries = r.read_u32()?;
+        let read_pairs = |r: &mut Reader<'_>| -> Option<Vec<(u32, u32)>> {
+            let n = r.read_u32()? as usize;
+            if n > 65_536 {
+                return None;
+            }
+            r.check_remaining(n, 8)?;
+            let mut out = try_vec_with_capacity(n)?;
+            for _ in 0..n {
+                out.push((r.read_u32()?, r.read_u32()?));
+            }
+            Some(out)
+        };
+        let g_reads = read_pairs(&mut r)?;
+        let g_writes = read_pairs(&mut r)?;
+        let ci_pairs = read_pairs(&mut r)?;
+        bodies.push(ValBodyEntry {
+            raw_body_hash,
+            total_locals,
+            insn_count,
+            imm_elems,
+            saw_data_count_op,
+            sig_arity,
+            br_table_entries,
+            g_reads,
+            g_writes,
+            ci_pairs,
+        });
+    }
+    if r.pos != payload.len() {
+        return None;
+    }
+    Some(ValIndexData {
+        shell_hash,
+        abi_hash,
+        topo_bottom_up,
+        in_cycle,
+        bodies,
+    })
+}
+
+/// Atomically saves `ValIndexData` to `<cache_dir>/x64-inc/v.<shell_hash>.vidx`. Best-effort.
+pub fn save_val_index(cache_dir: &Path, data: &ValIndexData) {
+    let Ok(dir) = crate::build::ensure_private_dir(&cache_dir.join("x64-inc")) else {
+        return;
+    };
+    let n_defs = data.bodies.len();
+    let has_topo = data.topo_bottom_up.len() == n_defs && data.in_cycle.len() == n_defs;
+    let est =
+        85 + if has_topo {
+            n_defs * 4 + n_defs.div_ceil(8)
+        } else {
+            0
+        } + n_defs * 68
+            + 32;
+    let Some(mut out) = try_vec_with_capacity::<u8>(est.min(MAX_VIDX_FILE_BYTES)) else {
+        return;
+    };
+    out.extend_from_slice(VIDX_MAGIC);
+    out.extend_from_slice(&VIDX_VERSION.to_le_bytes());
+    out.extend_from_slice(&data.shell_hash);
+    out.extend_from_slice(&data.abi_hash);
+    out.extend_from_slice(&(n_defs as u32).to_le_bytes());
+    out.push(u8::from(has_topo));
+    if has_topo {
+        for &idx in &data.topo_bottom_up {
+            out.extend_from_slice(&(idx as u32).to_le_bytes());
+        }
+        let mut cyc_bytes = vec![0u8; n_defs.div_ceil(8)];
+        for (i, &c) in data.in_cycle.iter().enumerate() {
+            if c {
+                cyc_bytes[i >> 3] |= 1u8 << (i & 7);
+            }
+        }
+        out.extend_from_slice(&cyc_bytes);
+    }
+    for b in &data.bodies {
+        out.extend_from_slice(&b.raw_body_hash);
+        out.extend_from_slice(&b.total_locals.to_le_bytes());
+        out.extend_from_slice(&b.insn_count.to_le_bytes());
+        out.extend_from_slice(&b.imm_elems.to_le_bytes());
+        out.push(u8::from(b.saw_data_count_op));
+        out.extend_from_slice(&b.sig_arity.to_le_bytes());
+        out.extend_from_slice(&b.br_table_entries.to_le_bytes());
+        for pairs in [&b.g_reads, &b.g_writes, &b.ci_pairs] {
+            out.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+            for &(k, v) in pairs {
+                out.extend_from_slice(&k.to_le_bytes());
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        if out.len() + 32 > MAX_VIDX_FILE_BYTES {
+            return;
+        }
+    }
+    let Some(checksum) = parallel_payload_digest(&out) else {
+        return;
+    };
+    out.extend_from_slice(&checksum);
+
+    let target = dir.join(vidx_file_name(&data.shell_hash));
     for _ in 0..16 {
         let seq = NEXT_INC_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = dir.join(format!("tmp.{}.{seq}", std::process::id()));

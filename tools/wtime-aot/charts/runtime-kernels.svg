@@ -39,79 +39,83 @@
 <text class="lg" x="450" y="73.5">Wasmtime 49.0.3</text>
 <rect class="v8" x="561" y="64" width="11" height="11" rx="3"/>
 <text class="lg" x="577" y="73.5">V8 (Node v26.5.0)</text>
-<line class="grid" x1="208.3" x2="208.3" y1="94" y2="444.0"/>
-<text class="tick" x="208.3" y="462.0" text-anchor="middle">1 µs</text>
-<line class="grid" x1="304.9" x2="304.9" y1="94" y2="444.0"/>
-<text class="tick" x="304.9" y="462.0" text-anchor="middle">2 µs</text>
-<line class="grid" x1="432.4" x2="432.4" y1="94" y2="444.0"/>
-<text class="tick" x="432.4" y="462.0" text-anchor="middle">5 µs</text>
-<line class="grid" x1="528.9" x2="528.9" y1="94" y2="444.0"/>
-<text class="tick" x="528.9" y="462.0" text-anchor="middle">10 µs</text>
-<line class="grid" x1="625.4" x2="625.4" y1="94" y2="444.0"/>
-<text class="tick" x="625.4" y="462.0" text-anchor="middle">20 µs</text>
+<line class="grid" x1="150.4" x2="150.4" y1="94" y2="444.0"/>
+<text class="tick" x="150.4" y="462.0" text-anchor="middle">0.2 µs</text>
+<line class="grid" x1="247.9" x2="247.9" y1="94" y2="444.0"/>
+<text class="tick" x="247.9" y="462.0" text-anchor="middle">0.5 µs</text>
+<line class="grid" x1="321.7" x2="321.7" y1="94" y2="444.0"/>
+<text class="tick" x="321.7" y="462.0" text-anchor="middle">1 µs</text>
+<line class="grid" x1="395.5" x2="395.5" y1="94" y2="444.0"/>
+<text class="tick" x="395.5" y="462.0" text-anchor="middle">2 µs</text>
+<line class="grid" x1="493.0" x2="493.0" y1="94" y2="444.0"/>
+<text class="tick" x="493.0" y="462.0" text-anchor="middle">5 µs</text>
+<line class="grid" x1="566.8" x2="566.8" y1="94" y2="444.0"/>
+<text class="tick" x="566.8" y="462.0" text-anchor="middle">10 µs</text>
+<line class="grid" x1="640.5" x2="640.5" y1="94" y2="444.0"/>
+<text class="tick" x="640.5" y="462.0" text-anchor="middle">20 µs</text>
 <line class="ax" x1="136.0" x2="136.0" y1="94" y2="444.0"/>
 <text class="lb" x="124" y="142.5" text-anchor="end">graph_bfs</text>
-<g><title>graph_bfs — wtime-aot x64: 1.13 µs (5.8× vs WT)</title>
-<path class="x64" d="M136.0,104.0H221.9Q225.4,104.0 225.4,107.5V111.5Q225.4,115.0 221.9,115.0H136.0Z"/>
-<text class="v-hi" x="232.4" y="113.5" text-anchor="start">1.13 µs (5.8× vs WT)</text></g>
-<g><title>graph_bfs — wtime-aot c (-O2): 6.75 µs</title>
-<path class="bc" d="M136.0,118.5H470.8Q474.3,118.5 474.3,122.0V126.0Q474.3,129.5 470.8,129.5H136.0Z"/>
-<text class="v" x="481.3" y="128.0" text-anchor="start">6.75 µs</text></g>
-<g><title>graph_bfs — wtime-aot rust (-O3): 1.26 µs (5.2× vs WT)</title>
-<path class="rust" d="M136.0,133.0H236.5Q240.0,133.0 240.0,136.5V140.5Q240.0,144.0 236.5,144.0H136.0Z"/>
-<text class="v" x="247.0" y="142.5" text-anchor="start">1.26 µs (5.2× vs WT)</text></g>
-<g><title>graph_bfs — Wasmtime 49.0.3: 6.54 µs</title>
-<path class="wt" d="M136.0,147.5H466.2Q469.7,147.5 469.7,151.0V155.0Q469.7,158.5 466.2,158.5H136.0Z"/>
-<text class="v" x="476.7" y="157.0" text-anchor="start">6.54 µs</text></g>
-<g><title>graph_bfs — V8 (Node v26.5.0): 2.59 µs</title>
-<path class="v8" d="M136.0,162.0H337.6Q341.1,162.0 341.1,165.5V169.5Q341.1,173.0 337.6,173.0H136.0Z"/>
-<text class="v" x="348.1" y="171.5" text-anchor="start">2.59 µs</text></g>
+<g><title>graph_bfs — wtime-aot x64: 1.10 µs (5.9× vs WT)</title>
+<path class="x64" d="M136.0,104.0H328.1Q331.6,104.0 331.6,107.5V111.5Q331.6,115.0 328.1,115.0H136.0Z"/>
+<text class="v-hi" x="338.6" y="113.5" text-anchor="start">1.10 µs (5.9× vs WT)</text></g>
+<g><title>graph_bfs — wtime-aot c (-O2): 6.47 µs</title>
+<path class="bc" d="M136.0,118.5H516.9Q520.4,118.5 520.4,122.0V126.0Q520.4,129.5 516.9,129.5H136.0Z"/>
+<text class="v" x="527.4" y="128.0" text-anchor="start">6.47 µs</text></g>
+<g><title>graph_bfs — wtime-aot rust (-O3): 1.10 µs (5.9× vs WT)</title>
+<path class="rust" d="M136.0,133.0H328.8Q332.3,133.0 332.3,136.5V140.5Q332.3,144.0 328.8,144.0H136.0Z"/>
+<text class="v-hi" x="339.3" y="142.5" text-anchor="start">1.10 µs (5.9× vs WT)</text></g>
+<g><title>graph_bfs — Wasmtime 49.0.3: 6.49 µs</title>
+<path class="wt" d="M136.0,147.5H517.2Q520.7,147.5 520.7,151.0V155.0Q520.7,158.5 517.2,158.5H136.0Z"/>
+<text class="v" x="527.7" y="157.0" text-anchor="start">6.49 µs</text></g>
+<g><title>graph_bfs — V8 (Node v26.5.0): 2.58 µs</title>
+<path class="v8" d="M136.0,162.0H419.0Q422.5,162.0 422.5,165.5V169.5Q422.5,173.0 419.0,173.0H136.0Z"/>
+<text class="v" x="429.5" y="171.5" text-anchor="start">2.58 µs</text></g>
 <text class="lb" x="124" y="227.5" text-anchor="end">parser_hash</text>
-<g><title>parser_hash — wtime-aot x64: 3.32 µs (1.2× vs WT)</title>
-<path class="x64" d="M136.0,189.0H371.9Q375.4,189.0 375.4,192.5V196.5Q375.4,200.0 371.9,200.0H136.0Z"/>
-<text class="v-hi" x="382.4" y="198.5" text-anchor="start">3.32 µs (1.2× vs WT)</text></g>
-<g><title>parser_hash — wtime-aot c (-O2): 3.31 µs</title>
-<path class="bc" d="M136.0,203.5H371.4Q374.9,203.5 374.9,207.0V211.0Q374.9,214.5 371.4,214.5H136.0Z"/>
-<text class="v-hi" x="381.9" y="213.0" text-anchor="start">3.31 µs</text></g>
-<g><title>parser_hash — wtime-aot rust (-O3): 3.41 µs</title>
-<path class="rust" d="M136.0,218.0H375.8Q379.3,218.0 379.3,221.5V225.5Q379.3,229.0 375.8,229.0H136.0Z"/>
-<text class="v" x="386.3" y="227.5" text-anchor="start">3.41 µs</text></g>
-<g><title>parser_hash — Wasmtime 49.0.3: 3.84 µs</title>
-<path class="wt" d="M136.0,232.5H392.1Q395.6,232.5 395.6,236.0V240.0Q395.6,243.5 392.1,243.5H136.0Z"/>
-<text class="v" x="402.6" y="242.0" text-anchor="start">3.84 µs</text></g>
-<g><title>parser_hash — V8 (Node v26.5.0): 3.74 µs</title>
-<path class="v8" d="M136.0,247.0H388.4Q391.9,247.0 391.9,250.5V254.5Q391.9,258.0 388.4,258.0H136.0Z"/>
-<text class="v" x="398.9" y="256.5" text-anchor="start">3.74 µs</text></g>
+<g><title>parser_hash — wtime-aot x64: 3.37 µs</title>
+<path class="x64" d="M136.0,189.0H447.6Q451.1,189.0 451.1,192.5V196.5Q451.1,200.0 447.6,200.0H136.0Z"/>
+<text class="v-hi" x="458.1" y="198.5" text-anchor="start">3.37 µs</text></g>
+<g><title>parser_hash — wtime-aot c (-O2): 3.38 µs</title>
+<path class="bc" d="M136.0,203.5H447.7Q451.2,203.5 451.2,207.0V211.0Q451.2,214.5 447.7,214.5H136.0Z"/>
+<text class="v-hi" x="458.2" y="213.0" text-anchor="start">3.38 µs</text></g>
+<g><title>parser_hash — wtime-aot rust (-O3): 3.36 µs</title>
+<path class="rust" d="M136.0,218.0H447.3Q450.8,218.0 450.8,221.5V225.5Q450.8,229.0 447.3,229.0H136.0Z"/>
+<text class="v-hi" x="457.8" y="227.5" text-anchor="start">3.36 µs</text></g>
+<g><title>parser_hash — Wasmtime 49.0.3: 3.36 µs</title>
+<path class="wt" d="M136.0,232.5H447.2Q450.7,232.5 450.7,236.0V240.0Q450.7,243.5 447.2,243.5H136.0Z"/>
+<text class="v-hi" x="457.7" y="242.0" text-anchor="start">3.36 µs</text></g>
+<g><title>parser_hash — V8 (Node v26.5.0): 3.45 µs</title>
+<path class="v8" d="M136.0,247.0H450.0Q453.5,247.0 453.5,250.5V254.5Q453.5,258.0 450.0,258.0H136.0Z"/>
+<text class="v" x="460.5" y="256.5" text-anchor="start">3.45 µs</text></g>
 <text class="lb" x="124" y="312.5" text-anchor="end">image_filter</text>
-<g><title>image_filter — wtime-aot x64: 4.70 µs</title>
-<path class="x64" d="M136.0,274.0H420.3Q423.8,274.0 423.8,277.5V281.5Q423.8,285.0 420.3,285.0H136.0Z"/>
-<text class="v" x="430.8" y="283.5" text-anchor="start">4.70 µs</text></g>
-<g><title>image_filter — wtime-aot c (-O2): 4.20 µs</title>
-<path class="bc" d="M136.0,288.5H404.8Q408.3,288.5 408.3,292.0V296.0Q408.3,299.5 404.8,299.5H136.0Z"/>
-<text class="v" x="415.3" y="298.0" text-anchor="start">4.20 µs</text></g>
-<g><title>image_filter — wtime-aot rust (-O3): 3.61 µs (1.4× vs WT)</title>
-<path class="rust" d="M136.0,303.0H383.7Q387.2,303.0 387.2,306.5V310.5Q387.2,314.0 383.7,314.0H136.0Z"/>
-<text class="v-hi" x="394.2" y="312.5" text-anchor="start">3.61 µs (1.4× vs WT)</text></g>
-<g><title>image_filter — Wasmtime 49.0.3: 4.98 µs</title>
-<path class="wt" d="M136.0,317.5H428.4Q431.9,317.5 431.9,321.0V325.0Q431.9,328.5 428.4,328.5H136.0Z"/>
-<text class="v" x="438.9" y="327.0" text-anchor="start">4.98 µs</text></g>
-<g><title>image_filter — V8 (Node v26.5.0): 4.75 µs</title>
-<path class="v8" d="M136.0,332.0H421.9Q425.4,332.0 425.4,335.5V339.5Q425.4,343.0 421.9,343.0H136.0Z"/>
-<text class="v" x="432.4" y="341.5" text-anchor="start">4.75 µs</text></g>
+<g><title>image_filter — wtime-aot x64: 0.33 µs (22.0× vs WT)</title>
+<path class="x64" d="M136.0,274.0H200.8Q204.3,274.0 204.3,277.5V281.5Q204.3,285.0 200.8,285.0H136.0Z"/>
+<text class="v-hi" x="211.3" y="283.5" text-anchor="start">0.33 µs (22.0× vs WT)</text></g>
+<g><title>image_filter — wtime-aot c (-O2): 5.83 µs</title>
+<path class="bc" d="M136.0,288.5H505.9Q509.4,288.5 509.4,292.0V296.0Q509.4,299.5 505.9,299.5H136.0Z"/>
+<text class="v" x="516.4" y="298.0" text-anchor="start">5.83 µs</text></g>
+<g><title>image_filter — wtime-aot rust (-O3): 6.00 µs (1.2× vs WT)</title>
+<path class="rust" d="M136.0,303.0H508.8Q512.3,303.0 512.3,306.5V310.5Q512.3,314.0 508.8,314.0H136.0Z"/>
+<text class="v" x="519.3" y="312.5" text-anchor="start">6.00 µs (1.2× vs WT)</text></g>
+<g><title>image_filter — Wasmtime 49.0.3: 7.30 µs</title>
+<path class="wt" d="M136.0,317.5H529.8Q533.3,317.5 533.3,321.0V325.0Q533.3,328.5 529.8,328.5H136.0Z"/>
+<text class="v" x="540.3" y="327.0" text-anchor="start">7.30 µs</text></g>
+<g><title>image_filter — V8 (Node v26.5.0): 6.16 µs</title>
+<path class="v8" d="M136.0,332.0H511.6Q515.1,332.0 515.1,335.5V339.5Q515.1,343.0 511.6,343.0H136.0Z"/>
+<text class="v" x="522.1" y="341.5" text-anchor="start">6.16 µs</text></g>
 <text class="lb" x="124" y="397.5" text-anchor="end">ecs_kernel</text>
-<g><title>ecs_kernel — wtime-aot x64: 5.34 µs (3.7× vs WT)</title>
-<path class="x64" d="M136.0,359.0H438.2Q441.7,359.0 441.7,362.5V366.5Q441.7,370.0 438.2,370.0H136.0Z"/>
-<text class="v-hi" x="448.7" y="368.5" text-anchor="start">5.34 µs (3.7× vs WT)</text></g>
-<g><title>ecs_kernel — wtime-aot c (-O2): 10.5 µs</title>
-<path class="bc" d="M136.0,373.5H532.5Q536.0,373.5 536.0,377.0V381.0Q536.0,384.5 532.5,384.5H136.0Z"/>
-<text class="v" x="543.0" y="383.0" text-anchor="start">10.5 µs</text></g>
-<g><title>ecs_kernel — wtime-aot rust (-O3): 6.39 µs (3.1× vs WT)</title>
-<path class="rust" d="M136.0,388.0H463.1Q466.6,388.0 466.6,391.5V395.5Q466.6,399.0 463.1,399.0H136.0Z"/>
-<text class="v" x="473.6" y="397.5" text-anchor="start">6.39 µs (3.1× vs WT)</text></g>
-<g><title>ecs_kernel — Wasmtime 49.0.3: 19.8 µs</title>
-<path class="wt" d="M136.0,402.5H620.8Q624.3,402.5 624.3,406.0V410.0Q624.3,413.5 620.8,413.5H136.0Z"/>
-<text class="v" x="631.3" y="412.0" text-anchor="start">19.8 µs</text></g>
-<g><title>ecs_kernel — V8 (Node v26.5.0): 13.0 µs</title>
-<path class="v8" d="M136.0,417.0H562.1Q565.6,417.0 565.6,420.5V424.5Q565.6,428.0 562.1,428.0H136.0Z"/>
-<text class="v" x="572.6" y="426.5" text-anchor="start">13.0 µs</text></g>
+<g><title>ecs_kernel — wtime-aot x64: 5.82 µs (3.4× vs WT)</title>
+<path class="x64" d="M136.0,359.0H505.7Q509.2,359.0 509.2,362.5V366.5Q509.2,370.0 505.7,370.0H136.0Z"/>
+<text class="v-hi" x="516.2" y="368.5" text-anchor="start">5.82 µs (3.4× vs WT)</text></g>
+<g><title>ecs_kernel — wtime-aot c (-O2): 10.2 µs</title>
+<path class="bc" d="M136.0,373.5H565.1Q568.6,373.5 568.6,377.0V381.0Q568.6,384.5 565.1,384.5H136.0Z"/>
+<text class="v" x="575.6" y="383.0" text-anchor="start">10.2 µs</text></g>
+<g><title>ecs_kernel — wtime-aot rust (-O3): 6.17 µs (3.2× vs WT)</title>
+<path class="rust" d="M136.0,388.0H511.9Q515.4,388.0 515.4,391.5V395.5Q515.4,399.0 511.9,399.0H136.0Z"/>
+<text class="v" x="522.4" y="397.5" text-anchor="start">6.17 µs (3.2× vs WT)</text></g>
+<g><title>ecs_kernel — Wasmtime 49.0.3: 20.0 µs</title>
+<path class="wt" d="M136.0,402.5H637.2Q640.7,402.5 640.7,406.0V410.0Q640.7,413.5 637.2,413.5H136.0Z"/>
+<text class="v" x="647.7" y="412.0" text-anchor="start">20.0 µs</text></g>
+<g><title>ecs_kernel — V8 (Node v26.5.0): 12.7 µs</title>
+<path class="v8" d="M136.0,417.0H588.9Q592.4,417.0 592.4,420.5V424.5Q592.4,428.0 588.9,428.0H136.0Z"/>
+<text class="v" x="599.4" y="426.5" text-anchor="start">12.7 µs</text></g>
 </svg>

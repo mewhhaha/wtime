@@ -369,6 +369,57 @@ impl A64Asm {
         Ok(())
     }
 
+    /// Extracts resolved jump-table metadata `(rodata_off, target_code_offs)` for incremental caching.
+    pub fn resolved_jump_tables(&self) -> Result<Vec<(u32, Vec<u32>)>, String> {
+        let mut out = Vec::with_capacity(self.jump_tables.len());
+        for jt in &self.jump_tables {
+            let mut offs = Vec::with_capacity(jt.targets.len());
+            for &lbl in &jt.targets {
+                let target_off = self.labels[lbl.0]
+                    .ok_or_else(|| format!("aarch64: unbound jump table label {}", lbl.0))?;
+                let off32 = u32::try_from(target_off)
+                    .map_err(|_| "aarch64: jump table target exceeds u32".to_string())?;
+                offs.push(off32);
+            }
+            out.push((jt.rodata_off, offs));
+        }
+        Ok(out)
+    }
+
+    /// Reconstructs a link-ready `A64Asm` directly from cached pre-link parts.
+    pub fn from_cached_parts(
+        code: Vec<u8>,
+        relocs: Vec<A64Reloc>,
+        local_rodata: Vec<u8>,
+        jt_resolved: Vec<(u32, Vec<u32>)>,
+    ) -> Self {
+        let mut labels = Vec::new();
+        let mut jump_tables = Vec::with_capacity(jt_resolved.len());
+        for (rodata_off, target_offs) in jt_resolved {
+            let mut targets = Vec::with_capacity(target_offs.len());
+            for toff in target_offs {
+                let id = labels.len();
+                labels.push(Some(toff as usize));
+                targets.push(Label(id));
+            }
+            jump_tables.push(A64JumpTable {
+                rodata_off,
+                targets,
+            });
+        }
+        Self {
+            code,
+            relocs,
+            local_rodata,
+            jump_tables,
+            labels,
+            fixups: Vec::new(),
+            f32_pool: HashMap::new(),
+            f64_pool: HashMap::new(),
+            v128_pool: HashMap::new(),
+        }
+    }
+
     // ---- Integer ALU (register & immediate) ----
 
     #[inline]
@@ -730,6 +781,22 @@ impl A64Asm {
 
     pub fn mul(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg) {
         self.madd(is64, rd, rn, rm, Reg::XZR);
+    }
+
+    /// 64-bit unsigned high multiply: `rd = ((u128(rn) * u128(rm)) >> 64) as u64`.
+    pub fn umulh(&mut self, rd: Reg, rn: Reg, rm: Reg) {
+        self.emit(0x9bc0_7c00 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | rd.0 as u32);
+    }
+
+    /// Add with carry: `rd = rn + rm + C`.
+    pub fn adc(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg) {
+        self.emit(
+            Self::sf(is64)
+                | 0x1a00_0000
+                | ((rm.0 as u32) << 16)
+                | ((rn.0 as u32) << 5)
+                | rd.0 as u32,
+        );
     }
 
     pub fn udiv(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg) {

@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use wtime_types::ValType;
 
-use super::ir::{CmpBranchKind, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange};
+use super::ir::{CmpBranchKind, FloatBinOp, IntBinOp, IrFunc, Op, Term, Ty, Val, ValRange};
 use super::module::{MAX_FRAME_BYTES, X64Module};
 use super::regalloc::{
     AllocConfig, AllocResult, HelperKind, Loc, MASK_GP_CALLER, MASK_RAX_RDX, MASK_RCX,
@@ -852,6 +852,48 @@ fn verify_inst_types(
             expect_ty(ir, bi, base, Ty::I32, "MemByteSum.base")?;
             expect_ty(ir, bi, count, Ty::I32, "MemByteSum.count")?;
             expect_res(ir, bi, res, Ty::I32, "MemByteSum")?;
+        }
+        Op::MemByteBlur3Div {
+            base,
+            count,
+            divisor,
+            ..
+        } => {
+            if divisor < 3 {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: MemByteBlur3Div divisor {divisor} < 3",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, base, Ty::I32, "MemByteBlur3Div.base")?;
+            expect_ty(ir, bi, count, Ty::I32, "MemByteBlur3Div.count")?;
+            expect_no_res(ir, bi, res, "MemByteBlur3Div")?;
+        }
+        Op::F64x4BinMem {
+            op,
+            dst,
+            lhs,
+            rhs,
+            rhs_is_splat,
+            ..
+        } => {
+            if !matches!(
+                op,
+                FloatBinOp::Add | FloatBinOp::Sub | FloatBinOp::Mul | FloatBinOp::Div
+            ) {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: unsupported F64x4BinMem op {op:?}",
+                    ir.func_index
+                ));
+            }
+            expect_ty(ir, bi, dst, addr_ty, "F64x4BinMem.dst")?;
+            expect_ty(ir, bi, lhs, addr_ty, "F64x4BinMem.lhs")?;
+            if rhs_is_splat {
+                expect_ty(ir, bi, rhs, Ty::F64, "F64x4BinMem.rhs_splat")?;
+            } else {
+                expect_ty(ir, bi, rhs, addr_ty, "F64x4BinMem.rhs")?;
+            }
+            expect_no_res(ir, bi, res, "F64x4BinMem")?;
         }
         Op::V128Splat { kind, val } => {
             expect_ty(ir, bi, val, kind.scalar_ty(), "V128Splat")?;

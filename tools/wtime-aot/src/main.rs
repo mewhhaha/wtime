@@ -226,6 +226,7 @@ fn main() {
             optimize: true,
             jobs: jobs.unwrap_or(0) as usize,
             deadline: Some(deadline),
+            ..Default::default()
         };
         let elf_bytes = match aarch64::compile_wasm_to_aarch64(&bytes, &opts) {
             Ok(img) => img,

@@ -1252,7 +1252,7 @@ pub(crate) fn verified_cached_artifact_bytes(
     }
     let expected = fs::read_to_string(digest_file).ok()?;
     let bytes = fs::read(artifact).ok()?;
-    (crate::sha256::hex(&bytes) == expected.trim()).then_some(bytes)
+    crate::sha256::verify_artifact_sidecar(&bytes, expected.trim()).then_some(bytes)
 }
 
 /// Verifies `artifact` is a non-symlink immutable regular file matching its `.sha256` sidecar.
@@ -1357,7 +1357,7 @@ fn build_c(
                     staged.display()
                 ));
             }
-            let so_sha = crate::sha256::hex(&so_bytes);
+            let so_sha = crate::sha256::artifact_sidecar_digest(&so_bytes);
             if let Err(e) = mark_artifact_immutable(&staged)
                 .and_then(|()| {
                     fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))
@@ -1409,7 +1409,8 @@ fn build_aarch64(
     check_deadline(deadline, options.time_limit)?;
     let cache = ensure_private_dir(cache)?;
     let gen_sha = generator_fingerprint::GENERATOR_BUILD_SHA256;
-    let wasm_sha = crate::sha256::digest(&wasm);
+    let wasm_sha = crate::sha256::parallel_merkle_digest(&wasm)
+        .unwrap_or_else(|| crate::sha256::digest(&wasm));
     let a64_target = match options.target {
         crate::codegen::Target::BlotCdylib => crate::x64::module::X64Target::BlotCdylib,
         crate::codegen::Target::GooseBin => crate::x64::module::X64Target::StandaloneExec,
@@ -1423,7 +1424,7 @@ fn build_aarch64(
         crate::codegen::Target::GooseBin => "program.sha256",
     };
     let mut key = Sha256::new();
-    field(&mut key, "wtime-aot build aarch64 1", &[]);
+    field(&mut key, "wtime-aot build aarch64 2", &[]);
     field(&mut key, "target", artifact_name.as_bytes());
     field(&mut key, "wasm digest", &wasm_sha);
     field(&mut key, "generator build sha256", &gen_sha);
@@ -1450,6 +1451,8 @@ fn build_aarch64(
         optimize: true,
         jobs: options.jobs.unwrap_or(0) as usize,
         deadline: Some(deadline),
+        inc_cache_dir: Some(cache.join("a64-inc")),
+        gen_fingerprint: gen_sha,
     };
     let elf_bytes =
         crate::aarch64::compile_wasm_to_aarch64(&wasm, &compile_opts).map_err(|e| match e {
@@ -1469,7 +1472,7 @@ fn build_aarch64(
     mark_file_immutable(&staged, 0o555).map_err(BuildError::Failed)?;
     fs::rename(&staged, &program)
         .map_err(|e| BuildError::Failed(format!("{}: {e}", program.display())))?;
-    let sha_hex = crate::sha256::hex(&elf_bytes);
+    let sha_hex = crate::sha256::artifact_sidecar_digest(&elf_bytes);
     publish_digest_sidecar(&entry, artifact_name, &sha_hex, &digest_file)
         .map_err(BuildError::Failed)?;
     publish_lock.release_checked(options.time_limit)?;
@@ -1635,10 +1638,10 @@ fn build_x64(
             opts.write(true).create_new(true);
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-            // Overlap staging file write + chmod with SHA-256 computation over `so_bytes`.
+            // Overlap staging file write + chmod with sidecar digest computation over `so_bytes`.
             let (write_res, so_sha) = std::thread::scope(|s| {
                 let h_sha = std::thread::Builder::new()
-                    .spawn_scoped(s, || crate::sha256::hex(&so_bytes))
+                    .spawn_scoped(s, || crate::sha256::artifact_sidecar_digest(&so_bytes))
                     .ok();
                 let wr = opts
                     .open(&staged)
@@ -1647,7 +1650,7 @@ fn build_x64(
                     .and_then(|()| mark_artifact_immutable(&staged));
                 let sha = h_sha
                     .and_then(|h| h.join().ok())
-                    .unwrap_or_else(|| crate::sha256::hex(&so_bytes));
+                    .unwrap_or_else(|| crate::sha256::artifact_sidecar_digest(&so_bytes));
                 (wr, sha)
             });
             // Write diagnostic `key.txt` and sweep any stale staging files (excluding our
@@ -2140,7 +2143,7 @@ fn cached(
             let staged = entry.join(format!("{artifact_name}.{}.{seq}", std::process::id()));
             fs::copy(&built, &staged).map_err(|e| format!("{}: {e}", built.display()))?;
             let bytes = fs::read(&staged).map_err(|e| format!("{}: {e}", staged.display()))?;
-            let sha = crate::sha256::hex(&bytes);
+            let sha = crate::sha256::artifact_sidecar_digest(&bytes);
             if let Err(e) = mark_artifact_immutable(&staged)
                 .and_then(|()| {
                     fs::rename(&staged, &program).map_err(|e| format!("{}: {e}", program.display()))

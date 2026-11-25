@@ -37,14 +37,24 @@ struct A64Vm {
     z: bool,
     c: bool,
     v_flag: bool,
-    /// Virtual address space segments `(base, bytes)`.
-    segs: Vec<(u64, Vec<u8>)>,
+    /// Virtual address space segments `(base, reserve_len, backing_bytes)`.
+    /// Any address in `[base + backing_bytes.len(), base + reserve_len)` is `PROT_NONE` (guard fault).
+    segs: Vec<(u64, u64, Vec<u8>)>,
     /// Next anonymous `mmap` address.
     next_mmap: u64,
     /// Emulated exit status from `SYS_EXIT_GROUP`.
     exited: Option<i32>,
-    /// Captured stderr bytes from `SYS_WRITE`.
+    /// Captured stdout bytes from `SYS_WRITE(fd=1)`.
+    stdout: Vec<u8>,
+    /// Captured stderr bytes from `SYS_WRITE(fd=2)`.
     stderr: Vec<u8>,
+    /// Emulated stdin bytes for `SYS_READ(fd=0)`.
+    stdin: Vec<u8>,
+    stdin_pos: usize,
+    /// Installed Linux arm64 `SIGSEGV` (`SA_SIGINFO`) handler address.
+    sigsegv_handler: Option<u64>,
+    /// Pending guard-page fault address to dispatch to `sigsegv_handler`.
+    pending_fault_addr: Option<u64>,
 }
 
 const RET_SENTINEL: u64 = 0xdead_beef_0000_0000;
@@ -63,29 +73,75 @@ impl A64Vm {
             segs: Vec::new(),
             next_mmap: 0x1000_0000,
             exited: None,
+            stdout: Vec::new(),
             stderr: Vec::new(),
+            stdin: Vec::new(),
+            stdin_pos: 0,
+            sigsegv_handler: None,
+            pending_fault_addr: None,
         };
-        vm.segs.push((img.rodata_vaddr, img.rodata.clone()));
-        vm.segs.push((img.text_vaddr, img.text.clone()));
-        // Host stack for calling exports.
+        vm.segs.push((
+            img.rodata_vaddr,
+            img.rodata.len() as u64,
+            img.rodata.clone(),
+        ));
+        vm.segs
+            .push((img.text_vaddr, img.text.len() as u64, img.text.clone()));
+        // Host stack for calling exports (and `_start` argc/argv = 0).
         let host_stack_base = vm.alloc_seg(256 * 1024);
         vm.sp = host_stack_base + 256 * 1024 - 64;
         vm
     }
 
     fn alloc_seg(&mut self, len: usize) -> u64 {
-        let al = (len + 0xffff) & !0xffff;
+        let al = (len as u64 + 0xffff) & !0xffff;
         let base = self.next_mmap;
-        self.next_mmap += al.max(0x10000) as u64;
-        self.segs.push((base, vec![0u8; len.max(1)]));
+        self.next_mmap += al.max(0x10000);
+        let actual = len.max(1);
+        self.segs.push((base, actual as u64, vec![0u8; actual]));
         base
     }
 
+    fn alloc_guard_seg(&mut self, reserve_len: u64) -> u64 {
+        let al = (reserve_len + 0xffff) & !0xffff;
+        let base = self.next_mmap;
+        self.next_mmap += al.max(0x10000);
+        self.segs.push((base, reserve_len, Vec::new()));
+        base
+    }
+
+    fn mprotect_rw(&mut self, addr: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        for (base, reserve_len, data) in &mut self.segs {
+            if addr >= *base && addr.saturating_add(len) <= base.saturating_add(*reserve_len) {
+                let need = (addr - *base + len) as usize;
+                if data.len() < need {
+                    data.resize(need, 0);
+                }
+                return;
+            }
+        }
+    }
+
+    fn is_guard_fault(&self, addr: u64, len: usize) -> bool {
+        let end = addr.saturating_add(len as u64);
+        self.segs.iter().any(|(base, reserve_len, data)| {
+            addr >= *base
+                && end <= base.saturating_add(*reserve_len)
+                && end > base.saturating_add(data.len() as u64)
+        })
+    }
+
     fn read_bytes(&self, addr: u64, len: usize) -> Result<&[u8], String> {
-        for (base, data) in &self.segs {
-            if addr >= *base && (addr - *base) as usize + len <= data.len() {
-                let off = (addr - *base) as usize;
-                return Ok(&data[off..off + len]);
+        for (base, _, data) in &self.segs {
+            if addr >= *base
+                && let Some(off) = (addr - *base).try_into().ok()
+                && let Some(end) = usize::checked_add(off, len)
+                && end <= data.len()
+            {
+                return Ok(&data[off..end]);
             }
         }
         Err(format!(
@@ -95,10 +151,13 @@ impl A64Vm {
     }
 
     fn write_bytes(&mut self, addr: u64, bytes: &[u8]) -> Result<(), String> {
-        for (base, data) in &mut self.segs {
-            if addr >= *base && (addr - *base) as usize + bytes.len() <= data.len() {
-                let off = (addr - *base) as usize;
-                data[off..off + bytes.len()].copy_from_slice(bytes);
+        for (base, _, data) in &mut self.segs {
+            if addr >= *base
+                && let Some(off) = (addr - *base).try_into().ok()
+                && let Some(end) = usize::checked_add(off, bytes.len())
+                && end <= data.len()
+            {
+                data[off..end].copy_from_slice(bytes);
                 return Ok(());
             }
         }
@@ -107,6 +166,62 @@ impl A64Vm {
             bytes.len(),
             self.pc
         ))
+    }
+
+    fn read_bytes_checked(&mut self, addr: u64, len: usize) -> Result<Option<Vec<u8>>, String> {
+        if let Ok(slice) = self.read_bytes(addr, len) {
+            return Ok(Some(slice.to_vec()));
+        }
+        if self.sigsegv_handler.is_some() && self.is_guard_fault(addr, len) {
+            self.pending_fault_addr = Some(addr);
+            return Ok(None);
+        }
+        Err(format!(
+            "A64Vm: unmapped read at {addr:#x} len={len} pc={:#x}",
+            self.pc
+        ))
+    }
+
+    fn write_bytes_checked(&mut self, addr: u64, bytes: &[u8]) -> Result<bool, String> {
+        if self.write_bytes(addr, bytes).is_ok() {
+            return Ok(true);
+        }
+        if self.sigsegv_handler.is_some() && self.is_guard_fault(addr, bytes.len()) {
+            self.pending_fault_addr = Some(addr);
+            return Ok(false);
+        }
+        Err(format!(
+            "A64Vm: unmapped write at {addr:#x} len={} pc={:#x}",
+            bytes.len(),
+            self.pc
+        ))
+    }
+
+    fn dispatch_sigsegv(&mut self, fault_addr: u64) -> Result<(), String> {
+        let handler = self
+            .sigsegv_handler
+            .ok_or_else(|| format!("A64Vm: unhandled SIGSEGV at {fault_addr:#x}"))?;
+        let frame = self.alloc_seg(1024);
+        let siginfo_ptr = frame;
+        let ucontext_ptr = frame + 128;
+        // siginfo_t.si_addr at +16
+        self.write_bytes(siginfo_ptr + 16, &fault_addr.to_le_bytes())?;
+        // ucontext_t.uc_mcontext.fault_address at +176, regs[0..31] at +184..+432, sp at +432, pc at +440
+        self.write_bytes(ucontext_ptr + 176, &fault_addr.to_le_bytes())?;
+        let regs_snap = self.x;
+        for (i, &rv) in regs_snap.iter().enumerate() {
+            self.write_bytes(ucontext_ptr + 184 + (i as u64) * 8, &rv.to_le_bytes())?;
+        }
+        let sp_snap = self.sp;
+        let pc_snap = self.pc;
+        self.write_bytes(ucontext_ptr + 432, &sp_snap.to_le_bytes())?;
+        self.write_bytes(ucontext_ptr + 440, &pc_snap.to_le_bytes())?;
+        self.x[0] = 11; // SIGSEGV
+        self.x[1] = siginfo_ptr;
+        self.x[2] = ucontext_ptr;
+        self.x[30] = RET_SENTINEL;
+        self.pc = handler;
+        Ok(())
     }
 
     fn read_u32(&self, addr: u64) -> Result<u32, String> {
@@ -230,25 +345,76 @@ impl A64Vm {
             match nr {
                 222 => {
                     // mmap(addr, len, prot, flags, fd, off)
-                    let len = self.x[1] as usize;
-                    let ptr = self.alloc_seg(len);
+                    let len = self.x[1];
+                    let prot = self.x[2];
+                    let ptr = if prot == 0 && len >= 0x1000_0000 {
+                        self.alloc_guard_seg(len)
+                    } else {
+                        self.alloc_seg(len as usize)
+                    };
                     self.x[0] = ptr;
                 }
                 226 => {
-                    // mprotect -> ok (0)
+                    // mprotect(addr, len, prot)
+                    let addr = self.x[0];
+                    let len = self.x[1];
+                    let prot = self.x[2];
+                    if prot != 0 {
+                        self.mprotect_rw(addr, len);
+                    }
                     self.x[0] = 0;
                 }
                 215 => {
                     // munmap -> ok (0)
                     self.x[0] = 0;
                 }
+                63 => {
+                    // read(fd, buf, len)
+                    let fd = self.x[0];
+                    let buf = self.x[1];
+                    let len = self.x[2] as usize;
+                    if fd == 0 {
+                        let avail = self.stdin.len().saturating_sub(self.stdin_pos);
+                        let take = avail.min(len);
+                        if take > 0 {
+                            let bytes = self.stdin[self.stdin_pos..self.stdin_pos + take].to_vec();
+                            self.write_bytes(buf, &bytes)?;
+                            self.stdin_pos += take;
+                        }
+                        self.x[0] = take as u64;
+                    } else {
+                        self.x[0] = (-9i64) as u64; // -EBADF
+                    }
+                }
                 64 => {
                     // write(fd, buf, len)
+                    let fd = self.x[0];
                     let buf = self.x[1];
                     let len = self.x[2] as usize;
                     let data = self.read_bytes(buf, len)?.to_vec();
-                    self.stderr.extend_from_slice(&data);
+                    if fd == 1 {
+                        self.stdout.extend_from_slice(&data);
+                    } else {
+                        self.stderr.extend_from_slice(&data);
+                    }
                     self.x[0] = len as u64;
+                }
+                113 => {
+                    // clock_gettime(clk_id, ts_ptr)
+                    let ts_ptr = self.x[1];
+                    self.write_bytes(ts_ptr, &1000u64.to_le_bytes())?;
+                    self.write_bytes(ts_ptr + 8, &123_456_789u64.to_le_bytes())?;
+                    self.x[0] = 0;
+                }
+                134 => {
+                    // rt_sigaction(sig, act, oldact, sigsetsize)
+                    let sig = self.x[0];
+                    let act = self.x[1];
+                    if sig == 11 && act != 0 {
+                        let h = self.read_u64(act)?;
+                        self.sigsegv_handler = (h != 0).then_some(h);
+                    }
+                    self.x[0] = 0;
                 }
                 94 => {
                     // exit_group(code)
@@ -379,6 +545,18 @@ impl A64Vm {
                 self.c = false;
                 self.v_flag = false;
             }
+            self.set_x(rd, res, false);
+        } else if (insn & 0xffe0_fc00) == 0x9bc0_7c00 {
+            // UMULH Xd, Xn, Xm
+            let a = u128::from(self.get_x(rn, false));
+            let b = u128::from(self.get_x(rm, false));
+            let res = ((a * b) >> 64) as u64;
+            self.set_x(rd, res, false);
+        } else if (insn & 0x7fe0_fc00) == 0x1a00_0000 {
+            // ADC Rd, Rn, Rm
+            let a = self.get_x(rn, false);
+            let b = self.get_x(rm, false);
+            let res = self.add_with_carry(sf, a, b, self.c, false);
             self.set_x(rd, res, false);
         } else if (insn & 0x7fe0_0000) == 0x1b00_0000 {
             // MADD / MSUB
@@ -624,30 +802,33 @@ impl A64Vm {
             if is_fp {
                 match (size, opc) {
                     (2, 1) => {
-                        let b: [u8; 4] = self.read_bytes(addr, 4)?.try_into().unwrap();
-                        self.v[rd as usize] = [0; 16];
-                        self.v[rd as usize][0..4].copy_from_slice(&b);
+                        if let Some(b) = self.read_bytes_checked(addr, 4)? {
+                            self.v[rd as usize] = [0; 16];
+                            self.v[rd as usize][0..4].copy_from_slice(&b);
+                        }
                     }
                     (2, 0) => {
                         let b = self.v[rd as usize][0..4].to_vec();
-                        self.write_bytes(addr, &b)?;
+                        self.write_bytes_checked(addr, &b)?;
                     }
                     (3, 1) => {
-                        let b: [u8; 8] = self.read_bytes(addr, 8)?.try_into().unwrap();
-                        self.v[rd as usize] = [0; 16];
-                        self.v[rd as usize][0..8].copy_from_slice(&b);
+                        if let Some(b) = self.read_bytes_checked(addr, 8)? {
+                            self.v[rd as usize] = [0; 16];
+                            self.v[rd as usize][0..8].copy_from_slice(&b);
+                        }
                     }
                     (3, 0) => {
                         let b = self.v[rd as usize][0..8].to_vec();
-                        self.write_bytes(addr, &b)?;
+                        self.write_bytes_checked(addr, &b)?;
                     }
                     (0, 3) => {
-                        let b: [u8; 16] = self.read_bytes(addr, 16)?.try_into().unwrap();
-                        self.v[rd as usize] = b;
+                        if let Some(b) = self.read_bytes_checked(addr, 16)? {
+                            self.v[rd as usize].copy_from_slice(&b);
+                        }
                     }
                     (0, 2) => {
                         let b = self.v[rd as usize];
-                        self.write_bytes(addr, &b)?;
+                        self.write_bytes_checked(addr, &b)?;
                     }
                     _ => return Err(format!("A64Vm: unsupported FP ldst {insn:#010x}")),
                 }
@@ -655,58 +836,77 @@ impl A64Vm {
                 match (size, opc) {
                     (0, 0) => {
                         let b = self.get_x(rd, false) as u8;
-                        self.write_bytes(addr, &[b])?;
+                        self.write_bytes_checked(addr, &[b])?;
                     }
                     (0, 1) => {
-                        let b = self.read_bytes(addr, 1)?[0];
-                        self.set_w(rd, u32::from(b), false);
+                        if let Some(b) = self.read_bytes_checked(addr, 1)? {
+                            self.set_w(rd, u32::from(b[0]), false);
+                        }
                     }
                     (0, 2) => {
-                        let b = self.read_bytes(addr, 1)?[0] as i8;
-                        self.set_x(rd, i64::from(b) as u64, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 1)? {
+                            self.set_x(rd, i64::from(b[0] as i8) as u64, false);
+                        }
                     }
                     (0, 3) => {
-                        let b = self.read_bytes(addr, 1)?[0] as i8;
-                        self.set_w(rd, i32::from(b) as u32, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 1)? {
+                            self.set_w(rd, i32::from(b[0] as i8) as u32, false);
+                        }
                     }
                     (1, 0) => {
                         let h = (self.get_x(rd, false) as u16).to_le_bytes();
-                        self.write_bytes(addr, &h)?;
+                        self.write_bytes_checked(addr, &h)?;
                     }
                     (1, 1) => {
-                        let h = u16::from_le_bytes(self.read_bytes(addr, 2)?.try_into().unwrap());
-                        self.set_w(rd, u32::from(h), false);
+                        if let Some(b) = self.read_bytes_checked(addr, 2)? {
+                            let h = u16::from_le_bytes(b.try_into().unwrap());
+                            self.set_w(rd, u32::from(h), false);
+                        }
                     }
                     (1, 2) => {
-                        let h = i16::from_le_bytes(self.read_bytes(addr, 2)?.try_into().unwrap());
-                        self.set_x(rd, i64::from(h) as u64, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 2)? {
+                            let h = i16::from_le_bytes(b.try_into().unwrap());
+                            self.set_x(rd, i64::from(h) as u64, false);
+                        }
                     }
                     (1, 3) => {
-                        let h = i16::from_le_bytes(self.read_bytes(addr, 2)?.try_into().unwrap());
-                        self.set_w(rd, i32::from(h) as u32, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 2)? {
+                            let h = i16::from_le_bytes(b.try_into().unwrap());
+                            self.set_w(rd, i32::from(h) as u32, false);
+                        }
                     }
                     (2, 0) => {
                         let w = (self.get_x(rd, false) as u32).to_le_bytes();
-                        self.write_bytes(addr, &w)?;
+                        self.write_bytes_checked(addr, &w)?;
                     }
                     (2, 1) => {
-                        let w = self.read_u32(addr)?;
-                        self.set_w(rd, w, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 4)? {
+                            let w = u32::from_le_bytes(b.try_into().unwrap());
+                            self.set_w(rd, w, false);
+                        }
                     }
                     (2, 2) => {
-                        let w = self.read_u32(addr)? as i32;
-                        self.set_x(rd, i64::from(w) as u64, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 4)? {
+                            let w = u32::from_le_bytes(b.try_into().unwrap()) as i32;
+                            self.set_x(rd, i64::from(w) as u64, false);
+                        }
                     }
                     (3, 0) => {
                         let q = self.get_x(rd, false).to_le_bytes();
-                        self.write_bytes(addr, &q)?;
+                        self.write_bytes_checked(addr, &q)?;
                     }
                     (3, 1) => {
-                        let q = self.read_u64(addr)?;
-                        self.set_x(rd, q, false);
+                        if let Some(b) = self.read_bytes_checked(addr, 8)? {
+                            let q = u64::from_le_bytes(b.try_into().unwrap());
+                            self.set_x(rd, q, false);
+                        }
                     }
                     _ => return Err(format!("A64Vm: unsupported GP ldst {insn:#010x}")),
                 }
+            }
+            if let Some(fault_addr) = self.pending_fault_addr.take() {
+                self.dispatch_sigsegv(fault_addr)?;
+                return Ok(());
             }
         } else if (insn & 0x5f20_0000) == 0x1e20_0000 {
             // Scalar FP data processing, compare, select, int<->fp convert/move
@@ -2084,6 +2284,7 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
             optimize: true,
             jobs: 0,
             deadline: None,
+            ..Default::default()
         },
     )
     .unwrap_or_else(|e| panic!("aarch64 compile failed for {label}: {e:?}"));
@@ -2453,6 +2654,7 @@ fn aarch64_oracle_arith_fp_memory64_slp_traps_and_standalone_exec() {
             optimize: true,
             jobs: 0,
             deadline: None,
+            ..Default::default()
         },
     )
     .expect("aarch64 standalone ET_EXEC compile failed");
@@ -2915,6 +3117,7 @@ fn aarch64_oracle_all_236_simd_opcodes_madd_msub_and_parallel_determinism() {
                 optimize: true,
                 jobs: 1,
                 deadline: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2925,6 +3128,7 @@ fn aarch64_oracle_all_236_simd_opcodes_madd_msub_and_parallel_determinism() {
                 optimize: true,
                 jobs: 8,
                 deadline: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2933,4 +3137,491 @@ fn aarch64_oracle_all_236_simd_opcodes_madd_msub_and_parallel_determinism() {
             "aarch64 --jobs 1 vs --jobs 8 ELF must be byte-identical for {name}"
         );
     }
+}
+
+#[test]
+fn aarch64_oracle_step3_blur3_magic_hoist_and_f64x4() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, leb_u32, section, type_sec, wasm_module,
+    };
+    // Seed 0..128 with [255, 255, 255, ...] and mixed bytes.
+    let mut seed = vec![0u8; 128];
+    for (i, b) in seed.iter_mut().enumerate() {
+        *b = if i < 6 {
+            255
+        } else {
+            ((i.wrapping_mul(37).wrapping_add(11)) & 0xff) as u8
+        };
+    }
+    let mut f64_seg = Vec::new();
+    for v in [1.5f64, -0.0, 7.25, -4.5, 2.25, 0.0, -3.5, 4.0] {
+        f64_seg.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut data_sec = vec![2, 0, 0x41, 0, 0x0b];
+    leb_u32(&mut data_sec, seed.len() as u32);
+    data_sec.extend_from_slice(&seed);
+    data_sec.extend_from_slice(&[0, 0x41]);
+    leb_i32(&mut data_sec, 1024);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, f64_seg.len() as u32);
+    data_sec.extend_from_slice(&f64_seg);
+
+    // f0(n): 3-tap blur / 3 -> dst 512 (triggers Op::MemByteBlur3Div on AArch64 lowering!).
+    let mut b0 = vec![
+        0x41, 0, 0x21, 1, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 1, 0x41,
+        1, 0x6b, 0x41, 0, 0x20, 1, 0x1b, 0x21, 2, 0x20, 0, 0x41, 1, 0x6b, 0x20, 1, 0x41, 1, 0x6a,
+        0x20, 1, 0x41, 1, 0x6a, 0x20, 0, 0x4f, 0x1b, 0x21, 3, 0x20, 1, 0x20, 2, 0x2d, 0, 0, 0x20,
+        1, 0x2d, 0, 0, 0x6a, 0x20, 3, 0x2d, 0, 0, 0x6a, 0x41, 3, 0x6e, 0x3a, 0, 0x80, 0x04, 0x20,
+        1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x41, 0, 0x21, 1, 0x41, 0, 0x21, 2, 0x02,
+        0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 2, 0x41, 31, 0x6c, 0x20, 1, 0x2d,
+        0, 0x80, 0x04, 0x6a, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20,
+        2,
+    ];
+    let _ = &mut b0;
+
+    // f1(mode): F64x4BinMem (mem rhs + splat rhs) returning low 32 bits of XOR of stored f64 bits.
+    let mut b1 = Vec::new();
+    b1.push(0x41);
+    leb_i32(&mut b1, 1088);
+    b1.extend_from_slice(&[0x21, 1, 0x41]);
+    leb_i32(&mut b1, 1024);
+    b1.extend_from_slice(&[0x21, 11, 0x41]);
+    leb_i32(&mut b1, 1056);
+    b1.extend_from_slice(&[0x21, 12]);
+    for k in 0..4usize {
+        b1.extend_from_slice(&[0x20, 11, 0x2b, 3, (k * 8) as u8, 0x21, (2 + k) as u8]);
+    }
+    for k in 0..4usize {
+        b1.extend_from_slice(&[0x20, 12, 0x2b, 3, (k * 8) as u8, 0x21, (6 + k) as u8]);
+    }
+    for k in 0..4usize {
+        b1.extend_from_slice(&[
+            0x20,
+            1,
+            0x20,
+            (2 + k) as u8,
+            0x20,
+            (6 + k) as u8,
+            0xa0,
+            0x39,
+            3,
+            (k * 8) as u8,
+        ]);
+    }
+    // Scale 4 lanes in-place by f64::from(mode + 2) (splat rhs!)
+    b1.extend_from_slice(&[0x20, 0, 0x41, 2, 0x6a, 0xb7, 0x21, 10]); // local 10 = f64(mode + 2)
+    for k in 0..4usize {
+        b1.extend_from_slice(&[
+            0x20,
+            1,
+            0x20,
+            1,
+            0x2b,
+            3,
+            (k * 8) as u8,
+            0x20,
+            10,
+            0xa2,
+            0x39,
+            3,
+            (k * 8) as u8,
+        ]);
+    }
+    b1.extend_from_slice(&[0x20, 1, 0x28, 2, 0]);
+    for k in 1..8usize {
+        b1.extend_from_slice(&[0x20, 1, 0x28, 2, (k * 4) as u8, 0x73]);
+    }
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[("blot:memory", 2, 0), ("blur3", 0, 0), ("f64x4", 0, 1)]),
+        code_sec(&[
+            enc_body(&[(3, 0x7f)], &b0),
+            enc_body(&[(1, 0x7f), (9, 0x7c), (2, 0x7f)], &b1),
+        ]),
+        section(11, &data_sec),
+    ]);
+
+    assert_aarch64_oracle(
+        "a64_step3_blur3_f64x4",
+        &wasm,
+        &[
+            ("blur3", Value::I32(0)),
+            ("blur3", Value::I32(3)),
+            ("blur3", Value::I32(18)),
+            ("blur3", Value::I32(67)),
+            ("f64x4", Value::I32(1)),
+            ("f64x4", Value::I32(-5)),
+        ],
+        1120,
+    );
+}
+
+#[test]
+fn aarch64_incremental_cache_1fn_edit_byte_exact() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, section, type_sec, wasm_module,
+    };
+
+    // Build an 8-function module with a small inlinable helper, a br_table jump table,
+    // a global effect, and independent sibling functions so a 1-function edit exercises
+    // partial reuse, inliner dirty propagation, jump-table caching, and byte-exact linking!
+    let make_mod = |edited_const: i32, helper_const: i32| -> Vec<u8> {
+        let mut bodies: Vec<Vec<u8>> = Vec::new();
+        // f0(x): small helper x + helper_const (inlined into f1)
+        let mut b0 = vec![0x20, 0, 0x41];
+        leb_i32(&mut b0, helper_const);
+        b0.push(0x6a);
+        bodies.push(enc_body(&[], &b0));
+        // f1(x): calls f0(x) * 3
+        bodies.push(enc_body(&[], &[0x20, 0, 0x10, 0, 0x41, 3, 0x6c]));
+        // f2(x): br_table switch over 0..3 -> exercises cached jump tables!
+        bodies.push(enc_body(
+            &[],
+            &[
+                0x02, 0x7f, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x20, 0, 0x0e, 3, 0, 1, 2, 2, 0x0b,
+                0x41, 11, 0x0c, 2, 0x0b, 0x41, 22, 0x0c, 1, 0x0b, 0x41, 33, 0x0b,
+            ],
+        ));
+        // f3..f6: untouched functions
+        for k in 0..4i32 {
+            let mut bk = vec![0x20, 0, 0x41];
+            leb_i32(&mut bk, 100 + k * 7);
+            bk.extend_from_slice(&[0x6a, 0x41, 5, 0x6c]);
+            bodies.push(enc_body(&[], &bk));
+        }
+        // f7(x): edited target leaf function
+        let mut b7 = vec![0x20, 0, 0x41];
+        leb_i32(&mut b7, edited_const);
+        b7.push(0x73); // xor
+        bodies.push(enc_body(&[], &b7));
+
+        wasm_module(&[
+            type_sec(&[(&[0x7f], &[0x7f])]),
+            func_sec(&[0; 8]),
+            section(5, &[1, 0x01, 1, 2]),
+            export_sec(&[
+                ("blot:memory", 2, 0),
+                ("f1", 0, 1),
+                ("f2", 0, 2),
+                ("f7", 0, 7),
+            ]),
+            code_sec(&bodies),
+        ])
+    };
+
+    let root = crate::build::create_fresh_test_root("wtime-aot-a64-inc");
+    let inc_dir = root.0.join("a64-inc");
+    let gen_fp = [0x42u8; 32];
+
+    let w1 = make_mod(17, 5);
+    let w2 = make_mod(99, 5); // 1-fn leaf edit (f7)
+    let w3 = make_mod(99, 13); // 1-fn inlined-callee edit (f0 -> must recompile f0 + caller f1!)
+
+    // 1. Cold build populates `a64-inc` + `.vidx`.
+    let cold_w1_nocache = compile_wasm_to_aarch64_for_test(
+        &w1,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let cold_w1_cache = compile_wasm_to_aarch64_for_test(
+        &w1,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 4,
+            inc_cache_dir: Some(inc_dir.clone()),
+            gen_fingerprint: gen_fp,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cold_w1_nocache.elf, cold_w1_cache.elf);
+    assert_eq!(cold_w1_cache.inc_reused_funcs, 0);
+
+    // 2. Warm 1-fn leaf edit (f7): MUST reuse 7/8 functions AND be 100% byte-identical to cold w2!
+    let cold_w2 = compile_wasm_to_aarch64_for_test(
+        &w2,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let warm_w2 = compile_wasm_to_aarch64_for_test(
+        &w2,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 4,
+            inc_cache_dir: Some(inc_dir.clone()),
+            gen_fingerprint: gen_fp,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        warm_w2.inc_reused_funcs, 7,
+        "1-fn leaf edit must reuse 7/8 functions"
+    );
+    assert_eq!(
+        warm_w2.elf, cold_w2.elf,
+        "a64-inc 1-fn leaf edit must emit 100% byte-identical ELF to cold compile"
+    );
+
+    // 3. Warm 1-fn inlined-callee edit (f0 -> invalidates f0 & caller f1, reuses 6/8)!
+    let cold_w3 = compile_wasm_to_aarch64_for_test(
+        &w3,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 4,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let warm_w3 = compile_wasm_to_aarch64_for_test(
+        &w3,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 4,
+            inc_cache_dir: Some(inc_dir.clone()),
+            gen_fingerprint: gen_fp,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        warm_w3.inc_reused_funcs, 6,
+        "inlined helper edit must invalidate f0 + caller f1 and reuse 6/8"
+    );
+    assert_eq!(
+        warm_w3.elf, cold_w3.elf,
+        "a64-inc inlined-callee edit must emit 100% byte-identical ELF to cold compile"
+    );
+
+    // 4. Corruption fallback: flip a byte in `a64-inc/*.bin`, verify clean cold fallback & exact ELF!
+    for entry in std::fs::read_dir(&inc_dir).unwrap().flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("bin") {
+            let mut bytes = std::fs::read(entry.path()).unwrap();
+            bytes[20] ^= 0xff;
+            std::fs::write(entry.path(), bytes).unwrap();
+        }
+    }
+    let after_corrupt = compile_wasm_to_aarch64_for_test(
+        &w3,
+        &A64CompileOptions {
+            target: X64Target::BlotCdylib,
+            optimize: true,
+            jobs: 2,
+            inc_cache_dir: Some(inc_dir),
+            gen_fingerprint: gen_fp,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(after_corrupt.inc_reused_funcs, 0);
+    assert_eq!(after_corrupt.elf, cold_w3.elf);
+    let _ = std::fs::remove_dir_all(&root.0);
+}
+
+#[test]
+fn aarch64_standalone_guard_page_bce_and_goose_ryu_wasi_parity() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, leb_u32, section, type_sec, wasm_module,
+    };
+
+    fn enc_import(out: &mut Vec<u8>, m: &str, f: &str, type_idx: u32) {
+        leb_u32(out, m.len() as u32);
+        out.extend_from_slice(m.as_bytes());
+        leb_u32(out, f.len() as u32);
+        out.extend_from_slice(f.as_bytes());
+        out.push(0x00); // func import
+        leb_u32(out, type_idx);
+    }
+
+    // 1. Standalone Goose + WASI + env binary testing Ryū f64/f32 formatting, integers, bools,
+    //    stdin `bench_input`/`bench_input_f64`, `format_f64`, and WASI `fd_write`!
+    // Types:
+    //  0: () -> ()
+    //  1: (f64) -> ()
+    //  2: (f32) -> ()
+    //  3: (i32, f64) -> i32
+    //  4: (i64) -> ()
+    //  5: (i32) -> ()
+    //  6: () -> i64
+    //  7: () -> f64
+    //  8: (i32, i32) -> ()
+    //  9: (i32, i32, i32, i32) -> i32
+    let types = type_sec(&[
+        (&[], &[]),
+        (&[0x7c], &[]),
+        (&[0x7d], &[]),
+        (&[0x7f, 0x7c], &[0x7f]),
+        (&[0x7e], &[]),
+        (&[0x7f], &[]),
+        (&[], &[0x7e]),
+        (&[], &[0x7c]),
+        (&[0x7f, 0x7f], &[]),
+        (&[0x7f, 0x7f, 0x7f, 0x7f], &[0x7f]),
+    ]);
+    let mut imp = Vec::new();
+    leb_u32(&mut imp, 10);
+    enc_import(&mut imp, "goose", "print_f64", 1); // 0
+    enc_import(&mut imp, "goose", "print_f32", 2); // 1
+    enc_import(&mut imp, "goose", "format_f64", 3); // 2
+    enc_import(&mut imp, "goose", "print_i64", 4); // 3
+    enc_import(&mut imp, "goose", "print_bool", 5); // 4
+    enc_import(&mut imp, "goose", "newline", 0); // 5
+    enc_import(&mut imp, "goose", "write", 8); // 6
+    enc_import(&mut imp, "env", "bench_input", 6); // 7
+    enc_import(&mut imp, "env", "bench_input_f64", 7); // 8
+    enc_import(&mut imp, "wasi_snapshot_preview1", "fd_write", 9); // 9
+
+    let mut body = Vec::new();
+    let f64_cases: &[(f64, &str)] = &[
+        (0.0, "0.0"),
+        (-0.0, "-0.0"),
+        (1.0, "1.0"),
+        (-42.5, "-42.5"),
+        (0.1, "0.1"),
+        (1e-5, "1e-05"),
+        (1e20, "1e+20"),
+        (std::f64::consts::PI, "3.141592653589793"),
+        (f64::NAN, "nan"),
+        (f64::INFINITY, "inf"),
+        (f64::NEG_INFINITY, "-inf"),
+        (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+        (f64::from_bits(1), "5e-324"),
+    ];
+    let mut expected_stdout = String::new();
+    for &(v, exp) in f64_cases {
+        body.push(0x44);
+        body.extend_from_slice(&v.to_le_bytes());
+        body.extend_from_slice(&[0x10, 0, 0x10, 5]); // print_f64; newline
+        expected_stdout.push_str(exp);
+        expected_stdout.push('\n');
+    }
+    for &(v, exp) in &[(0.1f32, "0.1"), (-0.0f32, "-0.0"), (f32::INFINITY, "inf")] {
+        body.push(0x43);
+        body.extend_from_slice(&v.to_le_bytes());
+        body.extend_from_slice(&[0x10, 1, 0x10, 5]); // print_f32; newline
+        expected_stdout.push_str(exp);
+        expected_stdout.push('\n');
+    }
+    // format_f64(1024, 123.456) -> len; goose::write(1024, len); newline
+    body.push(0x41);
+    leb_i32(&mut body, 1024);
+    body.push(0x44);
+    body.extend_from_slice(&123.456f64.to_le_bytes());
+    body.extend_from_slice(&[0x10, 2, 0x21, 0, 0x41]);
+    leb_i32(&mut body, 1024);
+    body.extend_from_slice(&[0x20, 0, 0x10, 6, 0x10, 5]);
+    expected_stdout.push_str("123.456\n");
+
+    // Read stdin "42 -3.125\n" via bench_input + bench_input_f64 and print them!
+    body.extend_from_slice(&[0x10, 7, 0x10, 3, 0x10, 5]); // print_i64(bench_input()); newline
+    body.extend_from_slice(&[0x10, 8, 0x10, 0, 0x10, 5]); // print_f64(bench_input_f64()); newline
+    body.extend_from_slice(&[0x41, 1, 0x10, 4, 0x10, 5]); // print_bool(1); newline
+    expected_stdout.push_str("42\n-3.125\ntrue\n");
+
+    // WASI fd_write(1, iov@0 -> {ptr: 2048 ("WASI\n"), len: 5}, 1, nout@16)
+    let mut data_sec = vec![1, 0, 0x41];
+    leb_i32(&mut data_sec, 2048);
+    data_sec.push(0x0b);
+    leb_u32(&mut data_sec, 5);
+    data_sec.extend_from_slice(b"WASI\n");
+    body.extend_from_slice(&[0x41, 0, 0x41]);
+    leb_i32(&mut body, 2048);
+    body.extend_from_slice(&[
+        0x36, 2, 0, // mem[0] = 2048
+        0x41, 4, 0x41, 5, 0x36, 2, 0, // mem[4] = 5
+        0x41, 1, 0x41, 0, 0x41, 1, 0x41, 16, 0x10, 9, 0x1a, // fd_write(1, 0, 1, 16); drop
+    ]);
+    expected_stdout.push_str("WASI\n");
+
+    let wasm_goose = wasm_module(&[
+        types,
+        section(2, &imp),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[("memory", 2, 0), ("_start", 0, 10)]),
+        code_sec(&[enc_body(&[(1, 0x7f)], &body)]),
+        section(11, &data_sec),
+    ]);
+    let img_goose = compile_wasm_to_aarch64_for_test(
+        &wasm_goose,
+        &A64CompileOptions {
+            target: X64Target::StandaloneExec,
+            optimize: true,
+            jobs: 1,
+            ..Default::default()
+        },
+    )
+    .expect("aarch64 standalone Goose+WASI compile failed");
+    verify_disasm_aarch64("a64_standalone_goose_ryu", &img_goose.elf);
+    let mut vm = A64Vm::new(&img_goose);
+    vm.stdin = b"42 -3.125\n".to_vec();
+    vm.run_until_ret(img_goose.entry_vaddr.unwrap(), 2_000_000)
+        .unwrap();
+    assert_eq!(
+        vm.exited,
+        Some(0),
+        "stderr={:?}",
+        String::from_utf8_lossy(&vm.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(vm.stdout).unwrap(),
+        expected_stdout,
+        "AArch64 Ryū / Goose / WASI stdout mismatch"
+    );
+
+    // 2. Standalone memory32 guard-page BCE + hardware SIGSEGV OOB trap test!
+    //    `load_at(idx)` executes an unchecked load (elided by guard-page BCE!) at `idx = 65536`,
+    //    landing in the `PROT_NONE` guard region -> SIGSEGV handler writes canonical message and exits(1)!
+    let wasm_oob = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[("memory", 2, 0), ("_start", 0, 0)]),
+        code_sec(&[enc_body(
+            &[],
+            &[
+                0x41, 0x80, 0x80, 0x04, // i32.const 65536 (first byte of PROT_NONE guard!)
+                0x28, 2,
+                0,    // i32.load (software bounds check elided -> hardware guard fault!)
+                0x1a, // drop
+            ],
+        )]),
+    ]);
+    let img_oob = compile_wasm_to_aarch64_for_test(
+        &wasm_oob,
+        &A64CompileOptions {
+            target: X64Target::StandaloneExec,
+            optimize: true,
+            jobs: 1,
+            ..Default::default()
+        },
+    )
+    .expect("aarch64 standalone guard-page OOB compile failed");
+    verify_disasm_aarch64("a64_standalone_guard_oob", &img_oob.elf);
+    let mut vm_oob = A64Vm::new(&img_oob);
+    vm_oob
+        .run_until_ret(img_oob.entry_vaddr.unwrap(), 1_000_000)
+        .unwrap();
+    assert_eq!(vm_oob.exited, Some(1), "guard-page OOB must exit(1)");
+    assert_eq!(
+        String::from_utf8_lossy(&vm_oob.stderr),
+        "out of bounds memory access\n"
+    );
 }
