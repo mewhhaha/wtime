@@ -21,10 +21,10 @@ use crate::x64::ir::{
     SimdSplatKind, StoreKind, Term, TruncOp, Ty, Val, ValRange,
 };
 use crate::x64::{
-    CtxLayout, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, OFF_RET_SPILL_PTR,
-    OFF_SCRATCH_TMP, OFF_SCRATCH_V128, OFF_STACK_FLOOR, TRAP_CALL_STACK, TRAP_DIV_ZERO,
-    TRAP_INDIRECT_CALL, TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_OOB, TRAP_TABLE_OOB,
-    TRAP_UNREACHABLE,
+    CtxLayout, HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW,
+    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, OFF_RET_SPILL_PTR, OFF_SCRATCH_TMP,
+    OFF_SCRATCH_V128, OFF_STACK_FLOOR, TRAP_CALL_STACK, TRAP_DIV_ZERO, TRAP_INDIRECT_CALL,
+    TRAP_INT_OVERFLOW, TRAP_INVALID_CONV, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
 
 pub const CTX_REG: Reg = Reg::X28;
@@ -222,6 +222,14 @@ fn cmp_to_cond(op: CmpOp) -> Cond {
     }
 }
 
+/// Intra-block live integer NZCV flag state preserved across flag-clean AArch64 instructions
+/// (`mov`, `csel`, `fcsel`, `ldr`, `str`, `add`, `sub`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum A64LiveFlags {
+    IntRR { is64: bool, a: Val, b: Val },
+    IntRI { is64: bool, a: Val, imm: i32 },
+}
+
 struct LowerA64<'a> {
     ir: &'a IrFunc,
     alloc: &'a A64AllocResult,
@@ -244,6 +252,9 @@ struct LowerA64<'a> {
     /// Lazily populated map of SSA `Val`s whose AArch64 defining write guarantees bits `32..63 == 0`,
     /// allowing redundant `uxtw` on `I32WrapI64`/`I64ExtendI32U` to be elided.
     val_upper32_zero: Option<Vec<bool>>,
+    /// Intra-block live integer NZCV flags for redundant `cmp` elision across adjacent
+    /// `Op::CmpSelect` / `Term::CmpBranch` instructions.
+    live_flags: Option<A64LiveFlags>,
 }
 
 impl<'a> LowerA64<'a> {
@@ -271,6 +282,7 @@ impl<'a> LowerA64<'a> {
                         | Op::I32Extend16S(_)
                         | Op::I32Bin(..)
                         | Op::I32BinImm(..)
+                        | Op::AddScaled { is64: false, .. }
                         | Op::I32Cmp(..)
                         | Op::I32CmpImm(..)
                         | Op::I64Cmp(..)
@@ -283,7 +295,7 @@ impl<'a> LowerA64<'a> {
                         Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
                         Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
                         Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
-                        Op::Load { kind, .. } => matches!(
+                        Op::Load { kind, .. } | Op::LoadScaled { kind, .. } => matches!(
                             kind,
                             LoadKind::I32
                                 | LoadKind::I32Load8S
@@ -618,6 +630,90 @@ impl<'a> LowerA64<'a> {
         }
     }
 
+    /// Computes `(base_reg, uimm_off)` for a scaled Wasm32 access `MEM_BASE_REG + zext(addr) * scale + offset`.
+    fn compute_scaled_mem_base_uimm(
+        &mut self,
+        addr_val: Val,
+        ar: Reg,
+        scale: u8,
+        offset: u64,
+        access_bytes: u64,
+    ) -> (Reg, u32) {
+        let shift = scale.trailing_zeros() as u8;
+        let ar_z = if self.is_upper32_zero(addr_val) {
+            ar
+        } else {
+            self.asm.mov_r(false, SGP2, ar);
+            SGP2
+        };
+        self.asm.add_r_lsl(true, SGP3, MEM_BASE_REG, ar_z, shift);
+        if offset == 0 {
+            return (SGP3, 0);
+        }
+        let align_mask = access_bytes - 1;
+        let max_uimm = 4095 * access_bytes;
+        if (offset & align_mask) == 0 && offset <= max_uimm {
+            return (SGP3, offset as u32);
+        }
+        if offset < 4096 {
+            self.asm.add_imm(true, SGP3, SGP3, offset as u16);
+        } else if offset < (1 << 24) {
+            self.asm
+                .add_imm_lsl12(true, SGP3, SGP3, (offset >> 12) as u16);
+            let lo = (offset & 0xfff) as u16;
+            if lo != 0 {
+                self.asm.add_imm(true, SGP3, SGP3, lo);
+            }
+        } else {
+            self.asm.mov_imm64(SGP2, offset);
+            self.asm.add_r(true, SGP3, SGP3, SGP2);
+        }
+        (SGP3, 0)
+    }
+
+    fn emit_int_cmp_flags_reusing(
+        &mut self,
+        prev_flags: Option<A64LiveFlags>,
+        kind: CmpBranchKind,
+        a: Val,
+        b: Val,
+    ) -> (Cond, Option<A64LiveFlags>) {
+        match kind {
+            CmpBranchKind::I32(cop) | CmpBranchKind::I64(cop) => {
+                let is64 = matches!(kind, CmpBranchKind::I64(_));
+                if prev_flags == Some(A64LiveFlags::IntRR { is64, a, b }) {
+                    return (cmp_to_cond(cop), prev_flags);
+                }
+                if prev_flags == Some(A64LiveFlags::IntRR { is64, a: b, b: a }) {
+                    return (cmp_to_cond(cop.swap()), prev_flags);
+                }
+                let ar = self.gp_read(a, SGP1);
+                let br = self.gp_read(b, SGP2);
+                self.asm.cmp_r(is64, ar, br);
+                (cmp_to_cond(cop), Some(A64LiveFlags::IntRR { is64, a, b }))
+            }
+            CmpBranchKind::I32Imm(cop, imm) | CmpBranchKind::I64Imm(cop, imm) => {
+                let is64 = matches!(kind, CmpBranchKind::I64Imm(..));
+                if prev_flags == Some(A64LiveFlags::IntRI { is64, a, imm }) {
+                    return (cmp_to_cond(cop), prev_flags);
+                }
+                let ar = self.gp_read(a, SGP1);
+                if (0..4096).contains(&imm) {
+                    self.asm.cmp_imm(is64, ar, imm as u16);
+                } else {
+                    if is64 {
+                        self.asm.mov_imm64(SGP2, imm as i64 as u64);
+                    } else {
+                        self.asm.mov_imm32(SGP2, imm as u32);
+                    }
+                    self.asm.cmp_r(is64, ar, SGP2);
+                }
+                (cmp_to_cond(cop), Some(A64LiveFlags::IntRI { is64, a, imm }))
+            }
+            _ => unreachable!("expected integer CmpBranchKind"),
+        }
+    }
+
     fn emit_edge_moves(&mut self, target_bb: u32, args: ValRange) {
         let params = &self.ir.blocks[target_bb as usize].params;
         let arg_vals = self.ir.pool_slice(args);
@@ -903,6 +999,127 @@ impl<'a> LowerA64<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_catch_abi(
+        &mut self,
+        args: ValRange,
+        ok_bb: crate::x64::ir::BlockId,
+        catch_bb: crate::x64::ir::BlockId,
+        catch_args: ValRange,
+        ci_idx: Option<(u32, Val)>,
+        direct_func: Option<u32>,
+        next_bb: Option<u32>,
+    ) -> Result<(), String> {
+        if let Some((_, idx_val)) = ci_idx {
+            let ir = self.gp_read(idx_val, SGP2);
+            emit_store_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(ir),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+        }
+        let arg_vals = self.ir.pool_slice(args);
+        if !arg_vals.is_empty() {
+            let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
+            let arg_layout = layout_args(&arg_tys)?;
+            let mut moves = Vec::with_capacity(arg_vals.len());
+            for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                let dst = match slot {
+                    A64AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    A64AbiSlot::Fp(v) => MoveLoc::Fp(v),
+                    A64AbiSlot::Stack(off) => MoveLoc::Stack(off),
+                };
+                moves.push((dst, MoveLoc::from(self.loc(av)), ty));
+            }
+            emit_parallel_moves(&mut self.asm, &moves);
+        }
+
+        let ret_vals = self.ir.blocks[ok_bb.0 as usize].params.clone();
+        let ret_tys: Vec<Ty> = ret_vals.iter().map(|&v| self.ty(v)).collect();
+        let ret_layout = layout_rets(&ret_tys)?;
+        if ret_layout.stack_bytes > 0 {
+            self.asm
+                .add_i32_checked(true, SGP1, Reg::SP, self.alloc.ret_buf_off, SGP3);
+            emit_store_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP1),
+                None,
+                CTX_REG,
+                OFF_RET_SPILL_PTR,
+                SGP3,
+            );
+        }
+
+        if let Some(f) = direct_func {
+            self.asm.bl_reloc(A64RelocTarget::Func(f));
+        } else if let Some((ci_id, _)) = ci_idx {
+            let ci = &self.layout.ci_tables[ci_id as usize];
+            let toob = self.trap_table_oob_lbl();
+            let bad = self.trap_ci_lbl();
+            emit_load_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            self.asm.mov_imm32(SGP3, ci.table_len);
+            self.asm.cmp_r(false, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hs, toob);
+            if ci.span == 0 {
+                self.asm.b(bad);
+                return Ok(());
+            }
+            if ci.min_slot > 0 {
+                self.asm.mov_imm32(SGP3, ci.min_slot);
+                self.asm.sub_r(false, SGP2, SGP2, SGP3);
+            }
+            self.asm.mov_imm32(SGP3, ci.span);
+            self.asm.cmp_r(false, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hs, bad);
+            self.asm
+                .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
+            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+            self.asm.cbz(true, SGP3, bad);
+            self.asm.add_r(true, SGP1, SGP1, SGP3);
+            self.asm.blr(SGP1);
+        }
+
+        let lbl_ok = self.asm.new_label();
+        let prop = self.trap_prop_lbl();
+        let catch_lbl = self.edge_target_label(catch_bb.0, catch_args);
+        self.asm.cbz(false, SGP1, lbl_ok);
+        self.asm
+            .cmp_imm(false, SGP1, u16::from(crate::x64::INTERNAL_EXN_SIGNAL));
+        self.asm.b_cond(Cond::Eq, catch_lbl);
+        self.asm.b(prop);
+        self.asm.bind(lbl_ok);
+
+        if !ret_vals.is_empty() {
+            let mut moves = Vec::with_capacity(ret_vals.len());
+            for ((&rv, &ty), slot) in ret_vals.iter().zip(&ret_tys).zip(ret_layout.slots) {
+                let src = match slot {
+                    A64AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    A64AbiSlot::Fp(v) => MoveLoc::Fp(v),
+                    A64AbiSlot::Stack(off) => MoveLoc::Stack(self.alloc.ret_buf_off + off),
+                };
+                moves.push((MoveLoc::from(self.loc(rv)), src, ty));
+            }
+            emit_parallel_moves(&mut self.asm, &moves);
+        }
+        if next_bb != Some(ok_bb.0) {
+            self.asm.b(self.bb_labels[ok_bb.0 as usize]);
+        }
+        Ok(())
+    }
+
     fn emit_tail_call(
         &mut self,
         args: ValRange,
@@ -1091,6 +1308,14 @@ impl<'a> LowerA64<'a> {
             IntBinOp::Add => self.asm.add_r(is64, d, ar, br),
             IntBinOp::Sub => self.asm.sub_r(is64, d, ar, br),
             IntBinOp::Mul => self.asm.mul(is64, d, ar, br),
+            IntBinOp::MulHiS => {
+                debug_assert!(is64);
+                self.asm.smulh(d, ar, br);
+            }
+            IntBinOp::MulHiU => {
+                debug_assert!(is64);
+                self.asm.umulh(d, ar, br);
+            }
             IntBinOp::And => self.asm.and_r(is64, d, ar, br),
             IntBinOp::Or => self.asm.orr_r(is64, d, ar, br),
             IntBinOp::Xor => self.asm.eor_r(is64, d, ar, br),
@@ -1335,6 +1560,7 @@ impl<'a> LowerA64<'a> {
     }
 
     fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
+        let prev_flags = self.live_flags.take();
         match op {
             Op::ConstI32(c) => {
                 let r = res.unwrap();
@@ -1476,6 +1702,19 @@ impl<'a> LowerA64<'a> {
             Op::I64Bin(bop, a, b) => self.emit_int_bin(true, bop, res.unwrap(), a, b),
             Op::I32BinImm(bop, a, imm) => self.emit_int_bin_imm(false, bop, res.unwrap(), a, imm),
             Op::I64BinImm(bop, a, imm) => self.emit_int_bin_imm(true, bop, res.unwrap(), a, imm),
+            Op::AddScaled {
+                is64,
+                base,
+                idx,
+                shift,
+            } => {
+                let r = res.unwrap();
+                let br = self.gp_read(base, SGP1);
+                let ir = self.gp_read(idx, SGP2);
+                let d = self.gp_write_reg(r);
+                self.asm.add_r_lsl(is64, d, br, ir, shift);
+                self.gp_commit(r, d);
+            }
             Op::I32Cmp(cop, a, b) | Op::I64Cmp(cop, a, b) => {
                 let is64 = matches!(op, Op::I64Cmp(..));
                 let r = res.unwrap();
@@ -1686,48 +1925,31 @@ impl<'a> LowerA64<'a> {
             Op::CmpSelect { kind, a, b, tv, fv } => {
                 let r = res.unwrap();
                 let ty = self.ty(r);
-                // Stage tv/fv BEFORE setting flags if they live in spill slots (or compare first when reg).
-                let cond = match kind {
-                    CmpBranchKind::I32(cop) | CmpBranchKind::I64(cop) => {
-                        let is64 = matches!(kind, CmpBranchKind::I64(_));
-                        let ar = self.gp_read(a, SGP1);
-                        let br = self.gp_read(b, SGP2);
-                        self.asm.cmp_r(is64, ar, br);
-                        cmp_to_cond(cop)
-                    }
-                    CmpBranchKind::I32Imm(cop, imm) | CmpBranchKind::I64Imm(cop, imm) => {
-                        let is64 = matches!(kind, CmpBranchKind::I64Imm(..));
-                        let ar = self.gp_read(a, SGP1);
-                        if (0..4096).contains(&imm) {
-                            self.asm.cmp_imm(is64, ar, imm as u16);
-                        } else {
-                            if is64 {
-                                self.asm.mov_imm64(SGP2, imm as i64 as u64);
-                            } else {
-                                self.asm.mov_imm32(SGP2, imm as u32);
-                            }
-                            self.asm.cmp_r(is64, ar, SGP2);
-                        }
-                        cmp_to_cond(cop)
+                let (cond, next_flags) = match kind {
+                    CmpBranchKind::I32(_)
+                    | CmpBranchKind::I64(_)
+                    | CmpBranchKind::I32Imm(..)
+                    | CmpBranchKind::I64Imm(..) => {
+                        self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b)
                     }
                     CmpBranchKind::F32(cop) | CmpBranchKind::F64(cop) => {
                         let is64 = matches!(kind, CmpBranchKind::F64(_));
                         let ar = self.fp_read(a, SFP1);
                         let br = self.fp_read(b, SFP2);
                         self.asm.fcmp(is64, ar, br);
-                        Self::fp_cmp_branch_cond(cop)
+                        (Self::fp_cmp_branch_cond(cop), None)
                     }
                 };
-                // Save condition into SGP3 before reading potentially spilled tv/fv (so `add_i32_checked` never clobbers flags!).
-                self.asm.cset(false, SGP3, cond);
-                self.asm.cmp_imm(false, SGP3, 0);
+                // Neither `gp_read`/`fp_read`/`emit_load_off`/`add_i32_checked`/`csel`/`fcsel`/`mov`
+                // nor `gp_commit`/`fp_commit` modifies NZCV flags on AArch64, so we emit direct
+                // `csel`/`fcsel`/`b.cond` with zero `cset + cmp` overhead and keep `live_flags` live!
                 if ty == Ty::V128 {
                     let lbl_f = self.asm.new_label();
                     let lbl_d = self.asm.new_label();
                     let tr = self.fp_read(tv, SFP1);
                     let fr = self.fp_read(fv, SFP2);
                     let d = self.fp_write_reg(r);
-                    self.asm.b_cond(Cond::Eq, lbl_f);
+                    self.asm.b_cond(cond.invert(), lbl_f);
                     self.asm.mov_16b(d, tr);
                     self.asm.b(lbl_d);
                     self.asm.bind(lbl_f);
@@ -1738,15 +1960,16 @@ impl<'a> LowerA64<'a> {
                     let tr = self.fp_read(tv, SFP1);
                     let fr = self.fp_read(fv, SFP2);
                     let d = self.fp_write_reg(r);
-                    self.asm.fcsel(ty == Ty::F64, d, tr, fr, Cond::Ne);
+                    self.asm.fcsel(ty == Ty::F64, d, tr, fr, cond);
                     self.fp_commit(r, d);
                 } else {
                     let tr = self.gp_read(tv, SGP1);
                     let fr = self.gp_read(fv, SGP2);
                     let d = self.gp_write_reg(r);
-                    self.asm.csel(ty == Ty::I64, d, tr, fr, Cond::Ne);
+                    self.asm.csel(ty == Ty::I64, d, tr, fr, cond);
                     self.gp_commit(r, d);
                 }
+                self.live_flags = next_flags;
             }
             Op::GlobalGet(g) => {
                 let r = res.unwrap();
@@ -2125,6 +2348,172 @@ impl<'a> LowerA64<'a> {
                     }
                 }
             }
+            Op::LoadScaled {
+                kind,
+                addr,
+                scale,
+                offset,
+            } => {
+                let r = res.unwrap();
+                let ar = self.gp_read(addr, SGP1);
+                if offset == 0 && u64::from(scale) == kind.bytes() {
+                    match kind {
+                        LoadKind::I32 | LoadKind::I64Load32U => {
+                            let d = self.gp_write_reg(r);
+                            self.asm.ldr_reg_scaled(false, d, MEM_BASE_REG, ar, true);
+                            self.gp_commit(r, d);
+                            return Ok(());
+                        }
+                        LoadKind::I64 => {
+                            let d = self.gp_write_reg(r);
+                            self.asm.ldr_reg_scaled(true, d, MEM_BASE_REG, ar, true);
+                            self.gp_commit(r, d);
+                            return Ok(());
+                        }
+                        LoadKind::I64Load32S => {
+                            let d = self.gp_write_reg(r);
+                            self.asm.ldrsw_reg_scaled(d, MEM_BASE_REG, ar, true);
+                            self.gp_commit(r, d);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+                let (ptr, uimm) =
+                    self.compute_scaled_mem_base_uimm(addr, ar, scale, offset, kind.bytes());
+                match kind {
+                    LoadKind::I32 | LoadKind::I64Load32U => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldr_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64 => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldr_uimm(true, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::F32 => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_s_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::F64 => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::I32Load8S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsb_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I32Load8U | LoadKind::I64Load8U => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrb_uimm(d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I32Load16S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsh_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I32Load16U | LoadKind::I64Load16U => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrh_uimm(d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load8S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsb_uimm(true, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load16S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsh_uimm(true, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load32S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsw_uimm(d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::V128 => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_q_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load8x8S => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(false, false, 0, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load8x8U => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(true, false, 0, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load16x4S => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(false, false, 1, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load16x4U => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(true, false, 1, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32x2S => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(false, false, 2, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32x2U => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(true, false, 2, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load8Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldrb_uimm(SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(0, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load16Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldrh_uimm(SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(1, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_uimm(false, SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(2, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load64Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_uimm(true, SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(3, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32Zero => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_s_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load64Zero => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                }
+            }
             Op::Store {
                 kind,
                 addr,
@@ -2210,6 +2599,69 @@ impl<'a> LowerA64<'a> {
                             let vr = self.fp_read(val, SFP1);
                             self.asm.str_q_uimm(vr, ptr, uimm);
                         }
+                    }
+                }
+            }
+            Op::StoreScaled {
+                kind,
+                addr,
+                val,
+                scale,
+                offset,
+            } => {
+                let ar = self.gp_read(addr, SGP1);
+                if offset == 0 && u64::from(scale) == kind.bytes() {
+                    match kind {
+                        StoreKind::I32 | StoreKind::I64 => {
+                            let ar_safe = if ar == SGP1 {
+                                self.asm.mov_r(true, SGP2, ar);
+                                SGP2
+                            } else {
+                                ar
+                            };
+                            let vr = self.gp_read(val, SGP1);
+                            self.asm.str_reg_scaled(
+                                kind == StoreKind::I64,
+                                vr,
+                                MEM_BASE_REG,
+                                ar_safe,
+                                true,
+                            );
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+                let (ptr, uimm) =
+                    self.compute_scaled_mem_base_uimm(addr, ar, scale, offset, kind.bytes());
+                match kind {
+                    StoreKind::I8 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.strb_uimm(vr, ptr, uimm);
+                    }
+                    StoreKind::I16 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.strh_uimm(vr, ptr, uimm);
+                    }
+                    StoreKind::I32 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.str_uimm(false, vr, ptr, uimm);
+                    }
+                    StoreKind::I64 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.str_uimm(true, vr, ptr, uimm);
+                    }
+                    StoreKind::F32 => {
+                        let vr = self.fp_read(val, SFP1);
+                        self.asm.str_s_uimm(vr, ptr, uimm);
+                    }
+                    StoreKind::F64 => {
+                        let vr = self.fp_read(val, SFP1);
+                        self.asm.str_d_uimm(vr, ptr, uimm);
+                    }
+                    StoreKind::V128 => {
+                        let vr = self.fp_read(val, SFP1);
+                        self.asm.str_q_uimm(vr, ptr, uimm);
                     }
                 }
             }
@@ -2359,6 +2811,524 @@ impl<'a> LowerA64<'a> {
                     self.asm.uxtw(Reg::X2, Reg::X2);
                 }
                 self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_MEM_FILL));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::LoadMem {
+                mem,
+                kind,
+                addr,
+                offset,
+            } => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SGP1);
+                if is64 {
+                    if ar != SGP1 {
+                        self.asm.mov_r(true, SGP1, ar);
+                    }
+                } else {
+                    self.asm.uxtw(SGP1, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                self.asm
+                    .mov_imm64(SGP3, offset.saturating_add(kind.bytes()));
+                self.asm.adds_r(true, SGP3, SGP1, SGP3);
+                self.asm.b_cond(Cond::Hs, oob);
+                self.asm.cmp_r(true, SGP3, SGP2);
+                self.asm.b_cond(Cond::Hi, oob);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, SGP1);
+                if offset != 0 {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.add_r(true, SGP2, SGP2, SGP3);
+                }
+                let ptr = SGP2;
+                let uimm = 0u32;
+                match kind {
+                    LoadKind::I32 => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldr_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64 => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldr_uimm(true, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::F32 => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_s_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::F64 => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::I32Load8S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsb_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I32Load8U | LoadKind::I64Load8U => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrb_uimm(d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I32Load16S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsh_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I32Load16U | LoadKind::I64Load16U => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrh_uimm(d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load8S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsb_uimm(true, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load16S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsh_uimm(true, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load32S => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldrsw_uimm(d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::I64Load32U => {
+                        let d = self.gp_write_reg(r);
+                        self.asm.ldr_uimm(false, d, ptr, uimm);
+                        self.gp_commit(r, d);
+                    }
+                    LoadKind::V128 => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_q_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load8x8S => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(false, false, 0, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load8x8U => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(true, false, 0, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load16x4S => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(false, false, 1, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load16x4U => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(true, false, 1, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32x2S => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(false, false, 2, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32x2U => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.asm.xtl_128(true, false, 2, d, d);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load8Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldrb_uimm(SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(0, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load16Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldrh_uimm(SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(1, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_uimm(false, SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(2, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load64Splat => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_uimm(true, SGP1, ptr, uimm);
+                        self.asm.dup_gp_128(3, d, SGP1);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load32Zero => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_s_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                    LoadKind::V128Load64Zero => {
+                        let d = self.fp_write_reg(r);
+                        self.asm.ldr_d_uimm(d, ptr, uimm);
+                        self.fp_commit(r, d);
+                    }
+                }
+            }
+            Op::StoreMem {
+                mem,
+                kind,
+                addr,
+                val,
+                offset,
+            } => {
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SGP1);
+                if is64 {
+                    if ar != SGP1 {
+                        self.asm.mov_r(true, SGP1, ar);
+                    }
+                } else {
+                    self.asm.uxtw(SGP1, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                self.asm
+                    .mov_imm64(SGP3, offset.saturating_add(kind.bytes()));
+                self.asm.adds_r(true, SGP3, SGP1, SGP3);
+                self.asm.b_cond(Cond::Hs, oob);
+                self.asm.cmp_r(true, SGP3, SGP2);
+                self.asm.b_cond(Cond::Hi, oob);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, SGP1);
+                if offset != 0 {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.add_r(true, SGP2, SGP2, SGP3);
+                }
+                match kind {
+                    StoreKind::I8 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.strb_uimm(vr, SGP2, 0);
+                    }
+                    StoreKind::I16 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.strh_uimm(vr, SGP2, 0);
+                    }
+                    StoreKind::I32 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.str_uimm(false, vr, SGP2, 0);
+                    }
+                    StoreKind::I64 => {
+                        let vr = self.gp_read(val, SGP1);
+                        self.asm.str_uimm(true, vr, SGP2, 0);
+                    }
+                    StoreKind::F32 => {
+                        let vr = self.fp_read(val, SFP1);
+                        self.asm.str_s_uimm(vr, SGP2, 0);
+                    }
+                    StoreKind::F64 => {
+                        let vr = self.fp_read(val, SFP1);
+                        self.asm.str_d_uimm(vr, SGP2, 0);
+                    }
+                    StoreKind::V128 => {
+                        let vr = self.fp_read(val, SFP1);
+                        self.asm.str_q_uimm(vr, SGP2, 0);
+                    }
+                }
+            }
+            Op::V128LoadLaneMem {
+                mem,
+                width,
+                addr,
+                vec,
+                offset,
+                lane,
+            } => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SGP1);
+                if is64 {
+                    if ar != SGP1 {
+                        self.asm.mov_r(true, SGP1, ar);
+                    }
+                } else {
+                    self.asm.uxtw(SGP1, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                self.asm
+                    .mov_imm64(SGP3, offset.saturating_add(u64::from(width)));
+                self.asm.adds_r(true, SGP3, SGP1, SGP3);
+                self.asm.b_cond(Cond::Hs, oob);
+                self.asm.cmp_r(true, SGP3, SGP2);
+                self.asm.b_cond(Cond::Hi, oob);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, SGP1);
+                if offset != 0 {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.add_r(true, SGP2, SGP2, SGP3);
+                }
+                let sz = match width {
+                    1 => {
+                        self.asm.ldrb_uimm(SGP1, SGP2, 0);
+                        0u8
+                    }
+                    2 => {
+                        self.asm.ldrh_uimm(SGP1, SGP2, 0);
+                        1u8
+                    }
+                    4 => {
+                        self.asm.ldr_uimm(false, SGP1, SGP2, 0);
+                        2u8
+                    }
+                    8 => {
+                        self.asm.ldr_uimm(true, SGP1, SGP2, 0);
+                        3u8
+                    }
+                    _ => return Err(format!("aarch64: invalid V128LoadLaneMem width {width}")),
+                };
+                let vr = self.fp_read(vec, SFP1);
+                let d = self.fp_write_reg(r);
+                self.asm.mov_16b(d, vr);
+                self.asm.ins_gp(sz, d, lane, SGP1);
+                self.fp_commit(r, d);
+            }
+            Op::V128StoreLaneMem {
+                mem,
+                width,
+                addr,
+                vec,
+                offset,
+                lane,
+            } => {
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SGP1);
+                if is64 {
+                    if ar != SGP1 {
+                        self.asm.mov_r(true, SGP1, ar);
+                    }
+                } else {
+                    self.asm.uxtw(SGP1, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                self.asm
+                    .mov_imm64(SGP3, offset.saturating_add(u64::from(width)));
+                self.asm.adds_r(true, SGP3, SGP1, SGP3);
+                self.asm.b_cond(Cond::Hs, oob);
+                self.asm.cmp_r(true, SGP3, SGP2);
+                self.asm.b_cond(Cond::Hi, oob);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, SGP1);
+                if offset != 0 {
+                    self.asm.mov_imm64(SGP3, offset);
+                    self.asm.add_r(true, SGP2, SGP2, SGP3);
+                }
+                let vr = self.fp_read(vec, SFP1);
+                match width {
+                    1 => {
+                        self.asm.umov(0, SGP1, vr, lane);
+                        self.asm.strb_uimm(SGP1, SGP2, 0);
+                    }
+                    2 => {
+                        self.asm.umov(1, SGP1, vr, lane);
+                        self.asm.strh_uimm(SGP1, SGP2, 0);
+                    }
+                    4 => {
+                        self.asm.umov(2, SGP1, vr, lane);
+                        self.asm.str_uimm(false, SGP1, SGP2, 0);
+                    }
+                    8 => {
+                        self.asm.umov(3, SGP1, vr, lane);
+                        self.asm.str_uimm(true, SGP1, SGP2, 0);
+                    }
+                    _ => return Err(format!("aarch64: invalid V128StoreLaneMem width {width}")),
+                }
+            }
+            Op::MemSizeIdx(mem) => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let d = self.gp_write_reg(r);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(d),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                self.asm.lsr_imm(true, d, d, 16);
+                self.gp_commit(r, d);
+            }
+            Op::MemGrowIdx { mem, delta } => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let dr = self.gp_read(delta, Reg::X0);
+                if is64 {
+                    self.asm.mov_r(true, Reg::X0, dr);
+                } else {
+                    self.asm.uxtw(Reg::X0, dr);
+                }
+                self.asm.mov_imm32(Reg::X1, desc_off as u32);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_EXTRA_MEM_GROW));
+                if !is64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                }
+                self.gp_commit(r, Reg::X0);
+            }
+            Op::MemCopyIdx {
+                dst_mem,
+                src_mem,
+                dst,
+                src,
+                len,
+            } => {
+                let d64 = self.layout.mem_is64(dst_mem);
+                let s64 = self.layout.mem_is64(src_mem);
+                let moves = [
+                    (
+                        MoveLoc::Gp(Reg::X0),
+                        MoveLoc::from(self.loc(dst)),
+                        self.ty(dst),
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(src)),
+                        self.ty(src),
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X2),
+                        MoveLoc::from(self.loc(len)),
+                        self.ty(len),
+                    ),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                if !d64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                }
+                if !s64 {
+                    self.asm.uxtw(Reg::X1, Reg::X1);
+                }
+                if !(d64 && s64) {
+                    self.asm.uxtw(Reg::X2, Reg::X2);
+                }
+                self.asm
+                    .mov_imm32(Reg::X3, self.layout.mem_desc_off(dst_mem) as u32);
+                self.asm
+                    .mov_imm32(Reg::X4, self.layout.mem_desc_off(src_mem) as u32);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_EXTRA_MEM_COPY));
+                let prop = self.trap_prop_lbl();
+                self.asm.cbnz(false, SGP1, prop);
+            }
+            Op::MemFillIdx { mem, dst, val, len } => {
+                let is64 = self.layout.mem_is64(mem);
+                let moves = [
+                    (
+                        MoveLoc::Gp(Reg::X0),
+                        MoveLoc::from(self.loc(dst)),
+                        self.ty(dst),
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(val)),
+                        self.ty(val),
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X2),
+                        MoveLoc::from(self.loc(len)),
+                        self.ty(len),
+                    ),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                if !is64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                    self.asm.uxtw(Reg::X2, Reg::X2);
+                }
+                self.asm
+                    .mov_imm32(Reg::X3, self.layout.mem_desc_off(mem) as u32);
+                self.asm
+                    .bl_reloc(A64RelocTarget::Helper(HELPER_EXTRA_MEM_FILL));
                 let prop = self.trap_prop_lbl();
                 self.asm.cbnz(false, SGP1, prop);
             }
@@ -2943,6 +3913,183 @@ impl<'a> LowerA64<'a> {
                 args,
                 rets,
             } => self.emit_call_abi(args, rets, Some((ci_id, idx)), None)?,
+            Op::ExnAlloc { tag, args } => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let (ref fields, rec_size) = self.layout.tag_layouts[tag as usize];
+                let lbl_oom = self.asm.new_label();
+                let lbl_ok = self.asm.new_label();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    exn_off + 16,
+                    SGP3,
+                );
+                self.asm.mov_imm32(SGP3, rec_size);
+                self.asm.add_r(true, SGP3, SGP1, SGP3);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    exn_off + 24,
+                    SGP2,
+                );
+                self.asm.cmp_r(true, SGP3, SGP2);
+                self.asm.b_cond(Cond::Hi, lbl_oom);
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP3),
+                    None,
+                    CTX_REG,
+                    exn_off + 16,
+                    SGP2,
+                );
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP1),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP2,
+                );
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    exn_off + 8,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, SGP1); // SGP2 = record_ptr
+                self.asm.mov_imm32(SGP1, tag);
+                self.asm.str_uimm(false, SGP1, SGP2, 0);
+                self.asm.str_uimm(false, Reg::XZR, SGP2, 4);
+                let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+                let field_specs: Vec<(Ty, i32)> = fields.clone();
+                for (av, (ty, foff)) in arg_vals.into_iter().zip(field_specs) {
+                    if ty.is_fp() {
+                        let vr = self.fp_read(av, SFP1);
+                        emit_store_off(&mut self.asm, ty, None, Some(vr), SGP2, foff, SGP3);
+                    } else {
+                        let gr = self.gp_read(av, SGP1);
+                        emit_store_off(&mut self.asm, ty, Some(gr), None, SGP2, foff, SGP3);
+                    }
+                }
+                let d = self.gp_write_reg(r);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(d),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.gp_commit(r, d);
+                self.asm.b(lbl_ok);
+                self.asm.bind(lbl_oom);
+                self.asm
+                    .mov_imm32(SGP1, u32::from(crate::x64::TRAP_ALLOC_FAILED));
+                let ep = self.epilogue_trap_lbl();
+                self.asm.b(ep);
+                self.asm.bind(lbl_ok);
+            }
+            Op::ExnSetActive(h) => {
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let hr = self.gp_read(h, SGP1);
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(hr),
+                    None,
+                    CTX_REG,
+                    exn_off,
+                    SGP3,
+                );
+            }
+            Op::ExnGetActive => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let d = self.gp_write_reg(r);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(d),
+                    None,
+                    CTX_REG,
+                    exn_off,
+                    SGP3,
+                );
+                self.gp_commit(r, d);
+            }
+            Op::ExnClearActive => {
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(Reg::XZR),
+                    None,
+                    CTX_REG,
+                    exn_off,
+                    SGP3,
+                );
+            }
+            Op::ExnGetTag(h) => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let hr = self.gp_read(h, SGP1);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    exn_off + 8,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, hr);
+                let d = self.gp_write_reg(r);
+                self.asm.ldr_uimm(false, d, SGP2, 0);
+                self.gp_commit(r, d);
+            }
+            Op::ExnGetPayload {
+                handle,
+                tag,
+                field,
+                ty,
+            } => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let foff = self.layout.tag_layouts[tag as usize].0[field as usize].1;
+                let hr = self.gp_read(handle, SGP1);
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    exn_off + 8,
+                    SGP3,
+                );
+                self.asm.add_r(true, SGP2, SGP2, hr);
+                if ty.is_fp() {
+                    let d = self.fp_write_reg(r);
+                    emit_load_off(&mut self.asm, ty, None, Some(d), SGP2, foff, SGP3);
+                    self.fp_commit(r, d);
+                } else {
+                    let d = self.gp_write_reg(r);
+                    emit_load_off(&mut self.asm, ty, Some(d), None, SGP2, foff, SGP3);
+                    self.gp_commit(r, d);
+                }
+            }
             Op::Trap(code) => {
                 let lbl = match code {
                     TRAP_UNREACHABLE => self.trap_unreach_lbl(),
@@ -2965,6 +4112,7 @@ impl<'a> LowerA64<'a> {
     }
 
     fn emit_term(&mut self, term: Term, next_bb: Option<u32>) -> Result<(), String> {
+        let prev_flags = self.live_flags.take();
         match term {
             Term::Jump { target, args } => {
                 self.emit_edge_moves(target.0, args);
@@ -2998,27 +4146,11 @@ impl<'a> LowerA64<'a> {
             } => {
                 let then_lbl = self.edge_target_label(then_bb.0, then_args);
                 let cond = match kind {
-                    CmpBranchKind::I32(cop) | CmpBranchKind::I64(cop) => {
-                        let is64 = matches!(kind, CmpBranchKind::I64(_));
-                        let ar = self.gp_read(a, SGP1);
-                        let br = self.gp_read(b, SGP2);
-                        self.asm.cmp_r(is64, ar, br);
-                        cmp_to_cond(cop)
-                    }
-                    CmpBranchKind::I32Imm(cop, imm) | CmpBranchKind::I64Imm(cop, imm) => {
-                        let is64 = matches!(kind, CmpBranchKind::I64Imm(..));
-                        let ar = self.gp_read(a, SGP1);
-                        if (0..4096).contains(&imm) {
-                            self.asm.cmp_imm(is64, ar, imm as u16);
-                        } else {
-                            if is64 {
-                                self.asm.mov_imm64(SGP2, imm as i64 as u64);
-                            } else {
-                                self.asm.mov_imm32(SGP2, imm as u32);
-                            }
-                            self.asm.cmp_r(is64, ar, SGP2);
-                        }
-                        cmp_to_cond(cop)
+                    CmpBranchKind::I32(_)
+                    | CmpBranchKind::I64(_)
+                    | CmpBranchKind::I32Imm(..)
+                    | CmpBranchKind::I64Imm(..) => {
+                        self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b).0
                     }
                     CmpBranchKind::F32(cop) | CmpBranchKind::F64(cop) => {
                         let is64 = matches!(kind, CmpBranchKind::F64(_));
@@ -3108,6 +4240,47 @@ impl<'a> LowerA64<'a> {
             Term::ReturnCallIndirect { ci_id, idx, args } => {
                 self.emit_tail_call(args, Some((ci_id, idx)), None)?;
             }
+            Term::CallCatch {
+                func,
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+            } => {
+                self.emit_call_catch_abi(
+                    args,
+                    ok_bb,
+                    catch_bb,
+                    catch_args,
+                    None,
+                    Some(func),
+                    next_bb,
+                )?;
+            }
+            Term::CallIndirectCatch {
+                ci_id,
+                idx,
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+            } => {
+                self.emit_call_catch_abi(
+                    args,
+                    ok_bb,
+                    catch_bb,
+                    catch_args,
+                    Some((ci_id, idx)),
+                    None,
+                    next_bb,
+                )?;
+            }
+            Term::ThrowActive => {
+                self.asm
+                    .mov_imm32(SGP1, u32::from(crate::x64::INTERNAL_EXN_SIGNAL));
+                let ep = self.epilogue_trap_lbl();
+                self.asm.b(ep);
+            }
             Term::Unreachable => {
                 let lbl = self.trap_unreach_lbl();
                 self.asm.b(lbl);
@@ -3145,6 +4318,7 @@ pub fn lower_ir_to_aarch64(
         edge_tramps: Vec::new(),
         edge_tramp_cache: HashMap::new(),
         val_upper32_zero: None,
+        live_flags: None,
     };
 
     // 1. Prologue: stack overflow floor check + allocate frame + save FP/LR + callee-saved regs.
@@ -3295,6 +4469,7 @@ pub fn lower_ir_to_aarch64(
         let bid = l.alloc.block_order[oi];
         let next_bb = l.alloc.block_order.get(oi + 1).copied();
         l.asm.bind(l.bb_labels[bid as usize]);
+        l.live_flags = None;
         let bb = &l.ir.blocks[bid as usize];
         let mut ii = 0usize;
         while ii < bb.insts.len() {

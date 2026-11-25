@@ -119,10 +119,17 @@ const INLINE_MAX_LOOP_CALLEE_VALS: usize = 160;
 const INLINE_MAX_SINGLE_CALLEE_INSTS: usize = 64;
 const INLINE_MAX_SINGLE_CALLEE_BLOCKS: usize = 16;
 const INLINE_MAX_SINGLE_CALLEE_VALS: usize = 192;
+const INLINE_MAX_CONST_DIV_CALLEE_INSTS: usize = 320;
+const INLINE_MAX_CONST_DIV_CALLEE_BLOCKS: usize = 96;
+const INLINE_MAX_CONST_DIV_CALLEE_VALS: usize = 768;
 const INLINE_MAX_CALLER_INSTS: usize = 1536;
 const INLINE_MAX_CALLER_BLOCKS: usize = 256;
 const INLINE_MAX_CALLER_VALS: usize = 3072;
+const INLINE_MAX_CONST_DIV_CALLER_INSTS: usize = 4096;
+const INLINE_MAX_CONST_DIV_CALLER_BLOCKS: usize = 1024;
+const INLINE_MAX_CONST_DIV_CALLER_VALS: usize = 8192;
 const INLINE_MAX_ADDED_PER_CALLER: usize = 256;
+const INLINE_MAX_CONST_DIV_ADDED_PER_CALLER: usize = 640;
 const INLINE_MAX_MODULE_ADDED_INSTS: usize = 4_000_000;
 const LICM_MAX_HOIST_PER_LOOP: usize = 12;
 const ELIDE_MAX_SUBTREE_STACK_BYTES: i32 = 8192;
@@ -484,6 +491,9 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::ConstV128(_)
         | Op::GlobalGet(_)
         | Op::MemSize
+        | Op::MemSizeIdx(_)
+        | Op::ExnGetActive
+        | Op::ExnClearActive
         | Op::Trap(_) => {}
         Op::I32Eqz(a)
         | Op::I64Eqz(a)
@@ -526,13 +536,22 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::TableGet { idx: a, .. }
         | Op::BoundsCheck { addr: a, .. }
         | Op::Load { addr: a, .. }
+        | Op::LoadScaled { addr: a, .. }
+        | Op::LoadMem { addr: a, .. }
         | Op::MemGrow(a)
+        | Op::MemGrowIdx { delta: a, .. }
         | Op::V128Splat { val: a, .. }
         | Op::V128ExtractLane { v: a, .. }
         | Op::V128Un { a, .. }
-        | Op::V128ToI32 { a, .. } => r(a),
+        | Op::V128ToI32 { a, .. }
+        | Op::ExnSetActive(a)
+        | Op::ExnGetTag(a)
+        | Op::ExnGetPayload { handle: a, .. } => r(a),
         Op::I32Bin(_, a, b)
         | Op::I64Bin(_, a, b)
+        | Op::AddScaled {
+            base: a, idx: b, ..
+        }
         | Op::I32Cmp(_, a, b)
         | Op::I64Cmp(_, a, b)
         | Op::F32Cmp(_, a, b)
@@ -543,10 +562,22 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
         | Op::Store {
             addr: a, val: b, ..
         }
+        | Op::StoreScaled {
+            addr: a, val: b, ..
+        }
+        | Op::StoreMem {
+            addr: a, val: b, ..
+        }
         | Op::V128LoadLane {
             addr: a, vec: b, ..
         }
+        | Op::V128LoadLaneMem {
+            addr: a, vec: b, ..
+        }
         | Op::V128StoreLane {
+            addr: a, vec: b, ..
+        }
+        | Op::V128StoreLaneMem {
             addr: a, vec: b, ..
         }
         | Op::V128ReplaceLane { v: a, x: b, .. }
@@ -601,17 +632,17 @@ fn rewrite_op_uses(op: &mut Op, pool: &mut [Val], subst: &[Val]) {
             r(tv);
             r(fv);
         }
-        Op::MemCopy { dst, src, len } => {
+        Op::MemCopy { dst, src, len } | Op::MemCopyIdx { dst, src, len, .. } => {
             r(dst);
             r(src);
             r(len);
         }
-        Op::MemFill { dst, val, len } => {
+        Op::MemFill { dst, val, len } | Op::MemFillIdx { dst, val, len, .. } => {
             r(dst);
             r(val);
             r(len);
         }
-        Op::Call { args, .. } => {
+        Op::Call { args, .. } | Op::ExnAlloc { args, .. } => {
             for v in &mut pool[args.start as usize..args.start as usize + args.len as usize] {
                 r(v);
             }
@@ -677,7 +708,23 @@ fn rewrite_term_uses(term: &mut Term, pool: &mut [Val], tables: &[BrTableData], 
             *idx = resolve_subst(subst, *idx);
             rw_range(pool, args);
         }
-        Term::Unreachable => {}
+        Term::CallCatch {
+            args, catch_args, ..
+        } => {
+            rw_range(pool, args);
+            rw_range(pool, catch_args);
+        }
+        Term::CallIndirectCatch {
+            ref mut idx,
+            args,
+            catch_args,
+            ..
+        } => {
+            *idx = resolve_subst(subst, *idx);
+            rw_range(pool, args);
+            rw_range(pool, catch_args);
+        }
+        Term::ThrowActive | Term::Unreachable => {}
     }
 }
 
@@ -776,9 +823,24 @@ pub fn rebuild_cfg_and_prune_into(
                         }
                     }
                 }
+                Term::CallCatch {
+                    ok_bb, catch_bb, ..
+                }
+                | Term::CallIndirectCatch {
+                    ok_bb, catch_bb, ..
+                } => {
+                    for t in [ok_bb, catch_bb] {
+                        sc.edge_in[t.0 as usize] = sc.edge_in[t.0 as usize].saturating_add(1);
+                        if !sc.reachable[t.0 as usize] {
+                            sc.reachable[t.0 as usize] = true;
+                            sc.stack.push(t.0);
+                        }
+                    }
+                }
                 Term::Return { .. }
                 | Term::ReturnCall { .. }
                 | Term::ReturnCallIndirect { .. }
+                | Term::ThrowActive
                 | Term::Unreachable => {}
             }
         }
@@ -924,9 +986,19 @@ pub fn rebuild_cfg_and_prune_into(
                                 };
                                 *table_idx = new_ti;
                             }
+                            Term::CallCatch {
+                                ok_bb, catch_bb, ..
+                            }
+                            | Term::CallIndirectCatch {
+                                ok_bb, catch_bb, ..
+                            } => {
+                                *ok_bb = map_b(*ok_bb);
+                                *catch_bb = map_b(*catch_bb);
+                            }
                             Term::Return { .. }
                             | Term::ReturnCall { .. }
                             | Term::ReturnCallIndirect { .. }
+                            | Term::ThrowActive
                             | Term::Unreachable => {}
                         }
                     }
@@ -944,10 +1016,20 @@ pub fn rebuild_cfg_and_prune_into(
                                 *then_bb = map_b(*then_bb);
                                 *else_bb = map_b(*else_bb);
                             }
+                            Term::CallCatch {
+                                ok_bb, catch_bb, ..
+                            }
+                            | Term::CallIndirectCatch {
+                                ok_bb, catch_bb, ..
+                            } => {
+                                *ok_bb = map_b(*ok_bb);
+                                *catch_bb = map_b(*catch_bb);
+                            }
                             Term::BrTable { .. }
                             | Term::Return { .. }
                             | Term::ReturnCall { .. }
                             | Term::ReturnCallIndirect { .. }
+                            | Term::ThrowActive
                             | Term::Unreachable => {}
                         }
                     }
@@ -1066,9 +1148,14 @@ pub fn prune_block_params_with_scratch(
                             total_edges += 1;
                         }
                     }
+                    Term::CallCatch { catch_bb, .. } | Term::CallIndirectCatch { catch_bb, .. } => {
+                        sc.in_edge_counts[catch_bb.0 as usize] += 1;
+                        total_edges += 1;
+                    }
                     Term::Return { .. }
                     | Term::ReturnCall { .. }
                     | Term::ReturnCallIndirect { .. }
+                    | Term::ThrowActive
                     | Term::Unreachable => {}
                 }
             }
@@ -1119,9 +1206,24 @@ pub fn prune_block_params_with_scratch(
                             sc.in_edge_data[pos] = a;
                         }
                     }
+                    Term::CallCatch {
+                        catch_bb,
+                        catch_args,
+                        ..
+                    }
+                    | Term::CallIndirectCatch {
+                        catch_bb,
+                        catch_args,
+                        ..
+                    } => {
+                        let pos = sc.in_edge_counts[catch_bb.0 as usize] as usize;
+                        sc.in_edge_counts[catch_bb.0 as usize] = (pos + 1) as u32;
+                        sc.in_edge_data[pos] = catch_args;
+                    }
                     Term::Return { .. }
                     | Term::ReturnCall { .. }
                     | Term::ReturnCallIndirect { .. }
+                    | Term::ThrowActive
                     | Term::Unreachable => {}
                 }
             }
@@ -1264,7 +1366,7 @@ pub fn prune_block_params_with_scratch(
                 }
             }
             match bb.term {
-                Term::Jump { .. } | Term::Unreachable => {}
+                Term::Jump { .. } | Term::ThrowActive | Term::Unreachable => {}
                 Term::BranchIf { cond, .. } => mark(cond, &mut sc.live_val, &mut sc.worklist),
                 Term::CmpBranch { kind, a, b, .. } => {
                     mark(a, &mut sc.live_val, &mut sc.worklist);
@@ -1290,6 +1392,25 @@ pub fn prune_block_params_with_scratch(
                     mark(idx, &mut sc.live_val, &mut sc.worklist);
                     for &av in ir.pool_slice(args) {
                         mark(av, &mut sc.live_val, &mut sc.worklist);
+                    }
+                }
+                Term::CallCatch { args, ok_bb, .. } => {
+                    for &av in ir.pool_slice(args) {
+                        mark(av, &mut sc.live_val, &mut sc.worklist);
+                    }
+                    for &p in &ir.blocks[ok_bb.0 as usize].params {
+                        sc.live_val[p.0 as usize] = true;
+                    }
+                }
+                Term::CallIndirectCatch {
+                    idx, args, ok_bb, ..
+                } => {
+                    mark(idx, &mut sc.live_val, &mut sc.worklist);
+                    for &av in ir.pool_slice(args) {
+                        mark(av, &mut sc.live_val, &mut sc.worklist);
+                    }
+                    for &p in &ir.blocks[ok_bb.0 as usize].params {
+                        sc.live_val[p.0 as usize] = true;
                     }
                 }
             }
@@ -1432,6 +1553,9 @@ pub fn prune_block_params_with_scratch(
                             *args = push_verbatim(&mut new_pool, *args);
                             *rets = push_verbatim(&mut new_pool, *rets);
                         }
+                        Op::ExnAlloc { args, .. } => {
+                            *args = push_verbatim(&mut new_pool, *args);
+                        }
                         _ => {}
                     }
                 }
@@ -1462,7 +1586,22 @@ pub fn prune_block_params_with_scratch(
                     Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
                         *args = push_verbatim(&mut new_pool, *args);
                     }
-                    Term::BrTable { .. } | Term::Unreachable => {}
+                    Term::CallCatch {
+                        args,
+                        catch_bb,
+                        catch_args,
+                        ..
+                    }
+                    | Term::CallIndirectCatch {
+                        args,
+                        catch_bb,
+                        catch_args,
+                        ..
+                    } => {
+                        *args = push_verbatim(&mut new_pool, *args);
+                        *catch_args = push_filtered(&mut new_pool, *catch_bb, *catch_args);
+                    }
+                    Term::BrTable { .. } | Term::ThrowActive | Term::Unreachable => {}
                 }
             }
             for td in &mut ir.br_tables {
@@ -1965,6 +2104,46 @@ pub fn try_collect_pre_inline_callees(
 /// Pre-inline summary tuple: `(inst_count, was_inlinable, sorted (callee_bi, call_count) pairs)`.
 pub type PreInlineSummary = (usize, bool, Vec<(u32, u32)>);
 
+/// Returns a bitmask of parameter indices `k < 64` used directly as the divisor of a
+/// `DivS`/`DivU`/`RemS`/`RemU` inside `ir`, enabling constant-divisor loop specialization.
+fn callee_div_rem_param_mask(ir: &IrFunc) -> u64 {
+    if ir.params.is_empty() {
+        return 0;
+    }
+    let mut mask = 0u64;
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            let div = match inst.op {
+                Op::I32Bin(
+                    IntBinOp::DivS
+                    | IntBinOp::DivU
+                    | IntBinOp::DivUNz
+                    | IntBinOp::RemS
+                    | IntBinOp::RemU
+                    | IntBinOp::RemUNz,
+                    _,
+                    b,
+                )
+                | Op::I64Bin(
+                    IntBinOp::DivS
+                    | IntBinOp::DivU
+                    | IntBinOp::DivUNz
+                    | IntBinOp::RemS
+                    | IntBinOp::RemU
+                    | IntBinOp::RemUNz,
+                    _,
+                    b,
+                ) => b,
+                _ => continue,
+            };
+            if let Some(pos) = ir.params.iter().take(64).position(|&p| p == div) {
+                mask |= 1u64 << pos;
+            }
+        }
+    }
+    mask
+}
+
 /// Counts total instructions in `ir` and tests whether it qualifies as an inline callee
 /// along with collecting sorted `(callee_bi, call_count)` pairs in a single L1-hot pass.
 pub fn try_collect_pre_inline_summary(
@@ -1973,27 +2152,38 @@ pub fn try_collect_pre_inline_summary(
     n_defs: usize,
 ) -> Option<PreInlineSummary> {
     let mut inst_count = 0usize;
-    let mut has_tail_call = false;
+    let mut has_disallowed = false;
     let mut raw: Vec<u32> = Vec::new();
     for bb in &ir.blocks {
         inst_count += bb.insts.len();
         for inst in &bb.insts {
-            if let Op::Call { func, .. } = inst.op {
-                let f = func as usize;
-                if f >= n_imports {
-                    let c = f - n_imports;
-                    if c < n_defs {
-                        if raw.len() == raw.capacity() {
-                            raw.try_reserve(1).ok()?;
+            match inst.op {
+                Op::Call { func, .. } => {
+                    let f = func as usize;
+                    if f >= n_imports {
+                        let c = f - n_imports;
+                        if c < n_defs {
+                            if raw.len() == raw.capacity() {
+                                raw.try_reserve(1).ok()?;
+                            }
+                            raw.push(c as u32);
                         }
-                        raw.push(c as u32);
                     }
                 }
+                Op::ExnAlloc { .. }
+                | Op::ExnSetActive(_)
+                | Op::ExnGetActive
+                | Op::ExnClearActive
+                | Op::ExnGetTag(_)
+                | Op::ExnGetPayload { .. } => {
+                    has_disallowed = true;
+                }
+                _ => {}
             }
         }
         match bb.term {
             Term::ReturnCall { func, .. } => {
-                has_tail_call = true;
+                has_disallowed = true;
                 let f = func as usize;
                 if f >= n_imports {
                     let c = f - n_imports;
@@ -2005,8 +2195,11 @@ pub fn try_collect_pre_inline_summary(
                     }
                 }
             }
-            Term::ReturnCallIndirect { .. } => {
-                has_tail_call = true;
+            Term::ReturnCallIndirect { .. }
+            | Term::CallCatch { .. }
+            | Term::CallIndirectCatch { .. }
+            | Term::ThrowActive => {
+                has_disallowed = true;
             }
             _ => {}
         }
@@ -2025,27 +2218,56 @@ pub fn try_collect_pre_inline_summary(
             out.push((c, 1));
         }
     }
-    let inlinable = !has_tail_call
-        && ir.br_tables.is_empty()
-        && inst_count <= INLINE_MAX_SINGLE_CALLEE_INSTS
+    let fits_single = inst_count <= INLINE_MAX_SINGLE_CALLEE_INSTS
         && ir.blocks.len() <= INLINE_MAX_SINGLE_CALLEE_BLOCKS
         && ir.val_tys.len() <= INLINE_MAX_SINGLE_CALLEE_VALS;
+    let fits_const_div = !fits_single
+        && inst_count <= INLINE_MAX_CONST_DIV_CALLEE_INSTS
+        && ir.blocks.len() <= INLINE_MAX_CONST_DIV_CALLEE_BLOCKS
+        && ir.val_tys.len() <= INLINE_MAX_CONST_DIV_CALLEE_VALS
+        && callee_div_rem_param_mask(ir) != 0;
+    let inlinable = !has_disallowed && ir.br_tables.is_empty() && (fits_single || fits_const_div);
     Some((inst_count, inlinable, out))
 }
 
 /// Conservative check for whether `ir` could qualify as an inline callee under any threshold
-/// (general, inside-loop, or single-call-site).
+/// (general, inside-loop, single-call-site, or constant-divisor loop specialization).
 pub fn is_inlinable_ir(ir: &IrFunc) -> bool {
-    ir.br_tables.is_empty()
-        && !ir.blocks.iter().any(|bb| {
+    if !ir.br_tables.is_empty() {
+        return false;
+    }
+    let insts = count_insts(ir);
+    let fits_single = insts <= INLINE_MAX_SINGLE_CALLEE_INSTS
+        && ir.blocks.len() <= INLINE_MAX_SINGLE_CALLEE_BLOCKS
+        && ir.val_tys.len() <= INLINE_MAX_SINGLE_CALLEE_VALS;
+    let fits_const_div = !fits_single
+        && insts <= INLINE_MAX_CONST_DIV_CALLEE_INSTS
+        && ir.blocks.len() <= INLINE_MAX_CONST_DIV_CALLEE_BLOCKS
+        && ir.val_tys.len() <= INLINE_MAX_CONST_DIV_CALLEE_VALS
+        && callee_div_rem_param_mask(ir) != 0;
+    if !fits_single && !fits_const_div {
+        return false;
+    }
+    !ir.blocks.iter().any(|bb| {
+        matches!(
+            bb.term,
+            Term::ReturnCall { .. }
+                | Term::ReturnCallIndirect { .. }
+                | Term::CallCatch { .. }
+                | Term::CallIndirectCatch { .. }
+                | Term::ThrowActive
+        ) || bb.insts.iter().any(|inst| {
             matches!(
-                bb.term,
-                Term::ReturnCall { .. } | Term::ReturnCallIndirect { .. }
+                inst.op,
+                Op::ExnAlloc { .. }
+                    | Op::ExnSetActive(_)
+                    | Op::ExnGetActive
+                    | Op::ExnClearActive
+                    | Op::ExnGetTag(_)
+                    | Op::ExnGetPayload { .. }
             )
         })
-        && count_insts(ir) <= INLINE_MAX_SINGLE_CALLEE_INSTS
-        && ir.blocks.len() <= INLINE_MAX_SINGLE_CALLEE_BLOCKS
-        && ir.val_tys.len() <= INLINE_MAX_SINGLE_CALLEE_VALS
+    })
 }
 
 /// Fallible fast O(B + E) detection of blocks belonging to natural loops (backedges in RPO) in `ir`.
@@ -2266,8 +2488,12 @@ fn clone_callee_into_caller(
                     .saturating_add(else_args.len as usize);
             }
             Term::Return { vals } => needed_pool = needed_pool.saturating_add(vals.len as usize),
-            Term::ReturnCall { .. } | Term::ReturnCallIndirect { .. } => {
-                return Err("x64: cannot inline tail-calling callee".into());
+            Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::CallCatch { .. }
+            | Term::CallIndirectCatch { .. }
+            | Term::ThrowActive => {
+                return Err("x64: cannot inline tail-calling or EH callee".into());
             }
             Term::BrTable { .. } | Term::Unreachable => {}
         }
@@ -2374,6 +2600,17 @@ fn clone_callee_into_caller(
                 Op::I64Bin(o, a, b) => Op::I64Bin(o, map_v(a), map_v(b)),
                 Op::I32BinImm(o, a, imm) => Op::I32BinImm(o, map_v(a), imm),
                 Op::I64BinImm(o, a, imm) => Op::I64BinImm(o, map_v(a), imm),
+                Op::AddScaled {
+                    is64,
+                    base,
+                    idx,
+                    shift,
+                } => Op::AddScaled {
+                    is64,
+                    base: map_v(base),
+                    idx: map_v(idx),
+                    shift,
+                },
                 Op::I32Cmp(o, a, b) => Op::I32Cmp(o, map_v(a), map_v(b)),
                 Op::I32CmpImm(o, a, imm) => Op::I32CmpImm(o, map_v(a), imm),
                 Op::I64Cmp(o, a, b) => Op::I64Cmp(o, map_v(a), map_v(b)),
@@ -2442,6 +2679,17 @@ fn clone_callee_into_caller(
                     offset,
                     checked,
                 },
+                Op::LoadScaled {
+                    kind,
+                    addr,
+                    scale,
+                    offset,
+                } => Op::LoadScaled {
+                    kind,
+                    addr: map_v(addr),
+                    scale,
+                    offset,
+                },
                 Op::Store {
                     kind,
                     addr,
@@ -2454,6 +2702,19 @@ fn clone_callee_into_caller(
                     val: map_v(val),
                     offset,
                     checked,
+                },
+                Op::StoreScaled {
+                    kind,
+                    addr,
+                    val,
+                    scale,
+                    offset,
+                } => Op::StoreScaled {
+                    kind,
+                    addr: map_v(addr),
+                    val: map_v(val),
+                    scale,
+                    offset,
                 },
                 Op::V128LoadLane {
                     width,
@@ -2486,13 +2747,91 @@ fn clone_callee_into_caller(
                     checked,
                 },
                 Op::MemSize => Op::MemSize,
+                Op::MemSizeIdx(m) => Op::MemSizeIdx(m),
                 Op::MemGrow(a) => Op::MemGrow(map_v(a)),
+                Op::MemGrowIdx { mem, delta } => Op::MemGrowIdx {
+                    mem,
+                    delta: map_v(delta),
+                },
+                Op::LoadMem {
+                    mem,
+                    kind,
+                    addr,
+                    offset,
+                } => Op::LoadMem {
+                    mem,
+                    kind,
+                    addr: map_v(addr),
+                    offset,
+                },
+                Op::StoreMem {
+                    mem,
+                    kind,
+                    addr,
+                    val,
+                    offset,
+                } => Op::StoreMem {
+                    mem,
+                    kind,
+                    addr: map_v(addr),
+                    val: map_v(val),
+                    offset,
+                },
+                Op::V128LoadLaneMem {
+                    mem,
+                    width,
+                    addr,
+                    vec,
+                    offset,
+                    lane,
+                } => Op::V128LoadLaneMem {
+                    mem,
+                    width,
+                    addr: map_v(addr),
+                    vec: map_v(vec),
+                    offset,
+                    lane,
+                },
+                Op::V128StoreLaneMem {
+                    mem,
+                    width,
+                    addr,
+                    vec,
+                    offset,
+                    lane,
+                } => Op::V128StoreLaneMem {
+                    mem,
+                    width,
+                    addr: map_v(addr),
+                    vec: map_v(vec),
+                    offset,
+                    lane,
+                },
                 Op::MemCopy { dst, src, len } => Op::MemCopy {
                     dst: map_v(dst),
                     src: map_v(src),
                     len: map_v(len),
                 },
+                Op::MemCopyIdx {
+                    dst_mem,
+                    src_mem,
+                    dst,
+                    src,
+                    len,
+                } => Op::MemCopyIdx {
+                    dst_mem,
+                    src_mem,
+                    dst: map_v(dst),
+                    src: map_v(src),
+                    len: map_v(len),
+                },
                 Op::MemFill { dst, val, len } => Op::MemFill {
+                    dst: map_v(dst),
+                    val: map_v(val),
+                    len: map_v(len),
+                },
+                Op::MemFillIdx { mem, dst, val, len } => Op::MemFillIdx {
+                    mem,
                     dst: map_v(dst),
                     val: map_v(val),
                     len: map_v(len),
@@ -2629,6 +2968,14 @@ fn clone_callee_into_caller(
                     args: map_range(&mut caller.val_pool, &callee.val_pool, args)?,
                     rets: map_range(&mut caller.val_pool, &callee.val_pool, rets)?,
                 },
+                Op::ExnAlloc { .. }
+                | Op::ExnSetActive(_)
+                | Op::ExnGetActive
+                | Op::ExnClearActive
+                | Op::ExnGetTag(_)
+                | Op::ExnGetPayload { .. } => {
+                    unreachable!("EH callee excluded by is_inlinable_ir")
+                }
                 Op::Trap(code) => Op::Trap(code),
             };
             insts.push(Inst { res, op });
@@ -2676,8 +3023,12 @@ fn clone_callee_into_caller(
                 target: cont_bb,
                 args: map_range(&mut caller.val_pool, &callee.val_pool, vals)?,
             },
-            Term::ReturnCall { .. } | Term::ReturnCallIndirect { .. } => {
-                unreachable!("tail-calling callee excluded above")
+            Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::CallCatch { .. }
+            | Term::CallIndirectCatch { .. }
+            | Term::ThrowActive => {
+                unreachable!("tail-calling or EH callee excluded above")
             }
             Term::Unreachable => Term::Unreachable,
         };
@@ -2782,6 +3133,7 @@ fn inline_single_caller(
 ) -> Res<Option<CallerInlineOutcome>> {
     let mut caller_insts = caller_init_insts;
     let mut caller_in_loop: Option<Vec<bool>> = None;
+    let mut caller_const_nz: Option<Vec<bool>> = None;
     let mut caller_added = 0usize;
     let mut did_inline = false;
     let mut hit_module_cap = false;
@@ -2802,8 +3154,8 @@ fn inline_single_caller(
                 hit_module_cap = true;
                 break;
             }
-            if caller_added >= INLINE_MAX_ADDED_PER_CALLER
-                || caller_insts >= INLINE_MAX_CALLER_INSTS
+            if caller_added >= INLINE_MAX_CONST_DIV_ADDED_PER_CALLER
+                || caller_insts >= INLINE_MAX_CONST_DIV_CALLER_INSTS
             {
                 break;
             }
@@ -2830,20 +3182,40 @@ fn inline_single_caller(
             let c_vals = callee_ir.val_tys.len();
             // Reject obviously oversized callees BEFORE computing `try_compute_in_loop_blocks`!
             if !callee_ir.br_tables.is_empty()
-                || c_insts > INLINE_MAX_SINGLE_CALLEE_INSTS
-                || c_blocks > INLINE_MAX_SINGLE_CALLEE_BLOCKS
-                || c_vals > INLINE_MAX_SINGLE_CALLEE_VALS
-                || caller_ir.blocks.len() + c_blocks + 1 > INLINE_MAX_CALLER_BLOCKS
-                || caller_ir.val_tys.len() + c_vals > INLINE_MAX_CALLER_VALS
+                || c_insts > INLINE_MAX_CONST_DIV_CALLEE_INSTS
+                || c_blocks > INLINE_MAX_CONST_DIV_CALLEE_BLOCKS
+                || c_vals > INLINE_MAX_CONST_DIV_CALLEE_VALS
+                || caller_ir.blocks.len() + c_blocks + 1 > INLINE_MAX_CONST_DIV_CALLER_BLOCKS
+                || caller_ir.val_tys.len() + c_vals > INLINE_MAX_CONST_DIV_CALLER_VALS
             {
                 ii += 1;
                 continue;
             }
-            let is_single_site =
-                !ext_ref[callee_bi] && total_call_counts.get(callee_bi).copied().unwrap_or(0) == 1;
+            let caller_fits_standard = caller_added < INLINE_MAX_ADDED_PER_CALLER
+                && caller_insts < INLINE_MAX_CALLER_INSTS
+                && caller_ir.blocks.len() + c_blocks < INLINE_MAX_CALLER_BLOCKS
+                && caller_ir.val_tys.len() + c_vals <= INLINE_MAX_CALLER_VALS;
+            let fits_single_cap = caller_fits_standard
+                && c_insts <= INLINE_MAX_SINGLE_CALLEE_INSTS
+                && c_blocks <= INLINE_MAX_SINGLE_CALLEE_BLOCKS
+                && c_vals <= INLINE_MAX_SINGLE_CALLEE_VALS;
+            let div_param_mask = if !fits_single_cap {
+                let m = callee_div_rem_param_mask(callee_ir);
+                if m == 0 {
+                    ii += 1;
+                    continue;
+                }
+                m
+            } else {
+                0
+            };
+            let is_single_site = fits_single_cap
+                && !ext_ref[callee_bi]
+                && total_call_counts.get(callee_bi).copied().unwrap_or(0) == 1;
             let block_in_loop = if is_single_site {
                 false
-            } else if c_insts <= INLINE_MAX_CALLEE_INSTS
+            } else if fits_single_cap
+                && c_insts <= INLINE_MAX_CALLEE_INSTS
                 && c_blocks <= INLINE_MAX_CALLEE_BLOCKS
                 && c_vals <= INLINE_MAX_CALLEE_VALS
             {
@@ -2873,26 +3245,68 @@ fn inline_single_caller(
                     .and_then(|v| v.get(bi).copied())
                     .unwrap_or(false)
             };
-            let (max_insts, max_blocks, max_vals) = if is_single_site {
-                (
-                    INLINE_MAX_SINGLE_CALLEE_INSTS,
-                    INLINE_MAX_SINGLE_CALLEE_BLOCKS,
-                    INLINE_MAX_SINGLE_CALLEE_VALS,
-                )
-            } else if block_in_loop {
-                (
-                    INLINE_MAX_LOOP_CALLEE_INSTS,
-                    INLINE_MAX_LOOP_CALLEE_BLOCKS,
-                    INLINE_MAX_LOOP_CALLEE_VALS,
-                )
+            let qualifies_standard = if caller_fits_standard {
+                let (max_insts, max_blocks, max_vals) = if is_single_site {
+                    (
+                        INLINE_MAX_SINGLE_CALLEE_INSTS,
+                        INLINE_MAX_SINGLE_CALLEE_BLOCKS,
+                        INLINE_MAX_SINGLE_CALLEE_VALS,
+                    )
+                } else if block_in_loop {
+                    (
+                        INLINE_MAX_LOOP_CALLEE_INSTS,
+                        INLINE_MAX_LOOP_CALLEE_BLOCKS,
+                        INLINE_MAX_LOOP_CALLEE_VALS,
+                    )
+                } else {
+                    (
+                        INLINE_MAX_CALLEE_INSTS,
+                        INLINE_MAX_CALLEE_BLOCKS,
+                        INLINE_MAX_CALLEE_VALS,
+                    )
+                };
+                c_insts <= max_insts && c_blocks <= max_blocks && c_vals <= max_vals
             } else {
-                (
-                    INLINE_MAX_CALLEE_INSTS,
-                    INLINE_MAX_CALLEE_BLOCKS,
-                    INLINE_MAX_CALLEE_VALS,
-                )
+                false
             };
-            if c_insts > max_insts || c_blocks > max_blocks || c_vals > max_vals {
+            let qualifies_const_div = if !qualifies_standard && block_in_loop {
+                let mask = if div_param_mask != 0 {
+                    div_param_mask
+                } else {
+                    callee_div_rem_param_mask(callee_ir)
+                };
+                if mask != 0 {
+                    let cnz = caller_const_nz.get_or_insert_with(|| {
+                        let mut v = vec![false; caller_ir.val_tys.len()];
+                        for obb in &caller_ir.blocks {
+                            for ins in &obb.insts {
+                                if let Some(r) = ins.res {
+                                    match ins.op {
+                                        Op::ConstI32(c) if c != 0 => v[r.0 as usize] = true,
+                                        Op::ConstI64(c) if c != 0 => v[r.0 as usize] = true,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        v
+                    });
+                    if cnz.len() < caller_ir.val_tys.len() {
+                        cnz.resize(caller_ir.val_tys.len(), false);
+                    }
+                    caller_ir
+                        .pool_slice(args)
+                        .iter()
+                        .enumerate()
+                        .take(64)
+                        .any(|(k, &av)| (mask & (1u64 << k)) != 0 && cnz[av.0 as usize])
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !qualifies_standard && !qualifies_const_div {
                 ii += 1;
                 continue;
             }
@@ -2961,8 +3375,11 @@ fn inline_single_caller(
             local_inlined.sort_unstable();
             local_inlined.dedup();
         }
-        if caller_insts <= INLINE_MAX_SINGLE_CALLEE_INSTS
-            && caller_ir.blocks.len() > INLINE_MAX_SINGLE_CALLEE_BLOCKS
+        if (caller_insts <= INLINE_MAX_SINGLE_CALLEE_INSTS
+            && caller_ir.blocks.len() > INLINE_MAX_SINGLE_CALLEE_BLOCKS)
+            || (caller_insts <= INLINE_MAX_CONST_DIV_CALLEE_INSTS
+                && caller_ir.blocks.len() > INLINE_MAX_CONST_DIV_CALLEE_BLOCKS
+                && callee_div_rem_param_mask(caller_ir) != 0)
         {
             rebuild_cfg_and_prune(caller_ir, budget)?;
         }
@@ -3123,7 +3540,8 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
         }));
     }
 
-    let max_worst_per_caller = INLINE_MAX_ADDED_PER_CALLER + INLINE_MAX_SINGLE_CALLEE_INSTS;
+    let max_worst_per_caller =
+        INLINE_MAX_CONST_DIV_ADDED_PER_CALLER + INLINE_MAX_CONST_DIV_CALLEE_INSTS;
     let active_some_count = if warm {
         irs.iter().filter(|o| o.is_some()).count()
     } else {
@@ -3134,6 +3552,13 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
         stratum.try_reserve_exact(n_defs).ok()?;
         stratum.resize(n_defs, 0u32);
         let mut max_s = 0u32;
+        let mut has_div_reach = Vec::new();
+        has_div_reach.try_reserve_exact(n_defs).ok()?;
+        has_div_reach.resize(n_defs, false);
+        let may_inline_callee = |c: usize, has_div: &[bool]| -> bool {
+            inst_counts[c] <= INLINE_MAX_SINGLE_CALLEE_INSTS
+                || (inst_counts[c] <= INLINE_MAX_CONST_DIV_CALLEE_INSTS && has_div[c])
+        };
         if let Some(pc) = pre_callees
             && pc.len() == n_defs
         {
@@ -3141,21 +3566,42 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
                 if irs[bi].is_none() {
                     continue;
                 }
+                let own_div = pre_was_inlinable
+                    .and_then(|pw| pw.get(bi).copied())
+                    .map_or_else(
+                        || {
+                            inst_counts[bi] <= INLINE_MAX_CONST_DIV_CALLEE_INSTS
+                                && irs[bi]
+                                    .as_ref()
+                                    .is_some_and(|ir| callee_div_rem_param_mask(ir) != 0)
+                        },
+                        |w| w && inst_counts[bi] > INLINE_MAX_SINGLE_CALLEE_INSTS,
+                    );
                 let mut s = 0u32;
+                let mut reach_div = own_div;
                 for &(c_u32, _) in &pc[bi] {
                     let c = c_u32 as usize;
-                    // Callees exceeding `INLINE_MAX_SINGLE_CALLEE_INSTS` can never be inlined
+                    // Callees exceeding all inline thresholds can never be inlined
                     // (inlining only increases instruction counts), so they create zero stratum deps!
                     if c != bi
                         && c < n_defs
                         && !in_cycle[c]
                         && irs[c].is_some()
-                        && inst_counts[c] <= INLINE_MAX_SINGLE_CALLEE_INSTS
+                        && may_inline_callee(c, &has_div_reach)
                     {
                         s = s.max(stratum[c].saturating_add(1));
+                        if has_div_reach[c]
+                            || (inst_counts[c] <= INLINE_MAX_SINGLE_CALLEE_INSTS
+                                && irs[c]
+                                    .as_ref()
+                                    .is_some_and(|ir| callee_div_rem_param_mask(ir) != 0))
+                        {
+                            reach_div = true;
+                        }
                     }
                 }
                 stratum[bi] = s;
+                has_div_reach[bi] = reach_div;
                 max_s = max_s.max(s);
             }
         } else {
@@ -3164,6 +3610,8 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
                     continue;
                 };
                 let mut s = 0u32;
+                let mut reach_div = inst_counts[bi] <= INLINE_MAX_CONST_DIV_CALLEE_INSTS
+                    && callee_div_rem_param_mask(ir) != 0;
                 for bb in &ir.blocks {
                     for inst in &bb.insts {
                         if let Op::Call { func, .. } = inst.op {
@@ -3174,15 +3622,19 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
                                     && c < n_defs
                                     && !in_cycle[c]
                                     && irs[c].is_some()
-                                    && inst_counts[c] <= INLINE_MAX_SINGLE_CALLEE_INSTS
+                                    && may_inline_callee(c, &has_div_reach)
                                 {
                                     s = s.max(stratum[c].saturating_add(1));
+                                    if has_div_reach[c] {
+                                        reach_div = true;
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 stratum[bi] = s;
+                has_div_reach[bi] = reach_div;
                 max_s = max_s.max(s);
             }
         }
@@ -3196,7 +3648,7 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
             // Stratum 0 functions have ZERO direct calls to any potentially-inlinable `!in_cycle`
             // defined callee `c != bi` present in `irs`, so `inline_single_caller` is a no-op!
             let st = stratum[bi] as usize;
-            if st > 0 && irs[bi].is_some() && inst_counts[bi] < INLINE_MAX_CALLER_INSTS {
+            if st > 0 && irs[bi].is_some() && inst_counts[bi] < INLINE_MAX_CONST_DIV_CALLER_INSTS {
                 let b = &mut buckets[st];
                 if b.len() == b.capacity() {
                     b.try_reserve(1).ok()?;
@@ -3471,7 +3923,7 @@ pub fn inline_small_helpers_subset_parallel_with_pre(
         {
             bg.check_deadline()?;
         }
-        if irs[caller_bi].is_none() || inst_counts[caller_bi] >= INLINE_MAX_CALLER_INSTS {
+        if irs[caller_bi].is_none() || inst_counts[caller_bi] >= INLINE_MAX_CONST_DIV_CALLER_INSTS {
             continue;
         }
         if total_added_insts >= INLINE_MAX_MODULE_ADDED_INSTS {
@@ -3630,17 +4082,22 @@ pub fn try_compute_fn_own_effects(
         for inst in &bb.insts {
             match inst.op {
                 Op::Store { .. }
+                | Op::StoreScaled { .. }
+                | Op::StoreMem { .. }
                 | Op::V128StoreLane { .. }
+                | Op::V128StoreLaneMem { .. }
                 | Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
                 | Op::MemFill { .. }
+                | Op::MemFillIdx { .. }
                 | Op::MemCopyConst { .. }
                 | Op::MemFillConst { .. }
                 | Op::MemByteBlur3Div { .. }
                 | Op::F64x4BinMem { .. }
                 | Op::F64AxpyLoop { .. } => writes_mem = true,
-                Op::MemGrow(_) => {
+                Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                     writes_mem = true;
-                    grows_mem = !fixed_mem;
+                    grows_mem = !fixed_mem || !module.extra_memories.is_empty();
                 }
                 Op::GlobalSet(g, _) => {
                     let gi = g as usize;
@@ -3671,13 +4128,15 @@ pub fn try_compute_fn_own_effects(
             }
         }
         match bb.term {
-            Term::ReturnCall { func, .. } if (func as usize) < n_total => {
+            Term::ReturnCall { func, .. } | Term::CallCatch { func, .. }
+                if (func as usize) < n_total =>
+            {
                 if direct_callees.len() == direct_callees.capacity() {
                     direct_callees.try_reserve(1).ok()?;
                 }
                 direct_callees.push(func);
             }
-            Term::ReturnCallIndirect { .. } => {
+            Term::ReturnCallIndirect { .. } | Term::CallIndirectCatch { .. } => {
                 writes_mem = true;
                 grows_mem = !fixed_mem;
                 writes_all_globals = true;
@@ -4201,6 +4660,7 @@ fn is_pure_licm_op(op: &Op) -> bool {
         | Op::F64ReinterpretI64(_)
         | Op::Select { .. }
         | Op::CmpSelect { .. }
+        | Op::AddScaled { .. }
         | Op::V128Splat { .. }
         | Op::V128ExtractLane { .. }
         | Op::V128ReplaceLane { .. }
@@ -4885,7 +5345,13 @@ fn canonical_gvn_key(op: Op) -> Option<GvnKey> {
     let comm_int = |bop: IntBinOp, a: Val, b: Val| -> (Val, Val) {
         if matches!(
             bop,
-            IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor
+            IntBinOp::Add
+                | IntBinOp::Mul
+                | IntBinOp::MulHiS
+                | IntBinOp::MulHiU
+                | IntBinOp::And
+                | IntBinOp::Or
+                | IntBinOp::Xor
         ) && a.0 > b.0
         {
             (b, a)
@@ -5008,6 +5474,7 @@ fn ranges_disjoint(off1: u64, sz1: u64, off2: u64, sz2: u64) -> bool {
 enum UndoEntry {
     Expr(GvnKey, Option<Val>),
     Const32(Val, Option<i32>),
+    Const64(Val, Option<i64>),
     AddConst(Val, Option<(Val, u32)>),
     Bound(Val, Option<u64>),
     CheckedMax(Val, Option<u64>),
@@ -5037,6 +5504,7 @@ pub struct Stage2Scratch {
     subst: Vec<Val>,
     exprs: HashMap<GvnKey, Val>,
     const32: Vec<Option<i32>>,
+    const64: HashMap<Val, i64>,
     add_const: Vec<Option<(Val, u32)>>,
     non_wrap_bound: Vec<Option<u64>>,
     checked_max: Vec<Option<u64>>,
@@ -5049,6 +5517,11 @@ pub struct Stage2Scratch {
     out_insts: Vec<Inst>,
     opt_ir: OptIrScratch,
     op_flags: u8,
+    reduced_div_rem: bool,
+    as_def_wrap: Vec<Option<Val>>,
+    as_scaled_def: Vec<Option<(bool, Val, u8)>>,
+    as_use_count: Vec<u32>,
+    as_add_fold_uses: Vec<u32>,
 }
 
 impl Default for Stage2Scratch {
@@ -5060,6 +5533,7 @@ impl Default for Stage2Scratch {
             subst: Vec::new(),
             exprs: fx_map(),
             const32: Vec::new(),
+            const64: fx_map(),
             add_const: Vec::new(),
             non_wrap_bound: Vec::new(),
             checked_max: Vec::new(),
@@ -5072,6 +5546,11 @@ impl Default for Stage2Scratch {
             out_insts: Vec::new(),
             opt_ir: OptIrScratch::default(),
             op_flags: 0,
+            reduced_div_rem: false,
+            as_def_wrap: Vec::new(),
+            as_scaled_def: Vec::new(),
+            as_use_count: Vec::new(),
+            as_add_fold_uses: Vec::new(),
         }
     }
 }
@@ -5095,6 +5574,7 @@ struct GvnState<'a> {
     record_undo: bool,
     exprs: HashMap<GvnKey, Val>,
     const32: Vec<Option<i32>>,
+    const64: HashMap<Val, i64>,
     add_const: Vec<Option<(Val, u32)>>,
     non_wrap_bound: Vec<Option<u64>>,
     checked_max: Vec<Option<u64>>,
@@ -5148,6 +5628,23 @@ impl<'a> GvnState<'a> {
         let prev = self.const32[v.0 as usize].replace(c);
         if self.record_undo {
             self.undo.push(UndoEntry::Const32(v, prev));
+        }
+    }
+
+    #[inline]
+    fn insert_const64(&mut self, v: Val, c: i64) {
+        let prev = self.const64.insert(v, c);
+        if self.record_undo {
+            self.undo.push(UndoEntry::Const64(v, prev));
+        }
+    }
+
+    #[inline]
+    fn get_const64(&self, v: Val) -> Option<i64> {
+        if self.const64.is_empty() {
+            None
+        } else {
+            self.const64.get(&v).copied()
         }
     }
 
@@ -5364,6 +5861,12 @@ impl<'a> GvnState<'a> {
                 UndoEntry::Const32(k, prev) => {
                     self.const32[k.0 as usize] = prev;
                 }
+                UndoEntry::Const64(k, Some(prev)) => {
+                    self.const64.insert(k, prev);
+                }
+                UndoEntry::Const64(k, None) => {
+                    self.const64.remove(&k);
+                }
                 UndoEntry::AddConst(k, prev) => {
                     self.add_const[k.0 as usize] = prev;
                 }
@@ -5443,6 +5946,47 @@ fn fold_i32_cmp_const(op: CmpOp, ca: i32, cb: i32) -> bool {
     }
 }
 
+/// Evaluates a pure non-trapping 64-bit binary op on known constants.
+fn fold_i64_bin_const(op: IntBinOp, ca: i64, cb: i64) -> Option<i64> {
+    match op {
+        IntBinOp::Add => Some(ca.wrapping_add(cb)),
+        IntBinOp::Sub => Some(ca.wrapping_sub(cb)),
+        IntBinOp::Mul => Some(ca.wrapping_mul(cb)),
+        IntBinOp::DivS if cb != 0 && !(ca == i64::MIN && cb == -1) => Some(ca.wrapping_div(cb)),
+        IntBinOp::DivU | IntBinOp::DivUNz if cb != 0 => Some(((ca as u64) / (cb as u64)) as i64),
+        IntBinOp::RemS if cb != 0 => Some(if ca == i64::MIN && cb == -1 {
+            0
+        } else {
+            ca.wrapping_rem(cb)
+        }),
+        IntBinOp::RemU | IntBinOp::RemUNz if cb != 0 => Some(((ca as u64) % (cb as u64)) as i64),
+        IntBinOp::And => Some(ca & cb),
+        IntBinOp::Or => Some(ca | cb),
+        IntBinOp::Xor => Some(ca ^ cb),
+        IntBinOp::Shl => Some(ca.wrapping_shl(cb as u32)),
+        IntBinOp::ShrS => Some(ca.wrapping_shr(cb as u32)),
+        IntBinOp::ShrU => Some(((ca as u64).wrapping_shr(cb as u32)) as i64),
+        IntBinOp::Rotl => Some((ca as u64).rotate_left((cb as u32) & 63) as i64),
+        IntBinOp::Rotr => Some((ca as u64).rotate_right((cb as u32) & 63) as i64),
+        _ => None,
+    }
+}
+
+fn fold_i64_cmp_const(op: CmpOp, ca: i64, cb: i64) -> bool {
+    match op {
+        CmpOp::Eq => ca == cb,
+        CmpOp::Ne => ca != cb,
+        CmpOp::LtS => ca < cb,
+        CmpOp::LtU => (ca as u64) < (cb as u64),
+        CmpOp::GtS => ca > cb,
+        CmpOp::GtU => (ca as u64) > (cb as u64),
+        CmpOp::LeS => ca <= cb,
+        CmpOp::LeU => (ca as u64) <= (cb as u64),
+        CmpOp::GeS => ca >= cb,
+        CmpOp::GeU => (ca as u64) >= (cb as u64),
+    }
+}
+
 /// Runs dominator-tree scoped GVN/CSE, post-inlining `const32` folding, `GlobalGet`/`MemSize`/`TableGet`/
 /// alias-safe `Load` CSE, cross-block dominator `checked_max` bounds-check elimination, and wrap-safe
 /// addressing-mode folding. Returns `(folded_any_branch, ir_mutated)`.
@@ -5472,6 +6016,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     // non-mutating functions keep facts valid across the ENTIRE dominator tree including joins & loops!).
     let mut fn_may_grow = false;
     let mut fn_writes_mem = false;
+    let mut block_writes_mem = vec![false; ir.blocks.len()];
     let mut fn_writes_all_globals = false;
     let mut fn_writes_any_global = false;
     let mut fn_written_globals = std::mem::take(&mut scratch.fn_written_globals);
@@ -5481,6 +6026,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     let mut fn_written_tables = 0u64;
     let mut op_flags = 0u8;
     for &b in &dom.rpo {
+        let mut blk_writes_mem = false;
         for inst in &ir.blocks[b as usize].insts {
             match inst.op {
                 Op::Load { kind, checked, .. } => {
@@ -5496,6 +6042,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                 }
                 Op::Store { kind, checked, .. } => {
                     fn_writes_mem = true;
+                    blk_writes_mem = true;
                     if !checked {
                         op_flags |= OP_FLAG_UNCHECKED_MEM;
                     }
@@ -5505,8 +6052,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                         _ => {}
                     }
                 }
+                Op::StoreScaled { .. } => {
+                    fn_writes_mem = true;
+                    blk_writes_mem = true;
+                }
                 Op::V128StoreLane { checked, .. } => {
                     fn_writes_mem = true;
+                    blk_writes_mem = true;
                     if !checked {
                         op_flags |= OP_FLAG_UNCHECKED_MEM;
                     }
@@ -5520,21 +6072,30 @@ fn run_dom_gvn_and_bce_with_scratch(
                     ..
                 } => {
                     fn_writes_mem = true;
+                    blk_writes_mem = true;
                     if !dst_checked || !src_checked {
                         op_flags |= OP_FLAG_UNCHECKED_MEM;
                     }
                 }
                 Op::MemFillConst { checked, .. } => {
                     fn_writes_mem = true;
+                    blk_writes_mem = true;
                     if !checked {
                         op_flags |= OP_FLAG_UNCHECKED_MEM;
                     }
                 }
                 Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
                 | Op::MemFill { .. }
+                | Op::MemFillIdx { .. }
+                | Op::StoreMem { .. }
+                | Op::V128StoreLaneMem { .. }
                 | Op::MemByteBlur3Div { .. }
                 | Op::F64x4BinMem { .. }
-                | Op::F64AxpyLoop { .. } => fn_writes_mem = true,
+                | Op::F64AxpyLoop { .. } => {
+                    fn_writes_mem = true;
+                    blk_writes_mem = true;
+                }
                 Op::I32Bin(IntBinOp::DivU | IntBinOp::RemU, ..)
                 | Op::I32BinImm(IntBinOp::DivU | IntBinOp::RemU, ..) => {
                     op_flags |= OP_FLAG_DIV_REM;
@@ -5542,9 +6103,10 @@ fn run_dom_gvn_and_bce_with_scratch(
                 Op::Select { .. } | Op::CmpSelect { .. } => {
                     op_flags |= OP_FLAG_SELECT;
                 }
-                Op::MemGrow(_) => {
+                Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                     fn_writes_mem = true;
-                    if !fixed_mem {
+                    blk_writes_mem = true;
+                    if !fixed_mem || !module.extra_memories.is_empty() {
                         fn_may_grow = true;
                     }
                 }
@@ -5564,6 +6126,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                 }
                 Op::CallIndirect { .. } => {
                     fn_writes_mem = true;
+                    blk_writes_mem = true;
                     if !fixed_mem {
                         fn_may_grow = true;
                     }
@@ -5575,9 +6138,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                     let f = func as usize;
                     if effects.writes_mem[f] {
                         fn_writes_mem = true;
+                        blk_writes_mem = true;
                     }
                     if effects.grows_mem[f] {
                         fn_may_grow = true;
+                        blk_writes_mem = true;
                     }
                     if effects.writes_all_globals[f] {
                         fn_writes_all_globals = true;
@@ -5602,6 +6167,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                 _ => {}
             }
         }
+        block_writes_mem[b as usize] = blk_writes_mem;
     }
 
     scratch.op_flags = op_flags;
@@ -5627,6 +6193,13 @@ fn run_dom_gvn_and_bce_with_scratch(
         const32.shrink_to(4096);
     }
     const32.resize(n_vals, None);
+    let mut const64 = std::mem::take(&mut scratch.const64);
+    if const64.capacity() > 1024 && n_vals <= 512 {
+        const64 = fx_map();
+    } else {
+        const64.clear();
+    }
+    scratch.reduced_div_rem = false;
     let mut add_const = std::mem::take(&mut scratch.add_const);
     add_const.clear();
     if add_const.capacity() > 16_384 && n_vals <= 4096 {
@@ -5686,6 +6259,7 @@ fn run_dom_gvn_and_bce_with_scratch(
         record_undo: false,
         exprs,
         const32,
+        const64,
         add_const,
         non_wrap_bound,
         checked_max,
@@ -5773,12 +6347,24 @@ fn run_dom_gvn_and_bce_with_scratch(
                 }
 
                 // At multi-predecessor joins/loops, conservatively invalidate mutable state (read-only facts persist!).
+                // Preserve `mem_facts` across pure read-only 1-level diamonds (`if cond { load ... }`) where
+                // every predecessor is either `idom` itself or a single-pred read-only child of `idom`.
                 if dom.preds(bid).len() > 1 {
                     if st.fn_may_grow {
                         st.grow_epoch = st.grow_epoch.wrapping_add(1);
                     }
                     if st.fn_writes_mem {
-                        st.clear_mem_facts();
+                        let idom_b = dom.idom[bid as usize];
+                        let mem_clean_join = idom_b != u32::MAX
+                            && dom.preds(bid).iter().all(|&p| {
+                                p == idom_b
+                                    || (!block_writes_mem[p as usize]
+                                        && dom.preds(p).len() == 1
+                                        && dom.preds(p)[0] == idom_b)
+                            });
+                        if !mem_clean_join {
+                            st.clear_mem_facts();
+                        }
                     }
                     if st.fn_writes_all_globals || st.fn_writes_any_global {
                         st.glob_epoch = st.glob_epoch.wrapping_add(1);
@@ -6133,7 +6719,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                             continue;
                         }
                         Op::MemCopy { .. }
+                        | Op::MemCopyIdx { .. }
                         | Op::MemFill { .. }
+                        | Op::MemFillIdx { .. }
+                        | Op::StoreMem { .. }
+                        | Op::V128StoreLaneMem { .. }
                         | Op::MemByteBlur3Div { .. }
                         | Op::F64x4BinMem { .. }
                         | Op::F64AxpyLoop { .. } => {
@@ -6141,9 +6731,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             out_insts.push(inst);
                             continue;
                         }
-                        Op::MemGrow(_) => {
+                        Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                             st.clear_mem_facts();
-                            if st.module.fixed32.is_none() {
+                            if st.module.fixed32.is_none() || !st.module.extra_memories.is_empty() {
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
                             }
                             out_insts.push(inst);
@@ -6268,13 +6858,37 @@ fn run_dom_gvn_and_bce_with_scratch(
                         _ => {}
                     }
 
-                    // Post-inlining `const32` constant folding + select folding (simplifies inlined helpers
-                    // like `blot:allocate(const)` directly into constants and dead branches).
+                    // Post-inlining `const32`/`const64` constant folding, single-const strength
+                    // reduction (`I32Bin`/`I64Bin` -> `*BinImm`), and select folding.
                     if let Some(res) = inst.res {
                         match inst.op {
                             Op::I32Eqz(a) => {
                                 if let Some(ca) = st.const32[a.0 as usize] {
                                     inst.op = Op::ConstI32(i32::from(ca == 0));
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::I64Eqz(a) => {
+                                if let Some(ca) = st.get_const64(a) {
+                                    inst.op = Op::ConstI32(i32::from(ca == 0));
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::I32WrapI64(a) => {
+                                if let Some(ca) = st.get_const64(a) {
+                                    inst.op = Op::ConstI32(ca as i32);
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::I64ExtendI32S(a) => {
+                                if let Some(ca) = st.const32[a.0 as usize] {
+                                    inst.op = Op::ConstI64(i64::from(ca));
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::I64ExtendI32U(a) => {
+                                if let Some(ca) = st.const32[a.0 as usize] {
+                                    inst.op = Op::ConstI64(i64::from(ca as u32));
                                     ir_mutated = true;
                                 }
                             }
@@ -6286,34 +6900,340 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     ir_mutated = true;
                                 }
                             }
-                            Op::I32Bin(bop, a, b) => {
+                            Op::I64BinImm(bop, a, imm) => {
+                                if let Some(ca) = st.get_const64(a) {
+                                    let cb = if matches!(bop, IntBinOp::DivU | IntBinOp::RemU) {
+                                        u64::from(imm as u32) as i64
+                                    } else {
+                                        i64::from(imm)
+                                    };
+                                    if let Some(v) = fold_i64_bin_const(bop, ca, cb) {
+                                        inst.op = Op::ConstI64(v);
+                                        ir_mutated = true;
+                                    }
+                                }
+                            }
+                            Op::I32Bin(bop, mut a, mut b) => {
                                 if let (Some(ca), Some(cb)) =
                                     (st.const32[a.0 as usize], st.const32[b.0 as usize])
                                     && let Some(v) = fold_i32_bin_const(bop, ca, cb)
                                 {
                                     inst.op = Op::ConstI32(v);
                                     ir_mutated = true;
-                                } else if matches!(bop, IntBinOp::DivU | IntBinOp::RemU)
-                                    && st.non_zero[b.0 as usize]
-                                {
-                                    let nz_op = if bop == IntBinOp::DivU {
-                                        IntBinOp::DivUNz
-                                    } else {
-                                        IntBinOp::RemUNz
-                                    };
-                                    inst.op = Op::I32Bin(nz_op, a, b);
-                                    ir_mutated = true;
+                                } else {
+                                    if matches!(
+                                        bop,
+                                        IntBinOp::Add
+                                            | IntBinOp::Mul
+                                            | IntBinOp::And
+                                            | IntBinOp::Or
+                                            | IntBinOp::Xor
+                                    ) && st.const32[a.0 as usize].is_some()
+                                        && st.const32[b.0 as usize].is_none()
+                                    {
+                                        std::mem::swap(&mut a, &mut b);
+                                    }
+                                    if let Some(cb) = st.const32[b.0 as usize] {
+                                        match bop {
+                                            IntBinOp::Add
+                                            | IntBinOp::Sub
+                                            | IntBinOp::Or
+                                            | IntBinOp::Xor
+                                                if cb == 0 =>
+                                            {
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            IntBinOp::And if cb == -1 => {
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            IntBinOp::And | IntBinOp::Mul if cb == 0 => {
+                                                inst.op = Op::ConstI32(0);
+                                                ir_mutated = true;
+                                            }
+                                            IntBinOp::Mul
+                                            | IntBinOp::DivS
+                                            | IntBinOp::DivU
+                                            | IntBinOp::DivUNz
+                                                if cb == 1 =>
+                                            {
+                                                if matches!(
+                                                    bop,
+                                                    IntBinOp::DivS
+                                                        | IntBinOp::DivU
+                                                        | IntBinOp::DivUNz
+                                                ) {
+                                                    scratch.reduced_div_rem = true;
+                                                }
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            IntBinOp::RemS if cb == 1 || cb == -1 => {
+                                                inst.op = Op::ConstI32(0);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::RemU | IntBinOp::RemUNz if cb == 1 => {
+                                                inst.op = Op::ConstI32(0);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::Mul if (cb as u32).is_power_of_two() => {
+                                                inst.op = Op::I32BinImm(
+                                                    IntBinOp::Shl,
+                                                    a,
+                                                    (cb as u32).trailing_zeros() as i32,
+                                                );
+                                                ir_mutated = true;
+                                            }
+                                            IntBinOp::DivU | IntBinOp::DivUNz
+                                                if (cb as u32).is_power_of_two() =>
+                                            {
+                                                inst.op = Op::I32BinImm(
+                                                    IntBinOp::ShrU,
+                                                    a,
+                                                    (cb as u32).trailing_zeros() as i32,
+                                                );
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::RemU | IntBinOp::RemUNz
+                                                if (cb as u32).is_power_of_two() =>
+                                            {
+                                                inst.op = Op::I32BinImm(
+                                                    IntBinOp::And,
+                                                    a,
+                                                    ((cb as u32) - 1) as i32,
+                                                );
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::DivU | IntBinOp::DivUNz if cb != 0 => {
+                                                inst.op = Op::I32BinImm(IntBinOp::DivU, a, cb);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::RemU | IntBinOp::RemUNz if cb != 0 => {
+                                                inst.op = Op::I32BinImm(IntBinOp::RemU, a, cb);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::DivS | IntBinOp::RemS
+                                                if cb != 0 && cb != -1 =>
+                                            {
+                                                inst.op = Op::I32BinImm(bop, a, cb);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::Shl
+                                            | IntBinOp::ShrS
+                                            | IntBinOp::ShrU
+                                            | IntBinOp::Rotl
+                                            | IntBinOp::Rotr => {
+                                                let sh = (cb as u32) & 31;
+                                                if sh == 0 {
+                                                    st.set_subst(res, a);
+                                                    ir_mutated = true;
+                                                    continue;
+                                                }
+                                                inst.op = Op::I32BinImm(bop, a, sh as i32);
+                                                ir_mutated = true;
+                                            }
+                                            IntBinOp::Add
+                                            | IntBinOp::Sub
+                                            | IntBinOp::Mul
+                                            | IntBinOp::And
+                                            | IntBinOp::Or
+                                            | IntBinOp::Xor => {
+                                                inst.op = Op::I32BinImm(bop, a, cb);
+                                                ir_mutated = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    } else if matches!(bop, IntBinOp::DivU | IntBinOp::RemU)
+                                        && st.non_zero[b.0 as usize]
+                                    {
+                                        let nz_op = if bop == IntBinOp::DivU {
+                                            IntBinOp::DivUNz
+                                        } else {
+                                            IntBinOp::RemUNz
+                                        };
+                                        inst.op = Op::I32Bin(nz_op, a, b);
+                                        ir_mutated = true;
+                                    }
                                 }
                             }
-                            Op::I64Bin(bop @ (IntBinOp::DivU | IntBinOp::RemU), a, b) => {
-                                if st.non_zero[b.0 as usize] {
-                                    let nz_op = if bop == IntBinOp::DivU {
-                                        IntBinOp::DivUNz
-                                    } else {
-                                        IntBinOp::RemUNz
-                                    };
-                                    inst.op = Op::I64Bin(nz_op, a, b);
+                            Op::I64Bin(bop, mut a, mut b) => {
+                                let ca_opt = st.get_const64(a);
+                                let cb_opt = st.get_const64(b);
+                                if let (Some(ca), Some(cb)) = (ca_opt, cb_opt)
+                                    && let Some(v) = fold_i64_bin_const(bop, ca, cb)
+                                {
+                                    inst.op = Op::ConstI64(v);
                                     ir_mutated = true;
+                                } else {
+                                    let eff_cb = if matches!(
+                                        bop,
+                                        IntBinOp::Add
+                                            | IntBinOp::Mul
+                                            | IntBinOp::And
+                                            | IntBinOp::Or
+                                            | IntBinOp::Xor
+                                    ) && ca_opt.is_some()
+                                        && cb_opt.is_none()
+                                    {
+                                        std::mem::swap(&mut a, &mut b);
+                                        ca_opt
+                                    } else {
+                                        cb_opt
+                                    };
+                                    if let Some(cb) = eff_cb {
+                                        match bop {
+                                            IntBinOp::Add
+                                            | IntBinOp::Sub
+                                            | IntBinOp::Or
+                                            | IntBinOp::Xor
+                                                if cb == 0 =>
+                                            {
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            IntBinOp::And if cb == -1 => {
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            IntBinOp::And | IntBinOp::Mul if cb == 0 => {
+                                                inst.op = Op::ConstI64(0);
+                                                ir_mutated = true;
+                                            }
+                                            IntBinOp::Mul
+                                            | IntBinOp::DivS
+                                            | IntBinOp::DivU
+                                            | IntBinOp::DivUNz
+                                                if cb == 1 =>
+                                            {
+                                                if matches!(
+                                                    bop,
+                                                    IntBinOp::DivS
+                                                        | IntBinOp::DivU
+                                                        | IntBinOp::DivUNz
+                                                ) {
+                                                    scratch.reduced_div_rem = true;
+                                                }
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            IntBinOp::RemS if cb == 1 || cb == -1 => {
+                                                inst.op = Op::ConstI64(0);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::RemU | IntBinOp::RemUNz if cb == 1 => {
+                                                inst.op = Op::ConstI64(0);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::Mul if (cb as u64).is_power_of_two() => {
+                                                inst.op = Op::I64BinImm(
+                                                    IntBinOp::Shl,
+                                                    a,
+                                                    (cb as u64).trailing_zeros() as i32,
+                                                );
+                                                ir_mutated = true;
+                                            }
+                                            IntBinOp::DivU | IntBinOp::DivUNz
+                                                if (cb as u64).is_power_of_two() =>
+                                            {
+                                                inst.op = Op::I64BinImm(
+                                                    IntBinOp::ShrU,
+                                                    a,
+                                                    (cb as u64).trailing_zeros() as i32,
+                                                );
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::RemU | IntBinOp::RemUNz
+                                                if (cb as u64).is_power_of_two()
+                                                    && ((cb as u64) - 1) <= i32::MAX as u64 =>
+                                            {
+                                                inst.op = Op::I64BinImm(
+                                                    IntBinOp::And,
+                                                    a,
+                                                    ((cb as u64) - 1) as i32,
+                                                );
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::DivU | IntBinOp::DivUNz
+                                                if cb >= 2 && cb <= i32::MAX as i64 =>
+                                            {
+                                                inst.op =
+                                                    Op::I64BinImm(IntBinOp::DivU, a, cb as i32);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::RemU | IntBinOp::RemUNz
+                                                if cb >= 2 && cb <= i32::MAX as i64 =>
+                                            {
+                                                inst.op =
+                                                    Op::I64BinImm(IntBinOp::RemU, a, cb as i32);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::DivS | IntBinOp::RemS
+                                                if cb != 0
+                                                    && cb != -1
+                                                    && i32::try_from(cb).is_ok() =>
+                                            {
+                                                inst.op = Op::I64BinImm(bop, a, cb as i32);
+                                                ir_mutated = true;
+                                                scratch.reduced_div_rem = true;
+                                            }
+                                            IntBinOp::Shl
+                                            | IntBinOp::ShrS
+                                            | IntBinOp::ShrU
+                                            | IntBinOp::Rotl
+                                            | IntBinOp::Rotr => {
+                                                let sh = (cb as u32) & 63;
+                                                if sh == 0 {
+                                                    st.set_subst(res, a);
+                                                    ir_mutated = true;
+                                                    continue;
+                                                }
+                                                inst.op = Op::I64BinImm(bop, a, sh as i32);
+                                                ir_mutated = true;
+                                            }
+                                            IntBinOp::Add
+                                            | IntBinOp::Sub
+                                            | IntBinOp::Mul
+                                            | IntBinOp::And
+                                            | IntBinOp::Or
+                                            | IntBinOp::Xor
+                                                if i32::try_from(cb).is_ok() =>
+                                            {
+                                                inst.op = Op::I64BinImm(bop, a, cb as i32);
+                                                ir_mutated = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    } else if matches!(bop, IntBinOp::DivU | IntBinOp::RemU)
+                                        && st.non_zero[b.0 as usize]
+                                    {
+                                        let nz_op = if bop == IntBinOp::DivU {
+                                            IntBinOp::DivUNz
+                                        } else {
+                                            IntBinOp::RemUNz
+                                        };
+                                        inst.op = Op::I64Bin(nz_op, a, b);
+                                        ir_mutated = true;
+                                    }
                                 }
                             }
                             Op::I32CmpImm(cop, a, imm) => {
@@ -6323,13 +7243,57 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     ir_mutated = true;
                                 }
                             }
-                            Op::I32Cmp(cop, a, b) => {
+                            Op::I32Cmp(mut cop, mut a, mut b) => {
                                 if let (Some(ca), Some(cb)) =
                                     (st.const32[a.0 as usize], st.const32[b.0 as usize])
                                 {
                                     inst.op =
                                         Op::ConstI32(i32::from(fold_i32_cmp_const(cop, ca, cb)));
                                     ir_mutated = true;
+                                } else {
+                                    if st.const32[a.0 as usize].is_some()
+                                        && st.const32[b.0 as usize].is_none()
+                                    {
+                                        std::mem::swap(&mut a, &mut b);
+                                        cop = cop.swap();
+                                    }
+                                    if let Some(cb) = st.const32[b.0 as usize] {
+                                        inst.op = Op::I32CmpImm(cop, a, cb);
+                                        ir_mutated = true;
+                                    }
+                                }
+                            }
+                            Op::I64CmpImm(cop, a, imm) => {
+                                if let Some(ca) = st.get_const64(a) {
+                                    inst.op = Op::ConstI32(i32::from(fold_i64_cmp_const(
+                                        cop,
+                                        ca,
+                                        i64::from(imm),
+                                    )));
+                                    ir_mutated = true;
+                                }
+                            }
+                            Op::I64Cmp(mut cop, mut a, mut b) => {
+                                let ca_opt = st.get_const64(a);
+                                let cb_opt = st.get_const64(b);
+                                if let (Some(ca), Some(cb)) = (ca_opt, cb_opt) {
+                                    inst.op =
+                                        Op::ConstI32(i32::from(fold_i64_cmp_const(cop, ca, cb)));
+                                    ir_mutated = true;
+                                } else {
+                                    let eff_cb = if ca_opt.is_some() && cb_opt.is_none() {
+                                        std::mem::swap(&mut a, &mut b);
+                                        cop = cop.swap();
+                                        ca_opt
+                                    } else {
+                                        cb_opt
+                                    };
+                                    if let Some(cb) = eff_cb
+                                        && let Ok(imm32) = i32::try_from(cb)
+                                    {
+                                        inst.op = Op::I64CmpImm(cop, a, imm32);
+                                        ir_mutated = true;
+                                    }
                                 }
                             }
                             Op::Select { cond, a, b } => {
@@ -6348,6 +7312,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                                         .map(|(ca, cb)| fold_i32_cmp_const(cop, ca, cb)),
                                     CmpBranchKind::I32Imm(cop, imm) => st.const32[a.0 as usize]
                                         .map(|ca| fold_i32_cmp_const(cop, ca, imm)),
+                                    CmpBranchKind::I64(cop) => st
+                                        .get_const64(a)
+                                        .zip(st.get_const64(b))
+                                        .map(|(ca, cb)| fold_i64_cmp_const(cop, ca, cb)),
+                                    CmpBranchKind::I64Imm(cop, imm) => st
+                                        .get_const64(a)
+                                        .map(|ca| fold_i64_cmp_const(cop, ca, i64::from(imm))),
                                     _ => None,
                                 };
                                 if let Some(take_tv) = known {
@@ -6379,8 +7350,11 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     st.mark_non_zero(res);
                                 }
                             }
-                            Op::ConstI64(c) if c != 0 => {
-                                st.mark_non_zero(res);
+                            Op::ConstI64(c) => {
+                                st.insert_const64(res, c);
+                                if c != 0 {
+                                    st.mark_non_zero(res);
+                                }
                             }
                             Op::I32BinImm(IntBinOp::Or, _, m)
                             | Op::I64BinImm(IntBinOp::Or, _, m)
@@ -6468,6 +7442,13 @@ fn run_dom_gvn_and_bce_with_scratch(
                             CmpBranchKind::I32Imm(cop, imm) => {
                                 st.const32[a.0 as usize].map(|ca| fold_i32_cmp_const(cop, ca, imm))
                             }
+                            CmpBranchKind::I64(cop) => st
+                                .get_const64(a)
+                                .zip(st.get_const64(b))
+                                .map(|(ca, cb)| fold_i64_cmp_const(cop, ca, cb)),
+                            CmpBranchKind::I64Imm(cop, imm) => st
+                                .get_const64(a)
+                                .map(|ca| fold_i64_cmp_const(cop, ca, i64::from(imm))),
                             _ => None,
                         };
                         if let Some(take_then) = known {
@@ -6580,6 +7561,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     scratch.subst = st.subst;
     scratch.exprs = st.exprs;
     scratch.const32 = st.const32;
+    scratch.const64 = st.const64;
     scratch.add_const = st.add_const;
     scratch.non_wrap_bound = st.non_wrap_bound;
     scratch.checked_max = st.checked_max;
@@ -6692,9 +7674,19 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
                     edge_in[t.0 as usize] = edge_in[t.0 as usize].saturating_add(1);
                 }
             }
+            Term::CallCatch {
+                ok_bb, catch_bb, ..
+            }
+            | Term::CallIndirectCatch {
+                ok_bb, catch_bb, ..
+            } => {
+                edge_in[ok_bb.0 as usize] = edge_in[ok_bb.0 as usize].saturating_add(1);
+                edge_in[catch_bb.0 as usize] = edge_in[catch_bb.0 as usize].saturating_add(1);
+            }
             Term::Return { .. }
             | Term::ReturnCall { .. }
             | Term::ReturnCallIndirect { .. }
+            | Term::ThrowActive
             | Term::Unreachable => {}
         }
     }
@@ -7117,6 +8109,9 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::ConstV128(_)
         | Op::GlobalGet(_)
         | Op::MemSize
+        | Op::MemSizeIdx(_)
+        | Op::ExnGetActive
+        | Op::ExnClearActive
         | Op::Trap(_) => {}
         Op::I32Eqz(a)
         | Op::I64Eqz(a)
@@ -7159,13 +8154,22 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::TableGet { idx: a, .. }
         | Op::BoundsCheck { addr: a, .. }
         | Op::Load { addr: a, .. }
+        | Op::LoadScaled { addr: a, .. }
+        | Op::LoadMem { addr: a, .. }
         | Op::MemGrow(a)
+        | Op::MemGrowIdx { delta: a, .. }
         | Op::V128Splat { val: a, .. }
         | Op::V128ExtractLane { v: a, .. }
         | Op::V128Un { a, .. }
-        | Op::V128ToI32 { a, .. } => r(a),
+        | Op::V128ToI32 { a, .. }
+        | Op::ExnSetActive(a)
+        | Op::ExnGetTag(a)
+        | Op::ExnGetPayload { handle: a, .. } => r(a),
         Op::I32Bin(_, a, b)
         | Op::I64Bin(_, a, b)
+        | Op::AddScaled {
+            base: a, idx: b, ..
+        }
         | Op::I32Cmp(_, a, b)
         | Op::I64Cmp(_, a, b)
         | Op::F32Cmp(_, a, b)
@@ -7176,10 +8180,22 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
         | Op::Store {
             addr: a, val: b, ..
         }
+        | Op::StoreScaled {
+            addr: a, val: b, ..
+        }
+        | Op::StoreMem {
+            addr: a, val: b, ..
+        }
         | Op::V128LoadLane {
             addr: a, vec: b, ..
         }
+        | Op::V128LoadLaneMem {
+            addr: a, vec: b, ..
+        }
         | Op::V128StoreLane {
+            addr: a, vec: b, ..
+        }
+        | Op::V128StoreLaneMem {
             addr: a, vec: b, ..
         }
         | Op::V128ReplaceLane { v: a, x: b, .. }
@@ -7234,20 +8250,20 @@ fn remap_op_uses_map(op: &mut Op, val_map: &HashMap<Val, Val>) {
             r(tv);
             r(fv);
         }
-        Op::MemCopy { dst, src, len } => {
+        Op::MemCopy { dst, src, len } | Op::MemCopyIdx { dst, src, len, .. } => {
             r(dst);
             r(src);
             r(len);
         }
-        Op::MemFill { dst, val, len } => {
+        Op::MemFill { dst, val, len } | Op::MemFillIdx { dst, val, len, .. } => {
             r(dst);
             r(val);
             r(len);
         }
-        Op::Call { .. } | Op::CallIndirect { .. } => {
+        Op::Call { .. } | Op::CallIndirect { .. } | Op::ExnAlloc { .. } => {
             debug_assert!(
                 false,
-                "version_checked_counted_loops excludes Call/CallIndirect"
+                "version_checked_counted_loops excludes Call/CallIndirect/Exn"
             );
         }
     }
@@ -7264,6 +8280,8 @@ fn version_checked_counted_loops(
     dom: &CfgDom,
     module: &X64Module,
     budget: Option<&CompileBudget>,
+    non_wrap_scaled: &mut HashSet<Val>,
+    versioned_diamond: &mut bool,
 ) -> Res<bool> {
     const LOOP_VER_MAX_BLOCKS: usize = 8;
     const LOOP_VER_MAX_INSTS: usize = 128;
@@ -7453,36 +8471,62 @@ fn version_checked_counted_loops(
         {
             continue;
         }
-        if exit_bb.0 == 0
-            || versioned_body_blocks.contains(&exit_bb.0)
-            || versioned_exits.contains(&exit_bb.0)
-            || dom.preds(exit_bb.0).len() != 1
-            || dom.preds(exit_bb.0)[0] != hdr
-        {
+        let single_exit_bb = exit_bb.0 != 0
+            && !versioned_body_blocks.contains(&exit_bb.0)
+            && !versioned_exits.contains(&exit_bb.0)
+            && dom.preds(exit_bb.0).len() == 1
+            && dom.preds(exit_bb.0)[0] == hdr;
+        if exit_bb.0 == 0 {
             continue;
         }
 
-        // Verify body has no calls, memory.grow, br_table, or non-header exits outside `body_set`.
+        // Verify body has no calls, tail calls, memory.grow, br_table, or EH ops; inner blocks may exit
+        // cleanly outside `body_set` (e.g. `sift_down` early break) provided no body value escapes.
         let mut body_clean = true;
+        let mut has_inner_exit = false;
         for &bb_id in &body {
             let bb = &ir.blocks[bb_id as usize];
-            if matches!(bb.term, Term::BrTable { .. }) {
+            if matches!(
+                bb.term,
+                Term::BrTable { .. }
+                    | Term::ReturnCall { .. }
+                    | Term::ReturnCallIndirect { .. }
+                    | Term::CallCatch { .. }
+                    | Term::CallIndirectCatch { .. }
+                    | Term::ThrowActive
+            ) {
                 body_clean = false;
                 break;
             }
             if bb.insts.iter().any(|ins| {
                 matches!(
                     ins.op,
-                    Op::Call { .. } | Op::CallIndirect { .. } | Op::MemGrow(_)
+                    Op::Call { .. }
+                        | Op::CallIndirect { .. }
+                        | Op::MemGrow(_)
+                        | Op::MemGrowIdx { .. }
+                        | Op::ExnAlloc { .. }
+                        | Op::ExnSetActive(_)
+                        | Op::ExnGetActive
+                        | Op::ExnClearActive
+                        | Op::ExnGetTag(_)
+                        | Op::ExnGetPayload { .. }
                 )
             }) {
                 body_clean = false;
                 break;
             }
             if bb_id != hdr {
+                if matches!(bb.term, Term::Return { .. }) {
+                    has_inner_exit = true;
+                }
                 bb.term.for_each_succ(&ir.br_tables, |s| {
                     if !body_set.contains(&s.0) {
-                        body_clean = false;
+                        if s.0 == 0 {
+                            body_clean = false;
+                        } else {
+                            has_inner_exit = true;
+                        }
                     }
                 });
                 if !body_clean {
@@ -7493,6 +8537,7 @@ fn version_checked_counted_loops(
         if !body_clean {
             continue;
         }
+        let can_promote_exit = single_exit_bb && !has_inner_exit;
 
         let const_of = |v: Val, def_inst: &[Option<Op>]| -> Option<u64> {
             match def_inst[v.0 as usize] {
@@ -7675,8 +8720,124 @@ fn version_checked_counted_loops(
             const_of(v, &def_inst).map(LoopBound::Const)
         };
 
-        let mut bounds: HashMap<Val, LoopBound> = fx_map();
-        let mut fold_add: HashMap<Val, (Val, u32)> = fx_map();
+        // Check whether edge `pred -> succ` proves `x <u limit` via an unsigned `CmpBranch`.
+        let edge_lt_limit = |pred: u32, succ: u32| -> Option<Val> {
+            let Term::CmpBranch {
+                kind: CmpBranchKind::I32(ecop),
+                a: ea,
+                b: eb,
+                then_bb: etb,
+                else_bb: eeb,
+                ..
+            } = ir.blocks[pred as usize].term
+            else {
+                return None;
+            };
+            if etb == eeb {
+                return None;
+            }
+            if etb.0 == succ {
+                match ecop {
+                    CmpOp::LtU if eb == limit => Some(ea),
+                    CmpOp::GtU if ea == limit => Some(eb),
+                    _ => None,
+                }
+            } else if eeb.0 == succ {
+                match ecop {
+                    CmpOp::GeU if eb == limit => Some(ea),
+                    CmpOp::LeU if ea == limit => Some(eb),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+
+        // Dominating per-block `x <u limit` facts within `body \ {hdr}` (in RPO order).
+        let mut bb_lt_limit: HashMap<u32, Vec<Val>> = fx_map();
+        for &bb_id in &body {
+            if bb_id == hdr {
+                continue;
+            }
+            let mut facts: Vec<Val> = Vec::new();
+            let idom_b = dom.idom[bb_id as usize];
+            if idom_b != u32::MAX
+                && idom_b != hdr
+                && body_set.contains(&idom_b)
+                && let Some(parent_facts) = bb_lt_limit.get(&idom_b)
+            {
+                facts.extend_from_slice(parent_facts);
+            }
+            if dom.preds(bb_id).len() == 1 {
+                let pred = dom.preds(bb_id)[0];
+                if body_set.contains(&pred)
+                    && let Some(v) = edge_lt_limit(pred, bb_id)
+                    && !facts.contains(&v)
+                {
+                    facts.push(v);
+                }
+            }
+            if !facts.is_empty() {
+                bb_lt_limit.insert(bb_id, facts);
+            }
+        }
+
+        // Collect all backedges `(src_bb, args)` into `hdr` for inductive header-param verification.
+        let mut backedges: Vec<(u32, ValRange)> = Vec::new();
+        for &bb_id in &body {
+            match ir.blocks[bb_id as usize].term {
+                Term::Jump { target, args } if target.0 == hdr => backedges.push((bb_id, args)),
+                Term::BranchIf {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                }
+                | Term::CmpBranch {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                } => {
+                    if then_bb.0 == hdr {
+                        backedges.push((bb_id, then_args));
+                    }
+                    if else_bb.0 == hdr {
+                        backedges.push((bb_id, else_args));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Candidate inductive `I32` header params proven `<u limit` across every backedge
+        // (e.g. `root` in binary-heap `sift_down`, binary search bounds, or tree cursors).
+        let entry_args_vec_scan: Vec<Val> = ir.pool_slice(entry_args).to_vec();
+        let mut cand_ind: Vec<usize> = Vec::new();
+        if signed_cap.is_none() && !backedges.is_empty() {
+            for (pi, &hp) in ir.blocks[hdr as usize].params.iter().enumerate() {
+                if ir.val_tys[hp.0 as usize] == Ty::I32
+                    && hp != idx
+                    && pi < entry_args_vec_scan.len()
+                    && cand_ind.len() < 4
+                {
+                    let ev = entry_args_vec_scan[pi];
+                    let entry_known_lt = const_of(ev, &def_inst) == Some(0) || is_limit_minus_1(ev);
+                    let entry_dom_pre = {
+                        let eb = def_block[ev.0 as usize];
+                        eb != u32::MAX
+                            && !body_set.contains(&eb)
+                            && !versioned_body_blocks.contains(&eb)
+                            && dom.dominates(eb, pre)
+                    };
+                    if entry_known_lt || entry_dom_pre {
+                        cand_ind.push(pi);
+                    }
+                }
+            }
+        }
 
         // Proven memory operations: `(bb_id, inst_idx, ProvenMemOp)`.
         #[derive(Clone, Copy)]
@@ -7686,19 +8847,29 @@ fn version_checked_counted_loops(
             MemFill,
             BoundsCheck,
         }
+
+        let mut bounds: HashMap<Val, LoopBound> = fx_map();
+        let mut fold_add: HashMap<Val, (Val, u32)> = fx_map();
         let mut proven_ops: HashMap<(u32, usize), ProvenMemOp> = fx_map();
         let mut fold_checked_ops: Vec<(u32, usize, u32)> = Vec::new();
-        let mut max_safe_limit: u32 = signed_cap.unwrap_or(u32::MAX);
+        let mut max_safe_limit: u32;
 
         let eval_cmp_select_bound = |kind: CmpBranchKind,
                                      ca: Val,
                                      cb: Val,
                                      tv: Val,
                                      fv: Val,
-                                     bounds: &HashMap<Val, LoopBound>|
+                                     bounds: &HashMap<Val, LoopBound>,
+                                     lt_facts: &[Val]|
          -> Option<LoopBound> {
-            let mut tb = get_bound(tv, bounds);
-            let mut fb = get_bound(fv, bounds);
+            let get_b = |v: Val| -> Option<LoopBound> {
+                if lt_facts.contains(&v) {
+                    return Some(LoopBound::ScaleAdd { shift: 0, add: 0 });
+                }
+                get_bound(v, bounds)
+            };
+            let mut tb = get_b(tv);
+            let mut fb = get_b(fv);
 
             // 1. Zero-guarded decrement: `(x == 0) ? tv : (x - 1)` or `(x != 0) ? (x - 1) : fv`.
             let eq_zero: Option<(Val, bool)> = match kind {
@@ -7719,7 +8890,7 @@ fn version_checked_counted_loops(
                 _ => None,
             };
             if let Some((x, zero_on_true)) = eq_zero
-                && let Some(xb) = get_bound(x, bounds)
+                && let Some(xb) = get_b(x)
             {
                 if zero_on_true {
                     if is_sub_one(fv, x) {
@@ -7738,7 +8909,7 @@ fn version_checked_counted_loops(
                         if cb == limit && fv == ca {
                             fb = Some(LoopBound::ScaleAdd { shift: 0, add: 0 });
                         } else if fv == ca
-                            && let Some(bb) = get_bound(cb, bounds)
+                            && let Some(bb) = get_b(cb)
                         {
                             fb = Some(bb);
                         }
@@ -7747,7 +8918,7 @@ fn version_checked_counted_loops(
                         if ca == limit && tv == cb {
                             tb = Some(LoopBound::ScaleAdd { shift: 0, add: 0 });
                         } else if fv == ca
-                            && let Some(bb) = get_bound(cb, bounds)
+                            && let Some(bb) = get_b(cb)
                         {
                             fb = Some(bb);
                         }
@@ -7756,7 +8927,7 @@ fn version_checked_counted_loops(
                         if cb == limit && tv == ca {
                             tb = Some(LoopBound::ScaleAdd { shift: 0, add: 0 });
                         } else if tv == ca
-                            && let Some(bb) = get_bound(cb, bounds)
+                            && let Some(bb) = get_b(cb)
                         {
                             tb = Some(bb);
                         }
@@ -7765,7 +8936,7 @@ fn version_checked_counted_loops(
                         if ca == limit && fv == cb {
                             fb = Some(LoopBound::ScaleAdd { shift: 0, add: 0 });
                         } else if tv == ca
-                            && let Some(bb) = get_bound(cb, bounds)
+                            && let Some(bb) = get_b(cb)
                         {
                             tb = Some(bb);
                         }
@@ -7780,59 +8951,121 @@ fn version_checked_counted_loops(
             }
         };
 
-        for &bb_id in &body {
-            if bb_id == hdr {
-                continue;
+        let ind_guard_val: Option<Val>;
+        loop {
+            bounds.clear();
+            fold_add.clear();
+            proven_ops.clear();
+            fold_checked_ops.clear();
+            max_safe_limit = signed_cap.unwrap_or(u32::MAX);
+
+            for &pi in &cand_ind {
+                let hp = ir.blocks[hdr as usize].params[pi];
+                bounds.insert(hp, LoopBound::ScaleAdd { shift: 0, add: 0 });
             }
-            for (ii, inst) in ir.blocks[bb_id as usize].insts.iter().enumerate() {
-                // Propagate symbolic bounds for I32 definitions.
-                if let Some(res) = inst.res
-                    && ir.val_tys[res.0 as usize] == Ty::I32
-                {
-                    let computed: Option<LoopBound> = match inst.op {
-                        Op::ConstI32(c) => Some(LoopBound::Const(u64::from(c as u32))),
-                        Op::I32BinImm(IntBinOp::Add, x, imm) if imm >= 0 => {
-                            let k = imm as u64;
-                            match get_bound(x, &bounds) {
-                                Some(LoopBound::Const(c)) => Some(LoopBound::Const(u64::from(
-                                    (c as u32).wrapping_add(k as u32),
-                                ))),
-                                Some(LoopBound::ScaleAdd { shift, add }) => {
-                                    if let Some(new_add) = add.checked_add(k)
-                                        && new_add <= u64::from(u32::MAX)
-                                    {
-                                        if let Some(&(base0, k0)) = fold_add.get(&x) {
-                                            if u64::from(k0) + k <= i32::MAX as u64 {
-                                                fold_add.insert(res, (base0, k0 + k as u32));
-                                            }
-                                        } else if k <= i32::MAX as u64 {
-                                            fold_add.insert(res, (x, k as u32));
-                                        }
-                                        Some(LoopBound::ScaleAdd {
-                                            shift,
-                                            add: new_add,
-                                        })
-                                    } else {
-                                        None
+
+            for &bb_id in &body {
+                if bb_id == hdr {
+                    continue;
+                }
+                let lt_facts: &[Val] = bb_lt_limit.get(&bb_id).map_or(&[], Vec::as_slice);
+                let get_b = |v: Val, bmap: &HashMap<Val, LoopBound>| -> Option<LoopBound> {
+                    if lt_facts.contains(&v) {
+                        return Some(LoopBound::ScaleAdd { shift: 0, add: 0 });
+                    }
+                    get_bound(v, bmap)
+                };
+
+                // Join forward-DAG block parameter bounds inside `body \ {hdr}`.
+                if !ir.blocks[bb_id as usize].params.is_empty() {
+                    let preds = dom.preds(bb_id);
+                    let bb_rpo = dom.rpo_pos[bb_id as usize];
+                    let all_forward = !preds.is_empty()
+                        && preds
+                            .iter()
+                            .all(|&p| body_set.contains(&p) && dom.rpo_pos[p as usize] < bb_rpo);
+                    if all_forward {
+                        for (bp_i, &bp) in ir.blocks[bb_id as usize].params.iter().enumerate() {
+                            if ir.val_tys[bp.0 as usize] != Ty::I32 {
+                                continue;
+                            }
+                            let mut joined: Option<LoopBound> = None;
+                            let mut all_ok = true;
+                            let mut saw_edge = false;
+                            for &pred in preds {
+                                let pred_facts: &[Val] =
+                                    bb_lt_limit.get(&pred).map_or(&[], Vec::as_slice);
+                                let edge_lt = edge_lt_limit(pred, bb_id);
+                                let mut handle_edge = |args: ValRange| {
+                                    saw_edge = true;
+                                    let sl = ir.pool_slice(args);
+                                    if bp_i >= sl.len() {
+                                        all_ok = false;
+                                        return;
                                     }
+                                    let av = sl[bp_i];
+                                    let ab = if edge_lt == Some(av) || pred_facts.contains(&av) {
+                                        Some(LoopBound::ScaleAdd { shift: 0, add: 0 })
+                                    } else {
+                                        get_bound(av, &bounds)
+                                    };
+                                    match (joined, ab) {
+                                        (_, None) => all_ok = false,
+                                        (None, Some(b)) => joined = Some(b),
+                                        (Some(j), Some(b)) => joined = Some(join_loop_bounds(j, b)),
+                                    }
+                                };
+                                match ir.blocks[pred as usize].term {
+                                    Term::Jump { target, args } if target.0 == bb_id => {
+                                        handle_edge(args);
+                                    }
+                                    Term::BranchIf {
+                                        then_bb,
+                                        then_args,
+                                        else_bb,
+                                        else_args,
+                                        ..
+                                    }
+                                    | Term::CmpBranch {
+                                        then_bb,
+                                        then_args,
+                                        else_bb,
+                                        else_args,
+                                        ..
+                                    } => {
+                                        if then_bb.0 == bb_id {
+                                            handle_edge(then_args);
+                                        }
+                                        if else_bb.0 == bb_id {
+                                            handle_edge(else_args);
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                None => None,
+                                if !all_ok {
+                                    break;
+                                }
+                            }
+                            if all_ok
+                                && saw_edge
+                                && let Some(jb) = joined
+                            {
+                                bounds.insert(bp, jb);
                             }
                         }
-                        Op::I32Bin(IntBinOp::Add, x, y) => {
-                            let pair = if let Some(k) = const_of(y, &def_inst)
-                                && k <= i32::MAX as u64
-                            {
-                                Some((x, k))
-                            } else if let Some(k) = const_of(x, &def_inst)
-                                && k <= i32::MAX as u64
-                            {
-                                Some((y, k))
-                            } else {
-                                None
-                            };
-                            if let Some((base, k)) = pair {
-                                match get_bound(base, &bounds) {
+                    }
+                }
+
+                for (ii, inst) in ir.blocks[bb_id as usize].insts.iter().enumerate() {
+                    // Propagate symbolic bounds for I32 definitions.
+                    if let Some(res) = inst.res
+                        && ir.val_tys[res.0 as usize] == Ty::I32
+                    {
+                        let computed: Option<LoopBound> = match inst.op {
+                            Op::ConstI32(c) => Some(LoopBound::Const(u64::from(c as u32))),
+                            Op::I32BinImm(IntBinOp::Add, x, imm) if imm >= 0 => {
+                                let k = imm as u64;
+                                match get_b(x, &bounds) {
                                     Some(LoopBound::Const(c)) => Some(LoopBound::Const(u64::from(
                                         (c as u32).wrapping_add(k as u32),
                                     ))),
@@ -7840,12 +9073,12 @@ fn version_checked_counted_loops(
                                         if let Some(new_add) = add.checked_add(k)
                                             && new_add <= u64::from(u32::MAX)
                                         {
-                                            if let Some(&(base0, k0)) = fold_add.get(&base) {
+                                            if let Some(&(base0, k0)) = fold_add.get(&x) {
                                                 if u64::from(k0) + k <= i32::MAX as u64 {
                                                     fold_add.insert(res, (base0, k0 + k as u32));
                                                 }
                                             } else if k <= i32::MAX as u64 {
-                                                fold_add.insert(res, (base, k as u32));
+                                                fold_add.insert(res, (x, k as u32));
                                             }
                                             Some(LoopBound::ScaleAdd {
                                                 shift,
@@ -7857,228 +9090,327 @@ fn version_checked_counted_loops(
                                     }
                                     None => None,
                                 }
-                            } else {
-                                None
                             }
-                        }
-                        Op::I32BinImm(IntBinOp::Shl, x, imm) => {
-                            let sh = (imm as u32) & 31;
-                            if sh == 0 {
-                                get_bound(x, &bounds)
-                            } else if sh <= 8 {
-                                match get_bound(x, &bounds) {
-                                    Some(LoopBound::Const(c)) => Some(LoopBound::Const(u64::from(
-                                        (c as u32).wrapping_shl(sh),
-                                    ))),
-                                    Some(LoopBound::ScaleAdd { shift, add }) if shift + sh <= 8 => {
-                                        add.checked_shl(sh)
-                                            .filter(|&a| a <= u64::from(u32::MAX))
-                                            .map(|a| LoopBound::ScaleAdd {
-                                                shift: shift + sh,
-                                                add: a,
-                                            })
+                            Op::I32Bin(IntBinOp::Add, x, y) => {
+                                let pair = if let Some(k) = const_of(y, &def_inst)
+                                    && k <= i32::MAX as u64
+                                {
+                                    Some((x, k))
+                                } else if let Some(k) = const_of(x, &def_inst)
+                                    && k <= i32::MAX as u64
+                                {
+                                    Some((y, k))
+                                } else {
+                                    None
+                                };
+                                if let Some((base, k)) = pair {
+                                    match get_b(base, &bounds) {
+                                        Some(LoopBound::Const(c)) => Some(LoopBound::Const(
+                                            u64::from((c as u32).wrapping_add(k as u32)),
+                                        )),
+                                        Some(LoopBound::ScaleAdd { shift, add }) => {
+                                            if let Some(new_add) = add.checked_add(k)
+                                                && new_add <= u64::from(u32::MAX)
+                                            {
+                                                if let Some(&(base0, k0)) = fold_add.get(&base) {
+                                                    if u64::from(k0) + k <= i32::MAX as u64 {
+                                                        fold_add
+                                                            .insert(res, (base0, k0 + k as u32));
+                                                    }
+                                                } else if k <= i32::MAX as u64 {
+                                                    fold_add.insert(res, (base, k as u32));
+                                                }
+                                                Some(LoopBound::ScaleAdd {
+                                                    shift,
+                                                    add: new_add,
+                                                })
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        None => None,
                                     }
-                                    _ => None,
+                                } else {
+                                    None
                                 }
-                            } else {
-                                None
                             }
-                        }
-                        Op::I32BinImm(IntBinOp::Mul, x, imm)
-                            if imm > 0 && (imm as u32).is_power_of_two() =>
-                        {
-                            let sh = (imm as u32).trailing_zeros();
-                            if sh == 0 {
-                                get_bound(x, &bounds)
-                            } else if sh <= 8 {
-                                match get_bound(x, &bounds) {
-                                    Some(LoopBound::Const(c)) => Some(LoopBound::Const(u64::from(
-                                        (c as u32).wrapping_shl(sh),
-                                    ))),
-                                    Some(LoopBound::ScaleAdd { shift, add }) if shift + sh <= 8 => {
-                                        add.checked_shl(sh)
-                                            .filter(|&a| a <= u64::from(u32::MAX))
-                                            .map(|a| LoopBound::ScaleAdd {
-                                                shift: shift + sh,
-                                                add: a,
-                                            })
+                            Op::I32BinImm(IntBinOp::Shl, x, imm) => {
+                                let sh = (imm as u32) & 31;
+                                if sh == 0 {
+                                    get_b(x, &bounds)
+                                } else if sh <= 8 {
+                                    match get_b(x, &bounds) {
+                                        Some(LoopBound::Const(c)) => Some(LoopBound::Const(
+                                            u64::from((c as u32).wrapping_shl(sh)),
+                                        )),
+                                        Some(LoopBound::ScaleAdd { shift, add })
+                                            if shift + sh <= 8 =>
+                                        {
+                                            add.checked_shl(sh)
+                                                .filter(|&a| a <= u64::from(u32::MAX))
+                                                .map(|a| LoopBound::ScaleAdd {
+                                                    shift: shift + sh,
+                                                    add: a,
+                                                })
+                                        }
+                                        _ => None,
                                     }
-                                    _ => None,
+                                } else {
+                                    None
                                 }
-                            } else {
-                                None
                             }
-                        }
-                        Op::I32BinImm(IntBinOp::And, _, mask) => {
-                            Some(LoopBound::Const(u64::from(mask as u32)))
-                        }
-                        Op::I32Bin(IntBinOp::And, x, y) => const_of(y, &def_inst)
-                            .or_else(|| const_of(x, &def_inst))
-                            .map(LoopBound::Const),
-                        Op::CmpSelect {
-                            kind,
-                            a: ca,
-                            b: cb,
-                            tv,
-                            fv,
-                        } => eval_cmp_select_bound(kind, ca, cb, tv, fv, &bounds),
-                        Op::Select { cond, a: tv, b: fv } => match def_inst[cond.0 as usize] {
-                            Some(Op::I32Eqz(x)) => eval_cmp_select_bound(
-                                CmpBranchKind::I32Imm(CmpOp::Eq, 0),
-                                x,
-                                x,
+                            Op::I32BinImm(IntBinOp::Mul, x, imm)
+                                if imm > 0 && (imm as u32).is_power_of_two() =>
+                            {
+                                let sh = (imm as u32).trailing_zeros();
+                                if sh == 0 {
+                                    get_b(x, &bounds)
+                                } else if sh <= 8 {
+                                    match get_b(x, &bounds) {
+                                        Some(LoopBound::Const(c)) => Some(LoopBound::Const(
+                                            u64::from((c as u32).wrapping_shl(sh)),
+                                        )),
+                                        Some(LoopBound::ScaleAdd { shift, add })
+                                            if shift + sh <= 8 =>
+                                        {
+                                            add.checked_shl(sh)
+                                                .filter(|&a| a <= u64::from(u32::MAX))
+                                                .map(|a| LoopBound::ScaleAdd {
+                                                    shift: shift + sh,
+                                                    add: a,
+                                                })
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                            Op::I32BinImm(IntBinOp::And, _, mask) => {
+                                Some(LoopBound::Const(u64::from(mask as u32)))
+                            }
+                            Op::I32Bin(IntBinOp::And, x, y) => const_of(y, &def_inst)
+                                .or_else(|| const_of(x, &def_inst))
+                                .map(LoopBound::Const),
+                            Op::CmpSelect {
+                                kind,
+                                a: ca,
+                                b: cb,
                                 tv,
                                 fv,
-                                &bounds,
-                            ),
-                            Some(Op::I32Cmp(ccop, ca, cb)) => eval_cmp_select_bound(
-                                CmpBranchKind::I32(ccop),
-                                ca,
-                                cb,
-                                tv,
-                                fv,
-                                &bounds,
-                            ),
-                            Some(Op::I32CmpImm(ccop, ca, imm)) => eval_cmp_select_bound(
-                                CmpBranchKind::I32Imm(ccop, imm),
-                                ca,
-                                ca,
-                                tv,
-                                fv,
-                                &bounds,
-                            ),
-                            _ => eval_cmp_select_bound(
-                                CmpBranchKind::I32Imm(CmpOp::Ne, 0),
-                                cond,
-                                cond,
-                                tv,
-                                fv,
-                                &bounds,
-                            ),
-                        },
-                        _ => None,
-                    };
-                    if let Some(b) = computed {
-                        bounds.insert(res, b);
-                    }
-                }
-
-                // Check whether unchecked memory ops are provably bounded under `limit <= max_safe_limit`.
-                match inst.op {
-                    Op::Load {
-                        kind,
-                        addr,
-                        offset,
-                        checked: false,
-                    } => {
-                        let end_off = offset.saturating_add(kind.bytes());
-                        if let Some(bnd) = get_bound(addr, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                        {
-                            max_safe_limit = max_safe_limit.min(lim);
-                            proven_ops.insert((bb_id, ii), ProvenMemOp::LoadStore);
-                        }
-                    }
-                    Op::Store {
-                        kind,
-                        addr,
-                        offset,
-                        checked: false,
-                        ..
-                    } => {
-                        let end_off = offset.saturating_add(kind.bytes());
-                        if let Some(bnd) = get_bound(addr, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                        {
-                            max_safe_limit = max_safe_limit.min(lim);
-                            proven_ops.insert((bb_id, ii), ProvenMemOp::LoadStore);
-                        }
-                    }
-                    Op::MemCopyConst {
-                        dst,
-                        src,
-                        len,
-                        dst_checked,
-                        src_checked,
-                    } if !dst_checked || !src_checked => {
-                        let end_off = u64::from(len);
-                        let mut p_dst = false;
-                        let mut p_src = false;
-                        if !dst_checked
-                            && let Some(bnd) = get_bound(dst, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                        {
-                            max_safe_limit = max_safe_limit.min(lim);
-                            p_dst = true;
-                        }
-                        if !src_checked
-                            && let Some(bnd) = get_bound(src, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                        {
-                            max_safe_limit = max_safe_limit.min(lim);
-                            p_src = true;
-                        }
-                        if p_dst || p_src {
-                            proven_ops.insert(
-                                (bb_id, ii),
-                                ProvenMemOp::MemCopy {
-                                    dst: p_dst,
-                                    src: p_src,
-                                },
-                            );
-                        }
-                    }
-                    Op::MemFillConst {
-                        dst,
-                        len,
-                        checked: false,
-                        ..
-                    } => {
-                        let end_off = u64::from(len);
-                        if let Some(bnd) = get_bound(dst, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                        {
-                            max_safe_limit = max_safe_limit.min(lim);
-                            proven_ops.insert((bb_id, ii), ProvenMemOp::MemFill);
-                        }
-                    }
-                    Op::BoundsCheck { addr, end_off, .. } => {
-                        if let Some(bnd) = get_bound(addr, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                        {
-                            max_safe_limit = max_safe_limit.min(lim);
-                            proven_ops.insert((bb_id, ii), ProvenMemOp::BoundsCheck);
-                        }
-                    }
-                    Op::Load {
-                        kind: _,
-                        addr,
-                        offset,
-                        checked: true,
-                    }
-                    | Op::Store {
-                        kind: _,
-                        addr,
-                        offset,
-                        checked: true,
-                        ..
-                    } if fold_add.contains_key(&addr) => {
-                        let bytes = match inst.op {
-                            Op::Load { kind, .. } => kind.bytes(),
-                            Op::Store { kind, .. } => kind.bytes(),
-                            _ => unreachable!(),
+                            } => eval_cmp_select_bound(kind, ca, cb, tv, fv, &bounds, lt_facts),
+                            Op::Select { cond, a: tv, b: fv } => match def_inst[cond.0 as usize] {
+                                Some(Op::I32Eqz(x)) => eval_cmp_select_bound(
+                                    CmpBranchKind::I32Imm(CmpOp::Eq, 0),
+                                    x,
+                                    x,
+                                    tv,
+                                    fv,
+                                    &bounds,
+                                    lt_facts,
+                                ),
+                                Some(Op::I32Cmp(ccop, ca, cb)) => eval_cmp_select_bound(
+                                    CmpBranchKind::I32(ccop),
+                                    ca,
+                                    cb,
+                                    tv,
+                                    fv,
+                                    &bounds,
+                                    lt_facts,
+                                ),
+                                Some(Op::I32CmpImm(ccop, ca, imm)) => eval_cmp_select_bound(
+                                    CmpBranchKind::I32Imm(ccop, imm),
+                                    ca,
+                                    ca,
+                                    tv,
+                                    fv,
+                                    &bounds,
+                                    lt_facts,
+                                ),
+                                _ => eval_cmp_select_bound(
+                                    CmpBranchKind::I32Imm(CmpOp::Ne, 0),
+                                    cond,
+                                    cond,
+                                    tv,
+                                    fv,
+                                    &bounds,
+                                    lt_facts,
+                                ),
+                            },
+                            _ => None,
                         };
-                        let end_off = offset.saturating_add(bytes);
-                        if let Some(bnd) = get_bound(addr, &bounds)
-                            && let Some(lim) = max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
-                            && lim >= 4
-                        {
-                            fold_checked_ops.push((bb_id, ii, lim));
+                        if let Some(b) = computed {
+                            bounds.insert(res, b);
                         }
                     }
-                    _ => {}
+
+                    // Check whether unchecked memory ops are provably bounded under `limit <= max_safe_limit`.
+                    match inst.op {
+                        Op::Load {
+                            kind,
+                            addr,
+                            offset,
+                            checked: false,
+                        } => {
+                            let end_off = offset.saturating_add(kind.bytes());
+                            if let Some(bnd) = get_b(addr, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            {
+                                max_safe_limit = max_safe_limit.min(lim);
+                                proven_ops.insert((bb_id, ii), ProvenMemOp::LoadStore);
+                            }
+                        }
+                        Op::Store {
+                            kind,
+                            addr,
+                            offset,
+                            checked: false,
+                            ..
+                        } => {
+                            let end_off = offset.saturating_add(kind.bytes());
+                            if let Some(bnd) = get_b(addr, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            {
+                                max_safe_limit = max_safe_limit.min(lim);
+                                proven_ops.insert((bb_id, ii), ProvenMemOp::LoadStore);
+                            }
+                        }
+                        Op::MemCopyConst {
+                            dst,
+                            src,
+                            len,
+                            dst_checked,
+                            src_checked,
+                        } if !dst_checked || !src_checked => {
+                            let end_off = u64::from(len);
+                            let mut p_dst = false;
+                            let mut p_src = false;
+                            if !dst_checked
+                                && let Some(bnd) = get_b(dst, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            {
+                                max_safe_limit = max_safe_limit.min(lim);
+                                p_dst = true;
+                            }
+                            if !src_checked
+                                && let Some(bnd) = get_b(src, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            {
+                                max_safe_limit = max_safe_limit.min(lim);
+                                p_src = true;
+                            }
+                            if p_dst || p_src {
+                                proven_ops.insert(
+                                    (bb_id, ii),
+                                    ProvenMemOp::MemCopy {
+                                        dst: p_dst,
+                                        src: p_src,
+                                    },
+                                );
+                            }
+                        }
+                        Op::MemFillConst {
+                            dst,
+                            len,
+                            checked: false,
+                            ..
+                        } => {
+                            let end_off = u64::from(len);
+                            if let Some(bnd) = get_b(dst, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            {
+                                max_safe_limit = max_safe_limit.min(lim);
+                                proven_ops.insert((bb_id, ii), ProvenMemOp::MemFill);
+                            }
+                        }
+                        Op::BoundsCheck { addr, end_off, .. } => {
+                            if let Some(bnd) = get_b(addr, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                            {
+                                max_safe_limit = max_safe_limit.min(lim);
+                                proven_ops.insert((bb_id, ii), ProvenMemOp::BoundsCheck);
+                            }
+                        }
+                        Op::Load {
+                            kind: _,
+                            addr,
+                            offset,
+                            checked: true,
+                        }
+                        | Op::Store {
+                            kind: _,
+                            addr,
+                            offset,
+                            checked: true,
+                            ..
+                        } if fold_add.contains_key(&addr) => {
+                            let bytes = match inst.op {
+                                Op::Load { kind, .. } => kind.bytes(),
+                                Op::Store { kind, .. } => kind.bytes(),
+                                _ => unreachable!(),
+                            };
+                            let end_off = offset.saturating_add(bytes);
+                            if let Some(bnd) = get_b(addr, &bounds)
+                                && let Some(lim) =
+                                    max_safe_limit_for_bound(bnd, end_off, mem_min_bytes)
+                                && lim >= 4
+                            {
+                                fold_checked_ops.push((bb_id, ii, lim));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
+
+            if cand_ind.is_empty() {
+                ind_guard_val = None;
+                break;
+            }
+            let prev_len = cand_ind.len();
+            cand_ind.retain(|&pi| {
+                backedges.iter().all(|&(src_bb, args_r)| {
+                    let sl = ir.pool_slice(args_r);
+                    if pi >= sl.len() {
+                        return false;
+                    }
+                    let av = sl[pi];
+                    let pred_facts: &[Val] = bb_lt_limit.get(&src_bb).map_or(&[], Vec::as_slice);
+                    let ab = if edge_lt_limit(src_bb, hdr) == Some(av) || pred_facts.contains(&av) {
+                        Some(LoopBound::ScaleAdd { shift: 0, add: 0 })
+                    } else {
+                        get_bound(av, &bounds)
+                    };
+                    matches!(
+                        ab,
+                        Some(LoopBound::ScaleAdd { shift: 0, add: 0 }) | Some(LoopBound::Const(0))
+                    )
+                })
+            });
+            if cand_ind.len() != prev_len {
+                continue;
+            }
+            // Allow at most 1 explicit preheader guard `entry_v <u limit` for non-zero entry args.
+            let mut need_guards: Vec<usize> = Vec::new();
+            for &pi in &cand_ind {
+                let ev = entry_args_vec_scan[pi];
+                if const_of(ev, &def_inst) != Some(0) && !is_limit_minus_1(ev) {
+                    need_guards.push(pi);
+                }
+            }
+            if need_guards.len() > 1 {
+                let keep_pi = need_guards[0];
+                cand_ind.retain(|&pi| !need_guards.contains(&pi) || pi == keep_pi);
+                continue;
+            }
+            ind_guard_val = need_guards.first().map(|&pi| entry_args_vec_scan[pi]);
+            break;
         }
 
         if proven_ops.is_empty() || max_safe_limit < 4 {
@@ -8118,7 +9450,7 @@ fn version_checked_counted_loops(
                 }
                 let db = def_block[v.0 as usize];
                 if db != u32::MAX && body_set.contains(&db) {
-                    if db != hdr || !dom.dominates(exit_bb.0, b_idx as u32) {
+                    if !can_promote_exit || db != hdr || !dom.dominates(exit_bb.0, b_idx as u32) {
                         *outside_ok = false;
                         return;
                     }
@@ -8197,23 +9529,39 @@ fn version_checked_counted_loops(
                 Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
                     needed_pool += args.len as usize;
                 }
-                Term::Unreachable | Term::BrTable { .. } => {}
+                Term::Unreachable
+                | Term::ThrowActive
+                | Term::BrTable { .. }
+                | Term::CallCatch { .. }
+                | Term::CallIndirectCatch { .. } => {}
             }
+        }
+        let extra_guard_blocks = usize::from(ind_guard_val.is_some());
+        if ind_guard_val.is_some() {
+            needed_pool += entry_args.len as usize;
         }
         if !promoted_hdr_vals.is_empty() {
             needed_pool += (exit_args.len as usize) + 2 * promoted_hdr_vals.len();
         }
-        if ir.blocks.len() + body.len() > MAX_BLOCKS_PER_FN
+        if ir.blocks.len() + body.len() + extra_guard_blocks > MAX_BLOCKS_PER_FN
             || ir.val_tys.len() + added_vals > MAX_IR_VALS_PER_FN
             || ir.val_pool.len() + needed_pool > MAX_VAL_POOL_PER_FN
         {
             continue;
         }
 
-        // Allocate `fast_entry_args` and optional `hdr_exit_args_new` first.
+        // Allocate `fast_entry_args` and optional `hdr_exit_args_new` / `ind_slow_entry_args` first.
         let entry_args_vec: Vec<Val> = ir.pool_slice(entry_args).to_vec();
         let Ok(fast_entry_args) = ir.push_pool(&entry_args_vec) else {
             continue;
+        };
+        let ind_slow_entry_args: Option<ValRange> = if ind_guard_val.is_some() {
+            let Ok(r) = ir.push_pool(&entry_args_vec) else {
+                continue;
+            };
+            Some(r)
+        } else {
+            None
         };
         let hdr_exit_args_new: Option<ValRange> = if promoted_hdr_vals.is_empty() {
             None
@@ -8278,12 +9626,16 @@ fn version_checked_counted_loops(
         // Construct cloned `fast_*` blocks with proven bounds checks elided and wrap-safe
         // address additions folded into `Load`/`Store` offsets.
         let mut fast_blocks: Vec<Block> = Vec::with_capacity(body.len());
+        let mut extra_exit_preds: Vec<u32> = Vec::new();
         for (bi_idx, &old_b) in body.iter().enumerate() {
             let old_insts = ir.blocks[old_b as usize].insts.clone();
             let old_term = ir.blocks[old_b as usize].term;
             let old_preds = ir.blocks[old_b as usize].preds;
+            let lt_facts_old: &[Val] = bb_lt_limit.get(&old_b).map_or(&[], Vec::as_slice);
             let mut fast_insts = Vec::with_capacity(old_insts.len());
             for (ii, mut inst) in old_insts.into_iter().enumerate() {
+                let orig_res = inst.res;
+                let orig_op = inst.op;
                 let orig_addr_opt = match inst.op {
                     Op::Load { addr, .. } | Op::Store { addr, .. } => Some(addr),
                     _ => None,
@@ -8292,6 +9644,50 @@ fn version_checked_counted_loops(
                     inst.res = Some(val_map[&r]);
                 }
                 remap_op_uses_map(&mut inst.op, &val_map);
+                // Record provably non-wrapping scaled address values `(base << 1..=3)` in `fast_*`
+                // so the post-SLP SIB pass can fold them into `[r14 + base*scale + disp]` safely.
+                if old_b != hdr
+                    && let Some(nr) = inst.res
+                    && let Some(_orig_r) = orig_res
+                {
+                    let sh_base: Option<(Val, u32)> = match orig_op {
+                        Op::I32BinImm(IntBinOp::Shl, base, imm) => {
+                            let sh = (imm as u32) & 31;
+                            (1..=3).contains(&sh).then_some((base, sh))
+                        }
+                        Op::I32BinImm(IntBinOp::Mul, base, imm) if matches!(imm, 2 | 4 | 8) => {
+                            Some((base, (imm as u32).trailing_zeros()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((base, sh)) = sh_base {
+                        let base_bnd = if lt_facts_old.contains(&base) || base == idx {
+                            Some(LoopBound::ScaleAdd { shift: 0, add: 0 })
+                        } else if let Some(&b) = bounds.get(&base) {
+                            Some(b)
+                        } else {
+                            match def_inst[base.0 as usize] {
+                                Some(Op::ConstI32(c)) => {
+                                    Some(LoopBound::Const(u64::from(c as u32)))
+                                }
+                                _ => None,
+                            }
+                        };
+                        let no_wrap = match base_bnd {
+                            Some(LoopBound::Const(c)) => c < (1u64 << (32 - sh)),
+                            Some(LoopBound::ScaleAdd { shift: 0, add }) => {
+                                u64::from(max_safe_limit.saturating_sub(1))
+                                    .saturating_add(add)
+                                    .checked_shl(sh)
+                                    .is_some_and(|v| v <= u64::from(u32::MAX))
+                            }
+                            _ => false,
+                        };
+                        if no_wrap {
+                            non_wrap_scaled.insert(nr);
+                        }
+                    }
+                }
                 if old_b != hdr
                     && let Some(&proven) = proven_ops.get(&(old_b, ii))
                 {
@@ -8357,23 +9753,47 @@ fn version_checked_counted_loops(
             }
 
             let fast_term = match old_term {
-                Term::Jump { target, args } => Term::Jump {
-                    target: block_map[&target.0],
-                    args: map_range(ir, args, &[])?,
-                },
+                Term::Jump { target, args } => {
+                    if let Some(&mapped) = block_map.get(&target.0) {
+                        Term::Jump {
+                            target: mapped,
+                            args: map_range(ir, args, &[])?,
+                        }
+                    } else {
+                        extra_exit_preds.push(target.0);
+                        Term::Jump {
+                            target,
+                            args: map_range(ir, args, &[])?,
+                        }
+                    }
+                }
                 Term::BranchIf {
                     cond,
                     then_bb: tb,
                     then_args: ta,
                     else_bb: eb,
                     else_args: ea,
-                } => Term::BranchIf {
-                    cond: map_val(cond),
-                    then_bb: block_map[&tb.0],
-                    then_args: map_range(ir, ta, &[])?,
-                    else_bb: block_map[&eb.0],
-                    else_args: map_range(ir, ea, &[])?,
-                },
+                } => {
+                    let ntb = if let Some(&mapped) = block_map.get(&tb.0) {
+                        mapped
+                    } else {
+                        extra_exit_preds.push(tb.0);
+                        tb
+                    };
+                    let neb = if let Some(&mapped) = block_map.get(&eb.0) {
+                        mapped
+                    } else {
+                        extra_exit_preds.push(eb.0);
+                        eb
+                    };
+                    Term::BranchIf {
+                        cond: map_val(cond),
+                        then_bb: ntb,
+                        then_args: map_range(ir, ta, &[])?,
+                        else_bb: neb,
+                        else_args: map_range(ir, ea, &[])?,
+                    }
+                }
                 Term::CmpBranch {
                     kind,
                     a: ca,
@@ -8393,12 +9813,24 @@ fn version_checked_counted_loops(
                     let (ntb, nta) = if let Some(&mapped) = block_map.get(&tb.0) {
                         (mapped, map_range(ir, ta, &[])?)
                     } else {
-                        (tb, map_range(ir, ta, &promoted_hdr_vals)?)
+                        extra_exit_preds.push(tb.0);
+                        let extra = if tb == exit_bb {
+                            promoted_hdr_vals.as_slice()
+                        } else {
+                            &[]
+                        };
+                        (tb, map_range(ir, ta, extra)?)
                     };
                     let (neb, nea) = if let Some(&mapped) = block_map.get(&eb.0) {
                         (mapped, map_range(ir, ea, &[])?)
                     } else {
-                        (eb, map_range(ir, ea, &promoted_hdr_vals)?)
+                        extra_exit_preds.push(eb.0);
+                        let extra = if eb == exit_bb {
+                            promoted_hdr_vals.as_slice()
+                        } else {
+                            &[]
+                        };
+                        (eb, map_range(ir, ea, extra)?)
                     };
                     Term::CmpBranch {
                         kind,
@@ -8423,7 +9855,10 @@ fn version_checked_counted_loops(
                     args: map_range(ir, args, &[])?,
                 },
                 Term::Unreachable => Term::Unreachable,
-                Term::BrTable { .. } => unreachable!("BrTable excluded above"),
+                Term::ThrowActive => Term::ThrowActive,
+                Term::BrTable { .. } | Term::CallCatch { .. } | Term::CallIndirectCatch { .. } => {
+                    unreachable!("BrTable/CallCatch excluded above")
+                }
             };
 
             fast_blocks.push(Block {
@@ -8470,18 +9905,51 @@ fn version_checked_counted_loops(
             ir.val_pool = pool;
         }
 
-        // Dispatch from `pre` to `fast_hdr` when `limit <=u max_safe_limit`, else original `hdr`.
+        // Dispatch from `pre` to `fast_hdr` when `limit <=u max_safe_limit` (plus optional
+        // `entry_v <u limit` guard for inductive header params), else original `hdr`.
         let fast_hdr = block_map[&hdr];
-        ir.blocks[pre as usize].term = Term::CmpBranch {
-            kind: CmpBranchKind::I32Imm(CmpOp::LeU, max_safe_limit as i32),
-            a: limit,
-            b: limit,
-            then_bb: fast_hdr,
-            then_args: fast_entry_args,
-            else_bb: BlockId(hdr),
-            else_args: entry_args,
-        };
-        ir.blocks[exit_bb.0 as usize].preds = ir.blocks[exit_bb.0 as usize].preds.saturating_add(1);
+        if let (Some(gv), Some(slow_args_2)) = (ind_guard_val, ind_slow_entry_args) {
+            let guard_bb = BlockId(ir.blocks.len() as u32);
+            ir.blocks.push(Block {
+                params: Vec::new(),
+                insts: Vec::new(),
+                term: Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::LtU),
+                    a: gv,
+                    b: limit,
+                    then_bb: fast_hdr,
+                    then_args: fast_entry_args,
+                    else_bb: BlockId(hdr),
+                    else_args: slow_args_2,
+                },
+                is_loop_header: false,
+                preds: 1,
+            });
+            ir.blocks[pre as usize].term = Term::CmpBranch {
+                kind: CmpBranchKind::I32Imm(CmpOp::LeU, max_safe_limit as i32),
+                a: limit,
+                b: limit,
+                then_bb: guard_bb,
+                then_args: ValRange::EMPTY,
+                else_bb: BlockId(hdr),
+                else_args: entry_args,
+            };
+            ir.blocks[hdr as usize].preds = ir.blocks[hdr as usize].preds.saturating_add(1);
+        } else {
+            ir.blocks[pre as usize].term = Term::CmpBranch {
+                kind: CmpBranchKind::I32Imm(CmpOp::LeU, max_safe_limit as i32),
+                a: limit,
+                b: limit,
+                then_bb: fast_hdr,
+                then_args: fast_entry_args,
+                else_bb: BlockId(hdr),
+                else_args: entry_args,
+            };
+        }
+        for ext_b in extra_exit_preds {
+            ir.blocks[ext_b as usize].preds = ir.blocks[ext_b as usize].preds.saturating_add(1);
+            versioned_exits.insert(ext_b);
+        }
 
         versioned_pres.insert(pre);
         versioned_exits.insert(exit_bb.0);
@@ -8490,6 +9958,9 @@ fn version_checked_counted_loops(
         }
         versioned_count += 1;
         versioned_any = true;
+        if body.len() >= 3 {
+            *versioned_diamond = true;
+        }
     }
 
     Ok(versioned_any)
@@ -9016,6 +10487,9 @@ pub fn optimize_func_stage2_with_scratch(
             {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
+            if fold_add_scaled(ir, scratch) {
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+            }
             return Ok(());
         }
         if early_state == 0 {
@@ -9073,17 +10547,46 @@ pub fn optimize_func_stage2_with_scratch(
         {
             let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
         }
+        // Re-run LICM ONLY when post-inlining constant reduction turned a trapping `Div`/`Rem`
+        // into a pure `BinImm` inside a loop (hoisting invariant ops like `(y + dy) % CONST`
+        // out of inner loops with zero cost on functions without reduced divisions).
+        if has_loops && scratch.reduced_div_rem && run_licm(ir, &dom, module, effects, budget)? {
+            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+            has_loops = ir.blocks.iter().any(|b| b.is_loop_header);
+        }
         // 5-7. Loop-only passes (BCE versioning, loop rotation, boundary-clamp peeling, byte-sum SIMD):
         //      skip completely on acyclic functions, and gate specialty passes in O(1) via `op_flags`!
         let mut post_rot_changed = false;
+        let mut non_wrap_scaled: HashSet<Val> = fx_set();
         if has_loops {
+            let mut versioned_diamond = false;
             if (op_flags & OP_FLAG_UNCHECKED_MEM) != 0
-                && version_checked_counted_loops(ir, &dom, module, budget)?
+                && version_checked_counted_loops(
+                    ir,
+                    &dom,
+                    module,
+                    budget,
+                    &mut non_wrap_scaled,
+                    &mut versioned_diamond,
+                )?
             {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
                 if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+                // Re-run DOM-GVN + load forwarding only when a multi-block (>= 3) diamond loop was
+                // versioned so loads across pure read-only diamonds (e.g. `heapsort` sift_down) forward!
+                if versioned_diamond {
+                    let (folded_after_ver, gvn_after_ver) = run_dom_gvn_and_bce_with_scratch(
+                        ir, &dom, module, effects, budget, scratch,
+                    )?;
+                    if folded_after_ver || gvn_after_ver {
+                        optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                        if folded_after_ver {
+                            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                        }
+                    }
                 }
             }
             if rotate_counted_loops(ir, &dom, budget)? {
@@ -9161,6 +10664,13 @@ pub fn optimize_func_stage2_with_scratch(
             post_rot_changed = true;
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
         }
+        let mut late_folded = !module.memory64 && fold_scaled_mem_addrs(ir, &non_wrap_scaled);
+        if fold_add_scaled(ir, scratch) {
+            late_folded = true;
+        }
+        if late_folded {
+            optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+        }
         let _ = post_rot_changed;
         Ok(())
     })();
@@ -9169,6 +10679,282 @@ pub fn optimize_func_stage2_with_scratch(
     scratch.cfg_scratch = cfg_sc;
     scratch.prune_scratch = prune_sc;
     res
+}
+
+/// Late addressing-mode folding: rewrites already-checked Wasm32 `Load`/`Store` ops whose address
+/// is a provably non-wrapping `base << {1,2,3}` (or `base * {2,4,8}`) into `Op::LoadScaled` /
+/// `Op::StoreScaled`, eliminating explicit index shifts (`[r14 + idx*scale + disp]` on x64 and
+/// shifted/scaled base-index addressing on AArch64).
+fn fold_scaled_mem_addrs(ir: &mut IrFunc, non_wrap_scaled: &HashSet<Val>) -> bool {
+    let has_checked = ir.blocks.iter().any(|bb| {
+        bb.insts.iter().any(|ins| {
+            matches!(
+                ins.op,
+                Op::Load { checked: true, .. } | Op::Store { checked: true, .. }
+            )
+        })
+    });
+    if !has_checked {
+        return false;
+    }
+    let n_vals = ir.val_tys.len();
+    let mut def_op: Vec<Option<Op>> = vec![None; n_vals];
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                def_op[r.0 as usize] = Some(inst.op);
+            }
+        }
+    }
+    let mut changed = false;
+    for bb in &mut ir.blocks {
+        for inst in &mut bb.insts {
+            match inst.op {
+                Op::Load {
+                    kind,
+                    addr,
+                    offset,
+                    checked: true,
+                } if offset <= i32::MAX as u64 => {
+                    if let Some((base, scale)) =
+                        match_non_wrap_scaled_addr(addr, &def_op, non_wrap_scaled)
+                    {
+                        inst.op = Op::LoadScaled {
+                            kind,
+                            addr: base,
+                            scale,
+                            offset,
+                        };
+                        changed = true;
+                    }
+                }
+                Op::Store {
+                    kind,
+                    addr,
+                    val,
+                    offset,
+                    checked: true,
+                } if offset <= i32::MAX as u64 => {
+                    if let Some((base, scale)) =
+                        match_non_wrap_scaled_addr(addr, &def_op, non_wrap_scaled)
+                    {
+                        inst.op = Op::StoreScaled {
+                            kind,
+                            addr: base,
+                            val,
+                            scale,
+                            offset,
+                        };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    changed
+}
+
+fn match_non_wrap_scaled_addr(
+    addr: Val,
+    def_op: &[Option<Op>],
+    non_wrap_scaled: &HashSet<Val>,
+) -> Option<(Val, u8)> {
+    let (base, sh) = match def_op[addr.0 as usize]? {
+        Op::I32BinImm(IntBinOp::Shl, b, imm) => {
+            let s = (imm as u32) & 31;
+            if (1..=3).contains(&s) {
+                (b, s)
+            } else {
+                return None;
+            }
+        }
+        Op::I32BinImm(IntBinOp::Mul, b, imm) if matches!(imm, 2 | 4 | 8) => {
+            (b, (imm as u32).trailing_zeros())
+        }
+        _ => return None,
+    };
+    let safe = non_wrap_scaled.contains(&addr)
+        || match def_op[base.0 as usize] {
+            Some(Op::Load {
+                kind: LoadKind::I32Load8U | LoadKind::I32Load16U,
+                ..
+            }) => true,
+            Some(Op::I32BinImm(IntBinOp::And, _, mask)) => {
+                u64::from(mask as u32) < (1u64 << (32 - sh))
+            }
+            _ => false,
+        };
+    safe.then_some((base, 1u8 << sh))
+}
+
+/// Late scaled-addition folding: rewrites `base + (idx << {1,2,3})` and `base + (idx * {2,4,8})`
+/// (for both `i32` and `i64`) into `Op::AddScaled`, collapsing `wrap + shl + add` array-indexing
+/// sequences into a single 1-cycle `lea` (x64) / `add rd, rn, rm, lsl #k` (AArch64).
+/// Only folds when every use of the shifted value is a foldable `Add`, guaranteeing strictly
+/// fewer instructions and zero live-range inflation.
+fn fold_add_scaled(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
+    let mut has_add = false;
+    let mut has_scale = false;
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            match inst.op {
+                Op::I32Bin(IntBinOp::Add, ..) | Op::I64Bin(IntBinOp::Add, ..) => has_add = true,
+                Op::I32BinImm(IntBinOp::Shl, _, imm) if (1..=3).contains(&((imm as u32) & 31)) => {
+                    has_scale = true;
+                }
+                Op::I64BinImm(IntBinOp::Shl, _, imm) if (1..=3).contains(&((imm as u32) & 63)) => {
+                    has_scale = true;
+                }
+                Op::I32BinImm(IntBinOp::Mul, _, 2 | 4 | 8)
+                | Op::I64BinImm(IntBinOp::Mul, _, 2 | 4 | 8) => has_scale = true,
+                _ => {}
+            }
+        }
+    }
+    if !has_add || !has_scale {
+        return false;
+    }
+
+    let n_vals = ir.val_tys.len();
+    scratch.as_def_wrap.clear();
+    if scratch.as_def_wrap.capacity() > 16_384 && n_vals <= 4096 {
+        scratch.as_def_wrap.shrink_to(4096);
+    }
+    scratch.as_def_wrap.resize(n_vals, None);
+    scratch.as_scaled_def.clear();
+    if scratch.as_scaled_def.capacity() > 16_384 && n_vals <= 4096 {
+        scratch.as_scaled_def.shrink_to(4096);
+    }
+    scratch.as_scaled_def.resize(n_vals, None);
+    scratch.as_use_count.clear();
+    if scratch.as_use_count.capacity() > 16_384 && n_vals <= 4096 {
+        scratch.as_use_count.shrink_to(4096);
+    }
+    scratch.as_use_count.resize(n_vals, 0);
+    scratch.as_add_fold_uses.clear();
+    if scratch.as_add_fold_uses.capacity() > 16_384 && n_vals <= 4096 {
+        scratch.as_add_fold_uses.shrink_to(4096);
+    }
+    scratch.as_add_fold_uses.resize(n_vals, 0);
+    let def_wrap = &mut scratch.as_def_wrap;
+    let scaled_def = &mut scratch.as_scaled_def;
+    let use_count = &mut scratch.as_use_count;
+    let add_fold_uses = &mut scratch.as_add_fold_uses;
+
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                match inst.op {
+                    Op::I32WrapI64(wide) => def_wrap[r.0 as usize] = Some(wide),
+                    Op::I32BinImm(IntBinOp::Shl, x, imm) => {
+                        let s = (imm as u32) & 31;
+                        if (1..=3).contains(&s) {
+                            scaled_def[r.0 as usize] = Some((false, x, s as u8));
+                        }
+                    }
+                    Op::I32BinImm(IntBinOp::Mul, x, imm @ (2 | 4 | 8)) => {
+                        scaled_def[r.0 as usize] =
+                            Some((false, x, (imm as u32).trailing_zeros() as u8));
+                    }
+                    Op::I64BinImm(IntBinOp::Shl, x, imm) => {
+                        let s = (imm as u32) & 63;
+                        if (1..=3).contains(&s) {
+                            scaled_def[r.0 as usize] = Some((true, x, s as u8));
+                        }
+                    }
+                    Op::I64BinImm(IntBinOp::Mul, x, imm @ (2 | 4 | 8)) => {
+                        scaled_def[r.0 as usize] =
+                            Some((true, x, (imm as u32).trailing_zeros() as u8));
+                    }
+                    _ => {}
+                }
+            }
+            inst.op.for_each_use(&ir.val_pool, |u| {
+                use_count[u.0 as usize] = use_count[u.0 as usize].saturating_add(1);
+            });
+        }
+        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |u| {
+            use_count[u.0 as usize] = use_count[u.0 as usize].saturating_add(1);
+        });
+    }
+
+    let pick_scaled = |is64: bool, a: Val, b: Val| -> Option<(Val, Val, Val, u8)> {
+        if a == b {
+            return None;
+        }
+        if let Some((s64, idx, sh)) = scaled_def[b.0 as usize]
+            && s64 == is64
+        {
+            return Some((a, b, idx, sh));
+        }
+        if let Some((s64, idx, sh)) = scaled_def[a.0 as usize]
+            && s64 == is64
+        {
+            return Some((b, a, idx, sh));
+        }
+        None
+    };
+
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            match inst.op {
+                Op::I32Bin(IntBinOp::Add, a, b) => {
+                    if let Some((_, sv, _, _)) = pick_scaled(false, a, b) {
+                        add_fold_uses[sv.0 as usize] =
+                            add_fold_uses[sv.0 as usize].saturating_add(1);
+                    }
+                }
+                Op::I64Bin(IntBinOp::Add, a, b) => {
+                    if let Some((_, sv, _, _)) = pick_scaled(true, a, b) {
+                        add_fold_uses[sv.0 as usize] =
+                            add_fold_uses[sv.0 as usize].saturating_add(1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut changed = false;
+    for bb in &mut ir.blocks {
+        for inst in &mut bb.insts {
+            let is64 = match inst.op {
+                Op::I32Bin(IntBinOp::Add, ..) => false,
+                Op::I64Bin(IntBinOp::Add, ..) => true,
+                _ => continue,
+            };
+            let (Op::I32Bin(_, a, b) | Op::I64Bin(_, a, b)) = inst.op else {
+                unreachable!()
+            };
+            let Some((mut base, sv, mut idx, shift)) = pick_scaled(is64, a, b) else {
+                continue;
+            };
+            if add_fold_uses[sv.0 as usize] != use_count[sv.0 as usize] {
+                continue;
+            }
+            if !is64 {
+                if use_count[idx.0 as usize] == 1
+                    && let Some(wide) = def_wrap[idx.0 as usize]
+                {
+                    idx = wide;
+                }
+                if use_count[base.0 as usize] == 1
+                    && let Some(wide) = def_wrap[base.0 as usize]
+                {
+                    base = wide;
+                }
+            }
+            inst.op = Op::AddScaled {
+                is64,
+                base,
+                idx,
+                shift,
+            };
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Narrows sparse equality-filtered counted `u32` loops (`for v in init..limit` with step `+1`)
@@ -9926,7 +11712,10 @@ fn peel_boundary_clamped_loops(ir: &mut IrFunc, module: &X64Module) -> bool {
         }
         // Require all instructions in `bi` to be single-result pure or checked loads/stores (no calls/traps).
         let insts_safe = bb.insts.iter().all(|ins| match ins.op {
-            Op::Load { checked: true, .. } | Op::Store { checked: true, .. } => true,
+            Op::Load { checked: true, .. }
+            | Op::LoadScaled { .. }
+            | Op::Store { checked: true, .. }
+            | Op::StoreScaled { .. } => true,
             op => !op.has_side_effect(),
         });
         if !insts_safe {
@@ -13867,11 +15656,17 @@ fn op_may_trap_locally(op: &Op) -> bool {
         | Op::Store { checked: false, .. }
         | Op::V128LoadLane { checked: false, .. }
         | Op::V128StoreLane { checked: false, .. }
+        | Op::LoadMem { .. }
+        | Op::StoreMem { .. }
+        | Op::V128LoadLaneMem { .. }
+        | Op::V128StoreLaneMem { .. }
         | Op::BoundsCheck { .. }
         | Op::TableGet { .. }
         | Op::TableSet { .. }
         | Op::MemCopy { .. }
         | Op::MemFill { .. }
+        | Op::MemCopyIdx { .. }
+        | Op::MemFillIdx { .. }
         | Op::MemCopyConst {
             dst_checked: false, ..
         }
@@ -13880,6 +15675,7 @@ fn op_may_trap_locally(op: &Op) -> bool {
         }
         | Op::MemFillConst { checked: false, .. }
         | Op::CallIndirect { .. }
+        | Op::ExnAlloc { .. }
         | Op::Trap(_) => true,
         _ => false,
     }
@@ -13912,10 +15708,13 @@ pub fn try_compute_fn_elide_input(
     let mut direct_def_callees: Vec<u32> = Vec::new();
     for bb in &ir.blocks {
         match bb.term {
-            Term::Unreachable => {
+            Term::Unreachable | Term::ThrowActive => {
                 local_may_trap = true;
             }
-            Term::ReturnCall { func, .. } => {
+            Term::ReturnCall { func, .. } | Term::CallCatch { func, .. } => {
+                if matches!(bb.term, Term::CallCatch { .. }) {
+                    local_may_trap = true;
+                }
                 let f = func as usize;
                 if f < n_imports {
                     calls_import_or_indirect = true;
@@ -13927,7 +15726,7 @@ pub fn try_compute_fn_elide_input(
                     direct_def_callees.push((f - n_imports) as u32);
                 }
             }
-            Term::ReturnCallIndirect { .. } => {
+            Term::ReturnCallIndirect { .. } | Term::CallIndirectCatch { .. } => {
                 calls_import_or_indirect = true;
                 local_may_trap = true;
             }
@@ -13952,7 +15751,13 @@ pub fn try_compute_fn_elide_input(
                 Op::CallIndirect { .. } => {
                     calls_import_or_indirect = true;
                 }
-                Op::Trunc(_, _) | Op::MemGrow(_) | Op::MemCopy { .. } | Op::MemFill { .. } => {
+                Op::Trunc(_, _)
+                | Op::MemGrow(_)
+                | Op::MemGrowIdx { .. }
+                | Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemFill { .. }
+                | Op::MemFillIdx { .. } => {
                     max_helper_bytes = max_helper_bytes.max(PURE_HELPER_STACK_BYTES);
                 }
                 _ => {}

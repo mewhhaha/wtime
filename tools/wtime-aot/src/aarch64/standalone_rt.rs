@@ -11,10 +11,11 @@ use crate::x64::module::X64Module;
 use crate::x64::runtime::RuntimeTables;
 use crate::x64::standalone_rt::build_ryu_pow5_tables;
 use crate::x64::{
-    CtxLayout, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES, GUEST_STACK_TOTAL_BYTES,
-    GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE, OFF_EXEC_ARGC,
-    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_EXIT_CODE, OFF_MEM_BASE, OFF_MEM_LEN,
-    OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, TRAP_EXIT, TRAP_HOST,
+    CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
+    GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE,
+    INTERNAL_EXN_SIGNAL, OFF_EXEC_ARGC, OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_EXIT_CODE,
+    OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR,
+    TRAP_EXIT, TRAP_HOST,
 };
 
 use super::asm::{A64Asm, A64RelocTarget, Cond, Label, Reg, VReg};
@@ -276,6 +277,124 @@ pub fn emit_a64_standalone_start(
         }
     }
 
+    // Reserve & commit additional linear memories `1..N` (`multi-memory`).
+    for (mi, em) in module.extra_memories.iter().enumerate() {
+        let desc_off = layout.extra_mem_offs[mi];
+        let hard_cap = if em.memory64 {
+            em.min_pages.max(131_072)
+        } else {
+            65_536
+        };
+        let eff_max = em.max_pages.min(hard_cap);
+        if eff_max == 0 {
+            continue;
+        }
+        a.mov_imm64(Reg::X4, eff_max);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X4),
+            None,
+            CTX_REG,
+            desc_off + 16,
+            SGP3,
+        );
+        let reserve_bytes = eff_max << 16;
+        a.mov_imm64(Reg::X1, reserve_bytes);
+        a.mov_r(true, Reg::X19, Reg::X1);
+        a.movz(true, Reg::X0, 0, 0);
+        a.movz(true, Reg::X2, 0, 0);
+        a.mov_imm32(Reg::X3, 0x4022);
+        a.mov_imm64(Reg::X4, u64::MAX);
+        a.movz(true, Reg::X5, 0, 0);
+        emit_syscall(&mut a, SYS_MMAP);
+        a.mov_imm64(Reg::X4, (-4095i64) as u64);
+        a.cmp_r(true, Reg::X0, Reg::X4);
+        a.b_cond(Cond::Hs, fail_alloc);
+        a.mov_r(true, Reg::X20, Reg::X0);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X20),
+            None,
+            CTX_REG,
+            desc_off,
+            SGP3,
+        );
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X19),
+            None,
+            CTX_REG,
+            desc_off + 24,
+            SGP3,
+        );
+        if em.min_pages > 0 {
+            let init_len = em.min_pages << 16;
+            a.mov_r(true, Reg::X0, Reg::X20);
+            a.mov_imm64(Reg::X1, init_len);
+            a.mov_imm32(Reg::X2, 3);
+            emit_syscall(&mut a, SYS_MPROTECT);
+            a.mov_imm64(Reg::X4, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X4);
+            a.b_cond(Cond::Hs, fail_alloc);
+            a.mov_imm64(Reg::X4, init_len);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X4),
+                None,
+                CTX_REG,
+                desc_off + 8,
+                SGP3,
+            );
+        }
+    }
+
+    // Exception arena slab (demand-paged RW, EH modules only).
+    if let Some(exn_off) = layout.exn_state_off {
+        a.movz(true, Reg::X0, 0, 0);
+        a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
+        a.mov_imm32(Reg::X2, 3);
+        a.mov_imm32(Reg::X3, 0x22);
+        a.mov_imm64(Reg::X4, u64::MAX);
+        a.movz(true, Reg::X5, 0, 0);
+        emit_syscall(&mut a, SYS_MMAP);
+        a.mov_imm64(Reg::X4, (-4095i64) as u64);
+        a.cmp_r(true, Reg::X0, Reg::X4);
+        a.b_cond(Cond::Hs, fail_alloc);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X0),
+            None,
+            CTX_REG,
+            exn_off + 8,
+            SGP3,
+        );
+        a.mov_imm64(Reg::X4, 16);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X4),
+            None,
+            CTX_REG,
+            exn_off + 16,
+            SGP3,
+        );
+        a.mov_imm64(Reg::X4, EXN_SLAB_BYTES as u64);
+        emit_store_off(
+            &mut a,
+            Ty::I64,
+            Some(Reg::X4),
+            None,
+            CTX_REG,
+            exn_off + 24,
+            SGP3,
+        );
+    }
+
     // Install SIGSEGV guard-page handler (standalone memory32 ONLY!).
     let lbl_sig_handler = a.new_label();
     if layout.use_guard_pages {
@@ -341,6 +460,19 @@ pub fn emit_a64_standalone_start(
     a.bind(trap_exit);
     let exit_one = a.new_label();
     a.uxtb(Reg::X9, SGP1);
+    if layout.exn_state_off.is_some() {
+        let not_exn = a.new_label();
+        a.cmp_imm(false, Reg::X9, u16::from(INTERNAL_EXN_SIGNAL));
+        a.b_cond(Cond::Ne, not_exn);
+        let exn_msg = b"Exception: uncaught wasm exception\n";
+        let exn_off = a.add_local_rodata(1, exn_msg);
+        a.adr_reloc(Reg::X12, A64RelocTarget::LocalRodata(exn_off));
+        a.mov_imm32(Reg::X13, exn_msg.len() as u32);
+        a.mov_imm32(Reg::X14, 2);
+        emit_write_all(&mut a, Reg::X14, Reg::X12, Reg::X13);
+        a.b(exit_one);
+        a.bind(not_exn);
+    }
     a.sub_imm(false, Reg::X9, Reg::X9, 1);
     a.cmp_imm(false, Reg::X9, 22);
     a.b_cond(Cond::Hs, exit_one);

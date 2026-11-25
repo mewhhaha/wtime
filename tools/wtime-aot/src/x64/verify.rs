@@ -355,7 +355,145 @@ pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
                     ));
                 }
             }
-            Term::Unreachable => {}
+            Term::CallCatch {
+                func,
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+            } => {
+                check_val_range(ir, args, "CallCatch.args")?;
+                let fty = module.func_type(func as usize).ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: CallCatch func {func} out of range",
+                        ir.func_index
+                    )
+                })?;
+                let avals = ir.pool_slice(args);
+                if avals.len() != fty.params.len() {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: CallCatch arg arity mismatch ({} vs {})",
+                        ir.func_index,
+                        avals.len(),
+                        fty.params.len()
+                    ));
+                }
+                for (i, (&av, &pt)) in avals.iter().zip(&fty.params).enumerate() {
+                    let actual = val_ty(ir, av, "CallCatch.arg")?;
+                    let expected = Ty::from_val(pt);
+                    if actual != expected {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: CallCatch arg {i} type mismatch ({actual:?} vs {expected:?})",
+                            ir.func_index
+                        ));
+                    }
+                }
+                let ok_target = ir.blocks.get(ok_bb.0 as usize).ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: CallCatch ok_bb bb{} out of range",
+                        ir.func_index, ok_bb.0
+                    )
+                })?;
+                if ok_target.params.len() != fty.results.len() {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: CallCatch ok_bb param arity mismatch ({} vs {})",
+                        ir.func_index,
+                        ok_target.params.len(),
+                        fty.results.len()
+                    ));
+                }
+                for (&pv, &rt) in ok_target.params.iter().zip(&fty.results) {
+                    if val_ty(ir, pv, "CallCatch.ok_param")? != Ty::from_val(rt) {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: CallCatch ok_bb param type mismatch",
+                            ir.func_index
+                        ));
+                    }
+                }
+                check_edge(ir, bi, catch_bb.0, catch_args, "CallCatch.catch")?;
+                succs[bi].push(ok_bb.0 as usize);
+                if catch_bb != ok_bb {
+                    succs[bi].push(catch_bb.0 as usize);
+                }
+            }
+            Term::CallIndirectCatch {
+                ci_id,
+                idx,
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+            } => {
+                if val_ty(ir, idx, "CallIndirectCatch.idx")? != Ty::I32 {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: CallIndirectCatch idx must be I32",
+                        ir.func_index
+                    ));
+                }
+                check_val_range(ir, args, "CallIndirectCatch.args")?;
+                let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: CallIndirectCatch ci_id {ci_id} out of range",
+                        ir.func_index
+                    )
+                })?;
+                let fty = module
+                    .module_types
+                    .get(ci.type_idx as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "verify_ir fn {} bb{bi}: CallIndirectCatch type_idx out of range",
+                            ir.func_index
+                        )
+                    })?;
+                let avals = ir.pool_slice(args);
+                if avals.len() != fty.params.len() {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: CallIndirectCatch arg arity mismatch ({} vs {})",
+                        ir.func_index,
+                        avals.len(),
+                        fty.params.len()
+                    ));
+                }
+                for (i, (&av, &pt)) in avals.iter().zip(&fty.params).enumerate() {
+                    let actual = val_ty(ir, av, "CallIndirectCatch.arg")?;
+                    let expected = Ty::from_val(pt);
+                    if actual != expected {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: CallIndirectCatch arg {i} type mismatch ({actual:?} vs {expected:?})",
+                            ir.func_index
+                        ));
+                    }
+                }
+                let ok_target = ir.blocks.get(ok_bb.0 as usize).ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: CallIndirectCatch ok_bb bb{} out of range",
+                        ir.func_index, ok_bb.0
+                    )
+                })?;
+                if ok_target.params.len() != fty.results.len() {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: CallIndirectCatch ok_bb param arity mismatch ({} vs {})",
+                        ir.func_index,
+                        ok_target.params.len(),
+                        fty.results.len()
+                    ));
+                }
+                for (&pv, &rt) in ok_target.params.iter().zip(&fty.results) {
+                    if val_ty(ir, pv, "CallIndirectCatch.ok_param")? != Ty::from_val(rt) {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: CallIndirectCatch ok_bb param type mismatch",
+                            ir.func_index
+                        ));
+                    }
+                }
+                check_edge(ir, bi, catch_bb.0, catch_args, "CallIndirectCatch.catch")?;
+                succs[bi].push(ok_bb.0 as usize);
+                if catch_bb != ok_bb {
+                    succs[bi].push(catch_bb.0 as usize);
+                }
+            }
+            Term::ThrowActive | Term::Unreachable => {}
         }
     }
 
@@ -612,6 +750,20 @@ fn verify_inst_types(
     match op {
         Op::ConstI32(_) => expect_res(ir, bi, res, Ty::I32, "ConstI32")?,
         Op::MemSize => expect_res(ir, bi, res, addr_ty, "MemSize")?,
+        Op::MemSizeIdx(mem) => {
+            if mem == 0 || (mem as usize) >= module.num_memories() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad MemSizeIdx {mem}",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_res(ir, bi, res, mty, "MemSizeIdx")?;
+        }
         Op::ConstI64(_) => expect_res(ir, bi, res, Ty::I64, "ConstI64")?,
         Op::ConstF32(_) => expect_res(ir, bi, res, Ty::F32, "ConstF32")?,
         Op::ConstF64(_) => expect_res(ir, bi, res, Ty::F64, "ConstF64")?,
@@ -667,6 +819,34 @@ fn verify_inst_types(
         Op::I64BinImm(_, a, _) => {
             expect_ty(ir, bi, a, Ty::I64, "i64 bin imm")?;
             expect_res(ir, bi, res, Ty::I64, "i64 bin imm")?;
+        }
+        Op::AddScaled {
+            is64,
+            base,
+            idx,
+            shift,
+        } => {
+            if !(1..=3).contains(&shift) {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: invalid AddScaled shift {shift}",
+                    ir.func_index
+                ));
+            }
+            if is64 {
+                expect_ty(ir, bi, base, Ty::I64, "AddScaled.base")?;
+                expect_ty(ir, bi, idx, Ty::I64, "AddScaled.idx")?;
+                expect_res(ir, bi, res, Ty::I64, "AddScaled")?;
+            } else {
+                let bt = val_ty(ir, base, "AddScaled.base")?;
+                let it = val_ty(ir, idx, "AddScaled.idx")?;
+                if !matches!(bt, Ty::I32 | Ty::I64) || !matches!(it, Ty::I32 | Ty::I64) {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: 32-bit AddScaled operands must be GP ({bt:?}, {it:?})",
+                        ir.func_index
+                    ));
+                }
+                expect_res(ir, bi, res, Ty::I32, "AddScaled")?;
+            }
         }
         Op::I64Cmp(_, a, b) => {
             expect_ty(ir, bi, a, Ty::I64, "i64 cmp")?;
@@ -837,6 +1017,21 @@ fn verify_inst_types(
             expect_ty(ir, bi, addr, addr_ty, "Load.addr")?;
             expect_res(ir, bi, res, kind.ty(), "Load")?;
         }
+        Op::LoadScaled {
+            kind,
+            addr,
+            scale,
+            offset,
+        } => {
+            if module.memory64 || !matches!(scale, 2 | 4 | 8) || offset > i32::MAX as u64 {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: invalid LoadScaled (memory64={}, scale={scale}, offset={offset})",
+                    ir.func_index, module.memory64
+                ));
+            }
+            expect_ty(ir, bi, addr, Ty::I32, "LoadScaled.addr")?;
+            expect_res(ir, bi, res, kind.ty(), "LoadScaled")?;
+        }
         Op::Store {
             kind, addr, val, ..
         } => {
@@ -870,6 +1065,41 @@ fn verify_inst_types(
             };
             expect_ty(ir, bi, val, vty, "Store.val")?;
             expect_no_res(ir, bi, res, "Store")?;
+        }
+        Op::StoreScaled {
+            kind,
+            addr,
+            val,
+            scale,
+            offset,
+        } => {
+            if module.memory64 || !matches!(scale, 2 | 4 | 8) || offset > i32::MAX as u64 {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: invalid StoreScaled (memory64={}, scale={scale}, offset={offset})",
+                    ir.func_index, module.memory64
+                ));
+            }
+            expect_ty(ir, bi, addr, Ty::I32, "StoreScaled.addr")?;
+            let vty = match kind {
+                super::ir::StoreKind::I8
+                | super::ir::StoreKind::I16
+                | super::ir::StoreKind::I32 => {
+                    let actual = val_ty(ir, val, "StoreScaled.val")?;
+                    if !matches!(actual, Ty::I32 | Ty::I64) {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: narrow StoreScaled val must be GP",
+                            ir.func_index
+                        ));
+                    }
+                    actual
+                }
+                super::ir::StoreKind::I64 => Ty::I64,
+                super::ir::StoreKind::F32 => Ty::F32,
+                super::ir::StoreKind::F64 => Ty::F64,
+                super::ir::StoreKind::V128 => Ty::V128,
+            };
+            expect_ty(ir, bi, val, vty, "StoreScaled.val")?;
+            expect_no_res(ir, bi, res, "StoreScaled")?;
         }
         Op::V128LoadLane {
             width,
@@ -920,6 +1150,184 @@ fn verify_inst_types(
             expect_ty(ir, bi, val, Ty::I32, "MemFill.val")?;
             expect_ty(ir, bi, len, addr_ty, "MemFill.len")?;
             expect_no_res(ir, bi, res, "MemFill")?;
+        }
+        Op::LoadMem {
+            mem, kind, addr, ..
+        } => {
+            if mem == 0 || (mem as usize) >= module.num_memories() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad LoadMem {mem}",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, addr, mty, "LoadMem.addr")?;
+            expect_res(ir, bi, res, kind.ty(), "LoadMem")?;
+        }
+        Op::StoreMem {
+            mem,
+            kind,
+            addr,
+            val,
+            ..
+        } => {
+            if mem == 0 || (mem as usize) >= module.num_memories() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad StoreMem {mem}",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, addr, mty, "StoreMem.addr")?;
+            let vty = match kind {
+                super::ir::StoreKind::I8
+                | super::ir::StoreKind::I16
+                | super::ir::StoreKind::I32 => {
+                    let actual = val_ty(ir, val, "StoreMem.val")?;
+                    if !matches!(actual, Ty::I32 | Ty::I64) {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: narrow StoreMem val must be GP",
+                            ir.func_index
+                        ));
+                    }
+                    actual
+                }
+                super::ir::StoreKind::I64 => Ty::I64,
+                super::ir::StoreKind::F32 => Ty::F32,
+                super::ir::StoreKind::F64 => Ty::F64,
+                super::ir::StoreKind::V128 => Ty::V128,
+            };
+            expect_ty(ir, bi, val, vty, "StoreMem.val")?;
+            expect_no_res(ir, bi, res, "StoreMem")?;
+        }
+        Op::V128LoadLaneMem {
+            mem,
+            width,
+            addr,
+            vec,
+            lane,
+            ..
+        } => {
+            if mem == 0
+                || (mem as usize) >= module.num_memories()
+                || !matches!(width, 1 | 2 | 4 | 8)
+                || lane >= 16 / width
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad V128LoadLaneMem",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, addr, mty, "V128LoadLaneMem.addr")?;
+            expect_ty(ir, bi, vec, Ty::V128, "V128LoadLaneMem.vec")?;
+            expect_res(ir, bi, res, Ty::V128, "V128LoadLaneMem")?;
+        }
+        Op::V128StoreLaneMem {
+            mem,
+            width,
+            addr,
+            vec,
+            lane,
+            ..
+        } => {
+            if mem == 0
+                || (mem as usize) >= module.num_memories()
+                || !matches!(width, 1 | 2 | 4 | 8)
+                || lane >= 16 / width
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad V128StoreLaneMem",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, addr, mty, "V128StoreLaneMem.addr")?;
+            expect_ty(ir, bi, vec, Ty::V128, "V128StoreLaneMem.vec")?;
+            expect_no_res(ir, bi, res, "V128StoreLaneMem")?;
+        }
+        Op::MemGrowIdx { mem, delta } => {
+            if mem == 0 || (mem as usize) >= module.num_memories() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad MemGrowIdx {mem}",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, delta, mty, "MemGrowIdx")?;
+            expect_res(ir, bi, res, mty, "MemGrowIdx")?;
+        }
+        Op::MemCopyIdx {
+            dst_mem,
+            src_mem,
+            dst,
+            src,
+            len,
+        } => {
+            if (dst_mem as usize) >= module.num_memories()
+                || (src_mem as usize) >= module.num_memories()
+            {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad MemCopyIdx",
+                    ir.func_index
+                ));
+            }
+            let dty = if module.mem_is_64(dst_mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            let sty = if module.mem_is_64(src_mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            let lty = if module.mem_is_64(dst_mem) && module.mem_is_64(src_mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, dst, dty, "MemCopyIdx.dst")?;
+            expect_ty(ir, bi, src, sty, "MemCopyIdx.src")?;
+            expect_ty(ir, bi, len, lty, "MemCopyIdx.len")?;
+            expect_no_res(ir, bi, res, "MemCopyIdx")?;
+        }
+        Op::MemFillIdx { mem, dst, val, len } => {
+            if mem == 0 || (mem as usize) >= module.num_memories() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: bad MemFillIdx {mem}",
+                    ir.func_index
+                ));
+            }
+            let mty = if module.mem_is_64(mem) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, dst, mty, "MemFillIdx.dst")?;
+            expect_ty(ir, bi, val, Ty::I32, "MemFillIdx.val")?;
+            expect_ty(ir, bi, len, mty, "MemFillIdx.len")?;
+            expect_no_res(ir, bi, res, "MemFillIdx")?;
         }
         Op::MemCopyConst { dst, src, len, .. } => {
             if len > 64 {
@@ -1109,6 +1517,69 @@ fn verify_inst_types(
                 rets,
                 "CallIndirect",
             )?;
+        }
+        Op::ExnAlloc { tag, args } => {
+            expect_res(ir, bi, res, Ty::I64, "ExnAlloc")?;
+            check_val_range(ir, args, "ExnAlloc.args")?;
+            let &fti = module.tags.get(tag as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ExnAlloc tag {tag} out of range",
+                    ir.func_index
+                )
+            })?;
+            let fty = &module.module_types[fti as usize];
+            let av = ir.pool_slice(args);
+            if av.len() != fty.params.len() {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ExnAlloc arg count {} != {}",
+                    ir.func_index,
+                    av.len(),
+                    fty.params.len()
+                ));
+            }
+            for (&v, &pt) in av.iter().zip(&fty.params) {
+                expect_ty(ir, bi, v, Ty::from_val(pt), "ExnAlloc.arg")?;
+            }
+        }
+        Op::ExnSetActive(h) => {
+            expect_no_res(ir, bi, res, "ExnSetActive")?;
+            expect_ty(ir, bi, h, Ty::I64, "ExnSetActive")?;
+        }
+        Op::ExnGetActive => expect_res(ir, bi, res, Ty::I64, "ExnGetActive")?,
+        Op::ExnClearActive => expect_no_res(ir, bi, res, "ExnClearActive")?,
+        Op::ExnGetTag(h) => {
+            expect_res(ir, bi, res, Ty::I32, "ExnGetTag")?;
+            expect_ty(ir, bi, h, Ty::I64, "ExnGetTag")?;
+        }
+        Op::ExnGetPayload {
+            handle,
+            tag,
+            field,
+            ty,
+        } => {
+            expect_res(ir, bi, res, ty, "ExnGetPayload")?;
+            expect_ty(ir, bi, handle, Ty::I64, "ExnGetPayload.handle")?;
+            let &fti = module.tags.get(tag as usize).ok_or_else(|| {
+                format!(
+                    "verify_ir fn {} bb{bi}: ExnGetPayload tag {tag} out of range",
+                    ir.func_index
+                )
+            })?;
+            let &pt = module.module_types[fti as usize]
+                .params
+                .get(field as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: ExnGetPayload field {field} out of range",
+                        ir.func_index
+                    )
+                })?;
+            if Ty::from_val(pt) != ty {
+                return Err(format!(
+                    "verify_ir fn {} bb{bi}: ExnGetPayload type mismatch",
+                    ir.func_index
+                ));
+            }
         }
         Op::Trap(_) => expect_no_res(ir, bi, res, "Trap")?,
     }
@@ -1340,13 +1811,46 @@ pub fn verify_alloc_with_config(
                         defined_in_reach[rv.0 as usize] = true;
                     }
                 }
-                Op::MemCopy { .. } | Op::MemFill { .. } | Op::MemGrow(_) | Op::Trunc(_, _) => {
+                Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemFill { .. }
+                | Op::MemFillIdx { .. }
+                | Op::MemGrow(_)
+                | Op::MemGrowIdx { .. }
+                | Op::Trunc(_, _) => {
                     has_any_clobber_or_call = true;
                 }
                 _ => {}
             }
         }
         match bb.term {
+            Term::CallCatch { args, ok_bb, .. } | Term::CallIndirectCatch { args, ok_bb, .. } => {
+                has_any_clobber_or_call = true;
+                let arg_tys: Vec<Ty> = ir
+                    .pool_slice(args)
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                let arg_layout = layout_args(&arg_tys)?;
+                if arg_layout.stack_bytes > alloc.outgoing_arg_bytes {
+                    return Err(format!(
+                        "verify_alloc fn {}: outgoing_arg_bytes ({}) < CallCatch needed ({})",
+                        ir.func_index, alloc.outgoing_arg_bytes, arg_layout.stack_bytes
+                    ));
+                }
+                let ret_tys: Vec<Ty> = ir.blocks[ok_bb.0 as usize]
+                    .params
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                let ret_layout = layout_rets(&ret_tys)?;
+                if ret_layout.stack_bytes > alloc.ret_buf_bytes {
+                    return Err(format!(
+                        "verify_alloc fn {}: ret_buf_bytes ({}) < CallCatch needed ({})",
+                        ir.func_index, alloc.ret_buf_bytes, ret_layout.stack_bytes
+                    ));
+                }
+            }
             Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
                 let arg_tys: Vec<Ty> = ir
                     .pool_slice(args)
@@ -1702,16 +2206,80 @@ pub fn verify_alloc_with_config(
                 bits &= bits - 1;
             }
         }
-        let mut term_err: Option<String> = None;
-        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-            if term_err.is_none()
-                && let Err(e) = tracker.insert(v.0, ir, alloc, b, "term", None)
-            {
-                term_err = Some(e);
+        match bb.term {
+            Term::CallCatch {
+                args, catch_args, ..
+            } => {
+                for &v in ir.pool_slice(catch_args) {
+                    tracker.insert(v.0, ir, alloc, b, "term.catch_args", None)?;
+                }
+                let hit_gp = MASK_GP_CALLER & tracker.gp_mask;
+                if hit_gp != 0 {
+                    let gid = hit_gp.trailing_zeros() as usize;
+                    let vi = tracker.gp_owner[gid].unwrap();
+                    return Err(format!(
+                        "verify_alloc fn {} bb{b} term: live value v{vi} in GP id {gid} clobbered by CallCatch",
+                        ir.func_index
+                    ));
+                }
+                let hit_xmm = MASK_XMM_CALLER & tracker.xmm_mask;
+                if hit_xmm != 0 {
+                    let xid = hit_xmm.trailing_zeros() as usize;
+                    let vi = tracker.xmm_owner[xid].unwrap();
+                    return Err(format!(
+                        "verify_alloc fn {} bb{b} term: live value v{vi} in XMM id {xid} clobbered by CallCatch",
+                        ir.func_index
+                    ));
+                }
+                for &v in ir.pool_slice(args) {
+                    tracker.insert(v.0, ir, alloc, b, "term.args", None)?;
+                }
             }
-        });
-        if let Some(e) = term_err {
-            return Err(e);
+            Term::CallIndirectCatch {
+                idx,
+                args,
+                catch_args,
+                ..
+            } => {
+                for &v in ir.pool_slice(catch_args) {
+                    tracker.insert(v.0, ir, alloc, b, "term.catch_args", None)?;
+                }
+                let hit_gp = MASK_GP_CALLER & tracker.gp_mask;
+                if hit_gp != 0 {
+                    let gid = hit_gp.trailing_zeros() as usize;
+                    let vi = tracker.gp_owner[gid].unwrap();
+                    return Err(format!(
+                        "verify_alloc fn {} bb{b} term: live value v{vi} in GP id {gid} clobbered by CallIndirectCatch",
+                        ir.func_index
+                    ));
+                }
+                let hit_xmm = MASK_XMM_CALLER & tracker.xmm_mask;
+                if hit_xmm != 0 {
+                    let xid = hit_xmm.trailing_zeros() as usize;
+                    let vi = tracker.xmm_owner[xid].unwrap();
+                    return Err(format!(
+                        "verify_alloc fn {} bb{b} term: live value v{vi} in XMM id {xid} clobbered by CallIndirectCatch",
+                        ir.func_index
+                    ));
+                }
+                tracker.insert(idx.0, ir, alloc, b, "term.idx", None)?;
+                for &v in ir.pool_slice(args) {
+                    tracker.insert(v.0, ir, alloc, b, "term.args", None)?;
+                }
+            }
+            _ => {
+                let mut term_err: Option<String> = None;
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    if term_err.is_none()
+                        && let Err(e) = tracker.insert(v.0, ir, alloc, b, "term", None)
+                    {
+                        term_err = Some(e);
+                    }
+                });
+                if let Some(e) = term_err {
+                    return Err(e);
+                }
+            }
         }
 
         for (ii, inst) in bb.insts.iter().enumerate().rev() {
@@ -1737,9 +2305,9 @@ pub fn verify_alloc_with_config(
             // Now `tracker` holds the EXACT set of values live strictly ACROSS `inst`: check clobbers in O(1)!
             let (gp_clob, xmm_clob) = match inst.op {
                 Op::Call { .. } | Op::CallIndirect { .. } => (MASK_GP_CALLER, MASK_XMM_CALLER),
-                Op::MemCopy { .. } => helper_clobbers(HelperKind::MemCopy),
-                Op::MemFill { .. } => helper_clobbers(HelperKind::MemFill),
-                Op::MemGrow(_) => helper_clobbers(HelperKind::MemGrow),
+                Op::MemCopy { .. } | Op::MemCopyIdx { .. } => helper_clobbers(HelperKind::MemCopy),
+                Op::MemFill { .. } | Op::MemFillIdx { .. } => helper_clobbers(HelperKind::MemFill),
+                Op::MemGrow(_) | Op::MemGrowIdx { .. } => helper_clobbers(HelperKind::MemGrow),
                 Op::Trunc(_, _) => helper_clobbers(HelperKind::Trunc),
                 Op::I32Bin(op, _, _) | Op::I64Bin(op, _, _) => match op {
                     IntBinOp::DivS
@@ -1747,7 +2315,9 @@ pub fn verify_alloc_with_config(
                     | IntBinOp::DivUNz
                     | IntBinOp::RemS
                     | IntBinOp::RemU
-                    | IntBinOp::RemUNz => (MASK_RAX_RDX, 0),
+                    | IntBinOp::RemUNz
+                    | IntBinOp::MulHiS
+                    | IntBinOp::MulHiU => (MASK_RAX_RDX, 0),
                     IntBinOp::Shl | IntBinOp::ShrS | IntBinOp::ShrU => {
                         if cfg.has_bmi2 {
                             (0, 0)
@@ -1759,10 +2329,17 @@ pub fn verify_alloc_with_config(
                     _ => (0, 0),
                 },
                 Op::I64BinImm(
-                    IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU,
+                    op @ (IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU),
                     _,
-                    _,
-                ) => (MASK_RAX_RDX, 0),
+                    imm,
+                ) => {
+                    let is_pow2 = if matches!(op, IntBinOp::DivU | IntBinOp::RemU) {
+                        u64::from(imm as u32).is_power_of_two()
+                    } else {
+                        i64::from(imm).unsigned_abs().is_power_of_two()
+                    };
+                    if is_pow2 { (0, 0) } else { (MASK_RAX_RDX, 0) }
+                }
                 Op::F64AxpyLoop { .. } => (MASK_RAX_RDX | MASK_RCX, (1 << 0) | (1 << 1) | (1 << 2)),
                 _ => (0, 0),
             };

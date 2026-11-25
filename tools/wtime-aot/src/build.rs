@@ -1567,12 +1567,14 @@ fn build_x64(
     }
     let key_hex = key.hex();
 
-    let (publish_lock, entry) = lock_cache_entry(&cache.join(&key_hex), deadline)?;
+    let entry_path = cache.join(&key_hex);
+    let entry_existed = fs::symlink_metadata(&entry_path).is_ok();
+    let (publish_lock, entry) = lock_cache_entry(&entry_path, deadline)?;
     check_deadline(deadline, options.time_limit)?;
     let program = entry.join(artifact_name);
     let digest_file = entry.join(digest_name);
     let t_ver = std::time::Instant::now();
-    if verified_cached_artifact(&program, &digest_file) {
+    if entry_existed && verified_cached_artifact(&program, &digest_file) {
         let d_ver = t_ver.elapsed();
         let t_sw = std::time::Instant::now();
         sweep_stale_staged_artifacts_bounded(&entry, deadline);
@@ -1592,11 +1594,13 @@ fn build_x64(
         }
         return Ok(program);
     }
-    for stale in [&digest_file, &program] {
-        if let Err(e) = fs::remove_file(stale)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(BuildError::Failed(format!("{}: {e}", stale.display())));
+    if entry_existed {
+        for stale in [&digest_file, &program] {
+            if let Err(e) = fs::remove_file(stale)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(BuildError::Failed(format!("{}: {e}", stale.display())));
+            }
         }
     }
     check_deadline(deadline, options.time_limit)?;
@@ -1712,7 +1716,9 @@ fn build_x64(
                 .and_then(|()| check_active())
                 .and_then(|()| {
                     let _ = fs::write(&key_file, format!("{key_txt_prefix}{so_sha}\n"));
-                    sweep_stale_staged_artifacts_inner(&entry, true, Some(&staged_name));
+                    if entry_existed {
+                        sweep_stale_staged_artifacts_inner(&entry, true, Some(&staged_name));
+                    }
                     check_active()
                 })
                 .and_then(|()| {

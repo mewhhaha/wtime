@@ -677,16 +677,19 @@ pub fn allocate_with_config_and_scratch(
         reset_fill(&mut scratch.has_unchecked_mem_blk, n_blocks, false);
         for &b in &scratch.postorder {
             let bb = &ir.blocks[b as usize];
-            let mut trap = matches!(bb.term, Term::Unreachable);
+            let mut trap = matches!(bb.term, Term::Unreachable | Term::ThrowActive);
             let mut call = matches!(
                 bb.term,
-                Term::ReturnCall { .. } | Term::ReturnCallIndirect { .. }
+                Term::ReturnCall { .. }
+                    | Term::ReturnCallIndirect { .. }
+                    | Term::CallCatch { .. }
+                    | Term::CallIndirectCatch { .. }
             );
             let mut store = false;
             let mut unchecked_mem = false;
             for inst in &bb.insts {
                 match inst.op {
-                    Op::Trap(_) | Op::MemGrow(_) => trap = true,
+                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. } => trap = true,
                     Op::Call { .. } | Op::CallIndirect { .. } => call = true,
                     Op::Store { checked, .. } | Op::V128StoreLane { checked, .. } => {
                         store = true;
@@ -694,11 +697,22 @@ pub fn allocate_with_config_and_scratch(
                             unchecked_mem = true;
                         }
                     }
+                    Op::StoreMem { .. } | Op::V128StoreLaneMem { .. } => {
+                        store = true;
+                        unchecked_mem = true;
+                    }
+                    Op::StoreScaled { .. } => {
+                        store = true;
+                    }
                     Op::Load { checked: false, .. }
+                    | Op::LoadMem { .. }
                     | Op::V128LoadLane { checked: false, .. }
+                    | Op::V128LoadLaneMem { .. }
                     | Op::BoundsCheck { .. }
                     | Op::MemCopy { .. }
+                    | Op::MemCopyIdx { .. }
                     | Op::MemFill { .. }
+                    | Op::MemFillIdx { .. }
                     | Op::MemCopyConst {
                         dst_checked: false, ..
                     }
@@ -821,8 +835,27 @@ pub fn allocate_with_config_and_scratch(
                             let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
                             match (t_ok, e_ok) {
                                 (true, true) => {
-                                    let ts = cand_score(cur, then_bb.0, true, placed);
-                                    let es = cand_score(cur, else_bb.0, false, placed);
+                                    let mut ts = cand_score(cur, then_bb.0, true, placed);
+                                    let mut es = cand_score(cur, else_bb.0, false, placed);
+                                    // Prefer linear fallthrough on triangle `if` diamonds
+                                    // (`cur -> arm -> merge`, e.g. `if right < end { ... }`) so
+                                    // the single-pred arm falls straight into `merge` without a
+                                    // forward jump + unconditional jump back!
+                                    let is_tri = |arm: u32, merge: u32| -> bool {
+                                        !is_trap_blk[arm as usize]
+                                            && !has_call_blk[arm as usize]
+                                            && !ir.blocks[arm as usize].is_loop_header
+                                            && ir.blocks[arm as usize].preds == 1
+                                            && matches!(
+                                                ir.blocks[arm as usize].term,
+                                                Term::Jump { target, .. } if target.0 == merge
+                                            )
+                                    };
+                                    if is_tri(then_bb.0, else_bb.0) {
+                                        ts -= 150;
+                                    } else if is_tri(else_bb.0, then_bb.0) {
+                                        es -= 150;
+                                    }
                                     let best = if (ts, rpo_pos_ro[then_bb.0 as usize])
                                         <= (es, rpo_pos_ro[else_bb.0 as usize])
                                     {
@@ -839,10 +872,16 @@ pub fn allocate_with_config_and_scratch(
                                 (false, false) => None,
                             }
                         }
+                        Term::CallCatch { ok_bb, .. } | Term::CallIndirectCatch { ok_bb, .. } => {
+                            (!placed[ok_bb.0 as usize]
+                                && (pass == 1 || !is_trap_blk[ok_bb.0 as usize]))
+                                .then_some(ok_bb.0)
+                        }
                         Term::BrTable { .. }
                         | Term::Return { .. }
                         | Term::ReturnCall { .. }
                         | Term::ReturnCallIndirect { .. }
+                        | Term::ThrowActive
                         | Term::Unreachable => None,
                     };
                     match next {
@@ -946,7 +985,7 @@ pub fn allocate_with_config_and_scratch(
                         max_ret_buf_bytes = ret_stack_bytes;
                     }
                 }
-                Op::MemCopy { .. } => {
+                Op::MemCopy { .. } | Op::MemCopyIdx { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemCopy);
                     clobbers.push(Clobber {
                         pos: pos_use,
@@ -954,7 +993,7 @@ pub fn allocate_with_config_and_scratch(
                         xmm_mask,
                     });
                 }
-                Op::MemFill { .. } => {
+                Op::MemFill { .. } | Op::MemFillIdx { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemFill);
                     clobbers.push(Clobber {
                         pos: pos_use,
@@ -962,7 +1001,7 @@ pub fn allocate_with_config_and_scratch(
                         xmm_mask,
                     });
                 }
-                Op::MemGrow(_) => {
+                Op::MemGrow(_) | Op::MemGrowIdx { .. } => {
                     let (gp_mask, xmm_mask) = helper_clobbers(HelperKind::MemGrow);
                     clobbers.push(Clobber {
                         pos: pos_use,
@@ -984,7 +1023,9 @@ pub fn allocate_with_config_and_scratch(
                     | IntBinOp::DivUNz
                     | IntBinOp::RemS
                     | IntBinOp::RemU
-                    | IntBinOp::RemUNz => {
+                    | IntBinOp::RemUNz
+                    | IntBinOp::MulHiS
+                    | IntBinOp::MulHiU => {
                         clobbers.push(Clobber {
                             pos: pos_use,
                             gp_mask: MASK_RAX_RDX,
@@ -1010,15 +1051,22 @@ pub fn allocate_with_config_and_scratch(
                     _ => {}
                 },
                 Op::I64BinImm(
-                    IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU,
+                    op @ (IntBinOp::DivS | IntBinOp::DivU | IntBinOp::RemS | IntBinOp::RemU),
                     _,
-                    _,
+                    imm,
                 ) => {
-                    clobbers.push(Clobber {
-                        pos: pos_use,
-                        gp_mask: MASK_RAX_RDX,
-                        xmm_mask: 0,
-                    });
+                    let is_pow2 = if matches!(op, IntBinOp::DivU | IntBinOp::RemU) {
+                        u64::from(imm as u32).is_power_of_two()
+                    } else {
+                        i64::from(imm).unsigned_abs().is_power_of_two()
+                    };
+                    if !is_pow2 {
+                        clobbers.push(Clobber {
+                            pos: pos_use,
+                            gp_mask: MASK_RAX_RDX,
+                            xmm_mask: 0,
+                        });
+                    }
                 }
                 Op::F64AxpyLoop { .. } => {
                     clobbers.push(Clobber {
@@ -1047,17 +1095,121 @@ pub fn allocate_with_config_and_scratch(
             tick += 2;
         }
         let pos_term = tick;
-        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-            let vi = v.0 as usize;
-            if def_block[vi] != oi as u32 {
-                cross_block[vi] = true;
-            }
-            if pos_term > last_use[vi] {
-                last_use[vi] = pos_term;
-            }
-        });
         match bb.term {
+            Term::CallCatch {
+                args,
+                ok_bb,
+                catch_args,
+                ..
+            } => {
+                for &v in ir.pool_slice(args) {
+                    let vi = v.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term > last_use[vi] {
+                        last_use[vi] = pos_term;
+                    }
+                }
+                for &v in ir.pool_slice(catch_args) {
+                    let vi = v.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term + 1 > last_use[vi] {
+                        last_use[vi] = pos_term + 1;
+                    }
+                }
+                clobbers.push(Clobber {
+                    pos: pos_term,
+                    gp_mask: MASK_GP_CALLER,
+                    xmm_mask: MASK_XMM_CALLER,
+                });
+                let arg_stack_bytes = layout_args_stack_bytes(
+                    ir.pool_slice(args)
+                        .iter()
+                        .map(|&av| ir.val_tys[av.0 as usize]),
+                )?;
+                if arg_stack_bytes > max_outgoing_arg_bytes {
+                    max_outgoing_arg_bytes = arg_stack_bytes;
+                }
+                let ret_stack_bytes = layout_rets_stack_bytes(
+                    ir.blocks[ok_bb.0 as usize]
+                        .params
+                        .iter()
+                        .map(|&rv| ir.val_tys[rv.0 as usize]),
+                )?;
+                if ret_stack_bytes > max_ret_buf_bytes {
+                    max_ret_buf_bytes = ret_stack_bytes;
+                }
+            }
+            Term::CallIndirectCatch {
+                idx,
+                args,
+                ok_bb,
+                catch_args,
+                ..
+            } => {
+                {
+                    let vi = idx.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term > last_use[vi] {
+                        last_use[vi] = pos_term;
+                    }
+                }
+                for &v in ir.pool_slice(args) {
+                    let vi = v.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term > last_use[vi] {
+                        last_use[vi] = pos_term;
+                    }
+                }
+                for &v in ir.pool_slice(catch_args) {
+                    let vi = v.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term + 1 > last_use[vi] {
+                        last_use[vi] = pos_term + 1;
+                    }
+                }
+                clobbers.push(Clobber {
+                    pos: pos_term,
+                    gp_mask: MASK_GP_CALLER,
+                    xmm_mask: MASK_XMM_CALLER,
+                });
+                let arg_stack_bytes = layout_args_stack_bytes(
+                    ir.pool_slice(args)
+                        .iter()
+                        .map(|&av| ir.val_tys[av.0 as usize]),
+                )?;
+                if arg_stack_bytes > max_outgoing_arg_bytes {
+                    max_outgoing_arg_bytes = arg_stack_bytes;
+                }
+                let ret_stack_bytes = layout_rets_stack_bytes(
+                    ir.blocks[ok_bb.0 as usize]
+                        .params
+                        .iter()
+                        .map(|&rv| ir.val_tys[rv.0 as usize]),
+                )?;
+                if ret_stack_bytes > max_ret_buf_bytes {
+                    max_ret_buf_bytes = ret_stack_bytes;
+                }
+            }
             Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    let vi = v.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term > last_use[vi] {
+                        last_use[vi] = pos_term;
+                    }
+                });
                 let arg_stack_bytes = layout_args_stack_bytes(
                     ir.pool_slice(args)
                         .iter()
@@ -1074,9 +1226,26 @@ pub fn allocate_with_config_and_scratch(
                     }
                 }
             }
-            _ => {}
+            _ => {
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    let vi = v.0 as usize;
+                    if def_block[vi] != oi as u32 {
+                        cross_block[vi] = true;
+                    }
+                    if pos_term > last_use[vi] {
+                        last_use[vi] = pos_term;
+                    }
+                });
+            }
         }
-        block_end[oi] = pos_term + 1;
+        block_end[oi] = if matches!(
+            bb.term,
+            Term::CallCatch { .. } | Term::CallIndirectCatch { .. }
+        ) {
+            pos_term + 2
+        } else {
+            pos_term + 1
+        };
         tick += 2;
     }
 
@@ -1334,12 +1503,55 @@ pub fn allocate_with_config_and_scratch(
                 t += 2;
             }
             let pos_term = t;
-            bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-                let c = cb_id[v.0 as usize];
-                if c != u32::MAX {
-                    last_use_in_blk[c as usize] = (oi_u32, pos_term);
+            match bb.term {
+                Term::CallCatch {
+                    args, catch_args, ..
+                } => {
+                    for &v in ir.pool_slice(args) {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX {
+                            last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                        }
+                    }
+                    for &v in ir.pool_slice(catch_args) {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX {
+                            last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
+                        }
+                    }
                 }
-            });
+                Term::CallIndirectCatch {
+                    idx,
+                    args,
+                    catch_args,
+                    ..
+                } => {
+                    let ci = cb_id[idx.0 as usize];
+                    if ci != u32::MAX {
+                        last_use_in_blk[ci as usize] = (oi_u32, pos_term);
+                    }
+                    for &v in ir.pool_slice(args) {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX {
+                            last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                        }
+                    }
+                    for &v in ir.pool_slice(catch_args) {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX {
+                            last_use_in_blk[c as usize] = (oi_u32, pos_term + 1);
+                        }
+                    }
+                }
+                _ => {
+                    bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                        let c = cb_id[v.0 as usize];
+                        if c != u32::MAX {
+                            last_use_in_blk[c as usize] = (oi_u32, pos_term);
+                        }
+                    });
+                }
+            }
             for w in 0..words {
                 let mut bits =
                     live_in[oi * words + w] | live_out[oi * words + w] | live_def[oi * words + w];
@@ -1823,7 +2035,51 @@ pub fn allocate_with_config_and_scratch(
                     },
                 );
             }
-            Term::Unreachable => {}
+            Term::CallCatch {
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+                ..
+            }
+            | Term::CallIndirectCatch {
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+                ..
+            } => {
+                wire_edge(catch_bb.0, catch_args);
+                let arg_slice = ir.pool_slice(args);
+                let _ = for_each_arg_slot(
+                    arg_slice.iter().map(|&av| ir.val_tys[av.0 as usize]),
+                    |idx, slot| {
+                        let av = arg_slice[idx];
+                        match slot {
+                            AbiSlot::Gp(g) if hint_gp[av.0 as usize].is_none() => {
+                                hint_gp[av.0 as usize] = Some(g);
+                            }
+                            AbiSlot::Xmm(x) if hint_xmm[av.0 as usize].is_none() => {
+                                hint_xmm[av.0 as usize] = Some(x);
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+                let ret_slice = &ir.blocks[ok_bb.0 as usize].params;
+                let _ = for_each_ret_slot(
+                    ret_slice.iter().map(|&rv| ir.val_tys[rv.0 as usize]),
+                    |idx, slot| {
+                        let rv = ret_slice[idx];
+                        match slot {
+                            AbiSlot::Gp(g) => hint_gp[rv.0 as usize] = Some(g),
+                            AbiSlot::Xmm(x) => hint_xmm[rv.0 as usize] = Some(x),
+                            AbiSlot::Stack(_) => {}
+                        }
+                    },
+                );
+            }
+            Term::ThrowActive | Term::Unreachable => {}
         }
     }
 

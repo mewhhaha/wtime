@@ -69,34 +69,46 @@ All inputs pass bounded file acquisition (`<= 64 MiB` for `--backend x64`,
 deadline-checked in direct 1 MiB chunks) and `wtime-validate` under the `--backend x64`
 feature profile (MVP + `mutable_globals`, `saturating_float_to_int`,
 `sign_extension`, `multi_value`, `reference_types`, `bulk_memory`, `simd`,
-`relaxed_simd`, `tail_call`, `memory64`, `extended_const`; `function_references: false`) with
+`relaxed_simd`, `tail_call`, `memory64`, `multi_memory`, `wide_arithmetic`,
+`exception_handling`, `extended_const`; `function_references: false`) with
 `ResourceLimits::default()`.
 
 Admitted constructs:
 - Plain final function types (no GC subtypes or descriptors).
-- `0` or `1` non-shared Wasm32 or `memory64` linear memory with standard 64 KiB
-  pages (Wasm32 `max <= 65_536`; `memory64` validated up to `2^48` pages and
-  bounded at runtime by `mem_limit_pages` / 8 GiB default reservation ceiling).
+- `0..=65` non-shared Wasm32 or `memory64` linear memories with standard 64 KiB
+  pages (memory 0 pinned in `R14`/`R13`, up to 64 extra memories backed by
+  per-memory descriptors in `Ctx` with zero overhead when unused; Wasm32
+  `max <= 65_536`; `memory64` validated up to `2^48` pages and bounded at
+  runtime by `mem_limit_pages` / 8 GiB default reservation ceiling).
 - Static 32-bit nullable `funcref` tables (`min <= 1_048_576`, aggregate
   `<= 2_097_152` slots) and mutable 32-bit nullable `externref` tables
   (`min == max <= 65_536`).
-- Active memory-0 data segments with constant `i32` (Wasm32) or `i64`
-  (`memory64`) offsets.
+- Active data segments targeting memory `0` or extra memories `1..=64` with
+  constant `i32` (Wasm32) or `i64` (`memory64`) offsets.
 - Plain function imports with Blot ABI-compatible signatures (for
   `--blot-cdylib`) or direct-syscall WASI Preview 1 / Goose (`goose::*`
   including pure-x86-64 Ryū shortest round-trip `print_f64`/`print_f32`/
   `format_f64`/`format_f32`) / benchmark `env::{bench_input, bench_input_f64}`
   imports (for standalone static `ET_EXEC` executables), and globals of `i32`,
-  `i64`, `f32`, `f64`, `v128`, or nullable `externref`.
-- MVP opcodes, saturating float-to-int truncations, `memory.copy`/`memory.fill`,
-  `memory64` 64-bit addressing (with 1-branch wrap-proof bounds checks when
-  `end_off <= mem_min_bytes`), `tail_call` (`return_call` / `return_call_indirect`
+  `i64`, `f32`, `f64`, `v128`, or nullable `externref`/`exnref`.
+- MVP opcodes, saturating float-to-int truncations, `memory.copy`/`memory.fill`
+  (including cross-memory `memory.copy dst_mem src_mem`), `memory64` 64-bit
+  addressing (with 1-branch wrap-proof bounds checks when
+  `end_off <= mem_min_bytes`), `wide-arithmetic` (`i64.add128`, `i64.sub128`,
+  `i64.mul_wide_s`, `i64.mul_wide_u`), `exception_handling` (`TagSection`,
+  `try_table` with `catch`/`catch_ref`/`catch_all`/`catch_all_ref`, `throw`,
+  `throw_ref`, `exnref` backed by a demand-paged 4 MiB RW exception slab;
+  guest-only `INTERNAL_EXN_SIGNAL (0xff)` maps to `TRAP_UNREACHABLE (1)` at
+  outer Blot ABI 8 boundaries so external trap codes `1..=22` remain unchanged,
+  and `throw_ref(null)` traps with `TRAP_INDIRECT_CALL (4)` matching
+  `TrapCode::NullReference`), `tail_call` (`return_call` / `return_call_indirect`
   with O(1)-stack frame reuse whenever `callee_arg_stack <= caller_param_stack`,
   and overflow return-buffer pointer forwarding), all 236 fixed-width 128-bit Wasm
   SIMD opcodes (`0xfd00..=0xfdff`), and all 20 `relaxed_simd` opcodes
   (`0xfd 0x100..=0x113`, bit-exact with `wtime-runtime`) — mirrored with
-  multi-core parallel compilation (`--jobs`) and full NEON + `tail_call` parity
-  on `--backend aarch64`.
+  multi-core parallel compilation (`--jobs`) and full NEON + `tail_call` +
+  `wide-arithmetic` + `multi-memory` + `exception_handling` parity on
+  `--backend aarch64`.
 
 Unsupported modules are rejected cleanly before codegen with CLI exit code `4`
 (`X64_ADMISSION_REJECTED_EXIT_CODE`), distinct from exit code `1` for I/O,

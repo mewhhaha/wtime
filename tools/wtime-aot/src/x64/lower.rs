@@ -24,10 +24,10 @@ use super::module::{
 };
 use super::regalloc::{AbiSlot, AllocResult, Loc, RematConst, layout_args, layout_rets};
 use super::{
-    CtxLayout, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_TRUNC_BASE,
-    OFF_RET_SPILL_PTR, OFF_SCRATCH_TMP, OFF_STACK_FLOOR, RodataConsts, TRAP_CALL_STACK,
-    TRAP_DIV_ZERO, TRAP_INDIRECT_CALL, TRAP_INT_OVERFLOW, TRAP_OOB, TRAP_TABLE_OOB,
-    TRAP_UNREACHABLE,
+    CtxLayout, HELPER_EXTRA_MEM_COPY, HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW,
+    HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW, HELPER_TRUNC_BASE, OFF_RET_SPILL_PTR,
+    OFF_SCRATCH_TMP, OFF_STACK_FLOOR, RodataConsts, TRAP_CALL_STACK, TRAP_DIV_ZERO,
+    TRAP_INDIRECT_CALL, TRAP_INT_OVERFLOW, TRAP_OOB, TRAP_TABLE_OOB, TRAP_UNREACHABLE,
 };
 
 const SCRATCH_GP1: Gp = Gp::R11;
@@ -480,6 +480,13 @@ pub struct TargetIsa {
     pub has_avx2: bool,
 }
 
+/// Intra-block live integer `RFLAGS` state preserved across flag-clean instructions (`mov`, `cmovcc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveFlags {
+    IntRR { is64: bool, a: Val, b: Val },
+    IntRI { is64: bool, a: Val, imm: i32 },
+}
+
 struct Lower<'a> {
     ir: &'a IrFunc,
     alloc: &'a AllocResult,
@@ -509,6 +516,9 @@ struct Lower<'a> {
     /// Lazily populated map of SSA `Val`s whose defining x86-64 emission guarantees bits `32..63 == 0`,
     /// allowing redundant `movl %r, %r` zero-extensions on `I32WrapI64`/`I64ExtendI32U` to be elided.
     val_upper32_zero: Option<Vec<bool>>,
+    /// Intra-block live integer `RFLAGS` state for redundant `cmp` elision across adjacent
+    /// `Op::CmpSelect` / `Term::CmpBranch` instructions.
+    live_flags: Option<LiveFlags>,
 }
 
 impl<'a> Lower<'a> {
@@ -542,6 +552,7 @@ impl<'a> Lower<'a> {
                         | Op::I32Extend16S(_)
                         | Op::I32Bin(..)
                         | Op::I32BinImm(..)
+                        | Op::AddScaled { is64: false, .. }
                         | Op::I32Cmp(..)
                         | Op::I32CmpImm(..)
                         | Op::I64Cmp(..)
@@ -554,7 +565,7 @@ impl<'a> Lower<'a> {
                         Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
                         Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
                         Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
-                        Op::Load { kind, .. } => matches!(
+                        Op::Load { kind, .. } | Op::LoadScaled { kind, .. } => matches!(
                             kind,
                             LoadKind::I32
                                 | LoadKind::I32Load8S
@@ -905,6 +916,144 @@ impl<'a> Lower<'a> {
         }
     }
 
+    fn emit_load_from_mem(&mut self, r: Val, kind: LoadKind, mem: Mem) {
+        if kind.ty().is_fp() {
+            let d = self.fp_write_reg(r);
+            match kind {
+                LoadKind::V128 if self.isa.has_avx2 => {
+                    self.asm.vmovdqu_xm(d, mem);
+                }
+                LoadKind::F32 | LoadKind::F64 | LoadKind::V128 => {
+                    emit_fp_load(&mut self.asm, d, mem, kind.ty());
+                }
+                LoadKind::V128Load8x8S => self.asm.pmovsxbw_xm(d, mem),
+                LoadKind::V128Load8x8U => self.asm.pmovzxbw_xm(d, mem),
+                LoadKind::V128Load16x4S => self.asm.pmovsxwd_xm(d, mem),
+                LoadKind::V128Load16x4U => self.asm.pmovzxwd_xm(d, mem),
+                LoadKind::V128Load32x2S => self.asm.pmovsxdq_xm(d, mem),
+                LoadKind::V128Load32x2U => self.asm.pmovzxdq_xm(d, mem),
+                LoadKind::V128Load8Splat => {
+                    self.asm.movzx_rm8(false, SCRATCH_GP1, mem);
+                    self.asm.movd_xr(d, SCRATCH_GP1);
+                    self.asm.punpcklbw(d, d);
+                    self.asm.punpcklwd(d, d);
+                    self.asm.punpckldq(d, d);
+                    self.asm.punpcklqdq(d, d);
+                }
+                LoadKind::V128Load16Splat => {
+                    self.asm.movzx_rm16(false, SCRATCH_GP1, mem);
+                    self.asm.movd_xr(d, SCRATCH_GP1);
+                    self.asm.punpcklwd(d, d);
+                    self.asm.punpckldq(d, d);
+                    self.asm.punpcklqdq(d, d);
+                }
+                LoadKind::V128Load32Splat => {
+                    self.asm.movss_xm(d, mem);
+                    self.asm.pshufd(d, d, 0);
+                }
+                LoadKind::V128Load64Splat => {
+                    self.asm.movddup_xm(d, mem);
+                }
+                LoadKind::V128Load32Zero => {
+                    self.asm.movss_xm(d, mem);
+                }
+                LoadKind::V128Load64Zero => {
+                    self.asm.movsd_xm(d, mem);
+                }
+                _ => unreachable!(),
+            }
+            self.fp_commit(r, d);
+        } else {
+            let d = self.gp_write_reg(r);
+            match kind {
+                LoadKind::I32 | LoadKind::I64Load32U => self.asm.mov_rm(false, d, mem),
+                LoadKind::I64 => self.asm.mov_rm(true, d, mem),
+                LoadKind::I32Load8S => self.asm.movsx_rm8(false, d, mem),
+                LoadKind::I32Load8U | LoadKind::I64Load8U => self.asm.movzx_rm8(false, d, mem),
+                LoadKind::I32Load16S => self.asm.movsx_rm16(false, d, mem),
+                LoadKind::I32Load16U | LoadKind::I64Load16U => self.asm.movzx_rm16(false, d, mem),
+                LoadKind::I64Load8S => self.asm.movsx_rm8(true, d, mem),
+                LoadKind::I64Load16S => self.asm.movsx_rm16(true, d, mem),
+                LoadKind::I64Load32S => self.asm.movsxd_rm(d, mem),
+                _ => unreachable!(),
+            }
+            self.gp_commit(r, d);
+        }
+    }
+
+    fn emit_store_to_mem(&mut self, kind: StoreKind, val: Val, mem: Mem, wide_offset: bool) {
+        match kind {
+            StoreKind::F32 => {
+                if let Loc::Remat(RematConst::F32(bits)) = self.loc(val) {
+                    self.asm.mov_mi32(false, mem, bits as i32);
+                } else {
+                    let vr = self.fp_read(val, SCRATCH_FP1);
+                    emit_fp_store(&mut self.asm, mem, vr, Ty::F32);
+                }
+            }
+            StoreKind::F64 => {
+                if let Loc::Remat(RematConst::F64(bits)) = self.loc(val)
+                    && let Ok(imm32) = i32::try_from(bits as i64)
+                {
+                    self.asm.mov_mi32(true, mem, imm32);
+                } else {
+                    let vr = self.fp_read(val, SCRATCH_FP1);
+                    emit_fp_store(&mut self.asm, mem, vr, Ty::F64);
+                }
+            }
+            StoreKind::V128 => {
+                let vr = self.fp_read(val, SCRATCH_FP1);
+                if self.isa.has_avx2 {
+                    self.asm.vmovdqu_mx(mem, vr);
+                } else {
+                    emit_fp_store(&mut self.asm, mem, vr, Ty::V128);
+                }
+            }
+            StoreKind::I8 | StoreKind::I16 | StoreKind::I32 | StoreKind::I64 => {
+                match (kind, self.loc(val)) {
+                    (StoreKind::I8, Loc::Remat(RematConst::I32(c))) => {
+                        self.asm.mov_mi8(mem, c as u8);
+                        return;
+                    }
+                    (StoreKind::I8, Loc::Remat(RematConst::I64(c))) => {
+                        self.asm.mov_mi8(mem, c as u8);
+                        return;
+                    }
+                    (StoreKind::I32, Loc::Remat(RematConst::I32(c))) => {
+                        self.asm.mov_mi32(false, mem, c);
+                        return;
+                    }
+                    (StoreKind::I32, Loc::Remat(RematConst::I64(c))) => {
+                        self.asm.mov_mi32(false, mem, c as i32);
+                        return;
+                    }
+                    (StoreKind::I64, Loc::Remat(RematConst::I64(c)))
+                        if i32::try_from(c).is_ok() =>
+                    {
+                        self.asm.mov_mi32(true, mem, c as i32);
+                        return;
+                    }
+                    _ => {}
+                }
+                let (mem, vr) = if wide_offset && !matches!(self.loc(val), Loc::Gp(_)) {
+                    self.asm.mov_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    let vr = self.gp_read(val, SCRATCH_GP1);
+                    (Mem::indexed(Gp::R14, SCRATCH_GP2, 1, 0), vr)
+                } else {
+                    let vr = self.gp_read(val, SCRATCH_GP1);
+                    (mem, vr)
+                };
+                match kind {
+                    StoreKind::I8 => self.asm.mov_mr8(mem, vr),
+                    StoreKind::I16 => self.asm.mov_mr16(mem, vr),
+                    StoreKind::I32 => self.asm.mov_mr(false, mem, vr),
+                    StoreKind::I64 => self.asm.mov_mr(true, mem, vr),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
     fn emit_edge_moves(&mut self, target_bb: u32, args: ValRange) {
         let params = &self.ir.blocks[target_bb as usize].params;
         let arg_vals = self.ir.pool_slice(args);
@@ -1112,6 +1261,113 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_catch_abi(
+        &mut self,
+        args: ValRange,
+        ok_bb: super::ir::BlockId,
+        catch_bb: super::ir::BlockId,
+        catch_args: ValRange,
+        ci_idx: Option<(u32, Val)>,
+        direct_func: Option<u32>,
+        next_bb: Option<u32>,
+    ) -> Result<(), String> {
+        if let Some((_, idx_val)) = ci_idx {
+            let ir = self.gp_read(idx_val, SCRATCH_GP2);
+            self.asm
+                .mov_mr(false, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
+        }
+        let arg_vals = self.ir.pool_slice(args);
+        if !arg_vals.is_empty() {
+            let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
+            let arg_layout = layout_args(&arg_tys)?;
+            let mut moves = Vec::with_capacity(arg_vals.len());
+            for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                let dst = match slot {
+                    AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                    AbiSlot::Stack(off) => MoveLoc::Stack(off),
+                };
+                moves.push((dst, MoveLoc::from(self.loc(av)), ty));
+            }
+            emit_parallel_moves(&mut self.asm, &moves);
+        }
+
+        let ret_vals = self.ir.blocks[ok_bb.0 as usize].params.clone();
+        let ret_tys: Vec<Ty> = ret_vals.iter().map(|&v| self.ty(v)).collect();
+        let ret_layout = layout_rets(&ret_tys)?;
+        if ret_layout.stack_bytes > 0 {
+            self.asm.lea(
+                true,
+                SCRATCH_GP1,
+                Mem::base_disp(Gp::Rsp, self.alloc.ret_buf_off),
+            );
+            self.asm.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, OFF_RET_SPILL_PTR),
+                SCRATCH_GP1,
+            );
+        }
+
+        if let Some(f) = direct_func {
+            self.asm.call_reloc(RelocTarget::Func(f));
+        } else if let Some((ci_id, _)) = ci_idx {
+            let ci = &self.layout.ci_tables[ci_id as usize];
+            let toob = self.trap_table_oob_lbl();
+            let bad = self.trap_ci_lbl();
+            self.asm
+                .mov_rm(false, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+            self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+            self.asm.jcc(Cond::Ae, toob);
+            if ci.span == 0 {
+                self.asm.jmp(bad);
+                return Ok(());
+            } else {
+                if ci.min_slot > 0 {
+                    self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
+                }
+                self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
+                self.asm.jcc(Cond::Ae, bad);
+                self.asm
+                    .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
+                self.asm
+                    .movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
+                self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
+                self.asm.jcc(Cond::E, bad);
+                self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                self.asm.call_reg(SCRATCH_GP1);
+            }
+        }
+
+        let lbl_ok = self.asm.new_label();
+        let prop = self.trap_prop_lbl();
+        let catch_lbl = self.edge_target_label(catch_bb.0, catch_args);
+        self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+        self.asm.jcc(Cond::E, lbl_ok);
+        self.asm
+            .cmp_ri(false, SCRATCH_GP1, i32::from(super::INTERNAL_EXN_SIGNAL));
+        self.asm.jcc(Cond::E, catch_lbl);
+        self.asm.jmp(prop);
+        self.asm.bind(lbl_ok);
+
+        if !ret_vals.is_empty() {
+            let mut moves = Vec::with_capacity(ret_vals.len());
+            for ((&rv, &ty), slot) in ret_vals.iter().zip(&ret_tys).zip(ret_layout.slots) {
+                let src = match slot {
+                    AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                    AbiSlot::Stack(off) => MoveLoc::Stack(self.alloc.ret_buf_off + off),
+                };
+                moves.push((MoveLoc::from(self.loc(rv)), src, ty));
+            }
+            emit_parallel_moves(&mut self.asm, &moves);
+        }
+        if next_bb != Some(ok_bb.0) {
+            self.asm.jmp(self.bb_labels[ok_bb.0 as usize]);
+        }
+        Ok(())
+    }
+
     fn emit_tail_call(
         &mut self,
         args: ValRange,
@@ -1264,6 +1520,24 @@ impl<'a> Lower<'a> {
 
     fn emit_int_bin(&mut self, is64: bool, op: IntBinOp, dst_val: Val, a: Val, b: Val) {
         match op {
+            IntBinOp::MulHiS | IntBinOp::MulHiU => {
+                // `regalloc` guarantees RAX & RDX are not live across this op.
+                // Stage `b` into R10 first, then `a` into RAX (handles `a == RDX` or `b == RAX`).
+                let br = self.gp_read(b, SCRATCH_GP2);
+                if br != SCRATCH_GP2 {
+                    self.asm.mov_rr(true, SCRATCH_GP2, br);
+                }
+                let ar = self.gp_read(a, Gp::Rax);
+                if ar != Gp::Rax {
+                    self.asm.mov_rr(true, Gp::Rax, ar);
+                }
+                if op == IntBinOp::MulHiS {
+                    self.asm.imul1_r(true, SCRATCH_GP2);
+                } else {
+                    self.asm.mul_r(true, SCRATCH_GP2);
+                }
+                self.gp_commit(dst_val, Gp::Rdx);
+            }
             IntBinOp::DivS
             | IntBinOp::DivU
             | IntBinOp::DivUNz
@@ -1516,6 +1790,18 @@ impl<'a> Lower<'a> {
                         self.asm.sar_imm(false, SCRATCH_GP2, k - 1);
                     }
                     self.asm.shr_imm(false, SCRATCH_GP2, 32 - k);
+                    if is_rem {
+                        self.asm.add_rr(false, SCRATCH_GP2, SCRATCH_GP1);
+                        self.asm
+                            .and_ri(false, SCRATCH_GP2, 0u32.wrapping_sub(1u32 << k) as i32);
+                        let d = self.gp_write_reg(dst_val);
+                        if d != SCRATCH_GP1 {
+                            self.asm.mov_rr(false, d, SCRATCH_GP1);
+                        }
+                        self.asm.sub_rr(false, d, SCRATCH_GP2);
+                        self.gp_commit(dst_val, d);
+                        return;
+                    }
                     self.asm.add_rr(false, SCRATCH_GP1, SCRATCH_GP2);
                     self.asm.sar_imm(false, SCRATCH_GP1, k);
                     if imm < 0 {
@@ -1567,12 +1853,17 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_magic_div_rem_i64(&mut self, op: IntBinOp, dst_val: Val, a: Val, imm: i32) {
-        // `regalloc` guarantees RAX & RDX are not live across 64-bit constant div/rem.
+        // `regalloc` guarantees RAX & RDX are not live across non-power-of-two 64-bit constant div/rem.
         let is_rem = matches!(op, IntBinOp::RemS | IntBinOp::RemU);
         let d64 = if matches!(op, IntBinOp::DivU | IntBinOp::RemU) {
             u64::from(imm as u32)
         } else {
             i64::from(imm) as u64
+        };
+        let is_pow2 = if matches!(op, IntBinOp::DivU | IntBinOp::RemU) {
+            d64.is_power_of_two()
+        } else {
+            i64::from(imm).unsigned_abs().is_power_of_two()
         };
         // Load original `a` into `SCRATCH_GP1` (and into `RAX` when needed).
         let ar = self.gp_read(a, SCRATCH_GP1);
@@ -1581,7 +1872,7 @@ impl<'a> Lower<'a> {
         }
         // `mul`/`imul1` overwrite BOTH `Rax` and `Rdx`; if `a` dies here in `Rax`/`Rdx`, preserve
         // original `a` in unallocated `SCRATCH_FP1` (`Xmm15`) so `rem = a - q * imm` reads original `a`.
-        let saved_a_in_fp = is_rem && matches!(self.loc(a), Loc::Gp(Gp::Rax | Gp::Rdx));
+        let saved_a_in_fp = is_rem && !is_pow2 && matches!(self.loc(a), Loc::Gp(Gp::Rax | Gp::Rdx));
         if saved_a_in_fp {
             self.asm.movq_xr(SCRATCH_FP1, SCRATCH_GP1);
         }
@@ -1630,6 +1921,19 @@ impl<'a> Lower<'a> {
                         self.asm.sar_imm(true, SCRATCH_GP2, k - 1);
                     }
                     self.asm.shr_imm(true, SCRATCH_GP2, 64 - k);
+                    if is_rem {
+                        // `r = a - ((a + bias) & -(2^k))` (valid for all `k in 1..=31`; zero `imul`, zero `RAX`/`RDX` clobber).
+                        self.asm.add_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                        self.asm
+                            .and_ri(true, SCRATCH_GP2, 0u32.wrapping_sub(1u32 << k) as i32);
+                        let d = self.gp_write_reg(dst_val);
+                        if d != SCRATCH_GP1 {
+                            self.asm.mov_rr(true, d, SCRATCH_GP1);
+                        }
+                        self.asm.sub_rr(true, d, SCRATCH_GP2);
+                        self.gp_commit(dst_val, d);
+                        return;
+                    }
                     self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                     self.asm.sar_imm(true, SCRATCH_GP1, k);
                     if ds < 0 {
@@ -1979,10 +2283,12 @@ impl<'a> Lower<'a> {
     }
 
     fn emit_inst(&mut self, res: Option<Val>, op: Op) -> Result<(), String> {
+        let prev_flags = self.live_flags.take();
         match op {
             Op::ConstI32(c) => {
                 let r = res.unwrap();
                 if matches!(self.loc(r), Loc::Remat(_)) {
+                    self.live_flags = prev_flags;
                     return Ok(());
                 }
                 let d = self.gp_write_reg(r);
@@ -1992,6 +2298,7 @@ impl<'a> Lower<'a> {
             Op::ConstI64(c) => {
                 let r = res.unwrap();
                 if matches!(self.loc(r), Loc::Remat(_)) {
+                    self.live_flags = prev_flags;
                     return Ok(());
                 }
                 let d = self.gp_write_reg(r);
@@ -2176,6 +2483,19 @@ impl<'a> Lower<'a> {
             Op::I64Bin(bop, a, b) => self.emit_int_bin(true, bop, res.unwrap(), a, b),
             Op::I32BinImm(bop, a, imm) => self.emit_int_bin_imm(false, bop, res.unwrap(), a, imm),
             Op::I64BinImm(bop, a, imm) => self.emit_int_bin_imm(true, bop, res.unwrap(), a, imm),
+            Op::AddScaled {
+                is64,
+                base,
+                idx,
+                shift,
+            } => {
+                let r = res.unwrap();
+                let br = self.gp_read(base, SCRATCH_GP1);
+                let ir = self.gp_read(idx, SCRATCH_GP2);
+                let d = self.gp_write_reg(r);
+                self.asm.lea(is64, d, Mem::indexed(br, ir, 1u8 << shift, 0));
+                self.gp_commit(r, d);
+            }
             Op::I32Cmp(cop, a, b) => {
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SCRATCH_GP1);
@@ -2816,10 +3136,22 @@ impl<'a> Lower<'a> {
             Op::CmpSelect { kind, a, b, tv, fv } => {
                 let r = res.unwrap();
                 let ty = self.ty(r);
-                // Emit comparison flags for `kind` (never modifies GP/XMM values other than scratches).
-                let emit_cmp_flags = |l: &mut Lower| -> (Cond, Option<CmpOp>) {
+                // Emit comparison flags for `kind` (reusing live integer RFLAGS when identical/swapped).
+                let emit_cmp_flags = |l: &mut Lower| -> (Cond, Option<CmpOp>, Option<LiveFlags>) {
                     match kind {
                         CmpBranchKind::I32(cop) => {
+                            if prev_flags == Some(LiveFlags::IntRR { is64: false, a, b }) {
+                                return (cmp_to_cond(cop), None, prev_flags);
+                            }
+                            if prev_flags
+                                == Some(LiveFlags::IntRR {
+                                    is64: false,
+                                    a: b,
+                                    b: a,
+                                })
+                            {
+                                return (cmp_to_cond(cop.swap()), None, prev_flags);
+                            }
                             let ar = l.gp_read(a, SCRATCH_GP1);
                             if let Loc::Spill(boff) = l.loc(b) {
                                 l.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
@@ -2827,18 +3159,51 @@ impl<'a> Lower<'a> {
                                 let br = l.gp_read(b, SCRATCH_GP2);
                                 l.asm.cmp_rr(false, ar, br);
                             }
-                            (cmp_to_cond(cop), None)
+                            (
+                                cmp_to_cond(cop),
+                                None,
+                                Some(LiveFlags::IntRR { is64: false, a, b }),
+                            )
                         }
                         CmpBranchKind::I32Imm(cop, imm) => {
+                            if prev_flags
+                                == Some(LiveFlags::IntRI {
+                                    is64: false,
+                                    a,
+                                    imm,
+                                })
+                            {
+                                return (cmp_to_cond(cop), None, prev_flags);
+                            }
                             let ar = l.gp_read(a, SCRATCH_GP1);
                             if imm == 0 {
                                 l.asm.test_rr(false, ar, ar);
                             } else {
                                 l.asm.cmp_ri(false, ar, imm);
                             }
-                            (cmp_to_cond(cop), None)
+                            (
+                                cmp_to_cond(cop),
+                                None,
+                                Some(LiveFlags::IntRI {
+                                    is64: false,
+                                    a,
+                                    imm,
+                                }),
+                            )
                         }
                         CmpBranchKind::I64(cop) => {
+                            if prev_flags == Some(LiveFlags::IntRR { is64: true, a, b }) {
+                                return (cmp_to_cond(cop), None, prev_flags);
+                            }
+                            if prev_flags
+                                == Some(LiveFlags::IntRR {
+                                    is64: true,
+                                    a: b,
+                                    b: a,
+                                })
+                            {
+                                return (cmp_to_cond(cop.swap()), None, prev_flags);
+                            }
                             let ar = l.gp_read(a, SCRATCH_GP1);
                             if let Loc::Spill(boff) = l.loc(b) {
                                 l.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
@@ -2846,20 +3211,31 @@ impl<'a> Lower<'a> {
                                 let br = l.gp_read(b, SCRATCH_GP2);
                                 l.asm.cmp_rr(true, ar, br);
                             }
-                            (cmp_to_cond(cop), None)
+                            (
+                                cmp_to_cond(cop),
+                                None,
+                                Some(LiveFlags::IntRR { is64: true, a, b }),
+                            )
                         }
                         CmpBranchKind::I64Imm(cop, imm) => {
+                            if prev_flags == Some(LiveFlags::IntRI { is64: true, a, imm }) {
+                                return (cmp_to_cond(cop), None, prev_flags);
+                            }
                             let ar = l.gp_read(a, SCRATCH_GP1);
                             if imm == 0 {
                                 l.asm.test_rr(true, ar, ar);
                             } else {
                                 l.asm.cmp_ri(true, ar, imm);
                             }
-                            (cmp_to_cond(cop), None)
+                            (
+                                cmp_to_cond(cop),
+                                None,
+                                Some(LiveFlags::IntRI { is64: true, a, imm }),
+                            )
                         }
                         CmpBranchKind::F32(cop) | CmpBranchKind::F64(cop) => {
                             let is64 = matches!(kind, CmpBranchKind::F64(_));
-                            match cop {
+                            let (c, eq_ne) = match cop {
                                 CmpOp::GtS => {
                                     let ar = l.fp_read(a, SCRATCH_FP1);
                                     l.emit_ucomi_rhs(is64, ar, b);
@@ -2909,14 +3285,15 @@ impl<'a> Lower<'a> {
                                     }
                                 }
                                 _ => unreachable!(),
-                            }
+                            };
+                            (c, eq_ne, None)
                         }
                     }
                 };
                 if !ty.is_fp() {
                     let is64 = ty == Ty::I64;
                     let d = self.gp_write_reg(r);
-                    let (cond, fp_eq_ne) = emit_cmp_flags(self);
+                    let (cond, fp_eq_ne, next_flags) = emit_cmp_flags(self);
                     // Note: `gp_read_preserve_flags` & `mov` NEVER modify EFLAGS on x86-64 (even for 0)!
                     if let Some(fp_op) = fp_eq_ne {
                         // Unordered-safe branchless FP Eq/Ne select:
@@ -2977,6 +3354,7 @@ impl<'a> Lower<'a> {
                         self.asm.cmovcc(cond, is64, d, tv_reg);
                     }
                     self.gp_commit(r, d);
+                    self.live_flags = next_flags;
                 } else {
                     // Bit-exact branchless SSE2 `minss`/`maxss`/`minsd`/`maxsd` fast path:
                     // On x86-64, `MIN(dst, src)` computes `if dst < src { dst } else { src }` and
@@ -3138,7 +3516,7 @@ impl<'a> Lower<'a> {
                         return Ok(());
                     }
                     let d = self.fp_write_reg(r);
-                    let (cond, fp_eq_ne) = emit_cmp_flags(self);
+                    let (cond, fp_eq_ne, _) = emit_cmp_flags(self);
                     let lbl_use_tv = self.asm.new_label();
                     let lbl_done = self.asm.new_label();
                     let tv_same = self.loc(tv) == Loc::Xmm(d);
@@ -3302,72 +3680,18 @@ impl<'a> Lower<'a> {
                     self.emit_bounds_check(ar, offset.saturating_add(kind.bytes()));
                 }
                 let mem = self.mem_addr(ar, offset);
-                if kind.ty().is_fp() {
-                    let d = self.fp_write_reg(r);
-                    match kind {
-                        LoadKind::V128 if self.isa.has_avx2 => {
-                            self.asm.vmovdqu_xm(d, mem);
-                        }
-                        LoadKind::F32 | LoadKind::F64 | LoadKind::V128 => {
-                            emit_fp_load(&mut self.asm, d, mem, kind.ty());
-                        }
-                        LoadKind::V128Load8x8S => self.asm.pmovsxbw_xm(d, mem),
-                        LoadKind::V128Load8x8U => self.asm.pmovzxbw_xm(d, mem),
-                        LoadKind::V128Load16x4S => self.asm.pmovsxwd_xm(d, mem),
-                        LoadKind::V128Load16x4U => self.asm.pmovzxwd_xm(d, mem),
-                        LoadKind::V128Load32x2S => self.asm.pmovsxdq_xm(d, mem),
-                        LoadKind::V128Load32x2U => self.asm.pmovzxdq_xm(d, mem),
-                        LoadKind::V128Load8Splat => {
-                            self.asm.movzx_rm8(false, SCRATCH_GP1, mem);
-                            self.asm.movd_xr(d, SCRATCH_GP1);
-                            self.asm.punpcklbw(d, d);
-                            self.asm.punpcklwd(d, d);
-                            self.asm.punpckldq(d, d);
-                            self.asm.punpcklqdq(d, d);
-                        }
-                        LoadKind::V128Load16Splat => {
-                            self.asm.movzx_rm16(false, SCRATCH_GP1, mem);
-                            self.asm.movd_xr(d, SCRATCH_GP1);
-                            self.asm.punpcklwd(d, d);
-                            self.asm.punpckldq(d, d);
-                            self.asm.punpcklqdq(d, d);
-                        }
-                        LoadKind::V128Load32Splat => {
-                            self.asm.movss_xm(d, mem);
-                            self.asm.pshufd(d, d, 0);
-                        }
-                        LoadKind::V128Load64Splat => {
-                            self.asm.movddup_xm(d, mem);
-                        }
-                        LoadKind::V128Load32Zero => {
-                            self.asm.movss_xm(d, mem);
-                        }
-                        LoadKind::V128Load64Zero => {
-                            self.asm.movsd_xm(d, mem);
-                        }
-                        _ => unreachable!(),
-                    }
-                    self.fp_commit(r, d);
-                } else {
-                    let d = self.gp_write_reg(r);
-                    match kind {
-                        LoadKind::I32 | LoadKind::I64Load32U => self.asm.mov_rm(false, d, mem),
-                        LoadKind::I64 => self.asm.mov_rm(true, d, mem),
-                        LoadKind::I32Load8S => self.asm.movsx_rm8(false, d, mem),
-                        LoadKind::I32Load8U | LoadKind::I64Load8U => {
-                            self.asm.movzx_rm8(false, d, mem)
-                        }
-                        LoadKind::I32Load16S => self.asm.movsx_rm16(false, d, mem),
-                        LoadKind::I32Load16U | LoadKind::I64Load16U => {
-                            self.asm.movzx_rm16(false, d, mem)
-                        }
-                        LoadKind::I64Load8S => self.asm.movsx_rm8(true, d, mem),
-                        LoadKind::I64Load16S => self.asm.movsx_rm16(true, d, mem),
-                        LoadKind::I64Load32S => self.asm.movsxd_rm(d, mem),
-                        _ => unreachable!(),
-                    }
-                    self.gp_commit(r, d);
-                }
+                self.emit_load_from_mem(r, kind, mem);
+            }
+            Op::LoadScaled {
+                kind,
+                addr,
+                scale,
+                offset,
+            } => {
+                let r = res.unwrap();
+                let ar = self.gp_read(addr, SCRATCH_GP2);
+                let mem = Mem::indexed(Gp::R14, ar, scale, offset as i32);
+                self.emit_load_from_mem(r, kind, mem);
             }
             Op::Store {
                 kind,
@@ -3385,79 +3709,18 @@ impl<'a> Lower<'a> {
                 }
                 // Careful: if `offset > i32::MAX`, `mem_addr` uses `SCRATCH_GP1`, so read `val` cleanly!
                 let mem = self.mem_addr(ar, offset);
-                match kind {
-                    StoreKind::F32 => {
-                        if let Loc::Remat(RematConst::F32(bits)) = self.loc(val) {
-                            self.asm.mov_mi32(false, mem, bits as i32);
-                        } else {
-                            let vr = self.fp_read(val, SCRATCH_FP1);
-                            emit_fp_store(&mut self.asm, mem, vr, Ty::F32);
-                        }
-                    }
-                    StoreKind::F64 => {
-                        if let Loc::Remat(RematConst::F64(bits)) = self.loc(val)
-                            && let Ok(imm32) = i32::try_from(bits as i64)
-                        {
-                            self.asm.mov_mi32(true, mem, imm32);
-                        } else {
-                            let vr = self.fp_read(val, SCRATCH_FP1);
-                            emit_fp_store(&mut self.asm, mem, vr, Ty::F64);
-                        }
-                    }
-                    StoreKind::V128 => {
-                        let vr = self.fp_read(val, SCRATCH_FP1);
-                        if self.isa.has_avx2 {
-                            self.asm.vmovdqu_mx(mem, vr);
-                        } else {
-                            emit_fp_store(&mut self.asm, mem, vr, Ty::V128);
-                        }
-                    }
-                    StoreKind::I8 | StoreKind::I16 | StoreKind::I32 | StoreKind::I64 => {
-                        // Direct immediate store fast path when `val` is a rematerialized constant!
-                        match (kind, self.loc(val)) {
-                            (StoreKind::I8, Loc::Remat(RematConst::I32(c))) => {
-                                self.asm.mov_mi8(mem, c as u8);
-                                return Ok(());
-                            }
-                            (StoreKind::I8, Loc::Remat(RematConst::I64(c))) => {
-                                self.asm.mov_mi8(mem, c as u8);
-                                return Ok(());
-                            }
-                            (StoreKind::I32, Loc::Remat(RematConst::I32(c))) => {
-                                self.asm.mov_mi32(false, mem, c);
-                                return Ok(());
-                            }
-                            (StoreKind::I32, Loc::Remat(RematConst::I64(c))) => {
-                                self.asm.mov_mi32(false, mem, c as i32);
-                                return Ok(());
-                            }
-                            (StoreKind::I64, Loc::Remat(RematConst::I64(c)))
-                                if i32::try_from(c).is_ok() =>
-                            {
-                                self.asm.mov_mi32(true, mem, c as i32);
-                                return Ok(());
-                            }
-                            _ => {}
-                        }
-                        // If `offset > i32::MAX`, `mem` uses `SCRATCH_GP1` as index! Move `mem` base to `SCRATCH_GP2` first if `val` is not in a GP reg!
-                        let (mem, vr) =
-                            if offset > i32::MAX as u64 && !matches!(self.loc(val), Loc::Gp(_)) {
-                                self.asm.mov_rr(true, SCRATCH_GP2, SCRATCH_GP1);
-                                let vr = self.gp_read(val, SCRATCH_GP1);
-                                (Mem::indexed(Gp::R14, SCRATCH_GP2, 1, 0), vr)
-                            } else {
-                                let vr = self.gp_read(val, SCRATCH_GP1);
-                                (mem, vr)
-                            };
-                        match kind {
-                            StoreKind::I8 => self.asm.mov_mr8(mem, vr),
-                            StoreKind::I16 => self.asm.mov_mr16(mem, vr),
-                            StoreKind::I32 => self.asm.mov_mr(false, mem, vr),
-                            StoreKind::I64 => self.asm.mov_mr(true, mem, vr),
-                            _ => unreachable!(),
-                        }
-                    }
-                }
+                self.emit_store_to_mem(kind, val, mem, offset > i32::MAX as u64);
+            }
+            Op::StoreScaled {
+                kind,
+                addr,
+                val,
+                scale,
+                offset,
+            } => {
+                let ar = self.gp_read(addr, SCRATCH_GP2);
+                let mem = Mem::indexed(Gp::R14, ar, scale, offset as i32);
+                self.emit_store_to_mem(kind, val, mem, false);
             }
             Op::V128LoadLane {
                 width,
@@ -3567,6 +3830,296 @@ impl<'a> Lower<'a> {
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
                 self.asm.call_reloc(RelocTarget::Helper(HELPER_MEM_FILL));
+                let prop = self.trap_prop_lbl();
+                self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                self.asm.jcc(Cond::Ne, prop);
+            }
+            Op::LoadMem {
+                mem,
+                kind,
+                addr,
+                offset,
+            } => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SCRATCH_GP2);
+                if is64 {
+                    if ar != SCRATCH_GP2 {
+                        self.asm.mov_rr(true, SCRATCH_GP2, ar);
+                    }
+                } else {
+                    self.asm.mov_rr(false, SCRATCH_GP2, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                let end_off = offset.saturating_add(kind.bytes());
+                self.asm.mov_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if let Ok(imm) = i32::try_from(end_off) {
+                    self.asm.add_ri(true, SCRATCH_GP1, imm);
+                } else {
+                    self.asm.mov_ri64(SCRATCH_GP1, end_off);
+                    self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                }
+                if is64 || end_off > u32::MAX as u64 {
+                    self.asm.jcc(Cond::B, oob);
+                }
+                self.asm
+                    .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
+                self.asm.jcc(Cond::A, oob);
+                // Effective host address into SCRATCH_GP1 = mem_base + addr + offset.
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
+                self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if offset != 0 {
+                    if let Ok(imm) = i32::try_from(offset) {
+                        self.asm.add_ri(true, SCRATCH_GP1, imm);
+                    } else {
+                        self.asm.mov_ri64(SCRATCH_GP2, offset);
+                        self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    }
+                }
+                self.emit_load_from_mem(r, kind, Mem::base(SCRATCH_GP1));
+            }
+            Op::StoreMem {
+                mem,
+                kind,
+                addr,
+                val,
+                offset,
+            } => {
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SCRATCH_GP2);
+                if is64 {
+                    if ar != SCRATCH_GP2 {
+                        self.asm.mov_rr(true, SCRATCH_GP2, ar);
+                    }
+                } else {
+                    self.asm.mov_rr(false, SCRATCH_GP2, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                let end_off = offset.saturating_add(kind.bytes());
+                self.asm.mov_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if let Ok(imm) = i32::try_from(end_off) {
+                    self.asm.add_ri(true, SCRATCH_GP1, imm);
+                } else {
+                    self.asm.mov_ri64(SCRATCH_GP1, end_off);
+                    self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                }
+                if is64 || end_off > u32::MAX as u64 {
+                    self.asm.jcc(Cond::B, oob);
+                }
+                self.asm
+                    .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
+                self.asm.jcc(Cond::A, oob);
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
+                self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if offset != 0 {
+                    if let Ok(imm) = i32::try_from(offset) {
+                        self.asm.add_ri(true, SCRATCH_GP1, imm);
+                    } else {
+                        self.asm.mov_ri64(SCRATCH_GP2, offset);
+                        self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    }
+                }
+                self.emit_store_to_mem(kind, val, Mem::base(SCRATCH_GP1), true);
+            }
+            Op::V128LoadLaneMem {
+                mem,
+                width,
+                addr,
+                vec,
+                offset,
+                lane,
+            } => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SCRATCH_GP2);
+                if is64 {
+                    if ar != SCRATCH_GP2 {
+                        self.asm.mov_rr(true, SCRATCH_GP2, ar);
+                    }
+                } else {
+                    self.asm.mov_rr(false, SCRATCH_GP2, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                let end_off = offset.saturating_add(u64::from(width));
+                self.asm.mov_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if let Ok(imm) = i32::try_from(end_off) {
+                    self.asm.add_ri(true, SCRATCH_GP1, imm);
+                } else {
+                    self.asm.mov_ri64(SCRATCH_GP1, end_off);
+                    self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                }
+                if is64 || end_off > u32::MAX as u64 {
+                    self.asm.jcc(Cond::B, oob);
+                }
+                self.asm
+                    .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
+                self.asm.jcc(Cond::A, oob);
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
+                self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if offset != 0 {
+                    if let Ok(imm) = i32::try_from(offset) {
+                        self.asm.add_ri(true, SCRATCH_GP1, imm);
+                    } else {
+                        self.asm.mov_ri64(SCRATCH_GP2, offset);
+                        self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    }
+                }
+                let m = Mem::base(SCRATCH_GP1);
+                let vr = self.fp_read(vec, SCRATCH_FP1);
+                let d = self.fp_write_reg(r);
+                self.asm.movaps_rr(d, vr);
+                match width {
+                    1 => self.asm.pinsrb_xm(d, m, lane),
+                    2 => self.asm.pinsrw_xm(d, m, lane),
+                    4 => self.asm.pinsrd_xm(d, m, lane),
+                    8 => self.asm.pinsrq_xm(d, m, lane),
+                    _ => unreachable!(),
+                }
+                self.fp_commit(r, d);
+            }
+            Op::V128StoreLaneMem {
+                mem,
+                width,
+                addr,
+                vec,
+                offset,
+                lane,
+            } => {
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let ar = self.gp_read(addr, SCRATCH_GP2);
+                if is64 {
+                    if ar != SCRATCH_GP2 {
+                        self.asm.mov_rr(true, SCRATCH_GP2, ar);
+                    }
+                } else {
+                    self.asm.mov_rr(false, SCRATCH_GP2, ar);
+                }
+                let oob = self.trap_oob_lbl();
+                let end_off = offset.saturating_add(u64::from(width));
+                self.asm.mov_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if let Ok(imm) = i32::try_from(end_off) {
+                    self.asm.add_ri(true, SCRATCH_GP1, imm);
+                } else {
+                    self.asm.mov_ri64(SCRATCH_GP1, end_off);
+                    self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                }
+                if is64 || end_off > u32::MAX as u64 {
+                    self.asm.jcc(Cond::B, oob);
+                }
+                self.asm
+                    .cmp_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
+                self.asm.jcc(Cond::A, oob);
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off));
+                self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                if offset != 0 {
+                    if let Ok(imm) = i32::try_from(offset) {
+                        self.asm.add_ri(true, SCRATCH_GP1, imm);
+                    } else {
+                        self.asm.mov_ri64(SCRATCH_GP2, offset);
+                        self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                    }
+                }
+                let m = Mem::base(SCRATCH_GP1);
+                let vr = self.fp_read(vec, SCRATCH_FP1);
+                match width {
+                    1 => self.asm.pextrb_mx(m, vr, lane),
+                    2 => self.asm.pextrw_mx(m, vr, lane),
+                    4 => self.asm.pextrd_mx(m, vr, lane),
+                    8 => self.asm.pextrq_mx(m, vr, lane),
+                    _ => unreachable!(),
+                }
+            }
+            Op::MemSizeIdx(mem) => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let d = self.gp_write_reg(r);
+                self.asm
+                    .mov_rm(true, d, Mem::base_disp(Gp::R15, desc_off + 8));
+                self.asm.shr_imm(true, d, 16);
+                self.gp_commit(r, d);
+            }
+            Op::MemGrowIdx { mem, delta } => {
+                let r = res.unwrap();
+                let desc_off = self.layout.mem_desc_off(mem);
+                let is64 = self.layout.mem_is64(mem);
+                let dr = self.gp_read(delta, Gp::Rdi);
+                if is64 {
+                    if dr != Gp::Rdi {
+                        self.asm.mov_rr(true, Gp::Rdi, dr);
+                    }
+                } else {
+                    self.asm.mov_rr(false, Gp::Rdi, dr);
+                }
+                self.asm.mov_ri32(Gp::Rsi, desc_off as u32);
+                self.asm
+                    .call_reloc(RelocTarget::Helper(HELPER_EXTRA_MEM_GROW));
+                if !is64 {
+                    self.asm.mov_rr(false, Gp::Rax, Gp::Rax);
+                }
+                self.gp_commit(r, Gp::Rax);
+            }
+            Op::MemCopyIdx {
+                dst_mem,
+                src_mem,
+                dst,
+                src,
+                len,
+            } => {
+                let d64 = self.layout.mem_is64(dst_mem);
+                let s64 = self.layout.mem_is64(src_mem);
+                let dty = if d64 { Ty::I64 } else { Ty::I32 };
+                let sty = if s64 { Ty::I64 } else { Ty::I32 };
+                let lty = if d64 && s64 { Ty::I64 } else { Ty::I32 };
+                let moves = [
+                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), dty),
+                    (MoveLoc::Gp(Gp::Rsi), MoveLoc::from(self.loc(src)), sty),
+                    (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(len)), lty),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                if !d64 {
+                    self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
+                }
+                if !s64 {
+                    self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
+                }
+                if !(d64 && s64) {
+                    self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                }
+                self.asm
+                    .mov_ri32(Gp::Rcx, self.layout.mem_desc_off(dst_mem) as u32);
+                self.asm
+                    .mov_ri32(Gp::R8, self.layout.mem_desc_off(src_mem) as u32);
+                self.asm
+                    .call_reloc(RelocTarget::Helper(HELPER_EXTRA_MEM_COPY));
+                let prop = self.trap_prop_lbl();
+                self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                self.asm.jcc(Cond::Ne, prop);
+            }
+            Op::MemFillIdx { mem, dst, val, len } => {
+                let is64 = self.layout.mem_is64(mem);
+                let aty = if is64 { Ty::I64 } else { Ty::I32 };
+                let moves = [
+                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), aty),
+                    (MoveLoc::Gp(Gp::Rsi), MoveLoc::from(self.loc(val)), Ty::I32),
+                    (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(len)), aty),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                if !is64 {
+                    self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
+                    self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                }
+                self.asm
+                    .mov_ri32(Gp::Rcx, self.layout.mem_desc_off(mem) as u32);
+                self.asm
+                    .call_reloc(RelocTarget::Helper(HELPER_EXTRA_MEM_FILL));
                 let prop = self.trap_prop_lbl();
                 self.asm.test_rr(false, SCRATCH_GP1, SCRATCH_GP1);
                 self.asm.jcc(Cond::Ne, prop);
@@ -3886,7 +4439,7 @@ impl<'a> Lower<'a> {
                     self.asm.sub_ri(true, SCRATCH_GP2, 64);
                     self.asm.cmp_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                     self.asm.jcc(Cond::A, lbl_after64);
-                    self.asm.mark_align16(lbl_loop64);
+                    self.asm.mark_align32(lbl_loop64);
                     self.asm.bind(lbl_loop64);
                     self.asm
                         .vpsadbw_yym(SCRATCH_FP2, Xmm::Xmm0, Mem::base(SCRATCH_GP1));
@@ -3926,7 +4479,7 @@ impl<'a> Lower<'a> {
                     self.asm.pxor(Xmm::Xmm0, Xmm::Xmm0);
                     self.asm.pxor(SCRATCH_FP1, SCRATCH_FP1);
                     let lbl_loop16 = self.asm.new_label();
-                    self.asm.mark_align16(lbl_loop16);
+                    self.asm.mark_align32(lbl_loop16);
                     self.asm.bind(lbl_loop16);
                     self.asm.movdqu_xm(SCRATCH_FP2, Mem::base(SCRATCH_GP1));
                     self.asm.psadbw(SCRATCH_FP2, Xmm::Xmm0);
@@ -4012,7 +4565,7 @@ impl<'a> Lower<'a> {
                         self.asm.vpbroadcastw_yx(Xmm::Xmm0, Xmm::Xmm0);
                     }
                     let lbl_loop16 = self.asm.new_label();
-                    self.asm.mark_align16(lbl_loop16);
+                    self.asm.mark_align32(lbl_loop16);
                     self.asm.bind(lbl_loop16);
                     self.asm.vpmovzxbw_ym(SCRATCH_FP1, Mem::base(SCRATCH_GP1));
                     self.asm
@@ -4112,7 +4665,7 @@ impl<'a> Lower<'a> {
                     self.asm.cmp_ri(true, Gp::Rcx, 8);
                     self.asm.jcc(Cond::B, lbl_vec4);
 
-                    self.asm.mark_align16(lbl_vec8);
+                    self.asm.mark_align32(lbl_vec8);
                     self.asm.bind(lbl_vec8);
                     self.asm
                         .vmulpd_yym(Xmm::Xmm1, Xmm::Xmm0, Mem::base(Gp::Rdx));
@@ -4530,6 +5083,110 @@ impl<'a> Lower<'a> {
                 args,
                 rets,
             } => self.emit_call_abi(args, rets, Some((ci_id, idx)), None)?,
+            Op::ExnAlloc { tag, args } => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let (ref fields, rec_size) = self.layout.tag_layouts[tag as usize];
+                let lbl_oom = self.asm.new_label();
+                let lbl_ok = self.asm.new_label();
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, exn_off + 16));
+                self.asm.mov_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                self.asm.add_ri(true, SCRATCH_GP2, rec_size as i32);
+                self.asm
+                    .cmp_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, exn_off + 24));
+                self.asm.jcc(Cond::A, lbl_oom);
+                self.asm
+                    .mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 16), SCRATCH_GP2);
+                self.asm
+                    .mov_mr(true, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), SCRATCH_GP1);
+                self.asm
+                    .add_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, exn_off + 8));
+                self.asm
+                    .mov_mi32(false, Mem::base_disp(SCRATCH_GP1, 0), tag as i32);
+                self.asm.mov_mi32(false, Mem::base_disp(SCRATCH_GP1, 4), 0);
+                let arg_vals: Vec<Val> = self.ir.pool_slice(args).to_vec();
+                let field_specs: Vec<(Ty, i32)> = fields.clone();
+                for (av, (ty, foff)) in arg_vals.into_iter().zip(field_specs) {
+                    let mem = Mem::base_disp(SCRATCH_GP1, foff);
+                    if ty.is_fp() {
+                        let xr = self.fp_read(av, SCRATCH_FP1);
+                        emit_fp_store(&mut self.asm, mem, xr, ty);
+                    } else {
+                        let gr = self.gp_read(av, SCRATCH_GP2);
+                        self.asm.mov_mr(ty == Ty::I64, mem, gr);
+                    }
+                }
+                let d = self.gp_write_reg(r);
+                self.asm
+                    .mov_rm(true, d, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+                self.gp_commit(r, d);
+                self.asm.jmp(lbl_ok);
+                self.asm.bind(lbl_oom);
+                self.asm
+                    .mov_ri32(SCRATCH_GP1, u32::from(super::TRAP_ALLOC_FAILED));
+                let ep = self.epilogue_trap_lbl();
+                self.asm.jmp(ep);
+                self.asm.bind(lbl_ok);
+            }
+            Op::ExnSetActive(h) => {
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let hr = self.gp_read(h, SCRATCH_GP1);
+                self.asm.mov_mr(true, Mem::base_disp(Gp::R15, exn_off), hr);
+            }
+            Op::ExnGetActive => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let d = self.gp_write_reg(r);
+                self.asm.mov_rm(true, d, Mem::base_disp(Gp::R15, exn_off));
+                self.gp_commit(r, d);
+            }
+            Op::ExnClearActive => {
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                self.asm.xor_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                self.asm
+                    .mov_mr(true, Mem::base_disp(Gp::R15, exn_off), SCRATCH_GP1);
+            }
+            Op::ExnGetTag(h) => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let hr = self.gp_read(h, SCRATCH_GP2);
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, exn_off + 8));
+                self.asm.add_rr(true, SCRATCH_GP1, hr);
+                let d = self.gp_write_reg(r);
+                self.asm.mov_rm(false, d, Mem::base_disp(SCRATCH_GP1, 0));
+                self.gp_commit(r, d);
+            }
+            Op::ExnGetPayload {
+                handle,
+                tag,
+                field,
+                ty,
+            } => {
+                let r = res.unwrap();
+                let exn_off = self.layout.exn_state_off.expect("exn_state_off missing");
+                let foff = self.layout.tag_layouts[tag as usize].0[field as usize].1;
+                let hr = self.gp_read(handle, SCRATCH_GP2);
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::R15, exn_off + 8));
+                self.asm.add_rr(true, SCRATCH_GP1, hr);
+                let mem = Mem::base_disp(SCRATCH_GP1, foff);
+                if ty.is_fp() {
+                    let d = self.fp_write_reg(r);
+                    match ty {
+                        Ty::F32 => self.asm.movss_xm(d, mem),
+                        Ty::F64 => self.asm.movsd_xm(d, mem),
+                        Ty::V128 => self.asm.movdqu_xm(d, mem),
+                        _ => unreachable!(),
+                    }
+                    self.fp_commit(r, d);
+                } else {
+                    let d = self.gp_write_reg(r);
+                    self.asm.mov_rm(ty == Ty::I64, d, mem);
+                    self.gp_commit(r, d);
+                }
+            }
             Op::Trap(code) => {
                 let lbl = match code {
                     TRAP_UNREACHABLE => self.trap_unreach_lbl(),
@@ -4548,6 +5205,50 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// Emits integer comparison flags for `kind` (`I32`/`I32Imm`/`I64`/`I64Imm`), reusing
+    /// `prev_flags` when the exact (or swapped) operands are already live in `RFLAGS`.
+    fn emit_int_cmp_flags_reusing(
+        &mut self,
+        prev_flags: Option<LiveFlags>,
+        kind: CmpBranchKind,
+        a: Val,
+        b: Val,
+    ) -> Cond {
+        match kind {
+            CmpBranchKind::I32(cop) | CmpBranchKind::I64(cop) => {
+                let is64 = matches!(kind, CmpBranchKind::I64(_));
+                if prev_flags == Some(LiveFlags::IntRR { is64, a, b }) {
+                    return cmp_to_cond(cop);
+                }
+                if prev_flags == Some(LiveFlags::IntRR { is64, a: b, b: a }) {
+                    return cmp_to_cond(cop.swap());
+                }
+                let ar = self.gp_read(a, SCRATCH_GP1);
+                if let Loc::Spill(boff) = self.loc(b) {
+                    self.asm.cmp_rm(is64, ar, Mem::base_disp(Gp::Rsp, boff));
+                } else {
+                    let br = self.gp_read(b, SCRATCH_GP2);
+                    self.asm.cmp_rr(is64, ar, br);
+                }
+                cmp_to_cond(cop)
+            }
+            CmpBranchKind::I32Imm(cop, imm) | CmpBranchKind::I64Imm(cop, imm) => {
+                let is64 = matches!(kind, CmpBranchKind::I64Imm(..));
+                if prev_flags == Some(LiveFlags::IntRI { is64, a, imm }) {
+                    return cmp_to_cond(cop);
+                }
+                let ar = self.gp_read(a, SCRATCH_GP1);
+                if imm == 0 {
+                    self.asm.test_rr(is64, ar, ar);
+                } else {
+                    self.asm.cmp_ri(is64, ar, imm);
+                }
+                cmp_to_cond(cop)
+            }
+            _ => unreachable!("expected integer CmpBranchKind"),
+        }
+    }
+
     fn emit_term(
         &mut self,
         term: Term,
@@ -4555,6 +5256,7 @@ impl<'a> Lower<'a> {
         budget: Option<&CompileBudget>,
         charged_rodata: &mut usize,
     ) -> Result<(), String> {
+        let prev_flags = self.live_flags.take();
         match term {
             Term::Jump { target, args } => {
                 self.emit_edge_moves(target.0, args);
@@ -4640,47 +5342,7 @@ impl<'a> Lower<'a> {
                     && self
                         .can_hoist_flag_preserving_moves(then_bb.0, then_args, else_bb.0, else_args)
                 {
-                    let cond = match kind {
-                        CmpBranchKind::I32(cop) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if let Loc::Spill(boff) = self.loc(b) {
-                                self.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
-                            } else {
-                                let br = self.gp_read(b, SCRATCH_GP2);
-                                self.asm.cmp_rr(false, ar, br);
-                            }
-                            cmp_to_cond(cop)
-                        }
-                        CmpBranchKind::I32Imm(cop, imm) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if imm == 0 {
-                                self.asm.test_rr(false, ar, ar);
-                            } else {
-                                self.asm.cmp_ri(false, ar, imm);
-                            }
-                            cmp_to_cond(cop)
-                        }
-                        CmpBranchKind::I64(cop) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if let Loc::Spill(boff) = self.loc(b) {
-                                self.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
-                            } else {
-                                let br = self.gp_read(b, SCRATCH_GP2);
-                                self.asm.cmp_rr(true, ar, br);
-                            }
-                            cmp_to_cond(cop)
-                        }
-                        CmpBranchKind::I64Imm(cop, imm) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if imm == 0 {
-                                self.asm.test_rr(true, ar, ar);
-                            } else {
-                                self.asm.cmp_ri(true, ar, imm);
-                            }
-                            cmp_to_cond(cop)
-                        }
-                        _ => unreachable!(),
-                    };
+                    let cond = self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b);
                     self.emit_edge_moves(then_bb.0, then_args);
                     self.asm.jcc(cond, self.bb_labels[then_bb.0 as usize]);
                     self.emit_edge_moves(else_bb.0, else_args);
@@ -4694,43 +5356,12 @@ impl<'a> Lower<'a> {
                 if invert_to_else {
                     let else_lbl = self.edge_target_label(else_bb.0, else_args);
                     match kind {
-                        CmpBranchKind::I32(cop) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if let Loc::Spill(boff) = self.loc(b) {
-                                self.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
-                            } else {
-                                let br = self.gp_read(b, SCRATCH_GP2);
-                                self.asm.cmp_rr(false, ar, br);
-                            }
-                            self.asm.jcc(cmp_to_cond(cop).invert(), else_lbl);
-                        }
-                        CmpBranchKind::I32Imm(cop, imm) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if imm == 0 {
-                                self.asm.test_rr(false, ar, ar);
-                            } else {
-                                self.asm.cmp_ri(false, ar, imm);
-                            }
-                            self.asm.jcc(cmp_to_cond(cop).invert(), else_lbl);
-                        }
-                        CmpBranchKind::I64(cop) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if let Loc::Spill(boff) = self.loc(b) {
-                                self.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
-                            } else {
-                                let br = self.gp_read(b, SCRATCH_GP2);
-                                self.asm.cmp_rr(true, ar, br);
-                            }
-                            self.asm.jcc(cmp_to_cond(cop).invert(), else_lbl);
-                        }
-                        CmpBranchKind::I64Imm(cop, imm) => {
-                            let ar = self.gp_read(a, SCRATCH_GP1);
-                            if imm == 0 {
-                                self.asm.test_rr(true, ar, ar);
-                            } else {
-                                self.asm.cmp_ri(true, ar, imm);
-                            }
-                            self.asm.jcc(cmp_to_cond(cop).invert(), else_lbl);
+                        CmpBranchKind::I32(_)
+                        | CmpBranchKind::I32Imm(..)
+                        | CmpBranchKind::I64(_)
+                        | CmpBranchKind::I64Imm(..) => {
+                            let cond = self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b);
+                            self.asm.jcc(cond.invert(), else_lbl);
                         }
                         CmpBranchKind::F32(_) | CmpBranchKind::F64(_) => {
                             let is64 = matches!(kind, CmpBranchKind::F64(_));
@@ -4751,43 +5382,12 @@ impl<'a> Lower<'a> {
                 }
                 let then_lbl = self.edge_target_label(then_bb.0, then_args);
                 match kind {
-                    CmpBranchKind::I32(cop) => {
-                        let ar = self.gp_read(a, SCRATCH_GP1);
-                        if let Loc::Spill(boff) = self.loc(b) {
-                            self.asm.cmp_rm(false, ar, Mem::base_disp(Gp::Rsp, boff));
-                        } else {
-                            let br = self.gp_read(b, SCRATCH_GP2);
-                            self.asm.cmp_rr(false, ar, br);
-                        }
-                        self.asm.jcc(cmp_to_cond(cop), then_lbl);
-                    }
-                    CmpBranchKind::I32Imm(cop, imm) => {
-                        let ar = self.gp_read(a, SCRATCH_GP1);
-                        if imm == 0 {
-                            self.asm.test_rr(false, ar, ar);
-                        } else {
-                            self.asm.cmp_ri(false, ar, imm);
-                        }
-                        self.asm.jcc(cmp_to_cond(cop), then_lbl);
-                    }
-                    CmpBranchKind::I64(cop) => {
-                        let ar = self.gp_read(a, SCRATCH_GP1);
-                        if let Loc::Spill(boff) = self.loc(b) {
-                            self.asm.cmp_rm(true, ar, Mem::base_disp(Gp::Rsp, boff));
-                        } else {
-                            let br = self.gp_read(b, SCRATCH_GP2);
-                            self.asm.cmp_rr(true, ar, br);
-                        }
-                        self.asm.jcc(cmp_to_cond(cop), then_lbl);
-                    }
-                    CmpBranchKind::I64Imm(cop, imm) => {
-                        let ar = self.gp_read(a, SCRATCH_GP1);
-                        if imm == 0 {
-                            self.asm.test_rr(true, ar, ar);
-                        } else {
-                            self.asm.cmp_ri(true, ar, imm);
-                        }
-                        self.asm.jcc(cmp_to_cond(cop), then_lbl);
+                    CmpBranchKind::I32(_)
+                    | CmpBranchKind::I32Imm(..)
+                    | CmpBranchKind::I64(_)
+                    | CmpBranchKind::I64Imm(..) => {
+                        let cond = self.emit_int_cmp_flags_reusing(prev_flags, kind, a, b);
+                        self.asm.jcc(cond, then_lbl);
                     }
                     CmpBranchKind::F32(cop) | CmpBranchKind::F64(cop) => {
                         let is64 = matches!(kind, CmpBranchKind::F64(_));
@@ -4982,6 +5582,47 @@ impl<'a> Lower<'a> {
             Term::ReturnCallIndirect { ci_id, idx, args } => {
                 self.emit_tail_call(args, Some((ci_id, idx)), None, next_bb)?;
             }
+            Term::CallCatch {
+                func,
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+            } => {
+                self.emit_call_catch_abi(
+                    args,
+                    ok_bb,
+                    catch_bb,
+                    catch_args,
+                    None,
+                    Some(func),
+                    next_bb,
+                )?;
+            }
+            Term::CallIndirectCatch {
+                ci_id,
+                idx,
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+            } => {
+                self.emit_call_catch_abi(
+                    args,
+                    ok_bb,
+                    catch_bb,
+                    catch_args,
+                    Some((ci_id, idx)),
+                    None,
+                    next_bb,
+                )?;
+            }
+            Term::ThrowActive => {
+                self.asm
+                    .mov_ri32(SCRATCH_GP1, u32::from(super::INTERNAL_EXN_SIGNAL));
+                let ep = self.epilogue_trap_lbl();
+                self.asm.jmp(ep);
+            }
             Term::Unreachable => {
                 let lbl = self.trap_unreach_lbl();
                 self.asm.jmp(lbl);
@@ -5055,6 +5696,7 @@ pub fn lower_ir_to_x64_with_budget(
         edge_tramp_cache: HashMap::new(),
         fp_nz_consts: None,
         val_upper32_zero: None,
+        live_flags: None,
     };
 
     // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----
@@ -5180,6 +5822,7 @@ pub fn lower_ir_to_x64_with_budget(
             l.asm.mark_align16(l.bb_labels[bid as usize]);
         }
         l.asm.bind(l.bb_labels[bid as usize]);
+        l.live_flags = None;
         for (ii, inst) in bb.insts.iter().enumerate() {
             l.emit_inst(inst.res, inst.op)?;
             if (ii & 255) == 255 {

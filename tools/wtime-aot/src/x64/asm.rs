@@ -271,7 +271,10 @@ pub struct Asm {
     pub local_rodata: Vec<u8>,
     pub jt_patches: Vec<JumpTablePatch>,
     labels: Vec<Option<u32>>,
-    align16_labels: Vec<bool>,
+    /// Optional per-label code alignment (`0` = none, `16` = loop header, `32` = hot AVX2 loop).
+    align_labels: Vec<u8>,
+    /// True when at least one label requested 32-byte alignment (so the linker aligns the function to 32B).
+    pub has_align32: bool,
     fixups: Vec<LocalFixup>,
     f32_pool: HashMap<u32, u32>,
     f64_pool: HashMap<u64, u32>,
@@ -286,7 +289,8 @@ impl Asm {
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
             labels: Vec::new(),
-            align16_labels: Vec::new(),
+            align_labels: Vec::new(),
+            has_align32: false,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -301,7 +305,8 @@ impl Asm {
             local_rodata: Vec::new(),
             jt_patches: Vec::new(),
             labels: Vec::new(),
-            align16_labels: Vec::new(),
+            align_labels: Vec::new(),
+            has_align32: false,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),
@@ -337,14 +342,24 @@ impl Asm {
     pub fn new_label(&mut self) -> Label {
         let id = u32::try_from(self.labels.len()).expect("label count exceeded u32::MAX");
         self.labels.push(None);
-        self.align16_labels.push(false);
+        self.align_labels.push(0);
         Label(id)
     }
 
     #[inline]
     pub fn mark_align16(&mut self, label: Label) {
-        if let Some(slot) = self.align16_labels.get_mut(label.0 as usize) {
-            *slot = true;
+        if let Some(slot) = self.align_labels.get_mut(label.0 as usize)
+            && *slot < 16
+        {
+            *slot = 16;
+        }
+    }
+
+    #[inline]
+    pub fn mark_align32(&mut self, label: Label) {
+        if let Some(slot) = self.align_labels.get_mut(label.0 as usize) {
+            *slot = 32;
+            self.has_align32 = true;
         }
     }
 
@@ -387,7 +402,7 @@ impl Asm {
             ));
         }
         self.pre_relax_code_len = self.code.len() as u32;
-        let has_align16 = self.align16_labels.iter().any(|&a| a);
+        let has_align16 = self.align_labels.iter().any(|&a| a != 0);
         let n_fix = self.fixups.len();
         if n_fix == 0 && !has_align16 {
             return Ok(());
@@ -615,21 +630,33 @@ impl Asm {
         // exceed `MAX_FN_CODE_BYTES`).
         if has_align16 && !self.code.is_empty() {
             let code_len = self.code.len() as u32;
-            let mut align_offs: Vec<u32> = self
+            let mut align_offs: Vec<(u32, u8)> = self
                 .labels
                 .iter()
-                .zip(&self.align16_labels)
-                .filter_map(|(&off, &want)| want.then_some(off).flatten())
-                .filter(|&off| off > 0 && off < code_len)
+                .zip(&self.align_labels)
+                .filter_map(|(&off, &want)| (want != 0).then_some(off).flatten().map(|o| (o, want)))
+                .filter(|&(off, _)| off > 0 && off < code_len)
                 .collect();
-            align_offs.sort_unstable();
-            align_offs.dedup();
+            align_offs.sort_unstable_by_key(|&(off, _)| off);
+            // Deduplicate identical offsets, keeping the stricter alignment requirement.
+            let mut deduped: Vec<(u32, u8)> = Vec::with_capacity(align_offs.len());
+            for (off, req) in align_offs {
+                if let Some(last) = deduped.last_mut()
+                    && last.0 == off
+                {
+                    last.1 = last.1.max(req);
+                } else {
+                    deduped.push((off, req));
+                }
+            }
 
             let mut pads: Vec<(u32, u32)> = Vec::new();
             let mut total_pad: u32 = 0;
-            for orig_off in align_offs {
+            for (orig_off, req) in deduped {
+                let align = u32::from(req);
+                let mask = align - 1;
                 let cur_off = orig_off.wrapping_add(total_pad);
-                let pad = (16 - (cur_off & 15)) & 15;
+                let pad = (align - (cur_off & mask)) & mask;
                 if pad == 0 {
                     continue;
                 }
@@ -755,7 +782,8 @@ impl Asm {
             local_rodata,
             jt_patches,
             labels,
-            align16_labels: Vec::new(),
+            align_labels: Vec::new(),
+            has_align32: false,
             fixups: Vec::new(),
             f32_pool: HashMap::new(),
             f64_pool: HashMap::new(),

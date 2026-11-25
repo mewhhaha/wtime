@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -40,11 +40,11 @@ const MAX_DELTA_READ_BYTES: usize = 1 << 20; // 1 MiB read cap
 const PARALLEL_INC_MIN_FUNCS: usize = 256;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20; // 128 MiB cap on read
 
-/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks using 4-way SIMD `digest4`
-/// across worker threads. Uses fallible allocation and `spawn_scoped` with inline fallback so
-/// optional cache hashing never aborts.
+/// Computes a deterministic SHA-256 Merkle root over 64 KiB chunks in parallel across worker
+/// threads using dynamic work-stealing. Uses fallible allocation and `spawn_scoped` with inline
+/// fallback so optional cache hashing never aborts.
 pub(crate) fn parallel_payload_digest(payload: &[u8]) -> Option<[u8; 32]> {
-    crate::sha256::parallel_merkle_digest_with_domain(b"WTX64INC-ROOT-1", payload)
+    crate::sha256::parallel_merkle_digest_with_chunk(b"WTX64INC-ROOT-2", payload, 64 << 10)
 }
 
 static NEXT_INC_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -260,6 +260,24 @@ pub fn compute_abi_hash(
         Some(b) => {
             h.update(&[1]);
             hash_u64(&mut h, b);
+        }
+    }
+    hash_u32(&mut h, module.extra_memories.len() as u32);
+    for em in &module.extra_memories {
+        hash_u64(&mut h, em.min_pages);
+        hash_u64(&mut h, em.max_pages);
+        h.update(&[u8::from(em.memory64)]);
+    }
+    h.update(&[u8::from(module.uses_exceptions)]);
+    hash_u32(&mut h, module.tags.len() as u32);
+    for &t in &module.tags {
+        hash_u32(&mut h, t);
+    }
+    match layout.exn_state_off {
+        None => h.update(&[0]),
+        Some(off) => {
+            h.update(&[1]);
+            hash_i32(&mut h, off);
         }
     }
 
@@ -1700,7 +1718,7 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
 // ============================================================================
 
 const VIDX_MAGIC: &[u8; 8] = b"WTX64VID";
-const VIDX_VERSION: u32 = 1;
+const VIDX_VERSION: u32 = 3;
 const MAX_VIDX_FILE_BYTES: usize = 32 << 20;
 
 /// Per-body cached validation and `x64` admission summary for incremental validation skip.
@@ -1711,6 +1729,7 @@ pub struct ValBodyEntry {
     pub insn_count: u32,
     pub imm_elems: u32,
     pub saw_data_count_op: bool,
+    pub uses_exceptions: bool,
     pub sig_arity: u32,
     pub br_table_entries: u32,
     pub g_reads: Vec<(u32, u32)>,
@@ -1835,7 +1854,15 @@ pub fn scan_wasm_shell_and_body_spans(
         } else {
             h.update(&[id]);
             hash_u32(&mut h, len as u32);
-            h.update(&wasm[pos..end]);
+            if len > 128 * 1024
+                && let Some(sec_root) = parallel_payload_digest(&wasm[pos..end])
+            {
+                h.update(&[1]);
+                h.update(&sec_root);
+            } else {
+                h.update(&[0]);
+                h.update(&wasm[pos..end]);
+            }
         }
         pos = end;
     }
@@ -1918,6 +1945,7 @@ pub fn load_val_index(
         let insn_count = r.read_u32()?;
         let imm_elems = r.read_u32()?;
         let saw_data_count_op = r.read_u8()? != 0;
+        let uses_exceptions = r.read_u8()? != 0;
         let sig_arity = r.read_u32()?;
         let br_table_entries = r.read_u32()?;
         let read_pairs = |r: &mut Reader<'_>| -> Option<Vec<(u32, u32)>> {
@@ -1941,6 +1969,7 @@ pub fn load_val_index(
             insn_count,
             imm_elems,
             saw_data_count_op,
+            uses_exceptions,
             sig_arity,
             br_table_entries,
             g_reads,
@@ -2001,6 +2030,7 @@ pub fn save_val_index(cache_dir: &Path, data: &ValIndexData) {
         out.extend_from_slice(&b.insn_count.to_le_bytes());
         out.extend_from_slice(&b.imm_elems.to_le_bytes());
         out.push(u8::from(b.saw_data_count_op));
+        out.push(u8::from(b.uses_exceptions));
         out.extend_from_slice(&b.sig_arity.to_le_bytes());
         out.extend_from_slice(&b.br_table_entries.to_le_bytes());
         for pairs in [&b.g_reads, &b.g_writes, &b.ci_pairs] {

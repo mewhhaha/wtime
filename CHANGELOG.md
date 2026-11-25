@@ -2,6 +2,73 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.3] - 2026-11-25
+
+Major Wasm 3.0 AOT feature-completeness (`wide-arithmetic`, `multi-memory`,
+`exception_handling`), branchy/array & real-workload codegen (`Op::LoadScaled`,
+`Op::AddScaled`, diamond load forwarding, post-inlining `const64` + constant-divisor
+loop specialization), compile-pipeline acceleration, and native 256-opcode SIMD +
+`relaxed_simd` + differential fuzzing in the opt-in safe-Rust register interpreter.
+Core crate `#![forbid(unsafe_code)]`, zero external production dependencies, public
+APIs, and `x86_64-unknown-linux-gnu` release scope remain unchanged.
+
+### Core interpreter (`crates/wtime-runtime`)
+- **Opt-in lazy register tier (`--features register-executor`)**:
+  - Full native **`simd`** (all 236 fixed-width 128-bit opcodes `0xfd00..=0xfdff`)
+    and **`relaxed_simd`** (all 20 opcodes `0xfd 0x100..=0xfd 0x113`) support using
+    variable 1-or-2 `u64` register slots per value while preserving the 12-byte
+    `RegOp` packing, exact logical `active_local_slots` and `max_stack_height`
+    accounting, hot inline `v128` load/store/arith/splat/shuffle/select paths, and
+    reusable zero-alloc-per-op scratch delegation for complete `256/256` parity.
+  - Added full 256-opcode parity + fuel-prefix sweep tests and a deterministic
+    differential fuzzer (80 random valid Wasm modules × 4 fuel budgets = 320 runs
+    verified bit-exact against `Decoded`).
+  - Raises lazy admission on the 4,454-function SIMD app to **99.8%** (`4,443 /
+    4,454` functions in `27.9 ms`) and reaches **4.09–4.67×** over the decoded
+    tier across the 4 benchmark kernels (`ecs_f64` `4.67×`, `parser_hash` `4.23×`,
+    `image_filter` `4.14×`, `graph_bfs` `4.09×`).
+
+### Ahead-of-time compiler (`tools/wtime-aot`, standalone tool)
+- **Wasm 3.0 backend features on BOTH `--backend x64` and `--backend aarch64`**:
+  - **`wide-arithmetic`** (`i64.add128`, `i64.sub128`, `i64.mul_wide_s`,
+    `i64.mul_wide_u` — `0xfc13..=0xfc16`).
+  - **`multi-memory`** (up to 64 extra memories with independent `memory32`/
+    `memory64` descriptors, active data segments, `load`/`store`/`v128.load*_lane`/
+    `store*_lane`, `memory.size`, `memory.grow`, `memory.fill`, and cross-memory
+    `memory.copy`).
+  - **`exception_handling`** (`TagSection`, `try_table` with `catch`/`catch_ref`/
+    `catch_all`/`catch_all_ref`, `throw`, `throw_ref`, `exnref`) backed by a
+    demand-paged 4 MiB RW exception slab with zero overhead for modules without
+    tags/EH; guest-only `INTERNAL_EXN_SIGNAL (0xff)` maps to `TRAP_UNREACHABLE (1)`
+    at Blot ABI 8 outer boundaries (`1..=22` unchanged) and `throw_ref(null)` traps
+    with `TRAP_INDIRECT_CALL (4)` matching `TrapCode::NullReference`.
+- **Branchy/array & real-workload x64 + AArch64 codegen**:
+  - `Op::LoadScaled`/`Op::StoreScaled` SIB addressing, general `Op::AddScaled`
+    (`lea dst, [base + idx * {2,4,8}]` on x64 and `add rd, rn, rm, lsl #k` on
+    AArch64, folding `i32.wrap_i64` directly into 32-bit scaled address ops),
+    diamond load forwarding, multi-exit/inductive counted-loop versioning,
+    intra-block `LiveFlags`/`A64LiveFlags` reuse, and 32-byte AVX2 loop alignment.
+  - Post-inlining `const64` + single-constant `Bin -> BinImm` / `Cmp -> CmpImm`
+    strength reduction with LICM retry on reduced divisions, zero-clobber 5-cycle
+    power-of-two signed `RemS` (`a - ((a + bias) & -(2^k))`), and bounded
+    constant-divisor loop specialization inlining.
+  - Cuts `heapsort_i32` from `55.76 µs` to **`43.11 µs`** — beating both
+    `--backend rust (-O3)` (`52.69 µs`, **1.22×**) and `--backend c (-O2)`
+    (`54.87 µs`, **1.27×**) — yields a **6.22×** 6-kernel geomean speedup over
+    Wasmtime `49.0.3` (**4.83×** vs. V8, **3.55×** vs. Rust `-O3`), and speeds up
+    real standalone Goose workloads (`sorting` **1.47×** to `43.89 ms`, beating
+    Rust `-O3`'s `50.61 ms` by 15%; `life` **1.74×** to `6.59 ms`).
+- **Compile & hot-reload pipeline (`wtime-decode`, `wtime-validate`, `tools/wtime-aot`)**:
+  - Single-thread fast path `< 64 KiB` in decode/validate, work-stealing parallel
+    SHA-256 Merkle chunking (64 KiB chunks in `WTX64INC-ROOT-2`), parallel non-code
+    section hashing, zero-clone `pre_vidx`, lazy `compiled` / sparse overlays,
+    early `DecodedModule` drop, and skipped stale sweeps on fresh caches.
+  - On a **5.79 MiB, 4,480-function** SIMD application (16T): **151.2 ms** cold
+    (**2.64×** faster than Wasmtime `49.0.3` at `399.8 ms`), **24.2 ms** on a
+    1-function edit (**16.6×** faster than Wasmtime at `400.6 ms`), **9.97 ms**
+    warm CLI cache hit, **0.031 ms** warm `.so` load (**59×** faster), and
+    **17.1%** smaller artifact (`7.75 MiB` vs. `9.34 MiB`).
+
 ## [0.1.2] - 2026-11-25
 
 Major pure-Rust AOT codegen, compile-pipeline, Wasm 3.0 backend, and opt-in

@@ -23,7 +23,9 @@ validator and compiles it ahead of time through one of four backends:
   `x64-v3` BMI1/BMI2/AVX2 + runtime OSXSAVE/XGETBV gating), and ELF64 linker
   with zero external compilers, zero subprocesses, and zero `libc`/`DT_NEEDED`
   runtime dependencies. Supports `memory32`, `memory64` (with 1-branch
-  wrap-proof bounds checks), `tail_call` (`return_call` / `return_call_indirect`
+  wrap-proof bounds checks), `multi-memory` (up to 64 extra memories),
+  `wide-arithmetic` (`0xfc13..=0xfc16`), `exception_handling` (`try_table`/
+  `throw`/`throw_ref`/`exnref`), `tail_call` (`return_call` / `return_call_indirect`
   with O(1) frame reuse), all 236 fixed-width 128-bit Wasm SIMD opcodes + all
   20 `relaxed_simd` opcodes, `.delta` incremental cache sidecars, and
   standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE + Goose Ryū float/bench
@@ -32,7 +34,8 @@ validator and compiles it ahead of time through one of four backends:
   for the exact admission, ABI, stack, signal, and CET `rdsspq` contract.
 - **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) multi-core
-  ARMv8-A backend (`--jobs`) with full 236+20 NEON SIMD, O(1)-stack `tail_call`,
+  ARMv8-A backend (`--jobs`) with full 236+20 NEON SIMD, `wide-arithmetic`,
+  `multi-memory`, `exception_handling`, O(1)-stack `tail_call`,
   and `memory64` parity, per-function incremental caching (`<cache>/a64-inc/` +
   companion `.vidx` incremental validation, byte-for-byte ELF identical to cold
   builds), standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE (`memory32`
@@ -117,6 +120,8 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     + `i64x2` splat/extract/replace.
 - **Blot ABI 8 shared libraries (`--blot-cdylib` across `x64`, `aarch64`, `c`, `rust`)** and **pure-Rust static Linux executables (`--backend x64` / `--backend aarch64`)**:
   - One non-shared Wasm32 memory (`max <= 65_536` pages; plus `memory64`,
+    `multi-memory` up to 64 extra memories, `wide-arithmetic` `0xfc13..=0xfc16`,
+    `exception_handling` `try_table`/`throw`/`throw_ref`/`exnref`,
     `tail_call` `return_call`/`return_call_indirect`, all 236 fixed-width
     128-bit Wasm SIMD opcodes, and all 20 `relaxed_simd` opcodes on both
     `--backend x64` and `--backend aarch64`), static 32-bit nullable `funcref`
@@ -141,9 +146,10 @@ internal errors).
   the safe-Rust core interpreter (`wtime-runtime`) where fuel or in-process
   cancellation is required, or isolate AOT binaries with OS cgroups and
   `--time-limit`.
-- **GC, exception handling, threads/atomics, continuations, multi-memory, custom
-  page sizes**: handled by the core interpreter (`wtime-runtime`), not
-  `wtime-aot`.
+- **GC, threads/atomics, continuations, custom page sizes**: handled by the
+  core interpreter (`wtime-runtime`), not `wtime-aot` (`exception_handling`,
+  `multi-memory`, and `wide-arithmetic` are supported on both `--backend x64`
+  and `--backend aarch64`).
 
 ## Uploaded modules & Threat Model
 

@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use wtime_types::ValType;
 use wtime_validate::{DecodedModule, Immediate, Instruction};
 
-use super::TRAP_OOB;
 use super::module::{
     CompileBudget, MAX_BLOCKS_PER_FN, MAX_FRAME_SCAN_WRITES, MAX_IF_SNAPSHOT_ENTRIES,
     MAX_IR_VALS_PER_FN, MAX_VAL_POOL_PER_FN, X64ConstVal, X64Module,
 };
+use super::{TRAP_INDIRECT_CALL, TRAP_OOB};
 
 pub type Res<T> = Result<T, String>;
 
@@ -73,6 +73,10 @@ pub enum IntBinOp {
     ShrU,
     Rotl,
     Rotr,
+    /// High 64 bits of signed 64×64 -> 128-bit multiply (`i64.mul_wide_s` upper limb, `I64` only).
+    MulHiS,
+    /// High 64 bits of unsigned 64×64 -> 128-bit multiply (`i64.mul_wide_u` upper limb, `I64` only).
+    MulHiU,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -400,6 +404,16 @@ pub enum Op {
     I32BinImm(IntBinOp, Val, i32),
     I64Bin(IntBinOp, Val, Val),
     I64BinImm(IntBinOp, Val, i32),
+    /// Scaled integer addition `base + (idx << shift)` (`shift ∈ 1..=3`), lowered to a single
+    /// 1-cycle `lea` on x64 and `add rd, rn, rm, lsl #shift` on AArch64.
+    /// When `!is64`, `base` and `idx` may be `Ty::I32` or `Ty::I64` (low 32 bits used,
+    /// zero-extended into 64 bits, folding `I32WrapI64` directly into the address op).
+    AddScaled {
+        is64: bool,
+        base: Val,
+        idx: Val,
+        shift: u8,
+    },
 
     I32Cmp(CmpOp, Val, Val),
     I32CmpImm(CmpOp, Val, i32),
@@ -468,12 +482,29 @@ pub enum Op {
         offset: u64,
         checked: bool,
     },
+    /// Non-wrapping, already-bounds-checked scaled load (`[mem_base + zero_ext(addr)*scale + offset]`,
+    /// `scale ∈ {2, 4, 8}`, Wasm32 only). Emitted late after vectorization/GVN.
+    LoadScaled {
+        kind: LoadKind,
+        addr: Val,
+        scale: u8,
+        offset: u64,
+    },
     Store {
         kind: StoreKind,
         addr: Val,
         val: Val,
         offset: u64,
         checked: bool,
+    },
+    /// Non-wrapping, already-bounds-checked scaled store (`[mem_base + zero_ext(addr)*scale + offset]`,
+    /// `scale ∈ {2, 4, 8}`, Wasm32 only). Emitted late after vectorization/GVN.
+    StoreScaled {
+        kind: StoreKind,
+        addr: Val,
+        val: Val,
+        scale: u8,
+        offset: u64,
     },
     V128LoadLane {
         width: u8,
@@ -499,6 +530,61 @@ pub enum Op {
         len: Val,
     },
     MemFill {
+        dst: Val,
+        val: Val,
+        len: Val,
+    },
+    /// Multi-memory load targeting memory `mem >= 1` (bounds-checked against `[Ctx + desc_off + 8]`).
+    LoadMem {
+        mem: u32,
+        kind: LoadKind,
+        addr: Val,
+        offset: u64,
+    },
+    /// Multi-memory store targeting memory `mem >= 1`.
+    StoreMem {
+        mem: u32,
+        kind: StoreKind,
+        addr: Val,
+        val: Val,
+        offset: u64,
+    },
+    /// Multi-memory SIMD lane load targeting memory `mem >= 1`.
+    V128LoadLaneMem {
+        mem: u32,
+        width: u8,
+        addr: Val,
+        vec: Val,
+        offset: u64,
+        lane: u8,
+    },
+    /// Multi-memory SIMD lane store targeting memory `mem >= 1`.
+    V128StoreLaneMem {
+        mem: u32,
+        width: u8,
+        addr: Val,
+        vec: Val,
+        offset: u64,
+        lane: u8,
+    },
+    /// `memory.size m` for `m >= 1`.
+    MemSizeIdx(u32),
+    /// `memory.grow m` for `m >= 1`.
+    MemGrowIdx {
+        mem: u32,
+        delta: Val,
+    },
+    /// `memory.copy dst_mem src_mem` when `dst_mem != 0 || src_mem != 0`.
+    MemCopyIdx {
+        dst_mem: u32,
+        src_mem: u32,
+        dst: Val,
+        src: Val,
+        len: Val,
+    },
+    /// `memory.fill m` for `m >= 1`.
+    MemFillIdx {
+        mem: u32,
         dst: Val,
         val: Val,
         len: Val,
@@ -621,6 +707,27 @@ pub enum Op {
         rets: ValRange,
     },
 
+    /// Allocates an exception record in the demand-paged exception slab (`I64` handle).
+    ExnAlloc {
+        tag: u32,
+        args: ValRange,
+    },
+    /// Stores the active exception handle (`[Ctx + exn_state_off + 0] = handle`).
+    ExnSetActive(Val),
+    /// Loads the active exception handle (`I64`) from `[Ctx + exn_state_off + 0]`.
+    ExnGetActive,
+    /// Clears `[Ctx + exn_state_off + 0] = 0`.
+    ExnClearActive,
+    /// Loads the `u32` tag index (`I32`) of exception handle `h`.
+    ExnGetTag(Val),
+    /// Loads payload field `field` (`ty`) of exception handle `h` for `tag`.
+    ExnGetPayload {
+        handle: Val,
+        tag: u32,
+        field: u32,
+        ty: Ty,
+    },
+
     Trap(u8),
 }
 
@@ -646,11 +753,19 @@ impl Op {
             | Op::BoundsCheck { .. }
             | Op::Load { checked: false, .. }
             | Op::Store { .. }
+            | Op::StoreScaled { .. }
             | Op::V128LoadLane { checked: false, .. }
             | Op::V128StoreLane { .. }
             | Op::MemGrow(_)
             | Op::MemCopy { .. }
             | Op::MemFill { .. }
+            | Op::LoadMem { .. }
+            | Op::StoreMem { .. }
+            | Op::V128LoadLaneMem { .. }
+            | Op::V128StoreLaneMem { .. }
+            | Op::MemGrowIdx { .. }
+            | Op::MemCopyIdx { .. }
+            | Op::MemFillIdx { .. }
             | Op::MemCopyConst { .. }
             | Op::MemFillConst { .. }
             | Op::MemByteBlur3Div { .. }
@@ -658,6 +773,12 @@ impl Op {
             | Op::F64AxpyLoop { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
+            | Op::ExnAlloc { .. }
+            | Op::ExnSetActive(_)
+            | Op::ExnGetActive
+            | Op::ExnClearActive
+            | Op::ExnGetTag(_)
+            | Op::ExnGetPayload { .. }
             | Op::Trap(_) => true,
             _ => false,
         }
@@ -672,6 +793,9 @@ impl Op {
             | Op::ConstV128(_)
             | Op::GlobalGet(_)
             | Op::MemSize
+            | Op::MemSizeIdx(_)
+            | Op::ExnGetActive
+            | Op::ExnClearActive
             | Op::Trap(_) => {}
             Op::I32Eqz(a)
             | Op::I64Eqz(a)
@@ -714,13 +838,22 @@ impl Op {
             | Op::TableGet { idx: a, .. }
             | Op::BoundsCheck { addr: a, .. }
             | Op::Load { addr: a, .. }
+            | Op::LoadScaled { addr: a, .. }
+            | Op::LoadMem { addr: a, .. }
             | Op::MemGrow(a)
+            | Op::MemGrowIdx { delta: a, .. }
             | Op::V128Splat { val: a, .. }
             | Op::V128ExtractLane { v: a, .. }
             | Op::V128Un { a, .. }
-            | Op::V128ToI32 { a, .. } => f(a),
+            | Op::V128ToI32 { a, .. }
+            | Op::ExnSetActive(a)
+            | Op::ExnGetTag(a)
+            | Op::ExnGetPayload { handle: a, .. } => f(a),
             Op::I32Bin(_, a, b)
             | Op::I64Bin(_, a, b)
+            | Op::AddScaled {
+                base: a, idx: b, ..
+            }
             | Op::I32Cmp(_, a, b)
             | Op::I64Cmp(_, a, b)
             | Op::F32Cmp(_, a, b)
@@ -731,10 +864,22 @@ impl Op {
             | Op::Store {
                 addr: a, val: b, ..
             }
+            | Op::StoreScaled {
+                addr: a, val: b, ..
+            }
+            | Op::StoreMem {
+                addr: a, val: b, ..
+            }
             | Op::V128LoadLane {
                 addr: a, vec: b, ..
             }
+            | Op::V128LoadLaneMem {
+                addr: a, vec: b, ..
+            }
             | Op::V128StoreLane {
+                addr: a, vec: b, ..
+            }
+            | Op::V128StoreLaneMem {
                 addr: a, vec: b, ..
             }
             | Op::V128ReplaceLane { v: a, x: b, .. }
@@ -762,12 +907,12 @@ impl Op {
                 f(tv);
                 f(fv);
             }
-            Op::MemCopy { dst, src, len } => {
+            Op::MemCopy { dst, src, len } | Op::MemCopyIdx { dst, src, len, .. } => {
                 f(dst);
                 f(src);
                 f(len);
             }
-            Op::MemFill { dst, val, len } => {
+            Op::MemFill { dst, val, len } | Op::MemFillIdx { dst, val, len, .. } => {
                 f(dst);
                 f(val);
                 f(len);
@@ -801,7 +946,7 @@ impl Op {
                 f(count);
                 f(scale);
             }
-            Op::Call { args, .. } => {
+            Op::Call { args, .. } | Op::ExnAlloc { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
                     f(v);
                 }
@@ -870,6 +1015,25 @@ pub enum Term {
         idx: Val,
         args: ValRange,
     },
+    /// Direct call inside a `try_table`; normal returns populate `ok_bb.params`, Wasm exceptions branch to `catch_bb(catch_args)`.
+    CallCatch {
+        func: u32,
+        args: ValRange,
+        ok_bb: BlockId,
+        catch_bb: BlockId,
+        catch_args: ValRange,
+    },
+    /// Indirect call inside a `try_table`; normal returns populate `ok_bb.params`, Wasm exceptions branch to `catch_bb(catch_args)`.
+    CallIndirectCatch {
+        ci_id: u32,
+        idx: Val,
+        args: ValRange,
+        ok_bb: BlockId,
+        catch_bb: BlockId,
+        catch_args: ValRange,
+    },
+    /// Unwinds out of the current function with `INTERNAL_EXN_SIGNAL` (`0xff`) for an active Wasm exception.
+    ThrowActive,
     Unreachable,
 }
 
@@ -923,7 +1087,23 @@ impl Term {
                 f(idx);
                 emit_range(pool, args, &mut f);
             }
-            Term::Unreachable => {}
+            Term::CallCatch {
+                args, catch_args, ..
+            } => {
+                emit_range(pool, args, &mut f);
+                emit_range(pool, catch_args, &mut f);
+            }
+            Term::CallIndirectCatch {
+                idx,
+                args,
+                catch_args,
+                ..
+            } => {
+                f(idx);
+                emit_range(pool, args, &mut f);
+                emit_range(pool, catch_args, &mut f);
+            }
+            Term::ThrowActive | Term::Unreachable => {}
         }
     }
 
@@ -945,9 +1125,19 @@ impl Term {
                     f(bb);
                 }
             }
+            Term::CallCatch {
+                ok_bb, catch_bb, ..
+            }
+            | Term::CallIndirectCatch {
+                ok_bb, catch_bb, ..
+            } => {
+                f(ok_bb);
+                f(catch_bb);
+            }
             Term::Return { .. }
             | Term::ReturnCall { .. }
             | Term::ReturnCallIndirect { .. }
+            | Term::ThrowActive
             | Term::Unreachable => {}
         }
     }
@@ -1111,10 +1301,10 @@ fn scan_frame_locals(
     n_locals: usize,
     budget: Option<&CompileBudget>,
 ) -> Res<FrameScan> {
-    // Fast check: count structured control frames (`block`/`loop`/`if`); skip all allocations if none!
+    // Fast check: count structured control frames (`block`/`loop`/`if`/`try_table`); skip all allocations if none!
     let mut n_frames = 0usize;
     for insn in code {
-        if matches!(insn.opcode, 0x02..=0x04) {
+        if matches!(insn.opcode, 0x02..=0x04 | 0x1f) {
             n_frames += 1;
         }
     }
@@ -1125,7 +1315,7 @@ fn scan_frame_locals(
         });
     }
 
-    // Pass 1: assign dense `frame_id` (0..n_frames) and matching `end_pc` for every `block`/`loop`/`if`.
+    // Pass 1: assign dense `frame_id` (0..n_frames) and matching `end_pc` for every `block`/`loop`/`if`/`try_table`.
     let mut pc_to_slot = vec![u32::MAX; code.len()];
     let mut frame_open_pc = Vec::with_capacity(n_frames);
     let mut frame_end_pc = vec![0usize; n_frames];
@@ -1138,7 +1328,7 @@ fn scan_frame_locals(
                 bg.check_deadline()?;
             }
             match insn.opcode {
-                0x02..=0x04 => {
+                0x02..=0x04 | 0x1f => {
                     let fid = frame_open_pc.len() as u32;
                     pc_to_slot[pc] = fid;
                     frame_open_pc.push(pc);
@@ -1167,7 +1357,7 @@ fn scan_frame_locals(
             bg.check_deadline()?;
         }
         match insn.opcode {
-            0x02 | 0x04 => open_frames.push((pc_to_slot[pc], false)),
+            0x02 | 0x04 | 0x1f => open_frames.push((pc_to_slot[pc], false)),
             0x03 => {
                 let fid = pc_to_slot[pc];
                 open_frames.push((fid, true));
@@ -1236,6 +1426,13 @@ enum FrameKind {
     Block,
     Loop,
     If,
+    TryTable,
+}
+
+struct TryTableState {
+    catch_bb: BlockId,
+    catches: Vec<(u8, Option<u32>, u32)>,
+    entry_locals: Vec<Val>,
 }
 
 struct BuildFrame {
@@ -1243,7 +1440,7 @@ struct BuildFrame {
     height: usize,
     params_len: usize,
     results: Vec<Ty>,
-    /// Target block for `br`: loop header (for Loop) or merge block (for Block/If). Unused for Function.
+    /// Target block for `br`: loop header (for Loop) or merge block (for Block/If/TryTable). Unused for Function.
     target_bb: BlockId,
     /// Locals carried into `target_bb` as trailing block params.
     carried_locals: Vec<u32>,
@@ -1253,6 +1450,8 @@ struct BuildFrame {
     if_undo_mark: usize,
     has_else: bool,
     unreachable: bool,
+    /// For `TryTable`: catch dispatcher block, source-order catch clauses, and entry locals snapshot.
+    try_state: Option<Box<TryTableState>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1492,7 +1691,13 @@ impl Builder {
     fn emit_i64_bin(&mut self, op: IntBinOp, mut a: Val, mut b: Val) -> Val {
         if matches!(
             op,
-            IntBinOp::Add | IntBinOp::Mul | IntBinOp::And | IntBinOp::Or | IntBinOp::Xor
+            IntBinOp::Add
+                | IntBinOp::Mul
+                | IntBinOp::MulHiS
+                | IntBinOp::MulHiU
+                | IntBinOp::And
+                | IntBinOp::Or
+                | IntBinOp::Xor
         ) && self.as_i64(a).is_some()
             && self.as_i64(b).is_none()
         {
@@ -1503,6 +1708,10 @@ impl Builder {
                 IntBinOp::Add => Some(ca.wrapping_add(cb)),
                 IntBinOp::Sub => Some(ca.wrapping_sub(cb)),
                 IntBinOp::Mul => Some(ca.wrapping_mul(cb)),
+                IntBinOp::MulHiS => Some(((i128::from(ca) * i128::from(cb)) >> 64) as i64),
+                IntBinOp::MulHiU => {
+                    Some(((u128::from(ca as u64) * u128::from(cb as u64)) >> 64) as i64)
+                }
                 IntBinOp::DivS if cb != 0 && !(ca == i64::MIN && cb == -1) => {
                     Some(ca.wrapping_div(cb))
                 }
@@ -1668,7 +1877,7 @@ fn block_type_tys(module: &X64Module, imm: &Immediate) -> Res<(Vec<Ty>, Vec<Ty>)
         Immediate::Block(-3) => (vec![], vec![Ty::F32]),
         Immediate::Block(-4) => (vec![], vec![Ty::F64]),
         Immediate::Block(-5) => (vec![], vec![Ty::V128]),
-        Immediate::Block(-17) => (vec![], vec![Ty::I64]),
+        Immediate::Block(-17) | Immediate::Block(-23) => (vec![], vec![Ty::I64]),
         Immediate::BlockType(t) => (vec![], vec![Ty::from_val(*t)]),
         Immediate::Block(i) if *i >= 0 => {
             let t = module
@@ -1802,6 +2011,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
         if_undo_mark: 0,
         has_else: false,
         unreachable: false,
+        try_state: None,
     }];
     let mut dead: usize = 0;
 
@@ -1879,7 +2089,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
         let op = insn.opcode;
         if frames.last().is_some_and(|f| f.unreachable) {
             match op {
-                0x02..=0x04 => {
+                0x02..=0x04 | 0x1f => {
                     dead += 1;
                     continue;
                 }
@@ -1935,6 +2145,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     if_undo_mark: 0,
                     has_else: false,
                     unreachable: false,
+                    try_state: None,
                 });
             }
             0x03 => {
@@ -1992,6 +2203,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     if_undo_mark: 0,
                     has_else: false,
                     unreachable: false,
+                    try_state: None,
                 });
             }
             0x04 => {
@@ -2047,7 +2259,128 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     if_undo_mark,
                     has_else: false,
                     unreachable: false,
+                    try_state: None,
                 });
+            }
+            0x1f => {
+                // try_table
+                let Immediate::TryTable(ref tt) = insn.immediate else {
+                    return Err("try_table immediate".into());
+                };
+                let (params, results) = block_type_tys(module, &tt.block)?;
+                let height = stack.len() - params.len();
+                let merge_bb = b.new_block(false)?;
+                let catch_bb = b.new_block(false)?;
+                let carried = scan.take_locals(pc);
+                let n_new = results
+                    .len()
+                    .saturating_add(carried.len().saturating_mul(2));
+                if b.ir.val_tys.len().saturating_add(n_new) > MAX_IR_VALS_PER_FN {
+                    return Err(format!(
+                        "x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"
+                    ));
+                }
+                for &rt in &results {
+                    b.add_block_param(merge_bb, rt);
+                }
+                for &lx in &carried {
+                    b.add_block_param(merge_bb, local_tys[lx as usize]);
+                    b.add_block_param(catch_bb, local_tys[lx as usize]);
+                }
+                let catches = tt
+                    .catches
+                    .iter()
+                    .map(|c| (c.kind, c.tag, c.label))
+                    .collect();
+                frames.push(BuildFrame {
+                    kind: FrameKind::TryTable,
+                    height,
+                    params_len: params.len(),
+                    results,
+                    target_bb: merge_bb,
+                    carried_locals: carried,
+                    else_bb: None,
+                    if_entry_params: Vec::new(),
+                    if_undo_mark: 0,
+                    has_else: false,
+                    unreachable: false,
+                    try_state: Some(Box::new(TryTableState {
+                        catch_bb,
+                        catches,
+                        entry_locals: locals.clone(),
+                    })),
+                });
+            }
+            0x08 => {
+                // throw tag
+                let tag = imm_idx()?;
+                let fti = *module
+                    .tags
+                    .get(tag as usize)
+                    .ok_or("throw tag out of range")?;
+                let tag_ty = module
+                    .module_types
+                    .get(fti as usize)
+                    .ok_or("throw tag type")?;
+                let n = tag_ty.params.len();
+                let at = stack.len() - n;
+                let args = b.ir.push_pool(&stack[at..])?;
+                stack.truncate(at);
+                let h = b.emit(Ty::I64, Op::ExnAlloc { tag, args });
+                b.emit_void(Op::ExnSetActive(h));
+                if let Some(tf) = frames.iter().rev().find(|f| f.kind == FrameKind::TryTable) {
+                    let catch_bb = tf.try_state.as_ref().unwrap().catch_bb;
+                    let mut cargs = Vec::with_capacity(tf.carried_locals.len());
+                    for &lx in &tf.carried_locals {
+                        cargs.push(locals[lx as usize]);
+                    }
+                    let vr = b.ir.push_pool(&cargs)?;
+                    b.terminate(Term::Jump {
+                        target: catch_bb,
+                        args: vr,
+                    });
+                    b.add_pred(catch_bb);
+                } else {
+                    b.terminate(Term::ThrowActive);
+                }
+                frames.last_mut().unwrap().unreachable = true;
+            }
+            0x0a => {
+                // throw_ref
+                let exn_val = stack.pop().ok_or("throw_ref val")?;
+                let trap_bb = b.new_block(false)?;
+                let throw_bb = b.new_block(false)?;
+                let is_null = b.emit(Ty::I32, Op::I64Eqz(exn_val));
+                b.terminate(Term::BranchIf {
+                    cond: is_null,
+                    then_bb: trap_bb,
+                    then_args: ValRange::EMPTY,
+                    else_bb: throw_bb,
+                    else_args: ValRange::EMPTY,
+                });
+                b.add_pred(trap_bb);
+                b.add_pred(throw_bb);
+                b.cur_bb = trap_bb;
+                b.emit_void(Op::Trap(TRAP_INDIRECT_CALL));
+                b.terminate(Term::Unreachable);
+                b.cur_bb = throw_bb;
+                b.emit_void(Op::ExnSetActive(exn_val));
+                if let Some(tf) = frames.iter().rev().find(|f| f.kind == FrameKind::TryTable) {
+                    let catch_bb = tf.try_state.as_ref().unwrap().catch_bb;
+                    let mut cargs = Vec::with_capacity(tf.carried_locals.len());
+                    for &lx in &tf.carried_locals {
+                        cargs.push(locals[lx as usize]);
+                    }
+                    let vr = b.ir.push_pool(&cargs)?;
+                    b.terminate(Term::Jump {
+                        target: catch_bb,
+                        args: vr,
+                    });
+                    b.add_pred(catch_bb);
+                } else {
+                    b.terminate(Term::ThrowActive);
+                }
+                frames.last_mut().unwrap().unreachable = true;
             }
             0x05 => {
                 // else
@@ -2096,7 +2429,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                             stack.extend(res_vals);
                         }
                     }
-                    FrameKind::Block | FrameKind::If => {
+                    FrameKind::Block | FrameKind::If | FrameKind::TryTable => {
                         if !f.unreachable {
                             let args_r = build_branch_args(&mut b, &stack, &locals, &f)?;
                             let target = f.target_bb;
@@ -2105,6 +2438,116 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                                 args: args_r,
                             });
                             b.add_pred(target);
+                        }
+                        if let Some(ts) = f.try_state
+                            && b.ir.blocks[ts.catch_bb.0 as usize].preds > 0
+                        {
+                            // Build catch dispatcher using `catch_locals` without mutating `locals`/`local_undo`.
+                            let mut catch_locals = ts.entry_locals;
+                            let cparams = b.ir.blocks[ts.catch_bb.0 as usize].params.clone();
+                            for (&lx, &lv) in f.carried_locals.iter().zip(&cparams) {
+                                catch_locals[lx as usize] = lv;
+                            }
+                            b.cur_bb = ts.catch_bb;
+                            let exn = b.emit(Ty::I64, Op::ExnGetActive);
+                            let exn_tag = if ts.catches.iter().any(|(_, t, _)| t.is_some()) {
+                                Some(b.emit(Ty::I32, Op::ExnGetTag(exn)))
+                            } else {
+                                None
+                            };
+                            let mut matched_all = false;
+                            for &(kind, tag_opt, label) in &ts.catches {
+                                let match_bb = b.new_block(false)?;
+                                let next_bb = if let Some(tag_idx) = tag_opt {
+                                    let nbb = b.new_block(false)?;
+                                    let tc = b.const_i32(tag_idx as i32);
+                                    let eq = b.emit_i32_cmp(CmpOp::Eq, exn_tag.unwrap(), tc);
+                                    b.terminate(Term::BranchIf {
+                                        cond: eq,
+                                        then_bb: match_bb,
+                                        then_args: ValRange::EMPTY,
+                                        else_bb: nbb,
+                                        else_args: ValRange::EMPTY,
+                                    });
+                                    b.add_pred(match_bb);
+                                    b.add_pred(nbb);
+                                    Some(nbb)
+                                } else {
+                                    b.terminate(Term::Jump {
+                                        target: match_bb,
+                                        args: ValRange::EMPTY,
+                                    });
+                                    b.add_pred(match_bb);
+                                    None
+                                };
+                                b.cur_bb = match_bb;
+                                b.emit_void(Op::ExnClearActive);
+                                let mut vals = Vec::new();
+                                if let Some(tag_idx) = tag_opt {
+                                    let fti = module.tags[tag_idx as usize] as usize;
+                                    for (field_i, &vt) in
+                                        module.module_types[fti].params.iter().enumerate()
+                                    {
+                                        let ty = Ty::from_val(vt);
+                                        vals.push(b.emit(
+                                            ty,
+                                            Op::ExnGetPayload {
+                                                handle: exn,
+                                                tag: tag_idx,
+                                                field: field_i as u32,
+                                                ty,
+                                            },
+                                        ));
+                                    }
+                                }
+                                if kind == 1 || kind == 3 {
+                                    vals.push(exn);
+                                }
+                                let tfi = frames.len() - 1 - label as usize;
+                                let tf = &frames[tfi];
+                                if tf.kind == FrameKind::Function {
+                                    let vr = b.ir.push_pool(&vals)?;
+                                    b.terminate(Term::Return { vals: vr });
+                                } else {
+                                    for &lx in &tf.carried_locals {
+                                        vals.push(catch_locals[lx as usize]);
+                                    }
+                                    let vr = b.ir.push_pool(&vals)?;
+                                    let tgt = tf.target_bb;
+                                    b.terminate(Term::Jump {
+                                        target: tgt,
+                                        args: vr,
+                                    });
+                                    b.add_pred(tgt);
+                                }
+                                if let Some(nbb) = next_bb {
+                                    b.cur_bb = nbb;
+                                } else {
+                                    matched_all = true;
+                                    break;
+                                }
+                            }
+                            if !matched_all {
+                                if let Some(enc) = frames
+                                    .iter()
+                                    .rev()
+                                    .find(|fr| fr.kind == FrameKind::TryTable)
+                                {
+                                    let enc_bb = enc.try_state.as_ref().unwrap().catch_bb;
+                                    let mut enc_args = Vec::with_capacity(enc.carried_locals.len());
+                                    for &lx in &enc.carried_locals {
+                                        enc_args.push(catch_locals[lx as usize]);
+                                    }
+                                    let vr = b.ir.push_pool(&enc_args)?;
+                                    b.terminate(Term::Jump {
+                                        target: enc_bb,
+                                        args: vr,
+                                    });
+                                    b.add_pred(enc_bb);
+                                } else {
+                                    b.terminate(Term::ThrowActive);
+                                }
+                            }
                         }
                         if f.kind == FrameKind::If && !f.has_else {
                             // Unwind `then`-branch local mutations back to exact `if`-entry state,
@@ -2291,19 +2734,48 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                         "x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"
                     ));
                 }
-                let mut rets_vec = Vec::with_capacity(fty.results.len());
-                for &rt in &fty.results {
-                    let v = b.ir.push_val(Ty::from_val(rt));
-                    b.consts.push(None);
-                    rets_vec.push(v);
+                if let Some(tf) = frames
+                    .iter()
+                    .rev()
+                    .find(|fr| fr.kind == FrameKind::TryTable)
+                {
+                    let catch_bb = tf.try_state.as_ref().unwrap().catch_bb;
+                    let mut cargs = Vec::with_capacity(tf.carried_locals.len());
+                    for &lx in &tf.carried_locals {
+                        cargs.push(locals[lx as usize]);
+                    }
+                    let catch_args = b.ir.push_pool(&cargs)?;
+                    let ok_bb = b.new_block(false)?;
+                    let mut rets_vec = Vec::with_capacity(fty.results.len());
+                    for &rt in &fty.results {
+                        rets_vec.push(b.add_block_param(ok_bb, Ty::from_val(rt)));
+                    }
+                    b.terminate(Term::CallCatch {
+                        func: f as u32,
+                        args,
+                        ok_bb,
+                        catch_bb,
+                        catch_args,
+                    });
+                    b.add_pred(ok_bb);
+                    b.add_pred(catch_bb);
+                    b.cur_bb = ok_bb;
+                    stack.extend(rets_vec);
+                } else {
+                    let mut rets_vec = Vec::with_capacity(fty.results.len());
+                    for &rt in &fty.results {
+                        let v = b.ir.push_val(Ty::from_val(rt));
+                        b.consts.push(None);
+                        rets_vec.push(v);
+                    }
+                    let rets = b.ir.push_pool(&rets_vec)?;
+                    b.emit_void(Op::Call {
+                        func: f as u32,
+                        args,
+                        rets,
+                    });
+                    stack.extend(rets_vec);
                 }
-                let rets = b.ir.push_pool(&rets_vec)?;
-                b.emit_void(Op::Call {
-                    func: f as u32,
-                    args,
-                    rets,
-                });
-                stack.extend(rets_vec);
             }
             0x11 => {
                 // call_indirect
@@ -2328,20 +2800,50 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                         "x64: function {func_index} SSA values exceed cap {MAX_IR_VALS_PER_FN}"
                     ));
                 }
-                let mut rets_vec = Vec::with_capacity(fty.results.len());
-                for &rt in &fty.results {
-                    let v = b.ir.push_val(Ty::from_val(rt));
-                    b.consts.push(None);
-                    rets_vec.push(v);
+                if let Some(tf) = frames
+                    .iter()
+                    .rev()
+                    .find(|fr| fr.kind == FrameKind::TryTable)
+                {
+                    let catch_bb = tf.try_state.as_ref().unwrap().catch_bb;
+                    let mut cargs = Vec::with_capacity(tf.carried_locals.len());
+                    for &lx in &tf.carried_locals {
+                        cargs.push(locals[lx as usize]);
+                    }
+                    let catch_args = b.ir.push_pool(&cargs)?;
+                    let ok_bb = b.new_block(false)?;
+                    let mut rets_vec = Vec::with_capacity(fty.results.len());
+                    for &rt in &fty.results {
+                        rets_vec.push(b.add_block_param(ok_bb, Ty::from_val(rt)));
+                    }
+                    b.terminate(Term::CallIndirectCatch {
+                        ci_id: ci_id as u32,
+                        idx,
+                        args,
+                        ok_bb,
+                        catch_bb,
+                        catch_args,
+                    });
+                    b.add_pred(ok_bb);
+                    b.add_pred(catch_bb);
+                    b.cur_bb = ok_bb;
+                    stack.extend(rets_vec);
+                } else {
+                    let mut rets_vec = Vec::with_capacity(fty.results.len());
+                    for &rt in &fty.results {
+                        let v = b.ir.push_val(Ty::from_val(rt));
+                        b.consts.push(None);
+                        rets_vec.push(v);
+                    }
+                    let rets = b.ir.push_pool(&rets_vec)?;
+                    b.emit_void(Op::CallIndirect {
+                        ci_id: ci_id as u32,
+                        idx,
+                        args,
+                        rets,
+                    });
+                    stack.extend(rets_vec);
                 }
-                let rets = b.ir.push_pool(&rets_vec)?;
-                b.emit_void(Op::CallIndirect {
-                    ci_id: ci_id as u32,
-                    idx,
-                    args,
-                    rets,
-                });
-                stack.extend(rets_vec);
             }
             0x12 => {
                 // return_call
@@ -2488,12 +2990,10 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 stack.push(r);
             }
             0x28..=0x35 | 0xfd00..=0xfd0a | 0xfd5c | 0xfd5d => {
-                let Immediate::MemArg {
-                    memory: 0, offset, ..
-                } = insn.immediate
-                else {
+                let Immediate::MemArg { memory, offset, .. } = insn.immediate else {
                     return Err("load on unsupported memory".into());
                 };
+                let mem64 = module.mem_is_64(memory);
                 let addr = stack.pop().ok_or("load addr")?;
                 let kind = match op {
                     0x28 => LoadKind::I32,
@@ -2524,7 +3024,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     0xfd5c => LoadKind::V128Load32Zero,
                     _ => LoadKind::V128Load64Zero,
                 };
-                if (!module.memory64 && offset > u32::MAX as u64)
+                if (!mem64 && offset > u32::MAX as u64)
                     || offset.checked_add(kind.bytes()).is_none()
                 {
                     b.emit_void(Op::Trap(TRAP_OOB));
@@ -2532,24 +3032,34 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     frames.last_mut().unwrap().unreachable = true;
                     continue;
                 }
-                let r = b.emit(
-                    kind.ty(),
-                    Op::Load {
-                        kind,
-                        addr,
-                        offset,
-                        checked: false,
-                    },
-                );
+                let r = if memory == 0 {
+                    b.emit(
+                        kind.ty(),
+                        Op::Load {
+                            kind,
+                            addr,
+                            offset,
+                            checked: false,
+                        },
+                    )
+                } else {
+                    b.emit(
+                        kind.ty(),
+                        Op::LoadMem {
+                            mem: memory,
+                            kind,
+                            addr,
+                            offset,
+                        },
+                    )
+                };
                 stack.push(r);
             }
             0x36..=0x3e | 0xfd0b => {
-                let Immediate::MemArg {
-                    memory: 0, offset, ..
-                } = insn.immediate
-                else {
+                let Immediate::MemArg { memory, offset, .. } = insn.immediate else {
                     return Err("store on unsupported memory".into());
                 };
+                let mem64 = module.mem_is_64(memory);
                 let val = stack.pop().ok_or("store val")?;
                 let addr = stack.pop().ok_or("store addr")?;
                 let kind = match op {
@@ -2561,7 +3071,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     0x3b | 0x3d => StoreKind::I16,
                     _ => StoreKind::V128,
                 };
-                if (!module.memory64 && offset > u32::MAX as u64)
+                if (!mem64 && offset > u32::MAX as u64)
                     || offset.checked_add(kind.bytes()).is_none()
                 {
                     b.emit_void(Op::Trap(TRAP_OOB));
@@ -2569,28 +3079,40 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     frames.last_mut().unwrap().unreachable = true;
                     continue;
                 }
-                b.emit_void(Op::Store {
-                    kind,
-                    addr,
-                    val,
-                    offset,
-                    checked: false,
-                });
+                if memory == 0 {
+                    b.emit_void(Op::Store {
+                        kind,
+                        addr,
+                        val,
+                        offset,
+                        checked: false,
+                    });
+                } else {
+                    b.emit_void(Op::StoreMem {
+                        mem: memory,
+                        kind,
+                        addr,
+                        val,
+                        offset,
+                    });
+                }
             }
             0xfd54..=0xfd5b => {
-                let (offset, lane) = match &insn.immediate {
+                let (memory, offset, lane) = match &insn.immediate {
                     Immediate::MemLane {
-                        memory: 0,
+                        memory,
                         offset,
                         lane,
                         ..
-                    } => (*offset, *lane),
+                    } => (*memory, *offset, *lane),
                     Immediate::Bytes(bs) if bs.len() == 17 => {
                         let off = u64::from_le_bytes(bs[4..12].try_into().unwrap());
-                        (off, bs[16])
+                        let mem = u32::from_le_bytes(bs[12..16].try_into().unwrap());
+                        (mem, off, bs[16])
                     }
                     _ => return Err("simd lane load/store on unsupported memory".into()),
                 };
+                let mem64 = module.mem_is_64(memory);
                 let width: u8 = match (op - 0xfd54) % 4 {
                     0 => 1,
                     1 => 2,
@@ -2599,7 +3121,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 };
                 let vec = stack.pop().ok_or("simd lane vec")?;
                 let addr = stack.pop().ok_or("simd lane addr")?;
-                if (!module.memory64 && offset > u32::MAX as u64)
+                if (!mem64 && offset > u32::MAX as u64)
                     || offset.checked_add(u64::from(width)).is_none()
                 {
                     b.emit_void(Op::Trap(TRAP_OOB));
@@ -2608,19 +3130,33 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     continue;
                 }
                 if op <= 0xfd57 {
-                    let r = b.emit(
-                        Ty::V128,
-                        Op::V128LoadLane {
-                            width,
-                            addr,
-                            vec,
-                            offset,
-                            lane,
-                            checked: false,
-                        },
-                    );
+                    let r = if memory == 0 {
+                        b.emit(
+                            Ty::V128,
+                            Op::V128LoadLane {
+                                width,
+                                addr,
+                                vec,
+                                offset,
+                                lane,
+                                checked: false,
+                            },
+                        )
+                    } else {
+                        b.emit(
+                            Ty::V128,
+                            Op::V128LoadLaneMem {
+                                mem: memory,
+                                width,
+                                addr,
+                                vec,
+                                offset,
+                                lane,
+                            },
+                        )
+                    };
                     stack.push(r);
-                } else {
+                } else if memory == 0 {
                     b.emit_void(Op::V128StoreLane {
                         width,
                         addr,
@@ -2629,27 +3165,59 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                         lane,
                         checked: false,
                     });
+                } else {
+                    b.emit_void(Op::V128StoreLaneMem {
+                        mem: memory,
+                        width,
+                        addr,
+                        vec,
+                        offset,
+                        lane,
+                    });
                 }
             }
             0x3f => {
-                let addr_ty = if module.memory64 { Ty::I64 } else { Ty::I32 };
-                let v = if b.const_fold
-                    && let Some(bytes) = module.fixed32
-                {
-                    if module.memory64 {
-                        b.const_i64((bytes >> 16) as i64)
+                let mem = match insn.immediate {
+                    Immediate::Index(m) => m,
+                    Immediate::None => 0,
+                    _ => return Err("memory.size immediate".into()),
+                };
+                let mem64 = module.mem_is_64(mem);
+                let addr_ty = if mem64 { Ty::I64 } else { Ty::I32 };
+                let v = if mem == 0 {
+                    if b.const_fold
+                        && let Some(bytes) = module.fixed32
+                    {
+                        if mem64 {
+                            b.const_i64((bytes >> 16) as i64)
+                        } else {
+                            b.const_i32((bytes >> 16) as i32)
+                        }
                     } else {
-                        b.const_i32((bytes >> 16) as i32)
+                        b.emit(addr_ty, Op::MemSize)
                     }
                 } else {
-                    b.emit(addr_ty, Op::MemSize)
+                    b.emit(addr_ty, Op::MemSizeIdx(mem))
                 };
                 stack.push(v);
             }
             0x40 => {
-                let addr_ty = if module.memory64 { Ty::I64 } else { Ty::I32 };
+                let mem = match insn.immediate {
+                    Immediate::Index(m) => m,
+                    Immediate::None => 0,
+                    _ => return Err("memory.grow immediate".into()),
+                };
+                let addr_ty = if module.mem_is_64(mem) {
+                    Ty::I64
+                } else {
+                    Ty::I32
+                };
                 let delta = stack.pop().ok_or("memory.grow")?;
-                let v = b.emit(addr_ty, Op::MemGrow(delta));
+                let v = if mem == 0 {
+                    b.emit(addr_ty, Op::MemGrow(delta))
+                } else {
+                    b.emit(addr_ty, Op::MemGrowIdx { mem, delta })
+                };
                 stack.push(v);
             }
             0x41 => {
@@ -2681,49 +3249,123 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 stack.push(r);
             }
             0xfc0a => {
+                let (dst_mem, src_mem) = match insn.immediate {
+                    Immediate::Pair(d, s) => (d, s),
+                    Immediate::None => (0, 0),
+                    _ => return Err("memory.copy immediate".into()),
+                };
                 let len = stack.pop().ok_or("mcopy len")?;
                 let src = stack.pop().ok_or("mcopy src")?;
                 let dst = stack.pop().ok_or("mcopy dst")?;
-                let const_len = if module.memory64 {
-                    b.as_i64(len).map(|c| c as u64)
+                if dst_mem == 0 && src_mem == 0 {
+                    let const_len = if module.memory64 {
+                        b.as_i64(len).map(|c| c as u64)
+                    } else {
+                        b.as_i32(len).map(|c| u64::from(c as u32))
+                    };
+                    if let Some(c) = const_len
+                        && c <= 64
+                    {
+                        b.emit_void(Op::MemCopyConst {
+                            dst,
+                            src,
+                            len: c as u32,
+                            dst_checked: false,
+                            src_checked: false,
+                        });
+                    } else {
+                        b.emit_void(Op::MemCopy { dst, src, len });
+                    }
                 } else {
-                    b.as_i32(len).map(|c| u64::from(c as u32))
-                };
-                if let Some(c) = const_len
-                    && c <= 64
-                {
-                    b.emit_void(Op::MemCopyConst {
+                    b.emit_void(Op::MemCopyIdx {
+                        dst_mem,
+                        src_mem,
                         dst,
                         src,
-                        len: c as u32,
-                        dst_checked: false,
-                        src_checked: false,
+                        len,
                     });
-                } else {
-                    b.emit_void(Op::MemCopy { dst, src, len });
                 }
             }
             0xfc0b => {
+                let mem = match insn.immediate {
+                    Immediate::Index(m) => m,
+                    Immediate::None => 0,
+                    _ => return Err("memory.fill immediate".into()),
+                };
                 let len = stack.pop().ok_or("mfill len")?;
                 let val = stack.pop().ok_or("mfill val")?;
                 let dst = stack.pop().ok_or("mfill dst")?;
-                let const_len = if module.memory64 {
-                    b.as_i64(len).map(|c| c as u64)
+                if mem == 0 {
+                    let const_len = if module.memory64 {
+                        b.as_i64(len).map(|c| c as u64)
+                    } else {
+                        b.as_i32(len).map(|c| u64::from(c as u32))
+                    };
+                    if let Some(c) = const_len
+                        && c <= 64
+                    {
+                        b.emit_void(Op::MemFillConst {
+                            dst,
+                            val,
+                            len: c as u32,
+                            checked: false,
+                        });
+                    } else {
+                        b.emit_void(Op::MemFill { dst, val, len });
+                    }
                 } else {
-                    b.as_i32(len).map(|c| u64::from(c as u32))
-                };
-                if let Some(c) = const_len
-                    && c <= 64
-                {
-                    b.emit_void(Op::MemFillConst {
-                        dst,
-                        val,
-                        len: c as u32,
-                        checked: false,
-                    });
-                } else {
-                    b.emit_void(Op::MemFill { dst, val, len });
+                    b.emit_void(Op::MemFillIdx { mem, dst, val, len });
                 }
+            }
+            0xfc13 => {
+                // i64.add128(a_lo, a_hi, b_lo, b_hi) -> (lo, hi)
+                let b_hi = stack.pop().ok_or("i64.add128 b_hi")?;
+                let b_lo = stack.pop().ok_or("i64.add128 b_lo")?;
+                let a_hi = stack.pop().ok_or("i64.add128 a_hi")?;
+                let a_lo = stack.pop().ok_or("i64.add128 a_lo")?;
+                let lo = b.emit_i64_bin(IntBinOp::Add, a_lo, b_lo);
+                let carry32 = b.emit_i64_cmp(CmpOp::LtU, lo, a_lo);
+                let carry64 = if let Some(c) = b.as_i32(carry32) {
+                    b.const_i64(i64::from(c as u32))
+                } else {
+                    b.emit(Ty::I64, Op::I64ExtendI32U(carry32))
+                };
+                let hi0 = b.emit_i64_bin(IntBinOp::Add, a_hi, b_hi);
+                let hi = b.emit_i64_bin(IntBinOp::Add, hi0, carry64);
+                stack.push(lo);
+                stack.push(hi);
+            }
+            0xfc14 => {
+                // i64.sub128(a_lo, a_hi, b_lo, b_hi) -> (lo, hi)
+                let b_hi = stack.pop().ok_or("i64.sub128 b_hi")?;
+                let b_lo = stack.pop().ok_or("i64.sub128 b_lo")?;
+                let a_hi = stack.pop().ok_or("i64.sub128 a_hi")?;
+                let a_lo = stack.pop().ok_or("i64.sub128 a_lo")?;
+                let lo = b.emit_i64_bin(IntBinOp::Sub, a_lo, b_lo);
+                let borrow32 = b.emit_i64_cmp(CmpOp::LtU, a_lo, b_lo);
+                let borrow64 = if let Some(c) = b.as_i32(borrow32) {
+                    b.const_i64(i64::from(c as u32))
+                } else {
+                    b.emit(Ty::I64, Op::I64ExtendI32U(borrow32))
+                };
+                let hi0 = b.emit_i64_bin(IntBinOp::Sub, a_hi, b_hi);
+                let hi = b.emit_i64_bin(IntBinOp::Sub, hi0, borrow64);
+                stack.push(lo);
+                stack.push(hi);
+            }
+            0xfc15 | 0xfc16 => {
+                // i64.mul_wide_s / i64.mul_wide_u(a, b) -> (lo, hi)
+                let rhs = stack.pop().ok_or("i64.mul_wide rhs")?;
+                let lhs = stack.pop().ok_or("i64.mul_wide lhs")?;
+                let lo = b.emit_i64_bin(IntBinOp::Mul, lhs, rhs);
+                let hi_op = if op == 0xfc15 {
+                    IntBinOp::MulHiS
+                } else {
+                    IntBinOp::MulHiU
+                };
+                let hi = b.emit_i64_bin(hi_op, lhs, rhs);
+                stack.push(lo);
+                stack.push(hi);
             }
             0xfd0c => {
                 let Immediate::Bytes(ref bytes) = insn.immediate else {

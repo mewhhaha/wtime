@@ -814,6 +814,11 @@ impl A64Asm {
         self.emit(0x9bc0_7c00 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | rd.0 as u32);
     }
 
+    /// 64-bit signed high multiply: `rd = ((i128(rn as i64) * i128(rm as i64)) >> 64) as u64`.
+    pub fn smulh(&mut self, rd: Reg, rn: Reg, rm: Reg) {
+        self.emit(0x9b40_7c00 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | rd.0 as u32);
+    }
+
     /// Add with carry: `rd = rn + rm + C`.
     pub fn adc(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg) {
         self.emit(

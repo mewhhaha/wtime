@@ -8,12 +8,13 @@ use super::lower::TargetIsa;
 use super::module::X64Module;
 use super::runtime::{RuntimeTables, RuntimeTestHooks};
 use super::{
-    CtxLayout, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES, GUEST_STACK_TOTAL_BYTES,
-    GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE, OFF_EXEC_ARGC,
-    OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_EXIT_CODE, OFF_EXEC_MEM_LIMIT,
-    OFF_EXEC_TIMING_PATH, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES,
-    OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR,
-    RodataConsts, TRAP_EXIT, TRAP_HOST, TRAP_MESSAGES, TRAP_OOB, TRAP_UNSUPPORTED_ISA,
+    CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
+    GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_GOOSE_FMT_FLOAT, HELPER_INITIALIZE,
+    INTERNAL_EXN_SIGNAL, OFF_EXEC_ARGC, OFF_EXEC_ARGV, OFF_EXEC_CLOCK_ORIGIN, OFF_EXEC_EXIT_CODE,
+    OFF_EXEC_MEM_LIMIT, OFF_EXEC_TIMING_PATH, OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP,
+    OFF_HANDLE_ALLOC_BYTES, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES,
+    OFF_STACK_FLOOR, RodataConsts, TRAP_EXIT, TRAP_HOST, TRAP_MESSAGES, TRAP_OOB,
+    TRAP_UNSUPPORTED_ISA,
 };
 
 const SYS_READ: u32 = 0;
@@ -486,6 +487,67 @@ pub fn emit_standalone_entry(
         a.bind(lbl_mem_done);
     }
 
+    // ---- Step 3a2: Additional linear memories `1..N` (`multi-memory`) ----
+    for (mi, em) in module.extra_memories.iter().enumerate() {
+        let desc_off = layout.extra_mem_offs[mi];
+        let hard_cap = if em.memory64 {
+            em.min_pages.max(131_072)
+        } else {
+            65_536
+        };
+        let eff_max = em.max_pages.min(hard_cap);
+        if eff_max == 0 {
+            continue;
+        }
+        a.mov_ri64(Gp::Rax, eff_max);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off + 16), Gp::Rax);
+        let reserve_bytes = eff_max << 16;
+        a.mov_ri64(Gp::Rbx, reserve_bytes);
+        a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_rr(true, Gp::Rsi, Gp::Rbx);
+        a.mov_ri32(Gp::Rdx, PROT_NONE);
+        a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON_NORESERVE);
+        a.mov_ri64(Gp::R8, u64::MAX);
+        a.xor_rr(false, Gp::R9, Gp::R9);
+        a.mov_ri32(Gp::Rax, SYS_MMAP);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_fail_alloc);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off), Gp::Rax);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off + 24), Gp::Rbx);
+        if em.min_pages > 0 {
+            let init_len = em.min_pages << 16;
+            a.mov_rr(true, Gp::Rdi, Gp::Rax);
+            a.mov_ri64(Gp::Rsi, init_len);
+            a.mov_ri32(Gp::Rdx, PROT_RW);
+            a.mov_ri32(Gp::Rax, SYS_MPROTECT);
+            a.syscall();
+            a.cmp_ri(true, Gp::Rax, -4095);
+            a.jcc(Cond::Ae, lbl_fail_alloc);
+            a.mov_ri64(Gp::Rax, init_len);
+            a.mov_mr(true, Mem::base_disp(Gp::R15, desc_off + 8), Gp::Rax);
+        }
+    }
+
+    // ---- Step 3a3: Exception arena slab (demand-paged RW, EH modules only) ----
+    if let Some(exn_off) = layout.exn_state_off {
+        a.xor_rr(false, Gp::Rdi, Gp::Rdi);
+        a.mov_ri64(Gp::Rsi, EXN_SLAB_BYTES as u64);
+        a.mov_ri32(Gp::Rdx, PROT_RW);
+        a.mov_ri32(Gp::R10, MAP_PRIVATE_ANON);
+        a.mov_ri64(Gp::R8, u64::MAX);
+        a.xor_rr(false, Gp::R9, Gp::R9);
+        a.mov_ri32(Gp::Rax, SYS_MMAP);
+        a.syscall();
+        a.cmp_ri(true, Gp::Rax, -4095);
+        a.jcc(Cond::Ae, lbl_fail_alloc);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 8), Gp::Rax);
+        a.mov_ri64(Gp::Rax, 16);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 16), Gp::Rax);
+        a.mov_ri64(Gp::Rax, EXN_SLAB_BYTES as u64);
+        a.mov_mr(true, Mem::base_disp(Gp::R15, exn_off + 24), Gp::Rax);
+    }
+
     // ---- Step 3b: Install SIGSEGV guard-page handler (standalone memory32 ONLY) ----
     let lbl_sig_handler = a.new_label();
     let lbl_sig_restorer = a.new_label();
@@ -652,10 +714,23 @@ pub fn emit_standalone_entry(
     a.mov_ri32(Gp::Rbx, 12); // TRAP_ALLOC_FAILED
 
     a.bind(lbl_fail_trap);
-    // Print canonical TRAP_MESSAGES[Rbx - 1] + "\n" to stderr (fd=2)
+    // Print canonical TRAP_MESSAGES[Rbx - 1] + "\n" (or uncaught exception message) to stderr (fd=2)
     a.movzx_rr8(Gp::Rax, Gp::Rbx);
-    a.sub_ri(false, Gp::Rax, 1);
     let lbl_exit1 = a.new_label();
+    if layout.exn_state_off.is_some() {
+        let lbl_not_exn = a.new_label();
+        a.cmp_ri(false, Gp::Rax, i32::from(INTERNAL_EXN_SIGNAL));
+        a.jcc(Cond::Ne, lbl_not_exn);
+        let msg = b"Exception: uncaught wasm exception\n";
+        let exn_msg_off = a.add_local_rodata(1, msg);
+        a.lea_rip(Gp::Rsi, RelocTarget::LocalRodata(exn_msg_off));
+        a.mov_ri32(Gp::Rdx, msg.len() as u32);
+        a.mov_ri32(Gp::R8, 2);
+        emit_write_all(&mut a, Gp::R8);
+        a.jmp(lbl_exit1);
+        a.bind(lbl_not_exn);
+    }
+    a.sub_ri(false, Gp::Rax, 1);
     a.cmp_ri(false, Gp::Rax, TRAP_MESSAGES.len() as i32);
     a.jcc(Cond::Ae, lbl_exit1);
     a.lea_rip(Gp::R9, RelocTarget::Rodata(tables.trap_table_off));

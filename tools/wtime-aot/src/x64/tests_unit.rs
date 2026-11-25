@@ -370,6 +370,9 @@ fn ctx_layout_enforces_16_mib_cap() {
         },
         memory: None,
         memory64: false,
+        extra_memories: Vec::new(),
+        tags: Vec::new(),
+        uses_exceptions: false,
         fixed32: None,
         active_elem_checks: Vec::new(),
         active_data_segs: Vec::new(),
@@ -502,6 +505,9 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         mut_extern_tables: Default::default(),
         memory: None,
         memory64: false,
+        extra_memories: Vec::new(),
+        tags: Vec::new(),
+        uses_exceptions: false,
         fixed32: None,
         active_elem_checks: Vec::new(),
         active_data_segs: Vec::new(),
@@ -895,10 +901,12 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     ]);
     assert!(compile_admit_only(&tail_call_mod).is_ok());
 
-    // 11. Rejected: multi-memory (DisabledFeature -> AdmissionRejected exit code 4!).
+    // 11. Admitted: multi-memory (`multi-memory` proposal); rejected: shared memory (`threads`).
     let multi_mem = wasm_module(&[section(5, &[2, 0x00, 1, 0x00, 1])]);
+    assert!(compile_admit_only(&multi_mem).is_ok());
+    let shared_mem = wasm_module(&[section(5, &[1, 0x03, 1, 2])]);
     assert!(matches!(
-        compile_admit_only(&multi_mem),
+        compile_admit_only(&shared_mem),
         Err(X64CompileError::AdmissionRejected(_))
     ));
 
@@ -1828,14 +1836,19 @@ fn stage25_prune_block_params_const_fold_and_short_jump_relaxation() {
         max_params <= 2,
         "dead loop-carried local cycles must be pruned (got {max_params} params on loop/merge block)"
     );
-    // Inlined `f0(136)` -> `(136 + 15) & -16` must constant-fold to `ConstI32(144)`!
-    let has_144 = irs[1]
-        .blocks
-        .iter()
-        .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::ConstI32(144))));
+    // Inlined `f0(136)` -> `(136 + 15) & -16` must constant-fold to `144` (either as `ConstI32(144)`
+    // or further folded directly into `I32BinImm(Add, i, 144)`!).
+    let has_144 = irs[1].blocks.iter().any(|b| {
+        b.insts.iter().any(|i| {
+            matches!(
+                i.op,
+                Op::ConstI32(144) | Op::I32BinImm(super::ir::IntBinOp::Add, _, 144)
+            )
+        })
+    });
     assert!(
         has_144,
-        "post-inlining const32 folding must fold f0(136) -> ConstI32(144)"
+        "post-inlining const32 folding must fold f0(136) -> 144 (ConstI32 or I32BinImm)"
     );
 
     // Dynamic R12 + R13 allocation verifier check:
@@ -4043,4 +4056,128 @@ fn stage7_f64_axpy_vectorizes_matmul_and_edge_module() {
         }
         assert!(any_axpy, "{name} must emit Op::F64AxpyLoop");
     }
+}
+
+#[test]
+fn stage8_add_scaled_const64_pow2_rem_s_and_const_div_inline() {
+    // f0(base: i32, idx: i64) -> i32: base + (i32.wrap_i64(idx) << 2) -> Op::AddScaled { is64: false, shift: 2 }
+    let f0 = vec![0x20, 0, 0x20, 1, 0xa7, 0x41, 2, 0x74, 0x6a];
+    // f1(base: i64, idx: i64) -> i64: base + (idx << 3) -> Op::AddScaled { is64: true, shift: 3 }
+    let f1 = vec![0x20, 0, 0x20, 1, 0x42, 3, 0x86, 0x7c];
+    // f2(x: i64, d: i64) -> i64: >64-inst helper with `x % d` so only constant-divisor loop specialization inlines it!
+    let mut f2 = vec![0x20, 0, 0x20, 1, 0x81]; // x % d
+    for _ in 0..70 {
+        f2.extend_from_slice(&[0x42, 1, 0x7c]); // + 1 (keeps >64 raw insts before folding)
+    }
+    // Wait: ir builder folds `+1 +1 ...` if same const; use `local.get 0; xor` alternation so inst_count > 64!
+    let mut f2_real = vec![0x20, 0, 0x20, 1, 0x81];
+    for k in 0..35u8 {
+        f2_real.extend_from_slice(&[0x20, 0, 0x85, 0x42, (k + 1) & 0x3f, 0x7c]);
+    }
+    let _ = f2;
+    // f3(n: i64) -> i64: loop summing f2(i, 64) for i in 0..n
+    let mut f3 = vec![
+        0x42, 0, 0x21, 1, // acc = 0
+        0x42, 0, 0x21, 2, // i = 0
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        0x20, 2, 0x20, 0, 0x57, 0x0d, 1, // br_if 1 (i >=s n)
+        0x20, 1, 0x20, 2, 0x42, 0xc0, 0x00, 0x10, 2, 0x7c, 0x21, 1, // acc += f2(i, 64)
+        0x20, 2, 0x42, 1, 0x7c, 0x21, 2, // i += 1
+        0x0c, 0, // br 0
+        0x0b, 0x0b, // end loop, end block
+        0x20, 1, // return acc
+    ];
+    let _ = &mut f3;
+    let wasm = wasm_module(&[
+        type_sec(&[
+            (&[0x7f, 0x7e], &[0x7f]),
+            (&[0x7e, 0x7e], &[0x7e]),
+            (&[0x7e], &[0x7e]),
+        ]),
+        func_sec(&[0, 1, 1, 2]),
+        export_sec(&[("f0", 0, 0), ("f1", 0, 1), ("f3", 0, 3)]),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[], &f2_real),
+            enc_body(&[(2, 0x7e)], &f3),
+        ]),
+    ]);
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::x64_validate_features(),
+        &super::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<IrFunc> = (0..val.decoded().code.len())
+        .map(|bi| {
+            let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap();
+            super::opt::prune_early_block_params(&mut ir, None).unwrap();
+            ir
+        })
+        .collect();
+    assert!(
+        !super::opt::is_inlinable_ir(&irs[0])
+            || irs[2].blocks.iter().map(|b| b.insts.len()).sum::<usize>() > 64,
+        "f2 must exceed standard 64-inst cap"
+    );
+    assert!(
+        super::opt::is_inlinable_ir(&irs[2]),
+        "f2 with param RemS must qualify under const-div specialization tier"
+    );
+    super::opt::inline_small_helpers(&mut irs, &module, None).unwrap();
+    let effects = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    for ir in &mut irs {
+        super::opt::optimize_func_stage2(ir, &module, &effects, None).unwrap();
+        super::verify::verify_ir(ir, &module).unwrap();
+        let alloc = super::regalloc::allocate(ir).unwrap();
+        super::verify::verify_alloc(ir, &alloc).unwrap();
+    }
+    assert!(
+        irs[0]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(
+                i.op,
+                Op::AddScaled {
+                    is64: false,
+                    shift: 2,
+                    ..
+                }
+            ))),
+        "f0 must fold wrap+shl+add into 32-bit Op::AddScaled"
+    );
+    assert!(
+        irs[1]
+            .blocks
+            .iter()
+            .any(|b| b.insts.iter().any(|i| matches!(
+                i.op,
+                Op::AddScaled {
+                    is64: true,
+                    shift: 3,
+                    ..
+                }
+            ))),
+        "f1 must fold 64-bit shl+add into 64-bit Op::AddScaled"
+    );
+    let f3_has_call = irs[3]
+        .blocks
+        .iter()
+        .any(|b| b.insts.iter().any(|i| matches!(i.op, Op::Call { .. })));
+    let f3_has_imm_rem = irs[3].blocks.iter().any(|b| {
+        b.insts
+            .iter()
+            .any(|i| matches!(i.op, Op::I64BinImm(super::ir::IntBinOp::RemS, _, 64)))
+    });
+    assert!(
+        !f3_has_call,
+        "f3 must inline const-div callee f2 inside loop"
+    );
+    assert!(
+        f3_has_imm_rem,
+        "f3 must fold inlined i64.rem_s(..., 64) into I64BinImm(RemS, _, 64)"
+    );
 }

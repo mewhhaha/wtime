@@ -5,11 +5,11 @@
 //! modes (`execution-reference`, `performance-counters`, `opcode-coverage`) are off.
 //! Admits functions lazily per body with no module-wide instruction cap, so large
 //! multi-thousand-function modules execute on the register tier without upfront cost.
-use super::{float, integer, ir::NumericType};
+use super::{float, integer};
 use crate::execution::{Frame, Label};
 use crate::{
     ErrorKind, Immediate, ImportKind, IndexType, MemoryType, Module, RefValue, Result, Store,
-    TableType, ValType, Value, allocation_failed, err, range, trap,
+    TableType, V128, ValType, Value, allocation_failed, err, range, trap,
 };
 use std::ops::Range;
 use std::sync::{Arc, atomic::Ordering};
@@ -53,12 +53,48 @@ struct BulkMemArg {
     src_mem: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FastType {
+    I32,
+    I64,
+    F32,
+    F64,
+    V128,
+}
+
+impl FastType {
+    #[inline(always)]
+    fn from_val(v: ValType) -> Option<Self> {
+        Some(match v {
+            ValType::I32 => Self::I32,
+            ValType::I64 => Self::I64,
+            ValType::F32 => Self::F32,
+            ValType::F64 => Self::F64,
+            ValType::V128 => Self::V128,
+            _ => return None,
+        })
+    }
+
+    #[inline(always)]
+    fn slots(self) -> u16 {
+        if matches!(self, Self::V128) { 2 } else { 1 }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SimdMemArg {
+    memory: u32,
+    offset: u64,
+    src_vec: u16,
+    lane: u8,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CallSite {
     func_idx: u32,
     arg_base: u16,
-    arg_count: u16,
-    ret_count: u16,
+    arg_slots: u16,
+    logical_arg_start: u16,
     meta_at_call: u32,
     meta_after_call: u32,
 }
@@ -69,8 +105,8 @@ struct CallIndirectSite {
     table_idx: u32,
     index_reg: u16,
     arg_base: u16,
-    arg_count: u16,
-    ret_count: u16,
+    arg_slots: u16,
+    logical_arg_start: u16,
     table_is_64: bool,
     meta_at_call: u32,
     meta_after_call: u32,
@@ -708,6 +744,74 @@ enum RegOp {
         kind: u8,
         base: u16,
     },
+    // ---- Native SIMD & Relaxed SIMD (2 consecutive `u64` slots per `v128`) ----
+    MovV128 {
+        dst: u16,
+        src: u16,
+    },
+    ConstV128 {
+        dst: u16,
+        idx: u32,
+    },
+    SelectV128 {
+        dst: u16,
+        a: u16,
+        b: u16,
+        cond: u16,
+    },
+    GlobalGetV128 {
+        dst: u16,
+        global: u32,
+    },
+    GlobalSetV128 {
+        src: u16,
+        global: u32,
+    },
+    LoadV128 {
+        dst: u16,
+        addr: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    StoreV128 {
+        addr: u16,
+        val: u16,
+        offset: u32,
+        src_off: u8,
+    },
+    SimdMemGen {
+        op: u16,
+        addr: u16,
+        val: u16,
+        arg_idx: u32,
+        src_off: u8,
+    },
+    SimdShuffle {
+        dst: u16,
+        a: u16,
+        b: u16,
+        mask_idx: u16,
+    },
+    SimdUnary {
+        op: u16,
+        dst: u16,
+        src: u16,
+        lane: u8,
+    },
+    SimdBinary {
+        op: u16,
+        dst: u16,
+        a: u16,
+        b: u16,
+        lane: u8,
+    },
+    SimdTernary {
+        op: u16,
+        dst: u16,
+        a: u16,
+        b: u16,
+        c: u16,
+    },
     Return {
         base: u16,
         count: u16,
@@ -726,18 +830,24 @@ enum RegOp {
 pub(crate) struct FastFunction {
     ops: Box<[RegOp]>,
     consts: Box<[u64]>,
+    v128_consts: Box<[[u64; 2]]>,
+    simd_masks: Box<[[u8; 16]]>,
     mem_args: Box<[MemGenArg]>,
+    simd_mem_args: Box<[SimdMemArg]>,
     bulk_args: Box<[BulkMemArg]>,
     call_sites: Box<[CallSite]>,
     call_indirect_sites: Box<[CallIndirectSite]>,
     table_ranges: Box<[Range<u32>]>,
     table_targets: Box<[u32]>,
     blocks: Box<[BlockMeta]>,
-    stack_types: Box<[NumericType]>,
+    stack_types: Box<[FastType]>,
     static_labels: Box<[StaticLabel]>,
-    local_types: Box<[NumericType]>,
-    result_types: Box<[NumericType]>,
+    local_types: Box<[FastType]>,
+    result_types: Box<[FastType]>,
+    /// Logical Wasm local count (`params + locals`) for `active_local_slots` resource accounting.
     num_locals: u16,
+    /// Physical `u64` register slots occupied by locals (`sum(ty.slots())`).
+    local_reg_slots: u16,
     slots: u16,
     stack_peak: usize,
     max_nesting: usize,
@@ -761,12 +871,14 @@ enum VVal {
     Local(u16),
     Imm32(u32),
     Imm64(u64),
+    ImmV128(u32),
 }
 
 #[derive(Clone, Copy)]
 struct VSlot {
     src: VVal,
-    ty: NumericType,
+    slot_off: u16,
+    ty: FastType,
 }
 
 struct CompileLabel {
@@ -775,9 +887,12 @@ struct CompileLabel {
     other: Option<usize>,
     loop_: bool,
     base_height: usize,
-    prefix: Vec<NumericType>,
-    params: Vec<NumericType>,
-    results: Vec<NumericType>,
+    base_slot: u16,
+    prefix: Vec<FastType>,
+    params: Vec<FastType>,
+    results: Vec<FastType>,
+    param_slots: u16,
+    result_slots: u16,
     parent_dead: bool,
 }
 
@@ -838,16 +953,27 @@ fn declared_func_type(module: &Module, index: u32) -> Option<&crate::FuncType> {
     decoded.types.get(ti)
 }
 
-fn block_sig(module: &Module, imm: &Immediate) -> Option<(Vec<NumericType>, Vec<NumericType>)> {
+#[inline(always)]
+fn fast_from_numeric(t: super::ir::NumericType) -> FastType {
+    match t {
+        super::ir::NumericType::I32 => FastType::I32,
+        super::ir::NumericType::I64 => FastType::I64,
+        super::ir::NumericType::F32 => FastType::F32,
+        super::ir::NumericType::F64 => FastType::F64,
+    }
+}
+
+fn block_sig(module: &Module, imm: &Immediate) -> Option<(Vec<FastType>, Vec<FastType>)> {
     match imm {
         Immediate::Block(-64) => Some((Vec::new(), Vec::new())),
-        Immediate::BlockType(ty) => Some((Vec::new(), vec![NumericType::admitted(*ty).ok()?])),
+        Immediate::BlockType(ty) => Some((Vec::new(), vec![FastType::from_val(*ty)?])),
         Immediate::Block(v) if *v < 0 => {
             let ty = match *v {
-                -1 => NumericType::I32,
-                -2 => NumericType::I64,
-                -3 => NumericType::F32,
-                -4 => NumericType::F64,
+                -1 => FastType::I32,
+                -2 => FastType::I64,
+                -3 => FastType::F32,
+                -4 => FastType::F64,
+                -5 => FastType::V128,
                 _ => return None,
             };
             Some((Vec::new(), vec![ty]))
@@ -856,11 +982,11 @@ fn block_sig(module: &Module, imm: &Immediate) -> Option<(Vec<NumericType>, Vec<
             let ft = module.data.inner.decoded().types.get(*idx as usize)?;
             let mut params = Vec::with_capacity(ft.params.len());
             for &t in &ft.params {
-                params.push(NumericType::admitted(t).ok()?);
+                params.push(FastType::from_val(t)?);
             }
             let mut results = Vec::with_capacity(ft.results.len());
             for &t in &ft.results {
-                results.push(NumericType::admitted(t).ok()?);
+                results.push(FastType::from_val(t)?);
             }
             Some((params, results))
         }
@@ -868,12 +994,12 @@ fn block_sig(module: &Module, imm: &Immediate) -> Option<(Vec<NumericType>, Vec<
     }
 }
 
-fn mem_sig(op: u16) -> Option<(NumericType, usize, bool)> {
+fn mem_sig(op: u16) -> Option<(FastType, usize, bool)> {
     let ty = match op {
-        0x28 | 0x2c..=0x2f | 0x36 | 0x3a..=0x3b => NumericType::I32,
-        0x29 | 0x30..=0x35 | 0x37 | 0x3c..=0x3e => NumericType::I64,
-        0x2a | 0x38 => NumericType::F32,
-        0x2b | 0x39 => NumericType::F64,
+        0x28 | 0x2c..=0x2f | 0x36 | 0x3a..=0x3b => FastType::I32,
+        0x29 | 0x30..=0x35 | 0x37 | 0x3c..=0x3e => FastType::I64,
+        0x2a | 0x38 => FastType::F32,
+        0x2b | 0x39 => FastType::F64,
         _ => return None,
     };
     let width = match op {
@@ -883,6 +1009,104 @@ fn mem_sig(op: u16) -> Option<(NumericType, usize, bool)> {
         _ => 2,
     };
     Some((ty, width, op >= 0x36))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SimdShape {
+    Mem,
+    Const,
+    Shuffle,
+    Unary { out_ty: FastType, has_lane: bool },
+    Binary { has_lane: bool },
+    Ternary,
+}
+
+fn simd_op_shape(op: u16) -> Option<SimdShape> {
+    Some(match op {
+        0xfd00..=0xfd0b | 0xfd54..=0xfd5d => SimdShape::Mem,
+        0xfd0c => SimdShape::Const,
+        0xfd0d => SimdShape::Shuffle,
+        0xfd0f..=0xfd14 => SimdShape::Unary {
+            out_ty: FastType::V128,
+            has_lane: false,
+        },
+        0xfd15 | 0xfd16 | 0xfd18 | 0xfd19 | 0xfd1b => SimdShape::Unary {
+            out_ty: FastType::I32,
+            has_lane: true,
+        },
+        0xfd1d => SimdShape::Unary {
+            out_ty: FastType::I64,
+            has_lane: true,
+        },
+        0xfd1f => SimdShape::Unary {
+            out_ty: FastType::F32,
+            has_lane: true,
+        },
+        0xfd21 => SimdShape::Unary {
+            out_ty: FastType::F64,
+            has_lane: true,
+        },
+        0xfd17 | 0xfd1a | 0xfd1c | 0xfd1e | 0xfd20 | 0xfd22 => SimdShape::Binary { has_lane: true },
+        0xfd0e
+        | 0xfd23..=0xfd4c
+        | 0xfd4e..=0xfd51
+        | 0xfd65
+        | 0xfd66
+        | 0xfd6b..=0xfd73
+        | 0xfd76..=0xfd79
+        | 0xfd7b
+        | 0xfd82
+        | 0xfd85
+        | 0xfd86
+        | 0xfd8b..=0xfd93
+        | 0xfd95..=0xfd99
+        | 0xfd9b..=0xfd9f
+        | 0xfdab..=0xfdae
+        | 0xfdb1
+        | 0xfdb5..=0xfdba
+        | 0xfdbc..=0xfdbf
+        | 0xfdcb..=0xfdce
+        | 0xfdd1
+        | 0xfdd5..=0xfddf
+        | 0xfde4..=0xfdeb
+        | 0xfdf0..=0xfdf7
+        | 0xfa00
+        | 0xfa0d..=0xfa12 => SimdShape::Binary { has_lane: false },
+        0xfd4d
+        | 0xfd5e..=0xfd62
+        | 0xfd67..=0xfd6a
+        | 0xfd74
+        | 0xfd75
+        | 0xfd7a
+        | 0xfd7c..=0xfd81
+        | 0xfd87..=0xfd8a
+        | 0xfd94
+        | 0xfda0
+        | 0xfda1
+        | 0xfda7..=0xfdaa
+        | 0xfdc0
+        | 0xfdc1
+        | 0xfdc7..=0xfdca
+        | 0xfde0
+        | 0xfde1
+        | 0xfde3
+        | 0xfdec
+        | 0xfded
+        | 0xfdef
+        | 0xfdf8..=0xfdff
+        | 0xfa01..=0xfa04 => SimdShape::Unary {
+            out_ty: FastType::V128,
+            has_lane: false,
+        },
+        0xfd53 | 0xfd63 | 0xfd64 | 0xfd83 | 0xfd84 | 0xfda3 | 0xfda4 | 0xfdc3 | 0xfdc4 => {
+            SimdShape::Unary {
+                out_ty: FastType::I32,
+                has_lane: false,
+            }
+        }
+        0xfd52 | 0xfa05..=0xfa0c | 0xfa13 => SimdShape::Ternary,
+        _ => return None,
+    })
 }
 
 fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
@@ -896,7 +1120,7 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
         | 0xfc00..=0xfc07
         | 0xfc13..=0xfc16 => true,
         0x1c => {
-            matches!(&insn.immediate, Immediate::Types(ts) if ts.len() == 1 && NumericType::admitted(ts[0]).is_ok())
+            matches!(&insn.immediate, Immediate::Types(ts) if ts.len() == 1 && FastType::from_val(ts[0]).is_some())
         }
         0x10 | 0x12 => {
             let Immediate::Index(fi) = insn.immediate else {
@@ -906,7 +1130,7 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
                 ft.params
                     .iter()
                     .chain(&ft.results)
-                    .all(|&t| NumericType::admitted(t).is_ok())
+                    .all(|&t| FastType::from_val(t).is_some())
             })
         }
         0x11 | 0x13 => {
@@ -924,14 +1148,14 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
                         ft.params
                             .iter()
                             .chain(&ft.results)
-                            .all(|&t| NumericType::admitted(t).is_ok())
+                            .all(|&t| FastType::from_val(t).is_some())
                     })
         }
         0x23 | 0x24 => {
             let Immediate::Index(gi) = insn.immediate else {
                 return false;
             };
-            declared_global_type(module, gi).is_some_and(|t| NumericType::admitted(t).is_ok())
+            declared_global_type(module, gi).is_some_and(|t| FastType::from_val(t).is_some())
         }
         0x28..=0x3e => {
             let Immediate::MemArg { memory, .. } = insn.immediate else {
@@ -957,6 +1181,13 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
             };
             declared_memory(module, mem).is_some()
         }
+        0xfd00..=0xfd0b | 0xfd54..=0xfd5d => match insn.immediate {
+            Immediate::MemArg { memory, .. } | Immediate::MemLane { memory, .. } => {
+                declared_memory(module, memory).is_some()
+            }
+            _ => false,
+        },
+        0xfd0c..=0xfd53 | 0xfd5e..=0xfdff | 0xfa00..=0xfa13 => simd_op_shape(insn.opcode).is_some(),
         _ => false,
     }
 }
@@ -1085,7 +1316,8 @@ fn fold_i32_bin(op: u16, a: u32, b: u32) -> Option<u32> {
 }
 
 /// Lazily compiles `body` of `module` to an untyped-`u64` 3-address `FastFunction`.
-/// Returns `None` if the function uses non-scalar locals/params/results or exceeds per-body limits.
+/// Supports scalar (`i32`, `i64`, `f32`, `f64`) and native SIMD (`v128`, 2 `u64` slots per value).
+/// Returns `None` if the function uses reference locals/params/results or exceeds per-body limits.
 pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunction>> {
     let decoded = module.data.inner.decoded();
     let code = decoded.code.get(body)?;
@@ -1098,19 +1330,28 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     let bounds = module.data.inner.function_bounds().get(body)?;
     let num_params = ft.params.len();
     let num_locals = num_params.checked_add(code.locals.len())?;
-    let total_slots = num_locals.checked_add(bounds.stack_peak)?;
-    if total_slots > MAX_FN_SLOTS {
-        return None;
-    }
 
     let mut local_types = Vec::with_capacity(num_locals);
+    let mut local_slots = Vec::with_capacity(num_locals);
+    let mut local_reg_slots_usize = 0usize;
     for &t in ft.params.iter().chain(&code.locals) {
-        local_types.push(NumericType::admitted(t).ok()?);
+        let fty = FastType::from_val(t)?;
+        local_slots.push(u16::try_from(local_reg_slots_usize).ok()?);
+        local_reg_slots_usize = local_reg_slots_usize.checked_add(fty.slots() as usize)?;
+        local_types.push(fty);
+    }
+    if local_reg_slots_usize.checked_add(bounds.stack_peak)? > MAX_FN_SLOTS {
+        return None;
     }
     let mut result_types = Vec::with_capacity(ft.results.len());
+    let mut result_reg_slots_usize = 0usize;
     for &t in &ft.results {
-        result_types.push(NumericType::admitted(t).ok()?);
+        let fty = FastType::from_val(t)?;
+        result_reg_slots_usize = result_reg_slots_usize.checked_add(fty.slots() as usize)?;
+        result_types.push(fty);
     }
+    let result_reg_slots = u16::try_from(result_reg_slots_usize).ok()?;
+    let local_reg_slots = u16::try_from(local_reg_slots_usize).ok()?;
 
     // Check block signatures and compute basic-block starts.
     let fuel_blocks = module.data.register_fast_fuel;
@@ -1122,7 +1363,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     for (pc, insn) in code.instructions.iter().enumerate() {
         match insn.opcode {
             0x02..=0x04 => {
-                // Non-scalar block signatures decline the whole function cleanly.
+                // Unsupported block signatures decline the whole function cleanly.
                 block_sig(module, &insn.immediate)?;
                 let (end, other) = module.data.control.get(body, pc)?;
                 if end >= n {
@@ -1170,14 +1411,17 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
 
     let mut ops: Vec<RegOp> = Vec::with_capacity(n);
     let mut consts: Vec<u64> = Vec::new();
+    let mut v128_consts: Vec<[u64; 2]> = Vec::new();
+    let mut simd_masks: Vec<[u8; 16]> = Vec::new();
     let mut mem_args: Vec<MemGenArg> = Vec::new();
+    let mut simd_mem_args: Vec<SimdMemArg> = Vec::new();
     let mut bulk_args: Vec<BulkMemArg> = Vec::new();
     let mut call_sites: Vec<CallSite> = Vec::new();
     let mut call_indirect_sites: Vec<CallIndirectSite> = Vec::new();
     let mut table_ranges: Vec<Range<u32>> = Vec::new();
     let mut table_targets: Vec<u32> = Vec::new();
     let mut blocks: Vec<BlockMeta> = Vec::new();
-    let mut stack_types: Vec<NumericType> = Vec::new();
+    let mut stack_types: Vec<FastType> = Vec::new();
     let mut static_labels: Vec<StaticLabel> = Vec::new();
 
     // Map Wasm source_pc -> emitted RegOp ip (for jump targets).
@@ -1187,7 +1431,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     // (table_targets_index, target_source_pc)
     let mut table_patches: Vec<(usize, usize)> = Vec::new();
 
-    let num_locals_u16 = num_locals as u16;
+    let mut max_slots: usize = local_reg_slots_usize + bounds.stack_peak;
     let mut vstack: Vec<VSlot> = Vec::with_capacity(bounds.stack_peak);
     let mut labels: Vec<CompileLabel> = Vec::new();
     let mut dead = false;
@@ -1198,11 +1442,17 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     let mut cur_block_meta: u32 = BLOCK_META_NONE;
     let mut cur_block_ops: usize = 0;
 
+    let slot_top = |vstack: &[VSlot]| -> u16 {
+        vstack
+            .last()
+            .map_or(local_reg_slots, |s| s.slot_off + s.ty.slots())
+    };
+
     let push_meta = |source_pc: usize,
                      vstack: &[VSlot],
                      labels: &[CompileLabel],
                      blocks: &mut Vec<BlockMeta>,
-                     stack_types: &mut Vec<NumericType>,
+                     stack_types: &mut Vec<FastType>,
                      static_labels: &mut Vec<StaticLabel>|
      -> u32 {
         let stack_start = stack_types.len() as u32;
@@ -1253,23 +1503,37 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         *cur_block_ops = 0;
     };
 
-    let flush_local = |local: u16, vstack: &mut [VSlot], ops: &mut Vec<RegOp>| {
-        for (h, slot) in vstack.iter_mut().enumerate() {
-            if slot.src == VVal::Local(local) {
-                let dst = num_locals_u16 + h as u16;
-                ops.push(RegOp::Mov { dst, src: local });
+    let flush_local = |local_slot: u16, vstack: &mut [VSlot], ops: &mut Vec<RegOp>| {
+        for slot in vstack.iter_mut() {
+            if slot.src == VVal::Local(local_slot) {
+                let dst = slot.slot_off;
+                if slot.ty == FastType::V128 {
+                    ops.push(RegOp::MovV128 {
+                        dst,
+                        src: local_slot,
+                    });
+                } else {
+                    ops.push(RegOp::Mov {
+                        dst,
+                        src: local_slot,
+                    });
+                }
                 slot.src = VVal::Slot(dst);
             }
         }
     };
 
     let flush_all = |vstack: &mut [VSlot], ops: &mut Vec<RegOp>, consts: &mut Vec<u64>| {
-        for (h, slot) in vstack.iter_mut().enumerate() {
-            let dst = num_locals_u16 + h as u16;
+        for slot in vstack.iter_mut() {
+            let dst = slot.slot_off;
             match slot.src {
                 VVal::Slot(s) if s == dst => {}
                 VVal::Slot(s) | VVal::Local(s) => {
-                    ops.push(RegOp::Mov { dst, src: s });
+                    if slot.ty == FastType::V128 {
+                        ops.push(RegOp::MovV128 { dst, src: s });
+                    } else {
+                        ops.push(RegOp::Mov { dst, src: s });
+                    }
                     slot.src = VVal::Slot(dst);
                 }
                 VVal::Imm32(val) => {
@@ -1281,20 +1545,36 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     ops.push(RegOp::Const64 { dst, idx });
                     slot.src = VVal::Slot(dst);
                 }
+                VVal::ImmV128(idx) => {
+                    ops.push(RegOp::ConstV128 { dst, idx });
+                    slot.src = VVal::Slot(dst);
+                }
             }
         }
     };
 
-    let mat = |v: VVal, tmp_slot: u16, ops: &mut Vec<RegOp>, consts: &mut Vec<u64>| -> u16 {
+    let mat = |v: VVal,
+               tmp_slot: u16,
+               max_slots: &mut usize,
+               ops: &mut Vec<RegOp>,
+               consts: &mut Vec<u64>|
+     -> u16 {
         match v {
             VVal::Slot(s) | VVal::Local(s) => s,
             VVal::Imm32(val) => {
+                *max_slots = (*max_slots).max(tmp_slot as usize + 1);
                 ops.push(RegOp::Const32 { dst: tmp_slot, val });
                 tmp_slot
             }
             VVal::Imm64(val) => {
+                *max_slots = (*max_slots).max(tmp_slot as usize + 1);
                 let idx = push_const(consts, val);
                 ops.push(RegOp::Const64 { dst: tmp_slot, idx });
+                tmp_slot
+            }
+            VVal::ImmV128(idx) => {
+                *max_slots = (*max_slots).max(tmp_slot as usize + 2);
+                ops.push(RegOp::ConstV128 { dst: tmp_slot, idx });
                 tmp_slot
             }
         }
@@ -1302,6 +1582,9 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
 
     let mut pc = 0usize;
     while pc < n {
+        if slot_top(&vstack) as usize + 8 > MAX_FN_SLOTS {
+            return None;
+        }
         let insn = &code.instructions[pc];
 
         // Handle dead (unreachable) regions up to matching `else` or `end`.
@@ -1309,6 +1592,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             match insn.opcode {
                 0x02..=0x04 => {
                     let (params, results) = block_sig(module, &insn.immediate)?;
+                    let param_slots = params.iter().map(|t| t.slots()).sum();
+                    let result_slots = results.iter().map(|t| t.slots()).sum();
                     let (end, other) = module.data.control.get(body, pc)?;
                     labels.push(CompileLabel {
                         start: pc + 1,
@@ -1316,9 +1601,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         other,
                         loop_: insn.opcode == 0x03,
                         base_height: 0,
+                        base_slot: local_reg_slots,
                         prefix: Vec::new(),
                         params,
                         results,
+                        param_slots,
+                        result_slots,
                         parent_dead: true,
                     });
                 }
@@ -1328,12 +1616,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         // Entering live `else` branch!
                         dead = false;
                         vstack.clear();
-                        for (h, &ty) in top.prefix.iter().chain(&top.params).enumerate() {
+                        let mut off = local_reg_slots;
+                        for &ty in top.prefix.iter().chain(&top.params) {
                             vstack.push(VSlot {
-                                src: VVal::Slot(num_locals_u16 + h as u16),
+                                src: VVal::Slot(off),
+                                slot_off: off,
                                 ty,
                             });
+                            off += ty.slots();
                         }
+                        max_slots = max_slots.max(off as usize);
                     }
                 }
                 0x0b => {
@@ -1341,12 +1633,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         if !label.parent_dead {
                             dead = false;
                             vstack.clear();
-                            for (h, &ty) in label.prefix.iter().chain(&label.results).enumerate() {
+                            let mut off = local_reg_slots;
+                            for &ty in label.prefix.iter().chain(&label.results) {
                                 vstack.push(VSlot {
-                                    src: VVal::Slot(num_locals_u16 + h as u16),
+                                    src: VVal::Slot(off),
+                                    slot_off: off,
                                     ty,
                                 });
+                                off += ty.slots();
                             }
+                            max_slots = max_slots.max(off as usize);
                             if is_block_start[pc] {
                                 pc_to_ip[pc] = ops.len() as u32;
                                 if fuel_blocks {
@@ -1469,43 +1765,49 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     cur_block_ops: usize,
                                     vstack: &mut Vec<VSlot>,
                                     ops: &mut Vec<RegOp>,
-                                    res_ty: NumericType|
+                                    res_ty: FastType|
          -> (u16, usize, bool) {
             if pc + 1 < n && !is_block_start[pc + 1] && cur_block_ops < MAX_BLOCK_OPS {
                 let next = &code.instructions[pc + 1];
                 if let Immediate::Index(l) = next.immediate
                     && (next.opcode == 0x21 || next.opcode == 0x22)
                 {
-                    let l = l as u16;
-                    flush_local(l, vstack, ops);
-                    return (l, 1, next.opcode == 0x22);
+                    let l_slot = local_slots[l as usize];
+                    flush_local(l_slot, vstack, ops);
+                    return (l_slot, 1, next.opcode == 0x22);
                 }
             }
             let _ = res_ty;
-            (num_locals_u16 + vstack.len() as u16, 0, false)
+            (slot_top(vstack), 0, false)
         };
 
         let finish_dst = |dst: u16,
                           consumed_next: usize,
                           is_tee: bool,
-                          res_ty: NumericType,
+                          res_ty: FastType,
                           vstack: &mut Vec<VSlot>,
+                          max_slots: &mut usize,
                           cur_block_ops: &mut usize,
                           pc: &mut usize| {
             if consumed_next > 0 {
                 *cur_block_ops += consumed_next;
                 *pc += consumed_next;
                 if is_tee {
+                    let slot_off = slot_top(vstack);
                     vstack.push(VSlot {
                         src: VVal::Local(dst),
+                        slot_off,
                         ty: res_ty,
                     });
+                    *max_slots = (*max_slots).max(slot_off as usize + res_ty.slots() as usize);
                 }
             } else {
                 vstack.push(VSlot {
                     src: VVal::Slot(dst),
+                    slot_off: dst,
                     ty: res_ty,
                 });
+                *max_slots = (*max_slots).max(dst as usize + res_ty.slots() as usize);
             }
         };
 
@@ -1529,11 +1831,18 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             0x02 | 0x03 => {
                 // block / loop
                 let (params, results) = block_sig(module, &insn.immediate)?;
+                let param_slots = params.iter().map(|t| t.slots()).sum();
+                let result_slots = results.iter().map(|t| t.slots()).sum();
                 let (end, other) = module.data.control.get(body, pc)?;
                 if insn.opcode == 0x03 {
                     flush_all(&mut vstack, &mut ops, &mut consts);
                 }
                 let base_height = vstack.len().checked_sub(params.len())?;
+                let base_slot = if base_height < vstack.len() {
+                    vstack[base_height].slot_off
+                } else {
+                    slot_top(&vstack)
+                };
                 let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
                 labels.push(CompileLabel {
                     start: pc + 1,
@@ -1541,9 +1850,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     other,
                     loop_: insn.opcode == 0x03,
                     base_height,
+                    base_slot,
                     prefix,
                     params,
                     results,
+                    param_slots,
+                    result_slots,
                     parent_dead: false,
                 });
                 if insn.opcode == 0x03 {
@@ -1561,15 +1873,23 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 // if
                 let cond_slot = vstack.pop()?;
                 let (params, results) = block_sig(module, &insn.immediate)?;
+                let param_slots = params.iter().map(|t| t.slots()).sum();
+                let result_slots = results.iter().map(|t| t.slots()).sum();
                 let (end, other) = module.data.control.get(body, pc)?;
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let cond_reg = mat(
                     cond_slot.src,
-                    num_locals_u16 + vstack.len() as u16,
+                    slot_top(&vstack),
+                    &mut max_slots,
                     &mut ops,
                     &mut consts,
                 );
                 let base_height = vstack.len().checked_sub(params.len())?;
+                let base_slot = if base_height < vstack.len() {
+                    vstack[base_height].slot_off
+                } else {
+                    slot_top(&vstack)
+                };
                 let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
                 labels.push(CompileLabel {
                     start: pc + 1,
@@ -1577,9 +1897,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     other,
                     loop_: false,
                     base_height,
+                    base_slot,
                     prefix,
                     params,
                     results,
+                    param_slots,
+                    result_slots,
                     parent_dead: false,
                 });
                 let false_pc = other.map_or(end, |e| e + 1);
@@ -1614,12 +1937,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                 );
                 vstack.clear();
-                for (h, &ty) in top.prefix.iter().chain(&top.params).enumerate() {
+                let mut off = local_reg_slots;
+                for &ty in top.prefix.iter().chain(&top.params) {
                     vstack.push(VSlot {
-                        src: VVal::Slot(num_locals_u16 + h as u16),
+                        src: VVal::Slot(off),
+                        slot_off: off,
                         ty,
                     });
+                    off += ty.slots();
                 }
+                max_slots = max_slots.max(off as usize);
             }
             0x0b => {
                 // end
@@ -1629,9 +1956,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     flush_all(&mut vstack, &mut ops, &mut consts);
                     let count = result_types.len();
                     let start = vstack.len().checked_sub(count)?;
+                    let base = if count > 0 {
+                        vstack[start].slot_off
+                    } else {
+                        local_reg_slots
+                    };
                     ops.push(RegOp::Return {
-                        base: num_locals_u16 + start as u16,
-                        count: count as u16,
+                        base,
+                        count: result_reg_slots,
                     });
                     close_block(
                         &mut in_block,
@@ -1653,9 +1985,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 if depth == labels.len() {
                     let count = result_types.len();
                     let start = vstack.len().checked_sub(count)?;
+                    let base = if count > 0 {
+                        vstack[start].slot_off
+                    } else {
+                        local_reg_slots
+                    };
                     ops.push(RegOp::Return {
-                        base: num_locals_u16 + start as u16,
-                        count: count as u16,
+                        base,
+                        count: result_reg_slots,
                     });
                 } else {
                     let idx = labels.len().checked_sub(depth + 1)?;
@@ -1665,19 +2002,23 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     } else {
                         label.end + 1
                     };
-                    let arity = if label.loop_ {
-                        label.params.len()
+                    let (arity, arity_slots) = if label.loop_ {
+                        (label.params.len(), label.param_slots)
                     } else {
-                        label.results.len()
+                        (label.results.len(), label.result_slots)
                     };
                     let src_start = vstack.len().checked_sub(arity)?;
-                    let src_base = num_locals_u16 + src_start as u16;
-                    let dst_base = num_locals_u16 + label.base_height as u16;
-                    if arity > 0 && src_base != dst_base {
+                    let src_base = if arity > 0 {
+                        vstack[src_start].slot_off
+                    } else {
+                        slot_top(&vstack)
+                    };
+                    let dst_base = label.base_slot;
+                    if arity_slots > 0 && src_base != dst_base {
                         ops.push(RegOp::MoveRange {
                             dst_base,
                             src_base,
-                            count: arity as u16,
+                            count: arity_slots,
                         });
                         let jmp_ip = ops.len();
                         ops.push(RegOp::Jump { target: 0 });
@@ -1721,21 +2062,27 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let cond_reg = mat(
                     cond_slot.src,
-                    num_locals_u16 + vstack.len() as u16,
+                    slot_top(&vstack),
+                    &mut max_slots,
                     &mut ops,
                     &mut consts,
                 );
                 if depth == labels.len() {
                     let count = result_types.len();
                     let start = vstack.len().checked_sub(count)?;
+                    let base = if count > 0 {
+                        vstack[start].slot_off
+                    } else {
+                        local_reg_slots
+                    };
                     let skip_ip = ops.len();
                     ops.push(RegOp::BrIfZero {
                         cond: cond_reg,
                         target: (skip_ip + 2) as u32,
                     });
                     ops.push(RegOp::Return {
-                        base: num_locals_u16 + start as u16,
-                        count: count as u16,
+                        base,
+                        count: result_reg_slots,
                     });
                 } else {
                     let idx = labels.len().checked_sub(depth + 1)?;
@@ -1745,15 +2092,19 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     } else {
                         label.end + 1
                     };
-                    let arity = if label.loop_ {
-                        label.params.len()
+                    let (arity, arity_slots) = if label.loop_ {
+                        (label.params.len(), label.param_slots)
                     } else {
-                        label.results.len()
+                        (label.results.len(), label.result_slots)
                     };
                     let src_start = vstack.len().checked_sub(arity)?;
-                    let src_base = num_locals_u16 + src_start as u16;
-                    let dst_base = num_locals_u16 + label.base_height as u16;
-                    if arity > 0 && src_base != dst_base {
+                    let src_base = if arity > 0 {
+                        vstack[src_start].slot_off
+                    } else {
+                        slot_top(&vstack)
+                    };
+                    let dst_base = label.base_slot;
+                    if arity_slots > 0 && src_base != dst_base {
                         let skip_ip = ops.len();
                         ops.push(RegOp::BrIfZero {
                             cond: cond_reg,
@@ -1762,7 +2113,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         ops.push(RegOp::MoveRange {
                             dst_base,
                             src_base,
-                            count: arity as u16,
+                            count: arity_slots,
                         });
                         let jmp_ip = ops.len();
                         ops.push(RegOp::Jump { target: 0 });
@@ -1794,7 +2145,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let sel_reg = mat(
                     sel_slot.src,
-                    num_locals_u16 + vstack.len() as u16,
+                    slot_top(&vstack),
+                    &mut max_slots,
                     &mut ops,
                     &mut consts,
                 );
@@ -1817,10 +2169,15 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     if depth == labels.len() {
                         let count = result_types.len();
                         let start = vstack.len().checked_sub(count)?;
+                        let base = if count > 0 {
+                            vstack[start].slot_off
+                        } else {
+                            local_reg_slots
+                        };
                         let tramp_ip = ops.len() as u32;
                         ops.push(RegOp::Return {
-                            base: num_locals_u16 + start as u16,
-                            count: count as u16,
+                            base,
+                            count: result_reg_slots,
                         });
                         table_targets.push(tramp_ip);
                     } else {
@@ -1831,20 +2188,24 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         } else {
                             label.end + 1
                         };
-                        let arity = if label.loop_ {
-                            label.params.len()
+                        let (arity, arity_slots) = if label.loop_ {
+                            (label.params.len(), label.param_slots)
                         } else {
-                            label.results.len()
+                            (label.results.len(), label.result_slots)
                         };
                         let src_start = vstack.len().checked_sub(arity)?;
-                        let src_base = num_locals_u16 + src_start as u16;
-                        let dst_base = num_locals_u16 + label.base_height as u16;
-                        if arity > 0 && src_base != dst_base {
+                        let src_base = if arity > 0 {
+                            vstack[src_start].slot_off
+                        } else {
+                            slot_top(&vstack)
+                        };
+                        let dst_base = label.base_slot;
+                        if arity_slots > 0 && src_base != dst_base {
                             let tramp_ip = ops.len() as u32;
                             ops.push(RegOp::MoveRange {
                                 dst_base,
                                 src_base,
-                                count: arity as u16,
+                                count: arity_slots,
                             });
                             let jmp_ip = ops.len();
                             ops.push(RegOp::Jump { target: 0 });
@@ -1866,9 +2227,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let count = result_types.len();
                 let start = vstack.len().checked_sub(count)?;
+                let base = if count > 0 {
+                    vstack[start].slot_off
+                } else {
+                    local_reg_slots
+                };
                 ops.push(RegOp::Return {
-                    base: num_locals_u16 + start as u16,
-                    count: count as u16,
+                    base,
+                    count: result_reg_slots,
                 });
                 close_block(
                     &mut in_block,
@@ -1887,7 +2253,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 };
                 let callee_ft = declared_func_type(module, fi)?;
                 let arg_count = callee_ft.params.len();
-                let ret_count = callee_ft.results.len();
+                let arg_slots: u16 = callee_ft
+                    .params
+                    .iter()
+                    .map(|&t| FastType::from_val(t).map(FastType::slots))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .sum();
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let meta_at_call = push_meta(
                     pc,
@@ -1898,6 +2270,11 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut static_labels,
                 );
                 let arg_start = vstack.len().checked_sub(arg_count)?;
+                let arg_base = if arg_count > 0 {
+                    vstack[arg_start].slot_off
+                } else {
+                    slot_top(&vstack)
+                };
                 vstack.truncate(arg_start);
                 let meta_after_call = push_meta(
                     pc + 1,
@@ -1910,19 +2287,24 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let call_idx = call_sites.len() as u32;
                 call_sites.push(CallSite {
                     func_idx: fi,
-                    arg_base: num_locals_u16 + arg_start as u16,
-                    arg_count: arg_count as u16,
-                    ret_count: ret_count as u16,
+                    arg_base,
+                    arg_slots,
+                    logical_arg_start: arg_start as u16,
                     meta_at_call,
                     meta_after_call,
                 });
                 ops.push(RegOp::Call { call_idx, src_off });
-                for (i, &rt) in callee_ft.results.iter().enumerate() {
+                let mut off = arg_base;
+                for &rt in &callee_ft.results {
+                    let ty = FastType::from_val(rt)?;
                     vstack.push(VSlot {
-                        src: VVal::Slot(num_locals_u16 + (arg_start + i) as u16),
-                        ty: NumericType::admitted(rt).ok()?,
+                        src: VVal::Slot(off),
+                        slot_off: off,
+                        ty,
                     });
+                    off += ty.slots();
                 }
+                max_slots = max_slots.max(off as usize);
                 close_block(
                     &mut in_block,
                     &mut cur_block_ip,
@@ -1940,7 +2322,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let callee_ft = decoded.types.get(type_idx as usize)?;
                 let table_is_64 = declared_table(module, table_idx)?.index_type == IndexType::I64;
                 let arg_count = callee_ft.params.len();
-                let ret_count = callee_ft.results.len();
+                let arg_slots: u16 = callee_ft
+                    .params
+                    .iter()
+                    .map(|&t| FastType::from_val(t).map(FastType::slots))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .sum();
                 // Flush before popping the table index so `meta_at_call` preserves
                 // `[args..., table_index]` on the canonical stack if this call bails!
                 flush_all(&mut vstack, &mut ops, &mut consts);
@@ -1952,9 +2340,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut stack_types,
                     &mut static_labels,
                 );
-                let _idx_slot = vstack.pop()?;
-                let index_reg = num_locals_u16 + vstack.len() as u16;
+                let idx_slot = vstack.pop()?;
+                let index_reg = idx_slot.slot_off;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
+                let arg_base = if arg_count > 0 {
+                    vstack[arg_start].slot_off
+                } else {
+                    slot_top(&vstack)
+                };
                 vstack.truncate(arg_start);
                 let meta_after_call = push_meta(
                     pc + 1,
@@ -1969,20 +2362,25 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     type_idx,
                     table_idx,
                     index_reg,
-                    arg_base: num_locals_u16 + arg_start as u16,
-                    arg_count: arg_count as u16,
-                    ret_count: ret_count as u16,
+                    arg_base,
+                    arg_slots,
+                    logical_arg_start: arg_start as u16,
                     table_is_64,
                     meta_at_call,
                     meta_after_call,
                 });
                 ops.push(RegOp::CallIndirect { call_idx, src_off });
-                for (i, &rt) in callee_ft.results.iter().enumerate() {
+                let mut off = arg_base;
+                for &rt in &callee_ft.results {
+                    let ty = FastType::from_val(rt)?;
                     vstack.push(VSlot {
-                        src: VVal::Slot(num_locals_u16 + (arg_start + i) as u16),
-                        ty: NumericType::admitted(rt).ok()?,
+                        src: VVal::Slot(off),
+                        slot_off: off,
+                        ty,
                     });
+                    off += ty.slots();
                 }
+                max_slots = max_slots.max(off as usize);
                 close_block(
                     &mut in_block,
                     &mut cur_block_ip,
@@ -1999,7 +2397,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 };
                 let callee_ft = declared_func_type(module, fi)?;
                 let arg_count = callee_ft.params.len();
-                let ret_count = callee_ft.results.len();
+                let arg_slots: u16 = callee_ft
+                    .params
+                    .iter()
+                    .map(|&t| FastType::from_val(t).map(FastType::slots))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .sum();
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let meta_at_call = push_meta(
                     pc,
@@ -2010,12 +2414,17 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut static_labels,
                 );
                 let arg_start = vstack.len().checked_sub(arg_count)?;
+                let arg_base = if arg_count > 0 {
+                    vstack[arg_start].slot_off
+                } else {
+                    slot_top(&vstack)
+                };
                 let call_idx = call_sites.len() as u32;
                 call_sites.push(CallSite {
                     func_idx: fi,
-                    arg_base: num_locals_u16 + arg_start as u16,
-                    arg_count: arg_count as u16,
-                    ret_count: ret_count as u16,
+                    arg_base,
+                    arg_slots,
+                    logical_arg_start: arg_start as u16,
                     meta_at_call,
                     meta_after_call: BLOCK_META_NONE,
                 });
@@ -2038,7 +2447,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let callee_ft = decoded.types.get(type_idx as usize)?;
                 let table_is_64 = declared_table(module, table_idx)?.index_type == IndexType::I64;
                 let arg_count = callee_ft.params.len();
-                let ret_count = callee_ft.results.len();
+                let arg_slots: u16 = callee_ft
+                    .params
+                    .iter()
+                    .map(|&t| FastType::from_val(t).map(FastType::slots))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_iter()
+                    .sum();
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let meta_at_call = push_meta(
                     pc,
@@ -2048,17 +2463,22 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut stack_types,
                     &mut static_labels,
                 );
-                let _idx_slot = vstack.pop()?;
-                let index_reg = num_locals_u16 + vstack.len() as u16;
+                let idx_slot = vstack.pop()?;
+                let index_reg = idx_slot.slot_off;
                 let arg_start = vstack.len().checked_sub(arg_count)?;
+                let arg_base = if arg_count > 0 {
+                    vstack[arg_start].slot_off
+                } else {
+                    slot_top(&vstack)
+                };
                 let call_idx = call_indirect_sites.len() as u32;
                 call_indirect_sites.push(CallIndirectSite {
                     type_idx,
                     table_idx,
                     index_reg,
-                    arg_base: num_locals_u16 + arg_start as u16,
-                    arg_count: arg_count as u16,
-                    ret_count: ret_count as u16,
+                    arg_base,
+                    arg_slots,
+                    logical_arg_start: arg_start as u16,
                     table_is_64,
                     meta_at_call,
                     meta_after_call: BLOCK_META_NONE,
@@ -2079,28 +2499,45 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 vstack.pop()?;
             }
             0x1b | 0x1c => {
-                // select
+                // select (scalar or v128)
                 let cond_v = vstack.pop()?;
                 let b_v = vstack.pop()?;
                 let a_v = vstack.pop()?;
-                let base_tmp = num_locals_u16 + vstack.len() as u16;
-                let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
-                let rb = mat(b_v.src, base_tmp + 1, &mut ops, &mut consts);
-                let rc = mat(cond_v.src, base_tmp + 2, &mut ops, &mut consts);
+                let base_tmp = slot_top(&vstack);
+                let w = a_v.ty.slots();
+                let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                let rb = mat(b_v.src, base_tmp + w, &mut max_slots, &mut ops, &mut consts);
+                let rc = mat(
+                    cond_v.src,
+                    base_tmp + 2 * w,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
                 let (dst, consumed, is_tee) =
                     try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, a_v.ty);
-                ops.push(RegOp::Select {
-                    dst,
-                    a: ra,
-                    b: rb,
-                    cond: rc,
-                });
+                if a_v.ty == FastType::V128 {
+                    ops.push(RegOp::SelectV128 {
+                        dst,
+                        a: ra,
+                        b: rb,
+                        cond: rc,
+                    });
+                } else {
+                    ops.push(RegOp::Select {
+                        dst,
+                        a: ra,
+                        b: rb,
+                        cond: rc,
+                    });
+                }
                 finish_dst(
                     dst,
                     consumed,
                     is_tee,
                     a_v.ty,
                     &mut vstack,
+                    &mut max_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -2112,33 +2549,58 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 };
                 let l = l as usize;
                 let ty = *local_types.get(l)?;
+                let l_slot = *local_slots.get(l)?;
+                let slot_off = slot_top(&vstack);
                 vstack.push(VSlot {
-                    src: VVal::Local(l as u16),
+                    src: VVal::Local(l_slot),
+                    slot_off,
                     ty,
                 });
+                max_slots = max_slots.max(slot_off as usize + ty.slots() as usize);
             }
             0x21 | 0x22 => {
                 // local.set / local.tee
                 let Immediate::Index(l) = insn.immediate else {
                     return None;
                 };
-                let l = l as u16;
+                let l_slot = *local_slots.get(l as usize)?;
                 let val = vstack.pop()?;
-                flush_local(l, &mut vstack, &mut ops);
+                flush_local(l_slot, &mut vstack, &mut ops);
                 match val.src {
-                    VVal::Local(s) if s == l => {}
-                    VVal::Slot(s) | VVal::Local(s) => ops.push(RegOp::Mov { dst: l, src: s }),
-                    VVal::Imm32(v) => ops.push(RegOp::Const32 { dst: l, val: v }),
+                    VVal::Local(s) if s == l_slot => {}
+                    VVal::Slot(s) | VVal::Local(s) => {
+                        if val.ty == FastType::V128 {
+                            ops.push(RegOp::MovV128 {
+                                dst: l_slot,
+                                src: s,
+                            });
+                        } else {
+                            ops.push(RegOp::Mov {
+                                dst: l_slot,
+                                src: s,
+                            });
+                        }
+                    }
+                    VVal::Imm32(v) => ops.push(RegOp::Const32 {
+                        dst: l_slot,
+                        val: v,
+                    }),
                     VVal::Imm64(v) => {
                         let idx = push_const(&mut consts, v);
-                        ops.push(RegOp::Const64 { dst: l, idx });
+                        ops.push(RegOp::Const64 { dst: l_slot, idx });
+                    }
+                    VVal::ImmV128(idx) => {
+                        ops.push(RegOp::ConstV128 { dst: l_slot, idx });
                     }
                 }
                 if insn.opcode == 0x22 {
+                    let slot_off = slot_top(&vstack);
                     vstack.push(VSlot {
-                        src: VVal::Local(l),
+                        src: VVal::Local(l_slot),
+                        slot_off,
                         ty: val.ty,
                     });
+                    max_slots = max_slots.max(slot_off as usize + val.ty.slots() as usize);
                 }
             }
             0x23 => {
@@ -2146,16 +2608,21 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let Immediate::Index(gi) = insn.immediate else {
                     return None;
                 };
-                let ty = NumericType::admitted(declared_global_type(module, gi)?).ok()?;
+                let ty = FastType::from_val(declared_global_type(module, gi)?)?;
                 let (dst, consumed, is_tee) =
                     try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
-                ops.push(RegOp::GlobalGet { dst, global: gi });
+                if ty == FastType::V128 {
+                    ops.push(RegOp::GlobalGetV128 { dst, global: gi });
+                } else {
+                    ops.push(RegOp::GlobalGet { dst, global: gi });
+                }
                 finish_dst(
                     dst,
                     consumed,
                     is_tee,
                     ty,
                     &mut vstack,
+                    &mut max_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -2168,11 +2635,16 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let val = vstack.pop()?;
                 let src = mat(
                     val.src,
-                    num_locals_u16 + vstack.len() as u16,
+                    slot_top(&vstack),
+                    &mut max_slots,
                     &mut ops,
                     &mut consts,
                 );
-                ops.push(RegOp::GlobalSet { src, global: gi });
+                if val.ty == FastType::V128 {
+                    ops.push(RegOp::GlobalSetV128 { src, global: gi });
+                } else {
+                    ops.push(RegOp::GlobalSet { src, global: gi });
+                }
             }
             0x28..=0x3e => {
                 // scalar memory load / store
@@ -2183,7 +2655,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 if is_store {
                     let val_v = vstack.pop()?;
                     let addr_v = vstack.pop()?;
-                    let base_tmp = num_locals_u16 + vstack.len() as u16;
+                    let base_tmp = slot_top(&vstack);
                     // Peephole: fuse preceding `I32AddImm { dst: tmp, src: base, imm }` into
                     // `StoreI32AddImm` / `StoreI32_8AddImm` when `offset == 0` and memory32.
                     let fused_add_imm = if memory == 0
@@ -2192,7 +2664,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         && offset == 0
                         && matches!(insn.opcode, 0x36 | 0x38 | 0x3a)
                         && let VVal::Slot(r_addr) = addr_v.src
-                        && r_addr >= num_locals_u16
+                        && r_addr >= local_reg_slots
                         && val_v.src != VVal::Slot(r_addr)
                         && ops.len() > cur_block_start_ip
                         && let Some(RegOp::I32AddImm { dst, src, imm }) = ops.last().copied()
@@ -2204,7 +2676,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         None
                     };
                     if let Some((base_reg, imm)) = fused_add_imm {
-                        let r_val = mat(val_v.src, base_tmp + 1, &mut ops, &mut consts);
+                        let r_val = mat(
+                            val_v.src,
+                            base_tmp + 1,
+                            &mut max_slots,
+                            &mut ops,
+                            &mut consts,
+                        );
                         match insn.opcode {
                             0x36 | 0x38 => ops.push(RegOp::StoreI32AddImm {
                                 addr: base_reg,
@@ -2220,8 +2698,15 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             }),
                         }
                     } else {
-                        let r_addr = mat(addr_v.src, base_tmp, &mut ops, &mut consts);
-                        let r_val = mat(val_v.src, base_tmp + 1, &mut ops, &mut consts);
+                        let r_addr =
+                            mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                        let r_val = mat(
+                            val_v.src,
+                            base_tmp + 1,
+                            &mut max_slots,
+                            &mut ops,
+                            &mut consts,
+                        );
                         if memory == 0
                             && mem0_unshared
                             && let Ok(off32) = u32::try_from(offset)
@@ -2277,8 +2762,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     }
                 } else {
                     let addr_v = vstack.pop()?;
-                    let base_tmp = num_locals_u16 + vstack.len() as u16;
-                    let r_addr = mat(addr_v.src, base_tmp, &mut ops, &mut consts);
+                    let base_tmp = slot_top(&vstack);
+                    let r_addr = mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
                     let (dst, consumed, is_tee) =
                         try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
                     if memory == 0
@@ -2287,7 +2772,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     {
                         let can_fuse_addr = !mem0_is_64
                             && matches!(insn.opcode, 0x28 | 0x2a | 0x2d)
-                            && r_addr >= num_locals_u16
+                            && r_addr >= local_reg_slots
                             && ops.len() > cur_block_start_ip;
                         let fused_addr = if can_fuse_addr
                             && let Some(RegOp::I32Add { dst: add_dst, a, b }) = ops.last().copied()
@@ -2395,6 +2880,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         is_tee,
                         ty,
                         &mut vstack,
+                        &mut max_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -2406,11 +2892,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     return None;
                 };
                 let is64 = declared_memory(module, mem)?.index_type == IndexType::I64;
-                let ty = if is64 {
-                    NumericType::I64
-                } else {
-                    NumericType::I32
-                };
+                let ty = if is64 { FastType::I64 } else { FastType::I32 };
                 let (dst, consumed, is_tee) =
                     try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, ty);
                 ops.push(RegOp::MemSize { dst, mem });
@@ -2420,6 +2902,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     is_tee,
                     ty,
                     &mut vstack,
+                    &mut max_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -2430,15 +2913,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     return None;
                 };
                 let is64 = declared_memory(module, mem)?.index_type == IndexType::I64;
-                let ty = if is64 {
-                    NumericType::I64
-                } else {
-                    NumericType::I32
-                };
+                let ty = if is64 { FastType::I64 } else { FastType::I32 };
                 let delta_v = vstack.pop()?;
                 let r_delta = mat(
                     delta_v.src,
-                    num_locals_u16 + vstack.len() as u16,
+                    slot_top(&vstack),
+                    &mut max_slots,
                     &mut ops,
                     &mut consts,
                 );
@@ -2456,6 +2936,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     is_tee,
                     ty,
                     &mut vstack,
+                    &mut max_slots,
                     &mut cur_block_ops,
                     &mut pc,
                 );
@@ -2468,10 +2949,22 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let len_v = vstack.pop()?;
                 let src_v = vstack.pop()?;
                 let dst_v = vstack.pop()?;
-                let base_tmp = num_locals_u16 + vstack.len() as u16;
-                let r_dst = mat(dst_v.src, base_tmp, &mut ops, &mut consts);
-                let r_src = mat(src_v.src, base_tmp + 1, &mut ops, &mut consts);
-                let r_len = mat(len_v.src, base_tmp + 2, &mut ops, &mut consts);
+                let base_tmp = slot_top(&vstack);
+                let r_dst = mat(dst_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                let r_src = mat(
+                    src_v.src,
+                    base_tmp + 1,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let r_len = mat(
+                    len_v.src,
+                    base_tmp + 2,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
                 if dst_mem == 0 && src_mem == 0 && mem0_unshared {
                     ops.push(RegOp::MemCopy0 {
                         dst: r_dst,
@@ -2500,10 +2993,22 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let len_v = vstack.pop()?;
                 let val_v = vstack.pop()?;
                 let dst_v = vstack.pop()?;
-                let base_tmp = num_locals_u16 + vstack.len() as u16;
-                let r_dst = mat(dst_v.src, base_tmp, &mut ops, &mut consts);
-                let r_val = mat(val_v.src, base_tmp + 1, &mut ops, &mut consts);
-                let r_len = mat(len_v.src, base_tmp + 2, &mut ops, &mut consts);
+                let base_tmp = slot_top(&vstack);
+                let r_dst = mat(dst_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                let r_val = mat(
+                    val_v.src,
+                    base_tmp + 1,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
+                let r_len = mat(
+                    len_v.src,
+                    base_tmp + 2,
+                    &mut max_slots,
+                    &mut ops,
+                    &mut consts,
+                );
                 if mem == 0 && mem0_unshared {
                     ops.push(RegOp::MemFill0 {
                         dst: r_dst,
@@ -2533,56 +3038,72 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                 let argc = if kind < 2 { 4usize } else { 2usize };
                 flush_all(&mut vstack, &mut ops, &mut consts);
                 let arg_start = vstack.len().checked_sub(argc)?;
+                let base = vstack[arg_start].slot_off;
                 vstack.truncate(arg_start);
-                let base = num_locals_u16 + arg_start as u16;
                 ops.push(RegOp::WideArith { kind, base });
                 vstack.push(VSlot {
                     src: VVal::Slot(base),
-                    ty: NumericType::I64,
+                    slot_off: base,
+                    ty: FastType::I64,
                 });
                 vstack.push(VSlot {
                     src: VVal::Slot(base + 1),
-                    ty: NumericType::I64,
+                    slot_off: base + 1,
+                    ty: FastType::I64,
                 });
+                max_slots = max_slots.max(base as usize + 2);
             }
             0x41 => {
                 let Immediate::I32(v) = insn.immediate else {
                     return None;
                 };
+                let slot_off = slot_top(&vstack);
                 vstack.push(VSlot {
                     src: VVal::Imm32(v as u32),
-                    ty: NumericType::I32,
+                    slot_off,
+                    ty: FastType::I32,
                 });
+                max_slots = max_slots.max(slot_off as usize + 1);
             }
             0x42 => {
                 let Immediate::I64(v) = insn.immediate else {
                     return None;
                 };
+                let slot_off = slot_top(&vstack);
                 vstack.push(VSlot {
                     src: VVal::Imm64(v as u64),
-                    ty: NumericType::I64,
+                    slot_off,
+                    ty: FastType::I64,
                 });
+                max_slots = max_slots.max(slot_off as usize + 1);
             }
             0x43 => {
                 let Immediate::F32(v) = insn.immediate else {
                     return None;
                 };
+                let slot_off = slot_top(&vstack);
                 vstack.push(VSlot {
                     src: VVal::Imm32(v),
-                    ty: NumericType::F32,
+                    slot_off,
+                    ty: FastType::F32,
                 });
+                max_slots = max_slots.max(slot_off as usize + 1);
             }
             0x44 => {
                 let Immediate::F64(v) = insn.immediate else {
                     return None;
                 };
+                let slot_off = slot_top(&vstack);
                 vstack.push(VSlot {
                     src: VVal::Imm64(v),
-                    ty: NumericType::F64,
+                    slot_off,
+                    ty: FastType::F64,
                 });
+                max_slots = max_slots.max(slot_off as usize + 1);
             }
             0x45..=0xc4 | 0xfc00..=0xfc07 => {
-                let (_in_ty, res_ty, is_binary) = super::ir::numeric_signature(insn.opcode)?;
+                let (_in_ty, raw_res_ty, is_binary) = super::ir::numeric_signature(insn.opcode)?;
+                let res_ty = fast_from_numeric(raw_res_ty);
                 if !is_binary {
                     let a_v = vstack.pop()?;
                     // Peephole: `i32.eqz` followed by `br_if` (arity 0) or `if`!
@@ -2611,7 +3132,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 flush_all(&mut vstack, &mut ops, &mut consts);
                                 let ra = mat(
                                     a_v.src,
-                                    num_locals_u16 + vstack.len() as u16,
+                                    slot_top(&vstack),
+                                    &mut max_slots,
                                     &mut ops,
                                     &mut consts,
                                 );
@@ -2636,11 +3158,14 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             }
                         } else if next_insn.opcode == 0x04 {
                             let (params, results) = block_sig(module, &next_insn.immediate)?;
+                            let param_slots = params.iter().map(|t| t.slots()).sum();
+                            let result_slots = results.iter().map(|t| t.slots()).sum();
                             let (end, other) = module.data.control.get(body, pc + 1)?;
                             flush_all(&mut vstack, &mut ops, &mut consts);
                             let ra = mat(
                                 a_v.src,
-                                num_locals_u16 + vstack.len() as u16,
+                                slot_top(&vstack),
+                                &mut max_slots,
                                 &mut ops,
                                 &mut consts,
                             );
@@ -2651,6 +3176,11 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 target: 0,
                             });
                             let base_height = vstack.len().checked_sub(params.len())?;
+                            let base_slot = if base_height < vstack.len() {
+                                vstack[base_height].slot_off
+                            } else {
+                                slot_top(&vstack)
+                            };
                             let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
                             labels.push(CompileLabel {
                                 start: pc + 2,
@@ -2658,9 +3188,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 other,
                                 loop_: false,
                                 base_height,
+                                base_slot,
                                 prefix,
                                 params,
                                 results,
+                                param_slots,
+                                result_slots,
                                 parent_dead: false,
                             });
                             let false_pc = other.map_or(end, |e| e + 1);
@@ -2681,7 +3214,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     }
                     let ra = mat(
                         a_v.src,
-                        num_locals_u16 + vstack.len() as u16,
+                        slot_top(&vstack),
+                        &mut max_slots,
                         &mut ops,
                         &mut consts,
                     );
@@ -2704,6 +3238,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         is_tee,
                         res_ty,
                         &mut vstack,
+                        &mut max_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
@@ -2739,10 +3274,22 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     labels[l_idx].end + 1
                                 };
                                 flush_all(&mut vstack, &mut ops, &mut consts);
-                                let base_tmp = num_locals_u16 + vstack.len() as u16;
+                                let base_tmp = slot_top(&vstack);
                                 let br_ip = if is_i64_cmp {
-                                    let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
-                                    let rb = mat(b_v.src, base_tmp + 1, &mut ops, &mut consts);
+                                    let ra = mat(
+                                        a_v.src,
+                                        base_tmp,
+                                        &mut max_slots,
+                                        &mut ops,
+                                        &mut consts,
+                                    );
+                                    let rb = mat(
+                                        b_v.src,
+                                        base_tmp + 1,
+                                        &mut max_slots,
+                                        &mut ops,
+                                        &mut consts,
+                                    );
                                     let ip = ops.len();
                                     ops.push(RegOp::I64CmpBrIf {
                                         cmp,
@@ -2752,7 +3299,13 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     });
                                     ip
                                 } else if let VVal::Imm32(imm) = b_v.src {
-                                    let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
+                                    let ra = mat(
+                                        a_v.src,
+                                        base_tmp,
+                                        &mut max_slots,
+                                        &mut ops,
+                                        &mut consts,
+                                    );
                                     let ip = ops.len();
                                     ops.push(RegOp::I32CmpImmBrIf {
                                         cmp,
@@ -2762,8 +3315,20 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     });
                                     ip
                                 } else {
-                                    let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
-                                    let rb = mat(b_v.src, base_tmp + 1, &mut ops, &mut consts);
+                                    let ra = mat(
+                                        a_v.src,
+                                        base_tmp,
+                                        &mut max_slots,
+                                        &mut ops,
+                                        &mut consts,
+                                    );
+                                    let rb = mat(
+                                        b_v.src,
+                                        base_tmp + 1,
+                                        &mut max_slots,
+                                        &mut ops,
+                                        &mut consts,
+                                    );
                                     if (cmp == 3 || cmp == 2)
                                         && rb != ra
                                         && ops.len() > cur_block_start_ip
@@ -2818,13 +3383,22 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             }
                         } else if next_insn.opcode == 0x04 {
                             let (params, results) = block_sig(module, &next_insn.immediate)?;
+                            let param_slots = params.iter().map(|t| t.slots()).sum();
+                            let result_slots = results.iter().map(|t| t.slots()).sum();
                             let (end, other) = module.data.control.get(body, pc + 1)?;
                             flush_all(&mut vstack, &mut ops, &mut consts);
-                            let base_tmp = num_locals_u16 + vstack.len() as u16;
+                            let base_tmp = slot_top(&vstack);
                             let inv = invert_i32_cmp(cmp);
                             let br_ip = if is_i64_cmp {
-                                let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
-                                let rb = mat(b_v.src, base_tmp + 1, &mut ops, &mut consts);
+                                let ra =
+                                    mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                                let rb = mat(
+                                    b_v.src,
+                                    base_tmp + 1,
+                                    &mut max_slots,
+                                    &mut ops,
+                                    &mut consts,
+                                );
                                 let ip = ops.len();
                                 ops.push(RegOp::I64CmpBrIf {
                                     cmp: inv,
@@ -2834,7 +3408,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 });
                                 ip
                             } else if let VVal::Imm32(imm) = b_v.src {
-                                let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
+                                let ra =
+                                    mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
                                 let ip = ops.len();
                                 ops.push(RegOp::I32CmpImmBrIf {
                                     cmp: inv,
@@ -2844,8 +3419,15 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 });
                                 ip
                             } else {
-                                let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
-                                let rb = mat(b_v.src, base_tmp + 1, &mut ops, &mut consts);
+                                let ra =
+                                    mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                                let rb = mat(
+                                    b_v.src,
+                                    base_tmp + 1,
+                                    &mut max_slots,
+                                    &mut ops,
+                                    &mut consts,
+                                );
                                 let ip = ops.len();
                                 ops.push(RegOp::I32CmpBrIf {
                                     cmp: inv,
@@ -2856,6 +3438,11 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 ip
                             };
                             let base_height = vstack.len().checked_sub(params.len())?;
+                            let base_slot = if base_height < vstack.len() {
+                                vstack[base_height].slot_off
+                            } else {
+                                slot_top(&vstack)
+                            };
                             let prefix = vstack[..base_height].iter().map(|s| s.ty).collect();
                             labels.push(CompileLabel {
                                 start: pc + 2,
@@ -2863,9 +3450,12 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 other,
                                 loop_: false,
                                 base_height,
+                                base_slot,
                                 prefix,
                                 params,
                                 results,
+                                param_slots,
+                                result_slots,
                                 parent_dead: false,
                             });
                             let false_pc = other.map_or(end, |e| e + 1);
@@ -2889,22 +3479,25 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     if let (VVal::Imm32(ca), VVal::Imm32(cb)) = (a_v.src, b_v.src)
                         && let Some(folded) = fold_i32_bin(insn.opcode, ca, cb)
                     {
+                        let slot_off = slot_top(&vstack);
                         vstack.push(VSlot {
                             src: VVal::Imm32(folded),
-                            ty: NumericType::I32,
+                            slot_off,
+                            ty: FastType::I32,
                         });
+                        max_slots = max_slots.max(slot_off as usize + 1);
                         pc += 1;
                         continue;
                     }
 
                     let (dst, consumed, is_tee) =
                         try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, res_ty);
-                    let base_tmp = num_locals_u16 + vstack.len() as u16;
+                    let base_tmp = slot_top(&vstack);
 
                     // Immediate-RHS (or commutative LHS) superinstructions for i32/i64/f64 ALU!
                     let emitted_imm = match (insn.opcode, a_v.src, b_v.src) {
                         (0x6a, a, VVal::Imm32(c)) | (0x6a, VVal::Imm32(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32AddImm {
                                 dst,
                                 src: ra,
@@ -2913,7 +3506,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x6b, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32SubImm {
                                 dst,
                                 src: ra,
@@ -2922,7 +3515,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x6c, a, VVal::Imm32(c)) | (0x6c, VVal::Imm32(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32MulImm {
                                 dst,
                                 src: ra,
@@ -2931,7 +3524,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x6e, a, VVal::Imm32(c)) if c != 0 => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             if c == 1 {
                                 if dst != ra {
                                     ops.push(RegOp::Mov { dst, src: ra });
@@ -2951,7 +3544,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x70, a, VVal::Imm32(c)) if c != 0 => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             if c == 1 {
                                 ops.push(RegOp::Const32 { dst, val: 0 });
                             } else if c.is_power_of_two() {
@@ -2970,7 +3563,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x71, a, VVal::Imm32(c)) | (0x71, VVal::Imm32(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32AndImm {
                                 dst,
                                 src: ra,
@@ -2979,7 +3572,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x72, a, VVal::Imm32(c)) | (0x72, VVal::Imm32(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32OrImm {
                                 dst,
                                 src: ra,
@@ -2988,7 +3581,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x73, a, VVal::Imm32(c)) | (0x73, VVal::Imm32(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32XorImm {
                                 dst,
                                 src: ra,
@@ -2997,7 +3590,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x74, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32ShlImm {
                                 dst,
                                 src: ra,
@@ -3006,7 +3599,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x75, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32ShrSImm {
                                 dst,
                                 src: ra,
@@ -3015,7 +3608,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x76, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32ShrUImm {
                                 dst,
                                 src: ra,
@@ -3024,7 +3617,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x77, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32RotlImm {
                                 dst,
                                 src: ra,
@@ -3033,7 +3626,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0x78, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32RotrImm {
                                 dst,
                                 src: ra,
@@ -3042,7 +3635,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (op @ 0x46..=0x4f, a, VVal::Imm32(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I32CmpImm {
                                 cmp: (op - 0x46) as u8,
                                 dst,
@@ -3054,7 +3647,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         (0x7c, a, VVal::Imm64(c)) | (0x7c, VVal::Imm64(c), a)
                             if i32::try_from(c as i64).is_ok() =>
                         {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             ops.push(RegOp::I64AddImm {
                                 dst,
                                 src: ra,
@@ -3063,31 +3656,31 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                             true
                         }
                         (0xa0, a, VVal::Imm64(c)) | (0xa0, VVal::Imm64(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             let cidx = push_const(&mut consts, c);
                             ops.push(RegOp::F64AddConst { dst, src: ra, cidx });
                             true
                         }
                         (0xa1, a, VVal::Imm64(c)) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             let cidx = push_const(&mut consts, c);
                             ops.push(RegOp::F64SubConst { dst, src: ra, cidx });
                             true
                         }
                         (0xa2, a, VVal::Imm64(c)) | (0xa2, VVal::Imm64(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             let cidx = push_const(&mut consts, c);
                             ops.push(RegOp::F64MulConst { dst, src: ra, cidx });
                             true
                         }
                         (0xa4, a, VVal::Imm64(c)) | (0xa4, VVal::Imm64(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             let cidx = push_const(&mut consts, c);
                             ops.push(RegOp::F64MinConst { dst, src: ra, cidx });
                             true
                         }
                         (0xa5, a, VVal::Imm64(c)) | (0xa5, VVal::Imm64(c), a) => {
-                            let ra = mat(a, base_tmp, &mut ops, &mut consts);
+                            let ra = mat(a, base_tmp, &mut max_slots, &mut ops, &mut consts);
                             let cidx = push_const(&mut consts, c);
                             ops.push(RegOp::F64MaxConst { dst, src: ra, cidx });
                             true
@@ -3096,8 +3689,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     };
 
                     if !emitted_imm {
-                        let ra = mat(a_v.src, base_tmp, &mut ops, &mut consts);
-                        let rb = mat(b_v.src, base_tmp + 1, &mut ops, &mut consts);
+                        let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                        let rb = mat(b_v.src, base_tmp + 1, &mut max_slots, &mut ops, &mut consts);
                         let in_cur_block = ops.len() > cur_block_start_ip;
                         let fused_load_add = if in_cur_block && insn.opcode == 0x6a {
                             match ops.last().copied() {
@@ -3106,7 +3699,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     addr,
                                     offset,
                                     src_off: l_src_off,
-                                }) if ldst >= num_locals_u16
+                                }) if ldst >= local_reg_slots
                                     && ((rb == ldst && ra == dst) || (ra == ldst && rb == dst))
                                     && addr != dst =>
                                 {
@@ -3124,7 +3717,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                     addr,
                                     imm,
                                     src_off: l_src_off,
-                                }) if ldst >= num_locals_u16
+                                }) if ldst >= local_reg_slots
                                     && ((rb == ldst && ra == dst) || (ra == ldst && rb == dst))
                                     && addr != dst =>
                                 {
@@ -3147,7 +3740,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                                 offset,
                                 src_off: l_src_off,
                             }) = ops.last().copied()
-                            && ldst >= num_locals_u16
+                            && ldst >= local_reg_slots
                             && ((rb == ldst && ra == dst) || (ra == ldst && rb == dst))
                             && addr != dst
                         {
@@ -3253,11 +3846,351 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         is_tee,
                         res_ty,
                         &mut vstack,
+                        &mut max_slots,
                         &mut cur_block_ops,
                         &mut pc,
                     );
                 }
             }
+            0xfd00..=0xfdff | 0xfa00..=0xfa13 => match simd_op_shape(insn.opcode)? {
+                SimdShape::Mem => {
+                    let (memory, offset, lane) = match insn.immediate {
+                        Immediate::MemArg { memory, offset, .. } => (memory, offset, 0u8),
+                        Immediate::MemLane {
+                            memory,
+                            offset,
+                            lane,
+                            ..
+                        } => (memory, offset, lane),
+                        _ => return None,
+                    };
+                    let sub = insn.opcode & 0xff;
+                    let lane_op = (0x54..=0x5b).contains(&sub);
+                    let is_store = sub == 11 || (0x58..=0x5b).contains(&sub);
+                    if is_store {
+                        let val_v = vstack.pop()?;
+                        let addr_v = vstack.pop()?;
+                        let base_tmp = slot_top(&vstack);
+                        let r_addr =
+                            mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                        let r_val = mat(
+                            val_v.src,
+                            base_tmp + 1,
+                            &mut max_slots,
+                            &mut ops,
+                            &mut consts,
+                        );
+                        if insn.opcode == 0xfd0b
+                            && memory == 0
+                            && mem0_unshared
+                            && let Ok(off32) = u32::try_from(offset)
+                        {
+                            ops.push(RegOp::StoreV128 {
+                                addr: r_addr,
+                                val: r_val,
+                                offset: off32,
+                                src_off,
+                            });
+                        } else {
+                            let arg_idx = simd_mem_args.len() as u32;
+                            simd_mem_args.push(SimdMemArg {
+                                memory,
+                                offset,
+                                src_vec: r_val,
+                                lane,
+                            });
+                            ops.push(RegOp::SimdMemGen {
+                                op: insn.opcode,
+                                addr: r_addr,
+                                val: r_val,
+                                arg_idx,
+                                src_off,
+                            });
+                        }
+                    } else if lane_op {
+                        let vec_v = vstack.pop()?;
+                        let addr_v = vstack.pop()?;
+                        let base_tmp = slot_top(&vstack);
+                        let r_addr =
+                            mat(addr_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                        let r_vec = mat(
+                            vec_v.src,
+                            base_tmp + 1,
+                            &mut max_slots,
+                            &mut ops,
+                            &mut consts,
+                        );
+                        let (dst, consumed, is_tee) = try_direct_local_dst(
+                            pc,
+                            cur_block_ops,
+                            &mut vstack,
+                            &mut ops,
+                            FastType::V128,
+                        );
+                        let arg_idx = simd_mem_args.len() as u32;
+                        simd_mem_args.push(SimdMemArg {
+                            memory,
+                            offset,
+                            src_vec: r_vec,
+                            lane,
+                        });
+                        ops.push(RegOp::SimdMemGen {
+                            op: insn.opcode,
+                            addr: r_addr,
+                            val: dst,
+                            arg_idx,
+                            src_off,
+                        });
+                        finish_dst(
+                            dst,
+                            consumed,
+                            is_tee,
+                            FastType::V128,
+                            &mut vstack,
+                            &mut max_slots,
+                            &mut cur_block_ops,
+                            &mut pc,
+                        );
+                    } else {
+                        let addr_v = vstack.pop()?;
+                        let r_addr = mat(
+                            addr_v.src,
+                            slot_top(&vstack),
+                            &mut max_slots,
+                            &mut ops,
+                            &mut consts,
+                        );
+                        let (dst, consumed, is_tee) = try_direct_local_dst(
+                            pc,
+                            cur_block_ops,
+                            &mut vstack,
+                            &mut ops,
+                            FastType::V128,
+                        );
+                        if insn.opcode == 0xfd00
+                            && memory == 0
+                            && mem0_unshared
+                            && let Ok(off32) = u32::try_from(offset)
+                        {
+                            ops.push(RegOp::LoadV128 {
+                                dst,
+                                addr: r_addr,
+                                offset: off32,
+                                src_off,
+                            });
+                        } else {
+                            let arg_idx = simd_mem_args.len() as u32;
+                            simd_mem_args.push(SimdMemArg {
+                                memory,
+                                offset,
+                                src_vec: dst,
+                                lane: 0,
+                            });
+                            ops.push(RegOp::SimdMemGen {
+                                op: insn.opcode,
+                                addr: r_addr,
+                                val: dst,
+                                arg_idx,
+                                src_off,
+                            });
+                        }
+                        finish_dst(
+                            dst,
+                            consumed,
+                            is_tee,
+                            FastType::V128,
+                            &mut vstack,
+                            &mut max_slots,
+                            &mut cur_block_ops,
+                            &mut pc,
+                        );
+                    }
+                }
+                SimdShape::Const => {
+                    let Immediate::Bytes(b) = &insn.immediate else {
+                        return None;
+                    };
+                    if b.len() != 16 {
+                        return None;
+                    }
+                    let lo = u64::from_le_bytes(b[0..8].try_into().ok()?);
+                    let hi = u64::from_le_bytes(b[8..16].try_into().ok()?);
+                    let pair = [lo, hi];
+                    let idx = if v128_consts.len() <= 32
+                        && let Some(pos) = v128_consts.iter().position(|&c| c == pair)
+                    {
+                        pos as u32
+                    } else {
+                        let i = v128_consts.len() as u32;
+                        v128_consts.push(pair);
+                        i
+                    };
+                    let slot_off = slot_top(&vstack);
+                    vstack.push(VSlot {
+                        src: VVal::ImmV128(idx),
+                        slot_off,
+                        ty: FastType::V128,
+                    });
+                    max_slots = max_slots.max(slot_off as usize + 2);
+                }
+                SimdShape::Shuffle => {
+                    let Immediate::Bytes(b) = &insn.immediate else {
+                        return None;
+                    };
+                    let mask: [u8; 16] = b.as_ref().try_into().ok()?;
+                    let mask_idx = if simd_masks.len() <= 32
+                        && let Some(pos) = simd_masks.iter().position(|&m| m == mask)
+                    {
+                        pos as u16
+                    } else {
+                        let i = u16::try_from(simd_masks.len()).ok()?;
+                        simd_masks.push(mask);
+                        i
+                    };
+                    let b_v = vstack.pop()?;
+                    let a_v = vstack.pop()?;
+                    let base_tmp = slot_top(&vstack);
+                    let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                    let rb = mat(b_v.src, base_tmp + 2, &mut max_slots, &mut ops, &mut consts);
+                    let (dst, consumed, is_tee) = try_direct_local_dst(
+                        pc,
+                        cur_block_ops,
+                        &mut vstack,
+                        &mut ops,
+                        FastType::V128,
+                    );
+                    ops.push(RegOp::SimdShuffle {
+                        dst,
+                        a: ra,
+                        b: rb,
+                        mask_idx,
+                    });
+                    finish_dst(
+                        dst,
+                        consumed,
+                        is_tee,
+                        FastType::V128,
+                        &mut vstack,
+                        &mut max_slots,
+                        &mut cur_block_ops,
+                        &mut pc,
+                    );
+                }
+                SimdShape::Unary { out_ty, has_lane } => {
+                    let lane = if has_lane {
+                        let Immediate::Index(l) = insn.immediate else {
+                            return None;
+                        };
+                        u8::try_from(l).ok()?
+                    } else {
+                        0
+                    };
+                    let a_v = vstack.pop()?;
+                    let ra = mat(
+                        a_v.src,
+                        slot_top(&vstack),
+                        &mut max_slots,
+                        &mut ops,
+                        &mut consts,
+                    );
+                    let (dst, consumed, is_tee) =
+                        try_direct_local_dst(pc, cur_block_ops, &mut vstack, &mut ops, out_ty);
+                    ops.push(RegOp::SimdUnary {
+                        op: insn.opcode,
+                        dst,
+                        src: ra,
+                        lane,
+                    });
+                    finish_dst(
+                        dst,
+                        consumed,
+                        is_tee,
+                        out_ty,
+                        &mut vstack,
+                        &mut max_slots,
+                        &mut cur_block_ops,
+                        &mut pc,
+                    );
+                }
+                SimdShape::Binary { has_lane } => {
+                    let lane = if has_lane {
+                        let Immediate::Index(l) = insn.immediate else {
+                            return None;
+                        };
+                        u8::try_from(l).ok()?
+                    } else {
+                        0
+                    };
+                    let b_v = vstack.pop()?;
+                    let a_v = vstack.pop()?;
+                    let base_tmp = slot_top(&vstack);
+                    let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                    let rb = mat(
+                        b_v.src,
+                        base_tmp + a_v.ty.slots(),
+                        &mut max_slots,
+                        &mut ops,
+                        &mut consts,
+                    );
+                    let (dst, consumed, is_tee) = try_direct_local_dst(
+                        pc,
+                        cur_block_ops,
+                        &mut vstack,
+                        &mut ops,
+                        FastType::V128,
+                    );
+                    ops.push(RegOp::SimdBinary {
+                        op: insn.opcode,
+                        dst,
+                        a: ra,
+                        b: rb,
+                        lane,
+                    });
+                    finish_dst(
+                        dst,
+                        consumed,
+                        is_tee,
+                        FastType::V128,
+                        &mut vstack,
+                        &mut max_slots,
+                        &mut cur_block_ops,
+                        &mut pc,
+                    );
+                }
+                SimdShape::Ternary => {
+                    let c_v = vstack.pop()?;
+                    let b_v = vstack.pop()?;
+                    let a_v = vstack.pop()?;
+                    let base_tmp = slot_top(&vstack);
+                    let ra = mat(a_v.src, base_tmp, &mut max_slots, &mut ops, &mut consts);
+                    let rb = mat(b_v.src, base_tmp + 2, &mut max_slots, &mut ops, &mut consts);
+                    let rc = mat(c_v.src, base_tmp + 4, &mut max_slots, &mut ops, &mut consts);
+                    let (dst, consumed, is_tee) = try_direct_local_dst(
+                        pc,
+                        cur_block_ops,
+                        &mut vstack,
+                        &mut ops,
+                        FastType::V128,
+                    );
+                    ops.push(RegOp::SimdTernary {
+                        op: insn.opcode,
+                        dst,
+                        a: ra,
+                        b: rb,
+                        c: rc,
+                    });
+                    finish_dst(
+                        dst,
+                        consumed,
+                        is_tee,
+                        FastType::V128,
+                        &mut vstack,
+                        &mut max_slots,
+                        &mut cur_block_ops,
+                        &mut pc,
+                    );
+                }
+            },
             _ => return None,
         }
 
@@ -3272,6 +4205,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         &mut ops,
         &mut blocks,
     );
+
+    if max_slots > MAX_FN_SLOTS {
+        return None;
+    }
 
     // Patch all forward/backward branch targets; if any target is unresolved (e.g. past an early Bail), decline.
     for (br_ip, target_pc) in branch_patches {
@@ -3303,7 +4240,10 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
     Some(Arc::new(FastFunction {
         ops: ops.into_boxed_slice(),
         consts: consts.into_boxed_slice(),
+        v128_consts: v128_consts.into_boxed_slice(),
+        simd_masks: simd_masks.into_boxed_slice(),
         mem_args: mem_args.into_boxed_slice(),
+        simd_mem_args: simd_mem_args.into_boxed_slice(),
         bulk_args: bulk_args.into_boxed_slice(),
         call_sites: call_sites.into_boxed_slice(),
         call_indirect_sites: call_indirect_sites.into_boxed_slice(),
@@ -3315,7 +4255,8 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
         local_types: local_types.into_boxed_slice(),
         result_types: result_types.into_boxed_slice(),
         num_locals: num_locals as u16,
-        slots: total_slots as u16,
+        local_reg_slots,
+        slots: max_slots as u16,
         stack_peak: bounds.stack_peak,
         max_nesting: bounds.maximum_nesting,
         mem0_is_64,
@@ -3335,12 +4276,32 @@ fn value_to_bits(v: Value) -> Option<u64> {
 }
 
 #[inline(always)]
-fn bits_to_value(ty: NumericType, bits: u64) -> Value {
+fn read_v128(regs: &[u64], slot: u16) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&regs[slot as usize].to_le_bytes());
+    out[8..16].copy_from_slice(&regs[slot as usize + 1].to_le_bytes());
+    out
+}
+
+#[inline(always)]
+fn write_v128(regs: &mut [u64], slot: u16, bytes: [u8; 16]) {
+    regs[slot as usize] = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    regs[slot as usize + 1] = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+}
+
+#[inline(always)]
+fn slots_to_value(ty: FastType, slots: &[u64], off: usize) -> Value {
     match ty {
-        NumericType::I32 => Value::I32(bits as u32 as i32),
-        NumericType::I64 => Value::I64(bits as i64),
-        NumericType::F32 => Value::F32(bits as u32),
-        NumericType::F64 => Value::F64(bits),
+        FastType::I32 => Value::I32(slots[off] as u32 as i32),
+        FastType::I64 => Value::I64(slots[off] as i64),
+        FastType::F32 => Value::F32(slots[off] as u32),
+        FastType::F64 => Value::F64(slots[off]),
+        FastType::V128 => {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&slots[off].to_le_bytes());
+            b[8..16].copy_from_slice(&slots[off + 1].to_le_bytes());
+            Value::V128(V128(b))
+        }
     }
 }
 
@@ -3353,6 +4314,191 @@ fn valtype_to_value(ty: ValType, bits: u64) -> Option<Value> {
         ValType::F64 => Value::F64(bits),
         _ => return None,
     })
+}
+
+#[inline(never)]
+fn simd_unary_slow(
+    op: u16,
+    lane: u8,
+    regs: &mut [u64],
+    dst: u16,
+    src: u16,
+    scratch: &mut Vec<Value>,
+) -> Result<()> {
+    scratch.clear();
+    match op {
+        0xfd0f..=0xfd11 => scratch.push(Value::I32(regs[src as usize] as u32 as i32)),
+        0xfd12 => scratch.push(Value::I64(regs[src as usize] as i64)),
+        0xfd13 => scratch.push(Value::F32(regs[src as usize] as u32)),
+        0xfd14 => scratch.push(Value::F64(regs[src as usize])),
+        _ => scratch.push(Value::V128(V128(read_v128(regs, src)))),
+    }
+    let imm = if (0xfd15..=0xfd22).contains(&op) {
+        Immediate::Index(u32::from(lane))
+    } else {
+        Immediate::None
+    };
+    crate::simd::execute(op, &imm, scratch)?;
+    match scratch.pop().ok_or_else(|| trap("simd result"))? {
+        Value::V128(v) => write_v128(regs, dst, v.0),
+        other => regs[dst as usize] = value_to_bits(other).ok_or_else(|| trap("simd scalar"))?,
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn simd_binary_slow(
+    op: u16,
+    lane: u8,
+    regs: &mut [u64],
+    dst: u16,
+    a: u16,
+    b: u16,
+    scratch: &mut Vec<Value>,
+) -> Result<()> {
+    scratch.clear();
+    scratch.push(Value::V128(V128(read_v128(regs, a))));
+    match op {
+        0xfd6b..=0xfd6d
+        | 0xfd8b..=0xfd8d
+        | 0xfdab..=0xfdad
+        | 0xfdcb..=0xfdcd
+        | 0xfd17
+        | 0xfd1a
+        | 0xfd1c => scratch.push(Value::I32(regs[b as usize] as u32 as i32)),
+        0xfd1e => scratch.push(Value::I64(regs[b as usize] as i64)),
+        0xfd20 => scratch.push(Value::F32(regs[b as usize] as u32)),
+        0xfd22 => scratch.push(Value::F64(regs[b as usize])),
+        _ => scratch.push(Value::V128(V128(read_v128(regs, b)))),
+    }
+    let imm = if (0xfd15..=0xfd22).contains(&op) {
+        Immediate::Index(u32::from(lane))
+    } else {
+        Immediate::None
+    };
+    crate::simd::execute(op, &imm, scratch)?;
+    let Value::V128(v) = scratch.pop().ok_or_else(|| trap("simd result"))? else {
+        return Err(trap("simd v128 result"));
+    };
+    write_v128(regs, dst, v.0);
+    Ok(())
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn simd_ternary_slow(
+    op: u16,
+    regs: &mut [u64],
+    dst: u16,
+    a: u16,
+    b: u16,
+    c: u16,
+    scratch: &mut Vec<Value>,
+) -> Result<()> {
+    scratch.clear();
+    scratch.push(Value::V128(V128(read_v128(regs, a))));
+    scratch.push(Value::V128(V128(read_v128(regs, b))));
+    scratch.push(Value::V128(V128(read_v128(regs, c))));
+    crate::simd::execute(op, &Immediate::None, scratch)?;
+    let Value::V128(v) = scratch.pop().ok_or_else(|| trap("simd result"))? else {
+        return Err(trap("simd v128 result"));
+    };
+    write_v128(regs, dst, v.0);
+    Ok(())
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn simd_mem_slow(
+    store: &mut Store,
+    inst_id: usize,
+    mem_idx_in_inst: u32,
+    op: u16,
+    offset: u64,
+    raw_addr: u64,
+    in_vec: [u8; 16],
+    lane: u8,
+) -> Result<(Option<[u8; 16]>, u64)> {
+    let h = *store.instances[inst_id]
+        .mems
+        .get(mem_idx_in_inst as usize)
+        .ok_or_else(|| trap("memory index"))?;
+    let idx = store.check(h.0, &store.mems)?;
+    let mem = &mut store.mems[idx];
+    let addr = if mem.ty.index_type == IndexType::I64 {
+        raw_addr
+    } else {
+        raw_addr as u32 as u64
+    };
+    let eff = addr
+        .checked_add(offset)
+        .ok_or_else(|| trap("address overflow"))?;
+    let sub = op & 0xff;
+    let lane_op = (0x54..=0x5b).contains(&sub);
+    let is_store = sub == 11 || (0x58..=0x5b).contains(&sub);
+    let n = match sub {
+        0 | 11 => 16,
+        1..=6 => 8,
+        7 => 1,
+        8 => 2,
+        9 | 0x5c => 4,
+        10 | 0x5d => 8,
+        0x54 | 0x58 => 1,
+        0x55 | 0x59 => 2,
+        0x56 | 0x5a => 4,
+        0x57 | 0x5b => 8,
+        _ => return Err(trap("SIMD memory opcode")),
+    };
+    range(eff, n, mem.len()?)?;
+    if is_store {
+        if lane_op {
+            let start = (lane as usize) * n;
+            if start + n > 16 {
+                return Err(trap("invalid lane"));
+            }
+            mem.write(eff, &in_vec[start..start + n])?;
+        } else {
+            mem.write(eff, &in_vec)?;
+        }
+        return Ok((None, eff));
+    }
+    let mut raw_buf = [0u8; 16];
+    mem.read_into(eff, &mut raw_buf[..n])?;
+    let bytes = &raw_buf[..n];
+    let mut out = if lane_op { in_vec } else { [0u8; 16] };
+    if lane_op {
+        let start = (lane as usize) * n;
+        if start + n > 16 {
+            return Err(trap("invalid lane"));
+        }
+        out[start..start + n].copy_from_slice(bytes);
+    } else {
+        match sub {
+            0 => out.copy_from_slice(bytes),
+            1..=6 => {
+                let width = 1usize << ((sub - 1) / 2);
+                let signed = sub % 2 == 1;
+                for (i, chunk) in bytes.chunks(width).enumerate() {
+                    let mut b = [0u8; 8];
+                    b[..width].copy_from_slice(chunk);
+                    let mut x = u64::from_le_bytes(b);
+                    if signed {
+                        x = ((x << (64 - width * 8)) as i64 >> (64 - width * 8)) as u64;
+                    }
+                    out[i * width * 2..(i + 1) * width * 2]
+                        .copy_from_slice(&x.to_le_bytes()[..width * 2]);
+                }
+            }
+            7..=10 => {
+                for c in out.chunks_mut(n) {
+                    c.copy_from_slice(bytes);
+                }
+            }
+            0x5c | 0x5d => out[..n].copy_from_slice(bytes),
+            _ => return Err(trap("SIMD load opcode")),
+        }
+    }
+    Ok((Some(out), eff))
 }
 
 #[inline(always)]
@@ -3746,11 +4892,20 @@ fn materialize_all(
         |stack: &mut Vec<Value>, func: &FastFunction, meta: &BlockMeta, slots: &[u64]| {
             let s_start = meta.stack_start as usize;
             let s_end = s_start + meta.stack_len as usize;
-            let num_locals = func.num_locals as usize;
-            for (h, &ty) in func.stack_types[s_start..s_end].iter().enumerate() {
-                stack.push(bits_to_value(ty, slots[num_locals + h]));
+            let mut off = func.local_reg_slots as usize;
+            for &ty in &func.stack_types[s_start..s_end] {
+                stack.push(slots_to_value(ty, slots, off));
+                off += ty.slots() as usize;
             }
         };
+
+    let push_locals = |dst: &mut Vec<Value>, func: &FastFunction, slots: &[u64]| {
+        let mut off = 0usize;
+        for &ty in &func.local_types {
+            dst.push(slots_to_value(ty, slots, off));
+            off += ty.slots() as usize;
+        }
+    };
 
     let cur_func = Arc::clone(
         store.instances[cur_inst].module.data.register_fast[cur_body]
@@ -3771,9 +4926,7 @@ fn materialize_all(
         {
             return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
         }
-        for (i, &ty) in cur_func.local_types.iter().enumerate() {
-            entry_frame.locals.push(bits_to_value(ty, slots[i]));
-        }
+        push_locals(&mut entry_frame.locals, &cur_func, slots);
         entry_frame.pc = meta.source_pc as usize;
         entry_frame.register = None;
         fill_labels(store, &mut entry_frame.labels, &cur_func, meta, entry_base)?;
@@ -3801,9 +4954,7 @@ fn materialize_all(
         {
             return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
         }
-        for (i, &ty) in f0_func.local_types.iter().enumerate() {
-            entry_frame.locals.push(bits_to_value(ty, slots[i]));
-        }
+        push_locals(&mut entry_frame.locals, &f0_func, slots);
         entry_frame.pc = meta.source_pc as usize;
         entry_frame.register = None;
         fill_labels(store, &mut entry_frame.labels, &f0_func, meta, entry_base)?;
@@ -3822,9 +4973,7 @@ fn materialize_all(
         let slots = &reg_bank[af.reg_base..af.reg_base + af_func.slots as usize];
         let base = stack.len();
         let mut locals = Vec::with_capacity(af_func.num_locals as usize);
-        for (i, &ty) in af_func.local_types.iter().enumerate() {
-            locals.push(bits_to_value(ty, slots[i]));
-        }
+        push_locals(&mut locals, &af_func, slots);
         let mut labels = Vec::new();
         fill_labels(store, &mut labels, &af_func, meta, base)?;
         push_operands(stack, &af_func, meta, slots);
@@ -3847,9 +4996,7 @@ fn materialize_all(
         let slots = &reg_bank[cur_reg_base..cur_reg_base + cur_func.slots as usize];
         let base = stack.len();
         let mut locals = Vec::with_capacity(cur_func.num_locals as usize);
-        for (i, &ty) in cur_func.local_types.iter().enumerate() {
-            locals.push(bits_to_value(ty, slots[i]));
-        }
+        push_locals(&mut locals, &cur_func, slots);
         let mut labels = Vec::new();
         fill_labels(store, &mut labels, &cur_func, meta, base)?;
         push_operands(stack, &cur_func, meta, slots);
@@ -3967,10 +5114,14 @@ pub(crate) fn run(
         return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
     }
     for &v in &entry_frame.locals {
-        let Some(bits) = value_to_bits(v) else {
+        if let Value::V128(vec) = v {
+            reg_bank.push(u64::from_le_bytes(vec.0[0..8].try_into().unwrap()));
+            reg_bank.push(u64::from_le_bytes(vec.0[8..16].try_into().unwrap()));
+        } else if let Some(bits) = value_to_bits(v) {
+            reg_bank.push(bits);
+        } else {
             return Ok(FastOutcome::Declined);
-        };
-        reg_bank.push(bits);
+        }
     }
     reg_bank.resize(entry_slots, 0);
 
@@ -4051,7 +5202,8 @@ enum InnerExit {
         callee_inst: usize,
         callee_body: usize,
         arg_base: u16,
-        arg_count: u16,
+        arg_slots: u16,
+        logical_arg_start: u16,
         meta_at_call: u32,
         meta_after_call: u32,
         src_off: u8,
@@ -4061,7 +5213,7 @@ enum InnerExit {
         callee_inst: usize,
         callee_body: usize,
         arg_base: u16,
-        arg_count: u16,
+        arg_slots: u16,
         src_off: u8,
     },
     SwitchInst,
@@ -4090,6 +5242,16 @@ enum InnerExit {
         offset: u64,
         raw: u64,
         val: u64,
+        src_off: u8,
+    },
+    SlowSimdMem {
+        op: u16,
+        mem: u32,
+        offset: u64,
+        raw: u64,
+        dst: u16,
+        in_vec: [u8; 16],
+        lane: u8,
         src_off: u8,
     },
     MemSize {
@@ -4128,6 +5290,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
     cursors: &mut ExecCursors,
     call_stack: &mut Vec<ActiveFrame>,
     reg_bank: &mut Vec<u64>,
+    simd_scratch: &mut Vec<Value>,
     fuel: &mut Option<u64>,
     cancel: &std::sync::atomic::AtomicBool,
     cache_p0_idx: usize,
@@ -4202,7 +5365,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
         let mut remaining_fuel = if FUEL { fuel.unwrap_or(0) } else { 0 };
 
         macro_rules! inline_call_target {
-            ($callee_handle:expr, $arg_base:expr, $arg_count:expr, $meta_at_call:expr, $meta_after_call:expr, $src_off:expr) => {{
+            ($callee_handle:expr, $arg_base:expr, $arg_slots:expr, $logical_arg_start:expr, $meta_at_call:expr, $meta_after_call:expr, $src_off:expr) => {{
                 let callee_handle = $callee_handle;
                 let Some(callee_fn) = funcs
                     .get_live(callee_handle.0.index, callee_handle.0.generation)
@@ -4238,8 +5401,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         refund_on_trap!($src_off);
                         return Err(err(ErrorKind::ResourceLimit, "active local slots limit"));
                     }
-                    let next_logical_base =
-                        cur_logical_base + ($arg_base as usize - cur_func.num_locals as usize);
+                    let next_logical_base = cur_logical_base + $logical_arg_start as usize;
                     let stack_ok = next_logical_base
                         .checked_add(callee_fast.stack_peak)
                         .is_some_and(|h| h <= max_stack_height);
@@ -4264,12 +5426,13 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 reg_bank.resize(needed, 0);
                             }
                             let arg_src = cur_reg_base + $arg_base as usize;
-                            let argc = $arg_count as usize;
-                            if argc > 0 {
-                                reg_bank.copy_within(arg_src..arg_src + argc, new_reg_base);
+                            let arg_slots = $arg_slots as usize;
+                            let nloc_reg = callee_fast.local_reg_slots as usize;
+                            if arg_slots > 0 {
+                                reg_bank.copy_within(arg_src..arg_src + arg_slots, new_reg_base);
                             }
-                            if nloc > argc {
-                                reg_bank[new_reg_base + argc..new_reg_base + nloc].fill(0);
+                            if nloc_reg > arg_slots {
+                                reg_bank[new_reg_base + arg_slots..new_reg_base + nloc_reg].fill(0);
                             }
                             active_local_slots += nloc;
                             call_stack.push(ActiveFrame {
@@ -4303,7 +5466,8 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 callee_inst,
                                 callee_body,
                                 arg_base: $arg_base,
-                                arg_count: $arg_count,
+                                arg_slots: $arg_slots,
+                                logical_arg_start: $logical_arg_start,
                                 meta_at_call: $meta_at_call,
                                 meta_after_call: $meta_after_call,
                                 src_off: $src_off,
@@ -4321,7 +5485,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
         }
 
         macro_rules! inline_tail_call_target {
-            ($callee_handle:expr, $arg_base:expr, $arg_count:expr, $meta_at_call:expr, $src_off:expr) => {{
+            ($callee_handle:expr, $arg_base:expr, $arg_slots:expr, $meta_at_call:expr, $src_off:expr) => {{
                 let callee_handle = $callee_handle;
                 let Some(callee_fn) = funcs
                     .get_live(callee_handle.0.index, callee_handle.0.generation)
@@ -4375,12 +5539,14 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 reg_bank.resize(needed, 0);
                             }
                             let arg_src = cur_reg_base + $arg_base as usize;
-                            let argc = $arg_count as usize;
-                            if argc > 0 && arg_src != cur_reg_base {
-                                reg_bank.copy_within(arg_src..arg_src + argc, cur_reg_base);
+                            let arg_slots = $arg_slots as usize;
+                            let new_nloc_reg = callee_fast.local_reg_slots as usize;
+                            if arg_slots > 0 && arg_src != cur_reg_base {
+                                reg_bank.copy_within(arg_src..arg_src + arg_slots, cur_reg_base);
                             }
-                            if new_nloc > argc {
-                                reg_bank[cur_reg_base + argc..cur_reg_base + new_nloc].fill(0);
+                            if new_nloc_reg > arg_slots {
+                                reg_bank[cur_reg_base + arg_slots..cur_reg_base + new_nloc_reg]
+                                    .fill(0);
                             }
                             active_local_slots = next_active_locals;
                             cur_body = callee_body;
@@ -4401,7 +5567,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 callee_inst,
                                 callee_body,
                                 arg_base: $arg_base,
-                                arg_count: $arg_count,
+                                arg_slots: $arg_slots,
                                 src_off: $src_off,
                             };
                         }
@@ -5671,7 +6837,8 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     inline_call_target!(
                         callee_handle,
                         site.arg_base,
-                        site.arg_count,
+                        site.arg_slots,
+                        site.logical_arg_start,
                         site.meta_at_call,
                         site.meta_after_call,
                         src_off
@@ -5749,7 +6916,8 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     inline_call_target!(
                         callee_handle,
                         site.arg_base,
-                        site.arg_count,
+                        site.arg_slots,
+                        site.logical_arg_start,
                         site.meta_at_call,
                         site.meta_after_call,
                         src_off
@@ -5761,7 +6929,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     inline_tail_call_target!(
                         callee_handle,
                         site.arg_base,
-                        site.arg_count,
+                        site.arg_slots,
                         site.meta_at_call,
                         src_off
                     );
@@ -5838,7 +7006,7 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     inline_tail_call_target!(
                         callee_handle,
                         site.arg_base,
-                        site.arg_count,
+                        site.arg_slots,
                         site.meta_at_call,
                         src_off
                     );
@@ -5861,6 +7029,308 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                     regs[b] = bits as u64;
                     regs[b + 1] = (bits >> 64) as u64;
                 }
+                // ---- Native SIMD & Relaxed SIMD ----
+                RegOp::MovV128 { dst, src } => {
+                    let lo = regs[src as usize];
+                    let hi = regs[src as usize + 1];
+                    regs[dst as usize] = lo;
+                    regs[dst as usize + 1] = hi;
+                }
+                RegOp::ConstV128 { dst, idx } => {
+                    let [lo, hi] = cur_func.v128_consts[idx as usize];
+                    regs[dst as usize] = lo;
+                    regs[dst as usize + 1] = hi;
+                }
+                RegOp::SelectV128 { dst, a, b, cond } => {
+                    let s = if regs[cond as usize] as u32 != 0 {
+                        a
+                    } else {
+                        b
+                    };
+                    let lo = regs[s as usize];
+                    let hi = regs[s as usize + 1];
+                    regs[dst as usize] = lo;
+                    regs[dst as usize + 1] = hi;
+                }
+                RegOp::GlobalGetV128 { dst, global } => {
+                    let gh = inst_globals[global as usize];
+                    let Value::V128(v) = globals[gh.0.index].value else {
+                        return Err(trap("global type"));
+                    };
+                    write_v128(regs, dst, v.0);
+                }
+                RegOp::GlobalSetV128 { src, global } => {
+                    let gh = inst_globals[global as usize];
+                    let slot = &mut globals[gh.0.index];
+                    if slot.ty.value != ValType::V128 {
+                        return Err(trap("global type"));
+                    }
+                    slot.value = Value::V128(V128(read_v128(regs, src)));
+                }
+                RegOp::LoadV128 {
+                    dst,
+                    addr,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    let at = if !mem0_64 {
+                        Some((raw as u32 as usize) + (offset as usize))
+                    } else {
+                        raw.checked_add(offset as u64)
+                            .and_then(|e| usize::try_from(e).ok())
+                    };
+                    if let Some(at) = at
+                        && let Some(arr) =
+                            fast_read_bytes::<16, DENSE>(at, p0_base, p0_slice, p1_base, p1_slice)
+                    {
+                        write_v128(regs, dst, arr);
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowSimdMem {
+                            op: 0xfd00,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst,
+                            in_vec: [0u8; 16],
+                            lane: 0,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::StoreV128 {
+                    addr,
+                    val,
+                    offset,
+                    src_off,
+                } => {
+                    let raw = regs[addr as usize];
+                    let data = read_v128(regs, val);
+                    let at = if !mem0_64 {
+                        Some((raw as u32 as usize) + (offset as usize))
+                    } else {
+                        raw.checked_add(offset as u64)
+                            .and_then(|e| usize::try_from(e).ok())
+                    };
+                    if let Some(at) = at
+                        && fast_write_bytes::<16, DENSE>(
+                            at, data, p0_base, p0_slice, p1_base, p1_slice,
+                        )
+                    {
+                        // committed
+                    } else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        break InnerExit::SlowSimdMem {
+                            op: 0xfd0b,
+                            mem: 0,
+                            offset: offset as u64,
+                            raw,
+                            dst: val,
+                            in_vec: data,
+                            lane: 0,
+                            src_off,
+                        };
+                    }
+                }
+                RegOp::SimdMemGen {
+                    op: mop,
+                    addr,
+                    val,
+                    arg_idx,
+                    src_off,
+                } => {
+                    let arg = cur_func.simd_mem_args[arg_idx as usize];
+                    let raw = regs[addr as usize];
+                    let sub = mop & 0xff;
+                    let in_vec = if sub == 11 || (0x54..=0x5b).contains(&sub) {
+                        read_v128(regs, arg.src_vec)
+                    } else {
+                        [0u8; 16]
+                    };
+                    if FUEL {
+                        *fuel = Some(remaining_fuel);
+                    }
+                    break InnerExit::SlowSimdMem {
+                        op: mop,
+                        mem: arg.memory,
+                        offset: arg.offset,
+                        raw,
+                        dst: val,
+                        in_vec,
+                        lane: arg.lane,
+                        src_off,
+                    };
+                }
+                RegOp::SimdShuffle {
+                    dst,
+                    a,
+                    b,
+                    mask_idx,
+                } => {
+                    let va = read_v128(regs, a);
+                    let vb = read_v128(regs, b);
+                    let ix = cur_func.simd_masks[mask_idx as usize];
+                    let mut out = [0u8; 16];
+                    for i in 0..16 {
+                        let m = ix[i] as usize;
+                        out[i] = if m < 16 { va[m] } else { vb[m - 16] };
+                    }
+                    write_v128(regs, dst, out);
+                }
+                RegOp::SimdUnary {
+                    op: sop,
+                    dst,
+                    src,
+                    lane,
+                } => match sop {
+                    0xfd4d => {
+                        let lo = !regs[src as usize];
+                        let hi = !regs[src as usize + 1];
+                        regs[dst as usize] = lo;
+                        regs[dst as usize + 1] = hi;
+                    }
+                    0xfd0f => {
+                        let w = u64::from_ne_bytes([regs[src as usize] as u8; 8]);
+                        regs[dst as usize] = w;
+                        regs[dst as usize + 1] = w;
+                    }
+                    0xfd10 => {
+                        let b = (regs[src as usize] as u16).to_le_bytes();
+                        let w =
+                            u64::from_le_bytes([b[0], b[1], b[0], b[1], b[0], b[1], b[0], b[1]]);
+                        regs[dst as usize] = w;
+                        regs[dst as usize + 1] = w;
+                    }
+                    0xfd11 | 0xfd13 => {
+                        let x = regs[src as usize] as u32 as u64;
+                        let w = x | (x << 32);
+                        regs[dst as usize] = w;
+                        regs[dst as usize + 1] = w;
+                    }
+                    0xfd12 | 0xfd14 => {
+                        let w = regs[src as usize];
+                        regs[dst as usize] = w;
+                        regs[dst as usize + 1] = w;
+                    }
+                    0xfd1b | 0xfd1f => {
+                        let word = regs[src as usize + (lane as usize >> 1)];
+                        regs[dst as usize] = ((word >> ((lane & 1) * 32)) as u32) as u64;
+                    }
+                    0xfd1d | 0xfd21 => {
+                        regs[dst as usize] = regs[src as usize + lane as usize];
+                    }
+                    _ => simd_unary_slow(sop, lane, regs, dst, src, simd_scratch)?,
+                },
+                RegOp::SimdBinary {
+                    op: sop,
+                    dst,
+                    a,
+                    b,
+                    lane,
+                } => match sop {
+                    0xfd4e => {
+                        let lo = regs[a as usize] & regs[b as usize];
+                        let hi = regs[a as usize + 1] & regs[b as usize + 1];
+                        regs[dst as usize] = lo;
+                        regs[dst as usize + 1] = hi;
+                    }
+                    0xfd4f => {
+                        let lo = regs[a as usize] & !regs[b as usize];
+                        let hi = regs[a as usize + 1] & !regs[b as usize + 1];
+                        regs[dst as usize] = lo;
+                        regs[dst as usize + 1] = hi;
+                    }
+                    0xfd50 => {
+                        let lo = regs[a as usize] | regs[b as usize];
+                        let hi = regs[a as usize + 1] | regs[b as usize + 1];
+                        regs[dst as usize] = lo;
+                        regs[dst as usize + 1] = hi;
+                    }
+                    0xfd51 => {
+                        let lo = regs[a as usize] ^ regs[b as usize];
+                        let hi = regs[a as usize + 1] ^ regs[b as usize + 1];
+                        regs[dst as usize] = lo;
+                        regs[dst as usize + 1] = hi;
+                    }
+                    0xfdae | 0xfdb1 | 0xfdb5 => {
+                        let alo = regs[a as usize];
+                        let ahi = regs[a as usize + 1];
+                        let blo = regs[b as usize];
+                        let bhi = regs[b as usize + 1];
+                        let lane_op = |x: u32, y: u32| -> u32 {
+                            match sop {
+                                0xfdae => x.wrapping_add(y),
+                                0xfdb1 => x.wrapping_sub(y),
+                                _ => x.wrapping_mul(y),
+                            }
+                        };
+                        let r0 = lane_op(alo as u32, blo as u32) as u64;
+                        let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
+                        let r2 = lane_op(ahi as u32, bhi as u32) as u64;
+                        let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
+                        regs[dst as usize] = r0 | (r1 << 32);
+                        regs[dst as usize + 1] = r2 | (r3 << 32);
+                    }
+                    0xfde4..=0xfde6 => {
+                        let alo = regs[a as usize];
+                        let ahi = regs[a as usize + 1];
+                        let blo = regs[b as usize];
+                        let bhi = regs[b as usize + 1];
+                        let lane_op = |x: u32, y: u32| -> u32 {
+                            let fx = f32::from_bits(x);
+                            let fy = f32::from_bits(y);
+                            match sop {
+                                0xfde4 => (fx + fy).to_bits(),
+                                0xfde5 => (fx - fy).to_bits(),
+                                _ => (fx * fy).to_bits(),
+                            }
+                        };
+                        let r0 = lane_op(alo as u32, blo as u32) as u64;
+                        let r1 = lane_op((alo >> 32) as u32, (blo >> 32) as u32) as u64;
+                        let r2 = lane_op(ahi as u32, bhi as u32) as u64;
+                        let r3 = lane_op((ahi >> 32) as u32, (bhi >> 32) as u32) as u64;
+                        regs[dst as usize] = r0 | (r1 << 32);
+                        regs[dst as usize + 1] = r2 | (r3 << 32);
+                    }
+                    0xfdf0..=0xfdf2 => {
+                        let ax0 = f64::from_bits(regs[a as usize]);
+                        let ax1 = f64::from_bits(regs[a as usize + 1]);
+                        let bx0 = f64::from_bits(regs[b as usize]);
+                        let bx1 = f64::from_bits(regs[b as usize + 1]);
+                        let (r0, r1) = match sop {
+                            0xfdf0 => (ax0 + bx0, ax1 + bx1),
+                            0xfdf1 => (ax0 - bx0, ax1 - bx1),
+                            _ => (ax0 * bx0, ax1 * bx1),
+                        };
+                        regs[dst as usize] = r0.to_bits();
+                        regs[dst as usize + 1] = r1.to_bits();
+                    }
+                    _ => simd_binary_slow(sop, lane, regs, dst, a, b, simd_scratch)?,
+                },
+                RegOp::SimdTernary {
+                    op: sop,
+                    dst,
+                    a,
+                    b,
+                    c,
+                } => match sop {
+                    0xfd52 | 0xfa09..=0xfa0c => {
+                        let alo = regs[a as usize];
+                        let ahi = regs[a as usize + 1];
+                        let blo = regs[b as usize];
+                        let bhi = regs[b as usize + 1];
+                        let clo = regs[c as usize];
+                        let chi = regs[c as usize + 1];
+                        regs[dst as usize] = (alo & clo) | (blo & !clo);
+                        regs[dst as usize + 1] = (ahi & chi) | (bhi & !chi);
+                    }
+                    _ => simd_ternary_slow(sop, regs, dst, a, b, c, simd_scratch)?,
+                },
                 RegOp::Return { base, count } => {
                     if let Some(caller) = call_stack.pop() {
                         let released = cur_func.num_locals as usize;
@@ -5869,7 +7339,12 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         let c = count as usize;
                         if c == 1 {
                             reg_bank[dst_start] = reg_bank[src_start];
-                        } else if c > 1 {
+                        } else if c == 2 {
+                            let lo = reg_bank[src_start];
+                            let hi = reg_bank[src_start + 1];
+                            reg_bank[dst_start] = lo;
+                            reg_bank[dst_start + 1] = hi;
+                        } else if c > 2 {
                             reg_bank.copy_within(src_start..src_start + c, dst_start);
                         }
                         active_local_slots = active_local_slots.saturating_sub(released);
@@ -5950,6 +7425,7 @@ fn run_loop<const FUEL: bool>(
     max_call_depth: usize,
 ) -> Result<FastOutcome> {
     let mut call_stack: Vec<ActiveFrame> = Vec::new();
+    let mut simd_scratch: Vec<Value> = Vec::new();
     let mut cur_reg_base: usize = 0;
     let mut cur_mem0: Option<usize> = resolve_mem0(store, cur_inst);
     if let Some(i) = cur_mem0
@@ -6020,6 +7496,7 @@ fn run_loop<const FUEL: bool>(
                 &mut cursors,
                 &mut call_stack,
                 reg_bank,
+                &mut simd_scratch,
                 fuel,
                 cancel,
                 cache_p0_idx,
@@ -6037,6 +7514,7 @@ fn run_loop<const FUEL: bool>(
                 &mut cursors,
                 &mut call_stack,
                 reg_bank,
+                &mut simd_scratch,
                 fuel,
                 cancel,
                 cache_p0_idx,
@@ -6132,6 +7610,37 @@ fn run_loop<const FUEL: bool>(
                     return Err(e);
                 }
             },
+            InnerExit::SlowSimdMem {
+                op: sop,
+                mem,
+                offset,
+                raw,
+                dst,
+                in_vec,
+                lane,
+                src_off,
+            } => match simd_mem_slow(store, cur_inst, mem, sop, offset, raw, in_vec, lane) {
+                Ok((res_vec, eff)) => {
+                    if let Some(v) = res_vec {
+                        write_v128(&mut reg_bank[cur_reg_base..], dst, v);
+                    }
+                    if mem == 0 {
+                        if let Some(i) = cur_mem0 {
+                            store.mems[i].bytes.try_promote_dense();
+                        }
+                        if let Ok(p) = usize::try_from(eff >> PAGE_BITS)
+                            && p != cache_p0_idx
+                        {
+                            cache_p1_idx = cache_p0_idx;
+                            cache_p0_idx = p;
+                        }
+                    }
+                }
+                Err(e) => {
+                    refund_on_trap!(src_off);
+                    return Err(e);
+                }
+            },
             InnerExit::MemSize { dst, mem } => {
                 let h = store.instances[cur_inst].mems[mem as usize];
                 let m = &store.mems[h.0.index];
@@ -6193,24 +7702,27 @@ fn run_loop<const FUEL: bool>(
                 callee_inst,
                 callee_body,
                 arg_base,
-                arg_count,
+                arg_slots,
+                logical_arg_start,
                 meta_at_call: _,
                 meta_after_call,
                 src_off,
             } => {
-                let (cur_slots, cur_num_locals) = {
-                    let f = store.instances[cur_inst].module.data.register_fast[cur_body]
-                        .get()
-                        .and_then(|o| o.as_deref())
-                        .unwrap();
-                    (f.slots as usize, f.num_locals as usize)
-                };
-                let (callee_slots, callee_num_locals) = {
+                let cur_slots = store.instances[cur_inst].module.data.register_fast[cur_body]
+                    .get()
+                    .and_then(|o| o.as_deref())
+                    .unwrap()
+                    .slots as usize;
+                let (callee_slots, callee_num_locals, callee_local_reg_slots) = {
                     let f = store.instances[callee_inst].module.data.register_fast[callee_body]
                         .get()
                         .and_then(|o| o.as_deref())
                         .unwrap();
-                    (f.slots as usize, f.num_locals as usize)
+                    (
+                        f.slots as usize,
+                        f.num_locals as usize,
+                        f.local_reg_slots as usize,
+                    )
                 };
                 let new_reg_base = cur_reg_base + cur_slots;
                 let needed = new_reg_base + callee_slots;
@@ -6222,15 +7734,16 @@ fn run_loop<const FUEL: bool>(
                     reg_bank.resize(needed, 0);
                 }
                 let arg_src = cur_reg_base + arg_base as usize;
-                let argc = arg_count as usize;
-                if argc > 0 {
-                    reg_bank.copy_within(arg_src..arg_src + argc, new_reg_base);
+                let arg_slots_usize = arg_slots as usize;
+                if arg_slots_usize > 0 {
+                    reg_bank.copy_within(arg_src..arg_src + arg_slots_usize, new_reg_base);
                 }
-                if callee_num_locals > argc {
-                    reg_bank[new_reg_base + argc..new_reg_base + callee_num_locals].fill(0);
+                if callee_local_reg_slots > arg_slots_usize {
+                    reg_bank[new_reg_base + arg_slots_usize..new_reg_base + callee_local_reg_slots]
+                        .fill(0);
                 }
                 store.acquire_local_slots(callee_num_locals);
-                let next_logical_base = cur_logical_base + (arg_base as usize - cur_num_locals);
+                let next_logical_base = cur_logical_base + logical_arg_start as usize;
                 let callee_mem0 = resolve_mem0(store, callee_inst);
                 call_stack.push(ActiveFrame {
                     inst_id: cur_inst,
@@ -6263,7 +7776,7 @@ fn run_loop<const FUEL: bool>(
                 callee_inst,
                 callee_body,
                 arg_base,
-                arg_count,
+                arg_slots,
                 src_off,
             } => {
                 let cur_num_locals = store.instances[cur_inst].module.data.register_fast[cur_body]
@@ -6271,12 +7784,16 @@ fn run_loop<const FUEL: bool>(
                     .and_then(|o| o.as_deref())
                     .unwrap()
                     .num_locals as usize;
-                let (callee_slots, callee_num_locals) = {
+                let (callee_slots, callee_num_locals, callee_local_reg_slots) = {
                     let f = store.instances[callee_inst].module.data.register_fast[callee_body]
                         .get()
                         .and_then(|o| o.as_deref())
                         .unwrap();
-                    (f.slots as usize, f.num_locals as usize)
+                    (
+                        f.slots as usize,
+                        f.num_locals as usize,
+                        f.local_reg_slots as usize,
+                    )
                 };
                 let needed = cur_reg_base + callee_slots;
                 if needed > reg_bank.len() {
@@ -6287,12 +7804,13 @@ fn run_loop<const FUEL: bool>(
                     reg_bank.resize(needed, 0);
                 }
                 let arg_src = cur_reg_base + arg_base as usize;
-                let argc = arg_count as usize;
-                if argc > 0 && arg_src != cur_reg_base {
-                    reg_bank.copy_within(arg_src..arg_src + argc, cur_reg_base);
+                let arg_slots_usize = arg_slots as usize;
+                if arg_slots_usize > 0 && arg_src != cur_reg_base {
+                    reg_bank.copy_within(arg_src..arg_src + arg_slots_usize, cur_reg_base);
                 }
-                if callee_num_locals > argc {
-                    reg_bank[cur_reg_base + argc..cur_reg_base + callee_num_locals].fill(0);
+                if callee_local_reg_slots > arg_slots_usize {
+                    reg_bank[cur_reg_base + arg_slots_usize..cur_reg_base + callee_local_reg_slots]
+                        .fill(0);
                 }
                 store.release_local_slots(cur_num_locals);
                 store.acquire_local_slots(callee_num_locals);
@@ -6320,8 +7838,10 @@ fn run_loop<const FUEL: bool>(
                     .and_then(|o| o.as_deref())
                     .unwrap();
                 let cur_num_locals = cur_func.num_locals as usize;
-                for (i, &ty) in cur_func.result_types.iter().enumerate() {
-                    stack.push(bits_to_value(ty, regs[base as usize + i]));
+                let mut off = base as usize;
+                for &ty in &cur_func.result_types {
+                    stack.push(slots_to_value(ty, regs, off));
+                    off += ty.slots() as usize;
                 }
                 // Reconcile `active_local_slots` to `entry_frame.locals.len()` (which `execution.rs`
                 // releases on `FastOutcome::Returned`) in case a tail call replaced the entry frame.
@@ -7546,5 +9066,945 @@ mod tests {
         canceller.join().unwrap();
         assert_eq!(err.kind, ErrorKind::ResourceLimit);
         assert_eq!(store.active_local_slots, 0);
+    }
+
+    #[test]
+    fn fast_register_all_236_simd_and_20_relaxed_simd_full_parity() {
+        use std::collections::BTreeSet;
+
+        fn push_sleb_i32(out: &mut Vec<u8>, mut v: i32) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if (v == 0 && (b & 0x40) == 0) || (v == -1 && (b & 0x40) != 0) {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn emit_simd_op(out: &mut Vec<u8>, op: u16, covered: &mut BTreeSet<u16>) {
+            covered.insert(op);
+            let sub = if op >= 0xfd00 {
+                u32::from(op - 0xfd00)
+            } else {
+                u32::from(op - 0xfa00 + 0x100)
+            };
+            out.push(0xfd);
+            leb_u32(out, sub);
+        }
+        fn push_v128(out: &mut Vec<u8>, bytes: [u8; 16], covered: &mut BTreeSet<u16>) {
+            emit_simd_op(out, 0xfd0c, covered);
+            out.extend_from_slice(&bytes);
+        }
+        fn load_v(out: &mut Vec<u8>, off: i32, covered: &mut BTreeSet<u16>) {
+            out.push(0x41);
+            push_sleb_i32(out, off);
+            emit_simd_op(out, 0xfd00, covered);
+            out.extend_from_slice(&[0, 0]);
+        }
+        fn store_v(out: &mut Vec<u8>, out_off: &mut i32, covered: &mut BTreeSet<u16>) {
+            // Stack has [v128]; stash in local 1, store at *out_off, advance *out_off += 16.
+            out.extend_from_slice(&[0x21, 1, 0x41]);
+            push_sleb_i32(out, *out_off);
+            out.extend_from_slice(&[0x20, 1]);
+            emit_simd_op(out, 0xfd0b, covered);
+            out.extend_from_slice(&[0, 0]);
+            *out_off += 16;
+        }
+
+        let mut covered: BTreeSet<u16> = BTreeSet::new();
+        let mut out_off: i32 = 512;
+
+        // Types:
+        // 0: (i32) -> (i32)
+        // 1: (i32, v128) -> (v128, i32)
+        // 2: (v128, i32) -> (v128)
+        let types = vec![
+            3, 0x60, 1, 0x7f, 1, 0x7f, // 0
+            0x60, 2, 0x7f, 0x7b, 2, 0x7b, 0x7f, // 1
+            0x60, 2, 0x7b, 0x7f, 1, 0x7b, // 2
+        ];
+        // Import 0: env::host_vec (v128, i32) -> (v128) (exercises live v128 bail + resume!)
+        let mut imps = vec![1];
+        for s in ["env", "host_vec"] {
+            leb_u32(&mut imps, s.len() as u32);
+            imps.extend_from_slice(s.as_bytes());
+        }
+        imps.extend_from_slice(&[0x00, 2]);
+
+        // Defined functions (indices 1..=7):
+        // 1 (type 0): f_mem_lanes_unary(seed) -> acc
+        // 2 (type 0): f_bin_tern_relaxed(shift) -> end_off
+        // 3 (type 1): vec_callee(tag, v) -> (v ^ const, tag + 1)
+        // 4 (type 1): vec_tail_step(n, v) -> (v', n') (tail calls self & indirect!)
+        // 5 (type 0): cfg_calls_globals_bail(x) -> i32 (v128 globals, select, multivalue block, call, return_call, host bail!)
+        // 6 (type 0): simd_oob_trap(addr) -> i32
+        // 7 (type 0): multi_mem64_simd(addr) -> i32
+        let funcs = vec![7, 0, 0, 1, 1, 0, 0, 0];
+        let tables = vec![1, 0x70, 0x00, 2]; // table 0: funcref min=2
+        let elem = vec![1, 0x00, 0x41, 0x00, 0x0b, 2, 3, 4];
+        // 3 memories: mem0 (32-bit, 2 pages), mem1 (32-bit, 1 page), mem2 (64-bit, 1 page)
+        let mems = vec![3, 0x00, 2, 0x00, 1, 0x04, 1];
+        // 1 mutable v128 global initialized to [1..=16]
+        let mut globals = vec![1, 0x7b, 0x01, 0xfd, 0x0c];
+        for i in 1u8..=16 {
+            globals.push(i);
+        }
+        globals.push(0x0b);
+
+        let mut exps = vec![6];
+        for (name, kind, idx) in [
+            ("memory", 2u8, 0u32),
+            ("f_mem_lanes_unary", 0, 1),
+            ("f_bin_tern_relaxed", 0, 2),
+            ("cfg_calls_globals_bail", 0, 5),
+            ("simd_oob_trap", 0, 6),
+            ("multi_mem64_simd", 0, 7),
+        ] {
+            leb_u32(&mut exps, name.len() as u32);
+            exps.extend_from_slice(name.as_bytes());
+            exps.push(kind);
+            leb_u32(&mut exps, idx);
+        }
+
+        // Active data segment initializing mem0[0..256] with rich int/float/signed/NaN patterns.
+        let mut init_bytes = Vec::new();
+        // 0: 16 bytes mixed signs
+        init_bytes.extend_from_slice(&[
+            0x00, 0x01, 0x7f, 0x80, 0xff, 0xfe, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+            0x42, 0xa5,
+        ]);
+        // 16: second integer pattern
+        init_bytes.extend_from_slice(&[
+            0x01, 0xff, 0x80, 0x7f, 0x00, 0x02, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x99, 0xaa,
+        ]);
+        // 32: 4 f32 values [1.5, -2.25, 0.0, -0.0]
+        for f in [1.5f32, -2.25, 0.0, -0.0] {
+            init_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        // 48: 4 f32 values [3.25, 0.5, f32::INFINITY, 1e10]
+        for f in [3.25f32, 0.5, f32::INFINITY, 1e10] {
+            init_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        // 64: 2 f64 values [1.5, -3.75]
+        for f in [1.5f64, -3.75] {
+            init_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        // 80: 2 f64 values [0.25, -0.0]
+        for f in [0.25f64, -0.0] {
+            init_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        // 96: all-nonzero vector for all_true
+        init_bytes.extend_from_slice(&[0x03; 16]);
+        let mut data_sec = vec![1, 0x00, 0x41, 0x00, 0x0b];
+        leb_u32(&mut data_sec, init_bytes.len() as u32);
+        data_sec.extend_from_slice(&init_bytes);
+
+        // ---- Body 1: f_mem_lanes_unary(seed: i32) -> i32 (locals: 1:v128, 2:i32 acc) ----
+        let mut b1 = Vec::new();
+        let mix_i32 = |out: &mut Vec<u8>| {
+            out.extend_from_slice(&[0x20, 2, 0x41, 31, 0x6c, 0x6a, 0x21, 2]);
+        };
+        // All 10 non-lane SIMD loads: 0xfd00..=0xfd0a, 0xfd5c, 0xfd5d
+        for op in [
+            0xfd00u16, 0xfd01, 0xfd02, 0xfd03, 0xfd04, 0xfd05, 0xfd06, 0xfd07, 0xfd08, 0xfd09,
+            0xfd0a, 0xfd5c, 0xfd5d,
+        ] {
+            b1.extend_from_slice(&[0x41, 0]);
+            emit_simd_op(&mut b1, op, &mut covered);
+            b1.extend_from_slice(&[0, 0]);
+            store_v(&mut b1, &mut out_off, &mut covered);
+        }
+        // All 4 load*_lane (0xfd54..=0xfd57) and 4 store*_lane (0xfd58..=0xfd5b)
+        for (op, lane) in [(0xfd54u16, 13u8), (0xfd55, 5), (0xfd56, 2), (0xfd57, 1)] {
+            b1.extend_from_slice(&[0x41, 0]);
+            load_v(&mut b1, 16, &mut covered);
+            emit_simd_op(&mut b1, op, &mut covered);
+            b1.extend_from_slice(&[0, 0, lane]);
+            store_v(&mut b1, &mut out_off, &mut covered);
+        }
+        for (op, lane) in [(0xfd58u16, 7u8), (0xfd59, 3), (0xfd5a, 1), (0xfd5b, 0)] {
+            b1.push(0x41);
+            push_sleb_i32(&mut b1, out_off);
+            load_v(&mut b1, 0, &mut covered);
+            emit_simd_op(&mut b1, op, &mut covered);
+            b1.extend_from_slice(&[0, 0, lane]);
+            out_off += 16;
+        }
+        // Shuffle (0xfd0d) & Swizzle (0xfd0e)
+        load_v(&mut b1, 0, &mut covered);
+        load_v(&mut b1, 16, &mut covered);
+        emit_simd_op(&mut b1, 0xfd0d, &mut covered);
+        b1.extend_from_slice(&[0, 17, 2, 19, 4, 21, 6, 23, 8, 25, 10, 27, 12, 29, 14, 31]);
+        store_v(&mut b1, &mut out_off, &mut covered);
+        load_v(&mut b1, 0, &mut covered);
+        load_v(&mut b1, 16, &mut covered);
+        emit_simd_op(&mut b1, 0xfd0e, &mut covered);
+        store_v(&mut b1, &mut out_off, &mut covered);
+        // All 6 splats (0xfd0f..=0xfd14)
+        for op in [0xfd0fu16, 0xfd10, 0xfd11] {
+            b1.extend_from_slice(&[0x20, 0]);
+            emit_simd_op(&mut b1, op, &mut covered);
+            store_v(&mut b1, &mut out_off, &mut covered);
+        }
+        b1.extend_from_slice(&[0x20, 0, 0xac]); // i64.extend_i32_s
+        emit_simd_op(&mut b1, 0xfd12, &mut covered);
+        store_v(&mut b1, &mut out_off, &mut covered);
+        b1.extend_from_slice(&[0x20, 0, 0xb2]); // f32.convert_i32_s
+        emit_simd_op(&mut b1, 0xfd13, &mut covered);
+        store_v(&mut b1, &mut out_off, &mut covered);
+        b1.extend_from_slice(&[0x20, 0, 0xb7]); // f64.convert_i32_s
+        emit_simd_op(&mut b1, 0xfd14, &mut covered);
+        store_v(&mut b1, &mut out_off, &mut covered);
+        // All 8 extract_lane (0xfd15,16,18,19,1b,1d,1f,21)
+        for (op, lane, cast) in [
+            (0xfd15u16, 3u8, 0u8),
+            (0xfd16, 4, 0),
+            (0xfd18, 2, 0),
+            (0xfd19, 5, 0),
+            (0xfd1b, 3, 0),
+            (0xfd1d, 1, 1), // i64 -> i32.wrap_i64
+            (0xfd1f, 2, 2), // f32 -> i32.reinterpret_f32
+            (0xfd21, 0, 3), // f64 -> i64.reinterpret_f64 + wrap
+        ] {
+            load_v(&mut b1, 0, &mut covered);
+            emit_simd_op(&mut b1, op, &mut covered);
+            b1.push(lane);
+            match cast {
+                1 => b1.push(0xa7),
+                2 => b1.push(0xbc),
+                3 => b1.extend_from_slice(&[0xbd, 0xa7]),
+                _ => {}
+            }
+            mix_i32(&mut b1);
+        }
+        // All 6 replace_lane (0xfd17,1a,1c,1e,20,22)
+        for (op, lane, kind) in [
+            (0xfd17u16, 9u8, 0u8),
+            (0xfd1a, 4, 0),
+            (0xfd1c, 2, 0),
+            (0xfd1e, 1, 1),
+            (0xfd20, 3, 2),
+            (0xfd22, 0, 3),
+        ] {
+            load_v(&mut b1, 0, &mut covered);
+            match kind {
+                0 => b1.extend_from_slice(&[0x20, 0]),
+                1 => b1.extend_from_slice(&[0x20, 0, 0xac]),
+                2 => b1.extend_from_slice(&[0x20, 0, 0xb2]),
+                _ => b1.extend_from_slice(&[0x20, 0, 0xb7]),
+            }
+            emit_simd_op(&mut b1, op, &mut covered);
+            b1.push(lane);
+            store_v(&mut b1, &mut out_off, &mut covered);
+        }
+        // All 9 V128 -> I32 ops
+        for op in [
+            0xfd53u16, 0xfd63, 0xfd64, 0xfd83, 0xfd84, 0xfda3, 0xfda4, 0xfdc3, 0xfdc4,
+        ] {
+            for off in [0, 96] {
+                load_v(&mut b1, off, &mut covered);
+                emit_simd_op(&mut b1, op, &mut covered);
+                mix_i32(&mut b1);
+            }
+        }
+        // All 50 unary V128 -> V128 + 4 relaxed unary (0xfa01..=0xfa04)
+        let unary_ops: &[u16] = &[
+            0xfd4d, 0xfd5e, 0xfd5f, 0xfd60, 0xfd61, 0xfd62, 0xfd67, 0xfd68, 0xfd69, 0xfd6a, 0xfd74,
+            0xfd75, 0xfd7a, 0xfd7c, 0xfd7d, 0xfd7e, 0xfd7f, 0xfd80, 0xfd81, 0xfd87, 0xfd88, 0xfd89,
+            0xfd8a, 0xfd94, 0xfda0, 0xfda1, 0xfda7, 0xfda8, 0xfda9, 0xfdaa, 0xfdc0, 0xfdc1, 0xfdc7,
+            0xfdc8, 0xfdc9, 0xfdca, 0xfde0, 0xfde1, 0xfde3, 0xfdec, 0xfded, 0xfdef, 0xfdf8, 0xfdf9,
+            0xfdfa, 0xfdfb, 0xfdfc, 0xfdfd, 0xfdfe, 0xfdff, 0xfa01, 0xfa02, 0xfa03, 0xfa04,
+        ];
+        for &op in unary_ops {
+            let src_off_mem = match op {
+                0xfd5e | 0xfd74 | 0xfd75 | 0xfd7a | 0xfd94 | 0xfdec | 0xfded | 0xfdef | 0xfdfc
+                | 0xfdfd | 0xfa03 | 0xfa04 => 64,
+                0xfd5f
+                | 0xfd67..=0xfd6a
+                | 0xfde0
+                | 0xfde1
+                | 0xfde3
+                | 0xfdf8
+                | 0xfdf9
+                | 0xfa01
+                | 0xfa02 => 32,
+                _ => 0,
+            };
+            load_v(&mut b1, src_off_mem, &mut covered);
+            emit_simd_op(&mut b1, op, &mut covered);
+            store_v(&mut b1, &mut out_off, &mut covered);
+        }
+        b1.extend_from_slice(&[0x20, 2]);
+
+        // ---- Body 2: f_bin_tern_relaxed(shift: i32) -> i32 (locals: 1:v128) ----
+        let mut b2 = Vec::new();
+        // All 12 shifts
+        for op in [
+            0xfd6bu16, 0xfd6c, 0xfd6d, 0xfd8b, 0xfd8c, 0xfd8d, 0xfdab, 0xfdac, 0xfdad, 0xfdcb,
+            0xfdcc, 0xfdcd,
+        ] {
+            load_v(&mut b2, 0, &mut covered);
+            b2.extend_from_slice(&[0x20, 0]);
+            emit_simd_op(&mut b2, op, &mut covered);
+            store_v(&mut b2, &mut out_off, &mut covered);
+        }
+        // All 119 binary V128xV128 + 7 relaxed binary (0xfa00, 0xfa0d..=0xfa12)
+        let bin_ops: &[u16] = &[
+            0xfd23, 0xfd24, 0xfd25, 0xfd26, 0xfd27, 0xfd28, 0xfd29, 0xfd2a, 0xfd2b, 0xfd2c, 0xfd2d,
+            0xfd2e, 0xfd2f, 0xfd30, 0xfd31, 0xfd32, 0xfd33, 0xfd34, 0xfd35, 0xfd36, 0xfd37, 0xfd38,
+            0xfd39, 0xfd3a, 0xfd3b, 0xfd3c, 0xfd3d, 0xfd3e, 0xfd3f, 0xfd40, 0xfd41, 0xfd42, 0xfd43,
+            0xfd44, 0xfd45, 0xfd46, 0xfd47, 0xfd48, 0xfd49, 0xfd4a, 0xfd4b, 0xfd4c, 0xfd4e, 0xfd4f,
+            0xfd50, 0xfd51, 0xfd65, 0xfd66, 0xfd6e, 0xfd6f, 0xfd70, 0xfd71, 0xfd72, 0xfd73, 0xfd76,
+            0xfd77, 0xfd78, 0xfd79, 0xfd7b, 0xfd82, 0xfd85, 0xfd86, 0xfd8e, 0xfd8f, 0xfd90, 0xfd91,
+            0xfd92, 0xfd93, 0xfd95, 0xfd96, 0xfd97, 0xfd98, 0xfd99, 0xfd9b, 0xfd9c, 0xfd9d, 0xfd9e,
+            0xfd9f, 0xfdae, 0xfdb1, 0xfdb5, 0xfdb6, 0xfdb7, 0xfdb8, 0xfdb9, 0xfdba, 0xfdbc, 0xfdbd,
+            0xfdbe, 0xfdbf, 0xfdce, 0xfdd1, 0xfdd5, 0xfdd6, 0xfdd7, 0xfdd8, 0xfdd9, 0xfdda, 0xfddb,
+            0xfddc, 0xfddd, 0xfdde, 0xfddf, 0xfde4, 0xfde5, 0xfde6, 0xfde7, 0xfde8, 0xfde9, 0xfdea,
+            0xfdeb, 0xfdf0, 0xfdf1, 0xfdf2, 0xfdf3, 0xfdf4, 0xfdf5, 0xfdf6, 0xfdf7, 0xfa00, 0xfa0d,
+            0xfa0e, 0xfa0f, 0xfa10, 0xfa11, 0xfa12,
+        ];
+        for &op in bin_ops {
+            let (a_off, b_off) = match op {
+                0xfd41..=0xfd46 | 0xfde4..=0xfdeb | 0xfa0d | 0xfa0e => (32, 48),
+                0xfd47..=0xfd4c | 0xfdf0..=0xfdf7 | 0xfa0f | 0xfa10 => (64, 80),
+                _ => (0, 16),
+            };
+            load_v(&mut b2, a_off, &mut covered);
+            load_v(&mut b2, b_off, &mut covered);
+            emit_simd_op(&mut b2, op, &mut covered);
+            store_v(&mut b2, &mut out_off, &mut covered);
+        }
+        // All 10 ternary ops: 0xfd52 + 0xfa05..=0xfa0c + 0xfa13
+        for op in [
+            0xfd52u16, 0xfa05, 0xfa06, 0xfa07, 0xfa08, 0xfa09, 0xfa0a, 0xfa0b, 0xfa0c, 0xfa13,
+        ] {
+            let (a_off, b_off, c_off) = match op {
+                0xfa05 | 0xfa06 => (32, 48, 32),
+                0xfa07 | 0xfa08 => (64, 80, 64),
+                _ => (0, 16, 96),
+            };
+            load_v(&mut b2, a_off, &mut covered);
+            load_v(&mut b2, b_off, &mut covered);
+            load_v(&mut b2, c_off, &mut covered);
+            emit_simd_op(&mut b2, op, &mut covered);
+            store_v(&mut b2, &mut out_off, &mut covered);
+        }
+        b2.push(0x41);
+        push_sleb_i32(&mut b2, out_off);
+
+        // ---- Body 3 (idx 3): vec_callee(tag: i32, v: v128) -> (v128, i32) ----
+        let mut b3 = Vec::new();
+        b3.extend_from_slice(&[0x20, 1]); // v
+        push_v128(&mut b3, [0x5a; 16], &mut covered);
+        emit_simd_op(&mut b3, 0xfd51, &mut covered); // v128.xor
+        b3.extend_from_slice(&[0x20, 0, 0x41, 1, 0x6a]); // tag + 1
+
+        // Verify ALL 236 SIMD + 20 Relaxed SIMD opcodes = 256 total!
+        assert_eq!(
+            covered.len(),
+            256,
+            "expected all 236 SIMD + 20 relaxed SIMD opcodes covered, got {}",
+            covered.len()
+        );
+
+        // ---- Body 4 (idx 4): vec_tail_step(n: i32, v: v128) -> (v128, i32) ----
+        // if n == 0 { return (v, 77) } else { return_call vec_tail_step(n - 1, v + splat(n)) }
+        let mut b4 = Vec::new();
+        b4.extend_from_slice(&[0x20, 0, 0x45, 0x04, 0x40]);
+        b4.extend_from_slice(&[0x20, 1, 0x41, 0xcd, 0x00, 0x0f, 0x0b]); // return (v, 77)
+        b4.extend_from_slice(&[0x20, 0, 0x41, 1, 0x6b]); // n - 1
+        b4.extend_from_slice(&[0x20, 1, 0x20, 0]);
+        emit_simd_op(&mut b4, 0xfd11, &mut covered); // i32x4.splat(n)
+        emit_simd_op(&mut b4, 0xfdae, &mut covered); // i32x4.add
+        b4.extend_from_slice(&[0x12, 4]); // return_call vec_tail_step
+
+        // ---- Body 5 (idx 5): cfg_calls_globals_bail(x: i32) -> i32 ----
+        // Mixes v128 global.get/set, v128 select (0x1b & 0x1c), multivalue block (i32, v128)->(v128, i32),
+        // direct call, call_indirect, tail-call callee, AND host_vec bail with live v128 local + live v128 stack value!
+        let mut b5 = Vec::new();
+        // local 1 (v128) = global.get 0
+        b5.extend_from_slice(&[0x23, 0, 0x22, 1]);
+        // push [x, v1] into multivalue block type 1: (i32, v128) -> (v128, i32)
+        b5.extend_from_slice(&[0x20, 0, 0x20, 1, 0x02, 1]);
+        // Inside block: call_indirect type 1 table 0 (slot 0 = vec_callee)
+        b5.extend_from_slice(&[0x41, 0, 0x11, 1, 0]);
+        b5.push(0x0b); // end block -> stack has [v1, v_out, tag_out]
+        b5.extend_from_slice(&[0x21, 2, 0x21, 3]); // local2(i32)=tag_out, local3(v128)=v_out; stack still has [v1]!
+        // Call vec_tail_step(4, v_out) -> (v_tail, 77)
+        b5.extend_from_slice(&[0x41, 4, 0x20, 3, 0x10, 4]);
+        b5.extend_from_slice(&[0x20, 2, 0x6a, 0x21, 2]); // local2 += 77; stack has [v1, v_tail]
+        // Typed select (0x1c [v128]) choosing between v1 and v_tail based on (x & 1)
+        b5.extend_from_slice(&[0x20, 0, 0x41, 1, 0x71, 0x1c, 1, 0x7b]);
+        // Keep a live v128 on stack AND call host_vec(selected, x) -> forces bail with live v128 local + stack!
+        b5.extend_from_slice(&[0x22, 3, 0x20, 3, 0x20, 0, 0x10, 0]); // stack: [selected, host_res]
+        // Untyped select (0x1b) choosing with (x & 2)
+        b5.extend_from_slice(&[0x20, 0, 0x41, 2, 0x71, 0x1b]);
+        // Store back into global 0 and extract lane 0 + lane 3 + local2
+        b5.extend_from_slice(&[0x22, 1, 0x24, 0]);
+        b5.extend_from_slice(&[0x20, 1, 0xfd, 0x1b, 0]); // i32x4.extract_lane 0
+        b5.extend_from_slice(&[0x20, 1, 0xfd, 0x1b, 3, 0x6a]); // + lane 3
+        b5.extend_from_slice(&[0x20, 2, 0x6a]); // + local2
+
+        // ---- Body 6 (idx 6): simd_oob_trap(addr: i32) -> i32 ----
+        let mut b6 = Vec::new();
+        // Write 1 word at mem0[0] before potentially trapping on v128.load(addr)
+        b6.extend_from_slice(&[0x41, 0, 0x41, 42, 0x36, 2, 0]);
+        b6.extend_from_slice(&[0x20, 0, 0xfd, 0x00, 0, 0, 0xfd, 0x1b, 0]);
+
+        // ---- Body 7 (idx 7): multi_mem64_simd(addr: i32) -> i32 ----
+        // Store v128 to mem1[addr], load back, store to mem2[addr as i64], load back!
+        let mut b7 = Vec::new();
+        b7.extend_from_slice(&[0x20, 0]);
+        load_v(&mut b7, 0, &mut covered);
+        // v128.store align=0 | 0x40 (has memidx), memidx=1, offset=0
+        b7.extend_from_slice(&[0xfd, 0x0b, 0x40, 1, 0]);
+        // mem2 (i64 addr): store what we load from mem1
+        b7.extend_from_slice(&[0x20, 0, 0xad]); // i64.extend_i32_u
+        b7.extend_from_slice(&[0x20, 0, 0xfd, 0x00, 0x40, 1, 0]);
+        b7.extend_from_slice(&[0xfd, 0x0b, 0x40, 2, 0]);
+        // Load back from mem2 and extract lane 2
+        b7.extend_from_slice(&[0x20, 0, 0xad, 0xfd, 0x00, 0x40, 2, 0, 0xfd, 0x1b, 2]);
+
+        let mut code = vec![7];
+        code.extend_from_slice(&body(&[(1, 0x7b), (1, 0x7f)], &b1));
+        code.extend_from_slice(&body(&[(1, 0x7b)], &b2));
+        code.extend_from_slice(&body(&[], &b3));
+        code.extend_from_slice(&body(&[], &b4));
+        code.extend_from_slice(&body(&[(1, 0x7b), (1, 0x7f), (1, 0x7b)], &b5));
+        code.extend_from_slice(&body(&[], &b6));
+        code.extend_from_slice(&body(&[], &b7));
+
+        let wasm = wasm_mod(&[
+            sec(1, &types),
+            sec(2, &imps),
+            sec(3, &funcs),
+            sec(4, &tables),
+            sec(5, &mems),
+            sec(6, &globals),
+            sec(7, &exps),
+            sec(9, &elem),
+            sec(10, &code),
+            sec(11, &data_sec),
+        ]);
+
+        let make_inst = |policy: ExecutionPolicy, fuel: Option<u64>| {
+            let mut features = FeatureSet::all_phase3_core();
+            features.tail_call = true;
+            features.relaxed_simd = true;
+            features.multi_memory = true;
+            features.memory64 = true;
+            let mut cfg = Config {
+                features,
+                ..Config::default()
+            };
+            cfg.limits.fuel = fuel;
+            let engine = Engine::with_execution_policy(cfg, policy).unwrap();
+            let module = engine.compile(&wasm).unwrap();
+            if policy == ExecutionPolicy::Register {
+                for bi in 0..7 {
+                    assert!(
+                        is_admitted(&module, bi),
+                        "SIMD body {bi} must be natively admitted by register-executor"
+                    );
+                }
+            }
+            let mut store = Store::new(&engine);
+            let mut linker = Linker::new(&engine);
+            let host_fn = store
+                .create_host_func(
+                    crate::FuncType {
+                        params: vec![ValType::V128, ValType::I32],
+                        results: vec![ValType::V128],
+                    },
+                    |args| {
+                        let (Value::V128(mut v), Value::I32(k)) = (args[0], args[1]) else {
+                            panic!()
+                        };
+                        for b in &mut v.0 {
+                            *b = b.wrapping_add(k as u8);
+                        }
+                        Ok(vec![Value::V128(v)])
+                    },
+                )
+                .unwrap();
+            linker
+                .define("env", "host_vec", External::Func(host_fn))
+                .unwrap();
+            let inst = linker.instantiate(&mut store, &module).unwrap();
+            (store, inst)
+        };
+
+        // 1. Run ALL 256 SIMD + relaxed SIMD ops, control flow, host bail, multi-memory, memory64, and OOB traps!
+        let (mut sd, id) = make_inst(ExecutionPolicy::Decoded, None);
+        let (mut sr, ir) = make_inst(ExecutionPolicy::Register, None);
+        for (name, arg) in [
+            ("f_mem_lanes_unary", 0x1234_5678i32),
+            ("f_bin_tern_relaxed", 5),
+            ("cfg_calls_globals_bail", 3),
+            ("cfg_calls_globals_bail", 2),
+            ("multi_mem64_simd", 64),
+            ("simd_oob_trap", 16),
+            ("simd_oob_trap", 2 * 65536 - 8), // traps OOB!
+        ] {
+            let External::Func(fd) = id.export(&sd, name).unwrap() else {
+                panic!()
+            };
+            let External::Func(fr) = ir.export(&sr, name).unwrap() else {
+                panic!()
+            };
+            let od = sd.invoke(fd, &[Value::I32(arg)]);
+            let or = sr.invoke(fr, &[Value::I32(arg)]);
+            match (&od, &or) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "{name}({arg}) mismatch"),
+                (Err(a), Err(b)) => {
+                    assert_eq!(
+                        (a.kind, a.trap_code, &a.message),
+                        (b.kind, b.trap_code, &b.message)
+                    )
+                }
+                _ => panic!("{name}({arg}): Decoded={od:?} != Register={or:?}"),
+            }
+            assert_eq!(sr.active_local_slots, 0);
+        }
+        let External::Memory(md) = id.export(&sd, "memory").unwrap() else {
+            panic!()
+        };
+        let External::Memory(mr) = ir.export(&sr, "memory").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            sd.read_memory(md, 0, out_off as usize).unwrap(),
+            sr.read_memory(mr, 0, out_off as usize).unwrap(),
+            "all-256 SIMD output memory buffer must match Decoded byte-for-byte!"
+        );
+
+        // 2. Exact source-level fuel prefix sweep across cfg_calls_globals_bail & simd_oob_trap!
+        for fuel in 0..=75u64 {
+            let (mut sd, id) = make_inst(ExecutionPolicy::Decoded, Some(fuel));
+            let (mut sr, ir) = make_inst(ExecutionPolicy::Register, Some(fuel));
+            let External::Func(fd) = id.export(&sd, "cfg_calls_globals_bail").unwrap() else {
+                panic!()
+            };
+            let External::Func(fr) = ir.export(&sr, "cfg_calls_globals_bail").unwrap() else {
+                panic!()
+            };
+            let od = sd.invoke(fd, &[Value::I32(5)]);
+            let or = sr.invoke(fr, &[Value::I32(5)]);
+            match (&od, &or) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "simd fuel={fuel}"),
+                (Err(a), Err(b)) => {
+                    assert_eq!(
+                        (a.kind, &a.message),
+                        (b.kind, &b.message),
+                        "simd fuel={fuel}"
+                    )
+                }
+                _ => panic!("simd fuel={fuel}: Decoded={od:?} != Register={or:?}"),
+            }
+            assert_eq!(
+                sd.current_fuel, sr.current_fuel,
+                "simd fuel={fuel} rem mismatch"
+            );
+            assert_eq!(sr.active_local_slots, 0);
+        }
+        // OOB SIMD load mid-block trap must leave exact earlier memory write and exact fuel!
+        {
+            let (mut sd, id) = make_inst(ExecutionPolicy::Decoded, Some(40));
+            let (mut sr, ir) = make_inst(ExecutionPolicy::Register, Some(40));
+            let External::Func(fd) = id.export(&sd, "simd_oob_trap").unwrap() else {
+                panic!()
+            };
+            let External::Func(fr) = ir.export(&sr, "simd_oob_trap").unwrap() else {
+                panic!()
+            };
+            let External::Memory(md) = id.export(&sd, "memory").unwrap() else {
+                panic!()
+            };
+            let External::Memory(mr) = ir.export(&sr, "memory").unwrap() else {
+                panic!()
+            };
+            let ed = sd.invoke(fd, &[Value::I32(2 * 65536 - 4)]).unwrap_err();
+            let er = sr.invoke(fr, &[Value::I32(2 * 65536 - 4)]).unwrap_err();
+            assert_eq!(
+                (ed.kind, ed.trap_code, ed.message),
+                (er.kind, er.trap_code, er.message)
+            );
+            assert_eq!(sd.current_fuel, sr.current_fuel);
+            assert_eq!(
+                sd.read_memory(md, 0, 16).unwrap(),
+                sr.read_memory(mr, 0, 16).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn fast_register_deterministic_differential_fuzzer() {
+        // Fixed-seed deterministic PRNG generating 80 valid random Wasm modules mixing:
+        // scalar + v128 locals, nested block/if/else/loop/br/br_if/br_table with multivalue
+        // (i32, v128, i64) results, memory loads/stores/copy/fill, SIMD + relaxed SIMD,
+        // wide-arithmetic, direct calls, call_indirect, return_call, select, and traps.
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn pick(&mut self, n: usize) -> usize {
+                (self.next() as usize) % n
+            }
+        }
+        fn push_sleb(out: &mut Vec<u8>, mut v: i32) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if (v == 0 && (b & 0x40) == 0) || (v == -1 && (b & 0x40) != 0) {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut features = FeatureSet::all_phase3_core();
+        features.tail_call = true;
+        features.relaxed_simd = true;
+        features.wide_arithmetic = true;
+
+        for seed_idx in 0..80usize {
+            // Fixed module shape with random instruction sequences:
+            // - type 0: (i32, i64) -> (i32)
+            // - type 1: (i32, v128) -> (v128, i32)
+            // - type 2: (i32) -> (i32)
+            // - import 0: env::host_mix (i32) -> (i32)
+            // - f1 (type 1): helper(a: i32, v: v128) -> (v128, i32)
+            // - f2 (type 1): tail_helper(k: i32, v: v128) -> (v128, i32)
+            // - f3 (type 0): main(x: i32, y: i64) -> i32  [locals: 2:i32, 3:i64, 4:v128, 5:v128, 6:f64]
+            let types = vec![
+                3, 0x60, 2, 0x7f, 0x7e, 1, 0x7f, // 0
+                0x60, 2, 0x7f, 0x7b, 2, 0x7b, 0x7f, // 1
+                0x60, 1, 0x7f, 1, 0x7f, // 2
+            ];
+            let mut imps = vec![1];
+            for s in ["env", "host_mix"] {
+                leb_u32(&mut imps, s.len() as u32);
+                imps.extend_from_slice(s.as_bytes());
+            }
+            imps.extend_from_slice(&[0x00, 2]);
+            let funcs = vec![3, 1, 1, 0];
+            let tbl = vec![1, 0x70, 0x00, 2];
+            let elem = vec![1, 0x00, 0x41, 0x00, 0x0b, 2, 1, 2];
+            let mem = vec![1, 0x01, 2, 4];
+            let mut globals = vec![2, 0x7f, 0x01, 0x41, 7, 0x0b, 0x7b, 0x01, 0xfd, 0x0c];
+            for _ in 0..16 {
+                globals.push(rng.next() as u8);
+            }
+            globals.push(0x0b);
+            let mut exps = vec![2];
+            for (name, kind, idx) in [("memory", 2u8, 0u32), ("main", 0, 3)] {
+                leb_u32(&mut exps, name.len() as u32);
+                exps.extend_from_slice(name.as_bytes());
+                exps.push(kind);
+                leb_u32(&mut exps, idx);
+            }
+
+            // f1: helper(a, v) -> (v op splat(a), a ^ lane0)
+            let mut f1 = Vec::new();
+            f1.extend_from_slice(&[0x20, 1, 0x20, 0, 0xfd, 0x11]); // v, splat(a)
+            let vop = [0xfdae_u16, 0xfdb1, 0xfdb5, 0xfd4e, 0xfd50, 0xfd51][rng.pick(6)];
+            f1.push(0xfd);
+            leb_u32(&mut f1, u32::from(vop - 0xfd00));
+            f1.extend_from_slice(&[0x22, 1, 0x20, 0, 0x20, 1, 0xfd, 0x1b, 0, 0x73]);
+
+            // f2: tail_helper(k, v) -> if (k & 3) == 0 { return (v, k) } else { return_call f1(k - 1, v) }
+            let mut f2 = Vec::new();
+            f2.extend_from_slice(&[
+                0x20, 0, 0x41, 3, 0x71, 0x45, 0x04, 0x40, 0x20, 1, 0x20, 0, 0x0f, 0x0b, 0x20, 0,
+                0x41, 1, 0x6b, 0x20, 1, 0x12, 1,
+            ]);
+
+            // f3: main(x:0, y:1; locals: i32:2, i64:3, v128:4, v128:5, f64:6) -> i32
+            let mut f3 = Vec::new();
+            // Seed v128 locals 4 & 5 from params
+            f3.extend_from_slice(&[0x20, 0, 0xfd, 0x11, 0x21, 4]);
+            f3.extend_from_slice(&[0x20, 1, 0xfd, 0x12, 0x21, 5]);
+            f3.extend_from_slice(&[0x20, 0, 0x21, 2, 0x20, 1, 0x21, 3]);
+            f3.extend_from_slice(&[0x20, 0, 0xb7, 0x21, 6]);
+
+            // Emit 14..24 random well-typed operations
+            let steps = 14 + rng.pick(11);
+            for _ in 0..steps {
+                match rng.pick(15) {
+                    0 => {
+                        // i32 ALU (including occasional div/rem that might trap if rhs==0)
+                        f3.extend_from_slice(&[0x20, 2, 0x20, 0]);
+                        let op = [
+                            0x6a, 0x6b, 0x6c, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x6d,
+                            0x70,
+                        ][rng.pick(13)];
+                        f3.push(op);
+                        f3.extend_from_slice(&[0x21, 2]);
+                    }
+                    1 => {
+                        // i64 wide-arithmetic (add128/sub128/mul_wide_s/mul_wide_u)
+                        match rng.pick(4) {
+                            0 | 1 => {
+                                f3.extend_from_slice(&[0x20, 3, 0x20, 1, 0x20, 1, 0x20, 3]);
+                                f3.extend_from_slice(&[
+                                    0xfc,
+                                    if rng.pick(2) == 0 { 0x13 } else { 0x14 },
+                                ]);
+                                f3.extend_from_slice(&[0x85, 0x21, 3]);
+                            }
+                            k => {
+                                f3.extend_from_slice(&[
+                                    0x20,
+                                    3,
+                                    0x20,
+                                    1,
+                                    0xfc,
+                                    (0x15 + (k - 2)) as u8,
+                                ]);
+                                f3.extend_from_slice(&[0x85, 0x21, 3]);
+                            }
+                        }
+                    }
+                    2 => {
+                        // v128 binary / relaxed op into local 4 or 5
+                        f3.extend_from_slice(&[0x20, 4, 0x20, 5]);
+                        let ops = [
+                            0xfd0eu16, 0xfd4e, 0xfd4f, 0xfd50, 0xfd51, 0xfd6e, 0xfd70, 0xfd82,
+                            0xfdae, 0xfdb1, 0xfdb5, 0xfdce, 0xfde4, 0xfdf0, 0xfa00, 0xfa11, 0xfa12,
+                        ];
+                        let op = ops[rng.pick(ops.len())];
+                        let sub = if op >= 0xfd00 {
+                            u32::from(op - 0xfd00)
+                        } else {
+                            u32::from(op - 0xfa00 + 0x100)
+                        };
+                        f3.push(0xfd);
+                        leb_u32(&mut f3, sub);
+                        f3.extend_from_slice(&[0x21, if rng.pick(2) == 0 { 4 } else { 5 }]);
+                    }
+                    3 => {
+                        // v128 ternary (bitselect / relaxed_madd / relaxed_dot_add)
+                        f3.extend_from_slice(&[0x20, 4, 0x20, 5, 0x23, 1]);
+                        let op = [0xfd52u16, 0xfa05, 0xfa07, 0xfa0a, 0xfa13][rng.pick(5)];
+                        let sub = if op >= 0xfd00 {
+                            u32::from(op - 0xfd00)
+                        } else {
+                            u32::from(op - 0xfa00 + 0x100)
+                        };
+                        f3.push(0xfd);
+                        leb_u32(&mut f3, sub);
+                        f3.extend_from_slice(&[0x21, 4]);
+                    }
+                    4 => {
+                        // v128 shuffle with random 32-entry lane mask
+                        f3.extend_from_slice(&[0x20, 4, 0x20, 5, 0xfd, 0x0d]);
+                        for _ in 0..16 {
+                            f3.push((rng.next() & 31) as u8);
+                        }
+                        f3.extend_from_slice(&[0x21, 5]);
+                    }
+                    5 => {
+                        // v128.store + v128.load at bounded (or occasionally cross-page/OOB!) address
+                        let base = if rng.pick(12) == 0 {
+                            65530 // cross-page!
+                        } else {
+                            (rng.pick(64) * 16) as i32
+                        };
+                        f3.push(0x41);
+                        push_sleb(&mut f3, base);
+                        f3.extend_from_slice(&[0x20, 4, 0xfd, 0x0b, 0, 0]);
+                        f3.push(0x41);
+                        push_sleb(&mut f3, base);
+                        f3.extend_from_slice(&[0xfd, 0x00, 0, 0, 0x21, 5]);
+                    }
+                    6 => {
+                        // v128.load32_lane + v128.store32_lane
+                        let off = (rng.pick(32) * 4) as i32;
+                        let lane = rng.pick(4) as u8;
+                        f3.push(0x41);
+                        push_sleb(&mut f3, off);
+                        f3.extend_from_slice(&[0x20, 4, 0xfd, 0x5a, 0, 0, lane]);
+                        f3.push(0x41);
+                        push_sleb(&mut f3, off);
+                        f3.extend_from_slice(&[0x20, 5, 0xfd, 0x56, 0, 0, lane, 0x21, 5]);
+                    }
+                    7 => {
+                        // Multivalue if/else producing (v128, i32) with mixed stack prefix!
+                        f3.extend_from_slice(&[0x20, 2, 0x20, 4, 0x20, 2, 0x41, 1, 0x71]);
+                        f3.extend_from_slice(&[0x04, 1]); // if (i32, v128)->(v128, i32)
+                        f3.extend_from_slice(&[0x10, 1]); // direct call helper
+                        f3.push(0x05);
+                        f3.extend_from_slice(&[0x41, (rng.pick(2)) as u8, 0x11, 1, 0]); // call_indirect helper or tail_helper
+                        f3.push(0x0b);
+                        f3.extend_from_slice(&[0x21, 2, 0x21, 4]);
+                    }
+                    8 => {
+                        // Counted loop mutating local 4 (v128) via global 0 trip counter
+                        let trips = (1 + rng.pick(4)) as i32;
+                        f3.push(0x41);
+                        push_sleb(&mut f3, trips);
+                        f3.extend_from_slice(&[
+                            0x24, 0, // global 0 = trips
+                            0x03, 0x40, 0x20, 4, 0x20, 5, 0xfd, 0xae, 0x01, 0x21, 4, 0x23, 0, 0x41,
+                            1, 0x6b, 0x24, 0, 0x23, 0, 0x0d, 0, 0x0b,
+                        ]);
+                    }
+                    9 => {
+                        // br_table over 3 nested blocks returning v128!
+                        f3.extend_from_slice(&[
+                            0x02, 0x7b, 0x02, 0x7b, 0x02, 0x7b, 0x20, 4, 0x20, 2, 0x41, 3, 0x71,
+                            0x0e, 2, 0, 1, 2, 0x0b, 0x20, 5, 0xfd, 0x51, 0x0b, 0x23, 1, 0xfd, 0x50,
+                            0x0b, 0x21, 4,
+                        ]);
+                    }
+                    10 => {
+                        // select on v128 & i32 + global v128 update
+                        f3.extend_from_slice(&[
+                            0x20, 4, 0x20, 5, 0x20, 2, 0x41, 2, 0x71, 0x1b, 0x22, 4, 0x24, 1,
+                        ]);
+                    }
+                    11 => {
+                        // scalar memory load/store + memory.fill / memory.copy
+                        let off = (rng.pick(32) * 4) as i32;
+                        f3.push(0x41);
+                        push_sleb(&mut f3, off);
+                        f3.extend_from_slice(&[0x20, 2, 0x36, 2, 0]);
+                        f3.push(0x41);
+                        push_sleb(&mut f3, off + 64);
+                        f3.push(0x41);
+                        push_sleb(&mut f3, off);
+                        f3.extend_from_slice(&[0x41, 8, 0xfc, 0x0a, 0, 0]);
+                        f3.push(0x41);
+                        push_sleb(&mut f3, off + 64);
+                        f3.extend_from_slice(&[0x28, 2, 0, 0x20, 2, 0x73, 0x21, 2]);
+                    }
+                    12 => {
+                        // Host call bail with live v128 on stack AND in locals!
+                        f3.extend_from_slice(&[
+                            0x20, 4, // live v128 on stack across host call!
+                            0x20, 2, 0x10, 0, // call host_mix(l2) -> bail & resume!
+                            0x21, 2, // l2 = res
+                            0x21, 5, // l5 = live v128 from stack!
+                        ]);
+                    }
+                    13 => {
+                        // f64 arithmetic + compare
+                        f3.extend_from_slice(&[
+                            0x20, 6, 0x20, 3, 0xb9, 0xa0, 0x22, 6, 0x44, 0, 0, 0, 0, 0, 0, 0xf0,
+                            0x3f, 0x63, 0x20, 2, 0x6a, 0x21, 2,
+                        ]);
+                    }
+                    _ => {
+                        // v128 unary + extract_lane -> mix into l2
+                        f3.extend_from_slice(&[
+                            0x20,
+                            4,
+                            0xfd,
+                            0x4d,
+                            0x22,
+                            4,
+                            0xfd,
+                            0x1b,
+                            (rng.pick(4)) as u8,
+                            0x20,
+                            2,
+                            0x73,
+                            0x21,
+                            2,
+                        ]);
+                    }
+                }
+            }
+            // Final return: l2 ^ wrap(l3) ^ lane0(v4) ^ lane3(v5)
+            f3.extend_from_slice(&[
+                0x20, 2, 0x20, 3, 0xa7, 0x73, 0x20, 4, 0xfd, 0x1b, 0, 0x73, 0x20, 5, 0xfd, 0x1b, 3,
+                0x73,
+            ]);
+
+            let mut code = vec![3];
+            code.extend_from_slice(&body(&[], &f1));
+            code.extend_from_slice(&body(&[], &f2));
+            code.extend_from_slice(&body(&[(1, 0x7f), (1, 0x7e), (2, 0x7b), (1, 0x7c)], &f3));
+
+            let wasm = wasm_mod(&[
+                sec(1, &types),
+                sec(2, &imps),
+                sec(3, &funcs),
+                sec(4, &tbl),
+                sec(5, &mem),
+                sec(6, &globals),
+                sec(7, &exps),
+                sec(9, &elem),
+                sec(10, &code),
+            ]);
+
+            let x_in = rng.next() as i32;
+            let y_in = rng.next() as i64;
+            for fuel in [None, Some(1), Some(12), Some(45)] {
+                let mut res = Vec::new();
+                for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                    let mut cfg = Config {
+                        features,
+                        ..Config::default()
+                    };
+                    cfg.limits.fuel = fuel;
+                    let engine = Engine::with_execution_policy(cfg, policy).unwrap();
+                    let module = engine.compile(&wasm).unwrap();
+                    if policy == ExecutionPolicy::Register {
+                        for bi in 0..3 {
+                            assert!(is_admitted(&module, bi), "fuzz seed {seed_idx} body {bi}");
+                        }
+                    }
+                    let mut store = Store::new(&engine);
+                    let mut linker = Linker::new(&engine);
+                    let hf = store
+                        .create_host_func(
+                            crate::FuncType {
+                                params: vec![ValType::I32],
+                                results: vec![ValType::I32],
+                            },
+                            |args| {
+                                let Value::I32(v) = args[0] else { panic!() };
+                                Ok(vec![Value::I32(v.wrapping_mul(17).wrapping_add(3))])
+                            },
+                        )
+                        .unwrap();
+                    linker
+                        .define("env", "host_mix", External::Func(hf))
+                        .unwrap();
+                    let inst = linker.instantiate(&mut store, &module).unwrap();
+                    let External::Func(fm) = inst.export(&store, "main").unwrap() else {
+                        panic!()
+                    };
+                    let External::Memory(mm) = inst.export(&store, "memory").unwrap() else {
+                        panic!()
+                    };
+                    let out = store.invoke(fm, &[Value::I32(x_in), Value::I64(y_in)]);
+                    assert_eq!(store.active_local_slots, 0);
+                    let mem_snap = store.read_memory(mm, 0, 256).unwrap();
+                    let mem_cross = store.read_memory(mm, 65520, 32).unwrap();
+                    res.push((
+                        out.map_err(|e| (e.kind, e.trap_code, e.message)),
+                        store.current_fuel,
+                        mem_snap,
+                        mem_cross,
+                    ));
+                }
+                assert_eq!(
+                    res[0], res[1],
+                    "differential fuzz mismatch on seed {seed_idx} (fuel={fuel:?})"
+                );
+            }
+        }
     }
 }

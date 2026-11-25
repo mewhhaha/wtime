@@ -263,17 +263,23 @@ pub fn hex(bytes: &[u8]) -> String {
 pub const MERKLE_CHUNK_BYTES: usize = 256 << 10;
 const MERKLE_PREFIX: &str = "merkle256k:";
 
-/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks with domain tag `domain`
-/// in parallel across up to 16 threads. Uses fallible allocation and `spawn_scoped` with inline fallback.
-pub fn parallel_merkle_digest_with_domain(domain: &[u8], bytes: &[u8]) -> Option<[u8; 32]> {
-    if bytes.len() <= MERKLE_CHUNK_BYTES {
+/// Computes a deterministic SHA-256 Merkle root over `chunk_bytes`-sized chunks with domain tag
+/// `domain` in parallel across up to 16 threads using dynamic work-stealing. Uses fallible
+/// allocation and `spawn_scoped` with inline fallback.
+pub fn parallel_merkle_digest_with_chunk(
+    domain: &[u8],
+    bytes: &[u8],
+    chunk_bytes: usize,
+) -> Option<[u8; 32]> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    if bytes.len() <= chunk_bytes {
         let mut h = Sha256::new();
         h.update(domain);
         h.update(&(bytes.len() as u64).to_le_bytes());
         h.update(&digest(bytes));
         return Some(h.finish());
     }
-    let n_chunks = bytes.len().div_ceil(MERKLE_CHUNK_BYTES);
+    let n_chunks = bytes.len().div_ceil(chunk_bytes);
     let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
     leaf_hashes.try_reserve_exact(n_chunks).ok()?;
     leaf_hashes.resize(n_chunks, [0u8; 32]);
@@ -281,38 +287,39 @@ pub fn parallel_merkle_digest_with_domain(domain: &[u8], bytes: &[u8]) -> Option
         .map_or(1, |n| n.get())
         .min(16)
         .min(n_chunks);
-    let per_worker = n_chunks.div_ceil(n_threads);
-    let hash_range = |start_idx: usize, slice: &mut [[u8; 32]]| {
-        for (j, slot) in slice.iter_mut().enumerate() {
-            let off = (start_idx + j) * MERKLE_CHUNK_BYTES;
-            let end = (off + MERKLE_CHUNK_BYTES).min(bytes.len());
-            *slot = digest(&bytes[off..end]);
-        }
-    };
-    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
-    let mut n_unspawned = 0usize;
+    let next_chunk = AtomicUsize::new(0);
+    let mut local_slots: Vec<Vec<(usize, [u8; 32])>> = Vec::new();
+    local_slots.try_reserve_exact(n_threads).ok()?;
+    for _ in 0..n_threads {
+        local_slots.push(Vec::new());
+    }
     std::thread::scope(|s| {
-        let mut rem_leaves = leaf_hashes.as_mut_slice();
-        let mut chunk_idx = 0usize;
-        while !rem_leaves.is_empty() {
-            let take = per_worker.min(rem_leaves.len());
-            let (slice, rest) = rem_leaves.split_at_mut(take);
-            let start_idx = chunk_idx;
-            rem_leaves = rest;
-            chunk_idx += take;
-            if rem_leaves.is_empty() {
-                hash_range(start_idx, slice);
-            } else if std::thread::Builder::new()
-                .spawn_scoped(s, move || hash_range(start_idx, slice))
-                .is_err()
-            {
-                unspawned[n_unspawned] = Some((start_idx, take));
-                n_unspawned += 1;
+        let next_ref = &next_chunk;
+        let run_worker = |out: &mut Vec<(usize, [u8; 32])>| {
+            loop {
+                let idx = next_ref.fetch_add(1, Ordering::Relaxed);
+                if idx >= n_chunks {
+                    break;
+                }
+                let off = idx * chunk_bytes;
+                let end = (off + chunk_bytes).min(bytes.len());
+                out.push((idx, digest(&bytes[off..end])));
+            }
+        };
+        let mut rem = local_slots.as_mut_slice();
+        while let Some((first, rest)) = rem.split_first_mut() {
+            rem = rest;
+            if rem.is_empty() {
+                run_worker(first);
+            } else {
+                let _ = std::thread::Builder::new().spawn_scoped(s, move || run_worker(first));
             }
         }
     });
-    for &(start_idx, take) in unspawned[..n_unspawned].iter().flatten() {
-        hash_range(start_idx, &mut leaf_hashes[start_idx..start_idx + take]);
+    for slot_vec in &local_slots {
+        for &(idx, d) in slot_vec {
+            leaf_hashes[idx] = d;
+        }
     }
     let mut root = Sha256::new();
     root.update(domain);
@@ -321,6 +328,12 @@ pub fn parallel_merkle_digest_with_domain(domain: &[u8], bytes: &[u8]) -> Option
         root.update(leaf);
     }
     Some(root.finish())
+}
+
+/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks with domain tag `domain`
+/// in parallel across up to 16 threads. Uses fallible allocation and `spawn_scoped` with inline fallback.
+pub fn parallel_merkle_digest_with_domain(domain: &[u8], bytes: &[u8]) -> Option<[u8; 32]> {
+    parallel_merkle_digest_with_chunk(domain, bytes, MERKLE_CHUNK_BYTES)
 }
 
 /// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 16

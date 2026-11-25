@@ -348,6 +348,7 @@ fn run_wtime_oracle(
                 let bits = vals.first().copied().map_or(0, val_to_u64);
                 Outcome::Ok(bits)
             }
+            Ok(RunOutcome::Exception(_)) => Outcome::Trap(1),
             Err(e) => Outcome::Trap(wtime_err_to_trap(&e)),
             other => panic!("unexpected outcome {other:?}"),
         };
@@ -3965,4 +3966,535 @@ fn oracle_stage7_relaxed_simd_tail_call_axpy_mem64_and_fixtures() {
             &[],
         );
     }
+}
+
+/// Shared Wasm 3.0 `wide-arithmetic` (`0xfc13..=0xfc16`) test module for x64 and AArch64 oracles.
+pub(crate) fn build_wide_arithmetic_test_wasm() -> Vec<u8> {
+    let mut b_add = Vec::new();
+    // Mixes multiple i64.add128 cases: (arg, 0) + (arg, 1), (-1, arg) + (1, -1), (u64::MAX, -1) + (arg, 0)
+    // local 0: arg, local 1: lo, local 2: hi, local 3: acc
+    // Case 1: dynamic carry
+    b_add.extend_from_slice(&[
+        0x20, 0, // a_lo = arg
+        0x20, 0, 0x42, 7, 0x7c, // a_hi = arg + 7
+        0x42, 0x7f, // b_lo = -1 (0xffff...)
+        0x42, 1, // b_hi = 1
+        0xfc, 0x13, // i64.add128 -> (lo, hi)
+        0x21, 2, 0x21, 1, // hi, lo
+        0x20, 1, 0x20, 2, 0x42, 13, 0x89, 0x85, // lo ^ rotl(hi, 13)
+        0x21, 3,
+    ]);
+    // Case 2: constant-folded carry cascade (-1, -1) + (1, 0) = (0, 0)
+    b_add.extend_from_slice(&[
+        0x42, 0x7f, 0x42, 0x7f, 0x42, 1, 0x42, 0, 0xfc, 0x13, 0x21, 2, 0x21, 1, 0x20, 3, 0x20, 1,
+        0x85, 0x20, 2, 0x7c, 0x21, 3,
+    ]);
+    // Case 3: dynamic (arg, arg ^ -1) + (arg * 3, arg >> 1)
+    b_add.extend_from_slice(&[
+        0x20, 0, 0x20, 0, 0x42, 0x7f, 0x85, 0x20, 0, 0x42, 3, 0x7e, 0x20, 0, 0x42, 1, 0x87, 0xfc,
+        0x13, 0x21, 2, 0x21, 1, 0x20, 3, 0x20, 1, 0x7c, 0x20, 2, 0x42, 7, 0x89, 0x85,
+    ]);
+
+    let mut b_sub = Vec::new();
+    // Case 1: dynamic borrow (arg, 0) - (-1, 1)
+    b_sub.extend_from_slice(&[
+        0x20, 0, 0x42, 0, 0x42, 0x7f, 0x42, 1, 0xfc, 0x14, 0x21, 2, 0x21, 1, 0x20, 1, 0x20, 2,
+        0x42, 17, 0x89, 0x85, 0x21, 3,
+    ]);
+    // Case 2: (0, 0) - (1, 0) = (-1, -1)
+    b_sub.extend_from_slice(&[
+        0x42, 0, 0x42, 0, 0x42, 1, 0x42, 0, 0xfc, 0x14, 0x21, 2, 0x21, 1, 0x20, 3, 0x20, 1, 0x85,
+        0x20, 2, 0x7c, 0x21, 3,
+    ]);
+    // Case 3: (arg, arg) - (arg + 1, 0) -> borrows whenever arg != u64::MAX
+    b_sub.extend_from_slice(&[
+        0x20, 0, 0x20, 0, 0x20, 0, 0x42, 1, 0x7c, 0x42, 0, 0xfc, 0x14, 0x21, 2, 0x21, 1, 0x20, 3,
+        0x20, 1, 0x7c, 0x20, 2, 0x42, 11, 0x89, 0x85,
+    ]);
+
+    // Loop stressing RAX/RDX clobber preservation across `i64.mul_wide_s` (0xfc15) and `i64.mul_wide_u` (0xfc16)
+    let make_mul_wide = |sub_op: u8| -> Vec<u8> {
+        // locals: 0=arg, 1=i(i32), 2=acc(i64), 3=a(i64), 4=b(i64), 5=lo(i64), 6=hi(i64)
+        let mut b = vec![
+            0x20, 0, 0x21, 3, // a = arg
+            0x20, 0, 0x42, 0x7f, 0x85, 0x21, 4, // b = ~arg
+            0x41, 0, 0x21, 1, // i = 0
+            0x42, 0, 0x21, 2, // acc = 0
+            0x03, 0x40, // loop
+            0x20, 3, 0x20, 4, 0xfc, sub_op, // mul_wide -> (lo, hi)
+            0x21, 6, 0x21, 5, // hi, lo
+            0x20, 2, 0x20, 5, 0x7c, 0x20, 6, 0x42, 19, 0x89, 0x85, 0x21,
+            2, // acc = (acc+lo) ^ rotl(hi, 19)
+            // Keep a and b live across mul_wide and update them
+            0x20, 3, 0x42, 0x93, 0x05, 0x7c, 0x21, 3, // a += 659
+            0x20, 4, 0x42, 0x7f, 0x7e, 0x42, 5, 0x7c, 0x21, 4, // b = -b + 5
+            0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x41, 8, 0x49, 0x0d,
+            0,    // i += 1; br_if 0 (i <u 8)
+            0x0b, // end loop
+            // Also test exact i64::MIN * -1 constant & dynamic path
+            0x20, 0, 0x42, 0x7f, 0xfc, sub_op, 0x21, 6, 0x21, 5, 0x20, 2, 0x20, 5, 0x85, 0x20, 6,
+            0x42, 5, 0x89, 0x7c,
+        ];
+        // Constant-fold check: i64::MIN * -1
+        b.push(0x42);
+        leb_i64(&mut b, i64::MIN);
+        b.extend_from_slice(&[0x42, 0x7f, 0xfc, sub_op, 0x21, 6, 0x21, 5]);
+        b.extend_from_slice(&[0x20, 5, 0x85, 0x20, 6, 0x7c]);
+        b
+    };
+
+    wasm_module(&[
+        type_sec(&[(&[0x7e], &[0x7e])]),
+        func_sec(&[0, 0, 0, 0]),
+        export_sec(&[
+            ("add128", 0, 0),
+            ("sub128", 0, 1),
+            ("mul_wide_s", 0, 2),
+            ("mul_wide_u", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[(3, 0x7e)], &b_add),
+            enc_body(&[(3, 0x7e)], &b_sub),
+            enc_body(&[(1, 0x7f), (5, 0x7e)], &make_mul_wide(0x15)),
+            enc_body(&[(1, 0x7f), (5, 0x7e)], &make_mul_wide(0x16)),
+        ]),
+    ])
+}
+
+/// Shared Wasm 3.0 `multi-memory` (mem 0: mem32, mem 1: mem32, mem 2: mem64) test module.
+pub(crate) fn build_multi_memory_test_wasm() -> Vec<u8> {
+    // 3 memories:
+    //   mem 0: i32, min=1, max=3 (flags=0x01)
+    //   mem 1: i32, min=1, max=3 (flags=0x01)
+    //   mem 2: i64, min=1, max=3 (flags=0x05)
+    let mem_sec = section(5, &[3, 0x01, 1, 3, 0x01, 1, 3, 0x05, 1, 3]);
+
+    // Active data segments for mem 0 (off 0), mem 1 (off 16), mem 2 (off 32, i64 offset!).
+    let mut data_payload = vec![3];
+    // seg 0: active mem 0 (flags=0), off=i32(0), "MEM0-INIT-DATA!!"
+    let s0 = b"MEM0-INIT-DATA!!";
+    data_payload.extend_from_slice(&[0x00, 0x41, 0, 0x0b, s0.len() as u8]);
+    data_payload.extend_from_slice(s0);
+    // seg 1: active mem 1 (flags=2, mem_idx=1), off=i32(16), "MEM1-HELLO-WORLD"
+    let s1 = b"MEM1-HELLO-WORLD";
+    data_payload.extend_from_slice(&[0x02, 1, 0x41, 16, 0x0b, s1.len() as u8]);
+    data_payload.extend_from_slice(s1);
+    // seg 2: active mem 2 (flags=2, mem_idx=2), off=i64(32), "MEM2-64BIT-WASM!"
+    let s2 = b"MEM2-64BIT-WASM!";
+    data_payload.extend_from_slice(&[0x02, 2, 0x42, 32, 0x0b, s2.len() as u8]);
+    data_payload.extend_from_slice(s2);
+
+    // f0: check_init(arg: i32) -> i64
+    // Loads i64 from mem0[0], mem1[16], mem2[32] (memarg flags = 0x40 | align, mem_idx, offset)
+    let f0 = vec![
+        0x41, 0, 0x29, 0x03, 0, // i64.load mem0 off=0
+        0x41, 16, 0x29, 0x43, 1, 0, // i64.load mem1 off=0
+        0x85, 0x42, 32, 0x29, 0x43, 2, 0, // i64.load mem2 off=0
+        0x7c, 0x20, 0, 0xad, 0x85,
+    ];
+
+    // f1: rw_and_simd(arg: i32) -> i64
+    // Stores i32/i64/v128 and v128.load32_lane / store32_lane on mem 1 and mem 2; checks isolation from mem 0.
+    let f1 = vec![
+        // mem1[128] = arg (i32); mem1[136] = i64(arg)*7
+        0x41, 128, 0x01, 0x20, 0, 0x36, 0x42, 1, 0, // i32.store mem1 addr=128
+        0x41, 136, 0x01, 0x20, 0, 0xac, 0x42, 7, 0x7e, 0x37, 0x43, 1,
+        0, // i64.store mem1 addr=136
+        // mem2[256] = v128.splat(arg)
+        0x42, 0x80, 0x02, 0x20, 0, 0xfd, 0x11, 0xfd, 0x0b, 0x40, 2,
+        0, // v128.store mem2 addr=256
+        // v128.load32_lane lane 2 from mem1[128] into mem2[256], then store32_lane lane 2 into mem2[288]
+        0x42, 0x80, 0x02, 0xfd, 0x00, 0x40, 2, 0, // load v128 from mem2[256]
+        0x21, 1, // local 1 (v128)
+        0x41, 128, 0x01, 0x20, 1, 0xfd, 0x56, 0x42, 1, 0, 2, // v128.load32_lane mem1 lane=2
+        0x21, 1, 0x42, 0xa0, 0x02, 0x20, 1, 0xfd, 0x5a, 0x42, 2, 0,
+        2, // v128.store32_lane mem2 addr=288 lane=2
+        // Read back mem1[136] ^ extend_u(mem2[288]) ^ mem0[0]
+        0x41, 136, 0x01, 0x29, 0x43, 1, 0, 0x42, 0xa0, 0x02, 0x28, 0x42, 2, 0, 0xad, 0x85, 0x41, 0,
+        0x29, 0x03, 0, 0x85,
+    ];
+
+    // f2: grow_and_bulk(arg: i32) -> i64
+    // Tests memory.size 1/2, memory.grow 1/2 (ok & fail), memory.fill 1/2, cross-memory copy 1->0, 0->2, 2->1, overlap 1->1
+    let f2 = vec![
+        // old1 = memory.grow 1 (1) -> 1; size1 = memory.size 1 -> 2; fail1 = memory.grow 1 (5) -> -1
+        0x41, 1, 0x40, 1, 0xad, // old1
+        0x3f, 1, 0xad, 0x42, 4, 0x86, 0x84, // | (size1 << 4)
+        0x41, 5, 0x40, 1, 0x41, 0x7f, 0x46, 0xad, 0x42, 8, 0x86,
+        0x84, // | ((fail1 == -1) << 8)
+        // old2 = memory.grow 2 (i64 1) -> 1; size2 = memory.size 2 -> 2; fail2 = memory.grow 2 (i64 5) -> -1
+        0x42, 1, 0x40, 2, 0x42, 12, 0x86, 0x84, 0x3f, 2, 0x42, 16, 0x86, 0x84, 0x42, 5, 0x40, 2,
+        0x42, 0x7f, 0x51, 0xad, 0x42, 20, 0x86, 0x84, 0x21, 1, // local 1 (i64 acc)
+        // Fill mem1[65536..+64] with (arg & 0xff)
+        0x41, 0x80, 0x80, 0x04, 0x20, 0, 0x41, 64, 0xfc, 0x0b, 1,
+        // Copy mem1[65536..+32] -> mem0[256..+32] (dst=0, src=1)
+        0x41, 0x80, 0x02, 0x41, 0x80, 0x80, 0x04, 0x41, 32, 0xfc, 0x0a, 0, 1,
+        // Copy mem0[0..+16] -> mem2[65536..+16] (dst=2 [i64], src=0 [i32], len [i32])
+        0x42, 0x80, 0x80, 0x04, 0x41, 0, 0x41, 16, 0xfc, 0x0a, 2, 0,
+        // Copy mem2[65536..+16] -> mem1[65600..+16] (dst=1 [i32], src=2 [i64], len [i32])
+        0x41, 0xc0, 0x80, 0x04, 0x42, 0x80, 0x80, 0x04, 0x41, 16, 0xfc, 0x0a, 1, 2,
+        // Backward overlapping copy on mem1: mem1[65604..+12] <- mem1[65600..+12]
+        0x41, 0xc4, 0x80, 0x04, 0x41, 0xc0, 0x80, 0x04, 0x41, 12, 0xfc, 0x0a, 1, 1,
+        // Read back mem1[65604] and mem0[256] into acc
+        0x20, 1, 0x41, 0xc4, 0x80, 0x04, 0x29, 0x43, 1, 0, 0x85, 0x41, 0x80, 0x02, 0x29, 0x03, 0,
+        0x7c,
+    ];
+
+    // f3: oob_mem1(addr: i32) -> i32
+    let f3 = vec![0x20, 0, 0x28, 0x42, 1, 0];
+
+    // f4: oob_copy12(len: i32) -> i32 (copies from mem1[65530..+len] -> mem2[0..+len])
+    let f4 = vec![
+        0x42, 0, 0x41, 0xfa, 0xff, 0x03, 0x20, 0, 0xfc, 0x0a, 2, 1, 0x41, 1,
+    ];
+
+    wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7e]), (&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0, 0, 1, 1]),
+        mem_sec,
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("check_init", 0, 0),
+            ("rw_and_simd", 0, 1),
+            ("grow_and_bulk", 0, 2),
+            ("oob_mem1", 0, 3),
+            ("oob_copy12", 0, 4),
+        ]),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[(1, 0x7b)], &f1),
+            enc_body(&[(1, 0x7e)], &f2),
+            enc_body(&[], &f3),
+            enc_body(&[], &f4),
+        ]),
+        section(11, &data_payload),
+    ])
+}
+
+/// Shared Wasm 3.0 `exception_handling` (`try_table`, `throw`, `throw_ref`, `exnref`) test module.
+pub(crate) fn build_exception_handling_test_wasm() -> Vec<u8> {
+    // Types:
+    //   0: () -> ()                   (tag 0)
+    //   1: (i32) -> ()                (tag 1)
+    //   2: (i32, i64, f64, v128) -> () (tag 2)
+    //   3: (i32) -> (i32)             (callees)
+    //   4: (i32) -> (i64)             (dispatch export)
+    //   5: () -> (i32, i64, f64, v128) (block type for catch 2)
+    //   6: () -> (i32, exnref)        (block type for catch_ref 1)
+    //   7: () -> (exnref)             (block type for catch_all_ref)
+    //   8: (i32) -> (i32)             (same as 3; reuse 3)
+    let types = type_sec(&[
+        (&[], &[]),
+        (&[0x7f], &[]),
+        (&[0x7f, 0x7e, 0x7c, 0x7b], &[]),
+        (&[0x7f], &[0x7f]),
+        (&[0x7f], &[0x7e]),
+        (&[], &[0x7f, 0x7e, 0x7c, 0x7b]),
+        (&[], &[0x7f, 0x69]),
+        (&[], &[0x69]),
+    ]);
+    // Tag section (id=13): 3 tags referencing type 0, 1, 2
+    let tag_sec = section(13, &[3, 0x00, 0, 0x00, 1, 0x00, 2]);
+    // Table 0: funcref, min=2, max=2; elem [0, 1] -> [f0 (f_throw_tag1), f1 (f_throw_tag2)]
+    let tbl_sec = section(4, &[1, 0x70, 0x01, 2, 2]);
+    let elem_sec = section(9, &[1, 0x00, 0x41, 0, 0x0b, 2, 0, 1]);
+
+    // f0: f_throw_tag1(x: i32) -> i32: if x < 0 { throw 1 (x * 10) } else { x + 1 }
+    let f0 = vec![
+        0x20, 0, 0x41, 0, 0x48, // x <s 0
+        0x04, 0x40, 0x20, 0, 0x41, 10, 0x6c, 0x08, 1, // throw 1 (x * 10)
+        0x0b, 0x20, 0, 0x41, 1, 0x6a,
+    ];
+    // f1: f_throw_tag2(x: i32) -> i32: throws tag 2 (x, i64(x)*1000, f64(x)+0.5, i32x4.splat(x^0x55))
+    let mut f1 = vec![
+        0x20, 0, // i32: x
+        0x20, 0, 0xac, 0x42, 0xe8, 0x07, 0x7e, // i64: x * 1000
+        0x20, 0, 0xb7, // f64.convert_i32_s(x)
+        0x44,
+    ];
+    f1.extend_from_slice(&0.5f64.to_le_bytes());
+    f1.extend_from_slice(&[
+        0xa0, // f64.add
+        0x20, 0, 0x41, 0xd5, 0x00, 0x73, 0xfd, 0x11, // i32x4.splat(x ^ 0x55)
+        0x08, 2, // throw 2
+    ]);
+    // f2: f_tail_throw(x: i32) -> i32: inside try_table(catch_all -> returns 999), executes return_call f0(x)!
+    // Per Wasm 3.0 spec, return_call pops try_table first -> f2 MUST NOT catch f0's throw!
+    let f2 = vec![
+        0x02, 0x40, // block $c
+        0x1f, 0x7f, 1, 0x02, 0, // try_table (result i32) [catch_all $c]
+        0x20, 0, 0x12, 0,    // return_call f0(x)
+        0x0b, // end try_table
+        0x0f, // return
+        0x0b, // end $c
+        0x41, 0xe7, 0x07, // 999 (must NOT be reached when f0 throws!)
+    ];
+    // f3: f_catch_to_fn(x: i32) -> i32: catch 1 targets function frame directly (label 0)!
+    let f3 = vec![
+        0x1f, 0x40, 1, 0x00, 1, 0, // try_table () [catch tag=1 label=0 (Function)]
+        0x20, 0, 0x10, 0, 0x1a, // call f0(x); drop
+        0x0b, 0x41, 77, // reached if f0 did not throw
+    ];
+
+    // f4: dispatch(case: i32) -> i64
+    // Locals: 0=case(i32), 1=tmp(i32), 2=i64tmp(i64), 3=f64tmp(f64), 4=vtmp(v128), 5=exn(exnref)
+    let mut f4 = Vec::new();
+    let case_branch = |buf: &mut Vec<u8>, id: i32, body: &[u8]| {
+        buf.extend_from_slice(&[0x20, 0, 0x41]);
+        leb_i32(buf, id);
+        buf.extend_from_slice(&[0x46, 0x04, 0x40]); // if case == id
+        buf.extend_from_slice(body);
+        buf.push(0x0f); // return
+        buf.push(0x0b); // end if
+    };
+    // Case 0: direct throw 1 + local mutation preserved into catch
+    case_branch(
+        &mut f4,
+        0,
+        &[
+            0x41, 10, 0x21, 1, // tmp = 10
+            0x02, 0x7f, // block $b (result i32)
+            0x1f, 0x40, 1, 0x00, 1, 0, // try_table () [catch 1 $b]
+            0x41, 33, 0x21, 1, // tmp = 33
+            0x41, 55, 0x08, 1, // throw 1 (55)
+            0x0b, 0x41, 0, 0x0b, 0x20, 1, 0x6a, 0xac, // (55 + 33) as i64 = 88
+        ],
+    );
+    // Case 1: cross-function direct call throw + local mutation preserved across call clobbers
+    case_branch(
+        &mut f4,
+        1,
+        &[
+            0x41, 1, 0x21, 1, 0x02, 0x7f, // block $b (result i32)
+            0x1f, 0x40, 1, 0x00, 1, 0, // try_table () [catch 1 $b]
+            0x41, 99, 0x21, 1, // tmp = 99
+            0x41, 0x79, 0x10, 0, 0x1a, // call f0(-7) -> throws -70
+            0x0b, 0x41, 0, 0x0b, 0x20, 1, 0x6a, 0xac, // (-70 + 99) as i64 = 29
+        ],
+    );
+    // Case 2: non-throwing call inside try_table
+    case_branch(
+        &mut f4,
+        2,
+        &[
+            0x02, 0x7f, // block $b (result i32)
+            0x1f, 0x7f, 1, 0x00, 1, 0, // try_table (result i32) [catch 1 $b]
+            0x41, 10, 0x10, 0, // call f0(10) -> 11
+            0x0b, 0x0b, 0xac,
+        ],
+    );
+    // Case 3: call_indirect throwing inside try_table
+    case_branch(
+        &mut f4,
+        3,
+        &[
+            0x02, 0x7f, 0x1f, 0x40, 1, 0x00, 1, 0, 0x41, 0x7b, 0x41, 0, 0x11, 3, 0,
+            0x1a, // call_indirect type 3 tbl 0 (idx=0 -> f0(-5))
+            0x0b, 0x41, 0, 0x0b, 0xac, // -50
+        ],
+    );
+    // Case 4: multi-value tag 2 (i32, i64, f64, v128) across call_indirect
+    case_branch(
+        &mut f4,
+        4,
+        &[
+            0x02, 5, // block $b (result i32 i64 f64 v128)
+            0x1f, 0x40, 1, 0x00, 2, 0, // try_table () [catch 2 $b]
+            0x41, 17, 0x41, 1, 0x11, 3, 0, 0x1a, // call_indirect idx=1 -> f1(17)
+            0x0b, 0x00, // unreachable
+            0x0b, // stack: [i32, i64, f64, v128]
+            0x21, 4, // vtmp
+            0x21, 3, // f64tmp
+            0x21, 2, // i64tmp
+            0x21, 1, // tmp
+            0x20, 1, 0xac, 0x20, 2, 0x7c, 0x20, 3, 0xbd,
+            0x85, // ^ i64.reinterpret_f64(f64tmp)
+            0x20, 4, 0xfd, 0x1d, 1, 0x85, // ^ i64x2.extract_lane 1 (vtmp)
+        ],
+    );
+    // Case 5: nested try_table (inner misses tag 1 -> outer catches tag 1, preserving inner local mutation)
+    case_branch(
+        &mut f4,
+        5,
+        &[
+            0x41, 5, 0x21, 1, 0x02, 0x7f, // outer $b1 (result i32)
+            0x1f, 0x40, 1, 0x00, 1, 0, // outer try_table [catch 1 $b1]
+            0x02, 0x40, // inner $b0 ()
+            0x1f, 0x40, 1, 0x00, 0, 0, // inner try_table [catch 0 $b0]
+            0x41, 40, 0x21, 1, // tmp = 40
+            0x41, 0x7c, 0x10, 0, 0x1a, // call f0(-4) -> throws tag 1 (-40)
+            0x0b, // end inner try_table
+            0x0b, // end $b0
+            0x0b, // end outer try_table
+            0x41, 0, 0x0b, // end $b1
+            0x20, 1, 0x6a, 0xac, // (-40 + 40) = 0
+        ],
+    );
+    // Case 6: catch_ref 1 -> ref.is_null == 0 -> rethrow via throw_ref -> outer catch 1
+    case_branch(
+        &mut f4,
+        6,
+        &[
+            0x02, 0x7f, // outer $outer (result i32)
+            0x1f, 0x40, 1, 0x00, 1, 0, // outer try_table [catch 1 $outer]
+            0x02, 6, // inner $inner (result i32 exnref)
+            0x1f, 0x40, 1, 0x01, 1, 0, // inner try_table [catch_ref 1 $inner]
+            0x41, 0x77, 0x10, 0, 0x1a, // call f0(-9) -> throws -90
+            0x0b, 0x00, 0x0b, // stack: [i32(-90), exnref]
+            0x21, 5, // exn = exnref
+            0x21, 1, // tmp = -90
+            // check ref.is_null(exn) == 0; add 1 if null
+            0x20, 5, 0xd1, 0x20, 1, 0x6a, 0x21, 1, 0x20, 5,
+            0x0a, // throw_ref(exn) -> caught by outer!
+            0x0b, 0x41, 0, 0x0b, // stack: [i32(-90)]
+            0x20, 1, 0x6a, 0xac, // -90 + -90 = -180
+        ],
+    );
+    // Case 7: catch_all_ref -> rethrow via throw_ref -> outer catch 0
+    case_branch(
+        &mut f4,
+        7,
+        &[
+            0x02, 0x40, // $outer0
+            0x1f, 0x40, 1, 0x00, 0, 0, // outer [catch 0 $outer0]
+            0x02, 7, // $inner (result exnref)
+            0x1f, 0x40, 1, 0x03, 0, // inner [catch_all_ref $inner]
+            0x08, 0, // throw 0
+            0x0b, 0x00, 0x0b, // stack: [exnref]
+            0x0a, // throw_ref
+            0x0b, 0x42, 0, 0x0f, // should not reach
+            0x0b, 0x42, 0x9b, 0x01, // 155
+        ],
+    );
+    // Case 8: catch targeting Function frame directly
+    case_branch(
+        &mut f4,
+        8,
+        &[
+            0x41, 0x7d, 0x10, 3, // f3(-3) -> catches -30 and returns directly!
+            0x41, 5, 0x10, 3, // f3(5) -> 77
+            0x6a, 0xac, // 47
+        ],
+    );
+    // Case 9: catch targeting enclosing loop (re-enters loop 5 times via throw!)
+    case_branch(
+        &mut f4,
+        9,
+        &[
+            0x41, 0, 0x21, 1, // tmp = 0
+            0x03, 0x40, // loop $L
+            0x1f, 0x40, 1, 0x00, 0, 0, // try_table [catch 0 $L]
+            0x20, 1, 0x41, 1, 0x6a, 0x22, 1, // tmp += 1
+            0x41, 5, 0x48, // tmp <s 5
+            0x04, 0x40, 0x08, 0, 0x0b, // if tmp < 5 { throw 0 } -> jumps to $L!
+            0x0b, // end try_table
+            0x0b, // end loop
+            0x20, 1, 0xac, // 5
+        ],
+    );
+    // Case 10: return_call inside f2's try_table escapes f2 and is caught here!
+    case_branch(
+        &mut f4,
+        10,
+        &[
+            0x02, 0x7f, // $b (result i32)
+            0x1f, 0x7f, 1, 0x00, 1, 0, // try_table (result i32) [catch 1 $b]
+            0x41, 0x7a, 0x10, 2, // call f2(-6) -> return_call f0(-6) -> throws -60!
+            0x0b, 0x0b, 0xac, // -60 (NOT 999!)
+        ],
+    );
+    // Case 11: throw_ref(ref.null exn) inside try_table(catch_all) -> MUST TRAP (not caught!)
+    case_branch(
+        &mut f4,
+        11,
+        &[
+            0x02, 0x40, 0x1f, 0x40, 1, 0x02, 0, // catch_all $b
+            0xd0, 0x69, 0x0a, // ref.null exn; throw_ref
+            0x0b, 0x0b, 0x42, 42,
+        ],
+    );
+    // Case 12: regular trap (div by 0) inside try_table(catch_all) -> MUST TRAP (not caught!)
+    case_branch(
+        &mut f4,
+        12,
+        &[
+            0x02, 0x40, 0x1f, 0x40, 1, 0x02, 0, // catch_all $b
+            0x41, 1, 0x41, 0, 0x6d, 0x1a, // i32.div_s(1, 0)
+            0x0b, 0x0b, 0x42, 42,
+        ],
+    );
+    // Case 13: uncaught top-level throw -> traps cleanly
+    case_branch(&mut f4, 13, &[0x41, 99, 0x08, 1]);
+    f4.extend_from_slice(&[0x42, 0]);
+
+    wasm_module(&[
+        types,
+        func_sec(&[3, 3, 3, 3, 4]),
+        tbl_sec,
+        tag_sec,
+        export_sec(&[("dispatch", 0, 4)]),
+        elem_sec,
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[], &f2),
+            enc_body(&[], &f3),
+            enc_body(
+                &[(1, 0x7f), (1, 0x7e), (1, 0x7c), (1, 0x7b), (1, 0x69)],
+                &f4,
+            ),
+        ]),
+    ])
+}
+
+#[test]
+fn oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+
+    // 1. Wasm 3.0 `wide-arithmetic` (0xfc13..=0xfc16)
+    let wa_wasm = build_wide_arithmetic_test_wasm();
+    let wa_inputs = [
+        0i64,
+        1,
+        -1,
+        7,
+        -7,
+        i64::MIN,
+        i64::MAX,
+        0x0123_4567_89ab_cdef,
+    ];
+    let mut wa_calls = Vec::new();
+    for &x in &wa_inputs {
+        for exp in ["add128", "sub128", "mul_wide_s", "mul_wide_u"] {
+            wa_calls.push(c(exp, ArgSpec::I64(x)));
+        }
+    }
+    assert_oracle_matrix("wasm3_wide_arithmetic", &wa_wasm, &wa_calls, &[], &[]);
+
+    // 2. Wasm 3.0 `multi-memory` (3 memories: mem32 + mem32 + mem64, active data, SIMD lanes, grow, copy, fill, traps)
+    let mm_wasm = build_multi_memory_test_wasm();
+    assert_oracle_matrix(
+        "wasm3_multi_memory",
+        &mm_wasm,
+        &[
+            c("check_init", ArgSpec::I32(12345)),
+            c("rw_and_simd", ArgSpec::I32(0x1357_9bdf)),
+            c("grow_and_bulk", ArgSpec::I32(0x42)),
+            c("oob_mem1", ArgSpec::I32(131068)), // in-bounds after grow to 2 pages
+            c("oob_mem1", ArgSpec::I32(131072)), // OOB trap on mem 1
+            c("oob_copy12", ArgSpec::I32(4)),    // ok
+            c("oob_copy12", ArgSpec::I32(200_000)), // OOB trap on cross-mem copy
+        ],
+        &[],
+        &[(0, 16), (256, 32)],
+    );
+
+    // 3. Wasm 3.0 `exception_handling` (try_table, throw, throw_ref, exnref, tail-call + EH, trap non-catch)
+    let eh_wasm = build_exception_handling_test_wasm();
+    let eh_calls: Vec<OracleCall> = (0..=13).map(|k| c("dispatch", ArgSpec::I32(k))).collect();
+    assert_oracle_matrix("wasm3_exception_handling", &eh_wasm, &eh_calls, &[], &[]);
 }

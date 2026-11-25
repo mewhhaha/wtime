@@ -14,12 +14,14 @@ use crate::x64::ir::Ty;
 use crate::x64::module::{X64ConstVal, X64Module};
 use crate::x64::runtime::{EXPORT_NAMES, RuntimeTables};
 use crate::x64::{
-    CtxLayout, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES, GUEST_STACK_TOTAL_BYTES,
-    GUEST_STACK_USABLE_BYTES, HELPER_INITIALIZE, HELPER_MEM_COPY, HELPER_MEM_FILL, HELPER_MEM_GROW,
-    OFF_GUEST_STACK_BASE, OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP,
-    OFF_HOST_USER_CTX, OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES,
-    OFF_MEM_RESERVE_BYTES, OFF_STACK_FLOOR, TRAP_ALLOC_FAILED, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE,
-    TRAP_OOB,
+    CtxLayout, EXN_SLAB_BYTES, GUEST_STACK_FLOOR_HEADROOM, GUEST_STACK_GUARD_BYTES,
+    GUEST_STACK_TOTAL_BYTES, GUEST_STACK_USABLE_BYTES, HELPER_EXTRA_MEM_COPY,
+    HELPER_EXTRA_MEM_FILL, HELPER_EXTRA_MEM_GROW, HELPER_INITIALIZE, HELPER_MEM_COPY,
+    HELPER_MEM_FILL, HELPER_MEM_GROW, INTERNAL_EXN_SIGNAL, OFF_GUEST_STACK_BASE,
+    OFF_GUEST_STACK_TOP, OFF_HANDLE_ALLOC_BYTES, OFF_HOST_FN, OFF_HOST_RSP, OFF_HOST_USER_CTX,
+    OFF_IN_CALL, OFF_MEM_BASE, OFF_MEM_LEN, OFF_MEM_MAX_PAGES, OFF_MEM_RESERVE_BYTES,
+    OFF_STACK_FLOOR, TRAP_ALLOC_FAILED, TRAP_MEM_LIMIT, TRAP_MEM_TOO_LARGE, TRAP_OOB,
+    TRAP_UNREACHABLE,
 };
 use wtime_types::ValType;
 
@@ -216,19 +218,47 @@ pub fn emit_a64_helpers(
                 }
             }
         }
-        // Copy active data segments from `.rodata` into linear memory.
-        for &(mem_off, rodata_off, seg_len) in &tables.data_segs {
+        // Copy active data segments from `.rodata` into target linear memory.
+        for &(mem_idx, mem_off, rodata_off, seg_len) in &tables.data_segs {
             let len = u64::from(seg_len);
-            if len == 0 {
-                continue;
-            }
             a.mov_imm64(Reg::X0, mem_off);
             a.mov_imm64(Reg::X2, len);
             a.adds_r(true, Reg::X3, Reg::X0, Reg::X2);
             a.b_cond(Cond::Hs, oob);
-            a.cmp_r(true, Reg::X3, MEM_LEN_REG);
-            a.b_cond(Cond::Hi, oob);
-            a.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
+            if mem_idx == 0 {
+                a.cmp_r(true, Reg::X3, MEM_LEN_REG);
+                a.b_cond(Cond::Hi, oob);
+                if len == 0 {
+                    continue;
+                }
+                a.add_r(true, Reg::X0, MEM_BASE_REG, Reg::X0);
+            } else {
+                let desc_off = layout.mem_desc_off(mem_idx);
+                emit_load_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X5),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+                a.cmp_r(true, Reg::X3, Reg::X5);
+                a.b_cond(Cond::Hi, oob);
+                if len == 0 {
+                    continue;
+                }
+                emit_load_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X5),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                a.add_r(true, Reg::X0, Reg::X5, Reg::X0);
+            }
             a.adr_reloc(Reg::X1, A64RelocTarget::Rodata(rodata_off));
             let lp = a.new_label();
             a.movz(true, Reg::X3, 0, 0);
@@ -272,6 +302,129 @@ pub fn emit_a64_helpers(
         a.ret();
         a.finish()?;
         out.push((HELPER_INITIALIZE, a));
+    }
+
+    // 5-7. Multi-memory helpers (`HELPER_EXTRA_MEM_GROW`, `HELPER_EXTRA_MEM_COPY`, `HELPER_EXTRA_MEM_FILL`).
+    if !module.extra_memories.is_empty() {
+        // HELPER_EXTRA_MEM_GROW: X0 = delta_pages, X1 = desc_off -> X0 = old_pages | u64::MAX.
+        {
+            let mut a = A64Asm::new();
+            let fail = a.new_label();
+            let ok_zero = a.new_label();
+            a.stp_x_pre(Reg::FP, Reg::LR, Reg::SP, -16);
+            a.add_r(true, Reg::X11, CTX_REG, Reg::X1); // desc_ptr
+            a.ldr_uimm(true, Reg::X12, Reg::X11, 8); // old_len
+            a.lsr_imm(true, Reg::X9, Reg::X12, 16); // old_pages
+            a.cbz(true, Reg::X0, ok_zero);
+            a.adds_r(true, Reg::X2, Reg::X9, Reg::X0);
+            a.b_cond(Cond::Hs, fail);
+            a.ldr_uimm(true, Reg::X3, Reg::X11, 16); // max_pages
+            a.cmp_r(true, Reg::X2, Reg::X3);
+            a.b_cond(Cond::Hi, fail);
+            a.lsl_imm(true, Reg::X10, Reg::X2, 16); // new_len
+            a.lsl_imm(true, Reg::X1, Reg::X0, 16); // delta_bytes
+            a.ldr_uimm(true, Reg::X0, Reg::X11, 0); // base
+            a.add_r(true, Reg::X0, Reg::X0, Reg::X12); // base + old_len
+            a.mov_imm32(Reg::X2, 3); // PROT_RW
+            emit_syscall(&mut a, SYS_MPROTECT);
+            a.mov_imm64(Reg::X3, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X3);
+            a.b_cond(Cond::Hs, fail);
+            a.str_uimm(true, Reg::X10, Reg::X11, 8);
+            a.mov_r(true, Reg::X0, Reg::X9);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 16);
+            a.ret();
+            a.bind(ok_zero);
+            a.mov_r(true, Reg::X0, Reg::X9);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 16);
+            a.ret();
+            a.bind(fail);
+            a.mov_imm64(Reg::X0, u64::MAX);
+            a.ldp_x_post(Reg::FP, Reg::LR, Reg::SP, 16);
+            a.ret();
+            a.finish()?;
+            out.push((HELPER_EXTRA_MEM_GROW, a));
+        }
+        // HELPER_EXTRA_MEM_COPY: X0 = dst, X1 = src, X2 = len, X3 = dst_desc_off, X4 = src_desc_off -> W16.
+        {
+            let mut a = A64Asm::new();
+            let oob = a.new_label();
+            let done = a.new_label();
+            let bwd = a.new_label();
+            let fwd_loop = a.new_label();
+            let bwd_loop = a.new_label();
+            a.add_r(true, Reg::X9, CTX_REG, Reg::X3); // dst_desc
+            a.add_r(true, Reg::X10, CTX_REG, Reg::X4); // src_desc
+            a.ldr_uimm(true, Reg::X11, Reg::X9, 8); // dst_len
+            a.adds_r(true, Reg::X5, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Hs, oob);
+            a.cmp_r(true, Reg::X5, Reg::X11);
+            a.b_cond(Cond::Hi, oob);
+            a.ldr_uimm(true, Reg::X12, Reg::X10, 8); // src_len
+            a.adds_r(true, Reg::X5, Reg::X1, Reg::X2);
+            a.b_cond(Cond::Hs, oob);
+            a.cmp_r(true, Reg::X5, Reg::X12);
+            a.b_cond(Cond::Hi, oob);
+            a.cbz(true, Reg::X2, done);
+            a.ldr_uimm(true, Reg::X11, Reg::X9, 0); // dst_base
+            a.ldr_uimm(true, Reg::X12, Reg::X10, 0); // src_base
+            a.add_r(true, Reg::X0, Reg::X11, Reg::X0);
+            a.add_r(true, Reg::X1, Reg::X12, Reg::X1);
+            a.cmp_r(true, Reg::X0, Reg::X1);
+            a.b_cond(Cond::Hi, bwd);
+            a.movz(true, Reg::X3, 0, 0);
+            a.bind(fwd_loop);
+            a.ldrb_reg(Reg::X4, Reg::X1, Reg::X3, false);
+            a.strb_reg(Reg::X4, Reg::X0, Reg::X3, false);
+            a.add_imm(true, Reg::X3, Reg::X3, 1);
+            a.cmp_r(true, Reg::X3, Reg::X2);
+            a.b_cond(Cond::Lo, fwd_loop);
+            a.b(done);
+            a.bind(bwd);
+            a.bind(bwd_loop);
+            a.sub_imm(true, Reg::X2, Reg::X2, 1);
+            a.ldrb_reg(Reg::X4, Reg::X1, Reg::X2, false);
+            a.strb_reg(Reg::X4, Reg::X0, Reg::X2, false);
+            a.cbnz(true, Reg::X2, bwd_loop);
+            a.bind(done);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_OOB));
+            a.ret();
+            a.finish()?;
+            out.push((HELPER_EXTRA_MEM_COPY, a));
+        }
+        // HELPER_EXTRA_MEM_FILL: X0 = dst, X1 = byte_val, X2 = len, X3 = desc_off -> W16.
+        {
+            let mut a = A64Asm::new();
+            let oob = a.new_label();
+            let done = a.new_label();
+            let lp = a.new_label();
+            a.add_r(true, Reg::X9, CTX_REG, Reg::X3);
+            a.ldr_uimm(true, Reg::X10, Reg::X9, 8);
+            a.adds_r(true, Reg::X5, Reg::X0, Reg::X2);
+            a.b_cond(Cond::Hs, oob);
+            a.cmp_r(true, Reg::X5, Reg::X10);
+            a.b_cond(Cond::Hi, oob);
+            a.cbz(true, Reg::X2, done);
+            a.ldr_uimm(true, Reg::X10, Reg::X9, 0);
+            a.add_r(true, Reg::X0, Reg::X10, Reg::X0);
+            a.movz(true, Reg::X3, 0, 0);
+            a.bind(lp);
+            a.strb_reg(Reg::X1, Reg::X0, Reg::X3, false);
+            a.add_imm(true, Reg::X3, Reg::X3, 1);
+            a.cmp_r(true, Reg::X3, Reg::X2);
+            a.b_cond(Cond::Lo, lp);
+            a.bind(done);
+            a.movz(false, SGP1, 0, 0);
+            a.ret();
+            a.bind(oob);
+            a.mov_imm32(SGP1, u32::from(TRAP_OOB));
+            a.ret();
+            a.finish()?;
+            out.push((HELPER_EXTRA_MEM_FILL, a));
+        }
     }
 
     Ok(out)
@@ -535,6 +688,121 @@ pub fn emit_a64_exports(
         }
         a.bind(skip_mem);
 
+        // Additional linear memories `1..N` (`multi-memory`).
+        for (mi, em) in module.extra_memories.iter().enumerate() {
+            let desc_off = layout.extra_mem_offs[mi];
+            let hard_cap = if em.memory64 {
+                em.min_pages.max(131_072)
+            } else {
+                65_536
+            };
+            let eff_max = em.max_pages.min(hard_cap);
+            if eff_max == 0 {
+                continue;
+            }
+            a.mov_imm64(Reg::X4, eff_max);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X4),
+                None,
+                CTX_REG,
+                desc_off + 16,
+                SGP3,
+            );
+            let reserve_bytes = eff_max << 16;
+            a.mov_imm64(Reg::X1, reserve_bytes);
+            a.mov_r(true, Reg::X19, Reg::X1);
+            a.movz(true, Reg::X0, 0, 0);
+            a.movz(true, Reg::X2, 0, 0);
+            a.mov_imm32(Reg::X3, 0x4022);
+            a.mov_imm64(Reg::X4, u64::MAX);
+            a.movz(true, Reg::X5, 0, 0);
+            emit_syscall(&mut a, SYS_MMAP);
+            a.mov_imm64(Reg::X4, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X4);
+            a.b_cond(Cond::Hs, fail_alloc);
+            a.mov_r(true, Reg::X20, Reg::X0);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X20),
+                None,
+                CTX_REG,
+                desc_off,
+                SGP3,
+            );
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X19),
+                None,
+                CTX_REG,
+                desc_off + 24,
+                SGP3,
+            );
+            if em.min_pages > 0 {
+                let init_len = em.min_pages << 16;
+                a.mov_r(true, Reg::X0, Reg::X20);
+                a.mov_imm64(Reg::X1, init_len);
+                a.mov_imm32(Reg::X2, 3);
+                emit_syscall(&mut a, SYS_MPROTECT);
+                a.mov_imm64(Reg::X4, init_len);
+                emit_store_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X4),
+                    None,
+                    CTX_REG,
+                    desc_off + 8,
+                    SGP3,
+                );
+            }
+        }
+
+        // Exception arena slab (demand-paged RW, EH modules only).
+        if let Some(exn_off) = layout.exn_state_off {
+            a.movz(true, Reg::X0, 0, 0);
+            a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
+            a.mov_imm32(Reg::X2, 3);
+            a.mov_imm32(Reg::X3, 0x22);
+            a.mov_imm64(Reg::X4, u64::MAX);
+            a.movz(true, Reg::X5, 0, 0);
+            emit_syscall(&mut a, SYS_MMAP);
+            a.mov_imm64(Reg::X4, (-4095i64) as u64);
+            a.cmp_r(true, Reg::X0, Reg::X4);
+            a.b_cond(Cond::Hs, fail_alloc);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                CTX_REG,
+                exn_off + 8,
+                SGP3,
+            );
+            a.mov_imm64(Reg::X4, 16);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X4),
+                None,
+                CTX_REG,
+                exn_off + 16,
+                SGP3,
+            );
+            a.mov_imm64(Reg::X4, EXN_SLAB_BYTES as u64);
+            emit_store_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X4),
+                None,
+                CTX_REG,
+                exn_off + 24,
+                SGP3,
+            );
+        }
+
         // Initialize globals, data segments, and optional start function.
         a.bl_reloc(A64RelocTarget::Helper(HELPER_INITIALIZE));
         a.cbnz(false, SGP1, fail_trap);
@@ -554,6 +822,11 @@ pub fn emit_a64_exports(
         a.bind(fail_alloc);
         a.mov_imm32(SGP1, u32::from(TRAP_ALLOC_FAILED));
         a.bind(fail_trap);
+        let not_exn_init = a.new_label();
+        a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
+        a.b_cond(Cond::Ne, not_exn_init);
+        a.mov_imm32(SGP1, u32::from(TRAP_UNREACHABLE));
+        a.bind(not_exn_init);
         let skip_tr = a.new_label();
         a.cbz(true, Reg::X22, skip_tr);
         a.strb_uimm(SGP1, Reg::X22, 0);
@@ -602,6 +875,46 @@ pub fn emit_a64_exports(
         a.cbz(true, Reg::X0, skip_m);
         emit_syscall(&mut a, SYS_MUNMAP);
         a.bind(skip_m);
+        for &desc_off in &layout.extra_mem_offs {
+            let skip_em = a.new_label();
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                Reg::X19,
+                desc_off,
+                SGP3,
+            );
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X1),
+                None,
+                Reg::X19,
+                desc_off + 24,
+                SGP3,
+            );
+            a.cbz(true, Reg::X1, skip_em);
+            emit_syscall(&mut a, SYS_MUNMAP);
+            a.bind(skip_em);
+        }
+        if let Some(exn_off) = layout.exn_state_off {
+            let skip_exn = a.new_label();
+            emit_load_off(
+                &mut a,
+                Ty::I64,
+                Some(Reg::X0),
+                None,
+                Reg::X19,
+                exn_off + 8,
+                SGP3,
+            );
+            a.cbz(true, Reg::X0, skip_exn);
+            a.mov_imm64(Reg::X1, EXN_SLAB_BYTES as u64);
+            emit_syscall(&mut a, SYS_MUNMAP);
+            a.bind(skip_exn);
+        }
         emit_load_off(
             &mut a,
             Ty::I64,
@@ -814,6 +1127,11 @@ pub fn emit_a64_exports(
                 a.b(ret_ep);
 
                 a.bind(got_trap);
+                let not_exn_call = a.new_label();
+                a.cmp_imm(false, SGP1, u16::from(INTERNAL_EXN_SIGNAL));
+                a.b_cond(Cond::Ne, not_exn_call);
+                a.mov_imm32(SGP1, u32::from(TRAP_UNREACHABLE));
+                a.bind(not_exn_call);
                 let skip_t = a.new_label();
                 a.cbz(true, Reg::X23, skip_t);
                 a.strb_uimm(SGP1, Reg::X23, 0);

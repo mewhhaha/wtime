@@ -973,7 +973,11 @@ fn decode_inner(
                     } else {
                         bodies.iter().map(|b| b.remaining()).sum()
                     };
-                    let threads = policy.body_threads(active_bytes);
+                    let threads = if active_bytes < 64 * 1024 {
+                        1
+                    } else {
+                        policy.body_threads(active_bytes)
+                    };
                     // Share cache-line-isolated module-wide pre-reserved budgets across all workers
                     // via per-worker batched banks so parallel decoding never retains past `policy`
                     // limits while avoiding per-body atomic contention.

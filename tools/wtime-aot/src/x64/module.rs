@@ -28,8 +28,8 @@ pub enum X64Target {
 }
 
 /// Exact Wasm feature profile enforced right at the front door of `wtime_validate::validate`,
-/// disabling unsupported proposals (exceptions, GC, multi-memory, threads,
-/// function-references, custom page sizes/descriptors, stack switching) before decoding/validation.
+/// disabling unsupported proposals (GC, threads, function-references, custom page sizes/descriptors,
+/// stack switching) before decoding/validation.
 pub const fn x64_validate_features() -> FeatureSet {
     FeatureSet {
         mutable_globals: true,
@@ -42,7 +42,10 @@ pub const fn x64_validate_features() -> FeatureSet {
         relaxed_simd: true,
         tail_call: true,
         memory64: true,
+        multi_memory: true,
         extended_const: true,
+        wide_arithmetic: true,
+        exception_handling: true,
         ..FeatureSet::mvp()
     }
 }
@@ -60,6 +63,8 @@ pub fn x64_validate_limits() -> ResourceLimits {
 /// Admission & compilation caps preventing OOM, peak-memory spikes, or integer overflow on adversarial modules.
 pub const MAX_MEM_PAGES: u64 = 65_536;
 pub const MAX_MEM64_PAGES: u64 = 1 << 48;
+pub const MAX_EXTRA_MEMORIES: usize = 64;
+pub const MAX_TAGS: usize = 4_096;
 pub const MAX_FUNCREF_TABLE_SLOTS: u32 = 1_048_576;
 pub const MAX_TOTAL_FUNCREF_SLOTS: usize = 2_097_152;
 pub const MAX_EXTERN_TABLE_SLOTS: u32 = 65_536;
@@ -270,6 +275,14 @@ pub struct X64CiSig {
     pub targets: Vec<(u32, u32)>,
 }
 
+/// Metadata for an additional linear memory (`memory_index >= 1`, Wasm `multi-memory`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtraMemMeta {
+    pub min_pages: u64,
+    pub max_pages: u64,
+    pub memory64: bool,
+}
+
 /// Lean module metadata consumed by `x64/{ir,lower,mod}.rs`.
 pub struct X64Module {
     /// Imported functions: `(module_name, import_name)`.
@@ -303,14 +316,20 @@ pub struct X64Module {
     pub memory64: bool,
     /// `Some(fixed_bytes)` iff memory 0 exists with `min == max`.
     pub fixed32: Option<u64>,
+    /// Additional linear memories `1..N` (`multi-memory`; empty for all 0/1-memory modules).
+    pub extra_memories: Vec<ExtraMemMeta>,
+    /// Defined exception tag type indices (`exception_handling`; empty for non-EH modules).
+    pub tags: Vec<u32>,
+    /// `true` iff the module declares any exception tags or uses `try_table`/`throw`/`throw_ref`/`exnref`.
+    pub uses_exceptions: bool,
     /// Compilation target (`BlotCdylib` vs `StandaloneExec`).
     pub target: X64Target,
     /// Exported `_start` function for `StandaloneExec`: `Some((func_idx, returns_i32))`.
     pub standalone_start: Option<(u32, bool)>,
     /// Active element segment bounds checks `(table_len, base_off, elem_len)` for `wt_initialize`.
     pub active_elem_checks: Vec<(u32, u32, u32)>,
-    /// Active data segments `(mem_off, decoded.data index)` for `wt_initialize` (in declaration order).
-    pub active_data_segs: Vec<(u64, usize)>,
+    /// Active data segments `(mem_idx, mem_off, decoded.data index)` for `wt_initialize` (in declaration order).
+    pub active_data_segs: Vec<(u32, u64, usize)>,
     /// Optional start function index.
     pub start: Option<u32>,
 }
@@ -321,6 +340,46 @@ impl X64Module {
     pub fn func_type(&self, func_index: usize) -> Option<&FuncType> {
         let &ti = self.func_type_idx.get(func_index)?;
         self.module_types.get(ti as usize)
+    }
+
+    /// Returns `true` iff linear memory `mem` uses 64-bit (`memory64`) addressing.
+    #[inline]
+    pub fn mem_is_64(&self, mem: u32) -> bool {
+        if mem == 0 {
+            self.memory64
+        } else {
+            self.extra_memories
+                .get((mem as usize).saturating_sub(1))
+                .is_some_and(|m| m.memory64)
+        }
+    }
+
+    /// Total number of declared linear memories (`0..=1 + MAX_EXTRA_MEMORIES`).
+    #[inline]
+    pub fn num_memories(&self) -> usize {
+        usize::from(self.memory.is_some()) + self.extra_memories.len()
+    }
+
+    /// Computes deterministic 8B/16B-aligned payload field offsets and 16B-aligned total record size
+    /// for exception tag `tag` (header at `+0: tag_idx: u32, +4: reserved: u32`, payload from `+8`).
+    pub fn tag_payload_layout(&self, tag: u32) -> (Vec<(super::ir::Ty, i32)>, u32) {
+        let ti = self.tags[tag as usize] as usize;
+        let params = &self.module_types[ti].params;
+        let mut off: i32 = 8;
+        let mut fields = Vec::with_capacity(params.len());
+        for &vt in params {
+            let ty = super::ir::Ty::from_val(vt);
+            let (sz, align) = if ty == super::ir::Ty::V128 {
+                (16, 16)
+            } else {
+                (8, 8)
+            };
+            off = (off + (align - 1)) & !(align - 1);
+            fields.push((ty, off));
+            off += sz;
+        }
+        let total = ((off + 15) & !15).max(16) as u32;
+        (fields, total)
     }
 }
 
@@ -378,7 +437,39 @@ fn check_val_type(vt: ValType) -> Res<()> {
     match vt {
         ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => Ok(()),
         ValType::Ref(rt) if rt.nullable && matches!(rt.heap, HeapType::Extern) => Ok(()),
+        ValType::Ref(rt) if matches!(rt.heap, HeapType::Exn) => Ok(()),
         other => Err(format!("x64: unsupported value type {other:?}")),
+    }
+}
+
+fn check_block_imm(
+    imm: &Immediate,
+    type_arity: &[usize],
+    type_admitted: &[bool],
+    total_sig_arity: &mut usize,
+) -> Res<()> {
+    match imm {
+        Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17 | -23) => Ok(()),
+        Immediate::Block(i) if *i >= 0 => {
+            let idx = *i as usize;
+            if !*type_admitted
+                .get(idx)
+                .ok_or("x64: block type index out of range")?
+            {
+                return Err(format!(
+                    "x64: block type index {idx} uses unsupported value type"
+                ));
+            }
+            *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
+            if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                return Err(format!(
+                    "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                ));
+            }
+            Ok(())
+        }
+        Immediate::BlockType(vt) => check_val_type(*vt),
+        other => Err(format!("x64: unsupported block type {other:?}")),
     }
 }
 
@@ -386,6 +477,7 @@ fn check_supported_opcode(
     op: u16,
     imm: &Immediate,
     func_type_idx: &[u32],
+    tag_type_idx: &[u32],
     type_arity: &[usize],
     type_admitted: &[bool],
     total_sig_arity: &mut usize,
@@ -394,6 +486,7 @@ fn check_supported_opcode(
         0x00
         | 0x01
         | 0x05
+        | 0x0a
         | 0x0b..=0x0f
         | 0x1a
         | 0x1b
@@ -401,6 +494,41 @@ fn check_supported_opcode(
         | 0x41..=0x44
         | 0x45..=0xc4
         | 0xd1 => Ok(()),
+        0x08 => match imm {
+            Immediate::Index(ti) => {
+                let &fty = tag_type_idx
+                    .get(*ti as usize)
+                    .ok_or_else(|| format!("x64: throw tag index {ti} out of range"))?;
+                *total_sig_arity = total_sig_arity.saturating_add(type_arity[fty as usize]);
+                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                    return Err(format!(
+                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err("x64: malformed throw immediate".into()),
+        },
+        0x1f => match imm {
+            Immediate::TryTable(tt) => {
+                check_block_imm(&tt.block, type_arity, type_admitted, total_sig_arity)?;
+                for c in &tt.catches {
+                    if let Some(tag) = c.tag {
+                        let &fty = tag_type_idx
+                            .get(tag as usize)
+                            .ok_or_else(|| format!("x64: catch tag index {tag} out of range"))?;
+                        *total_sig_arity = total_sig_arity.saturating_add(type_arity[fty as usize]);
+                        if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                            return Err(format!(
+                                "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Err("x64: malformed try_table immediate".into()),
+        },
         0x10 | 0x12 => match imm {
             Immediate::Index(fi) => {
                 let &ti = func_type_idx
@@ -416,29 +544,7 @@ fn check_supported_opcode(
             }
             _ => Err("x64: malformed call immediate".into()),
         },
-        0x02..=0x04 => match imm {
-            Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -17) => Ok(()),
-            Immediate::Block(i) if *i >= 0 => {
-                let idx = *i as usize;
-                if !*type_admitted
-                    .get(idx)
-                    .ok_or("x64: block type index out of range")?
-                {
-                    return Err(format!(
-                        "x64: block type index {idx} uses unsupported value type"
-                    ));
-                }
-                *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
-                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
-                    return Err(format!(
-                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
-                    ));
-                }
-                Ok(())
-            }
-            Immediate::BlockType(vt) => check_val_type(*vt),
-            other => Err(format!("x64: unsupported block type {other:?}")),
-        },
+        0x02..=0x04 => check_block_imm(imm, type_arity, type_admitted, total_sig_arity),
         0x11 | 0x13 => match imm {
             Immediate::Pair(ti, _) => {
                 let idx = *ti as usize;
@@ -470,34 +576,30 @@ fn check_supported_opcode(
             _ => Err("x64: malformed typed select immediate".into()),
         },
         0x3f | 0x40 => match imm {
-            Immediate::Index(0) | Immediate::None => Ok(()),
-            _ => Err("x64: memory.size/grow only supports memory 0".into()),
+            Immediate::Index(_) | Immediate::None => Ok(()),
+            _ => Err("x64: malformed memory.size/grow immediate".into()),
         },
         0xd0 => match imm {
-            Immediate::Heap(HeapType::Extern) => Ok(()),
+            Immediate::Heap(HeapType::Extern | HeapType::Exn) => Ok(()),
             other => Err(format!("x64: unsupported ref.null heap type {other:?}")),
         },
         0x28..=0x3e | 0xfd00..=0xfd0b | 0xfd5c | 0xfd5d => match imm {
-            Immediate::MemArg { memory: 0, .. } => Ok(()),
-            _ => Err("x64: only memory index 0 is supported".into()),
+            Immediate::MemArg { .. } => Ok(()),
+            _ => Err("x64: malformed memory load/store immediate".into()),
         },
         0xfd54..=0xfd5b => match imm {
-            Immediate::MemLane { memory: 0, .. } => Ok(()),
-            Immediate::Bytes(b)
-                if b.len() == 17 && u32::from_le_bytes(b[12..16].try_into().unwrap()) == 0 =>
-            {
-                Ok(())
-            }
-            _ => Err("x64: SIMD lane load/store only supports memory index 0".into()),
+            Immediate::MemLane { .. } => Ok(()),
+            Immediate::Bytes(b) if b.len() == 17 => Ok(()),
+            _ => Err("x64: malformed SIMD lane load/store immediate".into()),
         },
-        0xfc00..=0xfc07 => Ok(()),
+        0xfc00..=0xfc07 | 0xfc13..=0xfc16 => Ok(()),
         0xfc0a => match imm {
-            Immediate::Pair(0, 0) | Immediate::None => Ok(()),
-            _ => Err("x64: memory.copy only supports memory 0".into()),
+            Immediate::Pair(_, _) | Immediate::None => Ok(()),
+            _ => Err("x64: malformed memory.copy immediate".into()),
         },
         0xfc0b => match imm {
-            Immediate::Index(0) | Immediate::None => Ok(()),
-            _ => Err("x64: memory.fill only supports memory 0".into()),
+            Immediate::Index(_) | Immediate::None => Ok(()),
+            _ => Err("x64: malformed memory.fill immediate".into()),
         },
         0xfd0c..=0xfd53 | 0xfd5e..=0xfdff | 0xfa00..=0xfa13 => Ok(()),
         _ => Err(format!("x64: unsupported opcode {op:#x}")),
@@ -657,6 +759,7 @@ pub struct BodyAdmitSummary {
     pub insn_count: u32,
     pub imm_elems: u32,
     pub saw_data_count_op: bool,
+    pub uses_exceptions: bool,
     pub sig_arity: usize,
     pub br_table_entries: usize,
     pub g_reads: Vec<(u32, u32)>,
@@ -679,20 +782,26 @@ pub fn admit_x64_module_for_target(
     admit_x64_module_for_target_with_summaries(decoded, target, budget, None, false).map(|(m, _)| m)
 }
 
-/// Enforces the admission contract for `target`, optionally reusing per-body summaries for
-/// unchanged bodies and/or collecting per-body summaries for caching.
+/// Enforces the admission contract for `target`, optionally reusing per-body `ValBodyEntry`
+/// summaries directly by reference for unchanged bodies (zero `Vec` cloning!) and/or collecting
+/// per-body summaries for caching. When `pre_vidx` skips a body, the corresponding slot in the
+/// returned `Vec<BodyAdmitSummary>` is left `Default` so the caller can move the cached
+/// `ValBodyEntry` directly without cloning.
 pub fn admit_x64_module_for_target_with_summaries(
     decoded: &DecodedModule,
     target: X64Target,
     budget: Option<&CompileBudget>,
-    pre_summaries: Option<&[Option<BodyAdmitSummary>]>,
+    pre_vidx: Option<(&[super::inc_cache::ValBodyEntry], &[bool])>,
     collect_summaries: bool,
 ) -> Res<(X64Module, Vec<BodyAdmitSummary>)> {
     if let Some(b) = budget {
         b.check_deadline()?;
     }
-    if !decoded.tags.is_empty() {
-        return Err("x64: exception tags are not supported".into());
+    if decoded.tags.len() > MAX_TAGS {
+        return Err(format!(
+            "x64: module declares {} exception tags (max {MAX_TAGS})",
+            decoded.tags.len()
+        ));
     }
     for group in &decoded.type_groups {
         if group.explicit {
@@ -711,20 +820,21 @@ pub fn admit_x64_module_for_target_with_summaries(
             }
         }
     }
-    if decoded.memories.len() > 1 {
+    if decoded.memories.len() > 1 + MAX_EXTRA_MEMORIES {
         return Err(format!(
-            "x64: multi-memory ({}) is not supported",
-            decoded.memories.len()
+            "x64: memory count ({}) exceeds cap {}",
+            decoded.memories.len(),
+            1 + MAX_EXTRA_MEMORIES
         ));
     }
-    let (memory, memory64, fixed32) = if let Some(mt) = decoded.memories.first() {
+    let check_mem = |mi: usize, mt: &wtime_types::MemoryType| -> Res<(u64, u64, bool)> {
         let is_mem64 = mt.index_type == IndexType::I64;
         if mt.shared {
-            return Err("x64: shared memory is not supported".into());
+            return Err(format!("x64: shared memory {mi} is not supported"));
         }
         if mt.page_size_log2 != 16 {
             return Err(format!(
-                "x64: custom memory page size (2^{}) is not supported",
+                "x64: custom memory page size (2^{}) on memory {mi} is not supported",
                 mt.page_size_log2
             ));
         }
@@ -736,7 +846,7 @@ pub fn admit_x64_module_for_target_with_summaries(
         let max_p = match mt.limits.max {
             Some(m) if m > max_limit => {
                 return Err(format!(
-                    "x64: memory max ({m}) exceeds {} limit ({max_limit})",
+                    "x64: memory {mi} max ({m}) exceeds {} limit ({max_limit})",
                     if is_mem64 { "memory64" } else { "Wasm32" }
                 ));
             }
@@ -745,19 +855,32 @@ pub fn admit_x64_module_for_target_with_summaries(
         };
         if mt.limits.min > max_p {
             return Err(format!(
-                "x64: memory min ({}) exceeds max ({max_p})",
+                "x64: memory {mi} min ({}) exceeds max ({max_p})",
                 mt.limits.min
             ));
         }
-        let fixed = if mt.limits.min == max_p {
-            mt.limits.min.checked_mul(65_536)
+        Ok((mt.limits.min, max_p, is_mem64))
+    };
+    let (memory, memory64, fixed32) = if let Some(mt) = decoded.memories.first() {
+        let (min_p, max_p, is_mem64) = check_mem(0, mt)?;
+        let fixed = if min_p == max_p {
+            min_p.checked_mul(65_536)
         } else {
             None
         };
-        (Some((mt.limits.min, max_p)), is_mem64, fixed)
+        (Some((min_p, max_p)), is_mem64, fixed)
     } else {
         (None, false, None)
     };
+    let mut extra_memories = Vec::with_capacity(decoded.memories.len().saturating_sub(1));
+    for (mi, mt) in decoded.memories.iter().enumerate().skip(1) {
+        let (min_pages, max_pages, m64) = check_mem(mi, mt)?;
+        extra_memories.push(ExtraMemMeta {
+            min_pages,
+            max_pages,
+            memory64: m64,
+        });
+    }
 
     // Pre-validate and intern module types ONCE into canonical `u32` IDs + cached arity/admissibility
     // so every function declaration, block type, table slot, and `call_indirect` site runs in O(1)
@@ -799,6 +922,24 @@ pub fn admit_x64_module_for_target_with_summaries(
         );
     }
 
+    let mut tags: Vec<u32> = Vec::with_capacity(decoded.tags.len());
+    for (ti, tag) in decoded.tags.iter().enumerate() {
+        let fti = tag.function.0 as usize;
+        let fty = decoded
+            .types
+            .get(fti)
+            .ok_or_else(|| format!("x64: tag {ti} type index {fti} out of range"))?;
+        if !fty.results.is_empty() {
+            return Err(format!("x64: tag {ti} must have empty results"));
+        }
+        if !type_admitted[fti] {
+            return Err(format!(
+                "x64: tag {ti} type index {fti} uses unsupported value type"
+            ));
+        }
+        tags.push(tag.function.0);
+    }
+
     // Charge per-function/total locals AND aggregate signature arity (params + results) BEFORE allocating.
     if decoded.functions.len() != decoded.code.len() {
         return Err(format!(
@@ -824,9 +965,14 @@ pub fn admit_x64_module_for_target_with_summaries(
             .types
             .get(ti)
             .ok_or("function type index out of range")?;
-        let body_locals = pre_summaries
-            .and_then(|s| s.get(bi))
-            .and_then(|o| o.as_ref())
+        let body_locals = pre_vidx
+            .and_then(|(bs, skip)| {
+                skip.get(bi)
+                    .copied()
+                    .unwrap_or(false)
+                    .then(|| bs.get(bi))
+                    .flatten()
+            })
             .map_or(body.locals.len(), |pre| pre.total_locals as usize);
         let n_locals = fty.params.len().saturating_add(body_locals);
         if n_locals > MAX_LOCALS_PER_FN {
@@ -977,7 +1123,9 @@ pub fn admit_x64_module_for_target_with_summaries(
     }
     let worst_ctx_bytes = super::CTX_HEADER_BYTES
         .saturating_add(decoded.globals.len().saturating_mul(16))
-        .saturating_add(total_extern_slots.saturating_mul(8));
+        .saturating_add(total_extern_slots.saturating_mul(8))
+        .saturating_add(extra_memories.len().saturating_mul(32))
+        .saturating_add(32);
     if worst_ctx_bytes > MAX_CTX_BYTES {
         return Err(format!(
             "x64: Ctx storage ({worst_ctx_bytes} B) exceeds cap {MAX_CTX_BYTES} B"
@@ -1032,7 +1180,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                 exported_globals.push((exp.name.clone(), gi, vt, mutable));
             }
             ExternalKind::Memory => {
-                if exp.index != 0 || memory.is_none() {
+                if (exp.index as usize) >= decoded.memories.len() {
                     return Err(format!(
                         "x64: unsupported memory export {:?} (index {})",
                         exp.name, exp.index
@@ -1117,11 +1265,19 @@ pub fn admit_x64_module_for_target_with_summaries(
             b.check_deadline()?;
         }
         match &seg.mode {
-            SegmentMode::Active { index: 0, offset } => {
-                if memory.is_none() {
-                    return Err("x64: active data segment without linear memory".into());
+            SegmentMode::Active { index, offset } => {
+                let m_idx = *index as usize;
+                if m_idx >= decoded.memories.len() {
+                    return Err(format!(
+                        "x64: active data segment on out-of-range memory {index}"
+                    ));
                 }
-                let off_u64 = if memory64 {
+                let is_m64 = if m_idx == 0 {
+                    memory64
+                } else {
+                    extra_memories[m_idx - 1].memory64
+                };
+                let off_u64 = if is_m64 {
                     let X64ConstVal::I64(off_i64) = eval_const_expr(offset, &global_inits)? else {
                         return Err("x64: memory64 active data offset must be i64".into());
                     };
@@ -1132,12 +1288,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                     };
                     u64::from(off_i32 as u32)
                 };
-                active_data_segs.push((off_u64, di));
-            }
-            SegmentMode::Active { index, .. } => {
-                return Err(format!(
-                    "x64: active data segment on unsupported memory {index}"
-                ));
+                active_data_segs.push((*index, off_u64, di));
             }
             SegmentMode::Passive | SegmentMode::Declarative => {
                 return Err("x64: passive data segments are not supported".into());
@@ -1178,6 +1329,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     struct ChunkScan {
         sig_arity: usize,
         br_table_entries: usize,
+        uses_exceptions: bool,
         global_reads: Vec<usize>,
         global_writes: Vec<usize>,
         ci_pairs: Vec<(u32, u32)>,
@@ -1188,6 +1340,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     let scan_chunk = |base_bi: usize, bodies: &[wtime_validate::FunctionBody]| -> Res<ChunkScan> {
         let mut sig_arity = 0usize;
         let mut br_table_entries = 0usize;
+        let mut chunk_uses_exceptions = false;
         let mut g_reads = vec![0usize; n_globals];
         let mut g_writes = vec![0usize; n_globals];
         let mut ci_seen: HashSet<(u32, u32)> = HashSet::new();
@@ -1216,9 +1369,13 @@ pub fn admit_x64_module_for_target_with_summaries(
             {
                 b.check_deadline()?;
             }
-            if let Some(Some(pre)) = pre_summaries.and_then(|s| s.get(bi)) {
-                sig_arity = sig_arity.saturating_add(pre.sig_arity);
-                br_table_entries = br_table_entries.saturating_add(pre.br_table_entries);
+            if let Some((bs, skip)) = pre_vidx
+                && skip.get(bi).copied().unwrap_or(false)
+                && let Some(pre) = bs.get(bi)
+            {
+                sig_arity = sig_arity.saturating_add(pre.sig_arity as usize);
+                br_table_entries = br_table_entries.saturating_add(pre.br_table_entries as usize);
+                chunk_uses_exceptions |= pre.uses_exceptions;
                 if br_table_entries > MAX_AGGREGATE_BR_TABLE_ENTRIES {
                     return Err(format!(
                         "x64: aggregate br_table entries ({br_table_entries}) exceed cap {MAX_AGGREGATE_BR_TABLE_ENTRIES}"
@@ -1242,7 +1399,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                     }
                 }
                 if collect_summaries {
-                    body_summaries.push(pre.clone());
+                    body_summaries.push(BodyAdmitSummary::default());
                 }
                 continue;
             }
@@ -1251,8 +1408,12 @@ pub fn admit_x64_module_for_target_with_summaries(
             let mut b_ci: Vec<(u32, u32)> = Vec::new();
             let mut b_imm_elems = 0usize;
             let mut b_saw_data_count_op = false;
+            let mut b_uses_exceptions = false;
             for &vt in &body.locals {
                 check_val_type(vt)?;
+                if matches!(vt, ValType::Ref(rt) if rt.heap == HeapType::Exn) {
+                    b_uses_exceptions = true;
+                }
             }
             for (ii, insn) in body.instructions.iter().enumerate() {
                 if let Some(b) = budget
@@ -1264,10 +1425,16 @@ pub fn admit_x64_module_for_target_with_summaries(
                     insn.opcode,
                     &insn.immediate,
                     &func_type_idx,
+                    &tags,
                     &type_arity,
                     &type_admitted,
                     &mut sig_arity,
                 )?;
+                if matches!(insn.opcode, 0x08 | 0x0a | 0x1f)
+                    || matches!(insn.immediate, Immediate::Heap(HeapType::Exn))
+                {
+                    b_uses_exceptions = true;
+                }
                 if collect_summaries {
                     match &insn.immediate {
                         Immediate::BrTable(targets, _) => {
@@ -1345,6 +1512,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                     _ => {}
                 }
             }
+            chunk_uses_exceptions |= b_uses_exceptions;
             if collect_summaries {
                 let mut gr = Vec::with_capacity(touched_reads.len());
                 for g in touched_reads.drain(..) {
@@ -1363,6 +1531,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                     insn_count: body.instructions.len() as u32,
                     imm_elems: b_imm_elems as u32,
                     saw_data_count_op: b_saw_data_count_op,
+                    uses_exceptions: b_uses_exceptions,
                     sig_arity: sig_arity - b_sig_before,
                     br_table_entries: br_table_entries - b_br_before,
                     g_reads: gr,
@@ -1374,6 +1543,7 @@ pub fn admit_x64_module_for_target_with_summaries(
         Ok(ChunkScan {
             sig_arity,
             br_table_entries,
+            uses_exceptions: chunk_uses_exceptions,
             global_reads: g_reads,
             global_writes: g_writes,
             ci_pairs,
@@ -1382,7 +1552,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     };
 
     let n_bodies = decoded.code.len();
-    let n_chunks = if n_bodies >= 256 && pre_summaries.is_none() {
+    let n_chunks = if n_bodies >= 256 && pre_vidx.is_none() {
         std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(16)
@@ -1428,6 +1598,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     };
 
     let mut total_br_table_entries = 0usize;
+    let mut uses_exceptions = !tags.is_empty();
     let mut global_reads = vec![0usize; n_globals];
     let mut global_writes = vec![0usize; n_globals];
     let mut ci_canon: HashMap<(u32, u32), usize> = HashMap::new();
@@ -1442,6 +1613,7 @@ pub fn admit_x64_module_for_target_with_summaries(
 
     for chunk_res in chunk_results {
         let chunk = chunk_res?;
+        uses_exceptions |= chunk.uses_exceptions;
         if collect_summaries {
             all_body_summaries.extend(chunk.body_summaries);
         }
@@ -1595,6 +1767,9 @@ pub fn admit_x64_module_for_target_with_summaries(
             memory,
             memory64,
             fixed32,
+            extra_memories,
+            tags,
+            uses_exceptions,
             target,
             standalone_start,
             active_elem_checks,

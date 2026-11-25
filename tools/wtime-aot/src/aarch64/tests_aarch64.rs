@@ -570,6 +570,12 @@ impl A64Vm {
             let b = u128::from(self.get_x(rm, false));
             let res = ((a * b) >> 64) as u64;
             self.set_x(rd, res, false);
+        } else if (insn & 0xffe0_fc00) == 0x9b40_7c00 {
+            // SMULH Xd, Xn, Xm
+            let a = i128::from(self.get_x(rn, false) as i64);
+            let b = i128::from(self.get_x(rm, false) as i64);
+            let res = ((a * b) >> 64) as u64;
+            self.set_x(rd, res, false);
         } else if (insn & 0x7fe0_fc00) == 0x1a00_0000 {
             // ADC Rd, Rn, Rm
             let a = self.get_x(rn, false);
@@ -2386,7 +2392,7 @@ fn assert_aarch64_oracle(label: &str, wasm: &[u8], calls: &[(&str, Value)], mem_
                     "{label}/{fname}({arg:?}): AArch64={a64_res:#x} != wtime-runtime={expected_bits:#x}"
                 );
             }
-            Err(_) => {
+            Ok(RunOutcome::Exception(_)) | Err(_) => {
                 assert_eq!(
                     rc, 2,
                     "{label}/{fname}({arg:?}): expected trap rc=2, got rc={rc}"
@@ -3905,4 +3911,54 @@ fn aarch64_oracle_stage7_relaxed_simd_tail_call_axpy_mem64_and_mul_strength() {
         ],
         0,
     );
+}
+
+#[test]
+fn aarch64_oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
+    use crate::x64::tests_oracle::{
+        build_exception_handling_test_wasm, build_multi_memory_test_wasm,
+        build_wide_arithmetic_test_wasm,
+    };
+
+    // 1. Wasm 3.0 `wide-arithmetic` (0xfc13..=0xfc16: add128, sub128, mul_wide_s/SMULH, mul_wide_u/UMULH)
+    let wa_wasm = build_wide_arithmetic_test_wasm();
+    let wa_inputs = [
+        0i64,
+        1,
+        -1,
+        7,
+        -7,
+        i64::MIN,
+        i64::MAX,
+        0x0123_4567_89ab_cdef,
+    ];
+    let mut wa_calls = Vec::new();
+    for &x in &wa_inputs {
+        for exp in ["add128", "sub128", "mul_wide_s", "mul_wide_u"] {
+            wa_calls.push((exp, Value::I64(x)));
+        }
+    }
+    assert_aarch64_oracle("a64_wasm3_wide_arithmetic", &wa_wasm, &wa_calls, 0);
+
+    // 2. Wasm 3.0 `multi-memory` (mem32 + mem32 + mem64, active data, SIMD lanes, grow, copy, fill, traps)
+    let mm_wasm = build_multi_memory_test_wasm();
+    assert_aarch64_oracle(
+        "a64_wasm3_multi_memory",
+        &mm_wasm,
+        &[
+            ("check_init", Value::I32(12345)),
+            ("rw_and_simd", Value::I32(0x1357_9bdf)),
+            ("grow_and_bulk", Value::I32(0x42)),
+            ("oob_mem1", Value::I32(131068)),
+            ("oob_mem1", Value::I32(131072)),
+            ("oob_copy12", Value::I32(4)),
+            ("oob_copy12", Value::I32(200_000)),
+        ],
+        288,
+    );
+
+    // 3. Wasm 3.0 `exception_handling` (try_table, throw, throw_ref, exnref, tail-call + EH, trap non-catch)
+    let eh_wasm = build_exception_handling_test_wasm();
+    let eh_calls: Vec<(&str, Value)> = (0..=13).map(|k| ("dispatch", Value::I32(k))).collect();
+    assert_aarch64_oracle("a64_wasm3_exception_handling", &eh_wasm, &eh_calls, 0);
 }

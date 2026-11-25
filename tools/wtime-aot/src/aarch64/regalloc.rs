@@ -219,9 +219,21 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     }
                 }
             }
+            Term::CallCatch {
+                ok_bb, catch_bb, ..
+            }
+            | Term::CallIndirectCatch {
+                ok_bb, catch_bb, ..
+            } => {
+                succs[bi].push(ok_bb.0);
+                if catch_bb != ok_bb {
+                    succs[bi].push(catch_bb.0);
+                }
+            }
             Term::Return { .. }
             | Term::ReturnCall { .. }
             | Term::ReturnCallIndirect { .. }
+            | Term::ThrowActive
             | Term::Unreachable => {}
         }
     }
@@ -249,10 +261,13 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut is_trap_blk = vec![false; n_blocks];
     for &b in &post {
         let bb = &ir.blocks[b as usize];
-        let mut trap = matches!(bb.term, Term::Unreachable);
+        let mut trap = matches!(bb.term, Term::Unreachable | Term::ThrowActive);
         if !trap {
             for inst in &bb.insts {
-                if matches!(inst.op, Op::Trap(_) | Op::MemGrow(_)) {
+                if matches!(
+                    inst.op,
+                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. }
+                ) {
                     trap = true;
                     break;
                 }
@@ -336,7 +351,12 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                         last_use[rv.0 as usize] = last_use[rv.0 as usize].max(pos + 2);
                     }
                 }
-                Op::MemGrow(_) | Op::MemCopy { .. } | Op::MemFill { .. } => {
+                Op::MemGrow(_)
+                | Op::MemGrowIdx { .. }
+                | Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemFill { .. }
+                | Op::MemFillIdx { .. } => {
                     has_calls = true;
                     clobbers.push((pos, MASK_GP_CALLER, 0));
                 }
@@ -348,11 +368,67 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             }
             pos += 2;
         }
-        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-            last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
-        });
         match bb.term {
+            Term::CallCatch {
+                args,
+                ok_bb,
+                catch_args,
+                ..
+            } => {
+                for &v in ir.pool_slice(args) {
+                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                }
+                for &v in ir.pool_slice(catch_args) {
+                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos + 1);
+                }
+                has_calls = true;
+                clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
+                let arg_tys: Vec<Ty> = ir
+                    .pool_slice(args)
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                let ret_tys: Vec<Ty> = ir.blocks[ok_bb.0 as usize]
+                    .params
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                max_out_args = max_out_args.max(layout_args(&arg_tys)?.stack_bytes);
+                max_ret_buf = max_ret_buf.max(layout_rets(&ret_tys)?.stack_bytes);
+            }
+            Term::CallIndirectCatch {
+                idx,
+                args,
+                ok_bb,
+                catch_args,
+                ..
+            } => {
+                last_use[idx.0 as usize] = last_use[idx.0 as usize].max(pos);
+                for &v in ir.pool_slice(args) {
+                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                }
+                for &v in ir.pool_slice(catch_args) {
+                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos + 1);
+                }
+                has_calls = true;
+                clobbers.push((pos, MASK_GP_CALLER, MASK_FP_CALLER));
+                let arg_tys: Vec<Ty> = ir
+                    .pool_slice(args)
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                let ret_tys: Vec<Ty> = ir.blocks[ok_bb.0 as usize]
+                    .params
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                max_out_args = max_out_args.max(layout_args(&arg_tys)?.stack_bytes);
+                max_ret_buf = max_ret_buf.max(layout_rets(&ret_tys)?.stack_bytes);
+            }
             Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                });
                 let arg_tys: Vec<Ty> = ir
                     .pool_slice(args)
                     .iter()
@@ -364,7 +440,11 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     max_out_args = max_out_args.max(arg_stack);
                 }
             }
-            _ => {}
+            _ => {
+                bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+                    last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
+                });
+            }
         }
         pos += 2;
         block_end[oi] = pos;

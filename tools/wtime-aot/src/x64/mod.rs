@@ -15,7 +15,7 @@ pub mod standalone_rt;
 #[cfg(test)]
 mod tests_abi_faults;
 #[cfg(test)]
-mod tests_oracle;
+pub(crate) mod tests_oracle;
 #[cfg(test)]
 pub(crate) mod tests_unit;
 pub mod verify;
@@ -113,6 +113,12 @@ pub const TRAP_EXIT: u8 = 20;
 #[allow(dead_code)]
 pub const TRAP_STOP_ITER: u8 = 21;
 pub const TRAP_UNSUPPORTED_ISA: u8 = 22;
+/// Internal guest-only trap register sentinel (`R11d` / `W16`) signalling an in-flight Wasm
+/// exception. Caught exclusively by `try_table` handlers; mapped to `TRAP_UNREACHABLE` at Blot ABI 8
+/// outer boundaries so the canonical Blot trap table `1..=22` remains unchanged across all backends.
+pub const INTERNAL_EXN_SIGNAL: u8 = 0xff;
+/// Demand-paged RW exception arena slab size (4 MiB; zero physical pages touched until thrown).
+pub const EXN_SLAB_BYTES: usize = 4 << 20;
 
 // ---- Shared runtime helper IDs ----
 pub const HELPER_TRUNC_BASE: u32 = 0; // 0..=15
@@ -124,7 +130,10 @@ pub(crate) const HELPER_GROW_CORE: u32 = 20;
 pub(crate) const HELPER_INITIALIZE: u32 = 21;
 pub(crate) const HELPER_READ_GLOBAL: u32 = 22;
 pub(crate) const HELPER_GOOSE_FMT_FLOAT: u32 = 23;
-pub(crate) const NUM_HELPERS: usize = 24;
+pub const HELPER_EXTRA_MEM_GROW: u32 = 24;
+pub const HELPER_EXTRA_MEM_COPY: u32 = 25;
+pub const HELPER_EXTRA_MEM_FILL: u32 = 26;
+pub(crate) const NUM_HELPERS: usize = 27;
 
 /// Per-signature `call_indirect` dispatch table metadata in `.rodata`.
 #[derive(Clone, Copy, Debug)]
@@ -150,11 +159,40 @@ pub struct CtxLayout {
     pub use_guard_pages: bool,
     pub global_offs: Vec<i32>,
     pub extern_tables: BTreeMap<u32, (i32, u32)>,
+    /// Byte offsets into `Ctx` for 32-byte descriptors `(base, len, max_pages, reserve_bytes)`
+    /// of additional linear memories `1..N` (empty for 0/1-memory modules).
+    pub extra_mem_offs: Vec<i32>,
+    /// `memory64` flag for each extra linear memory `1..N`.
+    pub extra_mem_is64: Vec<bool>,
+    /// `Some(off)` when module uses Wasm `exception_handling` (`+0: active_exn, +8: slab_ptr, +16: slab_cursor, +24: slab_cap`).
+    pub exn_state_off: Option<i32>,
+    /// Per-tag payload field `(Ty, offset)` list and 16B-aligned total record size (empty for non-EH modules).
+    pub tag_layouts: Vec<(Vec<(ir::Ty, i32)>, u32)>,
     pub ci_tables: Vec<CiTableLayout>,
     pub total_bytes: usize,
 }
 
 impl CtxLayout {
+    /// Returns the `Ctx` byte offset of memory `mem`'s 32-byte descriptor (`0` for memory 0).
+    #[inline]
+    pub fn mem_desc_off(&self, mem: u32) -> i32 {
+        if mem == 0 {
+            0
+        } else {
+            self.extra_mem_offs[(mem as usize) - 1]
+        }
+    }
+
+    /// Returns `true` iff linear memory `mem` uses 64-bit (`memory64`) addressing.
+    #[inline]
+    pub fn mem_is64(&self, mem: u32) -> bool {
+        if mem == 0 {
+            self.memory64
+        } else {
+            self.extra_mem_is64[(mem as usize) - 1]
+        }
+    }
+
     /// Computes checked byte offsets for all non-folded globals and mutable `externref` tables,
     /// rounding `total_bytes` up to a 4 KiB page and enforcing `total_bytes <= MAX_CTX_BYTES`.
     pub fn compute(module: &X64Module, ci_tables: Vec<CiTableLayout>) -> Result<Self, String> {
@@ -195,6 +233,36 @@ impl CtxLayout {
             }
             extern_tables.insert(tbl, (off, len));
         }
+        let mut extra_mem_offs = Vec::with_capacity(module.extra_memories.len());
+        let mut extra_mem_is64 = Vec::with_capacity(module.extra_memories.len());
+        for em in &module.extra_memories {
+            cur = align_up_checked(cur, 8)?;
+            let off = i32::try_from(cur).map_err(|_| "x64: Ctx extra-memory offset exceeds i32")?;
+            cur = cur.checked_add(32).ok_or("x64: Ctx size overflow")?;
+            if cur > MAX_CTX_BYTES {
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
+            }
+            extra_mem_offs.push(off);
+            extra_mem_is64.push(em.memory64);
+        }
+        let exn_state_off = if module.uses_exceptions {
+            cur = align_up_checked(cur, 8)?;
+            let off = i32::try_from(cur).map_err(|_| "x64: Ctx exception offset exceeds i32")?;
+            cur = cur.checked_add(32).ok_or("x64: Ctx size overflow")?;
+            if cur > MAX_CTX_BYTES {
+                return Err(format!(
+                    "x64: Ctx layout ({cur} B) exceeds cap {MAX_CTX_BYTES} B"
+                ));
+            }
+            Some(off)
+        } else {
+            None
+        };
+        let tag_layouts = (0..module.tags.len() as u32)
+            .map(|t| module.tag_payload_layout(t))
+            .collect();
         let total_bytes = align_up_checked(cur, 4096)?;
         if total_bytes > MAX_CTX_BYTES {
             return Err(format!(
@@ -213,6 +281,10 @@ impl CtxLayout {
                 && module.memory.is_some(),
             global_offs,
             extern_tables,
+            extra_mem_offs,
+            extra_mem_is64,
+            exn_state_off,
+            tag_layouts,
             ci_tables,
             total_bytes,
         })
@@ -717,7 +789,7 @@ fn build_shared_rodata(
 
     // 9. Active data segment payloads (`WT_DATA`), counted in `MAX_TOTAL_RODATA_BYTES`.
     let mut data_segs = Vec::with_capacity(module.active_data_segs.len());
-    for (i, &(mem_off, di)) in module.active_data_segs.iter().enumerate() {
+    for (i, &(mem_idx, mem_off, di)) in module.active_data_segs.iter().enumerate() {
         if (i & 1023) == 1023 {
             budget.check_deadline()?;
         }
@@ -729,7 +801,7 @@ fn build_shared_rodata(
         } else {
             rb.push_bytes(1, payload)?
         };
-        data_segs.push((mem_off, ro_off, len));
+        data_segs.push((mem_idx, mem_off, ro_off, len));
     }
 
     budget.charge_rodata(rb.buf.len())?;
@@ -1017,39 +1089,45 @@ fn hash_raw_spans_parallel(
     if n_defs == 0 {
         return Some(body_hashes);
     }
-    let hash_slice = |start_bi: usize, dst: &mut [[u8; 32]]| {
-        for (j, slot) in dst.iter_mut().enumerate() {
-            let (s, e) = spans[start_bi + j];
-            *slot = crate::sha256::digest(&wasm[s..e]);
-        }
-    };
     let workers = n_workers.min(16).min(n_defs);
-    let per_worker = n_defs.div_ceil(workers);
-    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
-    let mut n_unspawned = 0usize;
-    std::thread::scope(|hs| {
-        let mut rem = body_hashes.as_mut_slice();
-        let mut bi = 0usize;
-        while !rem.is_empty() {
-            let take = per_worker.min(rem.len());
-            let (slice, rest) = rem.split_at_mut(take);
-            let start_bi = bi;
-            rem = rest;
-            bi += take;
-            if rem.is_empty() {
-                hash_slice(start_bi, slice);
-            } else if std::thread::Builder::new()
-                .spawn_scoped(hs, move || hash_slice(start_bi, slice))
-                .is_err()
-            {
-                unspawned[n_unspawned] = Some((start_bi, take));
-                n_unspawned += 1;
-            }
+    if workers <= 1 || n_defs < 64 {
+        for (bi, &(s, e)) in spans.iter().enumerate() {
+            body_hashes[bi] = crate::sha256::digest(&wasm[s..e]);
         }
-    });
-    for &(start_bi, take) in unspawned[..n_unspawned].iter().flatten() {
-        hash_slice(start_bi, &mut body_hashes[start_bi..start_bi + take]);
+        return Some(body_hashes);
     }
+    // Dynamic work-stealing over contiguous slices directly into `body_hashes` (zero sorting,
+    // zero intermediate result copying, balanced across giant and tiny function bodies).
+    let n_tasks = (workers * 4).min(n_defs);
+    let task_size = n_defs.div_ceil(n_tasks);
+    let mut tasks: Vec<(usize, &mut [[u8; 32]])> = Vec::with_capacity(n_tasks);
+    let mut rem = body_hashes.as_mut_slice();
+    let mut bi = 0usize;
+    while !rem.is_empty() {
+        let take = task_size.min(rem.len());
+        let (chunk, rest) = rem.split_at_mut(take);
+        tasks.push((bi, chunk));
+        rem = rest;
+        bi += take;
+    }
+    let work_q = Mutex::new(tasks);
+    std::thread::scope(|hs| {
+        let q_ref = &work_q;
+        let run = || loop {
+            let item = q_ref.lock().unwrap_or_else(|g| g.into_inner()).pop();
+            let Some((start_bi, dst)) = item else {
+                break;
+            };
+            for (j, slot) in dst.iter_mut().enumerate() {
+                let (s, e) = spans[start_bi + j];
+                *slot = crate::sha256::digest(&wasm[s..e]);
+            }
+        };
+        for _ in 1..workers {
+            let _ = std::thread::Builder::new().spawn_scoped(hs, run);
+        }
+        run();
+    });
     Some(body_hashes)
 }
 
@@ -1063,6 +1141,7 @@ fn val_body_entry_from_summary(
         insn_count: admit.insn_count,
         imm_elems: admit.imm_elems,
         saw_data_count_op: admit.saw_data_count_op,
+        uses_exceptions: admit.uses_exceptions,
         sig_arity: admit.sig_arity as u32,
         br_table_entries: admit.br_table_entries as u32,
         g_reads: admit.g_reads,
@@ -1107,7 +1186,7 @@ fn compile_wasm_to_x64_so_inner(
         std::sync::Condvar,
     )>;
     let mut pre_raw_state: Option<([u8; 32], PreRawWait)> = None;
-    let mut pre_admit_summaries: Option<Vec<Option<module::BodyAdmitSummary>>> = None;
+    let mut pre_admit_skip: Vec<bool> = Vec::new();
 
     if inc_enabled
         && let (Some(cache_dir), Some(salt)) = (opts.inc_cache_dir.as_deref(), opts.cache_key_salt)
@@ -1221,25 +1300,9 @@ fn compile_wasm_to_x64_so_inner(
                 },
             )
             .map_err(map_val_err)?;
-            let mut summaries = Vec::with_capacity(bodies_ref.len());
-            for (idx, vb) in bodies_ref.iter().enumerate() {
-                if !inc_mod.is_body_validated(idx) {
-                    summaries.push(Some(module::BodyAdmitSummary {
-                        total_locals: vb.total_locals,
-                        insn_count: vb.insn_count,
-                        imm_elems: vb.imm_elems,
-                        saw_data_count_op: vb.saw_data_count_op,
-                        sig_arity: vb.sig_arity as usize,
-                        br_table_entries: vb.br_table_entries as usize,
-                        g_reads: vb.g_reads.clone(),
-                        g_writes: vb.g_writes.clone(),
-                        ci_pairs: vb.ci_pairs.clone(),
-                    }));
-                } else {
-                    summaries.push(None);
-                }
-            }
-            pre_admit_summaries = Some(summaries);
+            pre_admit_skip = (0..bodies_ref.len())
+                .map(|idx| !inc_mod.is_body_validated(idx))
+                .collect();
             ValidatedBacking::Incremental(inc_mod)
         } else {
             ValidatedBacking::Full(
@@ -1252,11 +1315,15 @@ fn compile_wasm_to_x64_so_inner(
 
     // 2. Enforce admission contract & build lean X64Module metadata.
     let t0 = Instant::now();
+    let pre_vidx_admit = pre_vidx
+        .as_ref()
+        .filter(|v| pre_admit_skip.len() == v.bodies.len())
+        .map(|v| (v.bodies.as_slice(), pre_admit_skip.as_slice()));
     let (mut module, mut admit_summaries) = module::admit_x64_module_for_target_with_summaries(
         validated.decoded(),
         opts.target,
         Some(&budget),
-        pre_admit_summaries.as_deref(),
+        pre_vidx_admit,
         inc_enabled,
     )
     .map_err(|e| {
@@ -1344,7 +1411,7 @@ fn compile_wasm_to_x64_so_inner(
     let mut d_inline_effects = std::time::Duration::ZERO;
     let mut d_elide = std::time::Duration::ZERO;
 
-    let mut compiled: Vec<Option<Asm>> = (0..n_defs).map(|_| None).collect();
+    let mut compiled: Vec<Option<Asm>> = Vec::new();
     let mut new_inc_cache: Option<std::sync::Arc<inc_cache::IncCacheData>> = None;
     let mut new_val_index: Option<inc_cache::ValIndexData> = None;
     type DeferredValIndex = (
@@ -1583,9 +1650,7 @@ fn compile_wasm_to_x64_so_inner(
             )?
         {
             if let Some(asms) = inc_asms {
-                for (bi, asm) in asms.into_iter().enumerate() {
-                    compiled[bi] = Some(asm);
-                }
+                compiled = asms.into_iter().map(Some).collect();
             }
             if let (Some(sh), Some((topo_bu, in_cyc))) = (shell_hash_opt, topo_cycle_opt)
                 && admit_summaries.len() == n_defs
@@ -1604,6 +1669,7 @@ fn compile_wasm_to_x64_so_inner(
                                 insn_count: 0,
                                 imm_elems: 0,
                                 saw_data_count_op: false,
+                                uses_exceptions: false,
                                 sig_arity: 0,
                                 br_table_entries: 0,
                                 g_reads: Vec::new(),
@@ -1630,6 +1696,7 @@ fn compile_wasm_to_x64_so_inner(
     }
 
     if n_defs > 0 && !used_incremental {
+        compiled.resize_with(n_defs, || None);
         // If incremental validation skipped bodies and the warm path fell back, perform full
         // validation + admission cleanly before cold compilation so every body is decoded.
         if validated.is_incremental() {
@@ -1789,13 +1856,28 @@ fn compile_wasm_to_x64_so_inner(
         // Phase 5b (module-wide, only when `opts.opt`): budgeted small-leaf inlining + interprocedural effects.
         // Overlap deferred cold `body_hashes` computation (when `.vidx`/`.bin` were absent) with Phase 5b!
         let need_deferred_hashes = matches!(&inc_ctx, Some((_, None, _)));
+        let mut validated_early_dropped = false;
+        if n_defs >= 256
+            && (!need_deferred_hashes || body_spans_opt.as_ref().is_some_and(|s| s.len() == n_defs))
+        {
+            // `validated` (`DecodedModule`, ~70+ MiB) is never read again after Phase 5a on the
+            // cold path! Free it asynchronously during Phase 5b so Phase 5c/5e reuse its pages
+            // instead of faulting tens of thousands of fresh kernel pages.
+            let dummy = ValidatedBacking::Full(
+                wtime_validate::validate(b"\0asm\x01\0\0\0", &x64_validate_features(), &vlimits)
+                    .expect("empty wasm valid"),
+            );
+            let old_val = std::mem::replace(&mut validated, dummy);
+            validated_early_dropped = true;
+            let _ = std::thread::Builder::new().spawn(move || drop(old_val));
+        }
         let mut inline_track: Option<opt::InlineTrack> = None;
         let mut own_effects_vec: Vec<opt::FnOwnEffects> = Vec::new();
         let mut cold_topo_cycle: Option<(Vec<usize>, Vec<bool>)> = None;
         let (effects, deferred_hashes_res) = std::thread::scope(|s_5b| {
             let h_hashes = if need_deferred_hashes {
                 let spans_ref = body_spans_opt.as_deref();
-                let dec_ref = validated.decoded();
+                let dec_ref = (!validated_early_dropped).then(|| validated.decoded());
                 let n_hw = n_workers.clamp(1, 4);
                 std::thread::Builder::new()
                     .spawn_scoped(s_5b, move || {
@@ -1803,7 +1885,7 @@ fn compile_wasm_to_x64_so_inner(
                             && spans.len() == n_defs
                         {
                             hash_raw_spans_parallel(wasm, spans, n_hw)
-                        } else {
+                        } else if let Some(dec_ref) = dec_ref {
                             let mut out = inc_cache::try_vec_with_capacity(n_defs)?;
                             out.resize(n_defs, [0u8; 32]);
                             for (bi, slot) in out.iter_mut().enumerate() {
@@ -1811,6 +1893,8 @@ fn compile_wasm_to_x64_so_inner(
                                 *slot = crate::sha256::digest(&dec_ref.bytes[sp.start..sp.end]);
                             }
                             Some(out)
+                        } else {
+                            None
                         }
                     })
                     .ok()
@@ -2519,7 +2603,8 @@ fn compile_wasm_to_x64_so_inner(
         //     3. import trampolines, 4. defined functions.
         let mut planned_text_len = 0usize;
         let reserve_text_off = |planned: &mut usize, len: usize| -> Result<u64, X64CompileError> {
-            let aligned = align_up_checked(*planned, 16).map_err(X64CompileError::Failed)?;
+            let fn_align = if len >= 256 { 32 } else { 16 };
+            let aligned = align_up_checked(*planned, fn_align).map_err(X64CompileError::Failed)?;
             let next = aligned
                 .checked_add(len)
                 .ok_or_else(|| X64CompileError::Failed("x64: merged .text size overflow".into()))?;
@@ -3091,7 +3176,7 @@ fn try_compile_defs_incremental(
     // lower them into `raw_irs` in parallel with preallocated fallible output slots.
     let lower_subset = |validated: &mut ValidatedBacking,
                         indices: &[usize],
-                        raw_irs: &mut [Option<IrFunc>]|
+                        raw_irs: &mut [Option<Box<IrFunc>>]|
      -> Result<bool, X64CompileError> {
         if indices.is_empty() {
             return Ok(true);
@@ -3178,17 +3263,15 @@ fn try_compile_defs_incremental(
             .into_iter()
             .flatten()
         {
-            raw_irs[bi] = Some(ir);
+            raw_irs[bi] = Some(Box::new(ir));
         }
         Ok(true)
     };
 
-    let Some(mut raw_irs) = inc_cache::try_vec_with_capacity::<Option<IrFunc>>(n_defs) else {
+    let Some(mut raw_irs) = inc_cache::try_vec_with_capacity::<Option<Box<IrFunc>>>(n_defs) else {
         return Ok(None);
     };
-    for _ in 0..n_defs {
-        raw_irs.push(None);
-    }
+    raw_irs.resize_with(n_defs, || None);
     if !lower_subset(validated, &changed_indices, &mut raw_irs)? {
         return Ok(None);
     }
@@ -3211,7 +3294,7 @@ fn try_compile_defs_incremental(
     for bi in 0..n_defs {
         let prev_cs = &prev_cache.funcs[bi].pre_inline_callees;
         let cur_cs: &[(u32, u32)] = if changed[bi] {
-            let ir = raw_irs[bi].as_ref().unwrap();
+            let ir = raw_irs[bi].as_deref().unwrap();
             new_inlinable[bi] = opt::is_inlinable_ir(ir);
             let Some(cs) = opt::try_collect_pre_inline_callees(ir, n_imports, n_defs) else {
                 return Ok(None);
@@ -3369,7 +3452,8 @@ fn try_compile_defs_incremental(
         return Ok(None);
     }
 
-    // Sparse overlays for dirty functions only (ZERO cloning of 5,000+ clean `own_effects`/`elide_input`!).
+    // Compact pointer-sized sparse overlays for dirty functions only (8 B/slot instead of
+    // multi-hundred-byte inline structs, avoiding ~4+ MiB of page-faults on small 1-fn edits!).
     let (
         Some(mut opt_irs),
         Some(mut opt_allocs),
@@ -3378,24 +3462,22 @@ fn try_compile_defs_incremental(
         Some(mut elide_inputs_dirty),
         Some(mut compiled_dirty),
     ) = (
-        inc_cache::try_vec_with_capacity::<Option<IrFunc>>(n_defs),
-        inc_cache::try_vec_with_capacity::<Option<AllocResult>>(n_defs),
-        inc_cache::try_vec_with_capacity::<Option<(Vec<u32>, u32, bool)>>(n_defs),
-        inc_cache::try_vec_with_capacity::<Option<opt::FnOwnEffects>>(n_defs),
-        inc_cache::try_vec_with_capacity::<Option<opt::FnElideInput>>(n_defs),
+        inc_cache::try_vec_with_capacity::<Option<Box<IrFunc>>>(n_defs),
+        inc_cache::try_vec_with_capacity::<Option<Box<AllocResult>>>(n_defs),
+        inc_cache::try_vec_with_capacity::<Option<Box<(Vec<u32>, u32, bool)>>>(n_defs),
+        inc_cache::try_vec_with_capacity::<Option<Box<opt::FnOwnEffects>>>(n_defs),
+        inc_cache::try_vec_with_capacity::<Option<Box<opt::FnElideInput>>>(n_defs),
         inc_cache::try_vec_with_capacity::<bool>(n_defs),
     )
     else {
         return Ok(None);
     };
-    for _ in 0..n_defs {
-        opt_irs.push(None);
-        opt_allocs.push(None);
-        inline_track_dirty.push(None);
-        own_effects_dirty.push(None);
-        elide_inputs_dirty.push(None);
-        compiled_dirty.push(false);
-    }
+    opt_irs.resize_with(n_defs, || None);
+    opt_allocs.resize_with(n_defs, || None);
+    inline_track_dirty.resize_with(n_defs, || None);
+    own_effects_dirty.resize_with(n_defs, || None);
+    elide_inputs_dirty.resize_with(n_defs, || None);
+    compiled_dirty.resize(n_defs, false);
 
     // Fixed-point loop: compile dirty functions, check if transitive effects or stack/trap elision
     // changed for any clean caller, and promote those callers if so (almost always 1 iteration!).
@@ -3422,15 +3504,20 @@ fn try_compile_defs_incremental(
             }
         }
         // Pull transitive inlinable callees needed as read-only inputs for newly dirty callers.
+        let mut any_inlinable_callee = false;
         while let Some(u) = cone_q.pop() {
             let row: &[(u32, u32)] = pre_callees_changed[u]
                 .as_deref()
                 .unwrap_or(&prev_cache.funcs[u].pre_inline_callees);
             for &(c_u32, _) in row {
                 let c = c_u32 as usize;
-                if !need_lower[c] && (prev_cache.funcs[c].was_inlinable || new_inlinable[c]) {
-                    need_lower[c] = true;
-                    cone_q.push(c);
+                if c != u && !in_cycle[c] && (prev_cache.funcs[c].was_inlinable || new_inlinable[c])
+                {
+                    any_inlinable_callee = true;
+                    if !need_lower[c] {
+                        need_lower[c] = true;
+                        cone_q.push(c);
+                    }
                 }
             }
         }
@@ -3447,74 +3534,113 @@ fn try_compile_defs_incremental(
             return Ok(None);
         }
 
-        let Some(mut work_irs) = inc_cache::try_vec_with_capacity::<Option<IrFunc>>(n_defs) else {
-            return Ok(None);
-        };
-        for bi in 0..n_defs {
-            if need_lower[bi] {
-                let Some(cloned) = raw_irs[bi].as_ref().and_then(IrFunc::try_clone) else {
-                    return Ok(None);
-                };
-                work_irs.push(Some(cloned));
-            } else {
-                work_irs.push(None);
-            }
-        }
-
-        // Sum `inline_added_insts` of all functions NOT in `work_irs` so module cap check is exact.
-        let mut outside_added = 0usize;
-        for bi in 0..n_defs {
-            if !need_lower[bi] {
-                let add = if let Some((_, a, _)) = inline_track_dirty[bi] {
-                    a as usize
-                } else {
-                    prev_cache.funcs[bi].inline_added_insts as usize
-                };
-                outside_added = outside_added.saturating_add(add);
-            }
-        }
-        let Some(mut track) = opt::inline_small_helpers_subset_parallel(
-            &mut work_irs,
-            &in_cycle,
-            &topo_bottom_up,
-            &cur_call_counts,
-            module,
-            outside_added,
-            opt::InlineMode::WarmSpeculative,
-            n_workers,
-            Some(budget),
-        )
-        .map_err(map_worker_err)?
-        else {
-            return Ok(None);
-        };
-        if track.hit_module_cap || !track.tracking_complete {
-            return Ok(None);
-        }
-
+        // Fast path: when no newly-dirty caller invokes any non-cycle inlinable callee, skip
+        // allocating a full `n_defs`-slot `work_irs` table and running the inliner altogether!
         let (Some(mut newly_dirty_list), Some(mut newly_inlinable)) = (
             inc_cache::try_vec_with_capacity(n_defs),
             inc_cache::try_vec_with_capacity(n_defs),
         ) else {
             return Ok(None);
         };
-        for bi in 0..n_defs {
-            if dirty[bi] && !compiled_dirty[bi] {
-                let ir = work_irs[bi].as_ref().unwrap();
-                let Some(own_eff) = opt::try_compute_fn_own_effects(ir, module, n_total) else {
-                    return Ok(None);
-                };
-                own_effects_dirty[bi] = Some(own_eff);
-                inline_track_dirty[bi] = Some((
-                    std::mem::take(&mut track.inlined_callees[bi]),
-                    track.added_insts[bi],
-                    track.was_inlinable[bi],
-                ));
-                if track.was_inlinable[bi] && !new_inlinable[bi] {
-                    new_inlinable[bi] = true;
-                    newly_inlinable.push(bi);
+        let mut work_q_vec: Vec<(usize, IrFunc)> = Vec::new();
+        if !any_inlinable_callee {
+            for bi in 0..n_defs {
+                if dirty[bi] && !compiled_dirty[bi] {
+                    let Some(cloned) = raw_irs[bi].as_deref().and_then(IrFunc::try_clone) else {
+                        return Ok(None);
+                    };
+                    let Some(own_eff) = opt::try_compute_fn_own_effects(&cloned, module, n_total)
+                    else {
+                        return Ok(None);
+                    };
+                    let was_inl = opt::is_inlinable_ir(&cloned);
+                    own_effects_dirty[bi] = Some(Box::new(own_eff));
+                    inline_track_dirty[bi] = Some(Box::new((Vec::new(), 0, was_inl)));
+                    if was_inl && !new_inlinable[bi] {
+                        new_inlinable[bi] = true;
+                        newly_inlinable.push(bi);
+                    }
+                    newly_dirty_list.push(bi);
+                    if work_q_vec.len() == work_q_vec.capacity()
+                        && work_q_vec.try_reserve(1).is_err()
+                    {
+                        return Ok(None);
+                    }
+                    work_q_vec.push((bi, cloned));
                 }
-                newly_dirty_list.push(bi);
+            }
+        } else {
+            let Some(mut work_irs) = inc_cache::try_vec_with_capacity::<Option<IrFunc>>(n_defs)
+            else {
+                return Ok(None);
+            };
+            for bi in 0..n_defs {
+                if need_lower[bi] {
+                    let Some(cloned) = raw_irs[bi].as_deref().and_then(IrFunc::try_clone) else {
+                        return Ok(None);
+                    };
+                    work_irs.push(Some(cloned));
+                } else {
+                    work_irs.push(None);
+                }
+            }
+
+            // Sum `inline_added_insts` of all functions NOT in `work_irs` so module cap check is exact.
+            let mut outside_added = 0usize;
+            for bi in 0..n_defs {
+                if !need_lower[bi] {
+                    let add = if let Some(ref tr) = inline_track_dirty[bi] {
+                        tr.1 as usize
+                    } else {
+                        prev_cache.funcs[bi].inline_added_insts as usize
+                    };
+                    outside_added = outside_added.saturating_add(add);
+                }
+            }
+            let Some(mut track) = opt::inline_small_helpers_subset_parallel(
+                &mut work_irs,
+                &in_cycle,
+                &topo_bottom_up,
+                &cur_call_counts,
+                module,
+                outside_added,
+                opt::InlineMode::WarmSpeculative,
+                n_workers,
+                Some(budget),
+            )
+            .map_err(map_worker_err)?
+            else {
+                return Ok(None);
+            };
+            if track.hit_module_cap || !track.tracking_complete {
+                return Ok(None);
+            }
+
+            for bi in 0..n_defs {
+                if dirty[bi] && !compiled_dirty[bi] {
+                    let ir = work_irs[bi].take().unwrap();
+                    let Some(own_eff) = opt::try_compute_fn_own_effects(&ir, module, n_total)
+                    else {
+                        return Ok(None);
+                    };
+                    own_effects_dirty[bi] = Some(Box::new(own_eff));
+                    inline_track_dirty[bi] = Some(Box::new((
+                        std::mem::take(&mut track.inlined_callees[bi]),
+                        track.added_insts[bi],
+                        track.was_inlinable[bi],
+                    )));
+                    if track.was_inlinable[bi] && !new_inlinable[bi] {
+                        new_inlinable[bi] = true;
+                        newly_inlinable.push(bi);
+                    }
+                    newly_dirty_list.push(bi);
+                    if work_q_vec.len() == work_q_vec.capacity()
+                        && work_q_vec.try_reserve(1).is_err()
+                    {
+                        return Ok(None);
+                    }
+                    work_q_vec.push((bi, ir));
+                }
             }
         }
         let mut promoted = false;
@@ -3559,7 +3685,7 @@ fn try_compile_defs_incremental(
 
         let own_effects_changed = dirty.iter().enumerate().any(|(bi, &d)| {
             d && own_effects_dirty[bi]
-                .as_ref()
+                .as_deref()
                 .is_some_and(|e| *e != prev_cache.funcs[bi].own_effects)
         });
         if !own_effects_changed && promoted {
@@ -3574,7 +3700,7 @@ fn try_compile_defs_incremental(
                 n_defs,
                 |bi| {
                     own_effects_dirty[bi]
-                        .as_ref()
+                        .as_deref()
                         .unwrap_or(&prev_cache.funcs[bi].own_effects)
                 },
                 Some(&topo_bottom_up),
@@ -3596,7 +3722,7 @@ fn try_compile_defs_incremental(
                 &dirty_roots,
                 |bi| {
                     own_effects_dirty[bi]
-                        .as_ref()
+                        .as_deref()
                         .unwrap_or(&prev_cache.funcs[bi].own_effects)
                 },
                 module,
@@ -3629,16 +3755,12 @@ fn try_compile_defs_incremental(
         // Run Stage 2 opt + regalloc ONLY on `newly_dirty_list` (parallel when >1),
         // reusing worker-local `Stage2Scratch`.
         if !newly_dirty_list.is_empty() {
-            let (Some(mut work_q_vec), Some(mut out_slots_vec)) = (
-                inc_cache::try_vec_with_capacity(newly_dirty_list.len()),
-                inc_cache::try_vec_with_capacity::<Option<(usize, IrFunc, AllocResult)>>(
-                    newly_dirty_list.len(),
-                ),
-            ) else {
+            let Some(mut out_slots_vec) = inc_cache::try_vec_with_capacity::<
+                Option<(usize, IrFunc, AllocResult)>,
+            >(newly_dirty_list.len()) else {
                 return Ok(None);
             };
-            for &bi in &newly_dirty_list {
-                work_q_vec.push((bi, work_irs[bi].take().unwrap()));
+            for _ in 0..newly_dirty_list.len() {
                 out_slots_vec.push(None);
             }
             work_q_vec.sort_unstable_by_key(|(_, ir)| ir.val_tys.len());
@@ -3726,9 +3848,9 @@ fn try_compile_defs_incremental(
                 else {
                     return Ok(None);
                 };
-                elide_inputs_dirty[bi] = Some(elide_in);
-                opt_irs[bi] = Some(ir);
-                opt_allocs[bi] = Some(alloc);
+                elide_inputs_dirty[bi] = Some(Box::new(elide_in));
+                opt_irs[bi] = Some(Box::new(ir));
+                opt_allocs[bi] = Some(Box::new(alloc));
                 compiled_dirty[bi] = true;
             }
         }
@@ -3739,7 +3861,7 @@ fn try_compile_defs_incremental(
             n_defs,
             |bi| {
                 elide_inputs_dirty[bi]
-                    .as_ref()
+                    .as_deref()
                     .unwrap_or(&prev_cache.funcs[bi].elide_input)
             },
             module,
@@ -3753,7 +3875,7 @@ fn try_compile_defs_incremental(
 
         let elide_inputs_changed = dirty.iter().enumerate().any(|(bi, &d)| {
             d && elide_inputs_dirty[bi]
-                .as_ref()
+                .as_deref()
                 .is_some_and(|e| *e != prev_cache.funcs[bi].elide_input)
         });
         let mut promoted_elide = false;
@@ -3787,19 +3909,19 @@ fn try_compile_defs_incremental(
     // Reserve `final_asms` BEFORE emitting so allocation failure skips emission cleanly.
     let (Some(mut dirty_indices), Some(mut dirty_asms), Some(mut final_asms)) = (
         inc_cache::try_vec_with_capacity(n_defs),
-        inc_cache::try_vec_with_capacity::<Option<Asm>>(n_defs),
+        inc_cache::try_vec_with_capacity::<Option<Box<Asm>>>(n_defs),
         inc_cache::try_vec_with_capacity(n_defs),
     ) else {
         return Ok(None);
     };
+    dirty_asms.resize_with(n_defs, || None);
     for (bi, &is_dirty) in dirty.iter().enumerate() {
         if is_dirty {
             dirty_indices.push(bi);
         }
-        dirty_asms.push(None);
     }
     for &bi in &dirty_indices {
-        let ir = opt_irs[bi].as_mut().unwrap();
+        let ir = opt_irs[bi].as_deref_mut().unwrap();
         ir.needs_stack_check = elide_out.needs_stack_check[bi];
         ir.elided_callee_stack_bytes = elide_out.elided_callee_stack_bytes[bi];
     }
@@ -3834,8 +3956,8 @@ fn try_compile_defs_incremental(
                 let bi = dirty_indices[pos];
                 let te = Instant::now();
                 let res = lower_ir_to_x64_with_budget(
-                    opt_irs[bi].as_ref().unwrap(),
-                    opt_allocs[bi].as_ref().unwrap(),
+                    opt_irs[bi].as_deref().unwrap(),
+                    opt_allocs[bi].as_deref().unwrap(),
                     layout,
                     ro,
                     opts.isa,
@@ -3874,7 +3996,7 @@ fn try_compile_defs_incremental(
             .into_iter()
             .flatten()
         {
-            dirty_asms[bi] = Some(asm);
+            dirty_asms[bi] = Some(Box::new(asm));
         }
     }
 
@@ -3901,7 +4023,7 @@ fn try_compile_defs_incremental(
     else {
         for (bi, prev_cached) in prev_cache.funcs.drain(..).enumerate() {
             if dirty[bi] {
-                final_asms.push(dirty_asms[bi].take().unwrap());
+                final_asms.push(*dirty_asms[bi].take().unwrap());
             } else {
                 final_asms.push(prev_cached.into_asm(prev_backing_slice));
             }
@@ -3911,16 +4033,16 @@ fn try_compile_defs_incremental(
     let mut save_ok = true;
     for (bi, prev_cached) in prev_cache.funcs.drain(..).enumerate() {
         if dirty[bi] {
-            let asm = dirty_asms[bi].take().unwrap();
+            let asm = *dirty_asms[bi].take().unwrap();
             if save_ok {
                 let (inlined_callees, inline_added_insts, was_inlinable) =
-                    inline_track_dirty[bi].take().unwrap();
+                    *inline_track_dirty[bi].take().unwrap();
                 let own_eff = own_effects_dirty[bi]
                     .take()
-                    .unwrap_or(prev_cached.own_effects);
+                    .map_or(prev_cached.own_effects, |b| *b);
                 let elide_in = elide_inputs_dirty[bi]
                     .take()
-                    .unwrap_or(prev_cached.elide_input);
+                    .map_or(prev_cached.elide_input, |b| *b);
                 let pre_inline = pre_callees_changed[bi]
                     .take()
                     .unwrap_or(prev_cached.pre_inline_callees);

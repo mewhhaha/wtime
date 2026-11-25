@@ -849,7 +849,11 @@ where
                     "too many module locals",
                 )?;
             }
-            let threads = limits.body_threads(active_bytes);
+            let threads = if active_bytes < 64 * 1024 {
+                1
+            } else {
+                limits.body_threads(active_bytes)
+            };
             if threads <= 1 || active_indices.len() <= 2 {
                 let mut scratch = BodyScratch::new(c.types.clone(), limits.max_stack_height);
                 for &(idx, t, b) in &active_indices {

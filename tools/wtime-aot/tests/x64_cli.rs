@@ -87,8 +87,8 @@ fn cli_and_cached_build_x64_exit_codes_immutability_and_cache_keys() {
         section(7, &[1, 3, b'i', b'n', b'c', 0, 0]),
         section(10, &[1, 7, 0, 0x20, 0, 0x41, 1, 0x6a, 0x0b]),
     ]);
-    // Admission-rejected module (multi-memory -> exit code 4!).
-    let rej_bytes = wasm_module(&[section(5, &[2, 0x00, 1, 0x00, 1])]);
+    // Admission-rejected module (passive data segment -> exit code 4!).
+    let rej_bytes = wasm_module(&[section(12, &[1]), section(11, &[1, 1, 1, 0x42])]);
     fs::write(&ok_wasm, &ok_bytes).unwrap();
     fs::write(&rej_wasm, &rej_bytes).unwrap();
     fs::write(&bad_wasm, b"corrupt-not-wasm").unwrap();

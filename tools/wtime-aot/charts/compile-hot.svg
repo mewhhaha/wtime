@@ -37,44 +37,44 @@
 <text class="lg" x="290" y="73.5">wtime-aot rust (-O3)</text>
 <rect class="wt" x="434" y="64" width="11" height="11" rx="3"/>
 <text class="lg" x="450" y="73.5">Wasmtime 49.0.3</text>
-<line class="grid" x1="253.0" x2="253.0" y1="94" y2="338.0"/>
-<text class="tick" x="253.0" y="356.0" text-anchor="middle">0.1 ms</text>
-<line class="grid" x1="361.5" x2="361.5" y1="94" y2="338.0"/>
-<text class="tick" x="361.5" y="356.0" text-anchor="middle">1 ms</text>
-<line class="grid" x1="469.9" x2="469.9" y1="94" y2="338.0"/>
-<text class="tick" x="469.9" y="356.0" text-anchor="middle">10 ms</text>
-<line class="grid" x1="578.4" x2="578.4" y1="94" y2="338.0"/>
-<text class="tick" x="578.4" y="356.0" text-anchor="middle">100 ms</text>
+<line class="grid" x1="250.4" x2="250.4" y1="94" y2="338.0"/>
+<text class="tick" x="250.4" y="356.0" text-anchor="middle">0.1 ms</text>
+<line class="grid" x1="357.6" x2="357.6" y1="94" y2="338.0"/>
+<text class="tick" x="357.6" y="356.0" text-anchor="middle">1 ms</text>
+<line class="grid" x1="464.8" x2="464.8" y1="94" y2="338.0"/>
+<text class="tick" x="464.8" y="356.0" text-anchor="middle">10 ms</text>
+<line class="grid" x1="572.1" x2="572.1" y1="94" y2="338.0"/>
+<text class="tick" x="572.1" y="356.0" text-anchor="middle">100 ms</text>
 <line class="ax" x1="166.0" x2="166.0" y1="94" y2="338.0"/>
-<text class="grp" x="20" y="111.0">INCREMENTAL 1-FUNCTION EDIT (4,449 FNS, WARM FUNCTION/OBJECT CACHE)</text>
+<text class="grp" x="20" y="111.0">INCREMENTAL 1-FUNCTION EDIT (4,480 FNS, WARM FUNCTION/OBJECT CACHE)</text>
 <text class="lb" x="154" y="140.8" text-anchor="end">1-fn rebuild</text>
-<g><title>1-fn rebuild — wtime-aot x64: 24.4 ms (14.0× vs WT)</title>
-<path class="x64" d="M166.0,124.0H508.4Q511.9,124.0 511.9,127.5V131.5Q511.9,135.0 508.4,135.0H166.0Z"/>
-<text class="v-hi" x="518.9" y="133.5" text-anchor="start">24.4 ms (14.0× vs WT)</text></g>
-<g><title>1-fn rebuild — Wasmtime 49.0.3: 342 ms</title>
-<path class="wt" d="M166.0,138.5H632.9Q636.4,138.5 636.4,142.0V146.0Q636.4,149.5 632.9,149.5H166.0Z"/>
-<text class="v" x="643.4" y="148.0" text-anchor="start">342 ms</text></g>
+<g><title>1-fn rebuild — wtime-aot x64: 24.2 ms (16.6× vs WT)</title>
+<path class="x64" d="M166.0,124.0H502.4Q505.9,124.0 505.9,127.5V131.5Q505.9,135.0 502.4,135.0H166.0Z"/>
+<text class="v-hi" x="512.9" y="133.5" text-anchor="start">24.2 ms (16.6× vs WT)</text></g>
+<g><title>1-fn rebuild — Wasmtime 49.0.3: 401 ms</title>
+<path class="wt" d="M166.0,138.5H633.2Q636.7,138.5 636.7,142.0V146.0Q636.7,149.5 633.2,149.5H166.0Z"/>
+<text class="v" x="643.7" y="148.0" text-anchor="start">401 ms</text></g>
 <text class="grp" x="20" y="176.5">WARM FRESH-PROCESS ARTIFACT LOAD (.SO DLOPEN VS .CWASM DESERIALIZE)</text>
 <text class="lb" x="154" y="206.2" text-anchor="end">warm load</text>
-<g><title>warm load — wtime-aot x64: 0.030 ms (60.8× vs WT)</title>
-<path class="x64" d="M166.0,189.5H192.7Q196.2,189.5 196.2,193.0V197.0Q196.2,200.5 192.7,200.5H166.0Z"/>
-<text class="v-hi" x="203.2" y="199.0" text-anchor="start">0.030 ms (60.8× vs WT)</text></g>
-<g><title>warm load — Wasmtime 49.0.3: 1.82 ms</title>
-<path class="wt" d="M166.0,204.0H386.3Q389.8,204.0 389.8,207.5V211.5Q389.8,215.0 386.3,215.0H166.0Z"/>
-<text class="v" x="396.8" y="213.5" text-anchor="start">1.82 ms</text></g>
+<g><title>warm load — wtime-aot x64: 0.031 ms (59.2× vs WT)</title>
+<path class="x64" d="M166.0,189.5H192.4Q195.9,189.5 195.9,193.0V197.0Q195.9,200.5 192.4,200.5H166.0Z"/>
+<text class="v-hi" x="202.9" y="199.0" text-anchor="start">0.031 ms (59.2× vs WT)</text></g>
+<g><title>warm load — Wasmtime 49.0.3: 1.84 ms</title>
+<path class="wt" d="M166.0,204.0H382.4Q385.9,204.0 385.9,207.5V211.5Q385.9,215.0 382.4,215.0H166.0Z"/>
+<text class="v" x="392.9" y="213.5" text-anchor="start">1.84 ms</text></g>
 <text class="grp" x="20" y="242.0">WARM BUILD --CACHE HIT (CLI)</text>
-<text class="lb" x="154" y="264.5" text-anchor="end">5k-fn app (5.72 MiB)</text>
-<g><title>5k-fn app (5.72 MiB) — wtime-aot x64: 8.39 ms</title>
-<path class="x64" d="M166.0,255.0H458.2Q461.7,255.0 461.7,258.5V262.5Q461.7,266.0 458.2,266.0H166.0Z"/>
-<text class="v-hi" x="468.7" y="264.5" text-anchor="start">8.39 ms</text></g>
+<text class="lb" x="154" y="264.5" text-anchor="end">5k-fn app (5.79 MiB)</text>
+<g><title>5k-fn app (5.79 MiB) — wtime-aot x64: 9.97 ms</title>
+<path class="x64" d="M166.0,255.0H461.2Q464.7,255.0 464.7,258.5V262.5Q464.7,266.0 461.2,266.0H166.0Z"/>
+<text class="v-hi" x="471.7" y="264.5" text-anchor="start">9.97 ms</text></g>
 <text class="lb" x="154" y="306.0" text-anchor="end">kernels (mean)</text>
-<g><title>kernels (mean) — wtime-aot x64: 0.824 ms</title>
-<path class="x64" d="M166.0,282.0H348.8Q352.3,282.0 352.3,285.5V289.5Q352.3,293.0 348.8,293.0H166.0Z"/>
-<text class="v-hi" x="359.3" y="291.5" text-anchor="start">0.824 ms</text></g>
-<g><title>kernels (mean) — wtime-aot c (-O2): 251 ms</title>
-<path class="bc" d="M166.0,296.5H618.2Q621.7,296.5 621.7,300.0V304.0Q621.7,307.5 618.2,307.5H166.0Z"/>
-<text class="v" x="628.7" y="306.0" text-anchor="start">251 ms</text></g>
-<g><title>kernels (mean) — wtime-aot rust (-O3): 43.3 ms</title>
-<path class="rust" d="M166.0,311.0H535.5Q539.0,311.0 539.0,314.5V318.5Q539.0,322.0 535.5,322.0H166.0Z"/>
-<text class="v" x="546.0" y="320.5" text-anchor="start">43.3 ms</text></g>
+<g><title>kernels (mean) — wtime-aot x64: 0.800 ms</title>
+<path class="x64" d="M166.0,282.0H343.8Q347.3,282.0 347.3,285.5V289.5Q347.3,293.0 343.8,293.0H166.0Z"/>
+<text class="v-hi" x="354.3" y="291.5" text-anchor="start">0.800 ms</text></g>
+<g><title>kernels (mean) — wtime-aot c (-O2): 264 ms</title>
+<path class="bc" d="M166.0,296.5H613.7Q617.2,296.5 617.2,300.0V304.0Q617.2,307.5 613.7,307.5H166.0Z"/>
+<text class="v" x="624.2" y="306.0" text-anchor="start">264 ms</text></g>
+<g><title>kernels (mean) — wtime-aot rust (-O3): 43.4 ms</title>
+<path class="rust" d="M166.0,311.0H529.7Q533.2,311.0 533.2,314.5V318.5Q533.2,322.0 529.7,322.0H166.0Z"/>
+<text class="v" x="540.2" y="320.5" text-anchor="start">43.4 ms</text></g>
 </svg>

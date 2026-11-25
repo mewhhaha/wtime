@@ -246,6 +246,7 @@ fn build_val_body_entry(raw_body_hash: [u8; 32], admit: BodyAdmitSummary) -> Val
         insn_count: admit.insn_count,
         imm_elems: admit.imm_elems,
         saw_data_count_op: admit.saw_data_count_op,
+        uses_exceptions: admit.uses_exceptions,
         sig_arity: admit.sig_arity as u32,
         br_table_entries: admit.br_table_entries as u32,
         g_reads: admit.g_reads,
@@ -677,7 +678,7 @@ fn compile_wasm_to_aarch64_detailed(
     let mut shell_hash_opt: Option<[u8; 32]> = None;
     let mut pre_body_hashes: Option<Vec<[u8; 32]>> = None;
     let mut pre_vidx: Option<ValIndexData> = None;
-    let mut pre_admit_summaries: Option<Vec<Option<BodyAdmitSummary>>> = None;
+    let mut pre_admit_skip: Vec<bool> = Vec::new();
 
     if inc_enabled
         && let Some(cache_dir) = opts.inc_cache_dir.as_deref()
@@ -733,25 +734,9 @@ fn compile_wasm_to_aarch64_detailed(
         .map_err(|e| {
             X64CompileError::AdmissionRejected(format!("aarch64: validation failed: {e}"))
         })?;
-        let mut summaries = Vec::with_capacity(bodies_ref.len());
-        for (idx, vb) in bodies_ref.iter().enumerate() {
-            if !inc_mod.is_body_validated(idx) {
-                summaries.push(Some(BodyAdmitSummary {
-                    total_locals: vb.total_locals,
-                    insn_count: vb.insn_count,
-                    imm_elems: vb.imm_elems,
-                    saw_data_count_op: vb.saw_data_count_op,
-                    sig_arity: vb.sig_arity as usize,
-                    br_table_entries: vb.br_table_entries as usize,
-                    g_reads: vb.g_reads.clone(),
-                    g_writes: vb.g_writes.clone(),
-                    ci_pairs: vb.ci_pairs.clone(),
-                }));
-            } else {
-                summaries.push(None);
-            }
-        }
-        pre_admit_summaries = Some(summaries);
+        pre_admit_skip = (0..bodies_ref.len())
+            .map(|idx| !inc_mod.is_body_validated(idx))
+            .collect();
         A64Validated::Incremental(inc_mod)
     } else {
         A64Validated::Full(
@@ -761,11 +746,15 @@ fn compile_wasm_to_aarch64_detailed(
         )
     };
 
+    let pre_vidx_admit = pre_vidx
+        .as_ref()
+        .filter(|v| pre_admit_skip.len() == v.bodies.len())
+        .map(|v| (v.bodies.as_slice(), pre_admit_skip.as_slice()));
     let (module, mut admit_summaries) = admit_x64_module_for_target_with_summaries(
         validated.decoded(),
         opts.target,
         Some(&budget),
-        pre_admit_summaries.as_deref(),
+        pre_vidx_admit,
         inc_enabled,
     )
     .map_err(X64CompileError::AdmissionRejected)?;
@@ -819,11 +808,11 @@ fn compile_wasm_to_aarch64_detailed(
     }
 
     let mut data_segs = Vec::with_capacity(module.active_data_segs.len());
-    for &(mem_off, data_idx) in &module.active_data_segs {
+    for &(mem_idx, mem_off, data_idx) in &module.active_data_segs {
         let span = validated.decoded().data[data_idx].bytes;
         let bytes = &wasm[span.start..span.end];
         let roff = append_rodata(&mut rodata, 1, bytes).map_err(X64CompileError::Failed)?;
-        data_segs.push((mem_off, roff, bytes.len() as u32));
+        data_segs.push((mem_idx, mem_off, roff, bytes.len() as u32));
     }
 
     let tables = RuntimeTables {
@@ -899,11 +888,33 @@ fn compile_wasm_to_aarch64_detailed(
         let vidx_opt = if let Some(sh) = shell_hash_opt
             && admit_summaries.len() == n_defs
         {
-            let v_bodies: Vec<ValBodyEntry> = admit_summaries
-                .drain(..)
-                .enumerate()
-                .map(|(bi, a)| build_val_body_entry(bhs[bi], a))
-                .collect();
+            let mut prev_bodies = pre_vidx.take().map(|v| v.bodies);
+            let mut v_bodies = Vec::with_capacity(n_defs);
+            for (bi, a) in admit_summaries.drain(..).enumerate() {
+                if let Some(ref mut pbs) = prev_bodies
+                    && pre_admit_skip.get(bi).copied().unwrap_or(false)
+                    && pbs[bi].raw_body_hash == bhs[bi]
+                {
+                    v_bodies.push(std::mem::replace(
+                        &mut pbs[bi],
+                        ValBodyEntry {
+                            raw_body_hash: [0u8; 32],
+                            total_locals: 0,
+                            insn_count: 0,
+                            imm_elems: 0,
+                            saw_data_count_op: false,
+                            uses_exceptions: false,
+                            sig_arity: 0,
+                            br_table_entries: 0,
+                            g_reads: Vec::new(),
+                            g_writes: Vec::new(),
+                            ci_pairs: Vec::new(),
+                        },
+                    ));
+                } else {
+                    v_bodies.push(build_val_body_entry(bhs[bi], a));
+                }
+            }
             Some(ValIndexData {
                 shell_hash: sh,
                 abi_hash,
@@ -1249,11 +1260,33 @@ fn compile_wasm_to_aarch64_detailed(
                     (shell_hash_opt, topo_cycle_save)
                     && admit_summaries.len() == n_defs
                 {
-                    let v_bodies: Vec<ValBodyEntry> = admit_summaries
-                        .drain(..)
-                        .enumerate()
-                        .map(|(bi, a)| build_val_body_entry(bhs[bi], a))
-                        .collect();
+                    let mut prev_bodies = pre_vidx.take().map(|v| v.bodies);
+                    let mut v_bodies = Vec::with_capacity(n_defs);
+                    for (bi, a) in admit_summaries.drain(..).enumerate() {
+                        if let Some(ref mut pbs) = prev_bodies
+                            && pre_admit_skip.get(bi).copied().unwrap_or(false)
+                            && pbs[bi].raw_body_hash == bhs[bi]
+                        {
+                            v_bodies.push(std::mem::replace(
+                                &mut pbs[bi],
+                                ValBodyEntry {
+                                    raw_body_hash: [0u8; 32],
+                                    total_locals: 0,
+                                    insn_count: 0,
+                                    imm_elems: 0,
+                                    saw_data_count_op: false,
+                                    uses_exceptions: false,
+                                    sig_arity: 0,
+                                    br_table_entries: 0,
+                                    g_reads: Vec::new(),
+                                    g_writes: Vec::new(),
+                                    ci_pairs: Vec::new(),
+                                },
+                            ));
+                        } else {
+                            v_bodies.push(build_val_body_entry(bhs[bi], a));
+                        }
+                    }
                     Some(ValIndexData {
                         shell_hash: sh,
                         abi_hash,
