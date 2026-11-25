@@ -28,7 +28,7 @@ pub enum X64Target {
 }
 
 /// Exact Wasm feature profile enforced right at the front door of `wtime_validate::validate`,
-/// disabling unsupported proposals (exceptions, GC, multi-memory, threads, tail-call,
+/// disabling unsupported proposals (exceptions, GC, multi-memory, threads,
 /// function-references, custom page sizes/descriptors, stack switching) before decoding/validation.
 pub const fn x64_validate_features() -> FeatureSet {
     FeatureSet {
@@ -39,6 +39,8 @@ pub const fn x64_validate_features() -> FeatureSet {
         reference_types: true,
         bulk_memory: true,
         simd: true,
+        relaxed_simd: true,
+        tail_call: true,
         memory64: true,
         extended_const: true,
         ..FeatureSet::mvp()
@@ -399,7 +401,7 @@ fn check_supported_opcode(
         | 0x41..=0x44
         | 0x45..=0xc4
         | 0xd1 => Ok(()),
-        0x10 => match imm {
+        0x10 | 0x12 => match imm {
             Immediate::Index(fi) => {
                 let &ti = func_type_idx
                     .get(*fi as usize)
@@ -437,7 +439,7 @@ fn check_supported_opcode(
             Immediate::BlockType(vt) => check_val_type(*vt),
             other => Err(format!("x64: unsupported block type {other:?}")),
         },
-        0x11 => match imm {
+        0x11 | 0x13 => match imm {
             Immediate::Pair(ti, _) => {
                 let idx = *ti as usize;
                 if !*type_admitted
@@ -497,7 +499,7 @@ fn check_supported_opcode(
             Immediate::Index(0) | Immediate::None => Ok(()),
             _ => Err("x64: memory.fill only supports memory 0".into()),
         },
-        0xfd0c..=0xfd53 | 0xfd5e..=0xfdff => Ok(()),
+        0xfd0c..=0xfd53 | 0xfd5e..=0xfdff | 0xfa00..=0xfa13 => Ok(()),
         _ => Err(format!("x64: unsupported opcode {op:#x}")),
     }
 }
@@ -1329,7 +1331,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                             return Err(format!("x64: table.get/set on unsupported table {t}"));
                         }
                     }
-                    0x11 => {
+                    0x11 | 0x13 => {
                         let Immediate::Pair(ti, tbl) = insn.immediate else {
                             return Err("x64: malformed call_indirect immediate".into());
                         };

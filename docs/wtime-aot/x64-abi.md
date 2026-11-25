@@ -31,9 +31,10 @@ shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
     256-bit AVX2 VEX loops (`vmovdqu`, `vmovupd`, `vbroadcastsd`, `vpbroadcastb`,
     `vpmovzxbw`, `vpaddw`, `vpmulhuw`, `vpsrlw`, `vpackuswb`, `vpermq`, `vpxor`,
     `vpsadbw`, `vpaddq`, `vextracti128`) for bulk memory copy/fill, byte-sum
-    reductions, 3-tap byte blur+divide loops, and bit-exact 256-bit `f64x4` SLP
-    (strictly no FMA contraction), with mandatory `vzeroupper` before every
-    external/helper call and return boundary.
+    reductions, 3-tap byte blur+divide loops, bit-exact 256-bit `f64x4` SLP,
+    and 2×-unrolled `F64AxpyLoop` auto-vectorization (strictly no FMA
+    contraction), with mandatory `vzeroupper` before every external/helper call
+    and return boundary.
   - `x64-v2` (`has_abm_bmi1 = false, has_bmi2 = false, has_avx2 = false`):
     emits branchless `bsr`/`bsf` + `cmovz`, legacy `shl`/`shr`/`sar`/`rol`/
     `ror`, and 128-bit SSE2 memory/reduction loops.
@@ -68,7 +69,7 @@ All inputs pass bounded file acquisition (`<= 64 MiB` for `--backend x64`,
 deadline-checked in direct 1 MiB chunks) and `wtime-validate` under the `--backend x64`
 feature profile (MVP + `mutable_globals`, `saturating_float_to_int`,
 `sign_extension`, `multi_value`, `reference_types`, `bulk_memory`, `simd`,
-`memory64`, `extended_const`; `function_references: false`) with
+`relaxed_simd`, `tail_call`, `memory64`, `extended_const`; `function_references: false`) with
 `ResourceLimits::default()`.
 
 Admitted constructs:
@@ -88,9 +89,14 @@ Admitted constructs:
   imports (for standalone static `ET_EXEC` executables), and globals of `i32`,
   `i64`, `f32`, `f64`, `v128`, or nullable `externref`.
 - MVP opcodes, saturating float-to-int truncations, `memory.copy`/`memory.fill`,
-  `memory64` 64-bit addressing, and all 236 standard Wasm 1.0 fixed-width
-  128-bit SIMD opcodes (`0xfd00..=0xfdff`) — mirrored with multi-core parallel
-  compilation (`--jobs`) and full 236-opcode NEON parity on `--backend aarch64`.
+  `memory64` 64-bit addressing (with 1-branch wrap-proof bounds checks when
+  `end_off <= mem_min_bytes`), `tail_call` (`return_call` / `return_call_indirect`
+  with O(1)-stack frame reuse whenever `callee_arg_stack <= caller_param_stack`,
+  and overflow return-buffer pointer forwarding), all 236 fixed-width 128-bit Wasm
+  SIMD opcodes (`0xfd00..=0xfdff`), and all 20 `relaxed_simd` opcodes
+  (`0xfd 0x100..=0x113`, bit-exact with `wtime-runtime`) — mirrored with
+  multi-core parallel compilation (`--jobs`) and full NEON + `tail_call` parity
+  on `--backend aarch64`.
 
 Unsupported modules are rejected cleanly before codegen with CLI exit code `4`
 (`X64_ADMISSION_REJECTED_EXIT_CODE`), distinct from exit code `1` for I/O,
@@ -106,10 +112,11 @@ and debug builds; deliberately disabled by default in release cached
 set, which binds its own cache key so unverified hits never bypass verification;
 individual tests use `X64CompileOptions::default()` unless explicitly exercising
 the cached CLI default or setting `verify: false`). - Cached `build --cache` invocations also maintain a Merkle-verified
-  per-function incremental cache and companion `.vidx` incremental validation
-  index under `<cache>/x64-inc/` (and `<cache>/a64-inc/` for `--backend aarch64`)
-  that preserves bit-for-bit ELF parity with cold builds, plus parallel 256 KiB
-  Merkle payload digests for artifact sidecars.
+  per-function incremental cache (`<cache>/x64-inc/`, with compact `.delta`
+  sidecars that avoid rewriting the full base `.bin` on small edits) and
+  companion `.vidx` incremental validation index (plus `<cache>/a64-inc/` for
+  `--backend aarch64`) that preserves bit-for-bit ELF parity with cold builds,
+  plus parallel 256 KiB Merkle payload digests for artifact sidecars.
 
 ## 3. Runtime Stack, Memory & Blot ABI 8 Contract
 

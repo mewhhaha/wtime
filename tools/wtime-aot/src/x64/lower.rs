@@ -816,7 +816,7 @@ impl<'a> Lower<'a> {
             .get_or_insert_with(|| self.asm.new_label())
     }
 
-    fn emit_epilogue_body(&mut self) {
+    fn emit_epilogue_teardown(&mut self) {
         for (i, &x) in self.alloc.used_callee_xmm.iter().enumerate() {
             self.asm.movdqu_xm(
                 x,
@@ -829,6 +829,10 @@ impl<'a> Lower<'a> {
         for &g in self.alloc.used_callee_gp.iter().rev() {
             self.asm.pop(g);
         }
+    }
+
+    fn emit_epilogue_body(&mut self) {
+        self.emit_epilogue_teardown();
         self.asm.ret();
     }
 
@@ -856,6 +860,17 @@ impl<'a> Lower<'a> {
             return;
         }
         if self.layout.memory64 {
+            // Fast 1-branch wrap-proof check when `mem_min_bytes >= end_off` (so `R13 - end_off`
+            // can never underflow, because linear memory never shrinks): `addr <=u (R13 - end_off)`!
+            if end_off <= self.layout.mem_min_bytes
+                && let Ok(neg_disp) = i32::try_from(-(end_off as i64))
+            {
+                self.asm
+                    .lea(true, SCRATCH_GP1, Mem::base_disp(Gp::R13, neg_disp));
+                self.asm.cmp_rr(true, addr, SCRATCH_GP1);
+                self.asm.jcc(Cond::A, oob);
+                return;
+            }
             // Wrap-proof 64-bit unsigned addition: CF=1 (Cond::B) => overflow trap!
             if let Ok(disp) = i32::try_from(end_off) {
                 self.asm.mov_rr(true, SCRATCH_GP1, addr);
@@ -1093,6 +1108,156 @@ impl<'a> Lower<'a> {
                 moves.push((MoveLoc::from(self.loc(rv)), src, ty));
             }
             emit_parallel_moves(&mut self.asm, &moves);
+        }
+        Ok(())
+    }
+
+    fn emit_tail_call(
+        &mut self,
+        args: ValRange,
+        ci_idx: Option<(u32, Val)>,
+        direct_func: Option<u32>,
+        next_bb: Option<u32>,
+    ) -> Result<(), String> {
+        let param_tys: Vec<Ty> = self.ir.params.iter().map(|&pv| self.ty(pv)).collect();
+        let self_param_stack = layout_args(&param_tys)?.stack_bytes;
+        let arg_vals = self.ir.pool_slice(args);
+        let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
+        let arg_layout = layout_args(&arg_tys)?;
+        let can_tail_jump = arg_layout.stack_bytes <= self_param_stack;
+
+        if let Some((_, idx_val)) = ci_idx {
+            let ir = self.gp_read(idx_val, SCRATCH_GP2);
+            self.asm
+                .mov_mr(false, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
+        }
+
+        if can_tail_jump {
+            // True O(1)-stack tail call: overwrite caller's incoming stack-arg slots (above our
+            // frame + saved callee-saved GP regs + return address), tear down our frame, and jump!
+            if !arg_vals.is_empty() {
+                let incoming_stack_base = self
+                    .alloc
+                    .frame_size
+                    .checked_add((self.alloc.used_callee_gp.len() as i32 + 1) * 8)
+                    .ok_or("x64: tail call incoming stack base overflow")?;
+                let mut moves = Vec::with_capacity(arg_vals.len());
+                for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                    let dst = match slot {
+                        AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                        AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                        AbiSlot::Stack(off) => {
+                            let s = incoming_stack_base
+                                .checked_add(off)
+                                .ok_or("x64: tail call stack arg overflow")?;
+                            MoveLoc::Stack(s)
+                        }
+                    };
+                    moves.push((dst, MoveLoc::from(self.loc(av)), ty));
+                }
+                emit_parallel_moves(&mut self.asm, &moves);
+            }
+            if let Some((ci_id, _)) = ci_idx {
+                let ci = &self.layout.ci_tables[ci_id as usize];
+                let toob = self.trap_table_oob_lbl();
+                let bad = self.trap_ci_lbl();
+                self.asm
+                    .mov_rm(false, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+                self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+                self.asm.jcc(Cond::Ae, toob);
+                if ci.span == 0 {
+                    self.asm.jmp(bad);
+                    return Ok(());
+                }
+                if ci.min_slot > 0 {
+                    self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
+                }
+                self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
+                self.asm.jcc(Cond::Ae, bad);
+                self.asm
+                    .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
+                self.asm
+                    .movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
+                self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
+                self.asm.jcc(Cond::E, bad);
+                self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+                // Rax is disjoint from outgoing arg regs (Rdi..R9), callee-saved regs, and epilogue.
+                self.asm.mov_rr(true, Gp::Rax, SCRATCH_GP1);
+            }
+            // Restore original caller's overflow return buffer pointer before frame teardown.
+            if let Some(ptr_slot) = self.alloc.saved_ret_ptr_off {
+                self.asm
+                    .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, ptr_slot));
+                self.asm.mov_mr(
+                    true,
+                    Mem::base_disp(Gp::R15, OFF_RET_SPILL_PTR),
+                    SCRATCH_GP1,
+                );
+            }
+            self.emit_epilogue_teardown();
+            if let Some(f) = direct_func {
+                self.asm.jmp_reloc(RelocTarget::Func(f));
+            } else {
+                self.asm.jmp_reg(Gp::Rax);
+            }
+            return Ok(());
+        }
+
+        // Growing-arity fallback (`callee_arg_stack > caller_param_stack`): emit normal `call`
+        // forwarding caller's overflow return buffer pointer, then return callee's regs + trap directly.
+        if !arg_vals.is_empty() {
+            let mut moves = Vec::with_capacity(arg_vals.len());
+            for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                let dst = match slot {
+                    AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    AbiSlot::Xmm(x) => MoveLoc::Xmm(x),
+                    AbiSlot::Stack(off) => MoveLoc::Stack(off),
+                };
+                moves.push((dst, MoveLoc::from(self.loc(av)), ty));
+            }
+            emit_parallel_moves(&mut self.asm, &moves);
+        }
+        if let Some(ptr_slot) = self.alloc.saved_ret_ptr_off {
+            self.asm
+                .mov_rm(true, SCRATCH_GP1, Mem::base_disp(Gp::Rsp, ptr_slot));
+            self.asm.mov_mr(
+                true,
+                Mem::base_disp(Gp::R15, OFF_RET_SPILL_PTR),
+                SCRATCH_GP1,
+            );
+        }
+        if let Some(f) = direct_func {
+            self.asm.call_reloc(RelocTarget::Func(f));
+        } else if let Some((ci_id, _)) = ci_idx {
+            let ci = &self.layout.ci_tables[ci_id as usize];
+            let toob = self.trap_table_oob_lbl();
+            let bad = self.trap_ci_lbl();
+            self.asm
+                .mov_rm(false, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+            self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+            self.asm.jcc(Cond::Ae, toob);
+            if ci.span == 0 {
+                self.asm.jmp(bad);
+                return Ok(());
+            }
+            if ci.min_slot > 0 {
+                self.asm.sub_ri(false, SCRATCH_GP2, ci.min_slot as i32);
+            }
+            self.asm.cmp_ri(false, SCRATCH_GP2, ci.span as i32);
+            self.asm.jcc(Cond::Ae, bad);
+            self.asm
+                .lea_rip(SCRATCH_GP1, RelocTarget::Rodata(ci.rodata_off));
+            self.asm
+                .movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
+            self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
+            self.asm.jcc(Cond::E, bad);
+            self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+            self.asm.call_reg(SCRATCH_GP1);
+        }
+        // Return values & R11d trap status are already in exact ABI registers; tear down and return.
+        let ep = *self.epilogue_ok.get_or_insert_with(|| self.asm.new_label());
+        if next_bb.is_some() {
+            self.asm.jmp(ep);
         }
         Ok(())
     }
@@ -3903,6 +4068,153 @@ impl<'a> Lower<'a> {
                 }
                 self.asm.bind(lbl_done);
             }
+            Op::F64AxpyLoop {
+                dst,
+                src,
+                count,
+                scale,
+                is_sub,
+            } => {
+                // Read `scale` into non-allocatable `SCRATCH_FP2` BEFORE clobbering `Xmm0..Xmm2`,
+                // and move `(dst, src, count)` into `(Rax, Rdx, Rcx)` via cycle-safe parallel moves.
+                let sr_scale = self.fp_read(scale, SCRATCH_FP2);
+                if sr_scale != SCRATCH_FP2 {
+                    self.asm.movaps_rr(SCRATCH_FP2, sr_scale);
+                }
+                let moves = [
+                    (MoveLoc::Gp(Gp::Rax), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(src)), Ty::I32),
+                    (
+                        MoveLoc::Gp(Gp::Rcx),
+                        MoveLoc::from(self.loc(count)),
+                        Ty::I32,
+                    ),
+                ];
+                emit_parallel_moves(&mut self.asm, &moves);
+                // Zero-extend 32-bit offsets & count into 64-bit registers.
+                self.asm.mov_rr(false, Gp::Rax, Gp::Rax);
+                self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                self.asm.mov_rr(false, Gp::Rcx, Gp::Rcx);
+
+                let lbl_done = self.asm.new_label();
+                self.asm.test_rr(false, Gp::Rcx, Gp::Rcx);
+                self.asm.jcc(Cond::E, lbl_done);
+
+                self.asm.add_rr(true, Gp::Rax, Gp::R14);
+                self.asm.add_rr(true, Gp::Rdx, Gp::R14);
+
+                if self.isa.has_avx2 {
+                    self.asm.vbroadcastsd_yx(Xmm::Xmm0, SCRATCH_FP2);
+                    let lbl_vec8 = self.asm.new_label();
+                    let lbl_vec4 = self.asm.new_label();
+                    let lbl_tail = self.asm.new_label();
+
+                    self.asm.cmp_ri(true, Gp::Rcx, 8);
+                    self.asm.jcc(Cond::B, lbl_vec4);
+
+                    self.asm.mark_align16(lbl_vec8);
+                    self.asm.bind(lbl_vec8);
+                    self.asm
+                        .vmulpd_yym(Xmm::Xmm1, Xmm::Xmm0, Mem::base(Gp::Rdx));
+                    self.asm
+                        .vmulpd_yym(Xmm::Xmm2, Xmm::Xmm0, Mem::base_disp(Gp::Rdx, 32));
+                    if !is_sub {
+                        self.asm
+                            .vaddpd_yym(Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rax));
+                        self.asm
+                            .vaddpd_yym(Xmm::Xmm2, Xmm::Xmm2, Mem::base_disp(Gp::Rax, 32));
+                    } else {
+                        self.asm.vmovupd_ym(SCRATCH_FP1, Mem::base(Gp::Rax));
+                        self.asm.vsubpd_yyy(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                        self.asm
+                            .vmovupd_ym(SCRATCH_FP1, Mem::base_disp(Gp::Rax, 32));
+                        self.asm.vsubpd_yyy(Xmm::Xmm2, SCRATCH_FP1, Xmm::Xmm2);
+                    }
+                    self.asm.vmovupd_my(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.vmovupd_my(Mem::base_disp(Gp::Rax, 32), Xmm::Xmm2);
+                    self.asm.add_ri(true, Gp::Rdx, 64);
+                    self.asm.add_ri(true, Gp::Rax, 64);
+                    self.asm.sub_ri(true, Gp::Rcx, 8);
+                    self.asm.cmp_ri(true, Gp::Rcx, 8);
+                    self.asm.jcc(Cond::Ae, lbl_vec8);
+
+                    self.asm.bind(lbl_vec4);
+                    self.asm.cmp_ri(true, Gp::Rcx, 4);
+                    self.asm.jcc(Cond::B, lbl_tail);
+                    self.asm
+                        .vmulpd_yym(Xmm::Xmm1, Xmm::Xmm0, Mem::base(Gp::Rdx));
+                    if !is_sub {
+                        self.asm
+                            .vaddpd_yym(Xmm::Xmm1, Xmm::Xmm1, Mem::base(Gp::Rax));
+                    } else {
+                        self.asm.vmovupd_ym(SCRATCH_FP1, Mem::base(Gp::Rax));
+                        self.asm.vsubpd_yyy(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.vmovupd_my(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 32);
+                    self.asm.add_ri(true, Gp::Rax, 32);
+                    self.asm.sub_ri(true, Gp::Rcx, 4);
+
+                    self.asm.bind(lbl_tail);
+                    self.asm.vzeroupper();
+                    self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                    self.asm.jcc(Cond::E, lbl_done);
+                    let lbl_sc = self.asm.new_label();
+                    self.asm.bind(lbl_sc);
+                    self.asm.movsd_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    self.asm.vmulsd_xxx(Xmm::Xmm1, Xmm::Xmm1, SCRATCH_FP2);
+                    self.asm.movsd_xm(SCRATCH_FP1, Mem::base(Gp::Rax));
+                    if !is_sub {
+                        self.asm.vaddsd_xxx(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    } else {
+                        self.asm.vsubsd_xxx(Xmm::Xmm1, SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.movsd_mx(Mem::base(Gp::Rax), Xmm::Xmm1);
+                    self.asm.add_ri(true, Gp::Rdx, 8);
+                    self.asm.add_ri(true, Gp::Rax, 8);
+                    self.asm.sub_ri(true, Gp::Rcx, 1);
+                    self.asm.jcc(Cond::Ne, lbl_sc);
+                } else {
+                    // Pure SSE2 (`x64-v2`, zero VEX): 2× `f64` per iter + scalar tail.
+                    self.asm.movaps_rr(Xmm::Xmm0, SCRATCH_FP2);
+                    self.asm.unpcklpd(Xmm::Xmm0, Xmm::Xmm0);
+                    let lbl_vec2 = self.asm.new_label();
+                    let lbl_tail = self.asm.new_label();
+                    self.asm.cmp_ri(true, Gp::Rcx, 2);
+                    self.asm.jcc(Cond::B, lbl_tail);
+
+                    self.asm.mark_align16(lbl_vec2);
+                    self.asm.bind(lbl_vec2);
+                    self.asm.movdqu_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    self.asm.mulpd(Xmm::Xmm1, Xmm::Xmm0);
+                    self.asm.movdqu_xm(SCRATCH_FP1, Mem::base(Gp::Rax));
+                    if !is_sub {
+                        self.asm.addpd(SCRATCH_FP1, Xmm::Xmm1);
+                    } else {
+                        self.asm.subpd(SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.movdqu_mx(Mem::base(Gp::Rax), SCRATCH_FP1);
+                    self.asm.add_ri(true, Gp::Rdx, 16);
+                    self.asm.add_ri(true, Gp::Rax, 16);
+                    self.asm.sub_ri(true, Gp::Rcx, 2);
+                    self.asm.cmp_ri(true, Gp::Rcx, 2);
+                    self.asm.jcc(Cond::Ae, lbl_vec2);
+
+                    self.asm.bind(lbl_tail);
+                    self.asm.test_rr(true, Gp::Rcx, Gp::Rcx);
+                    self.asm.jcc(Cond::E, lbl_done);
+                    self.asm.movsd_xm(Xmm::Xmm1, Mem::base(Gp::Rdx));
+                    self.asm.mulsd(Xmm::Xmm1, SCRATCH_FP2);
+                    self.asm.movsd_xm(SCRATCH_FP1, Mem::base(Gp::Rax));
+                    if !is_sub {
+                        self.asm.addsd(SCRATCH_FP1, Xmm::Xmm1);
+                    } else {
+                        self.asm.subsd(SCRATCH_FP1, Xmm::Xmm1);
+                    }
+                    self.asm.movsd_mx(Mem::base(Gp::Rax), SCRATCH_FP1);
+                }
+                self.asm.bind(lbl_done);
+            }
             Op::F64x4BinMem {
                 op,
                 dst,
@@ -4663,6 +4975,12 @@ impl<'a> Lower<'a> {
                         self.asm.jmp(ep);
                     }
                 }
+            }
+            Term::ReturnCall { func, args } => {
+                self.emit_tail_call(args, None, Some(func), next_bb)?;
+            }
+            Term::ReturnCallIndirect { ci_id, idx, args } => {
+                self.emit_tail_call(args, Some((ci_id, idx)), None, next_bb)?;
             }
             Term::Unreachable => {
                 let lbl = self.trap_unreach_lbl();

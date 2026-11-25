@@ -3855,3 +3855,114 @@ fn oracle_stage6_narrow_eq_loops_mul_strength_and_upper32_zero() {
     ];
     assert_oracle_matrix("stage6_graph_bfs_fixture", &bfs_wasm, &bfs_calls, &[], &[]);
 }
+
+#[test]
+fn oracle_stage7_relaxed_simd_tail_call_axpy_mem64_and_fixtures() {
+    use super::tests_unit::{
+        build_axpy_edge_test_wasm, build_mem64_1branch_test_wasm, build_relaxed_simd_test_wasm,
+        build_tail_call_test_wasm,
+    };
+
+    // 1. ALL 20 relaxed SIMD opcodes (`0xfd 0x100..=0x113`) bit-exact across all 4 cells.
+    let relaxed_wasm = build_relaxed_simd_test_wasm();
+    assert_oracle_matrix(
+        "stage7_relaxed_simd_all20",
+        &relaxed_wasm,
+        &[
+            c("test_relaxed", ArgSpec::I32(0)),
+            c("test_relaxed", ArgSpec::I32(1)),
+            c("test_relaxed", ArgSpec::I32(2)),
+        ],
+        &[],
+        &[(64, 320)],
+    );
+
+    // 2. `tail_call` (`return_call` + `return_call_indirect`): deep O(1) mutual recursion (200k
+    //    steps proves constant stack space vs 8 MiB guest stack!), high-arity stack args (same
+    //    and growing), overflow multi-value return buffers, and indirect traps.
+    let tail_wasm = build_tail_call_test_wasm();
+    assert_oracle_matrix(
+        "stage7_tail_call",
+        &tail_wasm,
+        &[
+            c("even", ArgSpec::I32(0)),
+            c("even", ArgSpec::I32(1)),
+            c("even", ArgSpec::I32(200_000)),
+            c("even", ArgSpec::I32(200_001)),
+            c("even_ind", ArgSpec::I32(0)),
+            c("even_ind", ArgSpec::I32(50_000)),
+            c("even_ind", ArgSpec::I32(50_001)),
+            c("grow_arity", ArgSpec::I32(0)),
+            c("grow_arity", ArgSpec::I32(5)),
+            c("grow_arity", ArgSpec::I32(20_000)),
+            c("check_multiret", ArgSpec::I64(100)),
+            c("check_multiret", ArgSpec::I64(-42)),
+            c("grow_multiret", ArgSpec::I32(0)),
+            c("grow_multiret", ArgSpec::I32(10_000)),
+            c("ind_trap", ArgSpec::I32(5)),  // null slot
+            c("ind_trap", ArgSpec::I32(4)),  // bad signature
+            c("ind_trap", ArgSpec::I32(99)), // table OOB
+        ],
+        &[],
+        &[],
+    );
+
+    // 3. `Op::F64AxpyLoop` edge cases (add/sub, counts 0..17, dst==src, forward/backward overlap, OOB partial store trap).
+    let axpy_wasm = build_axpy_edge_test_wasm();
+    let mut axpy_calls: Vec<OracleCall> = (0..=10)
+        .chain([20, 21, 22, 23, 99])
+        .map(|k| c("run_case", ArgSpec::I32(k)))
+        .collect();
+    assert_oracle_matrix(
+        "stage7_f64_axpy_edges",
+        &axpy_wasm,
+        &axpy_calls,
+        &[],
+        &[(0, 512), (65520, 16)],
+    );
+    axpy_calls.clear();
+
+    // 4. Growable `memory64` 1-branch bounds checks (`mem_min_bytes >= end_off`) + 2-branch fallback + wrap traps.
+    let mem64_wasm = build_mem64_1branch_test_wasm();
+    assert_oracle_matrix(
+        "stage7_mem64_1branch",
+        &mem64_wasm,
+        &[
+            c("load_off0", ArgSpec::I64(0)),
+            c("load_off0", ArgSpec::I64(65528)),
+            c("load_off0", ArgSpec::I64(65529)),
+            c("load_off0", ArgSpec::I64(-1)),
+            c("store_load_off8", ArgSpec::I64(0)),
+            c("store_load_off8", ArgSpec::I64(65520)),
+            c("store_load_off8", ArgSpec::I64(65521)),
+            c("store_load_off8", ArgSpec::I64(-8)),
+            c("load_off_big", ArgSpec::I64(0)),
+            c("grow_store_load_off8", ArgSpec::I64(70000)),
+            c("grow_store_load_off8", ArgSpec::I64(131056)),
+            c("load_off_big", ArgSpec::I64(0)),
+            c("load_off_big", ArgSpec::I64(-1)),
+        ],
+        &[],
+        &[(0, 64)],
+    );
+
+    // 5. New execution benchmark fixtures (`matmul_f64.wasm`, `heapsort_i32.wasm`) bit-exact parity.
+    for (name, arg) in [("matmul_f64", 32), ("heapsort_i32", 256)] {
+        let wasm = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("fixtures/{name}.wasm")),
+        )
+        .unwrap_or_else(|e| panic!("read fixtures/{name}.wasm: {e}"));
+        assert_oracle_matrix(
+            &format!("stage7_fixture_{name}"),
+            &wasm,
+            &[
+                c("run", ArgSpec::I32(0)),
+                c("run", ArgSpec::I32(1)),
+                c("run", ArgSpec::I32(arg)),
+            ],
+            &[],
+            &[],
+        );
+    }
+}

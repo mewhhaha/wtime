@@ -880,16 +880,20 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     let mem64 = wasm_module(&[section(5, &[1, 0x04, 1])]);
     assert!(compile_admit_only(&mem64).is_ok());
 
-    // 10. Rejected: relaxed SIMD opcode (0xfd 0x80 0x02 = i8x16.relaxed_swizzle -> DisabledFeature).
+    // 10. Admitted: relaxed SIMD (0xfd 0x80 0x02 = i8x16.relaxed_swizzle) and tail_call (0x12).
     let relaxed_simd = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
         code_sec(&[enc_body(&[], &[0x00, 0xfd, 0x80, 0x02, 0x1a])]),
     ]);
-    assert!(matches!(
-        compile_admit_only(&relaxed_simd),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
+    assert!(compile_admit_only(&relaxed_simd).is_ok());
+
+    let tail_call_mod = wasm_module(&[
+        type_sec(&[(&[], &[])]),
+        func_sec(&[0]),
+        code_sec(&[enc_body(&[], &[0x12, 0])]),
+    ]);
+    assert!(compile_admit_only(&tail_call_mod).is_ok());
 
     // 11. Rejected: multi-memory (DisabledFeature -> AdmissionRejected exit code 4!).
     let multi_mem = wasm_module(&[section(5, &[2, 0x00, 1, 0x00, 1])]);
@@ -3508,4 +3512,535 @@ fn stage6_graph_bfs_ir_and_narrowing_check() {
         has_cmp_select,
         "graph_bfs::run must narrow the equality-filtered inner scan loop"
     );
+}
+
+/// Shared Wasm module exercising ALL 20 relaxed SIMD opcodes (`0xfd 0x100..=0x113`).
+pub(crate) fn build_relaxed_simd_test_wasm() -> Vec<u8> {
+    // f0(case: i32) -> i32: populates 3 v128 inputs at mem[0..48] depending on `case`,
+    // executes all 20 relaxed SIMD ops storing each 16-byte output to mem[64 + k*16],
+    // and returns a folded i32 checksum over bytes 64..384.
+    let mut b = Vec::new();
+    let vconst = |out: &mut Vec<u8>, bytes: [u8; 16]| {
+        out.extend_from_slice(&[0xfd, 0x0c]);
+        out.extend_from_slice(&bytes);
+    };
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| -> [u8; 16] {
+        let mut r = [0u8; 16];
+        r[0..4].copy_from_slice(&a.to_bits().to_le_bytes());
+        r[4..8].copy_from_slice(&b.to_bits().to_le_bytes());
+        r[8..12].copy_from_slice(&c.to_bits().to_le_bytes());
+        r[12..16].copy_from_slice(&d.to_bits().to_le_bytes());
+        r
+    };
+    let f64x2 = |a: f64, b: f64| -> [u8; 16] {
+        let mut r = [0u8; 16];
+        r[0..8].copy_from_slice(&a.to_bits().to_le_bytes());
+        r[8..16].copy_from_slice(&b.to_bits().to_le_bytes());
+        r
+    };
+    // Locals: 1=a(v128), 2=b(v128), 3=c(v128), 4=i(i32), 5=acc(i32)
+    // Select input triple based on `case` (0 = general/subnormal/dot, 1 = NaN/neg-zero/OOB-swizzle/sat-trunc, 2 = -128*i7/-128 extreme & non-canonical laneselect).
+    // if case == 0
+    b.extend_from_slice(&[0x20, 0, 0x45, 0x04, 0x40]);
+    vconst(&mut b, f32x4(1.5, -2.25, 0.125, 100.75));
+    b.extend_from_slice(&[0x21, 1]);
+    vconst(&mut b, f32x4(-3.0, 4.5, 16.0, -0.5));
+    b.extend_from_slice(&[0x21, 2]);
+    vconst(&mut b, f32x4(0.25, -1.0, 1.0e-6, 42.0));
+    b.extend_from_slice(&[0x21, 3]);
+    b.push(0x05); // else
+    // if case == 1
+    b.extend_from_slice(&[0x20, 0, 0x41, 1, 0x46, 0x04, 0x40]);
+    vconst(&mut b, f64x2(-0.0, f64::NAN));
+    b.extend_from_slice(&[0x21, 1]);
+    vconst(&mut b, f64x2(0.0, 1.0e30));
+    b.extend_from_slice(&[0x21, 2]);
+    vconst(
+        &mut b,
+        [
+            0, 15, 16, 127, 128, 255, 3, 7, 1, 2, 3, 4, 0x5a, 0xff, 0x00, 0x80,
+        ],
+    );
+    b.extend_from_slice(&[0x21, 3]);
+    b.push(0x05); // else (case >= 2)
+    vconst(
+        &mut b,
+        [
+            0x80, 0x7f, 0x80, 0x80, 0xff, 0x01, 0x7f, 0x80, 0xfe, 0x02, 0x80, 0x7f, 0x40, 0xc0,
+            0x00, 0xff,
+        ],
+    );
+    b.extend_from_slice(&[0x21, 1]);
+    vconst(
+        &mut b,
+        [
+            0x7f, 0x7f, 0x80, 0x80, 0x01, 0x7f, 0x7f, 0x80, 0x02, 0x7e, 0x7f, 0x7f, 0x10, 0x7f,
+            0x7f, 0x01,
+        ],
+    );
+    b.extend_from_slice(&[0x21, 2]);
+    vconst(
+        &mut b,
+        [
+            0x5a, 0xff, 0x00, 0x80, 0x00, 0xff, 0xff, 0x00, 0xa5, 0x00, 0xff, 0x7f, 0x80, 0x00,
+            0xff, 0x00,
+        ],
+    );
+    b.extend_from_slice(&[0x21, 3]);
+    b.extend_from_slice(&[0x0b, 0x0b]);
+
+    let emit_store = |out: &mut Vec<u8>, slot: u32, op_sub: u8, arity: u8| {
+        out.push(0x41);
+        leb_i32(out, (64 + slot * 16) as i32);
+        out.extend_from_slice(&[0x20, 1]);
+        if arity >= 2 {
+            out.extend_from_slice(&[0x20, 2]);
+        }
+        if arity >= 3 {
+            out.extend_from_slice(&[0x20, 3]);
+        }
+        // Relaxed SIMD opcodes 0x100..=0x113 encode as `0xfd, 0x80 + (sub), 0x02`.
+        out.extend_from_slice(&[0xfd, 0x80 | op_sub, 0x02]);
+        // v128.store align=4 offset=0
+        out.extend_from_slice(&[0xfd, 0x0b, 0x04, 0x00]);
+    };
+    let arities: [u8; 20] = [
+        2, // 0x100 i8x16.relaxed_swizzle
+        1, // 0x101 i32x4.relaxed_trunc_f32x4_s
+        1, // 0x102 i32x4.relaxed_trunc_f32x4_u
+        1, // 0x103 i32x4.relaxed_trunc_f64x2_s_zero
+        1, // 0x104 i32x4.relaxed_trunc_f64x2_u_zero
+        3, // 0x105 f32x4.relaxed_madd
+        3, // 0x106 f32x4.relaxed_nmadd
+        3, // 0x107 f64x2.relaxed_madd
+        3, // 0x108 f64x2.relaxed_nmadd
+        3, // 0x109 i8x16.relaxed_laneselect
+        3, // 0x10a i16x8.relaxed_laneselect
+        3, // 0x10b i32x4.relaxed_laneselect
+        3, // 0x10c i64x2.relaxed_laneselect
+        2, // 0x10d f32x4.relaxed_min
+        2, // 0x10e f32x4.relaxed_max
+        2, // 0x10f f64x2.relaxed_min
+        2, // 0x110 f64x2.relaxed_max
+        2, // 0x111 i16x8.relaxed_q15mulr_s
+        2, // 0x112 i16x8.relaxed_dot_i8x16_i7x16_s
+        3, // 0x113 i32x4.relaxed_dot_i8x16_i7x16_add_s
+    ];
+    for (k, &ar) in arities.iter().enumerate() {
+        emit_store(&mut b, k as u32, k as u8, ar);
+    }
+    // Fold bytes 64..384 (80 i32 words) into checksum acc.
+    b.extend_from_slice(&[0x41, 64, 0x21, 4, 0x41, 0, 0x21, 5]);
+    b.extend_from_slice(&[0x03, 0x40]); // loop
+    b.extend_from_slice(&[0x20, 5, 0x41]);
+    leb_i32(&mut b, 31);
+    b.extend_from_slice(&[0x6c, 0x20, 4, 0x28, 2, 0, 0x73, 0x21, 5]);
+    b.extend_from_slice(&[0x20, 4, 0x41, 4, 0x6a, 0x22, 4, 0x41]);
+    leb_i32(&mut b, 384);
+    b.extend_from_slice(&[0x49, 0x0d, 0, 0x0b, 0x20, 5]);
+
+    wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[("blot:memory", 2, 0), ("test_relaxed", 0, 0)]),
+        code_sec(&[enc_body(&[(3, 0x7b), (2, 0x7f)], &b)]),
+    ])
+}
+
+/// Shared Wasm module exercising `return_call` (0x12) and `return_call_indirect` (0x13):
+/// O(1)-stack deep mutual recursion, high-arity stack args (same-arity O(1) AND growing-arity
+/// fallback), multi-value overflow return buffers, and indirect call traps.
+pub(crate) fn build_tail_call_test_wasm() -> Vec<u8> {
+    let ten_i64 = [0x7e; 10];
+    let hi_params = [
+        0x7f, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e,
+    ];
+    // Types:
+    // 0: (i32) -> (i32)
+    // 1: (i32, i64 x 10) -> (i64)
+    // 2: (i32) -> (i64)
+    // 3: (i64) -> (i64 x 10)
+    // 4: (i64) -> (i64)
+    // 5: (i32) -> (i64 x 10)
+    // 6: (i32, i64 x 10) -> (i64 x 10)
+    // 7: () -> ()
+    let tsec = type_sec(&[
+        (&[0x7f], &[0x7f]),
+        (&hi_params, &[0x7e]),
+        (&[0x7f], &[0x7e]),
+        (&[0x7e], &ten_i64),
+        (&[0x7e], &[0x7e]),
+        (&[0x7f], &ten_i64),
+        (&hi_params, &ten_i64),
+        (&[], &[]),
+    ]);
+    // Functions:
+    // 0: even (type 0)
+    // 1: odd (type 0)
+    // 2: even_ind (type 0)
+    // 3: odd_ind (type 0)
+    // 4: sum_hi_arity (type 1)
+    // 5: grow_arity_entry (type 2)
+    // 6: leaf_multiret (type 3)
+    // 7: tail_multiret (type 3)
+    // 8: check_multiret (type 4)
+    // 9: leaf_multiret_hi (type 6)
+    // 10: grow_multiret_helper (type 5)
+    // 11: grow_multiret_caller (type 2)
+    // 12: bad_sig (type 7)
+    // 13: ind_trap (type 0)
+    let fsec = func_sec(&[0, 0, 0, 0, 1, 2, 3, 3, 4, 6, 5, 2, 7, 0]);
+    // Table 0: 6 funcref slots; active elem at 0: [2, 3, 4, 6, 12] (slot 5 is null!).
+    let tbl_p = vec![1, 0x70, 0x00, 6];
+    let elem_p = vec![1, 0x00, 0x41, 0x00, 0x0b, 5, 2, 3, 4, 6, 12];
+
+    // f0: even(n) = if n == 0 { 1 } else { return_call odd(n - 1) }
+    let f0 = vec![
+        0x20, 0, 0x45, 0x04, 0x7f, 0x41, 1, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 1, 0x0b,
+    ];
+    // f1: odd(n) = if n == 0 { 0 } else { return_call even(n - 1) }
+    let f1 = vec![
+        0x20, 0, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 0, 0x0b,
+    ];
+    // f2: even_ind(n) = if n == 0 { 1 } else { return_call_indirect type 0 table 0 (n - 1, slot 1) }
+    let f2 = vec![
+        0x20, 0, 0x45, 0x04, 0x7f, 0x41, 1, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x41, 1, 0x13, 0, 0, 0x0b,
+    ];
+    // f3: odd_ind(n) = if n == 0 { 0 } else { return_call_indirect type 0 table 0 (n - 1, slot 0) }
+    let f3 = vec![
+        0x20, 0, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x41, 0, 0x13, 0, 0, 0x0b,
+    ];
+    // f4: sum_hi_arity(n, a0..a9) -> if n == 0 { sum((k+1)*a_k) } else { return_call f4(n-1, a1..a9, a0+1) }
+    let mut f4 = vec![0x20, 0, 0x45, 0x04, 0x7e];
+    f4.extend_from_slice(&[0x42, 0]);
+    for k in 0u8..10 {
+        f4.extend_from_slice(&[0x20, 1 + k, 0x42, 2 * k + 1, 0x7e, 0x7c]);
+    }
+    f4.push(0x05);
+    f4.extend_from_slice(&[0x20, 0, 0x41, 1, 0x6b]);
+    for k in 1u8..10 {
+        f4.extend_from_slice(&[0x20, 1 + k]);
+    }
+    f4.extend_from_slice(&[0x20, 1, 0x42, 1, 0x7c]);
+    f4.extend_from_slice(&[0x12, 4, 0x0b]);
+
+    // f5: grow_arity_entry(n) = return_call sum_hi_arity(n, 1, 2, ..., 10)
+    let mut f5 = vec![0x20, 0];
+    for k in 1u8..=10 {
+        f5.extend_from_slice(&[0x42, k]);
+    }
+    f5.extend_from_slice(&[0x12, 4]);
+
+    // f6: leaf_multiret(x) -> (x+1, x+2, ..., x+10)
+    let mut f6 = Vec::new();
+    for k in 1u8..=10 {
+        f6.extend_from_slice(&[0x20, 0, 0x42, k, 0x7c]);
+    }
+    // f7: tail_multiret(x) = return_call leaf_multiret(x + 7)
+    let f7 = vec![0x20, 0, 0x42, 7, 0x7c, 0x12, 6];
+    // f8: check_multiret(x) = call tail_multiret(x); fold 10 values with weighted sum
+    let mut f8 = vec![0x20, 0, 0x10, 7];
+    // Stack has [r0, r1, ..., r9]; pop into locals 1..=10 then fold
+    for k in (1u8..=10).rev() {
+        f8.extend_from_slice(&[0x21, k]);
+    }
+    f8.extend_from_slice(&[0x42, 0]);
+    for k in 1u8..=10 {
+        f8.extend_from_slice(&[0x20, k, 0x42, 3 * k, 0x7e, 0x7c]);
+    }
+
+    // f9: leaf_multiret_hi(n, a0..a9) -> if n == 0 { (a0..a9) } else { return_call f9(n-1, a1..a9, a0+3) }
+    let mut f9 = vec![0x20, 0, 0x45, 0x04, 0x40];
+    for k in 0u8..10 {
+        f9.extend_from_slice(&[0x20, 1 + k]);
+    }
+    f9.extend_from_slice(&[0x0f, 0x0b]); // return; end
+    f9.extend_from_slice(&[0x20, 0, 0x41, 1, 0x6b]);
+    for k in 1u8..10 {
+        f9.extend_from_slice(&[0x20, 1 + k]);
+    }
+    f9.extend_from_slice(&[0x20, 1, 0x42, 3, 0x7c, 0x12, 9]);
+
+    // f10: grow_multiret_helper(n) = return_call f9(n, 10, 20, ..., 100) [growing-arity + overflow retbuf!]
+    let mut f10 = vec![0x20, 0];
+    for k in 1i32..=10 {
+        f10.push(0x42);
+        leb_i32(&mut f10, k * 10);
+    }
+    f10.extend_from_slice(&[0x12, 9]);
+
+    // f11: grow_multiret_caller(n) = call f10(n); fold 10 returns
+    let mut f11 = vec![0x20, 0, 0x10, 10];
+    for k in (1u8..=10).rev() {
+        f11.extend_from_slice(&[0x21, k]);
+    }
+    f11.extend_from_slice(&[0x42, 0]);
+    for k in 1u8..=10 {
+        f11.extend_from_slice(&[0x20, k, 0x42, k, 0x7e, 0x7c]);
+    }
+
+    // f12: bad_sig () -> ()
+    let f12 = Vec::new();
+    // f13: ind_trap(slot) = return_call_indirect type 0 table 0 (42, slot)
+    let f13 = vec![0x41, 42, 0x20, 0, 0x13, 0, 0];
+
+    wasm_module(&[
+        tsec,
+        fsec,
+        section(4, &tbl_p),
+        export_sec(&[
+            ("even", 0, 0),
+            ("even_ind", 0, 2),
+            ("grow_arity", 0, 5),
+            ("check_multiret", 0, 8),
+            ("grow_multiret", 0, 11),
+            ("ind_trap", 0, 13),
+        ]),
+        section(9, &elem_p),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[], &f2),
+            enc_body(&[], &f3),
+            enc_body(&[], &f4),
+            enc_body(&[], &f5),
+            enc_body(&[], &f6),
+            enc_body(&[], &f7),
+            enc_body(&[(10, 0x7e)], &f8),
+            enc_body(&[], &f9),
+            enc_body(&[], &f10),
+            enc_body(&[(10, 0x7e)], &f11),
+            enc_body(&[], &f12),
+            enc_body(&[], &f13),
+        ]),
+    ])
+}
+
+/// Shared Wasm module testing `Op::F64AxpyLoop` (add/sub, aliasing, OOB partial-store trap)
+/// AND growable `memory64` 1-branch bounds checks.
+pub(crate) fn build_axpy_edge_test_wasm() -> Vec<u8> {
+    // f0: axpy_add(dst: i32, src: i32, count: i32, scale: f64)
+    // f1: axpy_sub(dst: i32, src: i32, count: i32, scale: f64)
+    // f2: run_case(case: i32) -> i64
+    let make_axpy = |is_sub: bool| -> Vec<u8> {
+        let mut b = vec![
+            0x41,
+            0,
+            0x21,
+            4, // i = 0
+            0x02,
+            0x40,
+            0x03,
+            0x40, // block; loop
+            0x20,
+            4,
+            0x20,
+            2,
+            0x4f,
+            0x0d,
+            1, // if i >=u count break
+            // addr_d = dst + (i << 3)
+            0x20,
+            0,
+            0x20,
+            4,
+            0x41,
+            3,
+            0x74,
+            0x6a,
+            0x22,
+            5,
+            // load dst[i]
+            0x20,
+            5,
+            0x2b,
+            3,
+            0,
+            // load src[i] * scale
+            0x20,
+            1,
+            0x20,
+            4,
+            0x41,
+            3,
+            0x74,
+            0x6a,
+            0x2b,
+            3,
+            0,
+            0x20,
+            3,
+            0xa2,
+            // add or sub
+            if is_sub { 0xa1 } else { 0xa0 },
+            // store dst[i]
+            0x39,
+            3,
+            0,
+            // i += 1; br 0
+            0x20,
+            4,
+            0x41,
+            1,
+            0x6a,
+            0x21,
+            4,
+            0x0c,
+            0,
+            0x0b,
+            0x0b,
+        ];
+        let _ = &mut b;
+        b
+    };
+    let f0 = make_axpy(false);
+    let f1 = make_axpy(true);
+
+    // f2(case: i32) -> i64:
+    // Seed mem[0..512] with 64 distinct f64 values, then run selected axpy case and return FNV hash of mem[0..512].
+    let mut f2 = vec![
+        // for i in 0..64 { mem[i*8] = f64(i * 3 - 50) * 0.25 }
+        0x41, 0, 0x21, 1, // i = 0
+        0x03, 0x40, 0x20, 1, 0x41, 3, 0x74, // i*8
+        0x20, 1, 0x41, 3, 0x6c, 0x41, 50, 0x6b, 0xb7, // f64.convert_i32_s(i*3 - 50)
+        0x44,
+    ];
+    f2.extend_from_slice(&0.25f64.to_bits().to_le_bytes());
+    f2.extend_from_slice(&[
+        0xa2, 0x39, 3, 0, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x41, 64, 0x49, 0x0d, 0, 0x0b,
+    ]);
+    let emit_call_case =
+        |out: &mut Vec<u8>, id: i32, dst: i32, src: i32, cnt: i32, scale: f64, is_sub: bool| {
+            out.push(0x20);
+            out.push(0);
+            out.push(0x41);
+            leb_i32(out, id);
+            out.extend_from_slice(&[0x46, 0x04, 0x40]);
+            out.push(0x41);
+            leb_i32(out, dst);
+            out.push(0x41);
+            leb_i32(out, src);
+            out.push(0x41);
+            leb_i32(out, cnt);
+            out.push(0x44);
+            out.extend_from_slice(&scale.to_bits().to_le_bytes());
+            out.extend_from_slice(&[0x10, if is_sub { 1 } else { 0 }, 0x0b]);
+        };
+    // Disjoint counts: 0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17 (add & sub)
+    for (idx, &cnt) in [0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17].iter().enumerate() {
+        emit_call_case(&mut f2, idx as i32, 0, 256, cnt, 1.375, (idx & 1) == 1);
+    }
+    // Same-base dst == src (vectorizable!)
+    emit_call_case(&mut f2, 20, 64, 64, 13, 0.5, false);
+    emit_call_case(&mut f2, 21, 64, 64, 13, -0.75, true);
+    // Forward overlap: dst < src < dst_end (must fall back to scalar!)
+    emit_call_case(&mut f2, 22, 0, 8, 17, 1.25, false);
+    // Backward overlap: src < dst < src_end (must fall back to scalar!)
+    emit_call_case(&mut f2, 23, 8, 0, 17, 1.25, true);
+    // OOB partial-store trap: dst = 65536 - 16, src = 0, count = 4 (writes 2 lanes then traps!)
+    emit_call_case(&mut f2, 99, 65520, 0, 4, 2.0, false);
+
+    // Hash mem[0..512] as i64
+    f2.extend_from_slice(&[0x41, 0, 0x21, 1, 0x42, 0, 0x21, 2]);
+    f2.extend_from_slice(&[
+        0x03, 0x40, 0x20, 2, 0x42, 31, 0x7e, 0x20, 1, 0x29, 3, 0, 0x85, 0x21, 2, 0x20, 1, 0x41, 8,
+        0x6a, 0x22, 1, 0x41,
+    ]);
+    leb_i32(&mut f2, 512);
+    f2.extend_from_slice(&[0x49, 0x0d, 0, 0x0b, 0x20, 2]);
+
+    wasm_module(&[
+        type_sec(&[(&[0x7f, 0x7f, 0x7f, 0x7c], &[]), (&[0x7f], &[0x7e])]),
+        func_sec(&[0, 0, 1]),
+        section(5, &[1, 0x01, 1, 2]),
+        export_sec(&[("blot:memory", 2, 0), ("run_case", 0, 2)]),
+        code_sec(&[
+            enc_body(&[(2, 0x7f)], &f0),
+            enc_body(&[(2, 0x7f)], &f1),
+            enc_body(&[(1, 0x7f), (1, 0x7e)], &f2),
+        ]),
+    ])
+}
+
+/// Shared Wasm module testing 1-branch growable `memory64` bounds checks (`min=1, max=4`).
+pub(crate) fn build_mem64_1branch_test_wasm() -> Vec<u8> {
+    // mem64: flags=0x05 (memory64 + max), min=1, max=4
+    let mem_p = vec![1, 0x05, 1, 4];
+    // f0(a: i64) -> i64: i64.load offset=0 (end_off=8 <= 65536 -> 1-branch fast check)
+    let f0 = vec![0x20, 0, 0x29, 3, 0];
+    // f1(a: i64) -> i64: i64.store offset=8 (a^0x1234), then i64.load offset=8 (end_off=16 <= 65536)
+    let mut f1 = vec![0x20, 0, 0x20, 0, 0x42];
+    leb_i32(&mut f1, 0x1234);
+    f1.extend_from_slice(&[0x85, 0x37, 3, 8, 0x20, 0, 0x29, 3, 8]);
+    // f2(a: i64) -> i64: memory.grow(1); drop; i64.store offset=8 (a+99); i64.load offset=8
+    let mut f2 = vec![0x42, 1, 0x40, 0, 0x1a, 0x20, 0, 0x20, 0, 0x42];
+    leb_i32(&mut f2, 99);
+    f2.extend_from_slice(&[0x7c, 0x37, 3, 8, 0x20, 0, 0x29, 3, 8]);
+    // f3(a: i64) -> i64: i64.load offset=70000 (> mem_min_bytes=65536 -> 2-branch wrap-proof check)
+    let mut f3 = vec![0x20, 0, 0x29, 3];
+    leb_u32(&mut f3, 70000);
+
+    wasm_module(&[
+        type_sec(&[(&[0x7e], &[0x7e])]),
+        func_sec(&[0, 0, 0, 0]),
+        section(5, &mem_p),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("load_off0", 0, 0),
+            ("store_load_off8", 0, 1),
+            ("grow_store_load_off8", 0, 2),
+            ("load_off_big", 0, 3),
+        ]),
+        code_sec(&[
+            enc_body(&[], &f0),
+            enc_body(&[], &f1),
+            enc_body(&[], &f2),
+            enc_body(&[], &f3),
+        ]),
+    ])
+}
+
+#[test]
+fn stage7_f64_axpy_vectorizes_matmul_and_edge_module() {
+    for (name, wasm) in [
+        (
+            "matmul_f64",
+            std::fs::read(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/matmul_f64.wasm"),
+            )
+            .expect("read fixtures/matmul_f64.wasm"),
+        ),
+        ("axpy_edge", build_axpy_edge_test_wasm()),
+    ] {
+        let val = wtime_validate::validate(
+            &wasm,
+            &super::x64_validate_features(),
+            &super::x64_validate_limits(),
+        )
+        .unwrap();
+        let module = super::module::admit_x64_module(val.decoded()).unwrap();
+        let mut irs = Vec::new();
+        for bi in 0..val.decoded().code.len() {
+            let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap();
+            super::opt::prune_early_block_params(&mut ir, None).unwrap();
+            irs.push(ir);
+        }
+        let effects = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+        let mut any_axpy = false;
+        for ir0 in &irs {
+            let mut ir = ir0.clone();
+            super::opt::optimize_func_stage2(&mut ir, &module, &effects, None).unwrap();
+            super::verify::verify_ir(&ir, &module).unwrap();
+            if ir.blocks.iter().any(|b| {
+                b.insts
+                    .iter()
+                    .any(|ins| matches!(ins.op, super::ir::Op::F64AxpyLoop { .. }))
+            }) {
+                any_axpy = true;
+            }
+        }
+        assert!(any_axpy, "{name} must emit Op::F64AxpyLoop");
+    }
 }

@@ -544,6 +544,8 @@ def main() -> None:
             ("parser_hash", REPO_ROOT / "tools/wtime-aot/fixtures/parser_hash.wasm", "prepare", "run", 4096, 2000),
             ("image_filter", REPO_ROOT / "tools/wtime-aot/fixtures/image_filter.wasm", "prepare", "run", 4096, 500),
             ("ecs_kernel", ecs_wasm, "prepare", "run", 2048, 500),
+            ("matmul_f64", REPO_ROOT / "tools/wtime-aot/fixtures/matmul_f64.wasm", "prepare", "run", 64, 50),
+            ("heapsort_i32", REPO_ROOT / "tools/wtime-aot/fixtures/heapsort_i32.wasm", "prepare", "run", 2048, 25),
         ]
 
         gdir = None

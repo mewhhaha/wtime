@@ -241,9 +241,78 @@ struct LowerA64<'a> {
     epilogue_trap: Option<Label>,
     edge_tramps: Vec<(Label, u32, ValRange)>,
     edge_tramp_cache: HashMap<(u32, u32, u32), Label>,
+    /// Lazily populated map of SSA `Val`s whose AArch64 defining write guarantees bits `32..63 == 0`,
+    /// allowing redundant `uxtw` on `I32WrapI64`/`I64ExtendI32U` to be elided.
+    val_upper32_zero: Option<Vec<bool>>,
 }
 
 impl<'a> LowerA64<'a> {
+    fn is_upper32_zero(&mut self, v: Val) -> bool {
+        let table = self.val_upper32_zero.get_or_insert_with(|| {
+            let mut flags = vec![false; self.ir.val_tys.len()];
+            for bb in &self.ir.blocks {
+                for inst in &bb.insts {
+                    let Some(res) = inst.res else {
+                        continue;
+                    };
+                    let z = match inst.op {
+                        Op::ConstI32(_)
+                        | Op::I32Eqz(_)
+                        | Op::I64Eqz(_)
+                        | Op::I32Clz(_)
+                        | Op::I32Ctz(_)
+                        | Op::I32Popcnt(_)
+                        | Op::I64Clz(_)
+                        | Op::I64Ctz(_)
+                        | Op::I64Popcnt(_)
+                        | Op::I32WrapI64(_)
+                        | Op::I64ExtendI32U(_)
+                        | Op::I32Extend8S(_)
+                        | Op::I32Extend16S(_)
+                        | Op::I32Bin(..)
+                        | Op::I32BinImm(..)
+                        | Op::I32Cmp(..)
+                        | Op::I32CmpImm(..)
+                        | Op::I64Cmp(..)
+                        | Op::I64CmpImm(..)
+                        | Op::F32Cmp(..)
+                        | Op::F64Cmp(..)
+                        | Op::I32ReinterpretF32(_)
+                        | Op::MemByteSum { .. }
+                        | Op::V128ToI32 { .. } => true,
+                        Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
+                        Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
+                        Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
+                        Op::Load { kind, .. } => matches!(
+                            kind,
+                            LoadKind::I32
+                                | LoadKind::I32Load8S
+                                | LoadKind::I32Load8U
+                                | LoadKind::I32Load16S
+                                | LoadKind::I32Load16U
+                                | LoadKind::I64Load8U
+                                | LoadKind::I64Load16U
+                                | LoadKind::I64Load32U
+                        ),
+                        Op::V128ExtractLane { kind, .. } => matches!(
+                            kind,
+                            SimdLaneKind::I8x16S
+                                | SimdLaneKind::I8x16U
+                                | SimdLaneKind::I16x8S
+                                | SimdLaneKind::I16x8U
+                                | SimdLaneKind::I32x4
+                        ),
+                        _ => false,
+                    };
+                    if z {
+                        flags[res.0 as usize] = true;
+                    }
+                }
+            }
+            flags
+        });
+        table.get(v.0 as usize).copied().unwrap_or(false)
+    }
     #[inline]
     fn loc(&self, v: Val) -> A64Loc {
         self.alloc.locs[v.0 as usize]
@@ -368,7 +437,7 @@ impl<'a> LowerA64<'a> {
             .get_or_insert_with(|| self.asm.new_label())
     }
 
-    fn emit_epilogue_body(&mut self) {
+    fn emit_epilogue_teardown(&mut self) {
         let mut fi = 0usize;
         let fps = &self.alloc.used_callee_fp;
         while fi < fps.len() {
@@ -440,6 +509,10 @@ impl<'a> LowerA64<'a> {
             self.asm
                 .add_i32_checked(true, Reg::SP, Reg::SP, self.alloc.frame_size, SGP3);
         }
+    }
+
+    fn emit_epilogue_body(&mut self) {
+        self.emit_epilogue_teardown();
         self.asm.ret();
     }
 
@@ -472,6 +545,19 @@ impl<'a> LowerA64<'a> {
             return;
         }
         if self.layout.memory64 {
+            // Fast 1-branch wrap-proof check when `mem_min_bytes >= end_off` (so `MEM_LEN_REG - end_off`
+            // cannot underflow, because linear memory never shrinks): `addr <=u (MEM_LEN_REG - end_off)`!
+            if end_off <= self.layout.mem_min_bytes {
+                if end_off < 4096 {
+                    self.asm.sub_imm(true, SGP3, MEM_LEN_REG, end_off as u16);
+                } else {
+                    self.asm.mov_imm64(SGP3, end_off);
+                    self.asm.sub_r(true, SGP3, MEM_LEN_REG, SGP3);
+                }
+                self.asm.cmp_r(true, SGP2, SGP3);
+                self.asm.b_cond(Cond::Hi, oob);
+                return;
+            }
             self.asm.mov_imm64(SGP3, end_off);
             self.asm.adds_r(true, SGP2, SGP2, SGP3);
             self.asm.b_cond(Cond::Hs, oob); // carry set => 64-bit unsigned overflow!
@@ -817,6 +903,186 @@ impl<'a> LowerA64<'a> {
         Ok(())
     }
 
+    fn emit_tail_call(
+        &mut self,
+        args: ValRange,
+        ci_idx: Option<(u32, Val)>,
+        direct_func: Option<u32>,
+    ) -> Result<(), String> {
+        let param_tys: Vec<Ty> = self.ir.params.iter().map(|&pv| self.ty(pv)).collect();
+        let self_param_stack = layout_args(&param_tys)?.stack_bytes;
+        let arg_vals = self.ir.pool_slice(args);
+        let arg_tys: Vec<Ty> = arg_vals.iter().map(|&v| self.ty(v)).collect();
+        let arg_layout = layout_args(&arg_tys)?;
+        let can_tail_jump = arg_layout.stack_bytes <= self_param_stack;
+
+        if let Some((_, idx_val)) = ci_idx {
+            let ir = self.gp_read(idx_val, SGP2);
+            emit_store_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(ir),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+        }
+
+        if can_tail_jump {
+            // True O(1)-stack tail call: overwrite incoming stack-arg slots at `[sp + frame_size + off]`,
+            // resolve indirect target into SGP1 (X16, preserved across epilogue teardown), tear down
+            // our frame (restoring LR if saved), and branch directly with `b` / `br X16`!
+            if !arg_vals.is_empty() {
+                let mut moves = Vec::with_capacity(arg_vals.len());
+                for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                    let dst = match slot {
+                        A64AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                        A64AbiSlot::Fp(v) => MoveLoc::Fp(v),
+                        A64AbiSlot::Stack(off) => MoveLoc::Stack(self.alloc.frame_size + off),
+                    };
+                    moves.push((dst, MoveLoc::from(self.loc(av)), ty));
+                }
+                emit_parallel_moves(&mut self.asm, &moves);
+            }
+            if let Some((ci_id, _)) = ci_idx {
+                let ci = &self.layout.ci_tables[ci_id as usize];
+                let toob = self.trap_table_oob_lbl();
+                let bad = self.trap_ci_lbl();
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I32,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    OFF_SCRATCH_TMP,
+                    SGP3,
+                );
+                self.asm.mov_imm32(SGP3, ci.table_len);
+                self.asm.cmp_r(false, SGP2, SGP3);
+                self.asm.b_cond(Cond::Hs, toob);
+                if ci.span == 0 {
+                    self.asm.b(bad);
+                    return Ok(());
+                }
+                if ci.min_slot > 0 {
+                    self.asm.mov_imm32(SGP3, ci.min_slot);
+                    self.asm.sub_r(false, SGP2, SGP2, SGP3);
+                }
+                self.asm.mov_imm32(SGP3, ci.span);
+                self.asm.cmp_r(false, SGP2, SGP3);
+                self.asm.b_cond(Cond::Hs, bad);
+                self.asm
+                    .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
+                self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+                self.asm.cbz(true, SGP3, bad);
+                self.asm.add_r(true, SGP1, SGP1, SGP3);
+            }
+            if let Some(saved_off) = self.alloc.saved_ret_ptr_off {
+                emit_load_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    Reg::SP,
+                    saved_off,
+                    SGP3,
+                );
+                emit_store_off(
+                    &mut self.asm,
+                    Ty::I64,
+                    Some(SGP2),
+                    None,
+                    CTX_REG,
+                    OFF_RET_SPILL_PTR,
+                    SGP3,
+                );
+            }
+            self.emit_epilogue_teardown();
+            if let Some(f) = direct_func {
+                self.asm.b_reloc(A64RelocTarget::Func(f));
+            } else {
+                self.asm.br(SGP1);
+            }
+            return Ok(());
+        }
+
+        // Growing-arity fallback (`callee_arg_stack > caller_param_stack`): emit normal `bl`/`blr`
+        // forwarding caller's overflow return buffer pointer, then jump to epilogue.
+        if !arg_vals.is_empty() {
+            let mut moves = Vec::with_capacity(arg_vals.len());
+            for ((&av, &ty), slot) in arg_vals.iter().zip(&arg_tys).zip(arg_layout.slots) {
+                let dst = match slot {
+                    A64AbiSlot::Gp(r) => MoveLoc::Gp(r),
+                    A64AbiSlot::Fp(v) => MoveLoc::Fp(v),
+                    A64AbiSlot::Stack(off) => MoveLoc::Stack(off),
+                };
+                moves.push((dst, MoveLoc::from(self.loc(av)), ty));
+            }
+            emit_parallel_moves(&mut self.asm, &moves);
+        }
+        if let Some(saved_off) = self.alloc.saved_ret_ptr_off {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                Reg::SP,
+                saved_off,
+                SGP3,
+            );
+            emit_store_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_RET_SPILL_PTR,
+                SGP3,
+            );
+        }
+        if let Some(f) = direct_func {
+            self.asm.bl_reloc(A64RelocTarget::Func(f));
+        } else if let Some((ci_id, _)) = ci_idx {
+            let ci = &self.layout.ci_tables[ci_id as usize];
+            let toob = self.trap_table_oob_lbl();
+            let bad = self.trap_ci_lbl();
+            emit_load_off(
+                &mut self.asm,
+                Ty::I32,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            self.asm.mov_imm32(SGP3, ci.table_len);
+            self.asm.cmp_r(false, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hs, toob);
+            if ci.span == 0 {
+                self.asm.b(bad);
+                return Ok(());
+            }
+            if ci.min_slot > 0 {
+                self.asm.mov_imm32(SGP3, ci.min_slot);
+                self.asm.sub_r(false, SGP2, SGP2, SGP3);
+            }
+            self.asm.mov_imm32(SGP3, ci.span);
+            self.asm.cmp_r(false, SGP2, SGP3);
+            self.asm.b_cond(Cond::Hs, bad);
+            self.asm
+                .adr_reloc(SGP1, A64RelocTarget::Rodata(ci.rodata_off));
+            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+            self.asm.cbz(true, SGP3, bad);
+            self.asm.add_r(true, SGP1, SGP1, SGP3);
+            self.asm.blr(SGP1);
+        }
+        // Return values & W16 trap status are already in exact ABI registers.
+        let ep = *self.epilogue_ok.get_or_insert_with(|| self.asm.new_label());
+        self.asm.b(ep);
+        Ok(())
+    }
+
     fn emit_int_bin(&mut self, is64: bool, op: IntBinOp, dst_val: Val, a: Val, b: Val) {
         let ar = self.gp_read(a, SGP1);
         let br = self.gp_read(b, SGP2);
@@ -931,6 +1197,79 @@ impl<'a> LowerA64<'a> {
                 self.asm.ror_imm(is64, d, ar, (w - sh) & (w - 1));
                 self.gp_commit(dst_val, d);
                 return;
+            }
+            IntBinOp::Mul => {
+                // Strength-reduce small/power-of-two constant multiplies into 1–2 single-cycle
+                // shifted `add`/`sub`/`lsl` ops instead of `mov_imm + mul`.
+                let imm64 = imm as i64;
+                let neg = imm64 < 0;
+                let u = imm64.unsigned_abs();
+                if u == 0 {
+                    self.asm.movz(is64, d, 0, 0);
+                    self.gp_commit(dst_val, d);
+                    return;
+                }
+                let tz = u.trailing_zeros() as u8;
+                let odd = u >> tz;
+                let w = if is64 { 64u8 } else { 32u8 };
+                if tz < w {
+                    if odd == 1 {
+                        if tz == 0 {
+                            if neg {
+                                self.asm.neg_r(is64, d, ar);
+                            } else {
+                                self.asm.mov_r(is64, d, ar);
+                            }
+                        } else {
+                            self.asm.lsl_imm(is64, d, ar, tz);
+                            if neg {
+                                self.asm.neg_r(is64, d, d);
+                            }
+                        }
+                        self.gp_commit(dst_val, d);
+                        return;
+                    }
+                    if (!neg || tz == 0)
+                        && let Some(k) = (1u8..=6u8).find(|&k| odd == (1u64 << k) + 1)
+                    {
+                        self.asm.add_r_lsl(is64, d, ar, ar, k);
+                        if tz > 0 {
+                            self.asm.lsl_imm(is64, d, d, tz);
+                        }
+                        if neg {
+                            self.asm.neg_r(is64, d, d);
+                        }
+                        self.gp_commit(dst_val, d);
+                        return;
+                    }
+                    if tz == 0
+                        && let Some(k) = (3u8..=6u8).find(|&k| odd == (1u64 << k) - 1)
+                    {
+                        if neg {
+                            self.asm.sub_r_lsl(is64, d, ar, ar, k);
+                        } else {
+                            self.asm.lsl_imm(is64, SGP2, ar, k);
+                            self.asm.sub_r(is64, d, SGP2, ar);
+                        }
+                        self.gp_commit(dst_val, d);
+                        return;
+                    }
+                    if !neg && tz == 0 {
+                        let pair = match odd {
+                            25 => Some((2u8, 2u8)),
+                            27 => Some((1u8, 3u8)),
+                            45 => Some((2u8, 3u8)),
+                            81 => Some((3u8, 3u8)),
+                            _ => None,
+                        };
+                        if let Some((k1, k2)) = pair {
+                            self.asm.add_r_lsl(is64, SGP2, ar, ar, k1);
+                            self.asm.add_r_lsl(is64, d, SGP2, SGP2, k2);
+                            self.gp_commit(dst_val, d);
+                            return;
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -1089,7 +1428,13 @@ impl<'a> LowerA64<'a> {
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SGP1);
                 let d = self.gp_write_reg(r);
-                self.asm.uxtw(d, ar);
+                if self.is_upper32_zero(a) {
+                    if d != ar {
+                        self.asm.mov_r(true, d, ar);
+                    }
+                } else {
+                    self.asm.uxtw(d, ar);
+                }
                 self.gp_commit(r, d);
             }
             Op::I64ExtendI32S(a) | Op::I64Extend32S(a) => {
@@ -2253,6 +2598,76 @@ impl<'a> LowerA64<'a> {
                 self.asm.b_cond(Cond::Lo, lbl_loop);
                 self.asm.bind(lbl_done);
             }
+            Op::F64AxpyLoop {
+                dst,
+                src,
+                count,
+                scale,
+                is_sub,
+            } => {
+                // `SGP1 = dst_ptr`, `SGP2 = src_ptr`, `SGP3 = count` (elements).
+                // Save `V0` into `[CTX_REG + OFF_SCRATCH_V128]` to broadcast `[scale, scale]`
+                // with zero regalloc clobbers!
+                let sr = self.fp_read(scale, SFP2);
+                if sr != SFP2 {
+                    self.asm.fmov_fp(true, SFP2, sr);
+                }
+                let dr = self.gp_read(dst, SGP1);
+                self.asm.uxtw(SGP1, dr);
+                let sr_ptr = self.gp_read(src, SGP2);
+                self.asm.uxtw(SGP2, sr_ptr);
+                let cr = self.gp_read(count, SGP3);
+                self.asm.uxtw(SGP3, cr);
+
+                let lbl_done = self.asm.new_label();
+                let lbl_restore = self.asm.new_label();
+                self.asm.cbz(true, SGP3, lbl_done);
+
+                self.asm.add_r(true, SGP1, MEM_BASE_REG, SGP1);
+                self.asm.add_r(true, SGP2, MEM_BASE_REG, SGP2);
+
+                self.asm
+                    .str_q_uimm(VReg::V0, CTX_REG, OFF_SCRATCH_V128 as u32);
+                self.asm.dup_elt_128(3, VReg::V0, SFP2, 0);
+
+                let lbl_vec2 = self.asm.new_label();
+                let lbl_tail = self.asm.new_label();
+                self.asm.cmp_imm(true, SGP3, 2);
+                self.asm.b_cond(Cond::Lo, lbl_tail);
+
+                self.asm.bind(lbl_vec2);
+                self.asm.ldr_q_uimm(SFP1, SGP2, 0);
+                self.asm.fmul_v128(true, SFP1, SFP1, VReg::V0);
+                self.asm.ldr_q_uimm(SFP2, SGP1, 0);
+                if !is_sub {
+                    self.asm.fadd_v128(true, SFP2, SFP2, SFP1);
+                } else {
+                    self.asm.fsub_v128(true, SFP2, SFP2, SFP1);
+                }
+                self.asm.str_q_uimm(SFP2, SGP1, 0);
+                self.asm.add_imm(true, SGP1, SGP1, 16);
+                self.asm.add_imm(true, SGP2, SGP2, 16);
+                self.asm.sub_imm(true, SGP3, SGP3, 2);
+                self.asm.cmp_imm(true, SGP3, 2);
+                self.asm.b_cond(Cond::Hs, lbl_vec2);
+
+                self.asm.bind(lbl_tail);
+                self.asm.cbz(true, SGP3, lbl_restore);
+                self.asm.ldr_d_uimm(SFP1, SGP2, 0);
+                self.asm.fmul(true, SFP1, SFP1, VReg::V0);
+                self.asm.ldr_d_uimm(SFP2, SGP1, 0);
+                if !is_sub {
+                    self.asm.fadd(true, SFP2, SFP2, SFP1);
+                } else {
+                    self.asm.fsub(true, SFP2, SFP2, SFP1);
+                }
+                self.asm.str_d_uimm(SFP2, SGP1, 0);
+
+                self.asm.bind(lbl_restore);
+                self.asm
+                    .ldr_q_uimm(VReg::V0, CTX_REG, OFF_SCRATCH_V128 as u32);
+                self.asm.bind(lbl_done);
+            }
             Op::F64x4BinMem {
                 op,
                 dst,
@@ -2687,6 +3102,12 @@ impl<'a> LowerA64<'a> {
                 let ep = *self.epilogue_ok.get_or_insert_with(|| self.asm.new_label());
                 self.asm.b(ep);
             }
+            Term::ReturnCall { func, args } => {
+                self.emit_tail_call(args, None, Some(func))?;
+            }
+            Term::ReturnCallIndirect { ci_id, idx, args } => {
+                self.emit_tail_call(args, Some((ci_id, idx)), None)?;
+            }
             Term::Unreachable => {
                 let lbl = self.trap_unreach_lbl();
                 self.asm.b(lbl);
@@ -2723,6 +3144,7 @@ pub fn lower_ir_to_aarch64(
         epilogue_trap: None,
         edge_tramps: Vec::new(),
         edge_tramp_cache: HashMap::new(),
+        val_upper32_zero: None,
     };
 
     // 1. Prologue: stack overflow floor check + allocate frame + save FP/LR + callee-saved regs.

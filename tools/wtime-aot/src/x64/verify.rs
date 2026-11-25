@@ -260,6 +260,101 @@ pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
                     }
                 }
             }
+            Term::ReturnCall { func, args } => {
+                check_val_range(ir, args, "ReturnCall.args")?;
+                let fty = module.func_type(func as usize).ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: ReturnCall func {func} out of range",
+                        ir.func_index
+                    )
+                })?;
+                let avals = ir.pool_slice(args);
+                if avals.len() != fty.params.len() {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: ReturnCall arg arity mismatch ({} vs {})",
+                        ir.func_index,
+                        avals.len(),
+                        fty.params.len()
+                    ));
+                }
+                for (idx, (&av, &pt)) in avals.iter().zip(&fty.params).enumerate() {
+                    let actual = val_ty(ir, av, "ReturnCall.arg")?;
+                    let expected = Ty::from_val(pt);
+                    if actual != expected {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: ReturnCall arg {idx} type mismatch ({actual:?} vs {expected:?})",
+                            ir.func_index
+                        ));
+                    }
+                }
+                if fty.results.len() != ir.result_tys.len()
+                    || fty
+                        .results
+                        .iter()
+                        .zip(&ir.result_tys)
+                        .any(|(&rt, &et)| Ty::from_val(rt) != et)
+                {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: ReturnCall result types do not match caller",
+                        ir.func_index
+                    ));
+                }
+            }
+            Term::ReturnCallIndirect { ci_id, idx, args } => {
+                if val_ty(ir, idx, "ReturnCallIndirect.idx")? != Ty::I32 {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: ReturnCallIndirect idx must be I32",
+                        ir.func_index
+                    ));
+                }
+                check_val_range(ir, args, "ReturnCallIndirect.args")?;
+                let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
+                    format!(
+                        "verify_ir fn {} bb{bi}: ReturnCallIndirect ci_id {ci_id} out of range",
+                        ir.func_index
+                    )
+                })?;
+                let fty = module
+                    .module_types
+                    .get(ci.type_idx as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "verify_ir fn {} bb{bi}: ReturnCallIndirect type_idx out of range",
+                            ir.func_index
+                        )
+                    })?;
+                let avals = ir.pool_slice(args);
+                if avals.len() != fty.params.len() {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: ReturnCallIndirect arg arity mismatch ({} vs {})",
+                        ir.func_index,
+                        avals.len(),
+                        fty.params.len()
+                    ));
+                }
+                for (i, (&av, &pt)) in avals.iter().zip(&fty.params).enumerate() {
+                    let actual = val_ty(ir, av, "ReturnCallIndirect.arg")?;
+                    let expected = Ty::from_val(pt);
+                    if actual != expected {
+                        return Err(format!(
+                            "verify_ir fn {} bb{bi}: ReturnCallIndirect arg {i} type mismatch ({actual:?} vs {expected:?})",
+                            ir.func_index
+                        ));
+                    }
+                }
+                if fty.results.len() != ir.result_tys.len()
+                    || fty
+                        .results
+                        .iter()
+                        .zip(&ir.result_tys)
+                        .any(|(&rt, &et)| Ty::from_val(rt) != et)
+                {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: ReturnCallIndirect result types do not match caller",
+                        ir.func_index
+                    ));
+                }
+            }
             Term::Unreachable => {}
         }
     }
@@ -869,6 +964,19 @@ fn verify_inst_types(
             expect_ty(ir, bi, count, Ty::I32, "MemByteBlur3Div.count")?;
             expect_no_res(ir, bi, res, "MemByteBlur3Div")?;
         }
+        Op::F64AxpyLoop {
+            dst,
+            src,
+            count,
+            scale,
+            ..
+        } => {
+            expect_ty(ir, bi, dst, Ty::I32, "F64AxpyLoop.dst")?;
+            expect_ty(ir, bi, src, Ty::I32, "F64AxpyLoop.src")?;
+            expect_ty(ir, bi, count, Ty::I32, "F64AxpyLoop.count")?;
+            expect_ty(ir, bi, scale, Ty::F64, "F64AxpyLoop.scale")?;
+            expect_no_res(ir, bi, res, "F64AxpyLoop")?;
+        }
         Op::F64x4BinMem {
             op,
             dst,
@@ -1179,6 +1287,12 @@ pub fn verify_alloc_with_config(
     let mut defined_in_reach = vec![false; n_vals];
     let mut expected_remat: Vec<Option<RematConst>> = vec![None; n_vals];
     let mut has_any_clobber_or_call = false;
+    let self_param_tys: Vec<Ty> = ir
+        .params
+        .iter()
+        .map(|&pv| ir.val_tys[pv.0 as usize])
+        .collect();
+    let self_param_stack_bytes = layout_args(&self_param_tys)?.stack_bytes;
     for &b in &alloc.block_order {
         let bb = &ir.blocks[b as usize];
         for &p in &bb.params {
@@ -1231,6 +1345,26 @@ pub fn verify_alloc_with_config(
                 }
                 _ => {}
             }
+        }
+        match bb.term {
+            Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                let arg_tys: Vec<Ty> = ir
+                    .pool_slice(args)
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                let arg_layout = layout_args(&arg_tys)?;
+                if arg_layout.stack_bytes > self_param_stack_bytes {
+                    has_any_clobber_or_call = true;
+                    if arg_layout.stack_bytes > alloc.outgoing_arg_bytes {
+                        return Err(format!(
+                            "verify_alloc fn {}: outgoing_arg_bytes ({}) < tail-call fallback needed ({})",
+                            ir.func_index, alloc.outgoing_arg_bytes, arg_layout.stack_bytes
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
     }
     if has_any_clobber_or_call {
@@ -1629,6 +1763,7 @@ pub fn verify_alloc_with_config(
                     _,
                     _,
                 ) => (MASK_RAX_RDX, 0),
+                Op::F64AxpyLoop { .. } => (MASK_RAX_RDX | MASK_RCX, (1 << 0) | (1 << 1) | (1 << 2)),
                 _ => (0, 0),
             };
             let hit_gp = gp_clob & tracker.gp_mask;

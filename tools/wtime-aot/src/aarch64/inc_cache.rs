@@ -33,7 +33,7 @@ use crate::x64::{CtxLayout, NUM_HELPERS, RodataConsts};
 use super::asm::{A64Asm, A64Reloc, A64RelocKind, A64RelocTarget};
 
 const MAGIC: &[u8; 8] = b"WTA64INC";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20;
 
 static NEXT_A64_INC_SEQ: AtomicU64 = AtomicU64::new(0);

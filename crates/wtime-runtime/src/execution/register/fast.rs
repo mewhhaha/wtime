@@ -694,6 +694,20 @@ enum RegOp {
         call_idx: u32,
         src_off: u8,
     },
+    ReturnCall {
+        call_idx: u32,
+        src_off: u8,
+    },
+    ReturnCallIndirect {
+        call_idx: u32,
+        src_off: u8,
+    },
+    /// Wide 128-bit integer arithmetic (`0=add128, 1=sub128, 2=mul_wide_s, 3=mul_wide_u`)
+    /// operating in-place on contiguous slots `base..base+4` (or `+2`) and writing `(lo, hi)` to `base..base+2`.
+    WideArith {
+        kind: u8,
+        base: u16,
+    },
     Return {
         base: u16,
         count: u16,
@@ -873,13 +887,18 @@ fn mem_sig(op: u16) -> Option<(NumericType, usize, bool)> {
 
 fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
     match insn.opcode {
-        0x00..=0x05 | 0x0b..=0x0f | 0x1a | 0x1b | 0x20..=0x22 | 0x41..=0xc4 | 0xfc00..=0xfc07 => {
-            true
-        }
+        0x00..=0x05
+        | 0x0b..=0x0f
+        | 0x1a
+        | 0x1b
+        | 0x20..=0x22
+        | 0x41..=0xc4
+        | 0xfc00..=0xfc07
+        | 0xfc13..=0xfc16 => true,
         0x1c => {
             matches!(&insn.immediate, Immediate::Types(ts) if ts.len() == 1 && NumericType::admitted(ts[0]).is_ok())
         }
-        0x10 => {
+        0x10 | 0x12 => {
             let Immediate::Index(fi) = insn.immediate else {
                 return false;
             };
@@ -890,7 +909,7 @@ fn is_supported_op(module: &Module, insn: &crate::Instruction) -> bool {
                     .all(|&t| NumericType::admitted(t).is_ok())
             })
         }
-        0x11 => {
+        0x11 | 0x13 => {
             let Immediate::Pair(type_idx, table_idx) = insn.immediate else {
                 return false;
             };
@@ -1129,7 +1148,7 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
             0x00 | 0x0c..=0x0f => {
                 is_block_start[pc + 1] = true;
             }
-            0x10 | 0x11 => {
+            0x10..=0x13 => {
                 is_block_start[pc + 1] = true;
                 has_loops_or_calls = true;
             }
@@ -1973,6 +1992,88 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                     &mut blocks,
                 );
             }
+            0x12 => {
+                // return_call (O(1) tail call reusing current frame in-place)
+                let Immediate::Index(fi) = insn.immediate else {
+                    return None;
+                };
+                let callee_ft = declared_func_type(module, fi)?;
+                let arg_count = callee_ft.params.len();
+                let ret_count = callee_ft.results.len();
+                flush_all(&mut vstack, &mut ops, &mut consts);
+                let meta_at_call = push_meta(
+                    pc,
+                    &vstack,
+                    &labels,
+                    &mut blocks,
+                    &mut stack_types,
+                    &mut static_labels,
+                );
+                let arg_start = vstack.len().checked_sub(arg_count)?;
+                let call_idx = call_sites.len() as u32;
+                call_sites.push(CallSite {
+                    func_idx: fi,
+                    arg_base: num_locals_u16 + arg_start as u16,
+                    arg_count: arg_count as u16,
+                    ret_count: ret_count as u16,
+                    meta_at_call,
+                    meta_after_call: BLOCK_META_NONE,
+                });
+                ops.push(RegOp::ReturnCall { call_idx, src_off });
+                close_block(
+                    &mut in_block,
+                    &mut cur_block_ip,
+                    &mut cur_block_meta,
+                    &mut cur_block_ops,
+                    &mut ops,
+                    &mut blocks,
+                );
+                dead = true;
+            }
+            0x13 => {
+                // return_call_indirect (type_idx, table_idx)
+                let Immediate::Pair(type_idx, table_idx) = insn.immediate else {
+                    return None;
+                };
+                let callee_ft = decoded.types.get(type_idx as usize)?;
+                let table_is_64 = declared_table(module, table_idx)?.index_type == IndexType::I64;
+                let arg_count = callee_ft.params.len();
+                let ret_count = callee_ft.results.len();
+                flush_all(&mut vstack, &mut ops, &mut consts);
+                let meta_at_call = push_meta(
+                    pc,
+                    &vstack,
+                    &labels,
+                    &mut blocks,
+                    &mut stack_types,
+                    &mut static_labels,
+                );
+                let _idx_slot = vstack.pop()?;
+                let index_reg = num_locals_u16 + vstack.len() as u16;
+                let arg_start = vstack.len().checked_sub(arg_count)?;
+                let call_idx = call_indirect_sites.len() as u32;
+                call_indirect_sites.push(CallIndirectSite {
+                    type_idx,
+                    table_idx,
+                    index_reg,
+                    arg_base: num_locals_u16 + arg_start as u16,
+                    arg_count: arg_count as u16,
+                    ret_count: ret_count as u16,
+                    table_is_64,
+                    meta_at_call,
+                    meta_after_call: BLOCK_META_NONE,
+                });
+                ops.push(RegOp::ReturnCallIndirect { call_idx, src_off });
+                close_block(
+                    &mut in_block,
+                    &mut cur_block_ip,
+                    &mut cur_block_meta,
+                    &mut cur_block_ops,
+                    &mut ops,
+                    &mut blocks,
+                );
+                dead = true;
+            }
             0x1a => {
                 // drop
                 vstack.pop()?;
@@ -2425,6 +2526,24 @@ pub(crate) fn compile_fast(module: &Module, body: usize) -> Option<Arc<FastFunct
                         arg_idx,
                     });
                 }
+            }
+            0xfc13..=0xfc16 => {
+                // wide-arithmetic: i64.add128, i64.sub128, i64.mul_wide_s, i64.mul_wide_u
+                let kind = (insn.opcode - 0xfc13) as u8;
+                let argc = if kind < 2 { 4usize } else { 2usize };
+                flush_all(&mut vstack, &mut ops, &mut consts);
+                let arg_start = vstack.len().checked_sub(argc)?;
+                vstack.truncate(arg_start);
+                let base = num_locals_u16 + arg_start as u16;
+                ops.push(RegOp::WideArith { kind, base });
+                vstack.push(VSlot {
+                    src: VVal::Slot(base),
+                    ty: NumericType::I64,
+                });
+                vstack.push(VSlot {
+                    src: VVal::Slot(base + 1),
+                    ty: NumericType::I64,
+                });
             }
             0x41 => {
                 let Immediate::I32(v) = insn.immediate else {
@@ -3643,8 +3762,17 @@ fn materialize_all(
     if call_stack.is_empty() {
         let meta = &cur_func.blocks[cur_meta_idx as usize];
         let slots = &reg_bank[cur_reg_base..cur_reg_base + cur_func.slots as usize];
+        entry_frame.function = store.funcs[cur_handle.0.index].clone();
+        entry_frame.locals.clear();
+        if entry_frame
+            .locals
+            .try_reserve(cur_func.local_types.len())
+            .is_err()
+        {
+            return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
+        }
         for (i, &ty) in cur_func.local_types.iter().enumerate() {
-            entry_frame.locals[i] = bits_to_value(ty, slots[i]);
+            entry_frame.locals.push(bits_to_value(ty, slots[i]));
         }
         entry_frame.pc = meta.source_pc as usize;
         entry_frame.register = None;
@@ -3664,8 +3792,17 @@ fn materialize_all(
         );
         let meta = &f0_func.blocks[f0.meta_after_call as usize];
         let slots = &reg_bank[f0.reg_base..f0.reg_base + f0_func.slots as usize];
+        entry_frame.function = store.funcs[f0.func_handle.0.index].clone();
+        entry_frame.locals.clear();
+        if entry_frame
+            .locals
+            .try_reserve(f0_func.local_types.len())
+            .is_err()
+        {
+            return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
+        }
         for (i, &ty) in f0_func.local_types.iter().enumerate() {
-            entry_frame.locals[i] = bits_to_value(ty, slots[i]);
+            entry_frame.locals.push(bits_to_value(ty, slots[i]));
         }
         entry_frame.pc = meta.source_pc as usize;
         entry_frame.register = None;
@@ -3844,6 +3981,7 @@ pub(crate) fn run(
     if let Some(rem) = &mut local_fuel {
         *rem -= first_block_fuel.saturating_sub(1) as u64;
     }
+    let initial_active_local_slots = store.active_local_slots;
     let res = if local_fuel.is_some() {
         run_loop::<true>(
             store,
@@ -3879,6 +4017,9 @@ pub(crate) fn run(
             max_call_depth,
         )
     };
+    if res.is_err() {
+        store.active_local_slots = initial_active_local_slots;
+    }
     *fuel = local_fuel;
     store.current_fuel = local_fuel;
     res
@@ -3913,6 +4054,14 @@ enum InnerExit {
         arg_count: u16,
         meta_at_call: u32,
         meta_after_call: u32,
+        src_off: u8,
+    },
+    CrossInstanceTailCall {
+        callee_handle: crate::Func,
+        callee_inst: usize,
+        callee_body: usize,
+        arg_base: u16,
+        arg_count: u16,
         src_off: u8,
     },
     SwitchInst,
@@ -4157,6 +4306,102 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                                 arg_count: $arg_count,
                                 meta_at_call: $meta_at_call,
                                 meta_after_call: $meta_after_call,
+                                src_off: $src_off,
+                            };
+                        }
+                    }
+                }
+                if FUEL {
+                    *fuel = Some(remaining_fuel);
+                }
+                break InnerExit::BailAtCall {
+                    meta: $meta_at_call,
+                };
+            }};
+        }
+
+        macro_rules! inline_tail_call_target {
+            ($callee_handle:expr, $arg_base:expr, $arg_count:expr, $meta_at_call:expr, $src_off:expr) => {{
+                let callee_handle = $callee_handle;
+                let Some(callee_fn) = funcs
+                    .get_live(callee_handle.0.index, callee_handle.0.generation)
+                    .filter(|_| callee_handle.0.store == store_id)
+                else {
+                    if FUEL {
+                        *fuel = Some(remaining_fuel);
+                    }
+                    refund_on_trap!($src_off);
+                    return Err(err(ErrorKind::Host, "foreign or stale handle"));
+                };
+                let callee_inst = callee_fn.instance;
+                let callee_body = callee_fn.body;
+                if callee_fn.host.is_none()
+                    && let Some(callee_fast) =
+                        get_or_compile_ref(&instances[callee_inst].module, callee_body)
+                {
+                    let old_nloc = cur_func.num_locals as usize;
+                    let new_nloc = callee_fast.num_locals as usize;
+                    let Some(next_active_locals) = active_local_slots
+                        .saturating_sub(old_nloc)
+                        .checked_add(new_nloc)
+                        .filter(|&n| n <= max_local_slots_limit)
+                    else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        refund_on_trap!($src_off);
+                        return Err(err(ErrorKind::ResourceLimit, "active local slots limit"));
+                    };
+                    let stack_ok = cur_logical_base
+                        .checked_add(callee_fast.stack_peak)
+                        .is_some_and(|h| h <= max_stack_height);
+                    let labels_ok = active_labels
+                        .checked_add(callee_fast.max_nesting)
+                        .is_some_and(|n| n <= max_labels_limit);
+                    if stack_ok && labels_ok {
+                        if callee_inst == cur_inst {
+                            let needed = cur_reg_base + callee_fast.slots as usize;
+                            if needed > reg_bank.len() {
+                                if reg_bank.try_reserve(needed - reg_bank.len()).is_err() {
+                                    if FUEL {
+                                        *fuel = Some(remaining_fuel);
+                                    }
+                                    refund_on_trap!($src_off);
+                                    return Err(err(
+                                        ErrorKind::ResourceLimit,
+                                        "frame allocation failed",
+                                    ));
+                                }
+                                reg_bank.resize(needed, 0);
+                            }
+                            let arg_src = cur_reg_base + $arg_base as usize;
+                            let argc = $arg_count as usize;
+                            if argc > 0 && arg_src != cur_reg_base {
+                                reg_bank.copy_within(arg_src..arg_src + argc, cur_reg_base);
+                            }
+                            if new_nloc > argc {
+                                reg_bank[cur_reg_base + argc..cur_reg_base + new_nloc].fill(0);
+                            }
+                            active_local_slots = next_active_locals;
+                            cur_body = callee_body;
+                            cur_handle = callee_handle;
+                            cur_func = callee_fast;
+                            ops = &cur_func.ops;
+                            consts = &cur_func.consts;
+                            mem0_64 = cur_func.mem0_is_64;
+                            regs = &mut reg_bank[cur_reg_base..];
+                            ip = 0;
+                            continue;
+                        } else {
+                            if FUEL {
+                                *fuel = Some(remaining_fuel);
+                            }
+                            break InnerExit::CrossInstanceTailCall {
+                                callee_handle,
+                                callee_inst,
+                                callee_body,
+                                arg_base: $arg_base,
+                                arg_count: $arg_count,
                                 src_off: $src_off,
                             };
                         }
@@ -5510,6 +5755,112 @@ fn dispatch_inner<const FUEL: bool, const DENSE: bool>(
                         src_off
                     );
                 }
+                RegOp::ReturnCall { call_idx, src_off } => {
+                    let site = cur_func.call_sites[call_idx as usize];
+                    let callee_handle = inst_funcs[site.func_idx as usize];
+                    inline_tail_call_target!(
+                        callee_handle,
+                        site.arg_base,
+                        site.arg_count,
+                        site.meta_at_call,
+                        src_off
+                    );
+                }
+                RegOp::ReturnCallIndirect { call_idx, src_off } => {
+                    let site = cur_func.call_indirect_sites[call_idx as usize];
+                    let raw_ix = regs[site.index_reg as usize];
+                    let ix = if site.table_is_64 {
+                        raw_ix
+                    } else {
+                        raw_ix as u32 as u64
+                    };
+                    let tab_h = inst_tabs[site.table_idx as usize];
+                    let tab = &tabs[tab_h.0.index];
+                    let Some(&val) = usize::try_from(ix).ok().and_then(|i| tab.values.get(i))
+                    else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        refund_on_trap!(src_off);
+                        return Err(trap("table out of bounds"));
+                    };
+                    let Value::Ref(RefValue::Func(callee_handle)) = val else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        refund_on_trap!(src_off);
+                        return Err(trap("null indirect call"));
+                    };
+                    let Some(callee_fn) = funcs
+                        .get_live(callee_handle.0.index, callee_handle.0.generation)
+                        .filter(|_| callee_handle.0.store == store_id)
+                    else {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        refund_on_trap!(src_off);
+                        return Err(err(ErrorKind::Host, "foreign or stale handle"));
+                    };
+                    let expected_canonical = inst_canonical[site.type_idx as usize];
+                    let compatible = if callee_fn.canonical == expected_canonical {
+                        true
+                    } else {
+                        let Ok(guard) = canonical_lock.lock() else {
+                            if FUEL {
+                                *fuel = Some(remaining_fuel);
+                            }
+                            refund_on_trap!(src_off);
+                            return Err(err(ErrorKind::Host, "canonical registry poisoned"));
+                        };
+                        match guard.is_subtype(
+                            callee_fn.canonical,
+                            expected_canonical,
+                            false,
+                            max_type_work,
+                        ) {
+                            Ok(ok) => ok,
+                            Err(e) => {
+                                if FUEL {
+                                    *fuel = Some(remaining_fuel);
+                                }
+                                refund_on_trap!(src_off);
+                                return Err(e);
+                            }
+                        }
+                    };
+                    if !compatible {
+                        if FUEL {
+                            *fuel = Some(remaining_fuel);
+                        }
+                        refund_on_trap!(src_off);
+                        return Err(trap("indirect call type mismatch"));
+                    }
+                    inline_tail_call_target!(
+                        callee_handle,
+                        site.arg_base,
+                        site.arg_count,
+                        site.meta_at_call,
+                        src_off
+                    );
+                }
+                RegOp::WideArith { kind, base } => {
+                    let b = base as usize;
+                    let bits = match kind {
+                        0 | 1 => {
+                            let a = (u128::from(regs[b + 1]) << 64) | u128::from(regs[b]);
+                            let rhs = (u128::from(regs[b + 3]) << 64) | u128::from(regs[b + 2]);
+                            if kind == 0 {
+                                a.wrapping_add(rhs)
+                            } else {
+                                a.wrapping_sub(rhs)
+                            }
+                        }
+                        2 => ((regs[b] as i64 as i128) * (regs[b + 1] as i64 as i128)) as u128,
+                        _ => u128::from(regs[b]) * u128::from(regs[b + 1]),
+                    };
+                    regs[b] = bits as u64;
+                    regs[b + 1] = (bits >> 64) as u64;
+                }
                 RegOp::Return { base, count } => {
                     if let Some(caller) = call_stack.pop() {
                         let released = cur_func.num_locals as usize;
@@ -5907,17 +6258,75 @@ fn run_loop<const FUEL: bool>(
                 cache_p1_idx = 1;
                 ip = 0;
             }
+            InnerExit::CrossInstanceTailCall {
+                callee_handle,
+                callee_inst,
+                callee_body,
+                arg_base,
+                arg_count,
+                src_off,
+            } => {
+                let cur_num_locals = store.instances[cur_inst].module.data.register_fast[cur_body]
+                    .get()
+                    .and_then(|o| o.as_deref())
+                    .unwrap()
+                    .num_locals as usize;
+                let (callee_slots, callee_num_locals) = {
+                    let f = store.instances[callee_inst].module.data.register_fast[callee_body]
+                        .get()
+                        .and_then(|o| o.as_deref())
+                        .unwrap();
+                    (f.slots as usize, f.num_locals as usize)
+                };
+                let needed = cur_reg_base + callee_slots;
+                if needed > reg_bank.len() {
+                    if reg_bank.try_reserve(needed - reg_bank.len()).is_err() {
+                        refund_on_trap!(src_off);
+                        return Err(err(ErrorKind::ResourceLimit, "frame allocation failed"));
+                    }
+                    reg_bank.resize(needed, 0);
+                }
+                let arg_src = cur_reg_base + arg_base as usize;
+                let argc = arg_count as usize;
+                if argc > 0 && arg_src != cur_reg_base {
+                    reg_bank.copy_within(arg_src..arg_src + argc, cur_reg_base);
+                }
+                if callee_num_locals > argc {
+                    reg_bank[cur_reg_base + argc..cur_reg_base + callee_num_locals].fill(0);
+                }
+                store.release_local_slots(cur_num_locals);
+                store.acquire_local_slots(callee_num_locals);
+                cur_inst = callee_inst;
+                cur_body = callee_body;
+                cur_handle = callee_handle;
+                cur_mem0 = resolve_mem0(store, callee_inst);
+                if let Some(i) = cur_mem0
+                    && store.mems[i].bytes.has_written_storage()
+                {
+                    store.mems[i].bytes.try_promote_dense();
+                }
+                cache_p0_idx = 0;
+                cache_p1_idx = 1;
+                ip = 0;
+            }
             InnerExit::ReturnTop { base, count: _ } => {
-                let entry_base = frames.last().unwrap().base;
+                let entry_frame = frames.last().unwrap();
+                let entry_base = entry_frame.base;
+                let entry_locals = entry_frame.locals.len();
                 stack.truncate(entry_base);
                 let regs = &reg_bank[cur_reg_base..];
                 let cur_func = store.instances[cur_inst].module.data.register_fast[cur_body]
                     .get()
                     .and_then(|o| o.as_deref())
                     .unwrap();
+                let cur_num_locals = cur_func.num_locals as usize;
                 for (i, &ty) in cur_func.result_types.iter().enumerate() {
                     stack.push(bits_to_value(ty, regs[base as usize + i]));
                 }
+                // Reconcile `active_local_slots` to `entry_frame.locals.len()` (which `execution.rs`
+                // releases on `FastOutcome::Returned`) in case a tail call replaced the entry frame.
+                store.release_local_slots(cur_num_locals);
+                store.acquire_local_slots(entry_locals);
                 return Ok(FastOutcome::Returned);
             }
         }
@@ -6633,9 +7042,9 @@ mod tests {
             let cfg = Config {
                 features: FeatureSet::all_phase3_core(),
                 limits: crate::ResourceLimits {
-                    max_module_bytes: 16 << 20,
-                    max_functions: 16_384,
-                    max_instructions: 2_000_000,
+                    max_module_bytes: 32 << 20,
+                    max_functions: 32_768,
+                    max_instructions: 4_000_000,
                     max_locals: 16_384,
                     max_total_locals: 1_000_000,
                     ..Default::default()
@@ -6892,5 +7301,250 @@ mod tests {
             }
             assert_eq!(res_pair[0], res_pair[1], "dense fuel={fuel} mismatch");
         }
+    }
+
+    #[test]
+    fn fast_register_tail_call_and_wide_arith_full_parity() {
+        let mut features = FeatureSet::stable_core();
+        features.tail_call = true;
+        features.wide_arithmetic = true;
+
+        // Module with:
+        // - f0: import env::host_add (i32) -> (i32)
+        // - f1: even(n) -> if n == 0 { 1 } else { return_call odd(n - 1) }  [3 extra locals]
+        // - f2: odd(n)  -> if n == 0 { 0 } else { return_call even(n - 1) } [0 extra locals]
+        // - f3: even_ind(n) -> if n == 0 { 1 } else { return_call_indirect type 0 table 0 (n-1, 1) }
+        // - f4: odd_ind(n)  -> if n == 0 { 0 } else { return_call_indirect type 0 table 0 (n-1, 0) }
+        // - f5: tail_host(x) -> return_call host_add(x + 10) [bails cleanly to decoded host tail call!]
+        // - f6: inf_tail(n) -> return_call inf_tail(n + 1) [cancellation & fuel test]
+        // - f7: wide_test(a: i64, b: i64) -> i64 (exercises i64.add128, sub128, mul_wide_s, mul_wide_u)
+        let types = vec![
+            2, // 2 types
+            0x60, 1, 0x7f, 1, 0x7f, // type 0: (i32) -> (i32)
+            0x60, 2, 0x7e, 0x7e, 1, 0x7e, // type 1: (i64, i64) -> (i64)
+        ];
+        let mut imps = vec![1];
+        imps.push(3);
+        imps.extend_from_slice(b"env");
+        imps.push(8);
+        imps.extend_from_slice(b"host_add");
+        imps.push(0x00);
+        imps.push(0);
+        let funcs = vec![7, 0, 0, 0, 0, 0, 0, 1];
+        let tbl = vec![1, 0x70, 0x00, 3]; // funcref len=3 (slot 2 null!)
+        let elem = vec![1, 0x00, 0x41, 0x00, 0x0b, 2, 3, 4]; // [even_ind, odd_ind]
+        let mut exps = vec![5];
+        for (name, idx) in [
+            ("even", 1u32),
+            ("even_ind", 3),
+            ("tail_host", 5),
+            ("inf_tail", 6),
+            ("wide_test", 7),
+        ] {
+            exps.push(name.len() as u8);
+            exps.extend_from_slice(name.as_bytes());
+            exps.push(0x00);
+            leb_u32(&mut exps, idx);
+        }
+
+        let b_even = vec![
+            0x20, 0, 0x45, 0x04, 0x7f, 0x41, 1, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 2, 0x0b,
+        ];
+        let b_odd = vec![
+            0x20, 0, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 1, 0x0b,
+        ];
+        let b_even_ind = vec![
+            0x20, 0, 0x45, 0x04, 0x7f, 0x41, 1, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x41, 1, 0x13, 0, 0,
+            0x0b,
+        ];
+        let b_odd_ind = vec![
+            0x20, 0, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x41, 0, 0x13, 0, 0,
+            0x0b,
+        ];
+        let b_tail_host = vec![0x20, 0, 0x41, 10, 0x6a, 0x12, 0];
+        let b_inf_tail = vec![0x20, 0, 0x41, 1, 0x6a, 0x12, 6];
+        // wide_test(a, b):
+        // (lo1, hi1) = mul_wide_s(a, b)
+        // (lo2, hi2) = mul_wide_u(a, b)
+        // (lo3, hi3) = add128(lo1, hi1, lo2, hi2)
+        // (lo4, hi4) = sub128(lo3, hi3, a, b)
+        // return lo4 ^ (hi4 * 31)
+        let b_wide = vec![
+            0x20, 0, 0x20, 1, 0xfc, 0x15, // (lo1, hi1)
+            0x20, 0, 0x20, 1, 0xfc, 0x16, // (lo2, hi2)
+            0xfc, 0x13, // add128 -> (lo3, hi3)
+            0x20, 0, 0x20, 1, 0xfc, 0x14, // sub128 -> (lo4, hi4)
+            0x42, 31, 0x7e, 0x85, // hi4 * 31 ^ lo4
+        ];
+        let mut code = vec![7];
+        code.extend_from_slice(&body(&[(3, 0x7f)], &b_even));
+        code.extend_from_slice(&body(&[], &b_odd));
+        code.extend_from_slice(&body(&[], &b_even_ind));
+        code.extend_from_slice(&body(&[], &b_odd_ind));
+        code.extend_from_slice(&body(&[], &b_tail_host));
+        code.extend_from_slice(&body(&[], &b_inf_tail));
+        code.extend_from_slice(&body(&[], &b_wide));
+
+        let wasm = wasm_mod(&[
+            sec(1, &types),
+            sec(2, &imps),
+            sec(3, &funcs),
+            sec(4, &tbl),
+            sec(7, &exps),
+            sec(9, &elem),
+            sec(10, &code),
+        ]);
+
+        // 1. Deep O(1) tail recursion (50,000 steps with max_call_depth = 2!), host tail call, and wide-arith parity.
+        let mut results = Vec::new();
+        for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+            let mut cfg = Config {
+                features,
+                ..Config::default()
+            };
+            cfg.limits.max_call_depth = 2;
+            let engine = Engine::with_execution_policy(cfg, policy).unwrap();
+            let module = engine.compile(&wasm).unwrap();
+            if policy == ExecutionPolicy::Register {
+                for bi in 0..7 {
+                    assert!(
+                        is_admitted(&module, bi),
+                        "body {bi} must be admitted by fast register tier"
+                    );
+                }
+            }
+            let mut store = Store::new(&engine);
+            let mut linker = Linker::new(&engine);
+            let host_fn = store
+                .create_host_func(
+                    crate::FuncType {
+                        params: vec![ValType::I32],
+                        results: vec![ValType::I32],
+                    },
+                    |args| {
+                        let Value::I32(x) = args[0] else { panic!() };
+                        Ok(vec![Value::I32(x.wrapping_mul(3).wrapping_add(1))])
+                    },
+                )
+                .unwrap();
+            linker
+                .define("env", "host_add", External::Func(host_fn))
+                .unwrap();
+            let inst = linker.instantiate(&mut store, &module).unwrap();
+            let get = |s: &Store, name: &str| match inst.export(s, name).unwrap() {
+                External::Func(f) => f,
+                _ => panic!(),
+            };
+            let f_even = get(&store, "even");
+            let f_ind = get(&store, "even_ind");
+            let f_host = get(&store, "tail_host");
+            let f_wide = get(&store, "wide_test");
+            let r_even = store.invoke(f_even, &[Value::I32(50_000)]).unwrap();
+            let r_odd = store.invoke(f_even, &[Value::I32(50_001)]).unwrap();
+            let r_ind = store.invoke(f_ind, &[Value::I32(10_000)]).unwrap();
+            let r_host = store.invoke(f_host, &[Value::I32(7)]).unwrap();
+            let r_w1 = store
+                .invoke(f_wide, &[Value::I64(i64::MIN), Value::I64(-1)])
+                .unwrap();
+            let r_w2 = store
+                .invoke(
+                    f_wide,
+                    &[Value::I64(-123_456_789_012_345), Value::I64(987_654_321)],
+                )
+                .unwrap();
+            assert_eq!(store.active_local_slots, 0, "local slots leaked");
+            results.push((r_even, r_odd, r_ind, r_host, r_w1, r_w2));
+        }
+        assert_eq!(
+            results[0], results[1],
+            "Register != Decoded on tail_call/wide"
+        );
+        assert_eq!(
+            results[1].0,
+            crate::RunOutcome::Returned(vec![Value::I32(1)])
+        );
+        assert_eq!(
+            results[1].1,
+            crate::RunOutcome::Returned(vec![Value::I32(0)])
+        );
+        assert_eq!(
+            results[1].2,
+            crate::RunOutcome::Returned(vec![Value::I32(1)])
+        );
+        assert_eq!(
+            results[1].3,
+            crate::RunOutcome::Returned(vec![Value::I32(52)])
+        );
+
+        // 2. Instruction-exact fuel parity across tail calls (including host tail call & infinite tail loop).
+        for fuel in [0u64, 1, 2, 3, 4, 5, 7, 10, 15, 25, 40, 60] {
+            let mut pair = Vec::new();
+            for policy in [ExecutionPolicy::Decoded, ExecutionPolicy::Register] {
+                let mut cfg = Config {
+                    features,
+                    ..Config::default()
+                };
+                cfg.limits.fuel = Some(fuel);
+                let engine = Engine::with_execution_policy(cfg, policy).unwrap();
+                let module = engine.compile(&wasm).unwrap();
+                let mut store = Store::new(&engine);
+                let mut linker = Linker::new(&engine);
+                let host_fn = store
+                    .create_host_func(
+                        crate::FuncType {
+                            params: vec![ValType::I32],
+                            results: vec![ValType::I32],
+                        },
+                        |args| Ok(args.to_vec()),
+                    )
+                    .unwrap();
+                linker
+                    .define("env", "host_add", External::Func(host_fn))
+                    .unwrap();
+                let inst = linker.instantiate(&mut store, &module).unwrap();
+                let External::Func(f_even) = inst.export(&store, "even").unwrap() else {
+                    panic!()
+                };
+                let out = store.invoke(f_even, &[Value::I32(5)]);
+                assert_eq!(store.active_local_slots, 0);
+                pair.push((out.map_err(|e| (e.kind, e.message)), store.current_fuel));
+            }
+            assert_eq!(pair[0], pair[1], "tail_call fuel={fuel} mismatch");
+        }
+
+        // 3. Cooperative cancellation terminates infinite tail recursion cleanly.
+        let cfg = Config {
+            features,
+            ..Config::default()
+        };
+        let engine = Engine::with_execution_policy(cfg, ExecutionPolicy::Register).unwrap();
+        let module = engine.compile(&wasm).unwrap();
+        let mut store = Store::new(&engine);
+        let mut linker = Linker::new(&engine);
+        let host_fn = store
+            .create_host_func(
+                crate::FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![ValType::I32],
+                },
+                |args| Ok(args.to_vec()),
+            )
+            .unwrap();
+        linker
+            .define("env", "host_add", External::Func(host_fn))
+            .unwrap();
+        let inst = linker.instantiate(&mut store, &module).unwrap();
+        let External::Func(f_inf) = inst.export(&store, "inf_tail").unwrap() else {
+            panic!()
+        };
+        let cancel = store.cancellation_token();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cancel.cancel();
+        });
+        let err = store.invoke(f_inf, &[Value::I32(0)]).unwrap_err();
+        canceller.join().unwrap();
+        assert_eq!(err.kind, ErrorKind::ResourceLimit);
+        assert_eq!(store.active_local_slots, 0);
     }
 }

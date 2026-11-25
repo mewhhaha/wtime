@@ -437,6 +437,19 @@ impl A64Asm {
         );
     }
 
+    /// `add rd, rn, rm, lsl #shift` (shifted register, 1-cycle small-constant multiply building block).
+    pub fn add_r_lsl(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg, shift: u8) {
+        debug_assert!(shift < if is64 { 64 } else { 32 });
+        self.emit(
+            Self::sf(is64)
+                | 0x0b00_0000
+                | ((rm.0 as u32) << 16)
+                | ((u32::from(shift) & 0x3f) << 10)
+                | ((rn.0 as u32) << 5)
+                | rd.0 as u32,
+        );
+    }
+
     /// `add xd, xn, wm, uxtw #0` (zero-extends 32-bit `wm` and adds to 64-bit `xn` in 1 insn).
     pub fn add_ext_uxtw(&mut self, rd: Reg, rn: Reg, rm: Reg) {
         self.emit(0x8b20_4000 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | rd.0 as u32);
@@ -457,6 +470,19 @@ impl A64Asm {
             Self::sf(is64)
                 | 0x4b00_0000
                 | ((rm.0 as u32) << 16)
+                | ((rn.0 as u32) << 5)
+                | rd.0 as u32,
+        );
+    }
+
+    /// `sub rd, rn, rm, lsl #shift` (shifted register).
+    pub fn sub_r_lsl(&mut self, is64: bool, rd: Reg, rn: Reg, rm: Reg, shift: u8) {
+        debug_assert!(shift < if is64 { 64 } else { 32 });
+        self.emit(
+            Self::sf(is64)
+                | 0x4b00_0000
+                | ((rm.0 as u32) << 16)
+                | ((u32::from(shift) & 0x3f) << 10)
                 | ((rn.0 as u32) << 5)
                 | rd.0 as u32,
         );

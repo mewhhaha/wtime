@@ -141,6 +141,8 @@ pub struct CtxLayout {
     pub pinned_global: Option<u32>,
     /// `Some(fixed_bytes)` iff memory 0 is fixed-size (`min == max`), freeing `R13` as a 4th callee-saved GP reg.
     pub fixed_mem_bytes: Option<u64>,
+    /// Minimum guaranteed byte length of linear memory 0 (`min_pages * 65_536`; never shrinks).
+    pub mem_min_bytes: u64,
     /// `true` iff linear memory 0 uses 64-bit (`memory64`) addressing.
     pub memory64: bool,
     /// `true` iff standalone `ET_EXEC` reserves an `8 GiB + 64 KiB` `PROT_NONE` guard region with
@@ -202,6 +204,9 @@ impl CtxLayout {
         Ok(Self {
             pinned_global: module.pinned_global,
             fixed_mem_bytes: module.fixed32,
+            mem_min_bytes: module
+                .memory
+                .map_or(0u64, |(min_p, _)| min_p.saturating_mul(65_536)),
             memory64: module.memory64,
             use_guard_pages: module.target == X64Target::StandaloneExec
                 && !module.memory64
@@ -1097,7 +1102,10 @@ fn compile_wasm_to_x64_so_inner(
     let mut body_spans_opt: Option<Vec<(usize, usize)>> = None;
     let mut pre_body_hashes: Option<std::sync::Arc<Vec<[u8; 32]>>> = None;
     let mut pre_vidx: Option<inc_cache::ValIndexData> = None;
-    type PreRawWait = std::sync::Arc<(Mutex<Option<Option<Vec<u8>>>>, std::sync::Condvar)>;
+    type PreRawWait = std::sync::Arc<(
+        Mutex<Option<Option<inc_cache::RawIncCache>>>,
+        std::sync::Condvar,
+    )>;
     let mut pre_raw_state: Option<([u8; 32], PreRawWait)> = None;
     let mut pre_admit_summaries: Option<Vec<Option<module::BodyAdmitSummary>>> = None;
 
@@ -1134,7 +1142,7 @@ fn compile_wasm_to_x64_so_inner(
                             });
                             if raw_wait.is_none_or(|w| !w.is_zero()) {
                                 let st = std::sync::Arc::new((
-                                    Mutex::new(None::<Option<Vec<u8>>>),
+                                    Mutex::new(None::<Option<inc_cache::RawIncCache>>),
                                     std::sync::Condvar::new(),
                                 ));
                                 let st_bg = std::sync::Arc::clone(&st);
@@ -1329,7 +1337,8 @@ fn compile_wasm_to_x64_so_inner(
     let n_imports = module.imports.len();
     let n_defs = validated.decoded().code.len();
     let n_workers = resolve_jobs(opts.jobs).min(n_defs.max(1));
-    let ns_ssa_opt = AtomicU64::new(0);
+    let ns_lower5a = AtomicU64::new(0);
+    let ns_opt5c = AtomicU64::new(0);
     let ns_regalloc = AtomicU64::new(0);
     let ns_emit = AtomicU64::new(0);
     let mut d_inline_effects = std::time::Duration::ZERO;
@@ -1426,9 +1435,10 @@ fn compile_wasm_to_x64_so_inner(
             } else {
                 None
             };
-            let loaded = raw.and_then(|bytes| {
+            let loaded = raw.and_then(|raw_inc| {
                 inc_cache::decode_verified_inc_cache(
-                    std::sync::Arc::new(bytes),
+                    std::sync::Arc::new(raw_inc.base),
+                    raw_inc.delta.as_deref(),
                     &abi_hash,
                     n_imports,
                     n_defs,
@@ -1443,7 +1453,7 @@ fn compile_wasm_to_x64_so_inner(
         } else if let Some(mut body_hashes) = inc_cache::try_vec_with_capacity(n_defs) {
             body_hashes.resize(n_defs, [0u8; 32]);
             let raw_state = std::sync::Arc::new((
-                Mutex::new(None::<Option<Vec<u8>>>),
+                Mutex::new(None::<Option<inc_cache::RawIncCache>>),
                 std::sync::Condvar::new(),
             ));
             let spawned_raw = {
@@ -1516,9 +1526,10 @@ fn compile_wasm_to_x64_so_inner(
                 None
             };
             let body_hashes = std::sync::Arc::new(body_hashes);
-            let loaded = raw.and_then(|bytes| {
+            let loaded = raw.and_then(|raw_inc| {
                 inc_cache::decode_verified_inc_cache(
-                    std::sync::Arc::new(bytes),
+                    std::sync::Arc::new(raw_inc.base),
+                    raw_inc.delta.as_deref(),
                     &abi_hash,
                     n_imports,
                     n_defs,
@@ -1563,7 +1574,8 @@ fn compile_wasm_to_x64_so_inner(
                 prev_cache,
                 prev_topo_cycle,
                 &warm_budget,
-                &ns_ssa_opt,
+                &ns_lower5a,
+                &ns_opt5c,
                 &ns_regalloc,
                 &ns_emit,
                 &mut d_inline_effects,
@@ -1714,7 +1726,7 @@ fn compile_wasm_to_x64_so_inner(
                     }
                 }
             }
-            ns_ssa_opt.fetch_add(loc_ssa, Ordering::Relaxed);
+            ns_lower5a.fetch_add(loc_ssa, Ordering::Relaxed);
             worker_irs
                 .lock()
                 .unwrap_or_else(|g| g.into_inner())
@@ -1813,16 +1825,15 @@ fn compile_wasm_to_x64_so_inner(
                         (|| {
                             let mut counts = inc_cache::try_vec_with_capacity(n_defs)?;
                             counts.resize(n_defs, 0u32);
-                            let mut edges = inc_cache::try_vec_with_capacity(n_defs)?;
                             for cs in &pre_inline_callees {
-                                let mut row = inc_cache::try_vec_with_capacity(cs.len())?;
                                 for &(c, cnt) in cs {
-                                    row.push(c as usize);
                                     counts[c as usize] = counts[c as usize].saturating_add(cnt);
                                 }
-                                edges.push(row);
                             }
-                            let (in_cycle, topo) = opt::try_call_graph_sccs_from_edges(&edges)?;
+                            let (in_cycle, topo) =
+                                opt::try_call_graph_sccs_from_pair_lookup(n_defs, |i| {
+                                    pre_inline_callees[i].as_slice()
+                                })?;
                             let opt_irs: Vec<Option<IrFunc>> =
                                 inc_cache::try_vec_with_capacity(n_defs)?;
                             Some((counts, in_cycle, topo, opt_irs))
@@ -1894,14 +1905,22 @@ fn compile_wasm_to_x64_so_inner(
                         inc_ctx = None;
                         if pre_summary_complete {
                             let mut counts = vec![0u32; n_defs];
-                            let mut edges: Vec<Vec<usize>> = Vec::with_capacity(n_defs);
                             for cs in &pre_inline_callees {
-                                edges.push(cs.iter().map(|&(c, _)| c as usize).collect());
                                 for &(c, cnt) in cs {
                                     counts[c as usize] = counts[c as usize].saturating_add(cnt);
                                 }
                             }
-                            let (in_cycle, topo) = opt::call_graph_sccs_from_edges(&edges);
+                            let (in_cycle, topo) =
+                                opt::try_call_graph_sccs_from_pair_lookup(n_defs, |i| {
+                                    pre_inline_callees[i].as_slice()
+                                })
+                                .unwrap_or_else(|| {
+                                    let edges: Vec<Vec<usize>> = pre_inline_callees
+                                        .iter()
+                                        .map(|cs| cs.iter().map(|&(c, _)| c as usize).collect())
+                                        .collect();
+                                    opt::call_graph_sccs_from_edges(&edges)
+                                });
                             let mut opt_irs: Vec<Option<IrFunc>> =
                                 std::mem::take(&mut irs).into_iter().map(Some).collect();
                             opt::inline_small_helpers_subset_parallel_with_pre(
@@ -2067,7 +2086,7 @@ fn compile_wasm_to_x64_so_inner(
                     }
                 }
             }
-            ns_ssa_opt.fetch_add(loc_ssa, Ordering::Relaxed);
+            ns_opt5c.fetch_add(loc_ssa, Ordering::Relaxed);
             ns_regalloc.fetch_add(loc_ra, Ordering::Relaxed);
             worker_allocs
                 .lock()
@@ -2341,6 +2360,8 @@ fn compile_wasm_to_x64_so_inner(
                 hit_inline_cap: track.hit_module_cap,
                 funcs: cached_funcs,
                 backing: None,
+                base_checksum: None,
+                delta_dirty: Vec::new(),
             }));
         }
         if n_defs >= 256 {
@@ -2975,14 +2996,18 @@ fn compile_wasm_to_x64_so_inner(
 
     if std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1") {
         let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
-        let ssa_ms = (ns_ssa_opt.load(Ordering::Relaxed) as f64) / 1e6;
+        let l5a_ms = (ns_lower5a.load(Ordering::Relaxed) as f64) / 1e6;
+        let o5c_ms = (ns_opt5c.load(Ordering::Relaxed) as f64) / 1e6;
+        let ssa_ms = l5a_ms + o5c_ms;
         let ra_ms = (ns_regalloc.load(Ordering::Relaxed) as f64) / 1e6;
         let em_ms = (ns_emit.load(Ordering::Relaxed) as f64) / 1e6;
         eprintln!(
-            "wtime-aot x64 timings: validate={:.2}ms admit={:.2}ms ssa_opt={:.2}ms(cpu) inline_eff={:.2}ms regalloc={:.2}ms(cpu) elide={:.2}ms emit={:.2}ms(cpu) link={:.2}ms total={:.2}ms (fns={} reused={} workers={} text={}B rodata={}B)",
+            "wtime-aot x64 timings: validate={:.2}ms admit={:.2}ms ssa_opt={:.2}ms(cpu) [l5a={:.2}+o5c={:.2}] inline_eff={:.2}ms regalloc={:.2}ms(cpu) elide={:.2}ms emit={:.2}ms(cpu) link={:.2}ms total={:.2}ms (fns={} reused={} workers={} text={}B rodata={}B)",
             d_validate.as_secs_f64() * 1000.0,
             d_admit.as_secs_f64() * 1000.0,
             ssa_ms,
+            l5a_ms,
+            o5c_ms,
             d_inline_effects.as_secs_f64() * 1000.0,
             ra_ms,
             d_elide.as_secs_f64() * 1000.0,
@@ -3014,7 +3039,8 @@ fn try_compile_defs_incremental(
     mut prev_cache: inc_cache::IncCacheData,
     prev_topo_cycle: Option<(&[usize], &[bool])>,
     budget: &CompileBudget,
-    ns_ssa_opt: &AtomicU64,
+    ns_lower5a: &AtomicU64,
+    ns_opt5c: &AtomicU64,
     ns_regalloc: &AtomicU64,
     ns_emit: &AtomicU64,
     d_inline_effects: &mut std::time::Duration,
@@ -3135,7 +3161,7 @@ fn try_compile_defs_incremental(
                     }
                 }
             }
-            ns_ssa_opt.fetch_add(loc_ssa, Ordering::Relaxed);
+            ns_lower5a.fetch_add(loc_ssa, Ordering::Relaxed);
         };
         std::thread::scope(|s| {
             for _ in 1..workers {
@@ -3244,22 +3270,11 @@ fn try_compile_defs_incremental(
             };
             (c, t)
         } else {
-            let Some(mut cur_edges) = inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs) else {
-                return Ok(None);
-            };
-            for (bi, changed_row) in pre_callees_changed.iter().enumerate() {
-                let row: &[(u32, u32)] = changed_row
+            let Some(pair) = opt::try_call_graph_sccs_from_pair_lookup(n_defs, |bi| {
+                pre_callees_changed[bi]
                     .as_deref()
-                    .unwrap_or(&prev_cache.funcs[bi].pre_inline_callees);
-                let Some(mut cur_row) = inc_cache::try_vec_with_capacity(row.len()) else {
-                    return Ok(None);
-                };
-                for &(c, _) in row {
-                    cur_row.push(c as usize);
-                }
-                cur_edges.push(cur_row);
-            }
-            let Some(pair) = opt::try_call_graph_sccs_from_edges(&cur_edges) else {
+                    .unwrap_or(&prev_cache.funcs[bi].pre_inline_callees)
+            }) else {
                 return Ok(None);
             };
             pair
@@ -3274,25 +3289,18 @@ fn try_compile_defs_incremental(
     };
     cycle_or_body_changed.resize(n_defs, false);
     if any_callees_changed {
-        let (Some(mut prev_edges), Some(mut prev_call_counts)) = (
-            inc_cache::try_vec_with_capacity::<Vec<usize>>(n_defs),
-            inc_cache::try_vec_with_capacity::<u32>(n_defs),
-        ) else {
+        let Some(mut prev_call_counts) = inc_cache::try_vec_with_capacity::<u32>(n_defs) else {
             return Ok(None);
         };
         prev_call_counts.resize(n_defs, 0u32);
         for bi in 0..n_defs {
-            let prev_cs = &prev_cache.funcs[bi].pre_inline_callees;
-            let Some(mut prev_row) = inc_cache::try_vec_with_capacity(prev_cs.len()) else {
-                return Ok(None);
-            };
-            for &(c, cnt) in prev_cs {
-                prev_row.push(c as usize);
+            for &(c, cnt) in &prev_cache.funcs[bi].pre_inline_callees {
                 prev_call_counts[c as usize] = prev_call_counts[c as usize].saturating_add(cnt);
             }
-            prev_edges.push(prev_row);
         }
-        let Some((prev_in_cycle, _)) = opt::try_call_graph_sccs_from_edges(&prev_edges) else {
+        let Some((prev_in_cycle, _)) = opt::try_call_graph_sccs_from_pair_lookup(n_defs, |bi| {
+            prev_cache.funcs[bi].pre_inline_callees.as_slice()
+        }) else {
             return Ok(None);
         };
         for bi in 0..n_defs {
@@ -3695,7 +3703,7 @@ fn try_compile_defs_incremental(
                         }
                     }
                 }
-                ns_ssa_opt.fetch_add(loc_ssa, Ordering::Relaxed);
+                ns_opt5c.fetch_add(loc_ssa, Ordering::Relaxed);
                 ns_regalloc.fetch_add(loc_ra, Ordering::Relaxed);
             };
             std::thread::scope(|s| {
@@ -3886,6 +3894,8 @@ fn try_compile_defs_incremental(
         }
     }
     let prev_backing = prev_cache.backing.take();
+    let prev_base_checksum = prev_cache.base_checksum;
+    let mut merged_delta_dirty = std::mem::take(&mut prev_cache.delta_dirty);
     let prev_backing_slice = prev_backing.as_deref().map(Vec::as_slice);
     let Some(mut updated_funcs) = inc_cache::try_vec_with_capacity::<inc_cache::CachedFn>(n_defs)
     else {
@@ -3962,12 +3972,29 @@ fn try_compile_defs_incremental(
     }
 
     if save_ok {
+        if prev_base_checksum.is_some() {
+            if merged_delta_dirty.try_reserve(dirty_indices.len()).is_ok() {
+                merged_delta_dirty.extend_from_slice(&dirty_indices);
+                merged_delta_dirty.sort_unstable();
+                merged_delta_dirty.dedup();
+            } else {
+                merged_delta_dirty.clear();
+            }
+        } else {
+            merged_delta_dirty.clear();
+        }
         let updated = std::sync::Arc::new(inc_cache::IncCacheData {
             abi_hash,
             global_words: module.globals.len().div_ceil(64),
             hit_inline_cap: false,
             funcs: updated_funcs,
             backing: prev_backing,
+            base_checksum: if prev_base_checksum.is_some() && !merged_delta_dirty.is_empty() {
+                prev_base_checksum
+            } else {
+                None
+            },
+            delta_dirty: merged_delta_dirty,
         });
         Ok(Some((
             None,

@@ -1,4 +1,4 @@
-# Release readiness (`v0.1.1`)
+# Release readiness (`v0.1.2`)
 
 The release decision is verified by `python3 -B tools/checks/release_audit.py`.
 It joins the frozen proposal/source lock ([spec-lock.json](architecture/spec-lock.json)),
@@ -12,12 +12,12 @@ built executables, and documentation hashes, no semantic ledger owner remains
 pending, and no excluded or unspecified behavior is claimed as supported. Any
 missing, stale, unsupported, empty, or hash-mismatched item exits nonzero.
 
-## `v0.1.1` Target Scope
+## `v0.1.2` Target Scope
 
 - **Supported target**: `x86_64-unknown-linux-gnu` (`rustc 1.99.0`).
 - **Deferred target**: Native `aarch64-unknown-linux-gnu` release verification
   is planned for a follow-up release (the CI workflow runs native Ubuntu ARM
-  checks in `.github/workflows/ci.yml`, but local `v0.1.1` release evidence is
+  checks in `.github/workflows/ci.yml`, but local `v0.1.2` release evidence is
   scoped explicitly to `x86_64-unknown-linux-gnu`).
 - **Excluded scope**: JS/browser embedding APIs (`content-security-policy`,
   `ecmascript_module_integration`, `javascript_bigint_to_webassembly_i64_integration`,

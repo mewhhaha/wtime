@@ -2,6 +2,60 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.2] - 2026-11-25
+
+Major pure-Rust AOT codegen, compile-pipeline, Wasm 3.0 backend, and opt-in
+register-interpreter release across `wtime-runtime` and `tools/wtime-aot`. Core
+crate `#![forbid(unsafe_code)]`, zero external production dependencies, public
+APIs, and `x86_64-unknown-linux-gnu` release scope remain unchanged.
+
+### Core interpreter (`crates/wtime-runtime`)
+- **Opt-in lazy register tier (`--features register-executor`)**:
+  - Contiguous dense-memory fast path for active memories `<= 16 MiB` (with
+    fallible promotion and clean sparse demotion past `16 MiB`), bringing the 4
+    kernel workloads to **3.92–4.61×** over the decoded tier and 8-page scatter/
+    gather to **3.32×**, while lazily admitting `99.7%` of a multi-thousand-fn
+    application.
+  - Native O(1)-frame **`tail_call`** (`return_call`, `return_call_indirect`)
+    reusing active frames in place with instruction-exact fuel parity,
+    cooperative cancellation on infinite tail recursion, and clean host/fallback
+    materialization, plus native **`wide-arithmetic`** (`i64.add128`,
+    `i64.sub128`, `i64.mul_wide_s`, `i64.mul_wide_u`).
+
+### Ahead-of-time compiler (`tools/wtime-aot`, standalone tool)
+- **Wasm 3.0 backend features on BOTH `--backend x64` and `--backend aarch64`**:
+  - Full **`relaxed_simd`** support (all 20 opcodes `0xfd 0x100..=0x113`,
+    bit-exact with `wtime-runtime`).
+  - Full **`tail_call`** support (`return_call`, `return_call_indirect`) with
+    true O(1)-stack frame reuse (`jmp`/`b`/`br`) whenever `callee_arg_stack <=
+    caller_param_stack`, overflow multi-value return-buffer forwarding, and
+    clean growing-arity fallback.
+- **Compile & incremental cache pipeline (`--backend x64`)**:
+  - Compact `.delta` incremental sidecars (`WTX64DLT`, v1) avoiding full base
+    `.bin` rewrites on small edits (`wait_inc` `4.46 ms -> 0.00 ms`, byte-exact
+    `.so` output), O(1) epoch-stamped `def_stamp` in `optimize_ir`, filtered
+    inlining strata, zero-alloc pair-lookup SCCs, and `Stage2Scratch` capacity
+    capping after LPT giant functions.
+  - On a **5.72 MiB, 4,449-function** SIMD application (16T): **134.0 ms** cold
+    (**2.77×** faster than Wasmtime `49.0.3` at `371.6 ms`), **24.4 ms** on a
+    1-function edit (**14.0×** faster than Wasmtime at `342.2 ms`), **8.39 ms**
+    warm CLI cache hit, **0.030 ms** warm `.so` load (**61×** faster), and
+    **16.2%** smaller artifact (`7.74 MiB` vs `9.23 MiB`).
+- **Peak x64 & AArch64 codegen (strictly IEEE-754 bit-exact, zero FMA)**:
+  - Sparse equality-filtered counted-loop narrowing, AVX2 3-tap blur + `f64x4`
+    SLP, hoisted/deduplicated magic-constant loop division, bit-exact 2×-unrolled
+    AVX2/SSE2/NEON `F64AxpyLoop` auto-vectorization (`matmul_f64` **40.62 µs**,
+    **3.42×** faster than Wasmtime and **1.90×** faster than Rust `-O3`),
+    backward cold-trap block sinking, and 1-branch wrap-proof `memory64` bounds
+    checks.
+  - `--backend aarch64` parity: multi-core builds, `a64-inc` incremental cache,
+    standalone guard-page BCE + Ryū/WASI parity, `val_upper32_zero` redundant-
+    `uxtw` elision, shifted-`ADD`/`SUB` small-constant multiply strength
+    reduction, and cold-block sinking.
+- **Expanded benchmarks**: added `matmul_f64` and `heapsort_i32` fixtures to
+  the 5-engine suite (`tools/wtime-aot/bench.py`, **6.25×** 6-kernel geomean
+  vs. Wasmtime `49.0.3`) and regenerated all SVG charts.
+
 ## [0.1.1] - 2026-11-24
 
 Backwards-compatible performance and AOT-capability release across the safe-Rust

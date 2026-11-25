@@ -219,7 +219,10 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     }
                 }
             }
-            Term::Return { .. } | Term::Unreachable => {}
+            Term::Return { .. }
+            | Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::Unreachable => {}
         }
     }
     let mut visited = vec![false; n_blocks];
@@ -241,7 +244,42 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
     }
     post.reverse();
-    let block_order = post;
+    // Cold trap/unreachable block identification + backward propagation in reverse RPO,
+    // sinking cold trap/abort blocks out of hot loops to the tail of the function.
+    let mut is_trap_blk = vec![false; n_blocks];
+    for &b in &post {
+        let bb = &ir.blocks[b as usize];
+        let mut trap = matches!(bb.term, Term::Unreachable);
+        if !trap {
+            for inst in &bb.insts {
+                if matches!(inst.op, Op::Trap(_) | Op::MemGrow(_)) {
+                    trap = true;
+                    break;
+                }
+            }
+        }
+        is_trap_blk[b as usize] = trap;
+    }
+    for &b in post.iter().rev() {
+        let bu = b as usize;
+        if b == 0 || is_trap_blk[bu] {
+            continue;
+        }
+        if !succs[bu].is_empty() && succs[bu].iter().all(|&s| is_trap_blk[s as usize]) {
+            is_trap_blk[bu] = true;
+        }
+    }
+    let mut block_order = Vec::with_capacity(post.len());
+    for &b in &post {
+        if b == 0 || !is_trap_blk[b as usize] {
+            block_order.push(b);
+        }
+    }
+    for &b in &post {
+        if b != 0 && is_trap_blk[b as usize] {
+            block_order.push(b);
+        }
+    }
     let n_ord = block_order.len();
     let mut ord_of = vec![u32::MAX; n_blocks];
     for (oi, &b) in block_order.iter().enumerate() {
@@ -257,6 +295,12 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     let mut max_out_args = 0i32;
     let mut max_ret_buf = 0i32;
     let mut has_calls = false;
+    let self_param_tys: Vec<Ty> = ir
+        .params
+        .iter()
+        .map(|&pv| ir.val_tys[pv.0 as usize])
+        .collect();
+    let self_param_stack = layout_args(&self_param_tys)?.stack_bytes;
     let mut pos = 0u32;
 
     for (oi, &bid) in block_order.iter().enumerate() {
@@ -307,6 +351,21 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
             last_use[v.0 as usize] = last_use[v.0 as usize].max(pos);
         });
+        match bb.term {
+            Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                let arg_tys: Vec<Ty> = ir
+                    .pool_slice(args)
+                    .iter()
+                    .map(|&v| ir.val_tys[v.0 as usize])
+                    .collect();
+                let arg_stack = layout_args(&arg_tys)?.stack_bytes;
+                if arg_stack > self_param_stack {
+                    has_calls = true;
+                    max_out_args = max_out_args.max(arg_stack);
+                }
+            }
+            _ => {}
+        }
         pos += 2;
         block_end[oi] = pos;
     }

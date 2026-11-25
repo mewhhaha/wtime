@@ -678,7 +678,10 @@ pub fn allocate_with_config_and_scratch(
         for &b in &scratch.postorder {
             let bb = &ir.blocks[b as usize];
             let mut trap = matches!(bb.term, Term::Unreachable);
-            let mut call = false;
+            let mut call = matches!(
+                bb.term,
+                Term::ReturnCall { .. } | Term::ReturnCallIndirect { .. }
+            );
             let mut store = false;
             let mut unchecked_mem = false;
             for inst in &bb.insts {
@@ -713,6 +716,24 @@ pub fn allocate_with_config_and_scratch(
             scratch.has_call_blk[b as usize] = call;
             scratch.has_store_blk[b as usize] = store;
             scratch.has_unchecked_mem_blk[b as usize] = unchecked_mem;
+        }
+        // Backward propagation in reverse RPO: any non-entry block whose every successor is a
+        // cold trap/unreachable block (e.g., error-formatting or abort-call helper blocks before
+        // `unreachable`) is itself cold and sunk to the function tail.
+        for &b in scratch.postorder.iter().rev() {
+            let bu = b as usize;
+            if b == 0 || scratch.is_trap_blk[bu] {
+                continue;
+            }
+            let ss = scratch.succ_offs[bu] as usize;
+            let se = scratch.succ_offs[bu + 1] as usize;
+            if ss < se
+                && scratch.succ_data[ss..se]
+                    .iter()
+                    .all(|&s| scratch.is_trap_blk[s as usize])
+            {
+                scratch.is_trap_blk[bu] = true;
+            }
         }
 
         let succ_offs_ro = &scratch.succ_offs;
@@ -771,53 +792,63 @@ pub fn allocate_with_config_and_scratch(
         reset_fill(&mut scratch.placed, n_blocks, false);
         let placed = &mut scratch.placed;
         let rpo_pos_ro = &scratch.rpo_pos;
-        for &seed in &scratch.postorder {
-            if placed[seed as usize] {
-                continue;
-            }
-            let mut cur = seed;
-            loop {
-                placed[cur as usize] = true;
-                block_order.push(cur);
-                let next = match ir.blocks[cur as usize].term {
-                    Term::Jump { target, .. } => (!placed[target.0 as usize]
-                        && !is_trap_blk[target.0 as usize])
-                        .then_some(target.0),
-                    Term::BranchIf {
-                        then_bb, else_bb, ..
-                    }
-                    | Term::CmpBranch {
-                        then_bb, else_bb, ..
-                    } => {
-                        let t_ok = !placed[then_bb.0 as usize];
-                        let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
-                        match (t_ok, e_ok) {
-                            (true, true) => {
-                                let ts = cand_score(cur, then_bb.0, true, placed);
-                                let es = cand_score(cur, else_bb.0, false, placed);
-                                let best = if (ts, rpo_pos_ro[then_bb.0 as usize])
-                                    <= (es, rpo_pos_ro[else_bb.0 as usize])
-                                {
-                                    then_bb.0
-                                } else {
-                                    else_bb.0
-                                };
-                                (!is_trap_blk[best as usize]).then_some(best)
-                            }
-                            (true, false) => {
-                                (!is_trap_blk[then_bb.0 as usize]).then_some(then_bb.0)
-                            }
-                            (false, true) => {
-                                (!is_trap_blk[else_bb.0 as usize]).then_some(else_bb.0)
-                            }
-                            (false, false) => None,
+        // Pass 1: place all hot / non-trap blocks in contiguous traces (sinking cold trap/abort
+        // blocks out of hot loops so they neither pollute I-cache nor split/clobber hot ranges).
+        // Pass 2: append remaining cold trap/unreachable blocks at the tail of the function.
+        for pass in 0..2 {
+            for &seed in &scratch.postorder {
+                if placed[seed as usize] {
+                    continue;
+                }
+                if pass == 0 && seed != 0 && is_trap_blk[seed as usize] {
+                    continue;
+                }
+                let mut cur = seed;
+                loop {
+                    placed[cur as usize] = true;
+                    block_order.push(cur);
+                    let next = match ir.blocks[cur as usize].term {
+                        Term::Jump { target, .. } => (!placed[target.0 as usize]
+                            && (pass == 1 || !is_trap_blk[target.0 as usize]))
+                            .then_some(target.0),
+                        Term::BranchIf {
+                            then_bb, else_bb, ..
                         }
+                        | Term::CmpBranch {
+                            then_bb, else_bb, ..
+                        } => {
+                            let t_ok = !placed[then_bb.0 as usize];
+                            let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
+                            match (t_ok, e_ok) {
+                                (true, true) => {
+                                    let ts = cand_score(cur, then_bb.0, true, placed);
+                                    let es = cand_score(cur, else_bb.0, false, placed);
+                                    let best = if (ts, rpo_pos_ro[then_bb.0 as usize])
+                                        <= (es, rpo_pos_ro[else_bb.0 as usize])
+                                    {
+                                        then_bb.0
+                                    } else {
+                                        else_bb.0
+                                    };
+                                    (pass == 1 || !is_trap_blk[best as usize]).then_some(best)
+                                }
+                                (true, false) => (pass == 1 || !is_trap_blk[then_bb.0 as usize])
+                                    .then_some(then_bb.0),
+                                (false, true) => (pass == 1 || !is_trap_blk[else_bb.0 as usize])
+                                    .then_some(else_bb.0),
+                                (false, false) => None,
+                            }
+                        }
+                        Term::BrTable { .. }
+                        | Term::Return { .. }
+                        | Term::ReturnCall { .. }
+                        | Term::ReturnCallIndirect { .. }
+                        | Term::Unreachable => None,
+                    };
+                    match next {
+                        Some(nxt) => cur = nxt,
+                        None => break,
                     }
-                    Term::BrTable { .. } | Term::Return { .. } | Term::Unreachable => None,
-                };
-                match next {
-                    Some(nxt) => cur = nxt,
-                    None => break,
                 }
             }
         }
@@ -848,6 +879,8 @@ pub fn allocate_with_config_and_scratch(
     let clobbers = &mut scratch.clobbers;
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
+    let self_param_stack_bytes =
+        layout_args_stack_bytes(ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]))?;
 
     let mut tick = 0u32;
     let mut scan_steps: usize = 0;
@@ -987,6 +1020,13 @@ pub fn allocate_with_config_and_scratch(
                         xmm_mask: 0,
                     });
                 }
+                Op::F64AxpyLoop { .. } => {
+                    clobbers.push(Clobber {
+                        pos: pos_use,
+                        gp_mask: MASK_RAX_RDX | MASK_RCX,
+                        xmm_mask: (1 << 0) | (1 << 1) | (1 << 2),
+                    });
+                }
                 _ => {}
             }
             if let Some(res) = inst.res {
@@ -1016,6 +1056,26 @@ pub fn allocate_with_config_and_scratch(
                 last_use[vi] = pos_term;
             }
         });
+        match bb.term {
+            Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                let arg_stack_bytes = layout_args_stack_bytes(
+                    ir.pool_slice(args)
+                        .iter()
+                        .map(|&av| ir.val_tys[av.0 as usize]),
+                )?;
+                if arg_stack_bytes > self_param_stack_bytes {
+                    clobbers.push(Clobber {
+                        pos: pos_term,
+                        gp_mask: MASK_GP_CALLER,
+                        xmm_mask: MASK_XMM_CALLER,
+                    });
+                    if arg_stack_bytes > max_outgoing_arg_bytes {
+                        max_outgoing_arg_bytes = arg_stack_bytes;
+                    }
+                }
+            }
+            _ => {}
+        }
         block_end[oi] = pos_term + 1;
         tick += 2;
     }
@@ -1739,6 +1799,24 @@ pub fn allocate_with_config_and_scratch(
                             }
                             AbiSlot::Xmm(x) if hint_xmm[rv.0 as usize].is_none() => {
                                 hint_xmm[rv.0 as usize] = Some(x);
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+            }
+            Term::ReturnCall { args, .. } | Term::ReturnCallIndirect { args, .. } => {
+                let arg_slice = ir.pool_slice(args);
+                let _ = for_each_arg_slot(
+                    arg_slice.iter().map(|&av| ir.val_tys[av.0 as usize]),
+                    |idx, slot| {
+                        let av = arg_slice[idx];
+                        match slot {
+                            AbiSlot::Gp(g) if hint_gp[av.0 as usize].is_none() => {
+                                hint_gp[av.0 as usize] = Some(g);
+                            }
+                            AbiSlot::Xmm(x) if hint_xmm[av.0 as usize].is_none() => {
+                                hint_xmm[av.0 as usize] = Some(x);
                             }
                             _ => {}
                         }
@@ -2505,8 +2583,6 @@ pub fn allocate_with_config_and_scratch(
         0
     };
     let self_ret_stack_bytes = layout_rets_stack_bytes(ir.result_tys.iter().copied())?;
-    let self_param_stack_bytes =
-        layout_args_stack_bytes(ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]))?;
     let saved_ret_ptr_off = if self_ret_stack_bytes > 0 {
         raw_frame = raw_frame
             .checked_add(7)

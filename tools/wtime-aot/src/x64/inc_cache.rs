@@ -30,7 +30,13 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 8;
+const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
+const DELTA_VERSION: u32 = 1;
+const DELTA_HEADER_BYTES: usize = 89;
+const MAX_DELTA_ENTRIES: usize = 64;
+const MAX_DELTA_PAYLOAD_BYTES: usize = 256 << 10; // 256 KiB write threshold before compacting
+const MAX_DELTA_READ_BYTES: usize = 1 << 20; // 1 MiB read cap
 const PARALLEL_INC_MIN_FUNCS: usize = 256;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20; // 128 MiB cap on read
 
@@ -150,6 +156,16 @@ pub struct IncCacheData {
     pub funcs: Vec<CachedFn>,
     /// Shared read-only backing buffer for `CachedBytes::Slice` entries loaded from disk.
     pub backing: Option<std::sync::Arc<Vec<u8>>>,
+    /// Trailing 32-byte Merkle checksum of the on-disk base `<abi_hash>.bin` this cache descends from.
+    pub base_checksum: Option<[u8; 32]>,
+    /// Sorted, deduplicated indices modified relative to the on-disk base `<abi_hash>.bin`.
+    pub delta_dirty: Vec<usize>,
+}
+
+/// Verified raw base `.bin` buffer plus optional matching `.delta` override buffer.
+pub struct RawIncCache {
+    pub base: Vec<u8>,
+    pub delta: Option<Vec<u8>>,
 }
 
 fn hash_u32(h: &mut Sha256, v: u32) {
@@ -404,6 +420,11 @@ fn cache_file_name(abi_hash: &[u8; 32]) -> String {
     format!("{}.bin", &hex[..32])
 }
 
+fn delta_file_name(abi_hash: &[u8; 32]) -> String {
+    let hex = to_hex(abi_hash);
+    format!("{}.delta", &hex[..32])
+}
+
 /// Fast O(1) existence check for `<cache_dir>/x64-inc/<abi_hash>.bin` so cold builds avoid
 /// hashing all function bodies synchronously before validation/compilation.
 pub fn has_inc_cache(cache_dir: &Path, abi_hash: &[u8; 32]) -> bool {
@@ -598,10 +619,11 @@ impl<'a> Reader<'a> {
 
 /// Decodes and validates a single `CachedFn` entry slice, returning `(entry, code_len,
 /// pre_relax_code_len, ro_len)`. Requires exact slice consumption (`r.pos == slice.len()`).
-/// Borrows `code` and `local_rodata` zero-copy via `CachedBytes::Slice` into `backing`.
+/// When `entry_abs_base` is `Some`, borrows `code` and `local_rodata` zero-copy via
+/// `CachedBytes::Slice` into `backing`; when `None` (delta override), copies into `Owned`.
 fn decode_cached_fn(
     slice: &[u8],
-    entry_abs_base: usize,
+    entry_abs_base: Option<usize>,
     expected_bh: &[u8; 32],
     n_defs: usize,
     n_total: usize,
@@ -674,16 +696,18 @@ fn decode_cached_fn(
         return None;
     }
     let code_rel_pos = r.pos;
-    let _code_slice = r.read_bytes(code_len)?;
+    let code_slice = r.read_bytes(code_len)?;
     let code = if is_changed || code_len == 0 {
         CachedBytes::Owned(Vec::new())
-    } else {
-        let abs_start = u32::try_from(entry_abs_base.checked_add(code_rel_pos)?).ok()?;
+    } else if let Some(abs_base) = entry_abs_base {
+        let abs_start = u32::try_from(abs_base.checked_add(code_rel_pos)?).ok()?;
         let len_u32 = u32::try_from(code_len).ok()?;
         CachedBytes::Slice {
             start: abs_start,
             len: len_u32,
         }
+    } else {
+        CachedBytes::Owned(try_copy_slice(code_slice)?)
     };
 
     let n_relocs = r.read_u32()? as usize;
@@ -745,7 +769,7 @@ fn decode_cached_fn(
         return None;
     }
     let ro_rel_pos = r.pos;
-    let _ro_slice = r.read_bytes(ro_len)?;
+    let ro_slice = r.read_bytes(ro_len)?;
     if let Some(max_off) = max_local_rodata_off
         && (ro_len == 0 || (max_off as usize) >= ro_len)
     {
@@ -753,13 +777,15 @@ fn decode_cached_fn(
     }
     let local_rodata = if is_changed || ro_len == 0 {
         CachedBytes::Owned(Vec::new())
-    } else {
-        let abs_start = u32::try_from(entry_abs_base.checked_add(ro_rel_pos)?).ok()?;
+    } else if let Some(abs_base) = entry_abs_base {
+        let abs_start = u32::try_from(abs_base.checked_add(ro_rel_pos)?).ok()?;
         let len_u32 = u32::try_from(ro_len).ok()?;
         CachedBytes::Slice {
             start: abs_start,
             len: len_u32,
         }
+    } else {
+        CachedBytes::Owned(try_copy_slice(ro_slice)?)
     };
 
     let n_jt = r.read_u32()? as usize;
@@ -834,9 +860,9 @@ fn decode_cached_fn(
     ))
 }
 
-/// Reads and Merkle-verifies raw incremental cache file bytes (independent of `body_hashes`,
-/// so callers can overlap file read + digest verification with Wasm body hashing).
-pub fn load_inc_cache_raw(cache_dir: &Path, expected_abi_hash: &[u8; 32]) -> Option<Vec<u8>> {
+/// Reads and Merkle-verifies raw incremental cache file bytes (plus optional matching `.delta`
+/// sidecar), independent of `body_hashes` so callers can overlap I/O + verification with body hashing.
+pub fn load_inc_cache_raw(cache_dir: &Path, expected_abi_hash: &[u8; 32]) -> Option<RawIncCache> {
     let inc_dir = cache_dir.join("x64-inc");
     // Do not create `x64-inc/` on a read miss; validate it strictly when present.
     let dir_meta = fs::symlink_metadata(&inc_dir).ok()?;
@@ -846,12 +872,32 @@ pub fn load_inc_cache_raw(cache_dir: &Path, expected_abi_hash: &[u8; 32]) -> Opt
     let canon_dir = crate::build::ensure_private_dir(&inc_dir).ok()?;
     let path = canon_dir.join(cache_file_name(expected_abi_hash));
     let bytes = read_private_cache_file(&path)?;
+    if bytes.len() < 80 {
+        return None;
+    }
     let (payload, trailer) = bytes.split_at(bytes.len() - 32);
     let expected_sum = parallel_payload_digest(payload)?;
     if trailer != expected_sum {
         return None;
     }
-    Some(bytes)
+    // Opportunistically load and cryptographically verify `<abi_hash>.delta` bound to `expected_sum`.
+    let delta_path = canon_dir.join(delta_file_name(expected_abi_hash));
+    let delta = read_private_cache_file(&delta_path).and_then(|dbytes| {
+        if dbytes.len() < DELTA_HEADER_BYTES + 32 || dbytes.len() > MAX_DELTA_READ_BYTES {
+            return None;
+        }
+        let (d_payload, d_trailer) = dbytes.split_at(dbytes.len() - 32);
+        if &d_payload[..8] != DELTA_MAGIC
+            || u32::from_le_bytes(d_payload[8..12].try_into().ok()?) != DELTA_VERSION
+            || &d_payload[12..44] != expected_abi_hash
+            || &d_payload[44..76] != expected_sum.as_slice()
+        {
+            return None;
+        }
+        let actual = crate::sha256::digest(d_payload);
+        (d_trailer == actual.as_slice()).then_some(dbytes)
+    });
+    Some(RawIncCache { base: bytes, delta })
 }
 
 /// Loads and integrity-checks (SHA-256 Merkle trailer) the incremental function cache for `abi_hash`.
@@ -870,9 +916,10 @@ pub fn load_inc_cache(
     if expected_body_hashes.len() != expected_n_defs {
         return None;
     }
-    let bytes = load_inc_cache_raw(cache_dir, expected_abi_hash)?;
+    let raw = load_inc_cache_raw(cache_dir, expected_abi_hash)?;
     decode_verified_inc_cache(
-        std::sync::Arc::new(bytes),
+        std::sync::Arc::new(raw.base),
+        raw.delta.as_deref(),
         expected_abi_hash,
         expected_n_imports,
         expected_n_defs,
@@ -882,10 +929,76 @@ pub fn load_inc_cache(
     )
 }
 
-/// Decodes an already Merkle-verified incremental cache buffer from `load_inc_cache_raw`.
+/// Parses verified `.delta` sidecar entries into sorted `(bi, record_slice)` overrides.
+fn parse_verified_delta<'a>(
+    delta_bytes: &'a [u8],
+    expected_abi_hash: &[u8; 32],
+    expected_base_checksum: &[u8; 32],
+    expected_n_defs: usize,
+    expected_global_words: usize,
+    min_fn_wire: usize,
+) -> Option<Vec<(usize, &'a [u8])>> {
+    if delta_bytes.len() < DELTA_HEADER_BYTES + 32 || delta_bytes.len() > MAX_DELTA_READ_BYTES {
+        return None;
+    }
+    let (payload, _trailer) = delta_bytes.split_at(delta_bytes.len() - 32);
+    let mut r = Reader {
+        buf: payload,
+        pos: 0,
+    };
+    if r.read_bytes(8)? != DELTA_MAGIC {
+        return None;
+    }
+    if r.read_u32()? != DELTA_VERSION {
+        return None;
+    }
+    if &r.read_hash()? != expected_abi_hash {
+        return None;
+    }
+    if &r.read_hash()? != expected_base_checksum {
+        return None;
+    }
+    if (r.read_u32()? as usize) != expected_n_defs {
+        return None;
+    }
+    if (r.read_u32()? as usize) != expected_global_words {
+        return None;
+    }
+    if r.read_u8()? != 0 {
+        return None;
+    }
+    let n_entries = r.read_u32()? as usize;
+    if n_entries == 0 || n_entries > MAX_DELTA_ENTRIES {
+        return None;
+    }
+    let mut out = try_vec_with_capacity::<(usize, &'a [u8])>(n_entries)?;
+    let mut prev_bi: Option<usize> = None;
+    for _ in 0..n_entries {
+        let bi = r.read_u32()? as usize;
+        let rec_len = r.read_u32()? as usize;
+        if bi >= expected_n_defs || rec_len < min_fn_wire {
+            return None;
+        }
+        if prev_bi.is_some_and(|p| bi <= p) {
+            return None;
+        }
+        let rec = r.read_bytes(rec_len)?;
+        out.push((bi, rec));
+        prev_bi = Some(bi);
+    }
+    if r.pos != payload.len() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Decodes an already Merkle-verified incremental cache buffer from `load_inc_cache_raw`,
+/// overlaying any matching verified `.delta` overrides cleanly on top of the base `.bin`.
 /// Retains `bytes` as an immutable `Arc<Vec<u8>>` backing for zero-copy `CachedBytes::Slice`s.
+#[allow(clippy::too_many_arguments)]
 pub fn decode_verified_inc_cache(
     bytes: std::sync::Arc<Vec<u8>>,
+    delta_bytes: Option<&[u8]>,
     expected_abi_hash: &[u8; 32],
     expected_n_imports: usize,
     expected_n_defs: usize,
@@ -896,7 +1009,8 @@ pub fn decode_verified_inc_cache(
     if expected_body_hashes.len() != expected_n_defs || bytes.len() < 80 {
         return None;
     }
-    let (payload, _trailer) = bytes.split_at(bytes.len() - 32);
+    let (payload, trailer) = bytes.split_at(bytes.len() - 32);
+    let base_checksum: [u8; 32] = trailer.try_into().ok()?;
 
     let mut r = Reader {
         buf: payload,
@@ -929,7 +1043,7 @@ pub fn decode_verified_inc_cache(
     // 32 + 1 + 4 + 4 + 4 + 4 + 4 + global_words*8 + 8 + 12 + 64 + 4 (pre_relax) + 4 + 4 + 4 + 4 = 157 + global_words*8.
     let min_fn_wire = 157usize.checked_add(global_words.checked_mul(8)?)?;
 
-    // Format v6 offset table: `(n_defs + 1)` little-endian `u32` byte offsets relative to `entries`.
+    // Format v6/v7 offset table: `(n_defs + 1)` little-endian `u32` byte offsets relative to `entries`.
     let n_offs = n_defs.checked_add(1)?;
     let off_raw = r.read_bytes(n_offs.checked_mul(4)?)?;
     let entries_abs_base = r.pos;
@@ -952,11 +1066,38 @@ pub fn decode_verified_inc_cache(
         }
     }
 
+    let delta_overrides: Vec<(usize, &[u8])> = delta_bytes
+        .and_then(|db| {
+            parse_verified_delta(
+                db,
+                expected_abi_hash,
+                &base_checksum,
+                n_defs,
+                global_words,
+                min_fn_wire,
+            )
+        })
+        .unwrap_or_default();
+    let delta_lookup = |bi: usize| -> Option<&[u8]> {
+        if delta_overrides.is_empty() {
+            return None;
+        }
+        delta_overrides
+            .binary_search_by_key(&bi, |&(idx, _)| idx)
+            .ok()
+            .map(|pos| delta_overrides[pos].1)
+    };
+
     // Fast O(n_defs) early-bail check using the 32-byte `raw_body_hash` at the start of each entry.
     let mut changed_count = 0usize;
     for (i, expected_bh) in expected_body_hashes.iter().enumerate() {
-        let start = offsets[i] as usize;
-        if &entries[start..start + 32] != expected_bh {
+        let bh_slice = if let Some(ds) = delta_lookup(i) {
+            &ds[..32]
+        } else {
+            let start = offsets[i] as usize;
+            &entries[start..start + 32]
+        };
+        if bh_slice != expected_bh {
             changed_count += 1;
             if changed_count > n_defs / 2 {
                 // Incremental path would bail to cold compile anyway — abort before materializing!
@@ -972,11 +1113,18 @@ pub fn decode_verified_inc_cache(
 
     if n_defs < PARALLEL_INC_MIN_FUNCS {
         for (i, expected_bh) in expected_body_hashes.iter().enumerate() {
-            let off_i = offsets[i] as usize;
-            let slice = &entries[off_i..offsets[i + 1] as usize];
+            let (slice, abs_base) = if let Some(ds) = delta_lookup(i) {
+                (ds, None)
+            } else {
+                let off_i = offsets[i] as usize;
+                (
+                    &entries[off_i..offsets[i + 1] as usize],
+                    Some(entries_abs_base + off_i),
+                )
+            };
             let (cfn, code_len, pre_len, ro_len) = decode_cached_fn(
                 slice,
-                entries_abs_base + off_i,
+                abs_base,
                 expected_bh,
                 n_defs,
                 n_total,
@@ -1007,17 +1155,27 @@ pub fn decode_verified_inc_cache(
         let per_worker = n_defs.div_ceil(n_threads);
         let failed = AtomicBool::new(false);
         let offsets_ref = &offsets;
+        let delta_ref = delta_overrides.as_slice();
         let decode_range = |start_idx: usize, slots: &mut [DecodedSlot]| {
             for (j, slot) in slots.iter_mut().enumerate() {
                 if failed.load(Ordering::Acquire) {
                     return;
                 }
                 let i = start_idx + j;
-                let off_i = offsets_ref[i] as usize;
-                let slice = &entries[off_i..offsets_ref[i + 1] as usize];
+                let (slice, abs_base) = if !delta_ref.is_empty()
+                    && let Ok(pos) = delta_ref.binary_search_by_key(&i, |&(idx, _)| idx)
+                {
+                    (delta_ref[pos].1, None)
+                } else {
+                    let off_i = offsets_ref[i] as usize;
+                    (
+                        &entries[off_i..offsets_ref[i + 1] as usize],
+                        Some(entries_abs_base + off_i),
+                    )
+                };
                 match decode_cached_fn(
                     slice,
-                    entries_abs_base + off_i,
+                    abs_base,
                     &expected_body_hashes[i],
                     n_defs,
                     n_total,
@@ -1075,12 +1233,15 @@ pub fn decode_verified_inc_cache(
         }
     }
 
+    let delta_dirty: Vec<usize> = delta_overrides.iter().map(|&(bi, _)| bi).collect();
     Some(IncCacheData {
         abi_hash,
         global_words,
         hit_inline_cap,
         funcs,
         backing: Some(bytes),
+        base_checksum: Some(base_checksum),
+        delta_dirty,
     })
 }
 
@@ -1268,9 +1429,10 @@ fn write_cached_fn(
     }
 }
 
-/// Atomically writes `data` to `<cache_dir>/x64-inc/<abi_hash>.bin` with an offset table and
-/// trailing parallel SHA-256 Merkle digest. Best-effort: silently ignores I/O, permission, or
-/// OOM failures so caching can never break compilation.
+/// Atomically writes `data` to `<cache_dir>/x64-inc/<abi_hash>.bin` (or a compact `.delta`
+/// sidecar when `<= 64` functions changed relative to an intact base `.bin`, eliminating multi-MiB
+/// re-serialization & hashing on small incremental edits). Best-effort: silently ignores I/O,
+/// permission, or OOM failures so caching can never break compilation.
 pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
     let Ok(dir) = crate::build::ensure_private_dir(&cache_dir.join("x64-inc")) else {
         return;
@@ -1285,6 +1447,104 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
     else {
         return;
     };
+
+    let target = dir.join(cache_file_name(&data.abi_hash));
+    let delta_target = dir.join(delta_file_name(&data.abi_hash));
+
+    // Fast path: small incremental update against an intact base `.bin` on disk -> write compact
+    // `<abi_hash>.delta` (~2–16 KiB, <0.1 ms) instead of rewriting the full multi-MiB `.bin`!
+    if let Some(base_ck) = data.base_checksum
+        && !data.hit_inline_cap
+        && data.delta_dirty.len() <= MAX_DELTA_ENTRIES
+        && fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_file())
+    {
+        if data.delta_dirty.is_empty() {
+            return;
+        }
+        let mut delta_total = DELTA_HEADER_BYTES;
+        let mut delta_ok = true;
+        let mut prev_bi: Option<usize> = None;
+        for &bi in &data.delta_dirty {
+            if bi >= n_defs || prev_bi.is_some_and(|p| bi <= p) {
+                delta_ok = false;
+                break;
+            }
+            prev_bi = Some(bi);
+            let Some(sz) = fn_wire_len(&data.funcs[bi], fixed_fn) else {
+                delta_ok = false;
+                break;
+            };
+            let Some(next) = delta_total.checked_add(8).and_then(|n| n.checked_add(sz)) else {
+                delta_ok = false;
+                break;
+            };
+            if next > MAX_DELTA_PAYLOAD_BYTES {
+                delta_ok = false;
+                break;
+            }
+            delta_total = next;
+        }
+        if delta_ok && let Some(mut dout) = try_vec_with_capacity::<u8>(delta_total + 32) {
+            dout.extend_from_slice(DELTA_MAGIC);
+            dout.extend_from_slice(&DELTA_VERSION.to_le_bytes());
+            dout.extend_from_slice(&data.abi_hash);
+            dout.extend_from_slice(&base_ck);
+            dout.extend_from_slice(&(n_defs as u32).to_le_bytes());
+            dout.extend_from_slice(&(data.global_words as u32).to_le_bytes());
+            dout.push(u8::from(data.hit_inline_cap));
+            dout.extend_from_slice(&(data.delta_dirty.len() as u32).to_le_bytes());
+            debug_assert_eq!(dout.len(), DELTA_HEADER_BYTES);
+            let backing = data.backing.as_deref().map(Vec::as_slice);
+            for &bi in &data.delta_dirty {
+                let f = &data.funcs[bi];
+                let sz = fn_wire_len(f, fixed_fn).unwrap();
+                dout.extend_from_slice(&(bi as u32).to_le_bytes());
+                dout.extend_from_slice(&(sz as u32).to_le_bytes());
+                let start = dout.len();
+                dout.resize(start + sz, 0);
+                let mut w = SliceWriter {
+                    buf: &mut dout[start..start + sz],
+                    pos: 0,
+                };
+                write_cached_fn(&mut w, f, data.global_words, backing);
+                debug_assert_eq!(w.pos, sz);
+            }
+            debug_assert_eq!(dout.len(), delta_total);
+            let ck = crate::sha256::digest(&dout);
+            dout.extend_from_slice(&ck);
+            for _ in 0..16 {
+                let seq = NEXT_INC_SEQ.fetch_add(1, Ordering::Relaxed);
+                let tmp = dir.join(format!("tmp.{}.{seq}", std::process::id()));
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    opts.mode(0o600);
+                    let nf = unix_nofollow_flag();
+                    if nf != 0 {
+                        opts.custom_flags(nf);
+                    }
+                }
+                match opts.open(&tmp) {
+                    Ok(mut f) => {
+                        let ok = f
+                            .write_all(&dout)
+                            .and_then(|()| fs::rename(&tmp, &delta_target))
+                            .is_ok();
+                        if !ok {
+                            let _ = fs::remove_file(&tmp);
+                        }
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(_) => return,
+                }
+            }
+            return;
+        }
+    }
+
     let Some(off_table_bytes) = n_defs.checked_add(1).and_then(|n| n.checked_mul(4)) else {
         return;
     };
@@ -1387,9 +1647,8 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
         }
     }
 
-    // Overlap staging-file payload write with parallel 4-way SIMD Merkle checksum computation,
-    // then append the 32-byte trailer and atomically rename into place.
-    let target = dir.join(cache_file_name(&data.abi_hash));
+    // Overlap staging-file payload write with parallel Merkle checksum computation,
+    // then append the 32-byte trailer and atomically rename into place (clearing any old `.delta`).
     for _ in 0..16 {
         let seq = NEXT_INC_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp = dir.join(format!("tmp.{}.{seq}", std::process::id()));
@@ -1423,7 +1682,9 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
                             .and_then(|()| fs::rename(&tmp, &target))
                             .is_ok()
                     });
-                if !ok {
+                if ok {
+                    let _ = fs::remove_file(&delta_target);
+                } else {
                     let _ = fs::remove_file(&tmp);
                 }
                 return;

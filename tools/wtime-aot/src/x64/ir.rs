@@ -550,6 +550,19 @@ pub enum Op {
         rhs_off: u64,
         rhs_is_splat: bool,
     },
+    /// Bounds-checked-by-caller, non-overlapping (or exact-same-base) `f64` AXPY loop over
+    /// `k in 0..count` (`count: I32` elements):
+    /// `mem[dst + k*8] = mem[dst + k*8] (+/-) (mem[src + k*8] * scale)` (strictly bit-exact
+    /// IEEE-754 `mul` followed by `add`/`sub`, zero FMA contraction).
+    /// Lowered to 2×-unrolled 256-bit AVX2 (8× `f64`/iter) on `x64-v3`, 128-bit SSE2 on `x64-v2`,
+    /// or 128-bit NEON on `aarch64`, with scalar tails.
+    F64AxpyLoop {
+        dst: Val,
+        src: Val,
+        count: Val,
+        scale: Val,
+        is_sub: bool,
+    },
 
     V128Splat {
         kind: SimdSplatKind,
@@ -642,6 +655,7 @@ impl Op {
             | Op::MemFillConst { .. }
             | Op::MemByteBlur3Div { .. }
             | Op::F64x4BinMem { .. }
+            | Op::F64AxpyLoop { .. }
             | Op::Call { .. }
             | Op::CallIndirect { .. }
             | Op::Trap(_) => true,
@@ -775,6 +789,18 @@ impl Op {
                 f(lhs);
                 f(rhs);
             }
+            Op::F64AxpyLoop {
+                dst,
+                src,
+                count,
+                scale,
+                ..
+            } => {
+                f(dst);
+                f(src);
+                f(count);
+                f(scale);
+            }
             Op::Call { args, .. } => {
                 for &v in &pool[args.start as usize..args.start as usize + args.len as usize] {
                     f(v);
@@ -835,6 +861,15 @@ pub enum Term {
     Return {
         vals: ValRange,
     },
+    ReturnCall {
+        func: u32,
+        args: ValRange,
+    },
+    ReturnCallIndirect {
+        ci_id: u32,
+        idx: Val,
+        args: ValRange,
+    },
     Unreachable,
 }
 
@@ -883,6 +918,11 @@ impl Term {
                 }
             }
             Term::Return { vals } => emit_range(pool, vals, &mut f),
+            Term::ReturnCall { args, .. } => emit_range(pool, args, &mut f),
+            Term::ReturnCallIndirect { idx, args, .. } => {
+                f(idx);
+                emit_range(pool, args, &mut f);
+            }
             Term::Unreachable => {}
         }
     }
@@ -905,7 +945,10 @@ impl Term {
                     f(bb);
                 }
             }
-            Term::Return { .. } | Term::Unreachable => {}
+            Term::Return { .. }
+            | Term::ReturnCall { .. }
+            | Term::ReturnCallIndirect { .. }
+            | Term::Unreachable => {}
         }
     }
 }
@@ -1232,15 +1275,17 @@ impl Builder {
         result_tys: Vec<Ty>,
         needs_stack_check: bool,
         const_fold: bool,
+        wasm_insns_hint: usize,
     ) -> Self {
+        let est_vals = wasm_insns_hint.clamp(16, 4096);
         let mut ir = IrFunc {
             func_index,
             memory64,
             params: Vec::new(),
             result_tys,
-            val_tys: Vec::new(),
+            val_tys: Vec::with_capacity(est_vals),
             blocks: vec![Block::new(false)],
-            val_pool: Vec::new(),
+            val_pool: Vec::with_capacity(est_vals / 2),
             v128_consts: Vec::new(),
             br_tables: Vec::new(),
             needs_stack_check,
@@ -1251,7 +1296,7 @@ impl Builder {
         Self {
             ir,
             cur_bb: BlockId(0),
-            consts: Vec::new(),
+            consts: Vec::with_capacity(est_vals),
             const_fold,
         }
     }
@@ -1708,7 +1753,14 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
     let mut total_if_snapshot_entries: usize = 0;
     // Stage 1 checks prospective stack depth on every frame; Stage 2 can elide only based on
     // allocated native frame bytes and call depth.
-    let mut b = Builder::new(func_index, module.memory64, result_tys.clone(), true, opt);
+    let mut b = Builder::new(
+        func_index,
+        module.memory64,
+        result_tys.clone(),
+        true,
+        opt,
+        body.instructions.len(),
+    );
 
     // Initialize params and zero locals in entry block (bb0).
     let mut locals: Vec<Val> = Vec::with_capacity(local_tys.len());
@@ -2291,6 +2343,45 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 });
                 stack.extend(rets_vec);
             }
+            0x12 => {
+                // return_call
+                let f = imm_idx()? as usize;
+                let fty = module.func_type(f).ok_or("return_call func index")?;
+                let n = fty.params.len();
+                let at = stack.len() - n;
+                let args = b.ir.push_pool(&stack[at..])?;
+                stack.truncate(at);
+                b.terminate(Term::ReturnCall {
+                    func: f as u32,
+                    args,
+                });
+                frames.last_mut().unwrap().unreachable = true;
+            }
+            0x13 => {
+                // return_call_indirect
+                let Immediate::Pair(ti, tbl) = insn.immediate else {
+                    return Err("return_call_indirect immediate".into());
+                };
+                let &ci_id = module
+                    .ci_index
+                    .get(&(tbl, ti))
+                    .ok_or("return_call_indirect not registered")?;
+                let fty = module
+                    .module_types
+                    .get(ti as usize)
+                    .ok_or("return_call_indirect type")?;
+                let idx = stack.pop().ok_or("return_ci idx")?;
+                let n = fty.params.len();
+                let at = stack.len() - n;
+                let args = b.ir.push_pool(&stack[at..])?;
+                stack.truncate(at);
+                b.terminate(Term::ReturnCallIndirect {
+                    ci_id: ci_id as u32,
+                    idx,
+                    args,
+                });
+                frames.last_mut().unwrap().unreachable = true;
+            }
             0x1a => {
                 stack.pop().ok_or("drop")?;
             }
@@ -2765,6 +2856,210 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 let r = b.emit(Ty::V128, Op::V128Bin { op, a: av, b: bv });
                 stack.push(r);
             }
+            0xfa00..=0xfa13 => {
+                // Relaxed SIMD (all 20 opcodes, 100% bit-exact with `wtime-runtime/src/simd.rs`).
+                let r = match op {
+                    0xfa00 => {
+                        let bv = stack.pop().ok_or("relaxed_swizzle b")?;
+                        let av = stack.pop().ok_or("relaxed_swizzle a")?;
+                        b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfd0e,
+                                a: av,
+                                b: bv,
+                            },
+                        )
+                    }
+                    0xfa01..=0xfa04 => {
+                        let av = stack.pop().ok_or("relaxed_trunc a")?;
+                        let std_op = match op {
+                            0xfa01 => 0xfdf8,
+                            0xfa02 => 0xfdf9,
+                            0xfa03 => 0xfdfc,
+                            _ => 0xfdfd,
+                        };
+                        b.emit(Ty::V128, Op::V128Un { op: std_op, a: av })
+                    }
+                    0xfa05..=0xfa08 => {
+                        let cv = stack.pop().ok_or("relaxed_madd c")?;
+                        let bv = stack.pop().ok_or("relaxed_madd b")?;
+                        let av = stack.pop().ok_or("relaxed_madd a")?;
+                        let (neg_op, mul_op, add_op) = if op <= 0xfa06 {
+                            (0xfde1, 0xfde6, 0xfde4)
+                        } else {
+                            (0xfded, 0xfdf2, 0xfdf0)
+                        };
+                        let lhs = if (op & 1) == 0 {
+                            b.emit(Ty::V128, Op::V128Un { op: neg_op, a: av })
+                        } else {
+                            av
+                        };
+                        let prod = b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: mul_op,
+                                a: lhs,
+                                b: bv,
+                            },
+                        );
+                        b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: add_op,
+                                a: prod,
+                                b: cv,
+                            },
+                        )
+                    }
+                    0xfa09..=0xfa0c => {
+                        let cv = stack.pop().ok_or("relaxed_laneselect c")?;
+                        let bv = stack.pop().ok_or("relaxed_laneselect b")?;
+                        let av = stack.pop().ok_or("relaxed_laneselect a")?;
+                        b.emit(
+                            Ty::V128,
+                            Op::V128Ternary {
+                                op: 0xfd52,
+                                a: av,
+                                b: bv,
+                                c: cv,
+                            },
+                        )
+                    }
+                    0xfa0d..=0xfa11 => {
+                        let bv = stack.pop().ok_or("relaxed binop b")?;
+                        let av = stack.pop().ok_or("relaxed binop a")?;
+                        let std_op = match op {
+                            0xfa0d => 0xfde8,
+                            0xfa0e => 0xfde9,
+                            0xfa0f => 0xfdf4,
+                            0xfa10 => 0xfdf5,
+                            _ => 0xfd82,
+                        };
+                        b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: std_op,
+                                a: av,
+                                b: bv,
+                            },
+                        )
+                    }
+                    0xfa12 => {
+                        let bv = stack.pop().ok_or("relaxed_dot b")?;
+                        let av = stack.pop().ok_or("relaxed_dot a")?;
+                        let a0 = b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfd9c,
+                                a: av,
+                                b: bv,
+                            },
+                        );
+                        let a1 = b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfd9d,
+                                a: av,
+                                b: bv,
+                            },
+                        );
+                        let evens_idx = b.ir.v128_consts.len() as u32;
+                        b.ir.v128_consts
+                            .push([0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29]);
+                        let odds_idx = b.ir.v128_consts.len() as u32;
+                        b.ir.v128_consts
+                            .push([2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]);
+                        let evens = b.emit(
+                            Ty::V128,
+                            Op::V128Shuffle {
+                                a: a0,
+                                b: a1,
+                                lanes_idx: evens_idx,
+                            },
+                        );
+                        let odds = b.emit(
+                            Ty::V128,
+                            Op::V128Shuffle {
+                                a: a0,
+                                b: a1,
+                                lanes_idx: odds_idx,
+                            },
+                        );
+                        b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfd8e,
+                                a: evens,
+                                b: odds,
+                            },
+                        )
+                    }
+                    _ => {
+                        // 0xfa13: i32x4.relaxed_dot_i8x16_i7x16_add_s
+                        let cv = stack.pop().ok_or("relaxed_dot_add c")?;
+                        let bv = stack.pop().ok_or("relaxed_dot_add b")?;
+                        let av = stack.pop().ok_or("relaxed_dot_add a")?;
+                        let a0 = b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfd9c,
+                                a: av,
+                                b: bv,
+                            },
+                        );
+                        let a1 = b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfd9d,
+                                a: av,
+                                b: bv,
+                            },
+                        );
+                        let s0 = b.emit(Ty::V128, Op::V128Un { op: 0xfd7e, a: a0 });
+                        let s1 = b.emit(Ty::V128, Op::V128Un { op: 0xfd7e, a: a1 });
+                        let evens_idx = b.ir.v128_consts.len() as u32;
+                        b.ir.v128_consts
+                            .push([0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27]);
+                        let odds_idx = b.ir.v128_consts.len() as u32;
+                        b.ir.v128_consts
+                            .push([4, 5, 6, 7, 12, 13, 14, 15, 20, 21, 22, 23, 28, 29, 30, 31]);
+                        let evens = b.emit(
+                            Ty::V128,
+                            Op::V128Shuffle {
+                                a: s0,
+                                b: s1,
+                                lanes_idx: evens_idx,
+                            },
+                        );
+                        let odds = b.emit(
+                            Ty::V128,
+                            Op::V128Shuffle {
+                                a: s0,
+                                b: s1,
+                                lanes_idx: odds_idx,
+                            },
+                        );
+                        let dot = b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfdae,
+                                a: evens,
+                                b: odds,
+                            },
+                        );
+                        b.emit(
+                            Ty::V128,
+                            Op::V128Bin {
+                                op: 0xfdae,
+                                a: dot,
+                                b: cv,
+                            },
+                        )
+                    }
+                };
+                stack.push(r);
+            }
             // Numeric ops:
             0x45 => {
                 let a = stack.pop().ok_or("i32.eqz")?;
@@ -3133,6 +3428,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
 /// Reusable worker-local scratch buffers for `optimize_ir_with_budget_and_scratch`.
 #[derive(Default)]
 pub struct OptIrScratch {
+    def_stamp: Vec<(u32, u32)>,
     checked_stamp: Vec<(u32, u64)>,
     out_buf: Vec<Inst>,
     uses: Vec<u32>,
@@ -3160,17 +3456,17 @@ pub fn optimize_ir_with_budget_and_scratch(
     scratch: &mut OptIrScratch,
 ) -> Res<()> {
     // Pass 1: Fuse `Select` -> `CmpSelect` and `BranchIf` -> `CmpBranch` (without crossing Call/CallIndirect!).
-    let find_def_no_call = |insts: &[Inst], v: Val| -> Option<Op> {
-        for inst in insts.iter().rev() {
-            if matches!(inst.op, Op::Call { .. } | Op::CallIndirect { .. }) {
-                return None;
-            }
-            if inst.res == Some(v) {
-                return Some(inst.op);
-            }
-        }
-        None
-    };
+    // Uses an O(1) epoch-stamped `(epoch, inst_idx)` lookup table (`def_stamp`) where `epoch`
+    // bumps at every block start and every `Call`/`CallIndirect` barrier.
+    let n_vals = ir.val_tys.len();
+    scratch.def_stamp.clear();
+    if scratch.def_stamp.capacity() > 16_384 && n_vals <= 4096 {
+        scratch.def_stamp.shrink_to(4096);
+    }
+    scratch.def_stamp.resize(n_vals, (0, 0));
+    let def_stamp = &mut scratch.def_stamp;
+    let mut cur_epoch: u32 = 0;
+
     let mut dropped_preds: Vec<BlockId> = Vec::new();
     let mut any_mem_op = false;
     for (bi, bb) in ir.blocks.iter_mut().enumerate() {
@@ -3179,9 +3475,22 @@ pub fn optimize_ir_with_budget_and_scratch(
         {
             bg.check_deadline()?;
         }
+        cur_epoch = cur_epoch.wrapping_add(1);
+        if cur_epoch == 0 {
+            def_stamp.fill((0, 0));
+            cur_epoch = 1;
+        }
         // Pass 1a: Fuse `Cmp` + optional `I32Eqz` + `Select` -> `Op::CmpSelect`.
         for idx in 0..bb.insts.len() {
-            match bb.insts[idx].op {
+            let op = bb.insts[idx].op;
+            match op {
+                Op::Call { .. } | Op::CallIndirect { .. } => {
+                    cur_epoch = cur_epoch.wrapping_add(1);
+                    if cur_epoch == 0 {
+                        def_stamp.fill((0, 0));
+                        cur_epoch = 1;
+                    }
+                }
                 Op::BoundsCheck { .. } | Op::Load { .. } | Op::Store { .. } => {
                     any_mem_op = true;
                 }
@@ -3190,61 +3499,71 @@ pub fn optimize_ir_with_budget_and_scratch(
                     a: mut tv,
                     b: mut fv,
                 } => {
-                    let prefix = &bb.insts[..idx];
-                    if let Some(Op::I32Eqz(inner)) = find_def_no_call(prefix, cond) {
+                    let (ep0, idx0) = def_stamp[cond.0 as usize];
+                    if ep0 == cur_epoch
+                        && let Op::I32Eqz(inner) = bb.insts[idx0 as usize].op
+                    {
                         cond = inner;
                         std::mem::swap(&mut tv, &mut fv);
                     }
-                    let fused_sel = match find_def_no_call(prefix, cond) {
-                        Some(Op::I32Cmp(op, a, b)) => Some(Op::CmpSelect {
-                            kind: CmpBranchKind::I32(op),
-                            a,
-                            b,
-                            tv,
-                            fv,
-                        }),
-                        Some(Op::I32CmpImm(op, a, imm)) => Some(Op::CmpSelect {
-                            kind: CmpBranchKind::I32Imm(op, imm),
-                            a,
-                            b: a,
-                            tv,
-                            fv,
-                        }),
-                        Some(Op::I64Cmp(op, a, b)) => Some(Op::CmpSelect {
-                            kind: CmpBranchKind::I64(op),
-                            a,
-                            b,
-                            tv,
-                            fv,
-                        }),
-                        Some(Op::I64CmpImm(op, a, imm)) => Some(Op::CmpSelect {
-                            kind: CmpBranchKind::I64Imm(op, imm),
-                            a,
-                            b: a,
-                            tv,
-                            fv,
-                        }),
-                        Some(Op::F32Cmp(op, a, b)) => Some(Op::CmpSelect {
-                            kind: CmpBranchKind::F32(op),
-                            a,
-                            b,
-                            tv,
-                            fv,
-                        }),
-                        Some(Op::F64Cmp(op, a, b)) => Some(Op::CmpSelect {
-                            kind: CmpBranchKind::F64(op),
-                            a,
-                            b,
-                            tv,
-                            fv,
-                        }),
-                        _ => None,
+                    let (ep1, idx1) = def_stamp[cond.0 as usize];
+                    let fused_sel = if ep1 == cur_epoch {
+                        match bb.insts[idx1 as usize].op {
+                            Op::I32Cmp(op, a, b) => Some(Op::CmpSelect {
+                                kind: CmpBranchKind::I32(op),
+                                a,
+                                b,
+                                tv,
+                                fv,
+                            }),
+                            Op::I32CmpImm(op, a, imm) => Some(Op::CmpSelect {
+                                kind: CmpBranchKind::I32Imm(op, imm),
+                                a,
+                                b: a,
+                                tv,
+                                fv,
+                            }),
+                            Op::I64Cmp(op, a, b) => Some(Op::CmpSelect {
+                                kind: CmpBranchKind::I64(op),
+                                a,
+                                b,
+                                tv,
+                                fv,
+                            }),
+                            Op::I64CmpImm(op, a, imm) => Some(Op::CmpSelect {
+                                kind: CmpBranchKind::I64Imm(op, imm),
+                                a,
+                                b: a,
+                                tv,
+                                fv,
+                            }),
+                            Op::F32Cmp(op, a, b) => Some(Op::CmpSelect {
+                                kind: CmpBranchKind::F32(op),
+                                a,
+                                b,
+                                tv,
+                                fv,
+                            }),
+                            Op::F64Cmp(op, a, b) => Some(Op::CmpSelect {
+                                kind: CmpBranchKind::F64(op),
+                                a,
+                                b,
+                                tv,
+                                fv,
+                            }),
+                            _ => None,
+                        }
+                    } else {
+                        None
                     };
                     if let Some(new_op) = fused_sel {
                         bb.insts[idx].op = new_op;
                     }
                 }
                 _ => {}
+            }
+            if let Some(res) = bb.insts[idx].res {
+                def_stamp[res.0 as usize] = (cur_epoch, idx as u32);
             }
         }
         // Pass 1b: Fuse `BranchIf` with defining `Cmp`/`Eqz`/`ConstI32` in the same block (not crossing Call/CallIndirect).
@@ -3257,12 +3576,16 @@ pub fn optimize_ir_with_budget_and_scratch(
         } = bb.term
         {
             let mut fused: Option<Term> = None;
-            if let Some(Op::I32Eqz(inner)) = find_def_no_call(&bb.insts, cond) {
+            let (ep0, idx0) = def_stamp[cond.0 as usize];
+            if ep0 == cur_epoch
+                && let Op::I32Eqz(inner) = bb.insts[idx0 as usize].op
+            {
                 cond = inner;
                 std::mem::swap(&mut then_bb, &mut else_bb);
                 std::mem::swap(&mut then_args, &mut else_args);
             }
-            match find_def_no_call(&bb.insts, cond) {
+            let (ep1, idx1) = def_stamp[cond.0 as usize];
+            match (ep1 == cur_epoch).then(|| bb.insts[idx1 as usize].op) {
                 Some(Op::ConstI32(c)) => {
                     fused = Some(if c != 0 {
                         dropped_preds.push(else_bb);

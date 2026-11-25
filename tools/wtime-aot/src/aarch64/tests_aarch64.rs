@@ -493,12 +493,30 @@ impl A64Vm {
             let res = self.add_with_carry(sf, a, b, is_sub, s_flag);
             self.set_x(rd, res, !s_flag);
         } else if (insn & 0x1f20_0000) == 0x0b00_0000 {
-            // ADD / ADDS / SUB / SUBS (shifted reg, shift=0)
+            // ADD / ADDS / SUB / SUBS (shifted register: LSL/LSR/ASR)
             let is_sub = ((insn >> 30) & 1) != 0;
             let s_flag = ((insn >> 29) & 1) != 0;
+            let shift_ty = (insn >> 22) & 3;
+            let imm6 = (insn >> 10) & 0x3f;
             let a = self.get_x(rn, false);
             let raw_b = self.get_x(rm, false);
-            let b = if is_sub { !raw_b } else { raw_b };
+            let shifted_b = if sf {
+                match shift_ty {
+                    0 => raw_b.wrapping_shl(imm6),
+                    1 => raw_b.wrapping_shr(imm6),
+                    2 => ((raw_b as i64).wrapping_shr(imm6)) as u64,
+                    _ => return Err(format!("A64Vm: invalid add/sub shift type {shift_ty}")),
+                }
+            } else {
+                let w = raw_b as u32;
+                u64::from(match shift_ty {
+                    0 => w.wrapping_shl(imm6),
+                    1 => w.wrapping_shr(imm6),
+                    2 => ((w as i32).wrapping_shr(imm6)) as u32,
+                    _ => return Err(format!("A64Vm: invalid add/sub shift type {shift_ty}")),
+                })
+            };
+            let b = if is_sub { !shifted_b } else { shifted_b };
             let res = self.add_with_carry(sf, a, b, is_sub, s_flag);
             self.set_x(rd, res, false);
         } else if (insn & 0x1fe0_0000) == 0x0b20_0000 {
@@ -3711,5 +3729,180 @@ fn aarch64_oracle_stage6_narrow_eq_loops() {
             ("run", Value::I32(1024)),
         ],
         4224,
+    );
+}
+
+#[test]
+fn aarch64_oracle_stage7_relaxed_simd_tail_call_axpy_mem64_and_mul_strength() {
+    use crate::x64::tests_unit::{
+        build_axpy_edge_test_wasm, build_mem64_1branch_test_wasm, build_relaxed_simd_test_wasm,
+        build_tail_call_test_wasm, code_sec, enc_body, export_sec, func_sec, leb_i32, type_sec,
+        wasm_module,
+    };
+
+    // 1. ALL 20 relaxed SIMD opcodes on AArch64 NEON.
+    let relaxed_wasm = build_relaxed_simd_test_wasm();
+    assert_aarch64_oracle(
+        "a64_stage7_relaxed_simd_all20",
+        &relaxed_wasm,
+        &[
+            ("test_relaxed", Value::I32(0)),
+            ("test_relaxed", Value::I32(1)),
+            ("test_relaxed", Value::I32(2)),
+        ],
+        384,
+    );
+
+    // 2. `tail_call` (`return_call` + `return_call_indirect`): deep O(1) mutual recursion
+    //    (> 1024 default call depth!), high-arity stack args, overflow multi-value returns, traps.
+    let tail_wasm = build_tail_call_test_wasm();
+    assert_aarch64_oracle(
+        "a64_stage7_tail_call",
+        &tail_wasm,
+        &[
+            ("even", Value::I32(0)),
+            ("even", Value::I32(1)),
+            ("even", Value::I32(2_500)),
+            ("even", Value::I32(2_501)),
+            ("even_ind", Value::I32(1_500)),
+            ("even_ind", Value::I32(1_501)),
+            ("grow_arity", Value::I32(0)),
+            ("grow_arity", Value::I32(5)),
+            ("grow_arity", Value::I32(1_500)),
+            ("check_multiret", Value::I64(100)),
+            ("check_multiret", Value::I64(-42)),
+            ("grow_multiret", Value::I32(0)),
+            ("grow_multiret", Value::I32(500)),
+            ("ind_trap", Value::I32(5)),
+            ("ind_trap", Value::I32(4)),
+            ("ind_trap", Value::I32(99)),
+        ],
+        0,
+    );
+
+    // 3. `Op::F64AxpyLoop` edge cases + `matmul_f64.wasm` + `heapsort_i32.wasm` on AArch64 NEON.
+    let axpy_wasm = build_axpy_edge_test_wasm();
+    let axpy_calls: Vec<(&str, Value)> = (0..=10)
+        .chain([20, 21, 22, 23, 99])
+        .map(|k| ("run_case", Value::I32(k)))
+        .collect();
+    assert_aarch64_oracle("a64_stage7_f64_axpy_edges", &axpy_wasm, &axpy_calls, 512);
+
+    for (name, arg) in [("matmul_f64", 16), ("heapsort_i32", 128)] {
+        let wasm = std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/{name}.wasm")),
+        )
+        .unwrap();
+        assert_aarch64_oracle(
+            &format!("a64_stage7_{name}"),
+            &wasm,
+            &[
+                ("run", Value::I32(0)),
+                ("run", Value::I32(1)),
+                ("run", Value::I32(arg)),
+            ],
+            256,
+        );
+    }
+
+    // 4. Growable `memory64` 1-branch bounds check on AArch64.
+    let mem64_wasm = build_mem64_1branch_test_wasm();
+    assert_aarch64_oracle(
+        "a64_stage7_mem64_1branch",
+        &mem64_wasm,
+        &[
+            ("load_off0", Value::I64(0)),
+            ("load_off0", Value::I64(65528)),
+            ("load_off0", Value::I64(65529)),
+            ("load_off0", Value::I64(-1)),
+            ("store_load_off8", Value::I64(0)),
+            ("store_load_off8", Value::I64(65520)),
+            ("store_load_off8", Value::I64(65521)),
+            ("load_off_big", Value::I64(0)),
+            ("grow_store_load_off8", Value::I64(70000)),
+            ("load_off_big", Value::I64(0)),
+        ],
+        64,
+    );
+
+    // 5. AArch64 small-const multiply strength reduction (shifted ADD/SUB) & `val_upper32_zero` elision.
+    let consts = [
+        0,
+        1,
+        -1,
+        2,
+        -2,
+        3,
+        -3,
+        5,
+        -5,
+        6,
+        7,
+        -7,
+        9,
+        -9,
+        10,
+        12,
+        15,
+        -15,
+        17,
+        18,
+        20,
+        24,
+        25,
+        27,
+        31,
+        -31,
+        33,
+        36,
+        40,
+        45,
+        48,
+        63,
+        -63,
+        65,
+        72,
+        81,
+        i32::MIN,
+    ];
+    let mut b32 = vec![0x41, 0, 0x21, 1]; // acc = 0
+    for &k in &consts {
+        b32.extend_from_slice(&[0x20, 1, 0x20, 0, 0x41]);
+        leb_i32(&mut b32, k);
+        b32.extend_from_slice(&[0x6c, 0x73, 0x21, 1]); // acc ^= x * k
+    }
+    b32.extend_from_slice(&[0x20, 1]);
+
+    let mut b64 = vec![0x42, 0, 0x21, 1]; // acc = 0
+    for &k in &consts {
+        b64.extend_from_slice(&[0x20, 1, 0x20, 0, 0x42]);
+        leb_i32(&mut b64, k);
+        b64.extend_from_slice(&[0x7e, 0x85, 0x21, 1]);
+    }
+    // Exercise `val_upper32_zero`: (x as u32 -> i64.extend_i32_u -> i32.wrap_i64 -> i64.extend_i32_u) ^ (x >> 32)
+    b64.extend_from_slice(&[
+        0x20, 1, 0x20, 0, 0xa7, 0xad, 0xa7, 0xad, 0x85, 0x20, 0, 0x42, 33, 0x88, 0xa7, 0xad, 0x85,
+    ]);
+    let mul_wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7e], &[0x7e])]),
+        func_sec(&[0, 1]),
+        export_sec(&[("mul32", 0, 0), ("mul64_u32z", 0, 1)]),
+        code_sec(&[enc_body(&[(1, 0x7f)], &b32), enc_body(&[(1, 0x7e)], &b64)]),
+    ]);
+    assert_aarch64_oracle(
+        "a64_stage7_mul_strength_u32z",
+        &mul_wasm,
+        &[
+            ("mul32", Value::I32(0)),
+            ("mul32", Value::I32(1)),
+            ("mul32", Value::I32(-1)),
+            ("mul32", Value::I32(0x1234_5678)),
+            ("mul32", Value::I32(i32::MIN)),
+            ("mul64_u32z", Value::I64(0)),
+            ("mul64_u32z", Value::I64(-1)),
+            ("mul64_u32z", Value::I64(0x1234_5678_9abc_def0)),
+            ("mul64_u32z", Value::I64(i64::MIN)),
+        ],
+        0,
     );
 }

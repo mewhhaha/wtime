@@ -22,21 +22,26 @@ validator and compiles it ahead of time through one of four backends:
   `WTIME_AOT_VERIFY=1` for release `build --cache`), x86-64 assembler (with
   `x64-v3` BMI1/BMI2/AVX2 + runtime OSXSAVE/XGETBV gating), and ELF64 linker
   with zero external compilers, zero subprocesses, and zero `libc`/`DT_NEEDED`
-  runtime dependencies. Supports `memory32`, `memory64`, all 236 fixed-width
-  128-bit Wasm SIMD opcodes, and standalone `ET_EXEC` `8 GiB + 64 KiB`
-  guard-page BCE + Goose Ryū float/bench imports (with zero signal handlers in
-  `--blot-cdylib`). See [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md)
+  runtime dependencies. Supports `memory32`, `memory64` (with 1-branch
+  wrap-proof bounds checks), `tail_call` (`return_call` / `return_call_indirect`
+  with O(1) frame reuse), all 236 fixed-width 128-bit Wasm SIMD opcodes + all
+  20 `relaxed_simd` opcodes, `.delta` incremental cache sidecars, and
+  standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE + Goose Ryū float/bench
+  imports (with zero signal handlers in `--blot-cdylib`). See
+  [docs/wtime-aot/x64-abi.md](../../docs/wtime-aot/x64-abi.md)
   for the exact admission, ABI, stack, signal, and CET `rdsspq` contract.
 - **`--backend aarch64`** (`--blot-cdylib` or standalone static Linux AArch64
   `ET_EXEC`): a self-contained pure-Rust (`#![forbid(unsafe_code)]`) multi-core
-  ARMv8-A backend (`--jobs`) with full 236-opcode NEON 128-bit SIMD and
-  `memory64` parity, per-function incremental caching (`<cache>/a64-inc/` +
+  ARMv8-A backend (`--jobs`) with full 236+20 NEON SIMD, O(1)-stack `tail_call`,
+  and `memory64` parity, per-function incremental caching (`<cache>/a64-inc/` +
   companion `.vidx` incremental validation, byte-for-byte ELF identical to cold
   builds), standalone `ET_EXEC` `8 GiB + 64 KiB` guard-page BCE (`memory32`
   only, zero signal handlers in `--blot-cdylib`) + WASI/Goose/Ryū float runtime
-  parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]` addressing, and
-  `madd`/`msub` fusion, emitting Linux AArch64 ELF64 shared libraries (Blot ABI
-  8) and static executables with zero external compilers or cross-toolchains.
+  parity, paired `stp`/`ldp` frames, `[mem_base, addr, uxtw]` addressing,
+  `val_upper32_zero` redundant-`uxtw` elision, shifted-`ADD`/`SUB` multiply
+  strength reduction, cold-block sinking, and `madd`/`msub` fusion, emitting
+  Linux AArch64 ELF64 shared libraries (Blot ABI 8) and static executables with
+  zero external compilers or cross-toolchains.
 
 Nothing is JIT-compiled at run time.
 
@@ -111,10 +116,11 @@ out/target/release/aot-module [--timing-json path] [-- program arguments]
     truncations, `memory.copy`/`memory.fill`, and 16-byte `v128` load/store/const
     + `i64x2` splat/extract/replace.
 - **Blot ABI 8 shared libraries (`--blot-cdylib` across `x64`, `aarch64`, `c`, `rust`)** and **pure-Rust static Linux executables (`--backend x64` / `--backend aarch64`)**:
-  - One non-shared Wasm32 memory (`max <= 65_536` pages; plus `memory64` and all
-    236 fixed-width 128-bit Wasm SIMD opcodes on both `--backend x64` and
-    `--backend aarch64`), static 32-bit nullable `funcref` tables with
-    `call_indirect`, mutable 32-bit nullable `externref` tables with
+  - One non-shared Wasm32 memory (`max <= 65_536` pages; plus `memory64`,
+    `tail_call` `return_call`/`return_call_indirect`, all 236 fixed-width
+    128-bit Wasm SIMD opcodes, and all 20 `relaxed_simd` opcodes on both
+    `--backend x64` and `--backend aarch64`), static 32-bit nullable `funcref`
+    tables with `call_indirect`, mutable 32-bit nullable `externref` tables with
     `table.get`/`table.set`, `br_table`, multi-value blocks/functions, Blot host
     function imports (including byte-exact embedded NUL names), exported globals
     (including `externref`), and all 18 Blot ABI 8 C exports with identical
