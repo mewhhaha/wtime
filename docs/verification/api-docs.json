@@ -17,7 +17,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "20 + 22 = 42\n",
-      "stderr": "   Compiling wtime-runtime v0.1.1 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s\n     Running `target/evidence/debug/examples/embedding`\n"
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running `target/evidence/debug/examples/embedding`\n"
     },
     {
       "command": [
@@ -32,7 +32,7 @@
       "exit_code": 0,
       "passed": true,
       "stdout": "suspended with 7; resumed with 9\n",
-      "stderr": "   Compiling wtime-runtime v0.1.1 (crates/wtime-runtime)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s\n     Running `target/evidence/debug/examples/suspension`\n"
+      "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s\n     Running `target/evidence/debug/examples/suspension`\n"
     },
     {
       "command": [
@@ -66,7 +66,7 @@
   "documents": {
     "docs/embedding.md": "c86ebbeeb814a344c901d72f32c8c1cacd1b221bdd6dac00db704c3bd13ca40c",
     "examples/README.md": "64926d38d7bb32bf80a51cc13a8a92e0f2c3dbb0cba6b274a8cb6511d5d74862",
-    "README.md": "2022cd28e66cd2a23cc7d779e319facbc9b8bb55baaacefbfa1d50ede2221862",
+    "README.md": "b7c30742fc1f9a2e9140a04b63eb37d91449bae393186785e02e10f6df763df7",
     "examples/memory64-table64.wat": "666790be61e72bfa60bbe77486d9584fabfc3ab78bed2a057b3339cb4fdccbd6",
     "examples/memory64-table64.wasm": "3920201aeccfd378c6e88a8882392bbcb3cbf1b040ba604c1064b158708d5990",
     "docs/architecture/api.md": "cb61d31789dfa962a4817320f579a346c9109f136eb06414a37d3ced954e59af",

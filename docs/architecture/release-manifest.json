@@ -87,7 +87,7 @@
     },
     "api_docs": {
       "path": "docs/verification/api-docs.json",
-      "sha256": "c03af18b540c86836e4544b362a3d60cf9d2ff09ccdf7a3f199550b0633ad070"
+      "sha256": "60401ecef62ed4a4c77a02d586673a336a6218cade370854dbed3b77a38b7ab3"
     },
     "native_x86_64": {
       "path": "docs/verification/native-x86_64.json",
