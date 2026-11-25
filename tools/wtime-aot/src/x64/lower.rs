@@ -506,9 +506,84 @@ struct Lower<'a> {
     /// Lazily populated map of `Val`s defined by non-zero, non-NaN `ConstF32`/`ConstF64` ops
     /// (enables bit-exact SSE2 `min`/`max` lowering for non-strict `<=`/`>=` clamps like `clamp(x, -100.0, 100.0)`).
     fp_nz_consts: Option<Vec<bool>>,
+    /// Lazily populated map of SSA `Val`s whose defining x86-64 emission guarantees bits `32..63 == 0`,
+    /// allowing redundant `movl %r, %r` zero-extensions on `I32WrapI64`/`I64ExtendI32U` to be elided.
+    val_upper32_zero: Option<Vec<bool>>,
 }
 
 impl<'a> Lower<'a> {
+    fn is_upper32_zero(&mut self, v: Val) -> bool {
+        if matches!(self.loc(v), Loc::Remat(RematConst::I32(_))) {
+            return true;
+        }
+        if let Loc::Remat(RematConst::I64(c)) = self.loc(v) {
+            return (c as u64) <= u32::MAX as u64;
+        }
+        let table = self.val_upper32_zero.get_or_insert_with(|| {
+            let mut flags = vec![false; self.ir.val_tys.len()];
+            for bb in &self.ir.blocks {
+                for inst in &bb.insts {
+                    let Some(res) = inst.res else {
+                        continue;
+                    };
+                    let z = match inst.op {
+                        Op::ConstI32(_)
+                        | Op::I32Eqz(_)
+                        | Op::I64Eqz(_)
+                        | Op::I32Clz(_)
+                        | Op::I32Ctz(_)
+                        | Op::I32Popcnt(_)
+                        | Op::I64Clz(_)
+                        | Op::I64Ctz(_)
+                        | Op::I64Popcnt(_)
+                        | Op::I32WrapI64(_)
+                        | Op::I64ExtendI32U(_)
+                        | Op::I32Extend8S(_)
+                        | Op::I32Extend16S(_)
+                        | Op::I32Bin(..)
+                        | Op::I32BinImm(..)
+                        | Op::I32Cmp(..)
+                        | Op::I32CmpImm(..)
+                        | Op::I64Cmp(..)
+                        | Op::I64CmpImm(..)
+                        | Op::F32Cmp(..)
+                        | Op::F64Cmp(..)
+                        | Op::I32ReinterpretF32(_)
+                        | Op::MemByteSum { .. }
+                        | Op::V128ToI32 { .. } => true,
+                        Op::ConstI64(c) => (c as u64) <= u32::MAX as u64,
+                        Op::I64BinImm(IntBinOp::ShrU, _, imm) => (imm & 63) >= 32,
+                        Op::I64BinImm(IntBinOp::And, _, imm) => imm >= 0,
+                        Op::Load { kind, .. } => matches!(
+                            kind,
+                            LoadKind::I32
+                                | LoadKind::I32Load8S
+                                | LoadKind::I32Load8U
+                                | LoadKind::I32Load16S
+                                | LoadKind::I32Load16U
+                                | LoadKind::I64Load8U
+                                | LoadKind::I64Load16U
+                                | LoadKind::I64Load32U
+                        ),
+                        Op::V128ExtractLane { kind, .. } => matches!(
+                            kind,
+                            super::ir::SimdLaneKind::I8x16S
+                                | super::ir::SimdLaneKind::I8x16U
+                                | super::ir::SimdLaneKind::I16x8S
+                                | super::ir::SimdLaneKind::I16x8U
+                                | super::ir::SimdLaneKind::I32x4
+                        ),
+                        _ => false,
+                    };
+                    if z {
+                        flags[res.0 as usize] = true;
+                    }
+                }
+            }
+            flags
+        });
+        table.get(v.0 as usize).copied().unwrap_or(false)
+    }
     fn is_nonzero_non_nan_fp_const(&mut self, v: Val) -> bool {
         match self.loc(v) {
             Loc::Remat(RematConst::F32(bits)) => {
@@ -1310,7 +1385,7 @@ impl<'a> Lower<'a> {
             self.gp_commit(dst_val, d);
         } else {
             // `SCRATCH_GP1` holds `q`: compute `rem = a - q * imm`.
-            self.asm.imul_rri(false, SCRATCH_GP1, SCRATCH_GP1, imm);
+            self.emit_mul_imm(false, SCRATCH_GP1, SCRATCH_GP1, imm);
             let raw_d = self.gp_write_reg(dst_val);
             let out_reg = if raw_d == SCRATCH_GP1 {
                 SCRATCH_GP2
@@ -1422,7 +1497,7 @@ impl<'a> Lower<'a> {
             }
             self.gp_commit(dst_val, d);
         } else {
-            self.asm.imul_rri(true, SCRATCH_GP1, SCRATCH_GP1, imm);
+            self.emit_mul_imm(true, SCRATCH_GP1, SCRATCH_GP1, imm);
             let raw_d = self.gp_write_reg(dst_val);
             let out_reg = if raw_d == SCRATCH_GP1 {
                 SCRATCH_GP2
@@ -1440,6 +1515,81 @@ impl<'a> Lower<'a> {
             self.asm.sub_rr(true, out_reg, SCRATCH_GP1);
             self.gp_commit(dst_val, out_reg);
         }
+    }
+
+    /// Strength-reduces small constant integer multiplies to 1–2 cycle ALU (`lea`/`shl`/`add`/`sub`)
+    /// sequences, relieving single-port integer multiplier pressure without ever clobbering live regs.
+    /// Precondition: `d != SCRATCH_GP2 && ar != SCRATCH_GP2`.
+    fn emit_mul_imm(&mut self, is64: bool, d: Gp, ar: Gp, imm: i32) {
+        if ar != Gp::Rsp {
+            match imm {
+                3 | 5 | 9 => {
+                    self.asm
+                        .lea(is64, d, Mem::indexed(ar, ar, (imm - 1) as u8, 0));
+                    return;
+                }
+                6 | 10 | 18 => {
+                    let base = imm >> 1;
+                    self.asm
+                        .lea(is64, d, Mem::indexed(ar, ar, (base - 1) as u8, 0));
+                    self.asm.add_rr(is64, d, d);
+                    return;
+                }
+                12 | 20 | 24 | 36 | 40 | 48 | 72 => {
+                    let shift = imm.trailing_zeros() as u8;
+                    let base = imm >> shift;
+                    self.asm
+                        .lea(is64, d, Mem::indexed(ar, ar, (base - 1) as u8, 0));
+                    self.asm.shl_imm(is64, d, shift);
+                    return;
+                }
+                15 | 25 | 27 | 45 | 81 => {
+                    let (f1, f2): (u8, u8) = match imm {
+                        15 => (3, 5),
+                        25 => (5, 5),
+                        27 => (3, 9),
+                        45 => (5, 9),
+                        81 => (9, 9),
+                        _ => unreachable!(),
+                    };
+                    self.asm.lea(is64, d, Mem::indexed(ar, ar, f1 - 1, 0));
+                    if d != Gp::Rsp {
+                        self.asm.lea(is64, d, Mem::indexed(d, d, f2 - 1, 0));
+                        return;
+                    }
+                }
+                7 | 31 | 63 => {
+                    debug_assert!(d != SCRATCH_GP2 && ar != SCRATCH_GP2);
+                    let k = (imm + 1).trailing_zeros() as u8;
+                    if d == ar {
+                        self.asm.mov_rr(is64, SCRATCH_GP2, ar);
+                        self.asm.shl_imm(is64, d, k);
+                        self.asm.sub_rr(is64, d, SCRATCH_GP2);
+                    } else {
+                        self.asm.mov_rr(is64, d, ar);
+                        self.asm.shl_imm(is64, d, k);
+                        self.asm.sub_rr(is64, d, ar);
+                    }
+                    return;
+                }
+                17 | 33 | 65 => {
+                    debug_assert!(d != SCRATCH_GP2 && ar != SCRATCH_GP2);
+                    let k = (imm - 1).trailing_zeros() as u8;
+                    if d == ar {
+                        self.asm.mov_rr(is64, SCRATCH_GP2, ar);
+                        self.asm.shl_imm(is64, d, k);
+                        self.asm.add_rr(is64, d, SCRATCH_GP2);
+                    } else {
+                        self.asm.mov_rr(is64, d, ar);
+                        self.asm.shl_imm(is64, d, k);
+                        self.asm.add_rr(is64, d, ar);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.asm.imul_rri(is64, d, ar, imm);
     }
 
     fn emit_int_bin_imm(&mut self, is64: bool, op: IntBinOp, dst_val: Val, a: Val, imm: i32) {
@@ -1477,12 +1627,7 @@ impl<'a> Lower<'a> {
                 }
             }
             IntBinOp::Mul => {
-                if matches!(imm, 3 | 5 | 9) && ar != Gp::Rsp {
-                    self.asm
-                        .lea(is64, d, Mem::indexed(ar, ar, (imm - 1) as u8, 0));
-                } else {
-                    self.asm.imul_rri(is64, d, ar, imm);
-                }
+                self.emit_mul_imm(is64, d, ar, imm);
             }
             IntBinOp::And => {
                 if d != ar {
@@ -1817,11 +1962,14 @@ impl<'a> Lower<'a> {
                 self.gp_commit(r, d);
             }
             Op::I32WrapI64(a) | Op::I64ExtendI32U(a) => {
-                // Both zero-extend the low 32 bits into the 64-bit register!
+                // Both zero-extend the low 32 bits into the 64-bit register.
+                // Elide `movl %r, %r` completely when `a` is already proven upper-32-zero in `d`!
                 let r = res.unwrap();
                 let ar = self.gp_read(a, SCRATCH_GP1);
                 let d = self.gp_write_reg(r);
-                self.asm.mov_rr(false, d, ar);
+                if !(d == ar && self.is_upper32_zero(a)) {
+                    self.asm.mov_rr(false, d, ar);
+                }
                 self.gp_commit(r, d);
             }
             Op::I64ExtendI32S(a) | Op::I64Extend32S(a) => {
@@ -2992,6 +3140,9 @@ impl<'a> Lower<'a> {
                 if kind.ty().is_fp() {
                     let d = self.fp_write_reg(r);
                     match kind {
+                        LoadKind::V128 if self.isa.has_avx2 => {
+                            self.asm.vmovdqu_xm(d, mem);
+                        }
                         LoadKind::F32 | LoadKind::F64 | LoadKind::V128 => {
                             emit_fp_load(&mut self.asm, d, mem, kind.ty());
                         }
@@ -3090,7 +3241,11 @@ impl<'a> Lower<'a> {
                     }
                     StoreKind::V128 => {
                         let vr = self.fp_read(val, SCRATCH_FP1);
-                        emit_fp_store(&mut self.asm, mem, vr, Ty::V128);
+                        if self.isa.has_avx2 {
+                            self.asm.vmovdqu_mx(mem, vr);
+                        } else {
+                            emit_fp_store(&mut self.asm, mem, vr, Ty::V128);
+                        }
                     }
                     StoreKind::I8 | StoreKind::I16 | StoreKind::I32 | StoreKind::I64 => {
                         // Direct immediate store fast path when `val` is a rematerialized constant!
@@ -3912,6 +4067,7 @@ impl<'a> Lower<'a> {
                         lane,
                         None,
                         Some(d),
+                        self.isa.has_avx2,
                     );
                     self.fp_commit(r, d);
                 } else {
@@ -3923,6 +4079,7 @@ impl<'a> Lower<'a> {
                         lane,
                         Some(d),
                         None,
+                        self.isa.has_avx2,
                     );
                     self.gp_commit(r, d);
                 }
@@ -4579,6 +4736,7 @@ pub fn lower_ir_to_x64_with_budget(
         edge_tramps: Vec::new(),
         edge_tramp_cache: HashMap::new(),
         fp_nz_consts: None,
+        val_upper32_zero: None,
     };
 
     // ---- Wrap-Proof Prospective Stack Check BEFORE Any Push or Frame Allocation ----

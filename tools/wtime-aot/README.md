@@ -150,8 +150,8 @@ Per-backend input and build bounds:
 - **Max input `.wasm` size**: `64 MiB` for `--backend x64` and
   `--backend aarch64`; `256 MiB` for `--backend c` and `--backend rust` (inputs
   must be regular files, opened non-blockingly on Unix to reject FIFOs/devices
-  immediately, and read in deadline-checked 64 KiB chunks before full
-  buffering).
+  immediately, and read directly in deadline-checked 1 MiB chunks under the
+  hard byte cap).
 - **Build timeout**: `--time-limit SECONDS` (default `3600`) bounds regular-file
   reads, validation, codegen, and child compiler/linker processes (run builds on
   untrusted inputs inside an OS memory cgroup as well).

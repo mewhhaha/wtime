@@ -3625,3 +3625,91 @@ fn aarch64_standalone_guard_page_bce_and_goose_ryu_wasi_parity() {
         "out of bounds memory access\n"
     );
 }
+
+#[test]
+fn aarch64_oracle_stage6_narrow_eq_loops() {
+    use crate::x64::tests_unit::{
+        code_sec, enc_body, export_sec, func_sec, leb_i32, section, type_sec, wasm_module,
+    };
+    // f0(packed): 2-key filtered loop `for v in init..limit { if v == k1 || v == k2 { acc = acc*131 + v + 3; mem[320+cnt] = v; cnt += 1 } }`
+    let mut b0 = vec![
+        0x20, 0, 0x41, 15, 0x71, 0x22, 1, 0x21, 5, // init = v
+        0x20, 0, 0x41, 4, 0x76, 0x41, 15, 0x71, 0x21, 2, // limit
+        0x20, 0, 0x41, 8, 0x76, 0x41, 15, 0x71, 0x21, 3, // k1
+        0x20, 0, 0x41, 12, 0x76, 0x41, 15, 0x71, 0x21, 4, // k2
+        0x41, 5, 0x21, 6, // acc = 5
+        0x41, 0, 0x21, 7, // cnt = 0
+        0x02, 0x40, 0x03, 0x40, 0x20, 5, 0x20, 2, 0x4f, 0x0d, 1, // if v >=u limit break
+        0x20, 5, 0x20, 3, 0x46, 0x20, 5, 0x20, 4, 0x46, 0x72, // v == k1 || v == k2
+        0x04, 0x40, 0x20, 6, 0x41,
+    ];
+    leb_i32(&mut b0, 131);
+    b0.extend_from_slice(&[0x6c, 0x20, 5, 0x6a, 0x41, 3, 0x6a, 0x21, 6]);
+    b0.extend_from_slice(&[0x20, 7, 0x41]);
+    leb_i32(&mut b0, 320);
+    b0.extend_from_slice(&[0x6a, 0x20, 5, 0x3a, 0, 0]);
+    b0.extend_from_slice(&[
+        0x20, 7, 0x41, 1, 0x6a, 0x21, 7, 0x0b, 0x20, 5, 0x41, 1, 0x6a, 0x21, 5, 0x0c, 0, 0x0b,
+        0x0b, 0x20, 6, 0x20, 7, 0x41, 24, 0x74, 0x73,
+    ]);
+    // f1(packed): unguarded do-while loop (must NOT be mis-narrowed when init >= limit)
+    let b1 = vec![
+        0x20, 0, 0x41, 15, 0x71, 0x21, 1, // v = init
+        0x20, 0, 0x41, 4, 0x76, 0x41, 15, 0x71, 0x21, 2, // limit
+        0x20, 0, 0x41, 8, 0x76, 0x41, 15, 0x71, 0x21, 3, // k1
+        0x41, 0, 0x21, 4, // acc = 0
+        0x03, 0x40, 0x20, 1, 0x20, 3, 0x46, 0x04, 0x40, 0x20, 4, 0x20, 1, 0x6a, 0x41, 0xe4, 0x00,
+        0x6a, 0x21, 4, 0x0b, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x20, 2, 0x49, 0x0d, 0, 0x0b, 0x20,
+        4,
+    ];
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0, 0]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("narrow_2k", 0, 0),
+            ("dowhile_1k", 0, 1),
+        ]),
+        code_sec(&[enc_body(&[(7, 0x7f)], &b0), enc_body(&[(4, 0x7f)], &b1)]),
+    ]);
+
+    let mut calls = Vec::new();
+    for (init, limit, k1, k2) in [
+        (0, 0, 0, 0),
+        (0, 1, 0, 0),
+        (0, 10, 2, 7),
+        (0, 10, 7, 2),
+        (0, 10, 5, 5),
+        (3, 10, 1, 8),
+        (3, 10, 8, 12),
+        (3, 10, 1, 12),
+        (8, 3, 8, 9),
+    ] {
+        calls.push((
+            "narrow_2k",
+            Value::I32(init | (limit << 4) | (k1 << 8) | (k2 << 12)),
+        ));
+    }
+    for (init, limit, k1) in [(5, 0, 5), (5, 5, 5), (2, 7, 4)] {
+        calls.push(("dowhile_1k", Value::I32(init | (limit << 4) | (k1 << 8))));
+    }
+    assert_aarch64_oracle("a64_stage6_narrow_eq_loops", &wasm, &calls, 384);
+
+    // Verify `fixtures/graph_bfs.wasm` parity on AArch64 too!
+    let bfs_wasm =
+        std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/graph_bfs.wasm"))
+            .expect("read fixtures/graph_bfs.wasm");
+    assert_aarch64_oracle(
+        "a64_stage6_graph_bfs",
+        &bfs_wasm,
+        &[
+            ("run", Value::I32(0)),
+            ("run", Value::I32(1)),
+            ("run", Value::I32(16)),
+            ("run", Value::I32(64)),
+            ("run", Value::I32(1024)),
+        ],
+        4224,
+    );
+}

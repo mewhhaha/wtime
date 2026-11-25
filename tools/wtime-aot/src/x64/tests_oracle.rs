@@ -3584,3 +3584,274 @@ fn oracle_step3_avx2_blur3_magic_hoist_and_f64x4() {
         &[(512, 130), (1024, 67), (1536, 64), (4096, 160)],
     );
 }
+
+#[test]
+fn oracle_stage6_narrow_eq_loops_mul_strength_and_upper32_zero() {
+    // 1. `narrow_equality_filtered_loops` exhaustive edge-case matrix:
+    //    - f0(packed): 1-key loop `for v in init..limit { if v == k1 { acc = acc * 31 + v + 7; mem[64 + v] = v + 1 } }`
+    //      where init = packed & 0xff, limit = (packed >> 8) & 0xff, k1 = (packed >> 16) & 0xff.
+    //    - f1(packed): 2-key loop `for v in init..limit { if v == k1 || v == k2 { acc = acc * 131 + v + 3; mem[320 + cnt] = v; cnt += 1 } }`
+    //      where init = packed & 0xf, limit = (packed >> 4) & 0xf, k1 = (packed >> 8) & 0xf, k2 = (packed >> 12) & 0xf.
+    //      Strictly tests ascending visit order (`k1 > k2`), deduplication (`k1 == k2`), out-of-range keys (`< init` or `>= limit`),
+    //      empty range (`limit <= init`), and 1-element range (`limit == init + 1`)!
+    //    - f2(packed): `do-while` loop (NO entry guard!) `v = init; do { if v == k1 { acc += v + 100 }; v += 1 } while v <u limit`
+    //      with `init >= limit` (must STILL execute iteration `v = init` when `k1 == init`, MUST NOT be mis-narrowed!).
+    //    - f3(packed): side-effecting + trapping 2-key loop writing `mem[65530 + v] = 0x55`:
+    //      when `k1 = 8` (OOB!) and `k2 = 2` (in bounds!), ascending order MUST write `mem[65532] = 0x55` first then trap on `v = 8`;
+    //      when `k1 = 2` and `k2 = 8`, same exact partial write + OOB trap!
+    // 2. Strength-reduced constant multiplies (`emit_mul_imm`) for all 24 small constants in both i32 and i64.
+    // 3. `val_upper32_zero` elision safety on `i32.wrap_i64` / `i64.extend_i32_u` with both clean & dirty upper 32 bits.
+
+    // f0(packed: i32) -> i32: 1-key filtered loop
+    let mut b0 = Vec::new();
+    // l1=init, l2=limit, l3=k1, l4=v, l5=acc
+    b0.extend_from_slice(&[0x20, 0, 0x41]);
+    leb_i32(&mut b0, 0xff);
+    b0.extend_from_slice(&[0x71, 0x22, 1, 0x21, 4]); // init = v = packed & 0xff
+    b0.extend_from_slice(&[0x20, 0, 0x41, 8, 0x76, 0x41]);
+    leb_i32(&mut b0, 0xff);
+    b0.extend_from_slice(&[0x71, 0x21, 2]); // limit
+    b0.extend_from_slice(&[0x20, 0, 0x41, 16, 0x76, 0x41]);
+    leb_i32(&mut b0, 0xff);
+    b0.extend_from_slice(&[0x71, 0x21, 3]); // k1
+    b0.extend_from_slice(&[0x41, 1, 0x21, 5]); // acc = 1
+    b0.extend_from_slice(&[
+        0x02, 0x40, 0x03, 0x40, 0x20, 4, 0x20, 2, 0x4f, 0x0d, 1, // if v >=u limit break
+        0x20, 4, 0x20, 3, 0x46, 0x04, 0x40, // if v == k1
+        0x20, 5, 0x41, 31, 0x6c, 0x20, 4, 0x6a, 0x41, 7, 0x6a, 0x21,
+        5, // acc = acc*31 + v + 7
+        0x20, 4, 0x41, 64, 0x6a, 0x20, 4, 0x41, 1, 0x6a, 0x3a, 0, 0,    // mem[64+v] = v+1
+        0x0b, // end if
+        0x20, 4, 0x41, 1, 0x6a, 0x21, 4, 0x0c, 0, 0x0b, 0x0b, 0x20, 5,
+    ]);
+
+    // f1(packed: i32) -> i32: 2-key filtered loop
+    let mut b1 = Vec::new();
+    // l1=init, l2=limit, l3=k1, l4=k2, l5=v, l6=acc, l7=cnt
+    b1.extend_from_slice(&[
+        0x20, 0, 0x41, 15, 0x71, 0x22, 1, 0x21, 5, // init = v
+        0x20, 0, 0x41, 4, 0x76, 0x41, 15, 0x71, 0x21, 2, // limit
+        0x20, 0, 0x41, 8, 0x76, 0x41, 15, 0x71, 0x21, 3, // k1
+        0x20, 0, 0x41, 12, 0x76, 0x41, 15, 0x71, 0x21, 4, // k2
+        0x41, 5, 0x21, 6, // acc = 5
+        0x41, 0, 0x21, 7, // cnt = 0
+        0x02, 0x40, 0x03, 0x40, 0x20, 5, 0x20, 2, 0x4f, 0x0d, 1, // if v >=u limit break
+        0x20, 5, 0x20, 3, 0x46, 0x20, 5, 0x20, 4, 0x46, 0x72, // (v == k1) | (v == k2)
+        0x04, 0x40, // if
+        0x20, 6, 0x41,
+    ]);
+    leb_i32(&mut b1, 131);
+    b1.extend_from_slice(&[0x6c, 0x20, 5, 0x6a, 0x41, 3, 0x6a, 0x21, 6]); // acc = acc*131 + v + 3
+    b1.extend_from_slice(&[0x20, 7, 0x41]);
+    leb_i32(&mut b1, 320);
+    b1.extend_from_slice(&[0x6a, 0x20, 5, 0x3a, 0, 0]); // mem[320 + cnt] = v
+    b1.extend_from_slice(&[
+        0x20, 7, 0x41, 1, 0x6a, 0x21, 7,    // cnt += 1
+        0x0b, // end if
+        0x20, 5, 0x41, 1, 0x6a, 0x21, 5, 0x0c, 0, 0x0b, 0x0b, 0x20, 6, 0x20, 7, 0x41, 24, 0x74,
+        0x73,
+    ]);
+
+    // f2(packed: i32) -> i32: unguarded do-while loop (init = packed & 0xf, limit = (packed>>4)&0xf, k1 = (packed>>8)&0xf)
+    let b2 = vec![
+        0x20, 0, 0x41, 15, 0x71, 0x21, 1, // v = init
+        0x20, 0, 0x41, 4, 0x76, 0x41, 15, 0x71, 0x21, 2, // limit
+        0x20, 0, 0x41, 8, 0x76, 0x41, 15, 0x71, 0x21, 3, // k1
+        0x41, 0, 0x21, 4, // acc = 0
+        0x03, 0x40, // loop (do-while: body runs BEFORE check!)
+        0x20, 1, 0x20, 3, 0x46, 0x04, 0x40, 0x20, 4, 0x20, 1, 0x6a, 0x41, 0xe4, 0x00, 0x6a, 0x21,
+        4, // acc += v + 100
+        0x0b, 0x20, 1, 0x41, 1, 0x6a, 0x22, 1, 0x20, 2, 0x49, 0x0d, 0, // br_if (v <u limit) 0
+        0x0b, 0x20, 4,
+    ];
+
+    // f3(packed: i32) -> i32: 2-key loop writing mem[65530 + v] = v + 0x50 (traps OOB for v >= 6!)
+    // k1 = packed & 0xf, k2 = (packed >> 4) & 0xf, limit = 12
+    let mut b3 = vec![
+        0x20, 0, 0x41, 15, 0x71, 0x21, 1, // k1
+        0x20, 0, 0x41, 4, 0x76, 0x41, 15, 0x71, 0x21, 2, // k2
+        0x41, 0, 0x21, 3, // v = 0
+        0x41, 0, 0x21, 4, // acc = 0
+        0x02, 0x40, 0x03, 0x40, 0x20, 3, 0x41, 12, 0x4f, 0x0d, 1, // if v >=u 12 break
+        0x20, 3, 0x20, 1, 0x46, 0x20, 3, 0x20, 2, 0x46, 0x72, // v == k1 || v == k2
+        0x04, 0x40, 0x20, 3, 0x41,
+    ];
+    leb_i32(&mut b3, 65530);
+    b3.extend_from_slice(&[0x6a, 0x20, 3, 0x41]);
+    leb_i32(&mut b3, 0x50);
+    b3.extend_from_slice(&[0x6a, 0x3a, 0, 0]); // mem[65530 + v] = v + 0x50
+    b3.extend_from_slice(&[
+        0x20, 4, 0x41, 17, 0x6c, 0x20, 3, 0x6a, 0x21, 4, 0x0b, 0x20, 3, 0x41, 1, 0x6a, 0x21, 3,
+        0x0c, 0, 0x0b, 0x0b, 0x20, 4,
+    ]);
+
+    // f4(x: i32) -> i32: strength-reduced constant i32 multiplies across all 24 small multipliers
+    // (both `dst == src` chain and `dst != src` from live `x`)
+    let mults = [
+        3i32, 5, 6, 7, 9, 10, 12, 15, 17, 18, 20, 24, 25, 27, 31, 33, 36, 40, 45, 48, 63, 65, 72,
+        81,
+    ];
+    let mut b4 = vec![0x20, 0, 0x21, 1]; // acc = x
+    for &m in &mults {
+        // acc = (acc * m) ^ (x * m)
+        b4.extend_from_slice(&[0x20, 1, 0x41]);
+        leb_i32(&mut b4, m);
+        b4.extend_from_slice(&[0x6c, 0x20, 0, 0x41]);
+        leb_i32(&mut b4, m);
+        b4.extend_from_slice(&[0x6c, 0x73, 0x21, 1]);
+    }
+    b4.extend_from_slice(&[0x20, 1]);
+
+    // f5(x: i64) -> i64: strength-reduced constant i64 multiplies + `val_upper32_zero` wrap/extend checks!
+    // Tests:
+    //  a) all 24 small i64 multipliers with wraparound;
+    //  b) `i64.extend_i32_u(i32.wrap_i64(x))` where `x` has dirty high 32 bits (MUST zero upper 32 bits!);
+    //  c) `i64.extend_i32_u(i32.wrap_i64(x >>u 32))` where input IS already upper32_zero (elidable!);
+    //  d) `i64.extend_i32_u(i32.load[0])` + `i32.wrap_i64(i64.extend_i32_u(y))` used as address.
+    let mut b5 = vec![0x20, 0, 0x21, 1]; // acc = x
+    for &m in &mults {
+        b5.extend_from_slice(&[0x20, 1, 0x42]);
+        leb_i32(&mut b5, m);
+        b5.extend_from_slice(&[0x7e, 0x20, 0, 0x42]);
+        leb_i32(&mut b5, m);
+        b5.extend_from_slice(&[0x7e, 0x85, 0x21, 1]);
+    }
+    // b) dirty high bits wrap -> extend_u (must clear high 32 bits!)
+    b5.extend_from_slice(&[0x20, 1, 0x20, 0, 0xa7, 0xad, 0x85, 0x21, 1]);
+    // c) clean upper32_zero (`x >>u 32`) wrap -> extend_u
+    b5.extend_from_slice(&[0x20, 1, 0x20, 0, 0x42, 32, 0x88, 0xa7, 0xad, 0x7c, 0x21, 1]);
+    // d) negative i32 sign-extended to i64 (`0xffff_ffff_8000_0001`), wrapped then extended_u (MUST NOT elide!)
+    b5.extend_from_slice(&[
+        0x20, 1, 0x20, 0, 0xa7,
+        0xac, // i64.extend_i32_s -> dirty upper 32 bits if bit 31 set!
+        0xa7, // i32.wrap_i64
+        0xad, // i64.extend_i32_u -> upper 32 bits MUST be 0!
+        0x85, 0x21, 1, 0x20, 1,
+    ]);
+
+    let wasm = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f]), (&[0x7e], &[0x7e])]),
+        func_sec(&[0, 0, 0, 0, 0, 1]),
+        section(5, &[1, 0x01, 1, 1]),
+        export_sec(&[
+            ("blot:memory", 2, 0),
+            ("narrow_1k", 0, 0),
+            ("narrow_2k", 0, 1),
+            ("dowhile_1k", 0, 2),
+            ("narrow_2k_trap", 0, 3),
+            ("mul_i32", 0, 4),
+            ("mul_and_u32z_i64", 0, 5),
+        ]),
+        code_sec(&[
+            enc_body(&[(5, 0x7f)], &b0),
+            enc_body(&[(7, 0x7f)], &b1),
+            enc_body(&[(4, 0x7f)], &b2),
+            enc_body(&[(4, 0x7f)], &b3),
+            enc_body(&[(1, 0x7f)], &b4),
+            enc_body(&[(1, 0x7e)], &b5),
+        ]),
+    ]);
+
+    let mut calls = Vec::new();
+    // f0: (init, limit, k1)
+    for (init, limit, k1) in [
+        (0, 0, 0),
+        (0, 1, 0),
+        (0, 1, 1),
+        (0, 10, 0),
+        (0, 10, 5),
+        (0, 10, 9),
+        (0, 10, 10),
+        (5, 12, 4),
+        (5, 12, 5),
+        (5, 12, 8),
+        (5, 12, 11),
+        (5, 12, 12),
+        (10, 5, 10),
+    ] {
+        calls.push(c(
+            "narrow_1k",
+            ArgSpec::I32(init | (limit << 8) | (k1 << 16)),
+        ));
+    }
+    // f1: (init, limit, k1, k2)
+    for (init, limit, k1, k2) in [
+        (0, 0, 0, 0),
+        (0, 1, 0, 0),
+        (0, 1, 0, 1),
+        (0, 10, 2, 7),  // k1 < k2
+        (0, 10, 7, 2),  // k1 > k2 (ascending order!)
+        (0, 10, 5, 5),  // k1 == k2 (dedup!)
+        (3, 10, 1, 8),  // k1 < init, k2 in range
+        (3, 10, 8, 1),  // k1 in range, k2 < init
+        (3, 10, 4, 12), // k1 in range, k2 >= limit
+        (3, 10, 12, 4), // k1 >= limit, k2 in range
+        (3, 10, 1, 12), // both out of range
+        (3, 10, 3, 9),  // both exact boundaries
+        (3, 10, 9, 3),  // reversed exact boundaries
+        (8, 3, 8, 9),   // init > limit -> 0 iters
+    ] {
+        calls.push(c(
+            "narrow_2k",
+            ArgSpec::I32(init | (limit << 4) | (k1 << 8) | (k2 << 12)),
+        ));
+    }
+    // f2: unguarded do-while with init >= limit AND init < limit
+    for (init, limit, k1) in [
+        (5, 0, 5),
+        (5, 3, 5),
+        (5, 5, 5),
+        (5, 5, 4),
+        (2, 7, 4),
+        (2, 7, 2),
+    ] {
+        calls.push(c(
+            "dowhile_1k",
+            ArgSpec::I32(init | (limit << 4) | (k1 << 8)),
+        ));
+    }
+    // f3: trapping 2-key ordering (`k1 > k2` where larger traps -> smaller MUST commit first!)
+    for (k1, k2) in [(1, 4), (4, 1), (3, 3), (8, 2), (2, 8), (9, 7)] {
+        calls.push(c("narrow_2k_trap", ArgSpec::I32(k1 | (k2 << 4))));
+    }
+    // f4: i32 multiplies
+    for x in [0, 1, -1, 7, -13, 0x1234_5678, i32::MIN, i32::MAX] {
+        calls.push(c("mul_i32", ArgSpec::I32(x)));
+    }
+    // f5: i64 multiplies + upper32_zero wrap/extend
+    for x in [
+        0i64,
+        1,
+        -1,
+        0x1234_5678_9abc_def0,
+        (1i64 << 32) | 0x8000_0001,
+        i64::MIN,
+        i64::MAX,
+    ] {
+        calls.push(c("mul_and_u32z_i64", ArgSpec::I64(x)));
+    }
+    assert_oracle_matrix(
+        "stage6_narrow_mul_u32z",
+        &wasm,
+        &calls,
+        &[],
+        &[(64, 32), (320, 16), (65530, 6)],
+    );
+
+    // Also verify `fixtures/graph_bfs.wasm` end-to-end against `wtime_runtime` interpreter on
+    // BOTH cold initial memory (full BFS) and repeated calls!
+    let bfs_wasm = std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/graph_bfs.wasm"),
+    )
+    .expect("read fixtures/graph_bfs.wasm");
+    let bfs_calls = vec![
+        c("run", ArgSpec::I32(0)),
+        c("run", ArgSpec::I32(1)),
+        c("run", ArgSpec::I32(16)),
+        c("run", ArgSpec::I32(64)),
+        c("run", ArgSpec::I32(128)),
+        c("run", ArgSpec::I32(1024)),
+        c("run", ArgSpec::I32(1024)),
+    ];
+    assert_oracle_matrix("stage6_graph_bfs_fixture", &bfs_wasm, &bfs_calls, &[], &[]);
+}

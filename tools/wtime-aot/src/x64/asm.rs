@@ -2800,8 +2800,16 @@ impl Asm {
 
     // ---- AVX 128-bit 3-operand FP / SIMD instructions (L=0, zero upper YMM cleanly) ----
 
+    pub fn vmovdqu_xm(&mut self, dst: Xmm, mem: Mem) {
+        self.vex3_xmm_mem(1, 2, false, dst, None, mem, 0x6f);
+    }
     pub fn vmovdqu_mx(&mut self, mem: Mem, src: Xmm) {
         self.vex3_xmm_mem(1, 2, false, src, None, mem, 0x7f);
+    }
+    /// `vpshufd xmm, xmm, imm8` (`VEX.128.66.0F.WIG 70 /r ib`).
+    pub fn vpshufd(&mut self, d: Xmm, s: Xmm, imm: u8) {
+        self.vex3_xmm_rr(1, 1, false, d, None, s, 0x70);
+        self.emit_u8(imm);
     }
     pub fn vaddss_xxx(&mut self, d: Xmm, a: Xmm, b: Xmm) {
         self.vex3_xmm_rr(1, 2, false, d, Some(a), b, 0x58);

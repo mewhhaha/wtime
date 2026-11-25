@@ -15,3 +15,7 @@ wtime-types = { path = "../../crates/wtime-types" }
 
 [dev-dependencies]
 wtime-runtime = { path = "../../crates/wtime-runtime" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -263,12 +263,12 @@ pub fn hex(bytes: &[u8]) -> String {
 pub const MERKLE_CHUNK_BYTES: usize = 256 << 10;
 const MERKLE_PREFIX: &str = "merkle256k:";
 
-/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 16
-/// threads. Uses fallible allocation and `spawn_scoped` with inline fallback.
-pub fn parallel_merkle_digest(bytes: &[u8]) -> Option<[u8; 32]> {
+/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks with domain tag `domain`
+/// in parallel across up to 16 threads. Uses fallible allocation and `spawn_scoped` with inline fallback.
+pub fn parallel_merkle_digest_with_domain(domain: &[u8], bytes: &[u8]) -> Option<[u8; 32]> {
     if bytes.len() <= MERKLE_CHUNK_BYTES {
         let mut h = Sha256::new();
-        h.update(b"WTIME-MERKLE256K-1");
+        h.update(domain);
         h.update(&(bytes.len() as u64).to_le_bytes());
         h.update(&digest(bytes));
         return Some(h.finish());
@@ -315,12 +315,18 @@ pub fn parallel_merkle_digest(bytes: &[u8]) -> Option<[u8; 32]> {
         hash_range(start_idx, &mut leaf_hashes[start_idx..start_idx + take]);
     }
     let mut root = Sha256::new();
-    root.update(b"WTIME-MERKLE256K-1");
+    root.update(domain);
     root.update(&(bytes.len() as u64).to_le_bytes());
     for leaf in &leaf_hashes {
         root.update(leaf);
     }
     Some(root.finish())
+}
+
+/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 16
+/// threads. Uses fallible allocation and `spawn_scoped` with inline fallback.
+pub fn parallel_merkle_digest(bytes: &[u8]) -> Option<[u8; 32]> {
+    parallel_merkle_digest_with_domain(b"WTIME-MERKLE256K-1", bytes)
 }
 
 /// Computes the integrity sidecar digest for a cached build artifact.
@@ -400,5 +406,20 @@ mod tests {
         // Flip a byte in the middle chunk and confirm tamper detection.
         big[MERKLE_CHUNK_BYTES + 5] ^= 0x01;
         assert!(!verify_artifact_sidecar(&big, &big_dig));
+
+        // Verify multi-chunk Merkle root against scalar `digest` leaf by leaf.
+        let mut huge = vec![0u8; MERKLE_CHUNK_BYTES * 5 + 37];
+        for (i, b) in huge.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(29) ^ (i >> 7)) as u8;
+        }
+        let huge_dig = artifact_sidecar_digest(&huge);
+        assert!(verify_artifact_sidecar(&huge, &huge_dig));
+        let mut manual = Sha256::new();
+        manual.update(b"WTIME-MERKLE256K-1");
+        manual.update(&(huge.len() as u64).to_le_bytes());
+        for ch in huge.chunks(MERKLE_CHUNK_BYTES) {
+            manual.update(&digest(ch));
+        }
+        assert_eq!(huge_dig, format!("{MERKLE_PREFIX}{}", manual.hex()));
     }
 }

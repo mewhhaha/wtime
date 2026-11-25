@@ -759,8 +759,9 @@ struct LinkContext<'a> {
     helper_text_offs: &'a [u64],
 }
 
-fn patch_relocs(
-    text: &mut [u8],
+fn patch_relocs_in_slice(
+    slice: &mut [u8],
+    slice_base_off: u64,
     item_text_off: u64,
     relocs: &[Reloc],
     local_rodata_off: Option<u64>,
@@ -770,6 +771,9 @@ fn patch_relocs(
         .tx_vaddr
         .checked_add(item_text_off)
         .ok_or("x64: item vaddr overflow")?;
+    let rel_base = item_text_off
+        .checked_sub(slice_base_off)
+        .ok_or("x64: item offset precedes slice base")? as usize;
     for r in relocs {
         let target_vaddr: u64 = match r.target {
             RelocTarget::Func(fi) => {
@@ -809,19 +813,29 @@ fn patch_relocs(
         let rel = i128::from(target_vaddr) - i128::from(next_ip_vaddr);
         let rel32 = i32::try_from(rel)
             .map_err(|_| "x64: rel32 relocation out of 2 GiB range".to_string())?;
-        let p = (item_text_off as usize)
+        let p = rel_base
             .checked_add(r.patch_off as usize)
             .ok_or("x64: reloc patch offset overflow")?;
         let end = p.checked_add(4).ok_or("x64: reloc patch end overflow")?;
-        if end > text.len() {
+        if end > slice.len() {
             return Err(format!(
-                "x64: reloc patch extent {p}..{end} exceeds .text len {}",
-                text.len()
+                "x64: reloc patch extent {p}..{end} exceeds .text chunk len {}",
+                slice.len()
             ));
         }
-        text[p..end].copy_from_slice(&rel32.to_le_bytes());
+        slice[p..end].copy_from_slice(&rel32.to_le_bytes());
     }
     Ok(())
+}
+
+fn patch_relocs(
+    text: &mut [u8],
+    item_text_off: u64,
+    relocs: &[Reloc],
+    local_rodata_off: Option<u64>,
+    ctx: &LinkContext<'_>,
+) -> Result<(), String> {
+    patch_relocs_in_slice(text, 0, item_text_off, relocs, local_rodata_off, ctx)
 }
 
 /// Completion handle for a best-effort background incremental cache write started before linking.
@@ -1102,19 +1116,52 @@ fn compile_wasm_to_x64_so_inner(
         let n_defs_hint = spans.len();
         if n_defs_hint > 0 && inc_cache::has_val_index(cache_dir, &sh) {
             let n_hash_workers = resolve_jobs(opts.jobs).min(n_defs_hint);
-            // Overlap `.vidx` load + Merkle verify with parallel body hashing!
-            let (vidx_opt, hashes_opt) = std::thread::scope(|s| {
+            let deadline_opt = opts.deadline;
+            // Overlap `.vidx` load + immediate background `x64-inc` `.bin` preload with parallel
+            // body hashing so the 9+ MiB `.bin` read+Merkle verify starts at t~0.5ms instead of
+            // waiting for `hash_raw_spans_parallel` to finish!
+            let ((vidx_opt, early_raw), hashes_opt) = std::thread::scope(|s| {
                 let dir_ref = cache_dir;
                 let h_vidx = std::thread::Builder::new()
                     .spawn_scoped(s, move || {
-                        inc_cache::load_val_index(dir_ref, &sh, n_defs_hint)
+                        let vidx = inc_cache::load_val_index(dir_ref, &sh, n_defs_hint);
+                        let mut early: Option<([u8; 32], PreRawWait)> = None;
+                        if let Some(ref v) = vidx {
+                            let raw_wait = deadline_opt.map(|dl| {
+                                dl.saturating_duration_since(Instant::now())
+                                    .saturating_sub(std::time::Duration::from_millis(250))
+                                    .min(std::time::Duration::from_millis(250))
+                            });
+                            if raw_wait.is_none_or(|w| !w.is_zero()) {
+                                let st = std::sync::Arc::new((
+                                    Mutex::new(None::<Option<Vec<u8>>>),
+                                    std::sync::Condvar::new(),
+                                ));
+                                let st_bg = std::sync::Arc::clone(&st);
+                                let dir_buf = dir_ref.to_path_buf();
+                                let abi_hint = v.abi_hash;
+                                if std::thread::Builder::new()
+                                    .spawn(move || {
+                                        let raw =
+                                            inc_cache::load_inc_cache_raw(&dir_buf, &abi_hint);
+                                        let (lk, cv) = &*st_bg;
+                                        *lk.lock().unwrap_or_else(|g| g.into_inner()) = Some(raw);
+                                        cv.notify_all();
+                                    })
+                                    .is_ok()
+                                {
+                                    early = Some((abi_hint, st));
+                                }
+                            }
+                        }
+                        (vidx, early)
                     })
                     .ok();
                 let hashes = hash_raw_spans_parallel(wasm, &spans, n_hash_workers);
-                let vidx = h_vidx
-                    .and_then(|h| h.join().ok())
-                    .unwrap_or_else(|| inc_cache::load_val_index(cache_dir, &sh, n_defs_hint));
-                (vidx, hashes)
+                let vidx_pair = h_vidx.and_then(|h| h.join().ok()).unwrap_or_else(|| {
+                    (inc_cache::load_val_index(cache_dir, &sh, n_defs_hint), None)
+                });
+                (vidx_pair, hashes)
             });
             if let Some(hashes) = hashes_opt {
                 if let Some(vidx) = vidx_opt {
@@ -1124,32 +1171,7 @@ fn compile_wasm_to_x64_so_inner(
                         .filter(|(bh, vb)| *bh != &vb.raw_body_hash)
                         .count();
                     if changed_cnt <= n_defs_hint / 2 {
-                        // Start loading the 9 MiB `x64-inc` `.bin` cache in the background NOW!
-                        let raw_wait = opts.deadline.map(|dl| {
-                            dl.saturating_duration_since(Instant::now())
-                                .saturating_sub(std::time::Duration::from_millis(250))
-                                .min(std::time::Duration::from_millis(250))
-                        });
-                        if raw_wait.is_none_or(|w| !w.is_zero()) {
-                            let st = std::sync::Arc::new((
-                                Mutex::new(None::<Option<Vec<u8>>>),
-                                std::sync::Condvar::new(),
-                            ));
-                            let st_bg = std::sync::Arc::clone(&st);
-                            let dir_buf = cache_dir.to_path_buf();
-                            let abi_hint = vidx.abi_hash;
-                            if std::thread::Builder::new()
-                                .spawn(move || {
-                                    let raw = inc_cache::load_inc_cache_raw(&dir_buf, &abi_hint);
-                                    let (lk, cv) = &*st_bg;
-                                    *lk.lock().unwrap_or_else(|g| g.into_inner()) = Some(raw);
-                                    cv.notify_all();
-                                })
-                                .is_ok()
-                            {
-                                pre_raw_state = Some((abi_hint, st));
-                            }
-                        }
+                        pre_raw_state = early_raw;
                         pre_vidx = Some(vidx);
                     }
                 }
@@ -2471,13 +2493,12 @@ fn compile_wasm_to_x64_so_inner(
             }
         }
 
-        // 6b. Precompute exact merged `.text` capacity and merge (16-byte aligned per item)
-        //     in deterministic order: 1. exports / `_start`, 2. shared helpers, 3. import trampolines,
-        //     4. defined functions.
+        // 6b. Precompute exact merged `.text` offsets (16-byte aligned per item) without copying
+        //     bytes yet, in deterministic order: 1. exports / `_start`, 2. shared helpers,
+        //     3. import trampolines, 4. defined functions.
         let mut planned_text_len = 0usize;
-        let mut plan_code_len = |len: usize| -> Result<(), X64CompileError> {
-            let aligned =
-                align_up_checked(planned_text_len, 16).map_err(X64CompileError::Failed)?;
+        let reserve_text_off = |planned: &mut usize, len: usize| -> Result<u64, X64CompileError> {
+            let aligned = align_up_checked(*planned, 16).map_err(X64CompileError::Failed)?;
             let next = aligned
                 .checked_add(len)
                 .ok_or_else(|| X64CompileError::Failed("x64: merged .text size overflow".into()))?;
@@ -2486,34 +2507,14 @@ fn compile_wasm_to_x64_so_inner(
                     "x64: complete merged .text ({next} B) exceeds cap {MAX_TOTAL_CODE_BYTES} B"
                 )));
             }
-            planned_text_len = next;
-            Ok(())
-        };
-        for asm in export_asms.iter().chain(&helper_asms).chain(&import_asms) {
-            plan_code_len(asm.code.len())?;
-        }
-        if let Some(ref cache_arc) = link_cache {
-            for cf in &cache_arc.funcs {
-                plan_code_len(cf.code.len())?;
-            }
-        } else {
-            for asm in &def_asms {
-                plan_code_len(asm.code.len())?;
-            }
-        }
-        let mut text: Vec<u8> = Vec::with_capacity(planned_text_len);
-        let push_text = |text: &mut Vec<u8>, bytes: &[u8]| -> Result<u64, X64CompileError> {
-            let aligned = align_up_checked(text.len(), 16).map_err(X64CompileError::Failed)?;
-            // Pad inter-function gaps with INT3 (0xcc) for clean trap behavior if misjumped.
-            text.resize(aligned, 0xcc);
-            text.extend_from_slice(bytes);
+            *planned = next;
             Ok(aligned as u64)
         };
 
         let mut export_defs: Vec<ExportDef<'_>> = Vec::with_capacity(export_asms.len());
         let mut export_text_offs: Vec<u64> = Vec::with_capacity(export_asms.len());
         for (i, asm) in export_asms.iter().enumerate() {
-            let off = push_text(&mut text, &asm.code)?;
+            let off = reserve_text_off(&mut planned_text_len, asm.code.len())?;
             export_text_offs.push(off);
             if opts.target == X64Target::BlotCdylib {
                 export_defs.push(ExportDef {
@@ -2526,29 +2527,34 @@ fn compile_wasm_to_x64_so_inner(
 
         let mut helper_text_offs: Vec<u64> = Vec::with_capacity(helper_asms.len());
         for asm in &helper_asms {
-            helper_text_offs.push(push_text(&mut text, &asm.code)?);
+            helper_text_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
         }
 
         let mut func_text_offs: Vec<u64> = Vec::with_capacity(n_imports + n_defs);
         for asm in &import_asms {
-            func_text_offs.push(push_text(&mut text, &asm.code)?);
+            func_text_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
         }
+        let prefix_end_len = planned_text_len;
         if let Some(ref cache_arc) = link_cache {
-            let backing = cache_arc.backing.as_deref().map(Vec::as_slice);
             for (bi, cf) in cache_arc.funcs.iter().enumerate() {
                 if (bi & 1023) == 1023 {
                     check_dl()?;
                 }
-                func_text_offs.push(push_text(&mut text, cf.code.as_slice(backing))?);
+                func_text_offs.push(reserve_text_off(&mut planned_text_len, cf.code.len())?);
             }
         } else {
             for (bi, asm) in def_asms.iter().enumerate() {
                 if (bi & 1023) == 1023 {
                     check_dl()?;
                 }
-                func_text_offs.push(push_text(&mut text, &asm.code)?);
+                func_text_offs.push(reserve_text_off(&mut planned_text_len, asm.code.len())?);
             }
         }
+        let defs_start_off: usize = if n_defs > 0 {
+            func_text_offs[n_imports] as usize
+        } else {
+            planned_text_len
+        };
 
         // 6c. Plan ELF64 layout (shared object or static executable).
         enum PlannedElf {
@@ -2711,57 +2717,244 @@ fn compile_wasm_to_x64_so_inner(
             rodata[off..off + 4].copy_from_slice(&disp.to_le_bytes());
         }
 
-        // 6g. Patch all instruction relocations across exports, helpers, import trampolines, and defined functions.
+        // 6g. Fused single-pass `.text` copy + INT3 (0xcc) inter-function padding + relocation
+        //     patching (L1-hot and parallel across disjoint `&mut [u8]` slices for defined fns!).
+        let mut text: Vec<u8> = vec![0u8; planned_text_len];
         let link_ctx = LinkContext {
             tx_vaddr,
             ro_vaddr,
             func_text_offs: &func_text_offs,
             helper_text_offs: &helper_text_offs,
         };
-        for (i, asm) in export_asms.iter().enumerate() {
-            let lro = (!asm.local_rodata.is_empty()).then_some(exp_local_rodata_offs[i]);
-            patch_relocs(&mut text, export_text_offs[i], &asm.relocs, lro, &link_ctx)
-                .map_err(X64CompileError::Failed)?;
-        }
-        for (i, asm) in helper_asms.iter().enumerate() {
-            let lro = (!asm.local_rodata.is_empty()).then_some(helper_local_rodata_offs[i]);
-            patch_relocs(&mut text, helper_text_offs[i], &asm.relocs, lro, &link_ctx)
-                .map_err(X64CompileError::Failed)?;
-        }
-        for (k, asm) in import_asms.iter().enumerate() {
-            let lro = (!asm.local_rodata.is_empty()).then_some(imp_local_rodata_offs[k]);
-            patch_relocs(&mut text, func_text_offs[k], &asm.relocs, lro, &link_ctx)
-                .map_err(X64CompileError::Failed)?;
-        }
-        if let Some(ref cache_arc) = link_cache {
-            for (bi, cf) in cache_arc.funcs.iter().enumerate() {
-                if (bi & 1023) == 1023 {
-                    check_dl()?;
-                }
-                let lro = (!cf.local_rodata.is_empty()).then_some(fn_local_rodata_offs[bi]);
+        let (prefix_slice, defs_slice) = text.split_at_mut(defs_start_off);
+        {
+            let mut cursor = 0usize;
+            for (i, asm) in export_asms.iter().enumerate() {
+                let off = export_text_offs[i] as usize;
+                prefix_slice[cursor..off].fill(0xcc);
+                prefix_slice[off..off + asm.code.len()].copy_from_slice(&asm.code);
+                cursor = off + asm.code.len();
+                let lro = (!asm.local_rodata.is_empty()).then_some(exp_local_rodata_offs[i]);
                 patch_relocs(
-                    &mut text,
-                    func_text_offs[n_imports + bi],
-                    &cf.relocs,
-                    lro,
-                    &link_ctx,
-                )
-                .map_err(X64CompileError::Failed)?;
-            }
-        } else {
-            for (bi, asm) in def_asms.iter().enumerate() {
-                if (bi & 1023) == 1023 {
-                    check_dl()?;
-                }
-                let lro = (!asm.local_rodata.is_empty()).then_some(fn_local_rodata_offs[bi]);
-                patch_relocs(
-                    &mut text,
-                    func_text_offs[n_imports + bi],
+                    prefix_slice,
+                    export_text_offs[i],
                     &asm.relocs,
                     lro,
                     &link_ctx,
                 )
                 .map_err(X64CompileError::Failed)?;
+            }
+            for (i, asm) in helper_asms.iter().enumerate() {
+                let off = helper_text_offs[i] as usize;
+                prefix_slice[cursor..off].fill(0xcc);
+                prefix_slice[off..off + asm.code.len()].copy_from_slice(&asm.code);
+                cursor = off + asm.code.len();
+                let lro = (!asm.local_rodata.is_empty()).then_some(helper_local_rodata_offs[i]);
+                patch_relocs(
+                    prefix_slice,
+                    helper_text_offs[i],
+                    &asm.relocs,
+                    lro,
+                    &link_ctx,
+                )
+                .map_err(X64CompileError::Failed)?;
+            }
+            for (k, asm) in import_asms.iter().enumerate() {
+                let off = func_text_offs[k] as usize;
+                prefix_slice[cursor..off].fill(0xcc);
+                prefix_slice[off..off + asm.code.len()].copy_from_slice(&asm.code);
+                cursor = off + asm.code.len();
+                let lro = (!asm.local_rodata.is_empty()).then_some(imp_local_rodata_offs[k]);
+                patch_relocs(prefix_slice, func_text_offs[k], &asm.relocs, lro, &link_ctx)
+                    .map_err(X64CompileError::Failed)?;
+            }
+            debug_assert_eq!(cursor, prefix_end_len);
+            prefix_slice[cursor..defs_start_off].fill(0xcc);
+        }
+
+        if n_defs > 0 {
+            let link_cache_ref = link_cache.as_deref();
+            let def_asms_ref = def_asms.as_slice();
+            let fn_local_rodata_ref = fn_local_rodata_offs.as_slice();
+            let link_ctx_ref = &link_ctx;
+            let budget_ref = &budget;
+            let write_and_patch_range = |start_bi: usize,
+                                         end_bi: usize,
+                                         chunk_base_off: u64,
+                                         chunk: &mut [u8]|
+             -> Result<(), String> {
+                if let Some(cache_arc) = link_cache_ref {
+                    let backing = cache_arc.backing.as_deref().map(Vec::as_slice);
+                    for (rel_bi, &lro_off) in
+                        fn_local_rodata_ref[start_bi..end_bi].iter().enumerate()
+                    {
+                        let bi = start_bi + rel_bi;
+                        if (bi & 1023) == 1023 {
+                            budget_ref.check_deadline()?;
+                        }
+                        let cf = &cache_arc.funcs[bi];
+                        let fn_off = link_ctx_ref.func_text_offs[n_imports + bi];
+                        let local_off = (fn_off - chunk_base_off) as usize;
+                        let code = cf.code.as_slice(backing);
+                        let code_end = local_off + code.len();
+                        chunk[local_off..code_end].copy_from_slice(code);
+                        let next_off = if bi + 1 < end_bi {
+                            (link_ctx_ref.func_text_offs[n_imports + bi + 1] - chunk_base_off)
+                                as usize
+                        } else {
+                            chunk.len()
+                        };
+                        if next_off > code_end {
+                            chunk[code_end..next_off].fill(0xcc);
+                        }
+                        let lro = (!cf.local_rodata.is_empty()).then_some(lro_off);
+                        patch_relocs_in_slice(
+                            chunk,
+                            chunk_base_off,
+                            fn_off,
+                            &cf.relocs,
+                            lro,
+                            link_ctx_ref,
+                        )?;
+                    }
+                } else {
+                    for (rel_bi, &lro_off) in
+                        fn_local_rodata_ref[start_bi..end_bi].iter().enumerate()
+                    {
+                        let bi = start_bi + rel_bi;
+                        if (bi & 1023) == 1023 {
+                            budget_ref.check_deadline()?;
+                        }
+                        let asm = &def_asms_ref[bi];
+                        let fn_off = link_ctx_ref.func_text_offs[n_imports + bi];
+                        let local_off = (fn_off - chunk_base_off) as usize;
+                        let code_end = local_off + asm.code.len();
+                        chunk[local_off..code_end].copy_from_slice(&asm.code);
+                        let next_off = if bi + 1 < end_bi {
+                            (link_ctx_ref.func_text_offs[n_imports + bi + 1] - chunk_base_off)
+                                as usize
+                        } else {
+                            chunk.len()
+                        };
+                        if next_off > code_end {
+                            chunk[code_end..next_off].fill(0xcc);
+                        }
+                        let lro = (!asm.local_rodata.is_empty()).then_some(lro_off);
+                        patch_relocs_in_slice(
+                            chunk,
+                            chunk_base_off,
+                            fn_off,
+                            &asm.relocs,
+                            lro,
+                            link_ctx_ref,
+                        )?;
+                    }
+                }
+                Ok(())
+            };
+
+            let link_workers = if n_defs >= 64 && defs_slice.len() >= (64 << 10) {
+                n_workers.min(8).min(n_defs)
+            } else {
+                1
+            };
+            if link_workers <= 1 {
+                write_and_patch_range(0, n_defs, defs_start_off as u64, defs_slice)
+                    .map_err(X64CompileError::Failed)?;
+            } else {
+                // Partition `0..n_defs` by byte volume into `<= link_workers` disjoint slices.
+                let total_def_bytes = defs_slice.len();
+                let target_bytes = total_def_bytes.div_ceil(link_workers);
+                let mut ranges: [(usize, usize); 8] = [(0, 0); 8];
+                let mut n_ranges = 0usize;
+                let mut cur_bi = 0usize;
+                let mut cur_byte = defs_start_off as u64;
+                while cur_bi < n_defs {
+                    let start_bi = cur_bi;
+                    if n_ranges + 1 == link_workers {
+                        cur_bi = n_defs;
+                    } else {
+                        let goal = cur_byte + target_bytes as u64;
+                        while cur_bi < n_defs && func_text_offs[n_imports + cur_bi] < goal {
+                            cur_bi += 1;
+                        }
+                        if cur_bi == start_bi {
+                            cur_bi += 1;
+                        }
+                    }
+                    ranges[n_ranges] = (start_bi, cur_bi);
+                    n_ranges += 1;
+                    if cur_bi < n_defs {
+                        cur_byte = func_text_offs[n_imports + cur_bi];
+                    }
+                }
+
+                let first_err: Mutex<Option<(usize, String)>> = Mutex::new(None);
+                let failed = AtomicBool::new(false);
+                let mut unspawned: [Option<(usize, usize)>; 8] = [None; 8];
+                let mut n_unspawned = 0usize;
+                std::thread::scope(|s| {
+                    let mut rem = &mut *defs_slice;
+                    let mut cur_base = defs_start_off as u64;
+                    for &(start_bi, end_bi) in &ranges[..n_ranges] {
+                        let next_base = if end_bi < n_defs {
+                            func_text_offs[n_imports + end_bi]
+                        } else {
+                            planned_text_len as u64
+                        };
+                        let chunk_len = (next_base - cur_base) as usize;
+                        let (chunk, rest) = rem.split_at_mut(chunk_len);
+                        let base_off = cur_base;
+                        rem = rest;
+                        cur_base = next_base;
+                        let first_err_ref = &first_err;
+                        let failed_ref = &failed;
+                        let mut task = move || {
+                            if failed_ref.load(Ordering::Acquire) {
+                                return;
+                            }
+                            if let Err(e) = write_and_patch_range(start_bi, end_bi, base_off, chunk)
+                            {
+                                failed_ref.store(true, Ordering::Release);
+                                let mut g = first_err_ref.lock().unwrap_or_else(|x| x.into_inner());
+                                if g.as_ref().is_none_or(|(prev, _)| start_bi < *prev) {
+                                    *g = Some((start_bi, e));
+                                }
+                            }
+                        };
+                        if end_bi == n_defs {
+                            task();
+                        } else if std::thread::Builder::new().spawn_scoped(s, task).is_err() {
+                            unspawned[n_unspawned] = Some((start_bi, end_bi));
+                            n_unspawned += 1;
+                        }
+                    }
+                });
+                for &(start_bi, end_bi) in unspawned[..n_unspawned].iter().flatten() {
+                    if failed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let base_off = func_text_offs[n_imports + start_bi];
+                    let end_off = if end_bi < n_defs {
+                        func_text_offs[n_imports + end_bi]
+                    } else {
+                        planned_text_len as u64
+                    };
+                    let s0 = (base_off as usize) - defs_start_off;
+                    let s1 = (end_off as usize) - defs_start_off;
+                    if let Err(e) =
+                        write_and_patch_range(start_bi, end_bi, base_off, &mut defs_slice[s0..s1])
+                    {
+                        failed.store(true, Ordering::Release);
+                        let mut g = first_err.lock().unwrap_or_else(|x| x.into_inner());
+                        if g.as_ref().is_none_or(|(prev, _)| start_bi < *prev) {
+                            *g = Some((start_bi, e));
+                        }
+                    }
+                }
+                if let Some((_, err)) = first_err.into_inner().unwrap_or_else(|g| g.into_inner()) {
+                    return Err(X64CompileError::Failed(err));
+                }
             }
         }
         check_dl()?;
@@ -3356,27 +3549,55 @@ fn try_compile_defs_incremental(
             }
         }
 
-        // Recompute exact transitive effects over ALL functions in topological order without cloning clean summaries.
-        let Some(effects) = opt::try_compute_module_effects_from_lookup(
-            n_defs,
-            |bi| {
-                own_effects_dirty[bi]
-                    .as_ref()
-                    .unwrap_or(&prev_cache.funcs[bi].own_effects)
-            },
-            Some(&topo_bottom_up),
-            module,
-            Some(budget),
-        )
-        .map_err(map_worker_err)?
-        else {
-            return Ok(None);
-        };
         let own_effects_changed = dirty.iter().enumerate().any(|(bi, &d)| {
             d && own_effects_dirty[bi]
                 .as_ref()
                 .is_some_and(|e| *e != prev_cache.funcs[bi].own_effects)
         });
+        if !own_effects_changed && promoted {
+            // Clean callers were promoted for inlining; recompute before computing effects.
+            continue;
+        }
+        // Recompute exact transitive effects: when `own_effects_changed == false`, no clean
+        // function's effects can change, so compute ONLY on the call-graph cone reachable from
+        // `dirty` functions (mathematically identical for all dirty functions & their callees!).
+        let Some(effects) = (if own_effects_changed {
+            opt::try_compute_module_effects_from_lookup(
+                n_defs,
+                |bi| {
+                    own_effects_dirty[bi]
+                        .as_ref()
+                        .unwrap_or(&prev_cache.funcs[bi].own_effects)
+                },
+                Some(&topo_bottom_up),
+                module,
+                Some(budget),
+            )
+            .map_err(map_worker_err)?
+        } else {
+            let Some(mut dirty_roots) = inc_cache::try_vec_with_capacity(dirty_count) else {
+                return Ok(None);
+            };
+            for (bi, &d) in dirty.iter().enumerate() {
+                if d {
+                    dirty_roots.push(bi);
+                }
+            }
+            opt::try_compute_module_effects_subset_from_lookup(
+                n_defs,
+                &dirty_roots,
+                |bi| {
+                    own_effects_dirty[bi]
+                        .as_ref()
+                        .unwrap_or(&prev_cache.funcs[bi].own_effects)
+                },
+                module,
+                Some(budget),
+            )
+            .map_err(map_worker_err)?
+        }) else {
+            return Ok(None);
+        };
         if own_effects_changed {
             for (bi, is_dirty) in dirty.iter_mut().enumerate() {
                 if !*is_dirty {

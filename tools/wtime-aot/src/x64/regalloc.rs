@@ -246,57 +246,127 @@ fn checked_align_i32(v: i32, align: i32) -> Result<i32, String> {
         .ok_or_else(|| "x64: ABI/frame i32 offset overflow".to_string())
 }
 
-pub fn layout_args(tys: &[Ty]) -> Result<AbiLayout, String> {
-    let mut slots = Vec::with_capacity(tys.len());
+pub fn layout_args_stack_bytes<I: IntoIterator<Item = Ty>>(tys: I) -> Result<i32, String> {
     let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
-    for &ty in tys {
+    for ty in tys {
         if ty.is_fp() {
             if nf < CALL_FP_ARGS.len() {
-                slots.push(AbiSlot::Xmm(CALL_FP_ARGS[nf]));
                 nf += 1;
             } else {
                 let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
                 off = checked_align_i32(off, align)?;
-                slots.push(AbiSlot::Stack(off));
                 off = off.checked_add(sz).ok_or("x64: arg stack size overflow")?;
             }
         } else if ng < CALL_GP_ARGS.len() {
-            slots.push(AbiSlot::Gp(CALL_GP_ARGS[ng]));
             ng += 1;
         } else {
             off = checked_align_i32(off, 8)?;
-            slots.push(AbiSlot::Stack(off));
             off = off.checked_add(8).ok_or("x64: arg stack size overflow")?;
         }
     }
-    let stack_bytes = checked_align_i32(off, 16)?;
+    checked_align_i32(off, 16)
+}
+
+pub fn layout_rets_stack_bytes<I: IntoIterator<Item = Ty>>(tys: I) -> Result<i32, String> {
+    let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
+    for ty in tys {
+        if ty.is_fp() {
+            if nf < CALL_FP_RETS.len() {
+                nf += 1;
+            } else {
+                let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
+                off = checked_align_i32(off, align)?;
+                off = off.checked_add(sz).ok_or("x64: ret stack size overflow")?;
+            }
+        } else if ng < CALL_GP_RETS.len() {
+            ng += 1;
+        } else {
+            off = checked_align_i32(off, 8)?;
+            off = off.checked_add(8).ok_or("x64: ret stack size overflow")?;
+        }
+    }
+    checked_align_i32(off, 16)
+}
+
+#[inline]
+pub fn for_each_arg_slot<I, F>(tys: I, mut f: F) -> Result<i32, String>
+where
+    I: IntoIterator<Item = Ty>,
+    F: FnMut(usize, AbiSlot),
+{
+    let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
+    for (idx, ty) in tys.into_iter().enumerate() {
+        let slot = if ty.is_fp() {
+            if nf < CALL_FP_ARGS.len() {
+                let x = CALL_FP_ARGS[nf];
+                nf += 1;
+                AbiSlot::Xmm(x)
+            } else {
+                let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
+                off = checked_align_i32(off, align)?;
+                let s = AbiSlot::Stack(off);
+                off = off.checked_add(sz).ok_or("x64: arg stack size overflow")?;
+                s
+            }
+        } else if ng < CALL_GP_ARGS.len() {
+            let g = CALL_GP_ARGS[ng];
+            ng += 1;
+            AbiSlot::Gp(g)
+        } else {
+            off = checked_align_i32(off, 8)?;
+            let s = AbiSlot::Stack(off);
+            off = off.checked_add(8).ok_or("x64: arg stack size overflow")?;
+            s
+        };
+        f(idx, slot);
+    }
+    checked_align_i32(off, 16)
+}
+
+#[inline]
+pub fn for_each_ret_slot<I, F>(tys: I, mut f: F) -> Result<i32, String>
+where
+    I: IntoIterator<Item = Ty>,
+    F: FnMut(usize, AbiSlot),
+{
+    let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
+    for (idx, ty) in tys.into_iter().enumerate() {
+        let slot = if ty.is_fp() {
+            if nf < CALL_FP_RETS.len() {
+                let x = CALL_FP_RETS[nf];
+                nf += 1;
+                AbiSlot::Xmm(x)
+            } else {
+                let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
+                off = checked_align_i32(off, align)?;
+                let s = AbiSlot::Stack(off);
+                off = off.checked_add(sz).ok_or("x64: ret stack size overflow")?;
+                s
+            }
+        } else if ng < CALL_GP_RETS.len() {
+            let g = CALL_GP_RETS[ng];
+            ng += 1;
+            AbiSlot::Gp(g)
+        } else {
+            off = checked_align_i32(off, 8)?;
+            let s = AbiSlot::Stack(off);
+            off = off.checked_add(8).ok_or("x64: ret stack size overflow")?;
+            s
+        };
+        f(idx, slot);
+    }
+    checked_align_i32(off, 16)
+}
+
+pub fn layout_args(tys: &[Ty]) -> Result<AbiLayout, String> {
+    let mut slots = Vec::with_capacity(tys.len());
+    let stack_bytes = for_each_arg_slot(tys.iter().copied(), |_, s| slots.push(s))?;
     Ok(AbiLayout { slots, stack_bytes })
 }
 
 pub fn layout_rets(tys: &[Ty]) -> Result<AbiLayout, String> {
     let mut slots = Vec::with_capacity(tys.len());
-    let (mut ng, mut nf, mut off) = (0usize, 0usize, 0i32);
-    for &ty in tys {
-        if ty.is_fp() {
-            if nf < CALL_FP_RETS.len() {
-                slots.push(AbiSlot::Xmm(CALL_FP_RETS[nf]));
-                nf += 1;
-            } else {
-                let (sz, align) = if ty == Ty::V128 { (16, 16) } else { (8, 8) };
-                off = checked_align_i32(off, align)?;
-                slots.push(AbiSlot::Stack(off));
-                off = off.checked_add(sz).ok_or("x64: ret stack size overflow")?;
-            }
-        } else if ng < CALL_GP_RETS.len() {
-            slots.push(AbiSlot::Gp(CALL_GP_RETS[ng]));
-            ng += 1;
-        } else {
-            off = checked_align_i32(off, 8)?;
-            slots.push(AbiSlot::Stack(off));
-            off = off.checked_add(8).ok_or("x64: ret stack size overflow")?;
-        }
-    }
-    let stack_bytes = checked_align_i32(off, 16)?;
+    let stack_bytes = for_each_ret_slot(tys.iter().copied(), |_, s| slots.push(s))?;
     Ok(AbiLayout { slots, stack_bytes })
 }
 
@@ -346,6 +416,9 @@ struct Interval {
     clob_xmm: u16,
     score: u64,
     remat: Option<RematConst>,
+    /// True when this non-zero constant is loop-invariant (defined at lower loop depth than a use)
+    /// and may occupy a free callee-saved GP register to avoid in-loop constant rematerialization.
+    remat_hoisted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -454,10 +527,18 @@ pub struct RegallocScratch {
     val_remat: Vec<Option<RematConst>>,
     clobbers: Vec<Clobber>,
     clob_seg: Vec<(u16, u16)>,
-    scratch_tys: Vec<Ty>,
+    live_use: Vec<u64>,
+    live_def: Vec<u64>,
+    live_in: Vec<u64>,
+    live_out: Vec<u64>,
+    cb_seg_first: Vec<(u32, u32)>,
+    cb_seg_extra_idx: Vec<u32>,
+    cb_seg_overflow: Vec<bool>,
+    segs_pool: Vec<(u32, u32)>,
     cb_id: Vec<u32>,
     cb_vals: Vec<u32>,
     val_weight: Vec<u32>,
+    max_use_loop_depth: Vec<u8>,
     val_non_trap: Vec<bool>,
     hint_gp: Vec<Option<Gp>>,
     hint_xmm: Vec<Option<Xmm>>,
@@ -759,14 +840,12 @@ pub fn allocate_with_config_and_scratch(
     reset_fill(&mut scratch.cross_block, n_vals, false);
     reset_fill(&mut scratch.val_remat, n_vals, None);
     scratch.clobbers.clear();
-    scratch.scratch_tys.clear();
     let def_pos = &mut scratch.def_pos;
     let def_block = &mut scratch.def_block;
     let last_use = &mut scratch.last_use;
     let cross_block = &mut scratch.cross_block;
     let val_remat = &mut scratch.val_remat;
     let clobbers = &mut scratch.clobbers;
-    let scratch_tys = &mut scratch.scratch_tys;
     let mut max_outgoing_arg_bytes = 0i32;
     let mut max_ret_buf_bytes = 0i32;
 
@@ -810,27 +889,28 @@ pub fn allocate_with_config_and_scratch(
                         gp_mask: MASK_GP_CALLER,
                         xmm_mask: MASK_XMM_CALLER,
                     });
-                    scratch_tys.clear();
-                    for &av in ir.pool_slice(args) {
-                        scratch_tys.push(ir.val_tys[av.0 as usize]);
+                    let arg_stack_bytes = layout_args_stack_bytes(
+                        ir.pool_slice(args)
+                            .iter()
+                            .map(|&av| ir.val_tys[av.0 as usize]),
+                    )?;
+                    if arg_stack_bytes > max_outgoing_arg_bytes {
+                        max_outgoing_arg_bytes = arg_stack_bytes;
                     }
-                    let arg_layout = layout_args(scratch_tys)?;
-                    if arg_layout.stack_bytes > max_outgoing_arg_bytes {
-                        max_outgoing_arg_bytes = arg_layout.stack_bytes;
-                    }
-                    scratch_tys.clear();
-                    for &rv in ir.pool_slice(rets) {
+                    let ret_slice = ir.pool_slice(rets);
+                    for &rv in ret_slice {
                         let vi = rv.0 as usize;
-                        scratch_tys.push(ir.val_tys[vi]);
                         def_pos[vi] = pos_def;
                         def_block[vi] = oi as u32;
                         if last_use[vi] < pos_def + 1 {
                             last_use[vi] = pos_def + 1;
                         }
                     }
-                    let ret_layout = layout_rets(scratch_tys)?;
-                    if ret_layout.stack_bytes > max_ret_buf_bytes {
-                        max_ret_buf_bytes = ret_layout.stack_bytes;
+                    let ret_stack_bytes = layout_rets_stack_bytes(
+                        ret_slice.iter().map(|&rv| ir.val_tys[rv.0 as usize]),
+                    )?;
+                    if ret_stack_bytes > max_ret_buf_bytes {
+                        max_ret_buf_bytes = ret_stack_bytes;
                     }
                 }
                 Op::MemCopy { .. } => {
@@ -968,18 +1048,24 @@ pub fn allocate_with_config_and_scratch(
         });
     const MAX_SEGS_PER_VAL: usize = 64;
     const MAX_SEG_SLOTS_PER_FN: usize = 65_536;
+    const SCRATCH_RECYCLE_CAP: usize = 4096;
     // Declare `_liveness_guard` BEFORE `cb_*` and `segs_pool` so Rust's LIFO drop order
     // guarantees all liveness buffers drop BEFORE releasing the reservation even on early return.
     let mut _liveness_guard = None;
-    let mut cb_segs: Vec<Vec<(u32, u32)>> = Vec::new();
+    let mut cb_seg_first: Vec<(u32, u32)> = Vec::new();
+    let mut cb_seg_extra_idx: Vec<u32> = Vec::new();
+    let mut cb_extra_vecs: Vec<Vec<(u32, u32)>> = Vec::new();
     let mut cb_seg_overflow: Vec<bool> = Vec::new();
     let mut saved_live_in: Vec<u64> = Vec::new();
     let mut saved_live_words: usize = 0;
+    let mut has_exact_segs = false;
     if n_cb > 0 {
         let words = n_cb.div_ceil(64);
-        let matrix_bytes = n_ord
+        let matrix_words = n_ord
             .checked_mul(words)
-            .and_then(|n| n.checked_mul(4 * 8))
+            .ok_or("x64: liveness table size overflow")?;
+        let matrix_bytes = matrix_words
+            .checked_mul(4 * 8)
             .ok_or("x64: liveness table size overflow")?;
         // Account for BOTH `cb_hull` (8 B/val) and `last_use_in_blk` scratch (8 B/val).
         let hull_and_scratch_bytes = n_cb
@@ -994,24 +1080,26 @@ pub fn allocate_with_config_and_scratch(
                 ir.func_index
             ));
         }
-        // Budget exact live-range hole storage (`cb_segs` + `segs_pool`) strictly inside the
-        // remaining `MAX_LIVENESS_BYTES` headroom (at most 2 MiB) so parallel workers can never
-        // exceed the documented 16 MiB/fn or 256 MiB aggregate liveness caps. Values exceeding
-        // per-value or per-function segment budgets cleanly collapse to their exact `[start, end)` hull.
-        // For `n_ord <= 2`, disjoint multi-block holes cannot exist, so skip `cb_segs` completely!
-        let vec_hdr_bytes = n_cb.saturating_mul(std::mem::size_of::<Vec<(u32, u32)>>() + 1);
+        // Budget exact live-range hole storage strictly inside the remaining `MAX_LIVENESS_BYTES`
+        // headroom (at most 2 MiB) so parallel workers can never exceed the documented 16 MiB/fn
+        // or 256 MiB aggregate liveness caps. First segment lives inline in `cb_seg_first` (zero
+        // per-value heap allocation for contiguous live ranges!); only multi-segment values with
+        // real live-range holes allocate an entry in `cb_extra_vecs`.
+        // For `n_ord <= 2`, disjoint multi-block holes cannot exist, so skip exact segments completely!
+        let flat_hdr_bytes =
+            n_cb.saturating_mul(std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<u32>() + 1);
         let remaining_cap = MAX_LIVENESS_BYTES.saturating_sub(base_bytes).min(2 << 20);
         let max_cap_per_val = n_ord.min(MAX_SEGS_PER_VAL).next_power_of_two().max(4);
-        let seg_cap_slots = if n_ord > 2 && remaining_cap > vec_hdr_bytes {
-            // 16 B per slot covers 8 B in `cb_segs` (exact via `reserve_exact`) + 8 B in `segs_pool`.
-            ((remaining_cap - vec_hdr_bytes) / 16)
+        let seg_cap_slots = if n_ord > 2 && remaining_cap > flat_hdr_bytes {
+            // 24 B per slot conservatively covers 8 B in `cb_extra_vecs` + Vec header share + 8 B in `segs_pool`.
+            ((remaining_cap - flat_hdr_bytes) / 24)
                 .min(n_cb.saturating_mul(max_cap_per_val))
                 .min(MAX_SEG_SLOTS_PER_FN)
         } else {
             0
         };
         let seg_reserve_bytes = if seg_cap_slots > 0 {
-            vec_hdr_bytes.saturating_add(seg_cap_slots.saturating_mul(16))
+            flat_hdr_bytes.saturating_add(seg_cap_slots.saturating_mul(24))
         } else {
             0
         };
@@ -1020,10 +1108,18 @@ pub fn allocate_with_config_and_scratch(
             Some(b) => Some(b.reserve_liveness(total_liveness_bytes)?),
             None => None,
         };
-        let mut live_use = vec![0u64; n_ord * words];
-        let mut live_def = vec![0u64; n_ord * words];
-        let mut live_in = vec![0u64; n_ord * words];
-        let mut live_out = vec![0u64; n_ord * words];
+        let mut live_use = std::mem::take(&mut scratch.live_use);
+        let mut live_def = std::mem::take(&mut scratch.live_def);
+        let mut live_in = std::mem::take(&mut scratch.live_in);
+        let mut live_out = std::mem::take(&mut scratch.live_out);
+        live_use.clear();
+        live_use.resize(matrix_words, 0u64);
+        live_def.clear();
+        live_def.resize(matrix_words, 0u64);
+        live_in.clear();
+        live_in.resize(matrix_words, 0u64);
+        live_out.clear();
+        live_out.resize(matrix_words, 0u64);
 
         let set_bit = |buf: &mut [u64], oi: usize, bit: usize| {
             buf[oi * words + (bit >> 6)] |= 1u64 << (bit & 63);
@@ -1142,8 +1238,16 @@ pub fn allocate_with_config_and_scratch(
         // (preserving live-range holes while falling back any overflowing value to its exact hull).
         reset_fill(&mut scratch.cb_hull, n_cb, (u32::MAX, 0u32));
         if seg_cap_slots > 0 {
-            cb_segs = vec![Vec::new(); n_cb];
-            cb_seg_overflow = vec![false; n_cb];
+            has_exact_segs = true;
+            cb_seg_first = std::mem::take(&mut scratch.cb_seg_first);
+            cb_seg_first.clear();
+            cb_seg_first.resize(n_cb, (u32::MAX, 0u32));
+            cb_seg_extra_idx = std::mem::take(&mut scratch.cb_seg_extra_idx);
+            cb_seg_extra_idx.clear();
+            cb_seg_extra_idx.resize(n_cb, u32::MAX);
+            cb_seg_overflow = std::mem::take(&mut scratch.cb_seg_overflow);
+            cb_seg_overflow.clear();
+            cb_seg_overflow.resize(n_cb, false);
         }
         let mut total_seg_cap_slots = 0usize;
         reset_fill(&mut scratch.last_use_in_blk, n_cb, (u32::MAX, 0u32));
@@ -1203,41 +1307,69 @@ pub fn allocate_with_config_and_scratch(
                     if e > cb_hull[c].1 {
                         cb_hull[c].1 = e;
                     }
-                    if seg_cap_slots == 0 || cb_seg_overflow[c] {
+                    if !has_exact_segs || cb_seg_overflow[c] {
                         continue;
                     }
-                    let segs = &mut cb_segs[c];
-                    if let Some(last) = segs.last_mut()
-                        && s <= last.1 + 1
-                    {
-                        if e > last.1 {
-                            last.1 = e;
+                    let first = &mut cb_seg_first[c];
+                    if first.0 == u32::MAX {
+                        *first = (s, e);
+                    } else if cb_seg_extra_idx[c] == u32::MAX {
+                        if s <= first.1 + 1 {
+                            if e > first.1 {
+                                first.1 = e;
+                            }
+                        } else if 4 > MAX_SEGS_PER_VAL
+                            || total_seg_cap_slots.saturating_add(4) > seg_cap_slots
+                        {
+                            cb_seg_overflow[c] = true;
+                        } else {
+                            let mut v = Vec::new();
+                            v.reserve_exact(4);
+                            v.push(*first);
+                            v.push((s, e));
+                            total_seg_cap_slots += 4;
+                            cb_seg_extra_idx[c] = cb_extra_vecs.len() as u32;
+                            cb_extra_vecs.push(v);
                         }
                     } else {
-                        if segs.len() == segs.capacity() {
-                            let next_cap = if segs.capacity() == 0 {
-                                4
-                            } else {
-                                segs.capacity().saturating_mul(2)
-                            };
-                            let add_slots = next_cap.saturating_sub(segs.capacity());
-                            if next_cap > MAX_SEGS_PER_VAL
-                                || total_seg_cap_slots.saturating_add(add_slots) > seg_cap_slots
-                            {
-                                cb_seg_overflow[c] = true;
-                                total_seg_cap_slots =
-                                    total_seg_cap_slots.saturating_sub(segs.capacity());
-                                segs.clear();
-                                segs.shrink_to_fit();
-                                continue;
+                        let segs = &mut cb_extra_vecs[cb_seg_extra_idx[c] as usize];
+                        let last = segs.last_mut().unwrap();
+                        if s <= last.1 + 1 {
+                            if e > last.1 {
+                                last.1 = e;
                             }
-                            segs.reserve_exact(add_slots);
-                            total_seg_cap_slots += add_slots;
+                        } else {
+                            if segs.len() == segs.capacity() {
+                                let next_cap = segs.capacity().saturating_mul(2);
+                                let add_slots = next_cap.saturating_sub(segs.capacity());
+                                if next_cap > MAX_SEGS_PER_VAL
+                                    || total_seg_cap_slots.saturating_add(add_slots) > seg_cap_slots
+                                {
+                                    cb_seg_overflow[c] = true;
+                                    total_seg_cap_slots =
+                                        total_seg_cap_slots.saturating_sub(segs.capacity());
+                                    segs.clear();
+                                    segs.shrink_to_fit();
+                                    continue;
+                                }
+                                segs.reserve_exact(add_slots);
+                                total_seg_cap_slots += add_slots;
+                            }
+                            segs.push((s, e));
                         }
-                        segs.push((s, e));
                     }
                 }
             }
+        }
+        // Recycle small scratch matrices immediately; oversized ones drop here before `_liveness_guard`.
+        if live_use.capacity() <= SCRATCH_RECYCLE_CAP {
+            scratch.live_use = live_use;
+        }
+        if live_def.capacity() <= SCRATCH_RECYCLE_CAP {
+            scratch.live_def = live_def;
+        }
+        if live_out.capacity() <= SCRATCH_RECYCLE_CAP {
+            scratch.live_out = live_out;
         }
         saved_live_in = live_in;
         saved_live_words = words;
@@ -1368,11 +1500,13 @@ pub fn allocate_with_config_and_scratch(
     let loop_depth = &scratch.loop_depth;
 
     reset_fill(&mut scratch.val_weight, n_vals, 0u32);
+    reset_fill(&mut scratch.max_use_loop_depth, n_vals, 0u8);
     reset_fill(&mut scratch.hint_gp, n_vals, None);
     reset_fill(&mut scratch.hint_xmm, n_vals, None);
     reset_fill(&mut scratch.hint_peers, n_vals, [u32::MAX; 4]);
     reset_fill(&mut scratch.first_edge_arg, n_vals, u32::MAX);
     let val_weight = &mut scratch.val_weight;
+    let max_use_loop_depth = &mut scratch.max_use_loop_depth;
     let hint_gp = &mut scratch.hint_gp;
     let hint_xmm = &mut scratch.hint_xmm;
     let hint_peers = &mut scratch.hint_peers;
@@ -1393,22 +1527,19 @@ pub fn allocate_with_config_and_scratch(
         }
     };
 
-    // Hint entry params with their incoming ABI registers.
+    // Hint entry params with their incoming ABI registers (zero heap allocation).
     if !ir.params.is_empty() {
-        let p_tys: Vec<Ty> = ir
-            .params
-            .iter()
-            .map(|&pv| ir.val_tys[pv.0 as usize])
-            .collect();
-        if let Ok(al) = layout_args(&p_tys) {
-            for (&pv, slot) in ir.params.iter().zip(al.slots) {
+        let _ = for_each_arg_slot(
+            ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]),
+            |idx, slot| {
+                let pv = ir.params[idx];
                 match slot {
                     AbiSlot::Gp(g) => hint_gp[pv.0 as usize] = Some(g),
                     AbiSlot::Xmm(x) => hint_xmm[pv.0 as usize] = Some(x),
                     AbiSlot::Stack(_) => {}
                 }
-            }
-        }
+            },
+        );
     }
 
     let mut hint_steps: usize = 0;
@@ -1443,10 +1574,15 @@ pub fn allocate_with_config_and_scratch(
             {
                 bg.check_deadline()?;
             }
+            let cur_ld = loop_depth[oi];
             inst.op.for_each_use(&ir.val_pool, |v| {
-                val_weight[v.0 as usize] = val_weight[v.0 as usize].saturating_add(w);
+                let vu = v.0 as usize;
+                val_weight[vu] = val_weight[vu].saturating_add(w);
+                if cur_ld > max_use_loop_depth[vu] {
+                    max_use_loop_depth[vu] = cur_ld;
+                }
                 if !is_cold_trap {
-                    val_non_trap[v.0 as usize] = true;
+                    val_non_trap[vu] = true;
                 }
             });
             if let Some(r) = inst.res {
@@ -1468,8 +1604,18 @@ pub fn allocate_with_config_and_scratch(
                             add_peer(hint_peers, r.0, b.0);
                         }
                     }
-                    Op::I32BinImm(_, a, _) | Op::I64BinImm(_, a, _) => {
+                    Op::I32BinImm(_, a, _)
+                    | Op::I64BinImm(_, a, _)
+                    | Op::I32WrapI64(a)
+                    | Op::I64ExtendI32U(a) => {
                         add_peer(hint_peers, r.0, a.0);
+                    }
+                    Op::V128ExtractLane {
+                        kind: super::ir::SimdLaneKind::F64x2 | super::ir::SimdLaneKind::F32x4,
+                        v,
+                        lane: 0,
+                    } => {
+                        add_peer(hint_peers, r.0, v.0);
                     }
                     Op::F32Bin(bop, a, b) | Op::F64Bin(bop, a, b) => {
                         add_peer(hint_peers, r.0, a.0);
@@ -1490,12 +1636,11 @@ pub fn allocate_with_config_and_scratch(
             }
             match inst.op {
                 Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
-                    scratch_tys.clear();
-                    for &av in ir.pool_slice(args) {
-                        scratch_tys.push(ir.val_tys[av.0 as usize]);
-                    }
-                    if let Ok(al) = layout_args(scratch_tys) {
-                        for (&av, slot) in ir.pool_slice(args).iter().zip(al.slots) {
+                    let arg_slice = ir.pool_slice(args);
+                    let _ = for_each_arg_slot(
+                        arg_slice.iter().map(|&av| ir.val_tys[av.0 as usize]),
+                        |idx, slot| {
+                            let av = arg_slice[idx];
                             match slot {
                                 AbiSlot::Gp(g) if hint_gp[av.0 as usize].is_none() => {
                                     hint_gp[av.0 as usize] = Some(g);
@@ -1505,33 +1650,39 @@ pub fn allocate_with_config_and_scratch(
                                 }
                                 _ => {}
                             }
-                        }
-                    }
-                    scratch_tys.clear();
-                    for &rv in ir.pool_slice(rets) {
+                        },
+                    );
+                    let ret_slice = ir.pool_slice(rets);
+                    for &rv in ret_slice {
                         val_weight[rv.0 as usize] = val_weight[rv.0 as usize].saturating_add(w);
                         if !is_cold_trap {
                             val_non_trap[rv.0 as usize] = true;
                         }
-                        scratch_tys.push(ir.val_tys[rv.0 as usize]);
                     }
-                    if let Ok(rl) = layout_rets(scratch_tys) {
-                        for (&rv, slot) in ir.pool_slice(rets).iter().zip(rl.slots) {
+                    let _ = for_each_ret_slot(
+                        ret_slice.iter().map(|&rv| ir.val_tys[rv.0 as usize]),
+                        |idx, slot| {
+                            let rv = ret_slice[idx];
                             match slot {
                                 AbiSlot::Gp(g) => hint_gp[rv.0 as usize] = Some(g),
                                 AbiSlot::Xmm(x) => hint_xmm[rv.0 as usize] = Some(x),
                                 AbiSlot::Stack(_) => {}
                             }
-                        }
-                    }
+                        },
+                    );
                 }
                 _ => {}
             }
         }
+        let cur_ld = loop_depth[oi];
         bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
-            val_weight[v.0 as usize] = val_weight[v.0 as usize].saturating_add(w);
+            let vu = v.0 as usize;
+            val_weight[vu] = val_weight[vu].saturating_add(w);
+            if cur_ld > max_use_loop_depth[vu] {
+                max_use_loop_depth[vu] = cur_ld;
+            }
             if !is_cold_trap {
-                val_non_trap[v.0 as usize] = true;
+                val_non_trap[vu] = true;
             }
         });
         let mut wire_edge = |target_bb: u32, args: super::ir::ValRange| {
@@ -1577,12 +1728,11 @@ pub fn allocate_with_config_and_scratch(
                 }
             }
             Term::Return { vals } => {
-                scratch_tys.clear();
-                for &rv in ir.pool_slice(vals) {
-                    scratch_tys.push(ir.val_tys[rv.0 as usize]);
-                }
-                if let Ok(rl) = layout_rets(scratch_tys) {
-                    for (&rv, slot) in ir.pool_slice(vals).iter().zip(rl.slots) {
+                let ret_slice = ir.pool_slice(vals);
+                let _ = for_each_ret_slot(
+                    ret_slice.iter().map(|&rv| ir.val_tys[rv.0 as usize]),
+                    |idx, slot| {
+                        let rv = ret_slice[idx];
                         match slot {
                             AbiSlot::Gp(g) if hint_gp[rv.0 as usize].is_none() => {
                                 hint_gp[rv.0 as usize] = Some(g);
@@ -1592,8 +1742,8 @@ pub fn allocate_with_config_and_scratch(
                             }
                             _ => {}
                         }
-                    }
-                }
+                    },
+                );
             }
             Term::Unreachable => {}
         }
@@ -1602,13 +1752,16 @@ pub fn allocate_with_config_and_scratch(
     let mut locs = vec![Loc::Spill(0); n_vals];
     reset_fill(&mut scratch.assigned, n_vals, false);
     let assigned = &mut scratch.assigned;
-    let total_exact_seg_pairs: usize = cb_segs
+    let total_exact_seg_pairs: usize = cb_extra_vecs
         .iter()
         .filter(|s| s.len() > 1 && s.len() <= u16::MAX as usize)
         .map(Vec::len)
         .sum();
-    let mut segs_pool: Vec<(u32, u32)> = Vec::new();
-    segs_pool.reserve_exact(total_exact_seg_pairs);
+    let mut segs_pool = std::mem::take(&mut scratch.segs_pool);
+    segs_pool.clear();
+    if segs_pool.capacity() < total_exact_seg_pairs {
+        segs_pool.reserve_exact(total_exact_seg_pairs - segs_pool.len());
+    }
     reset_fill(&mut scratch.val_clob_gp, n_vals, 0u16);
     reset_fill(&mut scratch.val_clob_xmm, n_vals, 0u16);
     scratch.gp_intervals.clear();
@@ -1618,11 +1771,13 @@ pub fn allocate_with_config_and_scratch(
     let gp_intervals = &mut scratch.gp_intervals;
     let fp_intervals = &mut scratch.fp_intervals;
     let def_pos = &scratch.def_pos;
+    let def_block = &scratch.def_block;
     let last_use = &scratch.last_use;
     let cb_id = &scratch.cb_id;
     let cb_hull = &scratch.cb_hull;
     let val_remat = &scratch.val_remat;
     let val_weight = &scratch.val_weight;
+    let max_use_loop_depth = &scratch.max_use_loop_depth;
     let val_non_trap = &scratch.val_non_trap;
     let clobbers = &scratch.clobbers;
     for vi in 0..n_vals {
@@ -1639,28 +1794,45 @@ pub fn allocate_with_config_and_scratch(
         let (start, end, seg_off, seg_len, active_len, clob_gp, clob_xmm) =
             if c != u32::MAX && cb_hull[c as usize].0 != u32::MAX {
                 let ci = c as usize;
-                if !cb_segs.is_empty() && !cb_seg_overflow[ci] && !cb_segs[ci].is_empty() {
-                    let segs = &cb_segs[ci];
-                    let s0 = segs[0].0;
-                    let e_last = segs[segs.len() - 1].1;
-                    let (mut cg, mut cx) = (0u16, 0u16);
-                    let mut act = 0u64;
-                    for &(s, e) in segs {
-                        act += u64::from(e.saturating_sub(s).max(1));
-                        let lo = clobbers.partition_point(|cl| cl.pos <= s);
-                        let hi = clobbers.partition_point(|cl| cl.pos < e);
-                        let (g, x) = query_clobbers(lo, hi);
-                        cg |= g;
-                        cx |= x;
-                    }
-                    let (so, sl) = if segs.len() > 1 && segs.len() <= u16::MAX as usize {
-                        let off = segs_pool.len() as u32;
-                        segs_pool.extend_from_slice(segs);
-                        (off, segs.len() as u16)
+                if has_exact_segs && !cb_seg_overflow[ci] && cb_seg_first[ci].0 != u32::MAX {
+                    let ex_idx = cb_seg_extra_idx[ci];
+                    if ex_idx == u32::MAX {
+                        let (s0, e_last) = cb_seg_first[ci];
+                        let lo = clobbers.partition_point(|cl| cl.pos <= s0);
+                        let hi = clobbers.partition_point(|cl| cl.pos < e_last);
+                        let (cg, cx) = query_clobbers(lo, hi);
+                        (
+                            s0,
+                            e_last,
+                            0,
+                            0,
+                            u64::from(e_last.saturating_sub(s0).max(1)),
+                            cg,
+                            cx,
+                        )
                     } else {
-                        (0, 0)
-                    };
-                    (s0, e_last, so, sl, act.max(1), cg, cx)
+                        let segs = &cb_extra_vecs[ex_idx as usize];
+                        let s0 = segs[0].0;
+                        let e_last = segs[segs.len() - 1].1;
+                        let (mut cg, mut cx) = (0u16, 0u16);
+                        let mut act = 0u64;
+                        for &(s, e) in segs {
+                            act += u64::from(e.saturating_sub(s).max(1));
+                            let lo = clobbers.partition_point(|cl| cl.pos <= s);
+                            let hi = clobbers.partition_point(|cl| cl.pos < e);
+                            let (g, x) = query_clobbers(lo, hi);
+                            cg |= g;
+                            cx |= x;
+                        }
+                        let (so, sl) = if segs.len() > 1 && segs.len() <= u16::MAX as usize {
+                            let off = segs_pool.len() as u32;
+                            segs_pool.extend_from_slice(segs);
+                            (off, segs.len() as u16)
+                        } else {
+                            (0, 0)
+                        };
+                        (s0, e_last, so, sl, act.max(1), cg, cx)
+                    }
                 } else {
                     // Conservative exact hull fallback when segment budget is exceeded.
                     let (s0, e_last) = cb_hull[ci];
@@ -1689,16 +1861,22 @@ pub fn allocate_with_config_and_scratch(
         val_clob_gp[vi] = clob_gp;
         val_clob_xmm[vi] = clob_xmm;
         let ty = ir.val_tys[vi];
+        let mut remat_hoisted = false;
         if let Some(rc) = val_remat[vi] {
             // Always rematerialize zeros (0-cycle `xor`/`xorps`, direct immediate stores — eliminates all
             // `bb0` `cached_zeros` live ranges and stack spills!), call/clobber-crossing constants, and
-            // non-loop constants (`val_weight <= 2`). Hot non-zero loop constants without calls may still
-            // occupy a free caller-saved register (never callee-saved, never spilling).
+            // non-loop constants (`val_weight <= 8`). Hot non-zero loop-invariant GP constants (defined
+            // outside a loop and used inside) may also occupy a free callee-saved GP register (still at
+            // score 0, so they never evict or spill real values).
             let crosses_clobber = if ty.is_fp() {
                 (clob_xmm & MASK_XMM_CALLER) == MASK_XMM_CALLER
             } else {
                 (clob_gp & MASK_GP_CALLER) == MASK_GP_CALLER
             };
+            let def_ld = loop_depth[def_block[vi] as usize];
+            if !rc.is_zero() && !ty.is_fp() && !crosses_clobber && def_ld < max_use_loop_depth[vi] {
+                remat_hoisted = true;
+            }
             if rc.is_zero() || crosses_clobber || val_weight[vi] <= 8 {
                 locs[vi] = Loc::Remat(rc);
                 assigned[vi] = true;
@@ -1725,6 +1903,7 @@ pub fn allocate_with_config_and_scratch(
             clob_xmm,
             score,
             remat: val_remat[vi],
+            remat_hoisted,
         };
         if iv.ty.is_fp() {
             fp_intervals.push(iv);
@@ -1732,8 +1911,22 @@ pub fn allocate_with_config_and_scratch(
             gp_intervals.push(iv);
         }
     }
-    drop(cb_segs);
-    drop(cb_seg_overflow);
+    drop(cb_extra_vecs);
+    if cb_seg_first.capacity() <= SCRATCH_RECYCLE_CAP {
+        scratch.cb_seg_first = cb_seg_first;
+    } else {
+        drop(cb_seg_first);
+    }
+    if cb_seg_extra_idx.capacity() <= SCRATCH_RECYCLE_CAP {
+        scratch.cb_seg_extra_idx = cb_seg_extra_idx;
+    } else {
+        drop(cb_seg_extra_idx);
+    }
+    if cb_seg_overflow.capacity() <= SCRATCH_RECYCLE_CAP {
+        scratch.cb_seg_overflow = cb_seg_overflow;
+    } else {
+        drop(cb_seg_overflow);
+    }
 
     if let Some(bg) = budget {
         bg.check_deadline()?;
@@ -1841,7 +2034,7 @@ pub fn allocate_with_config_and_scratch(
             }
         }
         let forbidden = used_regs | iv.clob_gp;
-        let max_ri = if iv.remat.is_some() {
+        let max_ri = if iv.remat.is_some() && !iv.remat_hoisted {
             GP_CALLER_COUNT
         } else {
             gp_alloc.len()
@@ -2311,14 +2504,10 @@ pub fn allocate_with_config_and_scratch(
     } else {
         0
     };
-    let self_ret_layout = layout_rets(&ir.result_tys)?;
-    let self_param_tys: Vec<Ty> = ir
-        .params
-        .iter()
-        .map(|&pv| ir.val_tys[pv.0 as usize])
-        .collect();
-    let self_param_layout = layout_args(&self_param_tys)?;
-    let saved_ret_ptr_off = if self_ret_layout.stack_bytes > 0 {
+    let self_ret_stack_bytes = layout_rets_stack_bytes(ir.result_tys.iter().copied())?;
+    let self_param_stack_bytes =
+        layout_args_stack_bytes(ir.params.iter().map(|&pv| ir.val_tys[pv.0 as usize]))?;
+    let saved_ret_ptr_off = if self_ret_stack_bytes > 0 {
         raw_frame = raw_frame
             .checked_add(7)
             .ok_or("x64: stack frame size overflow")?
@@ -2353,7 +2542,7 @@ pub fn allocate_with_config_and_scratch(
     }
     let incoming_stack_base = frame_size
         .checked_add(pushes_bytes)
-        .and_then(|v| v.checked_add(self_param_layout.stack_bytes))
+        .and_then(|v| v.checked_add(self_param_stack_bytes))
         .ok_or("x64: incoming stack parameter offset overflow")?;
     if incoming_stack_base > MAX_FRAME_BYTES.saturating_mul(2) {
         return Err(format!(
@@ -2388,6 +2577,12 @@ pub fn allocate_with_config_and_scratch(
             block_live_in_gp[bid as usize] = gp_m;
             block_live_in_xmm[bid as usize] = xmm_m;
         }
+    }
+    if saved_live_in.capacity() <= SCRATCH_RECYCLE_CAP {
+        scratch.live_in = saved_live_in;
+    }
+    if segs_pool.capacity() <= SCRATCH_RECYCLE_CAP {
+        scratch.segs_pool = segs_pool;
     }
 
     Ok(AllocResult {

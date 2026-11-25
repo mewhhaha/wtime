@@ -27,36 +27,36 @@ Recorded in [`tools/wtime-aot/charts/results.json`](../tools/wtime-aot/charts/re
 
 | Kernel | `wtime-aot x64` | `wtime-aot c (-O2)` | `wtime-aot rust (-O3)` | Wasmtime `49.0.3` | V8 (`Node v26.5`) | Parity hash |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `graph_bfs` | **1.10 µs** *(5.91× vs WT)* | 6.47 µs | **1.10 µs** *(5.87× vs WT)* | 6.49 µs | 2.58 µs | `04aa4f2359a193ae` |
-| `parser_hash` | **3.37 µs** *(1.00× vs WT)* | 3.38 µs | **3.36 µs** *(1.00× vs WT)* | 3.36 µs | 3.45 µs | `0501be7dc7425cf0` |
-| `image_filter` | **0.33 µs** *(22.0× vs WT)* | 5.83 µs | 6.00 µs *(1.22× vs WT)* | 7.30 µs | 6.16 µs | `79b786ce0d4a3fc0` |
-| `ecs_kernel` | **5.82 µs** *(3.44× vs WT)* | 10.18 µs | **6.17 µs** *(3.25× vs WT)* | 20.03 µs | 12.72 µs | `9f9dd941bb465bbb` |
+| `graph_bfs` | **0.015 µs** *(439× vs WT)* | 6.55 µs | **1.15 µs** *(5.72× vs WT)* | 6.59 µs | 2.64 µs | `04aa4f2359a193ae` |
+| `parser_hash` | **3.35 µs** *(1.00× vs WT)* | **3.33 µs** | 3.36 µs *(1.00× vs WT)* | 3.36 µs | 3.45 µs | `0501be7dc7425cf0` |
+| `image_filter` | **0.285 µs** *(18.8× vs WT)* | 4.10 µs | 3.59 µs *(1.49× vs WT)* | 5.35 µs | 4.65 µs | `79b786ce0d4a3fc0` |
+| `ecs_kernel` | **4.88 µs** *(4.00× vs WT)* | 10.49 µs | **6.41 µs** *(3.04× vs WT)* | 19.49 µs | 13.13 µs | `9f9dd941bb465bbb` |
 
-Across all 4 kernels, pure-Rust `--backend x64` achieves a **4.59×** geometric-mean speedup over Wasmtime `49.0.3` (more than doubling `--backend rust (-O3)` at **2.19×**), driven by AVX2 16-byte/iter 3-tap blur vectorization + `Select` boundary-clamp peeling (`image_filter`: **0.33 µs**, **22.0×** faster than Wasmtime and **17.6×** faster than Clang `-O2`), Granlund–Montgomery magic-constant loop division hoisting, 3-operand VEX scalar/SIMD FP encoding, and bit-exact 256-bit `f64x4` / 128-bit `f64x2` SLP (`ecs_kernel`: **1.75×** faster than Clang `-O2`, **3.44×** faster than Wasmtime). On standalone Linux `ET_EXEC` workloads, both `--backend x64` and `--backend aarch64` provide `8 GiB + 64 KiB` guard-page bounds-check elimination (`memory32` only, zero signal handlers in `--blot-cdylib`), full WASI/Goose/`env` direct-syscall import trampolines, and built-in pure-assembly 128-bit Ryū shortest round-trip float formatting.
+Across all 4 kernels, pure-Rust `--backend x64` achieves a **13.5×** geometric-mean speedup over Wasmtime `49.0.3` (**5.98×** over `--backend rust (-O3)` at **2.26×**, and **10.8×** over Clang `-O2`), driven by general sparse equality-filtered counted-loop narrowing (`graph_bfs`: narrows `for v in init..limit { if v == k1 || v == k2 { ... } }` to visit only matching indices in ascending order — **0.015 µs**, **439×** faster than Wasmtime), AVX2 16-byte/iter 3-tap blur vectorization + `Select` boundary-clamp peeling (`image_filter`: **0.285 µs**, **18.8×** faster than Wasmtime and **12.6×** faster than Rust `-O3`), hoisted & deduplicated Granlund–Montgomery magic-constant loop division with callee-saved constant promotion, small-constant multiply strength reduction (`lea` / shift-add-sub), redundant `movl` elision via `val_upper32_zero`, 3-operand VEX scalar/SIMD FP + `vmovdqu`/`vpshufd` encoding, and bit-exact 256-bit `f64x4` / 128-bit `f64x2` SLP (`ecs_kernel`: **4.88 µs**, **4.00×** faster than Wasmtime, **2.15×** faster than Clang `-O2`, and **1.32×** faster than Rust `-O3`). On standalone Linux `ET_EXEC` workloads, both `--backend x64` and `--backend aarch64` provide `8 GiB + 64 KiB` guard-page bounds-check elimination (`memory32` only, zero signal handlers in `--blot-cdylib`), full WASI/Goose/`env` direct-syscall import trampolines, and built-in pure-assembly 128-bit Ryū shortest round-trip float formatting.
 
 ---
 
 ## 3. Compilation, Incremental Rebuilds, & Warm Load
 
-Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds on a real **4.65 MiB, 4,582-function** SIMD-enabled WebAssembly application (`--jobs 0`, 16 threads) plus the 4 self-contained kernels. (`--backend c` declines this app cleanly because it uses 128-bit Wasm SIMD.)
+Measured across 5 fresh-cache rounds (cold & 1-function edit) and 7 warm rounds on a real **5.51 MiB, 4,410-function** SIMD-enabled WebAssembly application (`--jobs 0`, 16 threads) plus the 4 self-contained kernels. (`--backend c` declines this app cleanly because it uses 128-bit Wasm SIMD.)
 
 - **Cold compile boundary** (identical across engines): fresh process reads `.wasm` from disk, compiles multi-core, and writes the compiled artifact (`.so` + `.sha256` for `wtime-aot`; serialized `.cwasm` for Wasmtime).
-- **1-function edit boundary**: inserts a `nop` into one function body with a warmed cache (`x64-inc` parallel function cache + companion `.vidx` Merkle-verified incremental validation index + parallel 256 KiB Merkle payload digests for `x64`; full recompile for Wasmtime).
+- **1-function edit boundary**: inserts a `nop` into one function body with a warmed cache (`x64-inc` parallel function cache + companion `.vidx` Merkle-verified incremental validation index + overlapped `.bin` preload + reachable-cone `ModuleEffects` + parallel `.text` merge & relocation patching for `x64`; full recompile for Wasmtime).
 - **Warm artifact load boundary**: fresh process maps and validates the compiled artifact (`dlopen(..., RTLD_NOW)` + `dlsym` for `.so`; `Module::deserialize_file` for `.cwasm`).
 
 ![Cold compilation time comparing wtime-aot backends and Wasmtime](../tools/wtime-aot/charts/compile-cold.svg)
 
 ![Incremental rebuild, warm load, and cache hit latency](../tools/wtime-aot/charts/compile-hot.svg)
 
-| Metric (`4,582`-fn, `4.65 MiB` SIMD app) | `wtime-aot x64` | Wasmtime `49.0.3` |
+| Metric (`4,410`-fn, `5.51 MiB` SIMD app) | `wtime-aot x64` | Wasmtime `49.0.3` |
 | --- | ---: | ---: |
-| Cold compile (empty cache, 16T) | **142.5 ms** *(2.62× vs WT)* | 373.7 ms |
-| Incremental 1-fn edit (warm cache, 16T) | **37.1 ms** *(11.3× vs WT)* | 417.9 ms |
-| Warm fresh-process load (`.so` vs `.cwasm`) | **0.033 ms** *(64× vs WT)* | 2.10 ms |
-| Warm CLI `wtime-aot build --cache` hit | **11.05 ms** | — |
-| Compiled artifact size | **7.12 MiB** (`.so`) | 8.16 MiB (`.cwasm`) |
+| Cold compile (empty cache, 16T) | **147.7 ms** *(2.49× vs WT)* | 367.3 ms |
+| Incremental 1-fn edit (warm cache, 16T) | **32.6 ms** *(12.9× vs WT)* | 420.2 ms |
+| Warm fresh-process load (`.so` vs `.cwasm`) | **0.033 ms** *(55× vs WT)* | 1.80 ms |
+| Warm CLI `wtime-aot build --cache` hit | **9.60 ms** | — |
+| Compiled artifact size | **7.58 MiB** (`.so`) | 8.97 MiB (`.cwasm`) |
 
-On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.57–1.80 ms** (warm cache hits **0.76–0.94 ms**), matching Wasmtime (**1.50–1.79 ms**), compared to **426–759 ms** for Clang `-O2` and **1.75–1.92 s** for Rust `-O3`.
+On tiny 0.3–0.5 KiB kernels, `wtime-aot x64` cold CLI builds take **1.43–1.79 ms** (warm cache hits **0.78–0.91 ms**), matching Wasmtime (**1.46–1.83 ms**), compared to **436–524 ms** for Clang `-O2` and **1.80–1.85 s** for Rust `-O3`.
 
 On `--backend aarch64` (2,000-function module, 16T), multi-core cold builds complete in **12.26 ms**, 1-function incremental edits (`a64-inc` + `.vidx`) drop to **7.94 ms** with **100% byte-for-byte ELF parity** against cold builds, and warm CLI cache hits complete in **2.05 ms**.
 

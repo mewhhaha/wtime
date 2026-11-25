@@ -3471,3 +3471,41 @@ fn stage5_wave2_rotation_alignment_memcopy_forward_and_inc_v6() {
         assert_eq!(compile_wasm_to_x64_so(&w, &opts).unwrap(), expected_so);
     }
 }
+
+#[test]
+fn stage6_graph_bfs_ir_and_narrowing_check() {
+    let wasm = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/graph_bfs.wasm"
+    ))
+    .expect("read graph_bfs.wasm");
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::x64_validate_features(),
+        &super::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs = Vec::new();
+    for bi in 0..val.decoded().code.len() {
+        let mut ir = super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap();
+        super::opt::prune_early_block_params(&mut ir, None).unwrap();
+        irs.push(ir);
+    }
+    super::opt::inline_small_helpers(&mut irs, &module, None).unwrap();
+    let effects = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    let mut ir = irs[2].clone();
+    super::opt::optimize_func_stage2(&mut ir, &module, &effects, None).unwrap();
+    super::verify::verify_ir(&ir, &module).unwrap();
+    // Sparse equality-filtered loop narrowing must eliminate the `v == k1 || v == k2` scan loop
+    // in `graph_bfs::run` and emit branchless `CmpSelect` min/max preheader ordering!
+    let has_cmp_select = ir.blocks.iter().any(|b| {
+        b.insts
+            .iter()
+            .any(|ins| matches!(ins.op, super::ir::Op::CmpSelect { .. }))
+    });
+    assert!(
+        has_cmp_select,
+        "graph_bfs::run must narrow the equality-filtered inner scan loop"
+    );
+}

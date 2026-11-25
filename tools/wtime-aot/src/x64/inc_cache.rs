@@ -33,65 +33,12 @@ const MAGIC: &[u8; 8] = b"WTX64INC";
 const FORMAT_VERSION: u32 = 7;
 const PARALLEL_INC_MIN_FUNCS: usize = 256;
 const MAX_CACHE_FILE_BYTES: usize = 128 << 20; // 128 MiB cap on read
-const PARALLEL_HASH_CHUNK_BYTES: usize = 256 << 10; // 256 KiB chunks for parallel SHA-256 Merkle trailer
 
-/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks in parallel across up to 16 threads.
-/// Uses fallible allocation and `spawn_scoped` with inline fallback so optional cache hashing never aborts.
+/// Computes a deterministic SHA-256 Merkle root over 256 KiB chunks using 4-way SIMD `digest4`
+/// across worker threads. Uses fallible allocation and `spawn_scoped` with inline fallback so
+/// optional cache hashing never aborts.
 pub(crate) fn parallel_payload_digest(payload: &[u8]) -> Option<[u8; 32]> {
-    if payload.len() <= PARALLEL_HASH_CHUNK_BYTES {
-        let mut h = Sha256::new();
-        h.update(b"WTX64INC-ROOT-1");
-        h.update(&(payload.len() as u64).to_le_bytes());
-        h.update(&crate::sha256::digest(payload));
-        return Some(h.finish());
-    }
-    let n_chunks = payload.len().div_ceil(PARALLEL_HASH_CHUNK_BYTES);
-    let mut leaf_hashes = try_vec_with_capacity(n_chunks)?;
-    leaf_hashes.resize(n_chunks, [0u8; 32]);
-    let n_threads = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(16)
-        .min(n_chunks);
-    let per_worker = n_chunks.div_ceil(n_threads);
-    let hash_range = |start_idx: usize, slice: &mut [[u8; 32]]| {
-        for (j, slot) in slice.iter_mut().enumerate() {
-            let off = (start_idx + j) * PARALLEL_HASH_CHUNK_BYTES;
-            let end = (off + PARALLEL_HASH_CHUNK_BYTES).min(payload.len());
-            *slot = crate::sha256::digest(&payload[off..end]);
-        }
-    };
-    let mut unspawned: [Option<(usize, usize)>; 16] = [None; 16];
-    let mut n_unspawned = 0usize;
-    std::thread::scope(|s| {
-        let mut rem_leaves = leaf_hashes.as_mut_slice();
-        let mut chunk_idx = 0usize;
-        while !rem_leaves.is_empty() {
-            let take = per_worker.min(rem_leaves.len());
-            let (slice, rest) = rem_leaves.split_at_mut(take);
-            let start_idx = chunk_idx;
-            rem_leaves = rest;
-            chunk_idx += take;
-            if rem_leaves.is_empty() {
-                hash_range(start_idx, slice);
-            } else if std::thread::Builder::new()
-                .spawn_scoped(s, move || hash_range(start_idx, slice))
-                .is_err()
-            {
-                unspawned[n_unspawned] = Some((start_idx, take));
-                n_unspawned += 1;
-            }
-        }
-    });
-    for &(start_idx, take) in unspawned[..n_unspawned].iter().flatten() {
-        hash_range(start_idx, &mut leaf_hashes[start_idx..start_idx + take]);
-    }
-    let mut root = Sha256::new();
-    root.update(b"WTX64INC-ROOT-1");
-    root.update(&(payload.len() as u64).to_le_bytes());
-    for d in &leaf_hashes {
-        root.update(d);
-    }
-    Some(root.finish())
+    crate::sha256::parallel_merkle_digest_with_domain(b"WTX64INC-ROOT-1", payload)
 }
 
 static NEXT_INC_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -541,8 +488,23 @@ fn read_private_cache_file(path: &Path) -> Option<Vec<u8>> {
     if fmeta.len() < 80 || fmeta.len() > MAX_CACHE_FILE_BYTES as u64 {
         return None;
     }
-    let mut bytes = try_vec_with_capacity((fmeta.len() as usize).min(MAX_CACHE_FILE_BYTES))?;
+    let init_len = (fmeta.len() as usize).min(MAX_CACHE_FILE_BYTES);
+    let mut bytes = try_vec_with_capacity(init_len)?;
+    bytes.resize(init_len, 0u8);
     let mut reader = file.take((MAX_CACHE_FILE_BYTES + 1) as u64);
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let end = pos.saturating_add(1 << 20).min(bytes.len());
+        match reader.read(&mut bytes[pos..end]) {
+            Ok(0) => {
+                bytes.truncate(pos);
+                return (bytes.len() >= 80 && bytes.len() <= MAX_CACHE_FILE_BYTES).then_some(bytes);
+            }
+            Ok(n) => pos += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
     let mut chunk = [0u8; 65_536];
     loop {
         match reader.read(&mut chunk) {
@@ -1425,11 +1387,8 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
         }
     }
 
-    let Some(checksum) = parallel_payload_digest(&out) else {
-        return;
-    };
-    out.extend_from_slice(&checksum);
-
+    // Overlap staging-file payload write with parallel 4-way SIMD Merkle checksum computation,
+    // then append the 32-byte trailer and atomically rename into place.
     let target = dir.join(cache_file_name(&data.abi_hash));
     for _ in 0..16 {
         let seq = NEXT_INC_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -1447,10 +1406,23 @@ pub fn save_inc_cache(cache_dir: &Path, data: &IncCacheData) {
         }
         match opts.open(&tmp) {
             Ok(mut f) => {
-                let ok = f
-                    .write_all(&out)
-                    .and_then(|()| fs::rename(&tmp, &target))
-                    .is_ok();
+                let payload_ref = out.as_slice();
+                let (write_res, checksum_opt) = std::thread::scope(|s| {
+                    let h_hash = std::thread::Builder::new()
+                        .spawn_scoped(s, || parallel_payload_digest(payload_ref))
+                        .ok();
+                    let wr = f.write_all(payload_ref);
+                    let ck = h_hash
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_else(|| parallel_payload_digest(payload_ref));
+                    (wr, ck)
+                });
+                let ok = write_res.is_ok()
+                    && checksum_opt.is_some_and(|ck| {
+                        f.write_all(&ck)
+                            .and_then(|()| fs::rename(&tmp, &target))
+                            .is_ok()
+                    });
                 if !ok {
                     let _ = fs::remove_file(&tmp);
                 }

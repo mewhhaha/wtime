@@ -299,8 +299,71 @@ fn open_regular_file(path: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
+/// Reads a regular file directly into a bounded `Vec<u8>` in up to 1 MiB chunks without an
+/// intermediate stack copy, enforcing `max_bytes` and `deadline`.
+fn read_file_bounded_direct(
+    mut file: fs::File,
+    prealloc: usize,
+    max_bytes: usize,
+    deadline: Option<std::time::Instant>,
+) -> Result<Vec<u8>, BoundedReadErr> {
+    const READ_CHUNK: usize = 1 << 20;
+    let mut buf = Vec::new();
+    if prealloc > 0 {
+        buf.try_reserve_exact(prealloc).map_err(|_| {
+            BoundedReadErr::Io(std::io::Error::other("out of memory reading input"))
+        })?;
+        buf.resize(prealloc, 0u8);
+    }
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        if let Some(dl) = deadline
+            && std::time::Instant::now() >= dl
+        {
+            return Err(BoundedReadErr::Deadline);
+        }
+        let end = pos.saturating_add(READ_CHUNK).min(buf.len());
+        match file.read(&mut buf[pos..end]) {
+            Ok(0) => {
+                buf.truncate(pos);
+                return Ok(buf);
+            }
+            Ok(n) => pos += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(BoundedReadErr::Io(e)),
+        }
+    }
+    // Check for EOF or a file that grew past its initial metadata length.
+    let mut tail = [0u8; 65_536];
+    loop {
+        if let Some(dl) = deadline
+            && std::time::Instant::now() >= dl
+        {
+            return Err(BoundedReadErr::Deadline);
+        }
+        match file.read(&mut tail) {
+            Ok(0) => break,
+            Ok(n) => {
+                if buf.len().saturating_add(n) > max_bytes {
+                    return Err(BoundedReadErr::TooLarge);
+                }
+                buf.extend_from_slice(&tail[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(BoundedReadErr::Io(e)),
+        }
+    }
+    Ok(buf)
+}
+
+enum BoundedReadErr {
+    Deadline,
+    TooLarge,
+    Io(std::io::Error),
+}
+
 /// Reads a Wasm input file with a hard pre-allocation byte cap (checking initial file
-/// metadata, streaming in 64 KiB chunks, and enforcing `deadline` so growing/stalled inputs stay bounded).
+/// metadata, reading directly in 1 MiB chunks, and enforcing `deadline` so growing/stalled inputs stay bounded).
 pub(crate) fn read_bounded_wasm(
     path: &Path,
     max_bytes: usize,
@@ -314,7 +377,7 @@ pub(crate) fn read_bounded_wasm(
             path.display()
         ));
     }
-    let mut file = open_regular_file(path)?;
+    let file = open_regular_file(path)?;
     let mut prealloc = 0usize;
     if let Ok(meta) = file.metadata()
         && meta.is_file()
@@ -328,33 +391,17 @@ pub(crate) fn read_bounded_wasm(
         }
         prealloc = (meta.len() as usize).min(max_bytes);
     }
-    let mut buf = Vec::with_capacity(prealloc);
-    let mut chunk = [0u8; 65_536];
-    loop {
-        if let Some(dl) = deadline
-            && std::time::Instant::now() >= dl
-        {
-            return Err(format!(
-                "{}: exceeded build time limit while reading input",
-                path.display()
-            ));
-        }
-        match file.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                if buf.len().saturating_add(n) > max_bytes {
-                    return Err(format!(
-                        "{}: input size exceeds maximum module limit ({max_bytes} B)",
-                        path.display()
-                    ));
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        }
-    }
-    Ok(buf)
+    read_file_bounded_direct(file, prealloc, max_bytes, deadline).map_err(|e| match e {
+        BoundedReadErr::Deadline => format!(
+            "{}: exceeded build time limit while reading input",
+            path.display()
+        ),
+        BoundedReadErr::TooLarge => format!(
+            "{}: input size exceeds maximum module limit ({max_bytes} B)",
+            path.display()
+        ),
+        BoundedReadErr::Io(io) => format!("{}: {io}", path.display()),
+    })
 }
 
 /// Reads a Wasm input file under the `--backend x64` 64 MiB cap, classifying oversized modules as
@@ -372,7 +419,7 @@ pub(crate) fn read_bounded_wasm_for_x64(
             path.display()
         )));
     }
-    let mut file = open_regular_file(path).map_err(BuildError::Failed)?;
+    let file = open_regular_file(path).map_err(BuildError::Failed)?;
     let mut prealloc = 0usize;
     if let Ok(meta) = file.metadata()
         && meta.is_file()
@@ -386,34 +433,17 @@ pub(crate) fn read_bounded_wasm_for_x64(
         }
         prealloc = (meta.len() as usize).min(max_bytes);
     }
-    let mut buf = Vec::new();
-    let _ = buf.try_reserve_exact(prealloc);
-    let mut chunk = [0u8; 65_536];
-    loop {
-        if let Some(dl) = deadline
-            && std::time::Instant::now() >= dl
-        {
-            return Err(BuildError::Failed(format!(
-                "{}: exceeded build time limit while reading input",
-                path.display()
-            )));
-        }
-        match file.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                if buf.len().saturating_add(n) > max_bytes {
-                    return Err(BuildError::AdmissionRejected(format!(
-                        "x64: {}: input size exceeds x64 maximum module limit ({max_bytes} B)",
-                        path.display()
-                    )));
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(BuildError::Failed(format!("{}: {e}", path.display()))),
-        }
-    }
-    Ok(buf)
+    read_file_bounded_direct(file, prealloc, max_bytes, deadline).map_err(|e| match e {
+        BoundedReadErr::Deadline => BuildError::Failed(format!(
+            "{}: exceeded build time limit while reading input",
+            path.display()
+        )),
+        BoundedReadErr::TooLarge => BuildError::AdmissionRejected(format!(
+            "x64: {}: input size exceeds x64 maximum module limit ({max_bytes} B)",
+            path.display()
+        )),
+        BoundedReadErr::Io(io) => BuildError::Failed(format!("{}: {io}", path.display())),
+    })
 }
 
 /// When an outer orchestrator (such as Pen) runs `wtime-aot build` inside a dedicated process
@@ -1487,15 +1517,21 @@ fn build_x64(
     deadline: std::time::Instant,
 ) -> Result<PathBuf, BuildError> {
     use std::io::Write as _;
+    let timings = std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1");
+    let t_b0 = std::time::Instant::now();
     check_deadline(deadline, options.time_limit)?;
     // Validate CPU syntax and host platform BEFORE cache lookup or file hashing.
     let (isa_profile, isa) = crate::x64::resolve_x64_isa(options.target_cpu)?;
     let wasm = read_bounded_wasm_for_x64(module, Some(deadline))?;
+    let d_read = t_b0.elapsed();
+    let t_b1 = std::time::Instant::now();
     check_deadline(deadline, options.time_limit)?;
     let cache = ensure_private_dir(cache)?;
     let gen_sha = generator_fingerprint::GENERATOR_BUILD_SHA256;
     let wasm_sha = crate::x64::inc_cache::parallel_payload_digest(&wasm)
         .unwrap_or_else(|| crate::sha256::digest(&wasm));
+    let d_hash = t_b1.elapsed();
+    let t_b2 = std::time::Instant::now();
     check_deadline(deadline, options.time_limit)?;
 
     let verify = cfg!(debug_assertions)
@@ -1535,9 +1571,25 @@ fn build_x64(
     check_deadline(deadline, options.time_limit)?;
     let program = entry.join(artifact_name);
     let digest_file = entry.join(digest_name);
+    let t_ver = std::time::Instant::now();
     if verified_cached_artifact(&program, &digest_file) {
+        let d_ver = t_ver.elapsed();
+        let t_sw = std::time::Instant::now();
         sweep_stale_staged_artifacts_bounded(&entry, deadline);
+        let d_sw = t_sw.elapsed();
+        let t_un = std::time::Instant::now();
         publish_lock.release_checked(options.time_limit)?;
+        if timings {
+            eprintln!(
+                "wtime-aot x64 warm: read={:.2}ms hash={:.2}ms lock={:.2}ms verify={:.2}ms sweep={:.2}ms unlock={:.2}ms",
+                d_read.as_secs_f64() * 1000.0,
+                d_hash.as_secs_f64() * 1000.0,
+                t_ver.duration_since(t_b2).as_secs_f64() * 1000.0,
+                d_ver.as_secs_f64() * 1000.0,
+                d_sw.as_secs_f64() * 1000.0,
+                t_un.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         return Ok(program);
     }
     for stale in [&digest_file, &program] {
@@ -1816,13 +1868,18 @@ fn build_x64(
             }
         }
     }
+    let d_write = t_write.elapsed();
+    let t_wait = std::time::Instant::now();
     if let Some(pending) = pending_inc_save {
         crate::x64::wait_pending_inc_cache_save(pending, Some(deadline));
     }
-    if std::env::var_os("WTIME_AOT_TIMINGS").is_some_and(|v| v == "1") {
+    if timings {
         eprintln!(
-            "wtime-aot x64 write={:.2}ms",
-            t_write.elapsed().as_secs_f64() * 1000.0
+            "wtime-aot x64 build: read={:.2}ms hash={:.2}ms write={:.2}ms wait_inc={:.2}ms",
+            d_read.as_secs_f64() * 1000.0,
+            d_hash.as_secs_f64() * 1000.0,
+            d_write.as_secs_f64() * 1000.0,
+            t_wait.elapsed().as_secs_f64() * 1000.0,
         );
     }
     Ok(program)

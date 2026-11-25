@@ -1496,6 +1496,93 @@ pub fn prune_early_block_params_with_scratch(
 // 2. Budgeted Small-Leaf Inlining
 // ============================================================================
 
+/// Fallibly computes Tarjan SCCs directly from a `u32` callee-slice lookup (zero per-function
+/// `Vec<usize>` allocation), returning `None` on allocation failure.
+pub fn try_call_graph_sccs_from_u32_lookup<'a, F>(
+    n: usize,
+    edges_of: F,
+) -> Option<(Vec<bool>, Vec<usize>)>
+where
+    F: Fn(usize) -> &'a [u32],
+{
+    let mut index = Vec::new();
+    index.try_reserve_exact(n).ok()?;
+    index.resize(n, u32::MAX);
+    let mut lowlink = Vec::new();
+    lowlink.try_reserve_exact(n).ok()?;
+    lowlink.resize(n, 0u32);
+    let mut on_stack = Vec::new();
+    on_stack.try_reserve_exact(n).ok()?;
+    on_stack.resize(n, false);
+    let mut stack: Vec<usize> = Vec::new();
+    stack.try_reserve_exact(n).ok()?;
+    let mut cur_idx = 0u32;
+    let mut in_cycle = Vec::new();
+    in_cycle.try_reserve_exact(n).ok()?;
+    in_cycle.resize(n, false);
+    let mut topo_bottom_up = Vec::new();
+    topo_bottom_up.try_reserve_exact(n).ok()?;
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    frames.try_reserve_exact(n).ok()?;
+    let mut scc: Vec<usize> = Vec::new();
+    scc.try_reserve_exact(n).ok()?;
+
+    for start in 0..n {
+        if index[start] != u32::MAX {
+            continue;
+        }
+        index[start] = cur_idx;
+        lowlink[start] = cur_idx;
+        cur_idx += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        frames.push((start, 0));
+
+        while let Some((v, ei)) = frames.last_mut() {
+            let v = *v;
+            let row = edges_of(v);
+            if *ei < row.len() {
+                let w = row[*ei] as usize;
+                *ei += 1;
+                if index[w] == u32::MAX {
+                    index[w] = cur_idx;
+                    lowlink[w] = cur_idx;
+                    cur_idx += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    frames.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                }
+            } else {
+                frames.pop();
+                if let Some(&(parent, _)) = frames.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
+                }
+                if lowlink[v] == index[v] {
+                    scc.clear();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    let cyclic = scc.len() > 1
+                        || (scc.len() == 1 && edges_of(scc[0]).contains(&(scc[0] as u32)));
+                    for &node in &scc {
+                        if cyclic {
+                            in_cycle[node] = true;
+                        }
+                        topo_bottom_up.push(node);
+                    }
+                }
+            }
+        }
+    }
+    Some((in_cycle, topo_bottom_up))
+}
+
 /// Fallibly computes Tarjan SCCs from an adjacency list of defined-function edges,
 /// returning `None` on allocation failure so optional cache preparation can degrade cleanly.
 pub fn try_call_graph_sccs_from_edges(edges: &[Vec<usize>]) -> Option<(Vec<bool>, Vec<usize>)> {
@@ -3597,6 +3684,201 @@ where
     }))
 }
 
+/// Computes exact transitive `ModuleEffects` restricted strictly to the call-graph cone reachable
+/// from `roots` (defined-function indices `0..n_defs`). Every function `fi` in the cone receives
+/// bit-identical effects to full-module `try_compute_module_effects_from_lookup`, enabling fast
+/// incremental rebuilds when `own_effects` did not change.
+pub fn try_compute_module_effects_subset_from_lookup<'a, F>(
+    n_defs: usize,
+    roots: &[usize],
+    get: F,
+    module: &X64Module,
+    budget: Option<&CompileBudget>,
+) -> Res<Option<ModuleEffects>>
+where
+    F: Fn(usize) -> &'a FnOwnEffects,
+{
+    if let Some(bg) = budget {
+        bg.check_deadline()?;
+    }
+    let n_imports = module.imports.len();
+    let n_total = n_imports + n_defs;
+    let global_words = module.globals.len().div_ceil(64);
+    let fixed_mem = module.fixed32.is_some();
+    let flat_gw_len = n_total.checked_mul(global_words);
+
+    let alloc_res = (|| -> Option<_> {
+        let gw_len = flat_gw_len?;
+        let mut writes_mem = Vec::new();
+        writes_mem.try_reserve_exact(n_total).ok()?;
+        writes_mem.resize(n_total, false);
+        let mut grows_mem = Vec::new();
+        grows_mem.try_reserve_exact(n_total).ok()?;
+        grows_mem.resize(n_total, false);
+        let mut writes_all_globals = Vec::new();
+        writes_all_globals.try_reserve_exact(n_total).ok()?;
+        writes_all_globals.resize(n_total, false);
+        let mut written_globals = Vec::new();
+        written_globals.try_reserve_exact(gw_len).ok()?;
+        written_globals.resize(gw_len, 0u64);
+        let mut writes_all_tables = Vec::new();
+        writes_all_tables.try_reserve_exact(n_total).ok()?;
+        writes_all_tables.resize(n_total, false);
+        let mut written_tables = Vec::new();
+        written_tables.try_reserve_exact(n_total).ok()?;
+        written_tables.resize(n_total, 0u64);
+        let mut in_cone = Vec::new();
+        in_cone.try_reserve_exact(n_defs).ok()?;
+        in_cone.resize(n_defs, false);
+        let mut cone = Vec::new();
+        cone.try_reserve(roots.len().min(n_defs)).ok()?;
+        Some((
+            writes_mem,
+            grows_mem,
+            writes_all_globals,
+            written_globals,
+            writes_all_tables,
+            written_tables,
+            in_cone,
+            cone,
+        ))
+    })();
+    let Some((
+        mut writes_mem,
+        mut grows_mem,
+        mut writes_all_globals,
+        mut written_globals,
+        mut writes_all_tables,
+        mut written_tables,
+        mut in_cone,
+        mut cone,
+    )) = alloc_res
+    else {
+        return Ok(None);
+    };
+
+    for &bi in roots {
+        if bi < n_defs && !in_cone[bi] {
+            in_cone[bi] = true;
+            if cone.len() == cone.capacity() && cone.try_reserve(16).is_err() {
+                return Ok(None);
+            }
+            cone.push(bi);
+        }
+    }
+    let mut head = 0usize;
+    while head < cone.len() {
+        let bi = cone[head];
+        head += 1;
+        for &c_u32 in &get(bi).direct_callees {
+            let c = c_u32 as usize;
+            if c >= n_imports {
+                let cb = c - n_imports;
+                if cb < n_defs && !in_cone[cb] {
+                    in_cone[cb] = true;
+                    if cone.len() == cone.capacity() && cone.try_reserve(32).is_err() {
+                        return Ok(None);
+                    }
+                    cone.push(cb);
+                }
+            }
+        }
+    }
+
+    for fi in 0..n_imports {
+        writes_mem[fi] = true;
+        grows_mem[fi] = !fixed_mem;
+        writes_all_globals[fi] = true;
+        writes_all_tables[fi] = true;
+    }
+    for &bi in &cone {
+        let s = get(bi);
+        let fi = n_imports + bi;
+        writes_mem[fi] = s.writes_mem;
+        grows_mem[fi] = s.grows_mem;
+        writes_all_globals[fi] = s.writes_all_globals;
+        let base = fi * global_words;
+        for w in 0..global_words {
+            written_globals[base + w] = s.written_globals.get(w).copied().unwrap_or(0);
+        }
+        writes_all_tables[fi] = s.writes_all_tables;
+        written_tables[fi] = s.written_tables;
+    }
+
+    let mut changed = true;
+    let mut fix_steps = 0usize;
+    while changed {
+        changed = false;
+        for &bi in cone.iter().rev() {
+            let s = get(bi);
+            let fi = n_imports + bi;
+            for &c_u32 in &s.direct_callees {
+                let c = c_u32 as usize;
+                fix_steps = fix_steps.saturating_add(global_words.max(1));
+                if let Some(bg) = budget
+                    && fix_steps >= 4096
+                {
+                    fix_steps = 0;
+                    bg.check_deadline()?;
+                }
+                if writes_mem[c] && !writes_mem[fi] {
+                    writes_mem[fi] = true;
+                    changed = true;
+                }
+                if grows_mem[c] && !grows_mem[fi] {
+                    grows_mem[fi] = true;
+                    changed = true;
+                }
+                if writes_all_globals[c] && !writes_all_globals[fi] {
+                    writes_all_globals[fi] = true;
+                    changed = true;
+                } else if !writes_all_globals[fi] && c != fi && global_words > 0 {
+                    if global_words == 1 {
+                        let old = written_globals[fi];
+                        let nv = old | written_globals[c];
+                        if nv != old {
+                            written_globals[fi] = nv;
+                            changed = true;
+                        }
+                    } else {
+                        let dst_base = fi * global_words;
+                        let src_base = c * global_words;
+                        for w in 0..global_words {
+                            let old = written_globals[dst_base + w];
+                            let nv = old | written_globals[src_base + w];
+                            if nv != old {
+                                written_globals[dst_base + w] = nv;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if writes_all_tables[c] && !writes_all_tables[fi] {
+                    writes_all_tables[fi] = true;
+                    changed = true;
+                } else if !writes_all_tables[fi] {
+                    let old = written_tables[fi];
+                    let nv = old | written_tables[c];
+                    if nv != old {
+                        written_tables[fi] = nv;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(ModuleEffects {
+        writes_mem,
+        grows_mem,
+        writes_all_globals,
+        written_globals,
+        global_words,
+        writes_all_tables,
+        written_tables,
+    }))
+}
+
 /// Computes transitive `ModuleEffects` directly from per-function `FnOwnEffects` summaries.
 pub fn compute_module_effects_from_summaries(
     summaries: &[FnOwnEffects],
@@ -4500,6 +4782,14 @@ enum UndoEntry {
     MemClear(Vec<MemFact>),
 }
 
+const OP_FLAG_F64_LOAD: u8 = 1 << 0;
+const OP_FLAG_V128_MEM: u8 = 1 << 1;
+const OP_FLAG_BYTE_LOAD: u8 = 1 << 2;
+const OP_FLAG_BYTE_STORE: u8 = 1 << 3;
+const OP_FLAG_DIV_REM: u8 = 1 << 4;
+const OP_FLAG_SELECT: u8 = 1 << 5;
+const OP_FLAG_UNCHECKED_MEM: u8 = 1 << 6;
+
 /// Worker-local reusable scratch buffers for `optimize_func_stage2_with_scratch`, eliminating
 /// per-function `HashMap`/`Vec` heap churn across parallel compilation threads.
 pub struct Stage2Scratch {
@@ -4520,6 +4810,7 @@ pub struct Stage2Scratch {
     fn_written_globals: Vec<u64>,
     out_insts: Vec<Inst>,
     opt_ir: OptIrScratch,
+    op_flags: u8,
 }
 
 impl Default for Stage2Scratch {
@@ -4542,6 +4833,7 @@ impl Default for Stage2Scratch {
             fn_written_globals: Vec::new(),
             out_insts: Vec::new(),
             opt_ir: OptIrScratch::default(),
+            op_flags: 0,
         }
     }
 }
@@ -4949,17 +5241,68 @@ fn run_dom_gvn_and_bce_with_scratch(
     fn_written_globals.resize(effects.global_words, 0u64);
     let mut fn_writes_all_tables = false;
     let mut fn_written_tables = 0u64;
+    let mut op_flags = 0u8;
     for &b in &dom.rpo {
         for inst in &ir.blocks[b as usize].insts {
             match inst.op {
-                Op::Store { .. }
-                | Op::V128StoreLane { .. }
-                | Op::MemCopy { .. }
+                Op::Load { kind, checked, .. } => {
+                    if !checked {
+                        op_flags |= OP_FLAG_UNCHECKED_MEM;
+                    }
+                    match kind {
+                        LoadKind::F64 => op_flags |= OP_FLAG_F64_LOAD,
+                        LoadKind::V128 => op_flags |= OP_FLAG_V128_MEM,
+                        LoadKind::I32Load8U => op_flags |= OP_FLAG_BYTE_LOAD,
+                        _ => {}
+                    }
+                }
+                Op::Store { kind, checked, .. } => {
+                    fn_writes_mem = true;
+                    if !checked {
+                        op_flags |= OP_FLAG_UNCHECKED_MEM;
+                    }
+                    match kind {
+                        StoreKind::V128 => op_flags |= OP_FLAG_V128_MEM,
+                        StoreKind::I8 => op_flags |= OP_FLAG_BYTE_STORE,
+                        _ => {}
+                    }
+                }
+                Op::V128StoreLane { checked, .. } => {
+                    fn_writes_mem = true;
+                    if !checked {
+                        op_flags |= OP_FLAG_UNCHECKED_MEM;
+                    }
+                }
+                Op::V128LoadLane { checked: false, .. } | Op::BoundsCheck { .. } => {
+                    op_flags |= OP_FLAG_UNCHECKED_MEM;
+                }
+                Op::MemCopyConst {
+                    dst_checked,
+                    src_checked,
+                    ..
+                } => {
+                    fn_writes_mem = true;
+                    if !dst_checked || !src_checked {
+                        op_flags |= OP_FLAG_UNCHECKED_MEM;
+                    }
+                }
+                Op::MemFillConst { checked, .. } => {
+                    fn_writes_mem = true;
+                    if !checked {
+                        op_flags |= OP_FLAG_UNCHECKED_MEM;
+                    }
+                }
+                Op::MemCopy { .. }
                 | Op::MemFill { .. }
-                | Op::MemCopyConst { .. }
-                | Op::MemFillConst { .. }
                 | Op::MemByteBlur3Div { .. }
                 | Op::F64x4BinMem { .. } => fn_writes_mem = true,
+                Op::I32Bin(IntBinOp::DivU | IntBinOp::RemU, ..)
+                | Op::I32BinImm(IntBinOp::DivU | IntBinOp::RemU, ..) => {
+                    op_flags |= OP_FLAG_DIV_REM;
+                }
+                Op::Select { .. } | Op::CmpSelect { .. } => {
+                    op_flags |= OP_FLAG_SELECT;
+                }
                 Op::MemGrow(_) => {
                     fn_writes_mem = true;
                     if !fixed_mem {
@@ -5021,6 +5364,8 @@ fn run_dom_gvn_and_bce_with_scratch(
             }
         }
     }
+
+    scratch.op_flags = op_flags;
 
     let n_vals = ir.val_tys.len();
     let subst = std::mem::take(&mut scratch.subst);
@@ -6253,11 +6598,26 @@ fn if_convert_trivial_diamonds(ir: &mut IrFunc) -> bool {
 /// conditional branches so `optimize_ir_with_budget` fuses both directly into `CmpBranch`
 /// (eliminating `setcc + movzx + or/and + test` in hot inner loops).
 fn split_short_circuit_branches(ir: &mut IrFunc) -> bool {
-    if !ir
-        .blocks
-        .iter()
-        .any(|b| matches!(b.term, Term::BranchIf { .. }))
-    {
+    let has_cand = ir.blocks.iter().any(|b| {
+        let Term::BranchIf {
+            cond,
+            then_bb,
+            else_bb,
+            ..
+        } = b.term
+        else {
+            return false;
+        };
+        then_bb != else_bb
+            && b.insts.iter().rev().any(|ins| {
+                ins.res == Some(cond)
+                    && matches!(
+                        ins.op,
+                        Op::I32Bin(IntBinOp::Or | IntBinOp::And, l, r) if l != r
+                    )
+            })
+    });
+    if !has_cand {
         return false;
     }
     let n_vals = ir.val_tys.len();
@@ -8343,13 +8703,17 @@ pub fn optimize_func_stage2_with_scratch(
         if ir.blocks.len() == 1 {
             let (_, gvn_changed) =
                 run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+            let op_flags = scratch.op_flags;
             if gvn_changed || early_state != 2 {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
-            if slp_vectorize_f64x2(ir, &dom) {
+            let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
+            if slp2 {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
-            if slp_fuse_f64x4(ir) {
+            if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
+                && slp_fuse_f64x4(ir)
+            {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
             return Ok(());
@@ -8365,11 +8729,15 @@ pub fn optimize_func_stage2_with_scratch(
             if ir.blocks.len() == 1 {
                 let _ =
                     run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+                let op_flags = scratch.op_flags;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
-                if slp_vectorize_f64x2(ir, &dom) {
+                let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
+                if slp2 {
                     optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 }
-                if slp_fuse_f64x4(ir) {
+                if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0)
+                    && slp_fuse_f64x4(ir)
+                {
                     optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 }
                 return Ok(());
@@ -8385,6 +8753,7 @@ pub fn optimize_func_stage2_with_scratch(
         }
         let (folded_branch, gvn_mutated) =
             run_dom_gvn_and_bce_with_scratch(ir, &dom, module, effects, budget, scratch)?;
+        let mut op_flags = scratch.op_flags;
         let split_sc = split_short_circuit_branches(ir);
         let prev_blocks = ir.blocks.len();
         if cfg_or_ir_mutated || gvn_mutated || split_sc {
@@ -8405,10 +8774,12 @@ pub fn optimize_func_stage2_with_scratch(
             let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
         }
         // 5-7. Loop-only passes (BCE versioning, loop rotation, boundary-clamp peeling, byte-sum SIMD):
-        //      skip completely on acyclic functions!
+        //      skip completely on acyclic functions, and gate specialty passes in O(1) via `op_flags`!
         let mut post_rot_changed = false;
         if has_loops {
-            if version_checked_counted_loops(ir, &dom, module, budget)? {
+            if (op_flags & OP_FLAG_UNCHECKED_MEM) != 0
+                && version_checked_counted_loops(ir, &dom, module, budget)?
+            {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
                 if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
@@ -8422,7 +8793,16 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            post_rot_changed = peel_boundary_clamped_loops(ir, module);
+            if narrow_equality_filtered_loops(ir, &dom) {
+                op_flags |= OP_FLAG_SELECT;
+                optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+                rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+                if ir.blocks.iter().skip(1).any(|b| !b.params.is_empty()) {
+                    let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
+                }
+            }
+            post_rot_changed =
+                (op_flags & OP_FLAG_SELECT) != 0 && peel_boundary_clamped_loops(ir, module);
             if post_rot_changed {
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -8430,7 +8810,10 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            if vectorize_byte_blur3_loops(ir, module) {
+            if (op_flags & (OP_FLAG_BYTE_LOAD | OP_FLAG_BYTE_STORE))
+                == (OP_FLAG_BYTE_LOAD | OP_FLAG_BYTE_STORE)
+                && vectorize_byte_blur3_loops(ir, module)
+            {
                 post_rot_changed = true;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -8438,7 +8821,7 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            if vectorize_byte_sum_loops(ir, module) {
+            if (op_flags & OP_FLAG_BYTE_LOAD) != 0 && vectorize_byte_sum_loops(ir, module) {
                 post_rot_changed = true;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -8446,7 +8829,7 @@ pub fn optimize_func_stage2_with_scratch(
                     let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
                 }
             }
-            if lower_loop_magic_div_i32(ir, &dom) {
+            if (op_flags & OP_FLAG_DIV_REM) != 0 && lower_loop_magic_div_i32(ir, &dom) {
                 post_rot_changed = true;
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
                 if run_licm(ir, &dom, module, effects, budget)? {
@@ -8457,7 +8840,8 @@ pub fn optimize_func_stage2_with_scratch(
                 optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             }
         }
-        if slp_vectorize_f64x2(ir, &dom) {
+        let slp2 = (op_flags & OP_FLAG_F64_LOAD) != 0 && slp_vectorize_f64x2(ir, &dom);
+        if slp2 {
             post_rot_changed = true;
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
             rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
@@ -8465,7 +8849,7 @@ pub fn optimize_func_stage2_with_scratch(
                 let _ = prune_block_params_with_scratch(ir, &dom, budget, &mut prune_sc)?;
             }
         }
-        if slp_fuse_f64x4(ir) {
+        if (slp2 || (op_flags & (OP_FLAG_V128_MEM | OP_FLAG_F64_LOAD)) != 0) && slp_fuse_f64x4(ir) {
             post_rot_changed = true;
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
         }
@@ -8477,6 +8861,707 @@ pub fn optimize_func_stage2_with_scratch(
     scratch.cfg_scratch = cfg_sc;
     scratch.prune_scratch = prune_sc;
     res
+}
+
+/// Narrows sparse equality-filtered counted `u32` loops (`for v in init..limit` with step `+1`)
+/// whose header executes its body only when `v == k1` or `v == k1 || v == k2` (loop-invariant
+/// `k1, k2`) and whose skip path directly increments `v` with zero side effects and unchanged
+/// loop-carried state. Rewrites the loop to visit only matching indices in strictly ascending
+/// order (at most 1 or 2 iterations), preserving exact side-effect, trap, and aliasing semantics
+/// for all inputs including `k1 == k2`, `k1 > k2`, out-of-range keys, and `limit == u32::MAX`.
+fn narrow_equality_filtered_loops(ir: &mut IrFunc, dom: &CfgDom) -> bool {
+    let orig_blocks = ir.blocks.len();
+    if orig_blocks < 3 || !ir.blocks.iter().any(|b| b.is_loop_header) {
+        return false;
+    }
+    let mut cand_headers: Vec<u32> = Vec::new();
+    for (hi, bb) in ir.blocks.iter().enumerate().skip(1) {
+        if bb.is_loop_header
+            && bb.insts.is_empty()
+            && !bb.params.is_empty()
+            && matches!(
+                bb.term,
+                Term::CmpBranch {
+                    kind: CmpBranchKind::I32(CmpOp::Eq | CmpOp::Ne),
+                    ..
+                }
+            )
+        {
+            cand_headers.push(hi as u32);
+        }
+    }
+    if cand_headers.is_empty() {
+        return false;
+    }
+
+    let mut def_block = vec![u32::MAX; ir.val_tys.len()];
+    let mut const_i32 = vec![None::<i32>; ir.val_tys.len()];
+    for (bi, bb) in ir.blocks.iter().enumerate() {
+        let bu = bi as u32;
+        for &p in &bb.params {
+            def_block[p.0 as usize] = bu;
+        }
+        for inst in &bb.insts {
+            if let Some(r) = inst.res {
+                def_block[r.0 as usize] = bu;
+                if let Op::ConstI32(c) = inst.op {
+                    const_i32[r.0 as usize] = Some(c);
+                }
+            }
+            match inst.op {
+                Op::Call { rets, .. } | Op::CallIndirect { rets, .. } => {
+                    for &rv in ir.pool_slice(rets) {
+                        def_block[rv.0 as usize] = bu;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut changed = false;
+    let mut touched: HashSet<u32> = fx_set();
+
+    for h in cand_headers {
+        if touched.contains(&h) {
+            continue;
+        }
+        let mut back_preds: Vec<u32> = Vec::new();
+        let mut outside_preds: Vec<u32> = Vec::new();
+        for &p in dom.preds(h) {
+            if dom.dominates(h, p) {
+                back_preds.push(p);
+            } else {
+                outside_preds.push(p);
+            }
+        }
+        if back_preds.len() != 1 || outside_preds.is_empty() {
+            continue;
+        }
+        let latch = back_preds[0];
+        if latch == h || touched.contains(&latch) {
+            continue;
+        }
+        if outside_preds.iter().any(|&ep| {
+            touched.contains(&ep) || matches!(ir.blocks[ep as usize].term, Term::BrTable { .. })
+        }) {
+            continue;
+        }
+
+        // Collect natural loop body blocks.
+        let mut body_set: HashSet<u32> = fx_set();
+        body_set.insert(h);
+        body_set.insert(latch);
+        let mut wl = vec![latch];
+        while let Some(cur) = wl.pop() {
+            for &p in dom.preds(cur) {
+                if body_set.insert(p) {
+                    wl.push(p);
+                }
+            }
+        }
+        if body_set.iter().any(|b| touched.contains(b)) {
+            continue;
+        }
+
+        let is_inv = |v: Val| -> bool {
+            let db = def_block[v.0 as usize];
+            db != u32::MAX
+                && !body_set.contains(&db)
+                && outside_preds.iter().all(|&ep| dom.dominates(db, ep))
+        };
+
+        let orient_eq = |term: Term| -> Option<(Val, Val, BlockId, ValRange, BlockId, ValRange)> {
+            let Term::CmpBranch {
+                kind: CmpBranchKind::I32(cop),
+                a,
+                b,
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+            } = term
+            else {
+                return None;
+            };
+            match cop {
+                CmpOp::Eq => Some((a, b, then_bb, then_args, else_bb, else_args)),
+                CmpOp::Ne => Some((a, b, else_bb, else_args, then_bb, then_args)),
+                _ => None,
+            }
+        };
+
+        let Some((a1, b1, match_bb, match_args, miss1_bb, miss1_args)) =
+            orient_eq(ir.blocks[h as usize].term)
+        else {
+            continue;
+        };
+        if match_bb.0 == h || match_bb.0 == latch || !body_set.contains(&match_bb.0) {
+            continue;
+        }
+        let h_params: Vec<Val> = ir.blocks[h as usize].params.clone();
+        let (iv_pos, v, k1) = if let Some(pos) = h_params.iter().position(|&p| p == a1)
+            && ir.val_tys[a1.0 as usize] == Ty::I32
+            && is_inv(b1)
+        {
+            (pos, a1, b1)
+        } else if let Some(pos) = h_params.iter().position(|&p| p == b1)
+            && ir.val_tys[b1.0 as usize] == Ty::I32
+            && is_inv(a1)
+        {
+            (pos, b1, a1)
+        } else {
+            continue;
+        };
+
+        // Helper: resolve a direct edge to `latch` OR a 0-param, 0-inst empty `Jump` trampoline to `latch`.
+        let resolve_skip_to_latch =
+            |target: BlockId, args: ValRange| -> Option<(ValRange, Option<u32>)> {
+                if target.0 == latch {
+                    return Some((args, None));
+                }
+                if args.len == 0
+                    && target.0 != h
+                    && body_set.contains(&target.0)
+                    && ir.blocks[target.0 as usize].params.is_empty()
+                    && ir.blocks[target.0 as usize].insts.is_empty()
+                    && let Term::Jump {
+                        target: jt,
+                        args: ja,
+                    } = ir.blocks[target.0 as usize].term
+                    && jt.0 == latch
+                {
+                    return Some((ja, Some(target.0)));
+                }
+                None
+            };
+
+        // Match 1-key (`v == k1`) or 2-key (`v == k1 || v == k2`) filter ending at `latch`
+        // (directly or via an empty `Jump` trampoline block).
+        let (keys, skip_args_range, filter2_bb): (Vec<Val>, ValRange, Option<u32>) =
+            if let Some((sa, _)) = resolve_skip_to_latch(miss1_bb, miss1_args) {
+                (vec![k1], sa, None)
+            } else if miss1_bb.0 != h
+                && miss1_bb.0 != match_bb.0
+                && body_set.contains(&miss1_bb.0)
+                && miss1_args.len == 0
+                && ir.blocks[miss1_bb.0 as usize].params.is_empty()
+                && ir.blocks[miss1_bb.0 as usize].insts.is_empty()
+                && dom.preds(miss1_bb.0).len() == 1
+                && dom.preds(miss1_bb.0)[0] == h
+            {
+                let Some((a2, b2, match2_bb, match2_args, miss2_bb, miss2_args)) =
+                    orient_eq(ir.blocks[miss1_bb.0 as usize].term)
+                else {
+                    continue;
+                };
+                if match2_bb != match_bb || ir.pool_slice(match2_args) != ir.pool_slice(match_args)
+                {
+                    continue;
+                }
+                let Some((sa, _)) = resolve_skip_to_latch(miss2_bb, miss2_args) else {
+                    continue;
+                };
+                let k2 = if a2 == v && is_inv(b2) {
+                    b2
+                } else if b2 == v && is_inv(a2) {
+                    a2
+                } else {
+                    continue;
+                };
+                (vec![k1, k2], sa, Some(miss1_bb.0))
+            } else {
+                continue;
+            };
+
+        // Validate `latch`: single `v_next = v + 1` inst, `CmpBranch(v_next <u limit)` back to `h`.
+        let lbb = &ir.blocks[latch as usize];
+        if lbb.insts.len() != 1 {
+            continue;
+        }
+        let Some(v_next) = lbb.insts[0].res else {
+            continue;
+        };
+        if !matches!(lbb.insts[0].op, Op::I32BinImm(IntBinOp::Add, x, 1) if x == v) {
+            continue;
+        }
+        let Term::CmpBranch {
+            kind: CmpBranchKind::I32(l_cop),
+            a: la,
+            b: lb,
+            then_bb: l_tb,
+            then_args: l_ta,
+            else_bb: l_eb,
+            else_args: l_ea,
+        } = lbb.term
+        else {
+            continue;
+        };
+        let (eff_cop, back_args_range, exit_bb, exit_args_range) = if l_tb.0 == h && l_eb.0 != h {
+            (l_cop, l_ta, l_eb, l_ea)
+        } else if l_eb.0 == h && l_tb.0 != h {
+            (l_cop.invert_int(), l_ea, l_tb, l_ta)
+        } else {
+            continue;
+        };
+        if body_set.contains(&exit_bb.0) || exit_bb.0 == 0 || touched.contains(&exit_bb.0) {
+            continue;
+        }
+        let limit = match eff_cop {
+            CmpOp::LtU if la == v_next && is_inv(lb) => lb,
+            CmpOp::GtU if lb == v_next && is_inv(la) => la,
+            _ => continue,
+        };
+        if ir.val_tys[limit.0 as usize] != Ty::I32 {
+            continue;
+        }
+
+        let l_params: Vec<Val> = lbb.params.clone();
+        let skip_args: Vec<Val> = ir.pool_slice(skip_args_range).to_vec();
+        let back_args: Vec<Val> = ir.pool_slice(back_args_range).to_vec();
+        let exit_args: Vec<Val> = ir.pool_slice(exit_args_range).to_vec();
+        if skip_args.len() != l_params.len()
+            || back_args.len() != h_params.len()
+            || back_args[iv_pos] != v_next
+        {
+            continue;
+        }
+        // Verify skip path is a pure identity on every loop-carried state param `j != iv_pos`.
+        let mut skip_id_ok = true;
+        for j in 0..h_params.len() {
+            if j == iv_pos {
+                continue;
+            }
+            let ba = back_args[j];
+            if ba == h_params[j] {
+                continue;
+            }
+            if let Some(lp) = l_params.iter().position(|&p| p == ba)
+                && skip_args[lp] == h_params[j]
+            {
+                continue;
+            }
+            skip_id_ok = false;
+            break;
+        }
+        if !skip_id_ok {
+            continue;
+        }
+        // Verify every `exit_args` element can be materialized on a 0-hit entry without `v` or `v_next`.
+        enum ExitMap {
+            HParam(usize),
+            Inv(Val),
+        }
+        let mut exit_map: Vec<ExitMap> = Vec::with_capacity(exit_args.len());
+        let mut exit_ok = true;
+        for &ev in &exit_args {
+            if ev == v || ev == v_next {
+                exit_ok = false;
+                break;
+            }
+            let resolved = if let Some(lp) = l_params.iter().position(|&p| p == ev) {
+                skip_args[lp]
+            } else {
+                ev
+            };
+            if resolved == v || resolved == v_next {
+                exit_ok = false;
+                break;
+            }
+            if let Some(j) = h_params.iter().position(|&p| p == resolved) {
+                if j == iv_pos {
+                    exit_ok = false;
+                    break;
+                }
+                exit_map.push(ExitMap::HParam(j));
+            } else if is_inv(resolved) {
+                exit_map.push(ExitMap::Inv(resolved));
+            } else {
+                exit_ok = false;
+                break;
+            }
+        }
+        if !exit_ok {
+            continue;
+        }
+
+        // Verify `v_next` and `l_params` are never used outside `latch`, and `v` is never used outside `body_set`.
+        let mut uses_ok = true;
+        for (bi, bb) in ir.blocks.iter().enumerate() {
+            let bu = bi as u32;
+            let in_body = body_set.contains(&bu);
+            let is_latch = bu == latch;
+            let mut check_u = |u: Val| {
+                if !is_latch && (u == v_next || l_params.contains(&u)) {
+                    uses_ok = false;
+                }
+                if !in_body && u == v {
+                    uses_ok = false;
+                }
+            };
+            for inst in &bb.insts {
+                inst.op.for_each_use(&ir.val_pool, &mut check_u);
+            }
+            bb.term
+                .for_each_use(&ir.val_pool, &ir.br_tables, &mut check_u);
+            if !uses_ok {
+                break;
+            }
+        }
+        if !uses_ok {
+            continue;
+        }
+
+        // Collect all outside entry edges to `h` and verify EVERY entry proves `init <u limit`
+        // (prevents miscompiling `do { ... } while (++v <u limit)` loops where `init >=u limit`).
+        let mut entry_edges: Vec<(u32, bool, Vec<Val>)> = Vec::new(); // (ep, is_then_or_jump, orig_args)
+        let mut entries_ok = true;
+        for &ep in &outside_preds {
+            let term = ir.blocks[ep as usize].term;
+            let edge_proves_lt = |init: Val, is_then: bool| -> bool {
+                if let (Some(ci), Some(cl)) =
+                    (const_i32[init.0 as usize], const_i32[limit.0 as usize])
+                    && (ci as u32) < (cl as u32)
+                {
+                    return true;
+                }
+                match term {
+                    Term::CmpBranch {
+                        kind,
+                        a: ea,
+                        b: eb,
+                        then_bb,
+                        else_bb,
+                        ..
+                    } if then_bb != else_bb => match (kind, is_then) {
+                        (CmpBranchKind::I32(CmpOp::LtU), true) => ea == init && eb == limit,
+                        (CmpBranchKind::I32(CmpOp::GtU), true) => ea == limit && eb == init,
+                        (CmpBranchKind::I32(CmpOp::GeU), false) => ea == init && eb == limit,
+                        (CmpBranchKind::I32(CmpOp::LeU), false) => ea == limit && eb == init,
+                        (CmpBranchKind::I32Imm(CmpOp::GtU, imm), true) => {
+                            ea == limit && const_i32[init.0 as usize] == Some(imm)
+                        }
+                        (CmpBranchKind::I32Imm(CmpOp::LeU, imm), false) => {
+                            ea == limit && const_i32[init.0 as usize] == Some(imm)
+                        }
+                        (CmpBranchKind::I32Imm(CmpOp::Ne, 0), true) => {
+                            ea == limit && const_i32[init.0 as usize] == Some(0)
+                        }
+                        (CmpBranchKind::I32Imm(CmpOp::Eq, 0), false) => {
+                            ea == limit && const_i32[init.0 as usize] == Some(0)
+                        }
+                        (CmpBranchKind::I32Imm(CmpOp::LtU, imm), true) => {
+                            ea == init && const_i32[limit.0 as usize] == Some(imm)
+                        }
+                        (CmpBranchKind::I32Imm(CmpOp::GeU, imm), false) => {
+                            ea == init && const_i32[limit.0 as usize] == Some(imm)
+                        }
+                        _ => false,
+                    },
+                    Term::BranchIf {
+                        cond,
+                        then_bb,
+                        else_bb,
+                        ..
+                    } if then_bb != else_bb && is_then => {
+                        cond == limit && const_i32[init.0 as usize] == Some(0)
+                    }
+                    _ => false,
+                }
+            };
+            match term {
+                Term::Jump { target, args } if target.0 == h => {
+                    let av = ir.pool_slice(args).to_vec();
+                    if av.len() != h_params.len() || !edge_proves_lt(av[iv_pos], true) {
+                        entries_ok = false;
+                        break;
+                    }
+                    entry_edges.push((ep, true, av));
+                }
+                Term::BranchIf {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                }
+                | Term::CmpBranch {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                } => {
+                    if then_bb.0 == h {
+                        let av = ir.pool_slice(then_args).to_vec();
+                        if av.len() != h_params.len() || !edge_proves_lt(av[iv_pos], true) {
+                            entries_ok = false;
+                            break;
+                        }
+                        entry_edges.push((ep, true, av));
+                    }
+                    if else_bb.0 == h {
+                        let av = ir.pool_slice(else_args).to_vec();
+                        if av.len() != h_params.len() || !edge_proves_lt(av[iv_pos], false) {
+                            entries_ok = false;
+                            break;
+                        }
+                        entry_edges.push((ep, false, av));
+                    }
+                }
+                _ => {
+                    entries_ok = false;
+                    break;
+                }
+            }
+        }
+        if !entries_ok || entry_edges.is_empty() {
+            continue;
+        }
+
+        // Verify IR caps before mutating.
+        let n_entries = entry_edges.len();
+        let need_vals = 1 + n_entries * 8;
+        let need_pool = (h_params.len() + 1) * (n_entries + 1) + exit_args.len() * n_entries;
+        if ir.blocks.len() + n_entries > MAX_BLOCKS_PER_FN
+            || ir.val_tys.len() + need_vals > MAX_IR_VALS_PER_FN
+            || ir.val_pool.len() + need_pool > MAX_VAL_POOL_PER_FN
+        {
+            continue;
+        }
+
+        // Apply rewrite:
+        // 1. Add `next_v: I32` block param to `h`.
+        let next_v = ir.push_val(Ty::I32);
+        def_block.push(h);
+        const_i32.push(None);
+        ir.blocks[h as usize].params.push(next_v);
+
+        // 2. Build preheader block(s) computing `(first, second)` in `[init, limit)` using `limit` as sentinel.
+        let mut new_back_args = back_args;
+        new_back_args[iv_pos] = next_v;
+        new_back_args.push(limit);
+        let Ok(new_back_range) = ir.push_pool(&new_back_args) else {
+            ir.blocks[h as usize].params.pop();
+            continue;
+        };
+
+        let mut ph_blocks: Vec<(u32, bool, BlockId, Block)> = Vec::with_capacity(n_entries);
+        let mut pool_ok = true;
+        for (ep, is_then, orig_args) in entry_edges {
+            let init = orig_args[iv_pos];
+            let init_is_zero = const_i32[init.0 as usize] == Some(0);
+            let mut ph_insts: Vec<Inst> = Vec::with_capacity(6);
+            let (first, second) = if keys.len() == 1 {
+                let k1 = keys[0];
+                if init_is_zero {
+                    (k1, limit)
+                } else {
+                    let f = ir.push_val(Ty::I32);
+                    def_block.push(u32::MAX);
+                    const_i32.push(None);
+                    ph_insts.push(Inst {
+                        res: Some(f),
+                        op: Op::CmpSelect {
+                            kind: CmpBranchKind::I32(CmpOp::GeU),
+                            a: k1,
+                            b: init,
+                            tv: k1,
+                            fv: limit,
+                        },
+                    });
+                    (f, limit)
+                }
+            } else {
+                let (k1, k2) = (keys[0], keys[1]);
+                let lo = ir.push_val(Ty::I32);
+                let hi = ir.push_val(Ty::I32);
+                let second_cand = ir.push_val(Ty::I32);
+                def_block.extend_from_slice(&[u32::MAX; 3]);
+                const_i32.extend_from_slice(&[None; 3]);
+                ph_insts.push(Inst {
+                    res: Some(lo),
+                    op: Op::CmpSelect {
+                        kind: CmpBranchKind::I32(CmpOp::LtU),
+                        a: k1,
+                        b: k2,
+                        tv: k1,
+                        fv: k2,
+                    },
+                });
+                ph_insts.push(Inst {
+                    res: Some(hi),
+                    op: Op::CmpSelect {
+                        kind: CmpBranchKind::I32(CmpOp::LtU),
+                        a: k1,
+                        b: k2,
+                        tv: k2,
+                        fv: k1,
+                    },
+                });
+                ph_insts.push(Inst {
+                    res: Some(second_cand),
+                    op: Op::CmpSelect {
+                        kind: CmpBranchKind::I32(CmpOp::Ne),
+                        a: hi,
+                        b: lo,
+                        tv: hi,
+                        fv: limit,
+                    },
+                });
+                if init_is_zero {
+                    (lo, second_cand)
+                } else {
+                    let hi_or_lim = ir.push_val(Ty::I32);
+                    let f = ir.push_val(Ty::I32);
+                    let s = ir.push_val(Ty::I32);
+                    def_block.extend_from_slice(&[u32::MAX; 3]);
+                    const_i32.extend_from_slice(&[None; 3]);
+                    ph_insts.push(Inst {
+                        res: Some(hi_or_lim),
+                        op: Op::CmpSelect {
+                            kind: CmpBranchKind::I32(CmpOp::GeU),
+                            a: hi,
+                            b: init,
+                            tv: hi,
+                            fv: limit,
+                        },
+                    });
+                    ph_insts.push(Inst {
+                        res: Some(f),
+                        op: Op::CmpSelect {
+                            kind: CmpBranchKind::I32(CmpOp::GeU),
+                            a: lo,
+                            b: init,
+                            tv: lo,
+                            fv: hi_or_lim,
+                        },
+                    });
+                    ph_insts.push(Inst {
+                        res: Some(s),
+                        op: Op::CmpSelect {
+                            kind: CmpBranchKind::I32(CmpOp::GeU),
+                            a: lo,
+                            b: init,
+                            tv: second_cand,
+                            fv: limit,
+                        },
+                    });
+                    (f, s)
+                }
+            };
+
+            let mut ph_then = orig_args.clone();
+            ph_then[iv_pos] = first;
+            ph_then.push(second);
+            let Ok(ph_then_range) = ir.push_pool(&ph_then) else {
+                pool_ok = false;
+                break;
+            };
+            let ph_else: Vec<Val> = exit_map
+                .iter()
+                .map(|m| match *m {
+                    ExitMap::HParam(j) => orig_args[j],
+                    ExitMap::Inv(iv) => iv,
+                })
+                .collect();
+            let ph_else_range = if ph_else.is_empty() {
+                ValRange::EMPTY
+            } else {
+                match ir.push_pool(&ph_else) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        pool_ok = false;
+                        break;
+                    }
+                }
+            };
+            let ph_id = BlockId((ir.blocks.len() + ph_blocks.len()) as u32);
+            ph_blocks.push((
+                ep,
+                is_then,
+                ph_id,
+                Block {
+                    params: Vec::new(),
+                    insts: ph_insts,
+                    term: Term::CmpBranch {
+                        kind: CmpBranchKind::I32(CmpOp::LtU),
+                        a: first,
+                        b: limit,
+                        then_bb: BlockId(h),
+                        then_args: ph_then_range,
+                        else_bb: exit_bb,
+                        else_args: ph_else_range,
+                    },
+                    is_loop_header: false,
+                    preds: 1,
+                },
+            ));
+        }
+        if !pool_ok {
+            ir.blocks[h as usize].params.pop();
+            continue;
+        }
+
+        // Commit preheaders, retarget outside preds, jump `h -> match_bb`, and rewrite `latch`.
+        for (ep, is_then, ph_id, block) in ph_blocks {
+            ir.blocks.push(block);
+            match &mut ir.blocks[ep as usize].term {
+                Term::Jump { target, args } => {
+                    *target = ph_id;
+                    *args = ValRange::EMPTY;
+                }
+                Term::BranchIf {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                }
+                | Term::CmpBranch {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                } => {
+                    if is_then {
+                        *then_bb = ph_id;
+                        *then_args = ValRange::EMPTY;
+                    } else {
+                        *else_bb = ph_id;
+                        *else_args = ValRange::EMPTY;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            touched.insert(ep);
+        }
+        ir.blocks[h as usize].term = Term::Jump {
+            target: match_bb,
+            args: match_args,
+        };
+        ir.blocks[latch as usize].insts.clear();
+        ir.blocks[latch as usize].term = Term::CmpBranch {
+            kind: CmpBranchKind::I32(CmpOp::LtU),
+            a: next_v,
+            b: limit,
+            then_bb: BlockId(h),
+            then_args: new_back_range,
+            else_bb: exit_bb,
+            else_args: exit_args_range,
+        };
+        for &b in &body_set {
+            touched.insert(b);
+        }
+        if let Some(f2) = filter2_bb {
+            touched.insert(f2);
+        }
+        touched.insert(exit_bb.0);
+        changed = true;
+    }
+
+    changed
 }
 
 /// Peels the first (`i = 0`) and last (`i = limit - 1`) iterations of a rotated single-block
@@ -10052,6 +11137,19 @@ fn lower_loop_magic_div_i32(ir: &mut IrFunc, dom: &CfgDom) -> bool {
         if !block_has {
             continue;
         }
+        // Hoist 64-bit magic constants strictly outside all enclosing loops so GVN deduplicates
+        // them across loop copies and regalloc can keep them in a free callee-saved GP register.
+        let mut hoist_bb = bi;
+        while in_loop[hoist_bb] {
+            let id = dom.idom[hoist_bb];
+            if id == u32::MAX || id as usize == hoist_bb {
+                hoist_bb = 0;
+                break;
+            }
+            hoist_bb = id as usize;
+        }
+        let mut hoisted_consts: Vec<Inst> = Vec::new();
+        let mut hoisted_magic_map: Vec<(i64, Val)> = Vec::new();
         let old = std::mem::take(&mut ir.blocks[bi].insts);
         let mut rebuilt = Vec::with_capacity(old.len() + 8);
         for inst in old {
@@ -10076,11 +11174,29 @@ fn lower_loop_magic_div_i32(ir: &mut IrFunc, dom: &CfgDom) -> bool {
                                 op: Op::I64BinImm(IntBinOp::Mul, a64, magic as i32),
                             });
                         } else {
-                            let mc = ir.push_val(Ty::I64);
-                            rebuilt.push(Inst {
-                                res: Some(mc),
-                                op: Op::ConstI64(magic as i64),
-                            });
+                            let m_i64 = magic as i64;
+                            let mc = if hoist_bb != bi {
+                                if let Some(&(_, prev)) =
+                                    hoisted_magic_map.iter().find(|&&(k, _)| k == m_i64)
+                                {
+                                    prev
+                                } else {
+                                    let v = ir.push_val(Ty::I64);
+                                    hoisted_consts.push(Inst {
+                                        res: Some(v),
+                                        op: Op::ConstI64(m_i64),
+                                    });
+                                    hoisted_magic_map.push((m_i64, v));
+                                    v
+                                }
+                            } else {
+                                let v = ir.push_val(Ty::I64);
+                                rebuilt.push(Inst {
+                                    res: Some(v),
+                                    op: Op::ConstI64(m_i64),
+                                });
+                                v
+                            };
                             rebuilt.push(Inst {
                                 res: Some(prod),
                                 op: Op::I64Bin(IntBinOp::Mul, a64, mc),
@@ -10158,6 +11274,9 @@ fn lower_loop_magic_div_i32(ir: &mut IrFunc, dom: &CfgDom) -> bool {
             rebuilt.push(inst);
         }
         ir.blocks[bi].insts = rebuilt;
+        if !hoisted_consts.is_empty() {
+            ir.blocks[hoist_bb].insts.extend(hoisted_consts);
+        }
     }
 
     changed
@@ -10437,19 +11556,19 @@ fn slp_vectorize_f64x2(ir: &mut IrFunc, dom: &CfgDom) -> bool {
                         },
                     },
                     Inst {
-                        res: Some(vlo),
-                        op: Op::V128ExtractLane {
-                            kind: SimdLaneKind::F64x2,
-                            v: vec_v,
-                            lane: 0,
-                        },
-                    },
-                    Inst {
                         res: Some(vhi),
                         op: Op::V128ExtractLane {
                             kind: SimdLaneKind::F64x2,
                             v: vec_v,
                             lane: 1,
+                        },
+                    },
+                    Inst {
+                        res: Some(vlo),
+                        op: Op::V128ExtractLane {
+                            kind: SimdLaneKind::F64x2,
+                            v: vec_v,
+                            lane: 0,
                         },
                     },
                 ],
@@ -10756,19 +11875,19 @@ fn slp_vectorize_f64x2(ir: &mut IrFunc, dom: &CfgDom) -> bool {
                     op: vec_op,
                 });
                 local_prefix.push(Inst {
-                    res: Some(r0),
-                    op: Op::V128ExtractLane {
-                        kind: SimdLaneKind::F64x2,
-                        v: vec_res,
-                        lane: 0,
-                    },
-                });
-                local_prefix.push(Inst {
                     res: Some(r1),
                     op: Op::V128ExtractLane {
                         kind: SimdLaneKind::F64x2,
                         v: vec_res,
                         lane: 1,
+                    },
+                });
+                local_prefix.push(Inst {
+                    res: Some(r0),
+                    op: Op::V128ExtractLane {
+                        kind: SimdLaneKind::F64x2,
+                        v: vec_res,
+                        lane: 0,
                     },
                 });
                 pair_of.insert((r0, r1), vec_res);
@@ -11826,18 +12945,8 @@ where
     let n_total = n_imports + n_defs;
 
     let setup = (|| -> Option<_> {
-        let mut edges: Vec<Vec<usize>> = Vec::new();
-        edges.try_reserve_exact(n_defs).ok()?;
-        for bi in 0..n_defs {
-            let inp = get(bi);
-            let mut row = Vec::new();
-            row.try_reserve_exact(inp.direct_def_callees.len()).ok()?;
-            for &c in &inp.direct_def_callees {
-                row.push(c as usize);
-            }
-            edges.push(row);
-        }
-        let (in_cycle, topo_bottom_up) = try_call_graph_sccs_from_edges(&edges)?;
+        let (in_cycle, topo_bottom_up) =
+            try_call_graph_sccs_from_u32_lookup(n_defs, |bi| &get(bi).direct_def_callees)?;
         let mut cannot_elide = Vec::new();
         cannot_elide.try_reserve_exact(n_defs).ok()?;
         cannot_elide.resize(n_defs, false);

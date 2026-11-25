@@ -105,6 +105,7 @@ pub fn emit_v128_extract_lane(
     lane: u8,
     gp_dst: Option<Gp>,
     fp_dst: Option<Xmm>,
+    has_avx2: bool,
 ) {
     match kind {
         SimdLaneKind::I8x16S => {
@@ -145,6 +146,8 @@ pub fn emit_v128_extract_lane(
             let d = fp_dst.unwrap();
             if lane == 0 {
                 asm.movaps_rr(d, v);
+            } else if has_avx2 {
+                asm.vpshufd(d, v, lane);
             } else {
                 asm.pshufd(d, v, lane);
             }
@@ -153,6 +156,8 @@ pub fn emit_v128_extract_lane(
             let d = fp_dst.unwrap();
             if lane == 0 {
                 asm.movaps_rr(d, v);
+            } else if has_avx2 {
+                asm.vpshufd(d, v, 0xee);
             } else {
                 asm.pshufd(d, v, 0xee);
             }

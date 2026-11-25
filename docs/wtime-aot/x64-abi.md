@@ -26,13 +26,13 @@ shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
     `lzcnt`/`tzcnt` for `clz`/`ctz`, BMI2 `shlx`/`shrx`/`sarx` for variable
     shifts (eliminating `RCX` clobbers and extra copies on `shl`/`shr_s`/
     `shr_u`), 3-operand `rorx` for immediate rotates (variable `rotl`/`rotr`
-    still use `CL`/`RCX`), 3-operand 128-bit VEX scalar/SIMD FP ops
-    (`v{add,sub,mul,div}{ss,sd,pd}`, `v{min,max}pd`), and 256-bit AVX2 VEX
-    loops (`vmovdqu`, `vmovupd`, `vbroadcastsd`, `vpbroadcastb`, `vpmovzxbw`,
-    `vpaddw`, `vpmulhuw`, `vpsrlw`, `vpackuswb`, `vpermq`, `vpxor`, `vpsadbw`,
-    `vpaddq`, `vextracti128`) for bulk memory copy/fill, byte-sum reductions,
-    3-tap byte blur+divide loops, and bit-exact 256-bit `f64x4` SLP (strictly
-    no FMA contraction), with mandatory `vzeroupper` before every
+    still use `CL`/`RCX`), 3-operand 128-bit VEX scalar/SIMD FP & vector ops
+    (`v{add,sub,mul,div}{ss,sd,pd}`, `v{min,max}pd`, `vmovdqu`, `vpshufd`), and
+    256-bit AVX2 VEX loops (`vmovdqu`, `vmovupd`, `vbroadcastsd`, `vpbroadcastb`,
+    `vpmovzxbw`, `vpaddw`, `vpmulhuw`, `vpsrlw`, `vpackuswb`, `vpermq`, `vpxor`,
+    `vpsadbw`, `vpaddq`, `vextracti128`) for bulk memory copy/fill, byte-sum
+    reductions, 3-tap byte blur+divide loops, and bit-exact 256-bit `f64x4` SLP
+    (strictly no FMA contraction), with mandatory `vzeroupper` before every
     external/helper call and return boundary.
   - `x64-v2` (`has_abm_bmi1 = false, has_bmi2 = false, has_avx2 = false`):
     emits branchless `bsr`/`bsf` + `cmovz`, legacy `shl`/`shr`/`sar`/`rol`/
@@ -65,7 +65,7 @@ shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
 ## 2. Admission Contract & Compiler Caps
 
 All inputs pass bounded file acquisition (`<= 64 MiB` for `--backend x64`,
-deadline-checked in 64 KiB chunks) and `wtime-validate` under the `--backend x64`
+deadline-checked in direct 1 MiB chunks) and `wtime-validate` under the `--backend x64`
 feature profile (MVP + `mutable_globals`, `saturating_float_to_int`,
 `sign_extension`, `multi_value`, `reference_types`, `bulk_memory`, `simd`,
 `memory64`, `extended_const`; `function_references: false`) with
