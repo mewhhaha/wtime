@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "wtime-decode"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "wtime-types",
 ]
 
 [[package]]
 name = "wtime-goose"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "wtime-runtime",
  "wtime-types",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "wtime-runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "wtime-types",
  "wtime-validate",
@@ -27,11 +27,11 @@ dependencies = [
 
 [[package]]
 name = "wtime-types"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "wtime-validate"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "wtime-decode",
  "wtime-types",

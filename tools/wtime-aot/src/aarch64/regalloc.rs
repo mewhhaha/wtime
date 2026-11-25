@@ -24,7 +24,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use super::asm::{Reg, VReg};
-use crate::x64::ir::{IrFunc, Op, Term, Ty};
+use crate::x64::ir::{FloatBinOp, IntBinOp, IrFunc, Op, SimdLaneKind, Term, Ty, ValRange};
 use crate::x64::module::{CompileBudget, MAX_FRAME_BYTES};
 
 pub const CALL_GP_ARGS: [Reg; 8] = [
@@ -110,11 +110,20 @@ pub const MASK_GP_CALLER: u32 = 0x0000_ffff;
 /// Mask of caller-saved FP regs (`V0..V7`, `V16..V29`).
 pub const MASK_FP_CALLER: u32 = 0x3fff_00ff;
 
+/// Constant that can be rematerialized directly into a scratch GP register without occupying
+/// a register or stack spill slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum A64RematConst {
+    I32(i32),
+    I64(i64),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum A64Loc {
     Gp(Reg),
     Fp(VReg),
     Spill(i32),
+    Remat(A64RematConst),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,13 +199,30 @@ struct Interval {
     ty: Ty,
     clob_gp: u32,
     clob_fp: u32,
+    score: u64,
+    remat: Option<A64RematConst>,
+    remat_hoisted: bool,
 }
+
+#[derive(Clone, Copy)]
+struct ActiveEntry {
+    end: u32,
+    reg_idx: usize,
+    val: u32,
+    start: u32,
+    ty: Ty,
+    score: u64,
+    remat: Option<A64RematConst>,
+}
+
+const GP_CALLER_COUNT: usize = 16;
 
 pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocResult, String> {
     let n_blocks = ir.blocks.len();
     let n_vals = ir.val_tys.len();
 
-    // 1. RPO block order over reachable blocks.
+    // 1. RPO over reachable blocks + 2-pass hot-fallthrough trace layout (sinking cold trap/abort
+    //    blocks to the tail and linearizing single-pred triangle `if` diamonds).
     let mut succs: Vec<Vec<u32>> = vec![Vec::new(); n_blocks];
     for (bi, bb) in ir.blocks.iter().enumerate() {
         match bb.term {
@@ -256,24 +282,50 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
     }
     post.reverse();
-    // Cold trap/unreachable block identification + backward propagation in reverse RPO,
-    // sinking cold trap/abort blocks out of hot loops to the tail of the function.
+    let mut rpo_pos = vec![u32::MAX; n_blocks];
+    for (ri, &b) in post.iter().enumerate() {
+        rpo_pos[b as usize] = ri as u32;
+    }
+
+    // Cold trap/unreachable block identification + hotness metadata for trace layout.
     let mut is_trap_blk = vec![false; n_blocks];
+    let mut has_call_blk = vec![false; n_blocks];
+    let mut has_store_blk = vec![false; n_blocks];
+    let mut has_unchecked_mem_blk = vec![false; n_blocks];
     for &b in &post {
-        let bb = &ir.blocks[b as usize];
+        let bu = b as usize;
+        let bb = &ir.blocks[bu];
         let mut trap = matches!(bb.term, Term::Unreachable | Term::ThrowActive);
-        if !trap {
-            for inst in &bb.insts {
-                if matches!(
-                    inst.op,
-                    Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. } | Op::TableGrow { .. }
-                ) {
+        if matches!(
+            bb.term,
+            Term::CallCatch { .. } | Term::CallIndirectCatch { .. }
+        ) {
+            has_call_blk[bu] = true;
+        }
+        for inst in &bb.insts {
+            match inst.op {
+                Op::Trap(_) | Op::MemGrow(_) | Op::MemGrowIdx { .. } | Op::TableGrow { .. } => {
                     trap = true;
-                    break;
                 }
+                Op::Call { .. } | Op::CallIndirect { .. } => {
+                    has_call_blk[bu] = true;
+                }
+                Op::Store { checked, .. } => {
+                    has_store_blk[bu] = true;
+                    if !checked {
+                        has_unchecked_mem_blk[bu] = true;
+                    }
+                }
+                Op::StoreScaled { .. } => {
+                    has_store_blk[bu] = true;
+                }
+                Op::Load { checked: false, .. } => {
+                    has_unchecked_mem_blk[bu] = true;
+                }
+                _ => {}
             }
         }
-        is_trap_blk[b as usize] = trap;
+        is_trap_blk[bu] = trap;
     }
     for &b in post.iter().rev() {
         let bu = b as usize;
@@ -284,15 +336,134 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             is_trap_blk[bu] = true;
         }
     }
-    let mut block_order = Vec::with_capacity(post.len());
-    for &b in &post {
-        if b == 0 || !is_trap_blk[b as usize] {
-            block_order.push(b);
+
+    let cand_score = |cand: u32, placed: &[bool]| -> i32 {
+        let cu = cand as usize;
+        let mut s = 0i32;
+        if is_trap_blk[cu] {
+            s += 1000;
         }
-    }
-    for &b in &post {
-        if b != 0 && is_trap_blk[b as usize] {
-            block_order.push(b);
+        let cbb = &ir.blocks[cu];
+        let backedges_to_placed_hdr = succs[cu]
+            .iter()
+            .any(|&x| placed[x as usize] && ir.blocks[x as usize].is_loop_header);
+        if cbb.is_loop_header || backedges_to_placed_hdr {
+            s -= 100;
+        }
+        if has_call_blk[cu] {
+            s += 40;
+        }
+        if has_store_blk[cu] {
+            s += 20;
+        }
+        if !cbb.is_loop_header && cbb.insts.len() > 4 {
+            s += 10;
+        }
+        let mut unchecked = has_unchecked_mem_blk[cu];
+        if !unchecked
+            && cbb.insts.is_empty()
+            && let Term::CmpBranch { then_bb, .. } | Term::BranchIf { then_bb, .. } = cbb.term
+        {
+            unchecked = has_unchecked_mem_blk[then_bb.0 as usize];
+        }
+        if unchecked {
+            s += 15;
+        }
+        s
+    };
+
+    let mut block_order = Vec::with_capacity(post.len());
+    let mut placed = vec![false; n_blocks];
+    for pass in 0..2 {
+        for &seed in &post {
+            if placed[seed as usize] {
+                continue;
+            }
+            if pass == 0 && seed != 0 && is_trap_blk[seed as usize] {
+                continue;
+            }
+            let mut cur = seed;
+            loop {
+                placed[cur as usize] = true;
+                block_order.push(cur);
+                let next = match ir.blocks[cur as usize].term {
+                    Term::Jump { target, .. } => (!placed[target.0 as usize]
+                        && (pass == 1 || !is_trap_blk[target.0 as usize]))
+                        .then_some(target.0),
+                    Term::BranchIf {
+                        then_bb, else_bb, ..
+                    }
+                    | Term::CmpBranch {
+                        then_bb, else_bb, ..
+                    } => {
+                        let t_ok = !placed[then_bb.0 as usize];
+                        let e_ok = !placed[else_bb.0 as usize] && else_bb != then_bb;
+                        match (t_ok, e_ok) {
+                            (true, true) => {
+                                let mut ts = cand_score(then_bb.0, &placed);
+                                let mut es = cand_score(else_bb.0, &placed);
+                                let resolve_merge = |b: u32| -> u32 {
+                                    let bb = &ir.blocks[b as usize];
+                                    if bb.params.is_empty()
+                                        && bb.insts.is_empty()
+                                        && let Term::Jump { target, .. } = bb.term
+                                    {
+                                        target.0
+                                    } else {
+                                        b
+                                    }
+                                };
+                                let is_tri = |arm: u32, merge: u32| -> bool {
+                                    let eff_merge = resolve_merge(merge);
+                                    !is_trap_blk[arm as usize]
+                                        && !has_call_blk[arm as usize]
+                                        && !ir.blocks[arm as usize].is_loop_header
+                                        && ir.blocks[arm as usize].preds == 1
+                                        && matches!(
+                                            ir.blocks[arm as usize].term,
+                                            Term::Jump { target, .. }
+                                                if target.0 == merge || target.0 == eff_merge
+                                        )
+                                };
+                                if is_tri(then_bb.0, else_bb.0) {
+                                    ts -= 150;
+                                } else if is_tri(else_bb.0, then_bb.0) {
+                                    es -= 150;
+                                }
+                                let best = if (ts, rpo_pos[then_bb.0 as usize])
+                                    <= (es, rpo_pos[else_bb.0 as usize])
+                                {
+                                    then_bb.0
+                                } else {
+                                    else_bb.0
+                                };
+                                (pass == 1 || !is_trap_blk[best as usize]).then_some(best)
+                            }
+                            (true, false) => {
+                                (pass == 1 || !is_trap_blk[then_bb.0 as usize]).then_some(then_bb.0)
+                            }
+                            (false, true) => {
+                                (pass == 1 || !is_trap_blk[else_bb.0 as usize]).then_some(else_bb.0)
+                            }
+                            (false, false) => None,
+                        }
+                    }
+                    Term::CallCatch { ok_bb, .. } | Term::CallIndirectCatch { ok_bb, .. } => {
+                        (!placed[ok_bb.0 as usize] && (pass == 1 || !is_trap_blk[ok_bb.0 as usize]))
+                            .then_some(ok_bb.0)
+                    }
+                    Term::BrTable { .. }
+                    | Term::Return { .. }
+                    | Term::ReturnCall { .. }
+                    | Term::ReturnCallIndirect { .. }
+                    | Term::ThrowActive
+                    | Term::Unreachable => None,
+                };
+                match next {
+                    Some(nxt) => cur = nxt,
+                    None => break,
+                }
+            }
         }
     }
     let n_ord = block_order.len();
@@ -301,11 +472,13 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         ord_of[b as usize] = oi as u32;
     }
 
-    // 2. Linear program points, call/helper clobbers, and outgoing stack-arg/return-buffer sizes.
+    // 2. Linear program points, call/helper clobbers, remat constants, and outgoing stack-arg/return-buffer sizes.
     let mut block_start = vec![0u32; n_ord];
     let mut block_end = vec![0u32; n_ord];
     let mut def_pos = vec![u32::MAX; n_vals];
+    let mut def_block = vec![u32::MAX; n_vals];
     let mut last_use = vec![0u32; n_vals];
+    let mut val_remat: Vec<Option<A64RematConst>> = vec![None; n_vals];
     let mut clobbers: Vec<(u32, u32, u32)> = Vec::new();
     let mut max_out_args = 0i32;
     let mut max_ret_buf = 0i32;
@@ -323,6 +496,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         let bb = &ir.blocks[bid as usize];
         for &p in &bb.params {
             def_pos[p.0 as usize] = pos;
+            def_block[p.0 as usize] = oi as u32;
             last_use[p.0 as usize] = last_use[p.0 as usize].max(pos + 1);
         }
         pos += 2;
@@ -348,6 +522,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
                     max_ret_buf = max_ret_buf.max(layout_rets(&ret_tys)?.stack_bytes);
                     for &rv in ir.pool_slice(rets) {
                         def_pos[rv.0 as usize] = pos + 1;
+                        def_block[rv.0 as usize] = oi as u32;
                         last_use[rv.0 as usize] = last_use[rv.0 as usize].max(pos + 2);
                     }
                 }
@@ -369,7 +544,13 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             }
             if let Some(r) = inst.res {
                 def_pos[r.0 as usize] = pos + 1;
+                def_block[r.0 as usize] = oi as u32;
                 last_use[r.0 as usize] = last_use[r.0 as usize].max(pos + 2);
+                match inst.op {
+                    Op::ConstI32(c) => val_remat[r.0 as usize] = Some(A64RematConst::I32(c)),
+                    Op::ConstI64(c) => val_remat[r.0 as usize] = Some(A64RematConst::I64(c)),
+                    _ => {}
+                }
             }
             pos += 2;
         }
@@ -552,7 +733,294 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
     }
 
-    // 4. Build GP and FP intervals with exact clobber masks.
+    // 3b. Loop depth, spill-weight estimation, ABI register hints, and coalescing peer hints.
+    let mut loop_depth = vec![0u8; n_ord];
+    if n_ord > 1 {
+        let mut preds_rpo: Vec<Vec<u32>> = vec![Vec::new(); post.len()];
+        let mut backedges: Vec<(u32, u32)> = Vec::new();
+        for (ri, &bid) in post.iter().enumerate() {
+            for &sid in &succs[bid as usize] {
+                let sri = rpo_pos[sid as usize];
+                if sri != u32::MAX {
+                    preds_rpo[sri as usize].push(ri as u32);
+                    if sri <= ri as u32 {
+                        backedges.push((ri as u32, sri));
+                    }
+                }
+            }
+        }
+        if !backedges.is_empty() {
+            let mut rpo_depth = vec![0u8; post.len()];
+            let mut seen = vec![0u32; post.len()];
+            let mut wl = Vec::new();
+            let mut stamp = 0u32;
+            for (latch, header) in backedges {
+                stamp = stamp.wrapping_add(1);
+                seen[header as usize] = stamp;
+                rpo_depth[header as usize] = rpo_depth[header as usize].saturating_add(1).min(4);
+                if latch != header {
+                    seen[latch as usize] = stamp;
+                    rpo_depth[latch as usize] = rpo_depth[latch as usize].saturating_add(1).min(4);
+                    wl.push(latch);
+                    while let Some(u) = wl.pop() {
+                        for &p in &preds_rpo[u as usize] {
+                            if p > header && seen[p as usize] != stamp {
+                                seen[p as usize] = stamp;
+                                rpo_depth[p as usize] =
+                                    rpo_depth[p as usize].saturating_add(1).min(4);
+                                wl.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+            for (ri, &bid) in post.iter().enumerate() {
+                let oi = ord_of[bid as usize] as usize;
+                if oi < n_ord {
+                    loop_depth[oi] = rpo_depth[ri];
+                }
+            }
+        }
+    }
+
+    let mut val_weight = vec![0u32; n_vals];
+    let mut max_use_loop_depth = vec![0u8; n_vals];
+    let mut hint_gp: Vec<Option<Reg>> = vec![None; n_vals];
+    let mut hint_fp: Vec<Option<VReg>> = vec![None; n_vals];
+    let mut hint_peers: Vec<[u32; 4]> = vec![[u32::MAX; 4]; n_vals];
+    let mut first_edge_arg = vec![u32::MAX; n_vals];
+    let add_peer = |peers: &mut Vec<[u32; 4]>, a: u32, b: u32| {
+        if a == b {
+            return;
+        }
+        let slot = &mut peers[a as usize];
+        for entry in slot.iter_mut() {
+            if *entry == b {
+                return;
+            }
+            if *entry == u32::MAX {
+                *entry = b;
+                return;
+            }
+        }
+    };
+
+    if !ir.params.is_empty() {
+        let p_layout = layout_args(&self_param_tys)?;
+        for (&pv, slot) in ir.params.iter().zip(p_layout.slots) {
+            match slot {
+                A64AbiSlot::Gp(g) => hint_gp[pv.0 as usize] = Some(g),
+                A64AbiSlot::Fp(f) => hint_fp[pv.0 as usize] = Some(f),
+                A64AbiSlot::Stack(_) => {}
+            }
+        }
+    }
+
+    let hint_arg_slice = |slice: &[crate::x64::ir::Val],
+                          hint_gp: &mut [Option<Reg>],
+                          hint_fp: &mut [Option<VReg>]| {
+        let (mut ng, mut nf) = (0usize, 0usize);
+        for &v in slice {
+            let ty = ir.val_tys[v.0 as usize];
+            if ty.is_fp() {
+                if nf < CALL_FP_ARGS.len() {
+                    if hint_fp[v.0 as usize].is_none() {
+                        hint_fp[v.0 as usize] = Some(CALL_FP_ARGS[nf]);
+                    }
+                    nf += 1;
+                }
+            } else if ng < CALL_GP_ARGS.len() {
+                if hint_gp[v.0 as usize].is_none() {
+                    hint_gp[v.0 as usize] = Some(CALL_GP_ARGS[ng]);
+                }
+                ng += 1;
+            }
+        }
+    };
+    let hint_ret_def_slice = |slice: &[crate::x64::ir::Val],
+                              hint_gp: &mut [Option<Reg>],
+                              hint_fp: &mut [Option<VReg>]| {
+        let (mut ng, mut nf) = (0usize, 0usize);
+        for &v in slice {
+            let ty = ir.val_tys[v.0 as usize];
+            if ty.is_fp() {
+                if nf < CALL_FP_ARGS.len() {
+                    hint_fp[v.0 as usize] = Some(CALL_FP_ARGS[nf]);
+                    nf += 1;
+                }
+            } else if ng < CALL_GP_ARGS.len() {
+                hint_gp[v.0 as usize] = Some(CALL_GP_ARGS[ng]);
+                ng += 1;
+            }
+        }
+    };
+
+    for (oi, &bid) in block_order.iter().enumerate() {
+        let bb = &ir.blocks[bid as usize];
+        let is_cold_trap = n_blocks > 1 && is_trap_blk[bid as usize];
+        let cur_ld = loop_depth[oi];
+        let w = if is_cold_trap {
+            1u32
+        } else {
+            match cur_ld {
+                0 => 4u32,
+                1 => 64,
+                2 => 1024,
+                3 => 16_384,
+                _ => 131_072,
+            }
+        };
+        for &p in &bb.params {
+            val_weight[p.0 as usize] = val_weight[p.0 as usize].saturating_add(w);
+        }
+        for inst in &bb.insts {
+            inst.op.for_each_use(&ir.val_pool, |v| {
+                let vu = v.0 as usize;
+                val_weight[vu] = val_weight[vu].saturating_add(w);
+                if cur_ld > max_use_loop_depth[vu] {
+                    max_use_loop_depth[vu] = cur_ld;
+                }
+            });
+            if let Some(r) = inst.res {
+                val_weight[r.0 as usize] = val_weight[r.0 as usize].saturating_add(w);
+                match inst.op {
+                    Op::I32Bin(bop, a, b) | Op::I64Bin(bop, a, b) => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                        if matches!(
+                            bop,
+                            IntBinOp::Add
+                                | IntBinOp::Mul
+                                | IntBinOp::And
+                                | IntBinOp::Or
+                                | IntBinOp::Xor
+                        ) {
+                            add_peer(&mut hint_peers, r.0, b.0);
+                        }
+                    }
+                    Op::I32BinImm(_, a, _)
+                    | Op::I64BinImm(_, a, _)
+                    | Op::I32WrapI64(a)
+                    | Op::I64ExtendI32U(a) => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                    }
+                    Op::V128ExtractLane {
+                        kind: SimdLaneKind::F64x2 | SimdLaneKind::F32x4,
+                        v,
+                        lane: 0,
+                    } => {
+                        add_peer(&mut hint_peers, r.0, v.0);
+                    }
+                    Op::F32Bin(bop, a, b) | Op::F64Bin(bop, a, b) => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                        if matches!(bop, FloatBinOp::Add | FloatBinOp::Mul) {
+                            add_peer(&mut hint_peers, r.0, b.0);
+                        }
+                    }
+                    Op::Select { a, b, .. } => {
+                        add_peer(&mut hint_peers, r.0, a.0);
+                        add_peer(&mut hint_peers, r.0, b.0);
+                    }
+                    Op::CmpSelect { tv, fv, .. } => {
+                        add_peer(&mut hint_peers, r.0, fv.0);
+                        add_peer(&mut hint_peers, r.0, tv.0);
+                    }
+                    _ => {}
+                }
+            }
+            match inst.op {
+                Op::Call { args, rets, .. } | Op::CallIndirect { args, rets, .. } => {
+                    hint_arg_slice(ir.pool_slice(args), &mut hint_gp, &mut hint_fp);
+                    let ret_slice = ir.pool_slice(rets);
+                    for &rv in ret_slice {
+                        val_weight[rv.0 as usize] = val_weight[rv.0 as usize].saturating_add(w);
+                    }
+                    hint_ret_def_slice(ret_slice, &mut hint_gp, &mut hint_fp);
+                }
+                _ => {}
+            }
+        }
+        bb.term.for_each_use(&ir.val_pool, &ir.br_tables, |v| {
+            let vu = v.0 as usize;
+            val_weight[vu] = val_weight[vu].saturating_add(w);
+            if cur_ld > max_use_loop_depth[vu] {
+                max_use_loop_depth[vu] = cur_ld;
+            }
+        });
+        let mut wire_edge = |target_bb: u32, args: ValRange| {
+            let params = &ir.blocks[target_bb as usize].params;
+            let avals = ir.pool_slice(args);
+            for (&p, &a) in params.iter().zip(avals) {
+                add_peer(&mut hint_peers, p.0, a.0);
+                add_peer(&mut hint_peers, a.0, p.0);
+                if a != p {
+                    let prev = first_edge_arg[p.0 as usize];
+                    if prev == u32::MAX {
+                        first_edge_arg[p.0 as usize] = a.0;
+                    } else if prev != a.0 {
+                        add_peer(&mut hint_peers, a.0, prev);
+                        add_peer(&mut hint_peers, prev, a.0);
+                    }
+                }
+            }
+        };
+        match bb.term {
+            Term::Jump { target, args } => wire_edge(target.0, args),
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                wire_edge(then_bb.0, then_args);
+                wire_edge(else_bb.0, else_args);
+            }
+            Term::BrTable { table_idx, .. } => {
+                for &(t, a) in &ir.br_tables[table_idx as usize].unique_edges {
+                    wire_edge(t.0, a);
+                }
+            }
+            Term::Return { vals }
+            | Term::ReturnCall { args: vals, .. }
+            | Term::ReturnCallIndirect { args: vals, .. } => {
+                hint_arg_slice(ir.pool_slice(vals), &mut hint_gp, &mut hint_fp);
+            }
+            Term::CallCatch {
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+                ..
+            }
+            | Term::CallIndirectCatch {
+                args,
+                ok_bb,
+                catch_bb,
+                catch_args,
+                ..
+            } => {
+                wire_edge(catch_bb.0, catch_args);
+                hint_arg_slice(ir.pool_slice(args), &mut hint_gp, &mut hint_fp);
+                hint_ret_def_slice(
+                    &ir.blocks[ok_bb.0 as usize].params,
+                    &mut hint_gp,
+                    &mut hint_fp,
+                );
+            }
+            Term::ThrowActive | Term::Unreachable => {}
+        }
+    }
+
+    // 4. Build GP and FP intervals with exact clobber masks, spill weights, and remat metadata.
+    let mut val_clob_gp = vec![0u32; n_vals];
+    let mut val_clob_fp = vec![0u32; n_vals];
     let mut gp_ivs = Vec::new();
     let mut fp_ivs = Vec::new();
     for vi in 0..n_vals {
@@ -571,7 +1039,18 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             cgp |= gm;
             cfp |= fm;
         }
+        val_clob_gp[vi] = cgp;
+        val_clob_fp[vi] = cfp;
         let ty = ir.val_tys[vi];
+        let len = u64::from((e - s).max(1));
+        let score = (u64::from(val_weight[vi].max(1)) << 16) / len;
+        let remat = val_remat[vi];
+        let def_ld = if def_block[vi] != u32::MAX {
+            loop_depth[def_block[vi] as usize]
+        } else {
+            0
+        };
+        let remat_hoisted = remat.is_some() && max_use_loop_depth[vi] > def_ld;
         let iv = Interval {
             val: vi as u32,
             start: s,
@@ -579,6 +1058,9 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
             ty,
             clob_gp: cgp,
             clob_fp: cfp,
+            score,
+            remat,
+            remat_hoisted,
         };
         if ty.is_fp() {
             fp_ivs.push(iv);
@@ -589,7 +1071,7 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
     gp_ivs.sort_unstable_by_key(|iv| (iv.start, iv.end, iv.val));
     fp_ivs.sort_unstable_by_key(|iv| (iv.start, iv.end, iv.val));
 
-    // 5. Linear scan for GP and FP/V128.
+    // 5. Linear scan for GP and FP/V128 with vote-counted coalescing, ABI hints, remat, and weighted eviction.
     let mut locs = vec![A64Loc::Gp(Reg::X0); n_vals];
     let mut assigned = vec![false; n_vals];
     let mut next_spill = 0i32;
@@ -626,65 +1108,320 @@ pub fn allocate(ir: &IrFunc, budget: Option<&CompileBudget>) -> Result<A64AllocR
         }
     };
 
-    // GP scan
-    let mut active_gp: Vec<(u32, usize, u32)> = Vec::new(); // (end, reg_idx, val)
+    // 5a. GP scan
+    let mut active_gp: Vec<ActiveEntry> = Vec::new();
     for iv in &gp_ivs {
-        active_gp.retain(|a| a.0 > iv.start);
+        active_gp.retain(|a| a.end > iv.start);
         let mut used = 0u32;
-        for &(_, ri, _) in &active_gp {
-            used |= 1u32 << GP_ALLOC[ri].0;
+        for a in &active_gp {
+            used |= 1u32 << GP_ALLOC[a.reg_idx].0;
         }
         let forbid = used | iv.clob_gp;
-        if let Some((ri, &r)) = GP_ALLOC
-            .iter()
-            .enumerate()
-            .find(|&(_, &r)| (forbid & (1u32 << r.0)) == 0)
+        let max_ri = if iv.remat.is_some() && !iv.remat_hoisted {
+            GP_CALLER_COUNT
+        } else {
+            GP_ALLOC.len()
+        };
+
+        // 1. Vote-counted coalescing peer already assigned a non-interfering reg.
+        let mut chosen: Option<(usize, Reg)> = None;
         {
+            let mut cands: [(usize, Reg, u8); 4] = [(0, Reg::X0, 0); 4];
+            let mut n_cands = 0usize;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX
+                    && assigned[peer as usize]
+                    && let A64Loc::Gp(g) = locs[peer as usize]
+                    && (forbid & (1u32 << g.0)) == 0
+                    && let Some(ri) = GP_ALLOC[..max_ri].iter().position(|&x| x == g)
+                {
+                    if let Some(slot) = cands[..n_cands].iter_mut().find(|c| c.0 == ri) {
+                        slot.2 += 1;
+                    } else if n_cands < 4 {
+                        cands[n_cands] = (ri, g, 1);
+                        n_cands += 1;
+                    }
+                }
+            }
+            let mut best_votes = 0u8;
+            for &(ri, g, votes) in &cands[..n_cands] {
+                if votes > best_votes {
+                    best_votes = votes;
+                    chosen = Some((ri, g));
+                }
+            }
+        }
+        // 2. Direct ABI hint register.
+        if chosen.is_none()
+            && let Some(g) = hint_gp[iv.val as usize]
+            && (forbid & (1u32 << g.0)) == 0
+            && let Some(ri) = GP_ALLOC[..max_ri].iter().position(|&x| x == g)
+        {
+            chosen = Some((ri, g));
+        }
+        // 3. Forward peer ABI hint & peer clobber avoidance.
+        if chosen.is_none() {
+            let mut peer_avoid = 0u32;
+            let mut peer_hint: Option<Reg> = None;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX && !assigned[peer as usize] {
+                    peer_avoid |= val_clob_gp[peer as usize];
+                    if peer_hint.is_none() {
+                        peer_hint = hint_gp[peer as usize];
+                    }
+                }
+            }
+            if let Some(g) = peer_hint
+                && ((forbid | peer_avoid) & (1u32 << g.0)) == 0
+                && let Some(ri) = GP_ALLOC[..max_ri].iter().position(|&x| x == g)
+            {
+                chosen = Some((ri, g));
+            }
+            if chosen.is_none() && peer_avoid != 0 {
+                let avoid_mask = forbid | peer_avoid;
+                if let Some((ri, &r)) = GP_ALLOC[..max_ri]
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &r)| (avoid_mask & (1u32 << r.0)) == 0)
+                {
+                    chosen = Some((ri, r));
+                }
+            }
+            if chosen.is_none()
+                && let Some((ri, &r)) = GP_ALLOC[..max_ri]
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &r)| (forbid & (1u32 << r.0)) == 0)
+            {
+                chosen = Some((ri, r));
+            }
+        }
+
+        if let Some((ri, r)) = chosen {
             locs[iv.val as usize] = A64Loc::Gp(r);
             assigned[iv.val as usize] = true;
-            active_gp.push((iv.end, ri, iv.val));
-        } else {
-            let sp = alloc_spill(
-                iv.ty,
-                iv.start,
-                iv.end,
-                &mut free8,
-                &mut free16,
-                &mut next_spill,
-            )?;
-            locs[iv.val as usize] = A64Loc::Spill(sp);
+            active_gp.push(ActiveEntry {
+                end: iv.end,
+                reg_idx: ri,
+                val: iv.val,
+                start: iv.start,
+                ty: iv.ty,
+                score: iv.score,
+                remat: iv.remat,
+            });
+        } else if let Some(rc) = iv.remat {
+            locs[iv.val as usize] = A64Loc::Remat(rc);
             assigned[iv.val as usize] = true;
+        } else {
+            // Evict a rematerializable constant or strictly lower-score active entry if beneficial.
+            let mut best_ai: Option<(usize, bool, u64, u32)> = None;
+            for (ai, a) in active_gp.iter().enumerate() {
+                let r = GP_ALLOC[a.reg_idx];
+                if (iv.clob_gp & (1u32 << r.0)) != 0 {
+                    continue;
+                }
+                let is_remat = a.remat.is_some();
+                if !is_remat && (a.score > iv.score || (a.score == iv.score && a.end <= iv.end)) {
+                    continue;
+                }
+                // Prefer evicting remat first, then lowest score, then furthest end.
+                let key = (!is_remat, a.score, Reverse(a.end));
+                let better = match best_ai {
+                    None => true,
+                    Some((_, br, bsc, bend)) => key < (!br, bsc, Reverse(bend)),
+                };
+                if better {
+                    best_ai = Some((ai, is_remat, a.score, a.end));
+                }
+            }
+            if let Some((ai, _, _, _)) = best_ai {
+                let ev = active_gp.swap_remove(ai);
+                let r = GP_ALLOC[ev.reg_idx];
+                if let Some(rc) = ev.remat {
+                    locs[ev.val as usize] = A64Loc::Remat(rc);
+                } else {
+                    let sp = alloc_spill(
+                        ev.ty,
+                        ev.start,
+                        ev.end,
+                        &mut free8,
+                        &mut free16,
+                        &mut next_spill,
+                    )?;
+                    locs[ev.val as usize] = A64Loc::Spill(sp);
+                }
+                locs[iv.val as usize] = A64Loc::Gp(r);
+                assigned[iv.val as usize] = true;
+                active_gp.push(ActiveEntry {
+                    end: iv.end,
+                    reg_idx: ev.reg_idx,
+                    val: iv.val,
+                    start: iv.start,
+                    ty: iv.ty,
+                    score: iv.score,
+                    remat: None,
+                });
+            } else {
+                let sp = alloc_spill(
+                    iv.ty,
+                    iv.start,
+                    iv.end,
+                    &mut free8,
+                    &mut free16,
+                    &mut next_spill,
+                )?;
+                locs[iv.val as usize] = A64Loc::Spill(sp);
+                assigned[iv.val as usize] = true;
+            }
         }
     }
 
-    // FP / V128 scan
-    let mut active_fp: Vec<(u32, usize, u32)> = Vec::new();
+    // 5b. FP / V128 scan
+    let mut active_fp: Vec<ActiveEntry> = Vec::new();
     for iv in &fp_ivs {
-        active_fp.retain(|a| a.0 > iv.start);
+        active_fp.retain(|a| a.end > iv.start);
         let mut used = 0u32;
-        for &(_, ri, _) in &active_fp {
-            used |= 1u32 << FP_ALLOC[ri].0;
+        for a in &active_fp {
+            used |= 1u32 << FP_ALLOC[a.reg_idx].0;
         }
         let forbid = used | iv.clob_fp;
-        if let Some((ri, &v)) = FP_ALLOC
-            .iter()
-            .enumerate()
-            .find(|&(_, &v)| (forbid & (1u32 << v.0)) == 0)
+
+        let mut chosen: Option<(usize, VReg)> = None;
         {
+            let mut cands: [(usize, VReg, u8); 4] = [(0, VReg::V0, 0); 4];
+            let mut n_cands = 0usize;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX
+                    && assigned[peer as usize]
+                    && let A64Loc::Fp(v) = locs[peer as usize]
+                    && (forbid & (1u32 << v.0)) == 0
+                    && let Some(ri) = FP_ALLOC.iter().position(|&x| x == v)
+                {
+                    if let Some(slot) = cands[..n_cands].iter_mut().find(|c| c.0 == ri) {
+                        slot.2 += 1;
+                    } else if n_cands < 4 {
+                        cands[n_cands] = (ri, v, 1);
+                        n_cands += 1;
+                    }
+                }
+            }
+            let mut best_votes = 0u8;
+            for &(ri, v, votes) in &cands[..n_cands] {
+                if votes > best_votes {
+                    best_votes = votes;
+                    chosen = Some((ri, v));
+                }
+            }
+        }
+        if chosen.is_none()
+            && let Some(v) = hint_fp[iv.val as usize]
+            && (forbid & (1u32 << v.0)) == 0
+            && let Some(ri) = FP_ALLOC.iter().position(|&x| x == v)
+        {
+            chosen = Some((ri, v));
+        }
+        if chosen.is_none() {
+            let mut peer_avoid = 0u32;
+            let mut peer_hint: Option<VReg> = None;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX && !assigned[peer as usize] {
+                    peer_avoid |= val_clob_fp[peer as usize];
+                    if peer_hint.is_none() {
+                        peer_hint = hint_fp[peer as usize];
+                    }
+                }
+            }
+            if let Some(v) = peer_hint
+                && ((forbid | peer_avoid) & (1u32 << v.0)) == 0
+                && let Some(ri) = FP_ALLOC.iter().position(|&x| x == v)
+            {
+                chosen = Some((ri, v));
+            }
+            if chosen.is_none() && peer_avoid != 0 {
+                let avoid_mask = forbid | peer_avoid;
+                if let Some((ri, &v)) = FP_ALLOC
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &v)| (avoid_mask & (1u32 << v.0)) == 0)
+                {
+                    chosen = Some((ri, v));
+                }
+            }
+            if chosen.is_none()
+                && let Some((ri, &v)) = FP_ALLOC
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, &v)| (forbid & (1u32 << v.0)) == 0)
+            {
+                chosen = Some((ri, v));
+            }
+        }
+
+        if let Some((ri, v)) = chosen {
             locs[iv.val as usize] = A64Loc::Fp(v);
             assigned[iv.val as usize] = true;
-            active_fp.push((iv.end, ri, iv.val));
+            active_fp.push(ActiveEntry {
+                end: iv.end,
+                reg_idx: ri,
+                val: iv.val,
+                start: iv.start,
+                ty: iv.ty,
+                score: iv.score,
+                remat: None,
+            });
         } else {
-            let sp = alloc_spill(
-                iv.ty,
-                iv.start,
-                iv.end,
-                &mut free8,
-                &mut free16,
-                &mut next_spill,
-            )?;
-            locs[iv.val as usize] = A64Loc::Spill(sp);
-            assigned[iv.val as usize] = true;
+            let mut best_ai: Option<(usize, u64, u32)> = None;
+            for (ai, a) in active_fp.iter().enumerate() {
+                let v = FP_ALLOC[a.reg_idx];
+                if (iv.clob_fp & (1u32 << v.0)) != 0 {
+                    continue;
+                }
+                if a.score > iv.score || (a.score == iv.score && a.end <= iv.end) {
+                    continue;
+                }
+                let better = match best_ai {
+                    None => true,
+                    Some((_, bsc, bend)) => (a.score, Reverse(a.end)) < (bsc, Reverse(bend)),
+                };
+                if better {
+                    best_ai = Some((ai, a.score, a.end));
+                }
+            }
+            if let Some((ai, _, _)) = best_ai {
+                let ev = active_fp.swap_remove(ai);
+                let v = FP_ALLOC[ev.reg_idx];
+                let sp = alloc_spill(
+                    ev.ty,
+                    ev.start,
+                    ev.end,
+                    &mut free8,
+                    &mut free16,
+                    &mut next_spill,
+                )?;
+                locs[ev.val as usize] = A64Loc::Spill(sp);
+                locs[iv.val as usize] = A64Loc::Fp(v);
+                assigned[iv.val as usize] = true;
+                active_fp.push(ActiveEntry {
+                    end: iv.end,
+                    reg_idx: ev.reg_idx,
+                    val: iv.val,
+                    start: iv.start,
+                    ty: iv.ty,
+                    score: iv.score,
+                    remat: None,
+                });
+            } else {
+                let sp = alloc_spill(
+                    iv.ty,
+                    iv.start,
+                    iv.end,
+                    &mut free8,
+                    &mut free16,
+                    &mut next_spill,
+                )?;
+                locs[iv.val as usize] = A64Loc::Spill(sp);
+                assigned[iv.val as usize] = true;
+            }
         }
     }
 

@@ -847,14 +847,26 @@ pub fn allocate_with_config_and_scratch(
                                     // (`cur -> arm -> merge`, e.g. `if right < end { ... }`) so
                                     // the single-pred arm falls straight into `merge` without a
                                     // forward jump + unconditional jump back!
+                                    let resolve_merge = |b: u32| -> u32 {
+                                        let bb = &ir.blocks[b as usize];
+                                        if bb.params.is_empty()
+                                            && bb.insts.is_empty()
+                                            && let Term::Jump { target, .. } = bb.term
+                                        {
+                                            target.0
+                                        } else {
+                                            b
+                                        }
+                                    };
                                     let is_tri = |arm: u32, merge: u32| -> bool {
+                                        let eff_merge = resolve_merge(merge);
                                         !is_trap_blk[arm as usize]
                                             && !has_call_blk[arm as usize]
                                             && !ir.blocks[arm as usize].is_loop_header
                                             && ir.blocks[arm as usize].preds == 1
                                             && matches!(
                                                 ir.blocks[arm as usize].term,
-                                                Term::Jump { target, .. } if target.0 == merge
+                                                Term::Jump { target, .. } if target.0 == merge || target.0 == eff_merge
                                             )
                                     };
                                     if is_tri(then_bb.0, else_bb.0) {
@@ -1912,8 +1924,8 @@ pub fn allocate_with_config_and_scratch(
                         add_peer(hint_peers, r.0, b.0);
                     }
                     Op::CmpSelect { tv, fv, .. } => {
-                        add_peer(hint_peers, r.0, tv.0);
                         add_peer(hint_peers, r.0, fv.0);
+                        add_peer(hint_peers, r.0, tv.0);
                     }
                     _ => {}
                 }
@@ -2387,16 +2399,33 @@ pub fn allocate_with_config_and_scratch(
         };
 
         // 1. Coalescing peer already assigned a non-interfering register.
+        //    Vote-count across all peer slots so a register backed by both a phi target and an
+        //    operand (e.g. `CmpSelect` feeding a merge phi) beats a single-vote operand register.
         let mut chosen: Option<(usize, Gp)> = None;
-        for &peer in &hint_peers[iv.val as usize] {
-            if peer != u32::MAX
-                && assigned[peer as usize]
-                && let Loc::Gp(g) = locs[peer as usize]
-                && (forbidden & (1 << g.id())) == 0
-                && let Some(ri) = gp_alloc[..max_ri].iter().position(|&x| x == g)
-            {
-                chosen = Some((ri, g));
-                break;
+        {
+            let mut cands: [(usize, Gp, u8); 4] = [(0, Gp::Rax, 0); 4];
+            let mut n_cands = 0usize;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX
+                    && assigned[peer as usize]
+                    && let Loc::Gp(g) = locs[peer as usize]
+                    && (forbidden & (1 << g.id())) == 0
+                    && let Some(ri) = gp_alloc[..max_ri].iter().position(|&x| x == g)
+                {
+                    if let Some(slot) = cands[..n_cands].iter_mut().find(|c| c.0 == ri) {
+                        slot.2 += 1;
+                    } else if n_cands < 4 {
+                        cands[n_cands] = (ri, g, 1);
+                        n_cands += 1;
+                    }
+                }
+            }
+            let mut best_votes = 0u8;
+            for &(ri, g, votes) in &cands[..n_cands] {
+                if votes > best_votes {
+                    best_votes = votes;
+                    chosen = Some((ri, g));
+                }
             }
         }
         // 2. Direct ABI hint register.
@@ -2621,15 +2650,30 @@ pub fn allocate_with_config_and_scratch(
         };
 
         let mut chosen: Option<(usize, Xmm)> = None;
-        for &peer in &hint_peers[iv.val as usize] {
-            if peer != u32::MAX
-                && assigned[peer as usize]
-                && let Loc::Xmm(x) = locs[peer as usize]
-                && (forbidden & (1 << x.id())) == 0
-                && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
-            {
-                chosen = Some((ri, x));
-                break;
+        {
+            let mut cands: [(usize, Xmm, u8); 4] = [(0, Xmm::Xmm0, 0); 4];
+            let mut n_cands = 0usize;
+            for &peer in &hint_peers[iv.val as usize] {
+                if peer != u32::MAX
+                    && assigned[peer as usize]
+                    && let Loc::Xmm(x) = locs[peer as usize]
+                    && (forbidden & (1 << x.id())) == 0
+                    && let Some(ri) = XMM_ALLOC[..max_ri].iter().position(|&r| r == x)
+                {
+                    if let Some(slot) = cands[..n_cands].iter_mut().find(|c| c.0 == ri) {
+                        slot.2 += 1;
+                    } else if n_cands < 4 {
+                        cands[n_cands] = (ri, x, 1);
+                        n_cands += 1;
+                    }
+                }
+            }
+            let mut best_votes = 0u8;
+            for &(ri, x, votes) in &cands[..n_cands] {
+                if votes > best_votes {
+                    best_votes = votes;
+                    chosen = Some((ri, x));
+                }
             }
         }
         if chosen.is_none()

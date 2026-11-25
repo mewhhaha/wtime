@@ -2,6 +2,77 @@
 
 All notable changes to `wtime` are documented in this file.
 
+## [0.1.5] - 2026-11-25
+
+Wasm 3.0 `table64` & `function-references` (`call_ref`, `return_call_ref`,
+`ref.as_non_null`, `br_on_null`, `br_on_non_null`, explicit table initializers,
+typed concrete function references) across BOTH `--backend x64` and
+`--backend aarch64`, major branchy-loop & register-allocation codegen wins
+(`heapsort_i32` **1.54×** faster at **`32.29 µs`**, now beating Wasmtime `49.0.3`
+on all 6 of 6 benchmark kernels even with explicit software bounds checks),
+full AArch64 regalloc/trace-layout/prologue parity, native ARM64 CI fixes, and
+automated dual-arch Linux `x86_64` + `aarch64` GitHub Release publishing. Core
+crate `#![forbid(unsafe_code)]`, zero external production dependencies, and
+public APIs remain unchanged.
+
+### Ahead-of-time compiler (`tools/wtime-aot`, standalone tool)
+- **Wasm 3.0 `table64` and `function-references` on BOTH `--backend x64` and `--backend aarch64`**:
+  - Enabled `function_references` in the shared AOT validation profile and
+    admitted typed concrete function references `(ref $t)` / `(ref null $t)`,
+    non-nullable `funcref`/`externref`/`exnref`, explicit table initializers
+    (`0x40 0x00`), and 64-bit `table64` limits (`0x04`/`0x05`) across static
+    and dynamic tables, active element segments (`i64.const` offsets), globals,
+    locals, params, and block signatures.
+  - Lowered `call_ref` (`0x14`), `return_call_ref` (`0x15`, O(1) tail-call
+    frame reuse), `call_ref` inside `try_table` (preserving `catch`/`catch_all`
+    unwind while trapping `TRAP_INDIRECT_CALL` on null without catching),
+    `ref.as_non_null` (`0xd4`), `br_on_null` (`0xd5`), `br_on_non_null`
+    (`0xd6`), and full 64-bit `table64` indexing/bounds checks (`call_indirect`,
+    `return_call_indirect`, `table.get`/`set`/`size`/`grow`/`fill`/`init`/
+    `copy` including 64↔32 mixed table copies) with zero new IR op variants.
+  - Bumped incremental cache versions (`x64-inc` v10, `a64-inc` v4→v5) and
+    added a 17-case differential oracle (`oracle_wasm3_table64_and_function_references`
+    + `a64_wasm3_table64_funcref` + native ARM64 `ET_EXEC` check in
+    `tests/aarch64_native.rs`) verifying high-32-bit `0x1_0000_0000` OOB traps,
+    100,000-deep `return_call_ref` tail recursion, and `call_ref` + `try_table`.
+- **Branchy-loop & Goose codegen sweep (`--backend x64` & shared SSA IR)**:
+  - Extended `Op::AddScaled` with signed `disp: i32` (folding `(i << 1) + 1`
+    into a single 1-cycle `lea` / AArch64 shifted `add`+`add`), raised inline
+    `MemCopyConst`/`MemFillConst` cap from `64 -> 128` bytes with constant-zero
+    AVX2/SSE2/NEON fast paths, upgraded `forward_loop_carried_scaled_loads` to
+    split `Term::CmpBranch` preheaders, added late `thread_empty_branch_trampolines`
+    + 1-hop `resolve_merge` diamond linearization, and added vote-counted peer
+    coalescing with `fv`-first `CmpSelect` peer priority.
+  - Added Goose slice-unpack/wrap folding, redundant no-op `GlobalSet` elision,
+    narrow-store mask elision, nested mask folding, and `share_const_div_rem`.
+  - Cut `heapsort_i32` from `49.0 µs` to **`32.29 µs`** (**`1.64×`** faster
+    than Rust `-O3` at `52.92 µs`, **`1.69×`** faster than Clang `-O2` at
+    `54.68 µs`, and beating Wasmtime `49.0.3` at `32.43 µs` — winning **6/6**
+    kernels vs. Wasmtime at **`6.69×`** geomean, **`5.18×`** vs. V8,
+    **`6.50×`** vs. Clang `-O2`, **`3.67×`** vs. Rust `-O3`) and swept all 8
+    standalone Goose `suite2` workloads over Rust `-O3`.
+  - On the `5.91 MiB / 4,523`-function `gdev` SIMD app: **`151.3 ms`** cold
+    compile vs. Wasmtime `377.1 ms` (**`2.49×`**), **`23.2 ms`** 1-fn edit vs.
+    `369.7 ms` (**`15.9×`**), **`0.034 ms`** warm `.so` load vs. `1.84 ms`
+    (**`54×`**), **`8.31 ms`** warm CLI cache hit, and **`15.4%`** smaller
+    (`8.03 MiB` vs. `9.49 MiB`).
+- **AArch64 regalloc, layout, & prologue parity (`tools/wtime-aot/src/aarch64`)**:
+  - Added `A64Loc::Remat` GP constant rematerialization, 2-pass hot-fallthrough
+    trace block layout with triangle-`if` diamond linearization and cold trap
+    sinking, loop-depth-weighted spill eviction, ABI register hints +
+    vote-counted coalescing peer hints, `Term::BranchIf` (`cbz`) and
+    `Term::CmpBranch` (`b.cond` invert) fallthrough inversion, constant-zero
+    NEON `movi` `MemFillConst` fast path, and zero-frame leaf prologue
+    stack-check elision with prospective `frame_size` stack checking.
+- **CI & automated dual-arch GitHub Releases**:
+  - Fixed ARM64 test compilation (`x64/tests_oracle.rs`, `x64/runtime.rs`,
+    `cgen.rs`) and `conformance` checkout `fetch-depth: 0` in
+    `.github/workflows/ci.yml` (`fail-fast: false` on `wtime-aot` matrix).
+  - Added `.github/workflows/release.yml` to build, strip, checksum
+    (`SHA256SUMS.txt`), and publish both `x86_64-unknown-linux-gnu` and
+    `aarch64-unknown-linux-gnu` tarballs for `wtime-aot` and `wtime-cli` on
+    `v*` tags.
+
 ## [0.1.4] - 2026-11-25
 
 Full passive & declarative bulk memory/table support (`memory.init`, `data.drop`,

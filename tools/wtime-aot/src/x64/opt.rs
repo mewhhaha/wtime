@@ -2617,11 +2617,13 @@ fn clone_callee_into_caller(
                     base,
                     idx,
                     shift,
+                    disp,
                 } => Op::AddScaled {
                     is64,
                     base: map_v(base),
                     idx: map_v(idx),
                     shift,
+                    disp,
                 },
                 Op::I32Cmp(o, a, b) => Op::I32Cmp(o, map_v(a), map_v(b)),
                 Op::I32CmpImm(o, a, imm) => Op::I32CmpImm(o, map_v(a), imm),
@@ -5601,6 +5603,7 @@ pub struct Stage2Scratch {
     as_add_fold_uses: Vec<u32>,
     bool01_stamp: Vec<u32>,
     bool01_epoch: u32,
+    gvn_def_op: Vec<Option<Op>>,
 }
 
 impl Default for Stage2Scratch {
@@ -5632,6 +5635,7 @@ impl Default for Stage2Scratch {
             as_add_fold_uses: Vec::new(),
             bool01_stamp: Vec::new(),
             bool01_epoch: 0,
+            gvn_def_op: Vec::new(),
         }
     }
 }
@@ -5665,6 +5669,7 @@ struct GvnState<'a> {
     tables: HashMap<(u32, Val), (u32, Val)>,
     mem_facts: Vec<MemFact>,
     undo: Vec<UndoEntry>,
+    def_op: Vec<Option<Op>>,
 
     grow_epoch: u32,
     glob_epoch: u32,
@@ -6328,6 +6333,12 @@ fn run_dom_gvn_and_bce_with_scratch(
     if undo.capacity() > 16_384 && n_vals <= 4096 {
         undo.shrink_to(4096);
     }
+    let mut def_op = std::mem::take(&mut scratch.gvn_def_op);
+    def_op.clear();
+    if def_op.capacity() > 16_384 && n_vals <= 4096 {
+        def_op.shrink_to(4096);
+    }
+    def_op.resize(n_vals, None);
 
     let mut st = GvnState {
         module,
@@ -6357,6 +6368,7 @@ fn run_dom_gvn_and_bce_with_scratch(
         tables,
         mem_facts,
         undo,
+        def_op,
         grow_epoch: 1,
         glob_epoch: 1,
         tbl_epoch: 1,
@@ -6469,12 +6481,12 @@ fn run_dom_gvn_and_bce_with_scratch(
                         rewrite_op_uses(&mut inst.op, &mut pool, &st.subst);
                     }
 
-                    // Promote newly-known constant `MemCopy`/`MemFill` lengths (<= 64) after inlining/GVN.
+                    // Promote newly-known constant `MemCopy`/`MemFill` lengths (<= 128) after inlining/GVN.
                     if !module.memory64 {
                         match inst.op {
                             Op::MemCopy { dst, src, len } => {
                                 if let Some(c) = st.const32[len.0 as usize]
-                                    && (c as u32) <= 64
+                                    && (c as u32) <= 128
                                 {
                                     inst.op = Op::MemCopyConst {
                                         dst,
@@ -6488,7 +6500,7 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             Op::MemFill { dst, val, len } => {
                                 if let Some(c) = st.const32[len.0 as usize]
-                                    && (c as u32) <= 64
+                                    && (c as u32) <= 128
                                 {
                                     inst.op = Op::MemFillConst {
                                         dst,
@@ -6511,6 +6523,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 continue;
                             }
                             st.record_checked(*addr, *end_off);
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6565,6 +6580,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     _ => {}
                                 }
                             }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6575,6 +6593,28 @@ fn run_dom_gvn_and_bce_with_scratch(
                             offset,
                             checked,
                         } => {
+                            // Narrow stores (`i32.store8`, `i32.store16`) already truncate to 8/16 bits.
+                            match *kind {
+                                StoreKind::I8 => {
+                                    if let Some(Op::I32BinImm(IntBinOp::And, x, m)) =
+                                        st.def_op[val.0 as usize]
+                                        && (m & 0xff) == 0xff
+                                    {
+                                        *val = x;
+                                        ir_mutated = true;
+                                    }
+                                }
+                                StoreKind::I16 => {
+                                    if let Some(Op::I32BinImm(IntBinOp::And, x, m)) =
+                                        st.def_op[val.0 as usize]
+                                        && (m & 0xffff) == 0xffff
+                                    {
+                                        *val = x;
+                                        ir_mutated = true;
+                                    }
+                                }
+                                _ => {}
+                            }
                             let (na, noff) = st.try_fold_addr(*addr, *offset);
                             if na != *addr || noff != *offset {
                                 *addr = na;
@@ -6603,6 +6643,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 val: *val,
                                 val_ty: ir.val_tys[val.0 as usize],
                             });
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6624,6 +6667,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 *checked = true;
                             }
                             st.record_checked(*addr, end);
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6653,6 +6699,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     .map(|c| u64::from(c as u32).saturating_add(*offset))
                             };
                             st.kill_aliasing_mem_facts(*addr, const_addr, *offset, sz);
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6791,6 +6840,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             st.record_checked(*dst, end);
                             st.record_checked(*src, end);
                             st.clear_mem_facts();
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6803,6 +6855,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             st.record_checked(*dst, end);
                             st.clear_mem_facts();
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6817,6 +6872,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                         | Op::F64x4BinMem { .. }
                         | Op::F64AxpyLoop { .. } => {
                             st.clear_mem_facts();
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6824,6 +6882,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             st.clear_mem_facts();
                             if st.module.fixed32.is_none() || !st.module.extra_memories.is_empty() {
                                 st.grow_epoch = st.grow_epoch.wrapping_add(1);
+                            }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
                             }
                             out_insts.push(inst);
                             continue;
@@ -6842,6 +6903,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 if st.record_undo {
                                     st.undo.push(UndoEntry::MemSize(prev));
                                 }
+                            }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
                             }
                             out_insts.push(inst);
                             continue;
@@ -6867,6 +6931,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     }
                                 }
                             }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6878,10 +6945,22 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 } else {
                                     0
                                 };
+                                // Eliminate redundant no-op `global.set` writing the exact value
+                                // already known to reside in `g` along the dominating path.
+                                if let Some((gep, gv)) = st.globals[gi]
+                                    && gep == ep
+                                    && gv == *v
+                                {
+                                    ir_mutated = true;
+                                    continue;
+                                }
                                 let prev = st.globals[gi].replace((ep, *v));
                                 if st.record_undo {
                                     st.undo.push(UndoEntry::Global(*g, prev));
                                 }
+                            }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
                             }
                             out_insts.push(inst);
                             continue;
@@ -6905,6 +6984,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     st.undo.push(UndoEntry::Table(tkey, prev));
                                 }
                             }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6914,6 +6996,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                         | Op::TableGrow { .. }
                         | Op::TableFill { .. } => {
                             st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6934,6 +7019,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             {
                                 st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
                             }
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6944,6 +7032,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             st.glob_epoch = st.glob_epoch.wrapping_add(1);
                             st.tbl_epoch = st.tbl_epoch.wrapping_add(1);
+                            if let Some(res) = inst.res {
+                                st.def_op[res.0 as usize] = Some(inst.op);
+                            }
                             out_insts.push(inst);
                             continue;
                         }
@@ -6970,6 +7061,33 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 if let Some(ca) = st.get_const64(a) {
                                     inst.op = Op::ConstI32(ca as i32);
                                     ir_mutated = true;
+                                } else {
+                                    // Unwrap `(zext32(x) | (hi << 32))` and `wrap(ext32(x))` -> `x`.
+                                    let mut cur = a;
+                                    if let Some(Op::I64Bin(
+                                        IntBinOp::Or | IntBinOp::Xor | IntBinOp::Add,
+                                        x,
+                                        y,
+                                    )) = st.def_op[cur.0 as usize]
+                                    {
+                                        if st.get_const64(y).is_some_and(|c| (c as u32) == 0) {
+                                            cur = x;
+                                            inst.op = Op::I32WrapI64(cur);
+                                            ir_mutated = true;
+                                        } else if st.get_const64(x).is_some_and(|c| (c as u32) == 0)
+                                        {
+                                            cur = y;
+                                            inst.op = Op::I32WrapI64(cur);
+                                            ir_mutated = true;
+                                        }
+                                    }
+                                    if let Some(Op::I64ExtendI32U(x) | Op::I64ExtendI32S(x)) =
+                                        st.def_op[cur.0 as usize]
+                                    {
+                                        st.set_subst(res, x);
+                                        ir_mutated = true;
+                                        continue;
+                                    }
                                 }
                             }
                             Op::I64ExtendI32S(a) => {
@@ -6990,6 +7108,36 @@ fn run_dom_gvn_and_bce_with_scratch(
                                 {
                                     inst.op = Op::ConstI32(v);
                                     ir_mutated = true;
+                                } else if bop == IntBinOp::And {
+                                    match st.def_op[a.0 as usize] {
+                                        Some(Op::I32BinImm(IntBinOp::And, x, m1)) => {
+                                            let m = m1 & imm;
+                                            if m == m1 {
+                                                st.set_subst(res, a);
+                                                ir_mutated = true;
+                                                continue;
+                                            }
+                                            inst.op = Op::I32BinImm(IntBinOp::And, x, m);
+                                            ir_mutated = true;
+                                        }
+                                        Some(Op::Load {
+                                            kind: LoadKind::I32Load8U,
+                                            ..
+                                        }) if (imm & 0xff) == 0xff => {
+                                            st.set_subst(res, a);
+                                            ir_mutated = true;
+                                            continue;
+                                        }
+                                        Some(Op::Load {
+                                            kind: LoadKind::I32Load16U,
+                                            ..
+                                        }) if (imm & 0xffff) == 0xffff => {
+                                            st.set_subst(res, a);
+                                            ir_mutated = true;
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             Op::I64BinImm(bop, a, imm) => {
@@ -7001,6 +7149,38 @@ fn run_dom_gvn_and_bce_with_scratch(
                                     };
                                     if let Some(v) = fold_i64_bin_const(bop, ca, cb) {
                                         inst.op = Op::ConstI64(v);
+                                        ir_mutated = true;
+                                    }
+                                } else if bop == IntBinOp::And {
+                                    if let Some(Op::I64BinImm(IntBinOp::And, x, m1)) =
+                                        st.def_op[a.0 as usize]
+                                    {
+                                        let m = m1 & imm;
+                                        if m == m1 {
+                                            st.set_subst(res, a);
+                                            ir_mutated = true;
+                                            continue;
+                                        }
+                                        inst.op = Op::I64BinImm(IntBinOp::And, x, m);
+                                        ir_mutated = true;
+                                    }
+                                } else if bop == IntBinOp::ShrU
+                                    && ((imm as u32) & 63) >= 32
+                                    && let Some(Op::I64Bin(IntBinOp::Or | IntBinOp::Xor, x, y)) =
+                                        st.def_op[a.0 as usize]
+                                {
+                                    let sh = (imm as u32) & 63;
+                                    if matches!(st.def_op[x.0 as usize], Some(Op::I64ExtendI32U(_)))
+                                        && let Some(c) = st.get_const64(y)
+                                    {
+                                        inst.op = Op::ConstI64(((c as u64) >> sh) as i64);
+                                        ir_mutated = true;
+                                    } else if matches!(
+                                        st.def_op[y.0 as usize],
+                                        Some(Op::I64ExtendI32U(_))
+                                    ) && let Some(c) = st.get_const64(x)
+                                    {
+                                        inst.op = Op::ConstI64(((c as u64) >> sh) as i64);
                                         ir_mutated = true;
                                     }
                                 }
@@ -7146,6 +7326,19 @@ fn run_dom_gvn_and_bce_with_scratch(
                                             }
                                             _ => {}
                                         }
+                                    } else if matches!(
+                                        bop,
+                                        IntBinOp::Shl
+                                            | IntBinOp::ShrS
+                                            | IntBinOp::ShrU
+                                            | IntBinOp::Rotl
+                                            | IntBinOp::Rotr
+                                    ) && let Some(Op::I32BinImm(IntBinOp::And, c, m)) =
+                                        st.def_op[b.0 as usize]
+                                        && (m & 31) == 31
+                                    {
+                                        inst.op = Op::I32Bin(bop, a, c);
+                                        ir_mutated = true;
                                     } else if matches!(bop, IntBinOp::DivU | IntBinOp::RemU)
                                         && st.non_zero[b.0 as usize]
                                     {
@@ -7315,6 +7508,19 @@ fn run_dom_gvn_and_bce_with_scratch(
                                             }
                                             _ => {}
                                         }
+                                    } else if matches!(
+                                        bop,
+                                        IntBinOp::Shl
+                                            | IntBinOp::ShrS
+                                            | IntBinOp::ShrU
+                                            | IntBinOp::Rotl
+                                            | IntBinOp::Rotr
+                                    ) && let Some(Op::I64BinImm(IntBinOp::And, c, m)) =
+                                        st.def_op[b.0 as usize]
+                                        && (m & 63) == 63
+                                    {
+                                        inst.op = Op::I64Bin(bop, a, c);
+                                        ir_mutated = true;
                                     } else if matches!(bop, IntBinOp::DivU | IntBinOp::RemU)
                                         && st.non_zero[b.0 as usize]
                                     {
@@ -7486,6 +7692,9 @@ fn run_dom_gvn_and_bce_with_scratch(
                             }
                             _ => {}
                         }
+                    }
+                    if let Some(res) = inst.res {
+                        st.def_op[res.0 as usize] = Some(inst.op);
                     }
                     out_insts.push(inst);
                 }
@@ -7662,6 +7871,7 @@ fn run_dom_gvn_and_bce_with_scratch(
     scratch.tables = st.tables;
     scratch.mem_facts = st.mem_facts;
     scratch.undo = st.undo;
+    scratch.gvn_def_op = st.def_op;
     scratch.fn_written_globals = st.fn_written_globals;
     scratch.out_insts = out_insts;
     Ok((
@@ -10825,12 +11035,23 @@ pub fn optimize_func_stage2_with_scratch(
             post_rot_changed = true;
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
         }
-        let mut late_folded = !module.memory64 && fold_scaled_mem_addrs(ir, &non_wrap_scaled);
+        let scaled_folded = !module.memory64 && fold_scaled_mem_addrs(ir, &non_wrap_scaled);
+        let mut late_folded = scaled_folded;
+        if share_const_div_rem(ir, &dom) {
+            late_folded = true;
+        }
+        if scaled_folded && forward_loop_carried_scaled_loads(ir, &dom, module) {
+            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
+            late_folded = true;
+        }
         if fold_add_scaled(ir, scratch) {
             late_folded = true;
         }
         if late_folded {
             optimize_ir_with_budget_and_scratch(ir, budget, &mut scratch.opt_ir)?;
+        }
+        if thread_empty_branch_trampolines(ir) {
+            rebuild_cfg_and_prune_into(ir, &mut dom, budget, &mut cfg_sc)?;
         }
         let _ = post_rot_changed;
         Ok(())
@@ -10840,6 +11061,105 @@ pub fn optimize_func_stage2_with_scratch(
     scratch.cfg_scratch = cfg_sc;
     scratch.prune_scratch = prune_sc;
     res
+}
+
+/// Late CFG cleanup: threads single-predecessor empty jump trampolines off `BranchIf`/`CmpBranch`
+/// edges (`cur -> tramp(empty) -> m(m_args)` -> `cur -> m(m_args)` when `m != other`), exposing
+/// true triangle `if` shapes to `regalloc` without perturbing earlier loop pattern matchers.
+fn thread_empty_branch_trampolines(ir: &mut IrFunc) -> bool {
+    let n = ir.blocks.len();
+    if n <= 2 {
+        return false;
+    }
+    let mut edge_in = vec![0u32; n];
+    for bb in &ir.blocks {
+        bb.term.for_each_succ(&ir.br_tables, |s| {
+            if (s.0 as usize) < n {
+                edge_in[s.0 as usize] = edge_in[s.0 as usize].saturating_add(1);
+            }
+        });
+    }
+    let mut dead = vec![false; n];
+    let mut changed = false;
+    for bi in 0..n {
+        if dead[bi] {
+            continue;
+        }
+        let (mut then_bb, mut then_args, mut else_bb, mut else_args) = match ir.blocks[bi].term {
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => (then_bb, then_args, else_bb, else_args),
+            _ => continue,
+        };
+        let mut updated = false;
+        for is_then in [true, false] {
+            let (tgt, t_args, other) = if is_then {
+                (&mut then_bb, &mut then_args, else_bb)
+            } else {
+                (&mut else_bb, &mut else_args, then_bb)
+            };
+            let ti = tgt.0 as usize;
+            if t_args.len == 0
+                && ti != 0
+                && ti != bi
+                && !dead[ti]
+                && edge_in[ti] == 1
+                && ir.blocks[ti].params.is_empty()
+                && ir.blocks[ti].insts.is_empty()
+                && let Term::Jump {
+                    target: real_t,
+                    args: real_args,
+                } = ir.blocks[ti].term
+                && real_t.0 as usize != ti
+                && real_t != other
+            {
+                *tgt = real_t;
+                *t_args = real_args;
+                ir.blocks[ti].term = Term::Unreachable;
+                dead[ti] = true;
+                edge_in[ti] = 0;
+                edge_in[real_t.0 as usize] = edge_in[real_t.0 as usize].saturating_add(1);
+                updated = true;
+                changed = true;
+            }
+        }
+        if updated {
+            match &mut ir.blocks[bi].term {
+                Term::BranchIf {
+                    then_bb: tb,
+                    then_args: ta,
+                    else_bb: eb,
+                    else_args: ea,
+                    ..
+                }
+                | Term::CmpBranch {
+                    then_bb: tb,
+                    then_args: ta,
+                    else_bb: eb,
+                    else_args: ea,
+                    ..
+                } => {
+                    *tb = then_bb;
+                    *ta = then_args;
+                    *eb = else_bb;
+                    *ea = else_args;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    changed
 }
 
 /// Late addressing-mode folding: rewrites already-checked Wasm32 `Load`/`Store` ops whose address
@@ -10949,18 +11269,574 @@ fn match_non_wrap_scaled_addr(
     safe.then_some((base, 1u8 << sh))
 }
 
-/// Late scaled-addition folding: rewrites `base + (idx << {1,2,3})` and `base + (idx * {2,4,8})`
-/// (for both `i32` and `i64`) into `Op::AddScaled`, collapsing `wrap + shl + add` array-indexing
-/// sequences into a single 1-cycle `lea` (x64) / `add rd, rn, rm, lsl #k` (AArch64).
-/// Only folds when every use of the shifted value is a foldable `Add`, guaranteeing strictly
-/// fewer instructions and zero live-range inflation.
+/// Shares a dominating constant-divisor quotient (`q = a / c`) with a subsequent constant-divisor
+/// remainder (`a % c` -> `a - q * c`) for non-power-of-two `c != 0, -1`, avoiding a duplicate
+/// 64-bit magic-constant multiply (e.g. `cell / 9` followed by `cell % 9` in grid solvers).
+fn share_const_div_rem(ir: &mut IrFunc, dom: &CfgDom) -> bool {
+    let mut has_div = false;
+    let mut has_rem = false;
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            match inst.op {
+                Op::I32BinImm(IntBinOp::DivS, _, c) | Op::I64BinImm(IntBinOp::DivS, _, c)
+                    if c != 0 && c != -1 =>
+                {
+                    has_div = true;
+                }
+                Op::I32BinImm(IntBinOp::RemS, _, c) | Op::I64BinImm(IntBinOp::RemS, _, c)
+                    if c != 0 && c != -1 && !(c > 0 && (c as u32).is_power_of_two()) =>
+                {
+                    has_rem = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if !has_div || !has_rem || dom.rpo.is_empty() {
+        return false;
+    }
+    let mut divs: HashMap<(bool, Val, i32), Val> = fx_map();
+    let mut undo: Vec<((bool, Val, i32), Option<Val>)> = Vec::new();
+    enum Act {
+        Enter(u32),
+        Exit(usize),
+    }
+    let mut stack = vec![Act::Enter(0)];
+    let mut changed = false;
+    while let Some(act) = stack.pop() {
+        match act {
+            Act::Exit(mark) => {
+                while undo.len() > mark {
+                    let (k, prev) = undo.pop().unwrap();
+                    if let Some(v) = prev {
+                        divs.insert(k, v);
+                    } else {
+                        divs.remove(&k);
+                    }
+                }
+            }
+            Act::Enter(bid) => {
+                let mark = undo.len();
+                stack.push(Act::Exit(mark));
+                let old_insts = std::mem::take(&mut ir.blocks[bid as usize].insts);
+                let mut new_insts = Vec::with_capacity(old_insts.len());
+                for mut inst in old_insts {
+                    match inst.op {
+                        Op::I32BinImm(IntBinOp::DivS, a, c) if c != 0 && c != -1 => {
+                            if let Some(r) = inst.res {
+                                let prev = divs.insert((false, a, c), r);
+                                undo.push(((false, a, c), prev));
+                            }
+                            new_insts.push(inst);
+                        }
+                        Op::I64BinImm(IntBinOp::DivS, a, c) if c != 0 && c != -1 => {
+                            if let Some(r) = inst.res {
+                                let prev = divs.insert((true, a, c), r);
+                                undo.push(((true, a, c), prev));
+                            }
+                            new_insts.push(inst);
+                        }
+                        Op::I32BinImm(IntBinOp::RemS, a, c)
+                            if c != 0 && c != -1 && !(c > 0 && (c as u32).is_power_of_two()) =>
+                        {
+                            if let Some(&q) = divs.get(&(false, a, c)) {
+                                let prod = Val(ir.val_tys.len() as u32);
+                                ir.val_tys.push(Ty::I32);
+                                new_insts.push(Inst {
+                                    res: Some(prod),
+                                    op: Op::I32BinImm(IntBinOp::Mul, q, c),
+                                });
+                                inst.op = Op::I32Bin(IntBinOp::Sub, a, prod);
+                                changed = true;
+                            }
+                            new_insts.push(inst);
+                        }
+                        Op::I64BinImm(IntBinOp::RemS, a, c)
+                            if c != 0 && c != -1 && !(c > 0 && (c as u32).is_power_of_two()) =>
+                        {
+                            if let Some(&q) = divs.get(&(true, a, c)) {
+                                let prod = Val(ir.val_tys.len() as u32);
+                                ir.val_tys.push(Ty::I64);
+                                new_insts.push(Inst {
+                                    res: Some(prod),
+                                    op: Op::I64BinImm(IntBinOp::Mul, q, c),
+                                });
+                                inst.op = Op::I64Bin(IntBinOp::Sub, a, prod);
+                                changed = true;
+                            }
+                            new_insts.push(inst);
+                        }
+                        _ => new_insts.push(inst),
+                    }
+                }
+                ir.blocks[bid as usize].insts = new_insts;
+                for &child in dom.dom_children(bid).iter().rev() {
+                    stack.push(Act::Enter(child));
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Loop-carried store-to-load forwarding for proven-checked `Op::LoadScaled` in natural loops.
+/// When a loop header (or its unique immediate body block before any write/call) loads
+/// `v = LoadScaled(kind, p, scale, offset)` indexed by header param `p`, every backedge latch's
+/// last memory-writing op stores `v` right back to `StoreScaled(sk, next_p, v, scale, offset)`
+/// where `next_p` is the backedge value of `p`, and `init_p` is provably in-bounds in the
+/// dominating outside preheader, hoist the load into the preheader so `v` becomes a loop-invariant
+/// register — eliminating per-iteration store-to-load forwarding (STLF) stalls (e.g. binary heapsort).
+fn forward_loop_carried_scaled_loads(ir: &mut IrFunc, dom: &CfgDom, module: &X64Module) -> bool {
+    if module.memory64 || ir.blocks.len() <= 1 {
+        return false;
+    }
+    let mem_min_bytes = module
+        .memory
+        .map_or(0u64, |(min_p, _)| min_p.saturating_mul(65_536));
+    if mem_min_bytes == 0 {
+        return false;
+    }
+
+    let is_mem_write_or_call = |op: &Op| -> bool {
+        matches!(
+            op,
+            Op::Store { .. }
+                | Op::StoreScaled { .. }
+                | Op::StoreMem { .. }
+                | Op::V128StoreLane { .. }
+                | Op::V128StoreLaneMem { .. }
+                | Op::MemCopy { .. }
+                | Op::MemCopyIdx { .. }
+                | Op::MemCopyConst { .. }
+                | Op::MemFill { .. }
+                | Op::MemFillIdx { .. }
+                | Op::MemFillConst { .. }
+                | Op::MemInit { .. }
+                | Op::MemGrow(_)
+                | Op::MemGrowIdx { .. }
+                | Op::MemByteBlur3Div { .. }
+                | Op::F64x4BinMem { .. }
+                | Op::F64AxpyLoop { .. }
+                | Op::Call { .. }
+                | Op::CallIndirect { .. }
+        )
+    };
+    let matching_store_kind = |lk: LoadKind, sk: StoreKind| -> bool {
+        matches!(
+            (lk, sk),
+            (LoadKind::I32, StoreKind::I32)
+                | (LoadKind::I64, StoreKind::I64)
+                | (LoadKind::F32, StoreKind::F32)
+                | (LoadKind::F64, StoreKind::F64)
+        )
+    };
+
+    let n_vals = ir.val_tys.len();
+    let mut const32: Vec<Option<i32>> = vec![None; n_vals];
+    for bb in &ir.blocks {
+        for inst in &bb.insts {
+            if let (Some(r), Op::ConstI32(c)) = (inst.res, inst.op) {
+                const32[r.0 as usize] = Some(c);
+            }
+        }
+    }
+
+    let edge_args_to = |ir: &IrFunc, from: u32, to: u32| -> Option<ValRange> {
+        match ir.blocks[from as usize].term {
+            Term::Jump { target, args } if target.0 == to => Some(args),
+            Term::BranchIf {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            }
+            | Term::CmpBranch {
+                then_bb,
+                then_args,
+                else_bb,
+                else_args,
+                ..
+            } => {
+                if then_bb.0 == to && else_bb.0 != to {
+                    Some(then_args)
+                } else if else_bb.0 == to && then_bb.0 != to {
+                    Some(else_args)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+
+    // Returns `(safe, needs_edge_split)`.
+    let is_safe_in_preheader = |ir: &IrFunc,
+                                pre: u32,
+                                hdr: u32,
+                                init_p: Val,
+                                scale: u8,
+                                offset: u64,
+                                width: u64|
+     -> (bool, bool) {
+        if let Some(c) = const32[init_p.0 as usize] {
+            let end = u64::from(c as u32)
+                .saturating_mul(u64::from(scale))
+                .saturating_add(offset)
+                .saturating_add(width);
+            if end <= mem_min_bytes {
+                return (true, false);
+            }
+        }
+        // Check dominating `init_p < bound` (either directly on `pre -> hdr` or `idom(pre) -> pre`)
+        // followed by `bound <= max_elems`.
+        let edge_lt_bound = |parent: u32, child: u32| -> Option<(u32, Val)> {
+            if let Term::CmpBranch {
+                kind: CmpBranchKind::I32(cop),
+                a,
+                b,
+                then_bb,
+                else_bb,
+                ..
+            } = ir.blocks[parent as usize].term
+            {
+                let on_then = then_bb.0 == child && else_bb.0 != child;
+                let on_else = else_bb.0 == child && then_bb.0 != child;
+                if !on_then && !on_else {
+                    return None;
+                }
+                let eff = if on_then { cop } else { cop.invert_int() };
+                match eff {
+                    CmpOp::LtU if a == init_p => return Some((parent, b)),
+                    CmpOp::GtU if b == init_p => return Some((parent, a)),
+                    _ => {}
+                }
+            }
+            None
+        };
+        let check_bound_dom = |start_bb: u32, bound: Val| -> bool {
+            let mut cur = start_bb;
+            for _ in 0..3 {
+                let p = dom.idom[cur as usize];
+                if p == u32::MAX || p == cur {
+                    break;
+                }
+                if let Term::CmpBranch {
+                    kind: CmpBranchKind::I32Imm(cop, imm),
+                    a,
+                    then_bb,
+                    else_bb,
+                    ..
+                } = ir.blocks[p as usize].term
+                    && a == bound
+                {
+                    let on_then = then_bb.0 == cur && else_bb.0 != cur;
+                    let on_else = else_bb.0 == cur && then_bb.0 != cur;
+                    if on_then || on_else {
+                        let eff = if on_then { cop } else { cop.invert_int() };
+                        let max_bound = match eff {
+                            CmpOp::LeU => Some(u64::from(imm as u32)),
+                            CmpOp::LtU => Some(u64::from(imm as u32).saturating_sub(1)),
+                            _ => None,
+                        };
+                        if let Some(mb) = max_bound
+                            && mb > 0
+                            && mb.saturating_mul(u64::from(scale)).saturating_add(offset)
+                                <= mem_min_bytes
+                            && width <= u64::from(scale)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                cur = p;
+            }
+            false
+        };
+        // Case 2a: `pre -> hdr` itself is the `init_p < bound` branch (needs edge split!).
+        if let Some((g_bb, bound)) = edge_lt_bound(pre, hdr)
+            && check_bound_dom(g_bb, bound)
+        {
+            return (true, true);
+        }
+        // Case 2b: `idom(pre) -> pre` proved `init_p < bound`.
+        let p_pre = dom.idom[pre as usize];
+        if p_pre != u32::MAX
+            && p_pre != pre
+            && let Some((g_bb, bound)) = edge_lt_bound(p_pre, pre)
+            && check_bound_dom(g_bb, bound)
+        {
+            return (true, false);
+        }
+        (false, false)
+    };
+
+    let mut replacements: Vec<(Val, Val)> = Vec::new();
+    let mut changed = false;
+
+    let orig_n_blocks = ir.blocks.len() as u32;
+    for hdr in 0..orig_n_blocks {
+        if !ir.blocks[hdr as usize].is_loop_header || ir.blocks[hdr as usize].params.is_empty() {
+            continue;
+        }
+        let preds = dom.preds(hdr);
+        let mut pre_opt: Option<u32> = None;
+        let mut multi_outside = false;
+        let mut latches: Vec<u32> = Vec::new();
+        for &p in preds {
+            if dom.dominates(hdr, p) {
+                latches.push(p);
+            } else if pre_opt.is_none() {
+                pre_opt = Some(p);
+            } else {
+                multi_outside = true;
+            }
+        }
+        let Some(pre) = pre_opt else {
+            continue;
+        };
+        if multi_outside || latches.is_empty() || !dom.dominates(pre, hdr) {
+            continue;
+        }
+        let Some(pre_args) = edge_args_to(ir, pre, hdr) else {
+            continue;
+        };
+        let pre_is_jump = matches!(ir.blocks[pre as usize].term, Term::Jump { .. });
+
+        // Collect natural loop body blocks.
+        let mut body_set: HashSet<u32> = fx_set();
+        body_set.insert(hdr);
+        let mut wl = latches.clone();
+        while let Some(u) = wl.pop() {
+            if body_set.insert(u) {
+                for &p in dom.preds(u) {
+                    if !body_set.contains(&p) {
+                        wl.push(p);
+                    }
+                }
+            }
+        }
+
+        // Candidate load block: `hdr`, or `hdr`'s unique single-pred in-loop body block when `hdr`
+        // itself performs no memory writes/calls.
+        let mut cand_bbs: Vec<u32> = vec![hdr];
+        let hdr_pure = !ir.blocks[hdr as usize]
+            .insts
+            .iter()
+            .any(|ins| is_mem_write_or_call(&ins.op));
+        if hdr_pure {
+            let mut in_loop_succs = Vec::new();
+            ir.blocks[hdr as usize]
+                .term
+                .for_each_succ(&ir.br_tables, |s| {
+                    if s.0 != hdr && body_set.contains(&s.0) && !in_loop_succs.contains(&s.0) {
+                        in_loop_succs.push(s.0);
+                    }
+                });
+            if in_loop_succs.len() == 1 {
+                let b = in_loop_succs[0];
+                if dom.preds(b) == [hdr] && ir.blocks[b as usize].params.is_empty() {
+                    cand_bbs.push(b);
+                }
+            }
+        }
+
+        struct HoistedLoad {
+            lb: u32,
+            ii: usize,
+            load_res: Val,
+            kind: LoadKind,
+            init_p: Val,
+            scale: u8,
+            offset: u64,
+            do_split: bool,
+        }
+        let mut hoisted: Option<HoistedLoad> = None;
+        'find_load: for &lb in &cand_bbs {
+            if !latches.iter().all(|&l| dom.dominates(lb, l)) {
+                continue;
+            }
+            for (ii, inst) in ir.blocks[lb as usize].insts.iter().enumerate() {
+                if is_mem_write_or_call(&inst.op) {
+                    break;
+                }
+                let (
+                    Some(load_res),
+                    Op::LoadScaled {
+                        kind,
+                        addr: p,
+                        scale,
+                        offset,
+                    },
+                ) = (inst.res, inst.op)
+                else {
+                    continue;
+                };
+                if !matches!(
+                    kind,
+                    LoadKind::I32 | LoadKind::I64 | LoadKind::F32 | LoadKind::F64
+                ) {
+                    continue;
+                }
+                let Some(pi) = ir.blocks[hdr as usize].params.iter().position(|&x| x == p) else {
+                    continue;
+                };
+                // Verify every backedge latch ends its memory effects with `StoreScaled(next_p, load_res)`.
+                let all_latches_match = latches.iter().all(|&latch| {
+                    let Some(l_args) = edge_args_to(ir, latch, hdr) else {
+                        return false;
+                    };
+                    let next_p = ir.pool_slice(l_args)[pi];
+                    for ins in ir.blocks[latch as usize].insts.iter().rev() {
+                        if is_mem_write_or_call(&ins.op) {
+                            return matches!(
+                                ins.op,
+                                Op::StoreScaled {
+                                    kind: sk,
+                                    addr,
+                                    val,
+                                    scale: ss,
+                                    offset: soff,
+                                } if matching_store_kind(kind, sk)
+                                    && addr == next_p
+                                    && val == load_res
+                                    && ss == scale
+                                    && soff == offset
+                            );
+                        }
+                    }
+                    false
+                });
+                if !all_latches_match {
+                    continue;
+                }
+                let init_p = ir.pool_slice(pre_args)[pi];
+                let (safe, needs_split) =
+                    is_safe_in_preheader(ir, pre, hdr, init_p, scale, offset, kind.bytes());
+                if !safe {
+                    continue;
+                }
+                hoisted = Some(HoistedLoad {
+                    lb,
+                    ii,
+                    load_res,
+                    kind,
+                    init_p,
+                    scale,
+                    offset,
+                    do_split: needs_split || !pre_is_jump,
+                });
+                break 'find_load;
+            }
+        }
+
+        if let Some(HoistedLoad {
+            lb,
+            ii,
+            load_res,
+            kind,
+            init_p,
+            scale,
+            offset,
+            do_split,
+        }) = hoisted
+        {
+            let init_v = Val(ir.val_tys.len() as u32);
+            ir.val_tys.push(ir.val_tys[load_res.0 as usize]);
+            let load_inst = Inst {
+                res: Some(init_v),
+                op: Op::LoadScaled {
+                    kind,
+                    addr: init_p,
+                    scale,
+                    offset,
+                },
+            };
+            if do_split {
+                let split_id = BlockId(ir.blocks.len() as u32);
+                let mut retargeted = false;
+                match &mut ir.blocks[pre as usize].term {
+                    Term::BranchIf {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    }
+                    | Term::CmpBranch {
+                        then_bb,
+                        then_args,
+                        else_bb,
+                        else_args,
+                        ..
+                    } => {
+                        if then_bb.0 == hdr && else_bb.0 != hdr {
+                            *then_bb = split_id;
+                            *then_args = ValRange::EMPTY;
+                            retargeted = true;
+                        } else if else_bb.0 == hdr && then_bb.0 != hdr {
+                            *else_bb = split_id;
+                            *else_args = ValRange::EMPTY;
+                            retargeted = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if !retargeted {
+                    ir.val_tys.pop();
+                    continue;
+                }
+                ir.blocks.push(Block {
+                    params: Vec::new(),
+                    insts: vec![load_inst],
+                    term: Term::Jump {
+                        target: BlockId(hdr),
+                        args: pre_args,
+                    },
+                    preds: 1,
+                    is_loop_header: false,
+                });
+            } else {
+                ir.blocks[pre as usize].insts.push(load_inst);
+            }
+            ir.blocks[lb as usize].insts.remove(ii);
+            replacements.push((load_res, init_v));
+            changed = true;
+        }
+    }
+
+    if !replacements.is_empty() {
+        let mut subst: Vec<Val> = (0..ir.val_tys.len() as u32).map(Val).collect();
+        for (old_v, new_v) in replacements {
+            subst[old_v.0 as usize] = new_v;
+        }
+        let mut pool = std::mem::take(&mut ir.val_pool);
+        for bb in &mut ir.blocks {
+            for inst in &mut bb.insts {
+                rewrite_op_uses(&mut inst.op, &mut pool, &subst);
+            }
+            rewrite_term_uses(&mut bb.term, &mut pool, &ir.br_tables, &subst);
+        }
+        ir.val_pool = pool;
+    }
+    changed
+}
+
+/// Late scaled-addition folding: rewrites `base + (idx << {1,2,3})`, `base + (idx * {2,4,8})`,
+/// `(x << 1) + disp`, and `AddScaled(..., 0) + disp` (for both `i32` and `i64`) into `Op::AddScaled`,
+/// collapsing `wrap + shl + add + disp` indexing sequences into a single 1-cycle `lea` on x64
+/// (and shifted add on AArch64). Only folds when every use of the shifted/intermediate value is
+/// foldable, guaranteeing strictly fewer instructions and zero live-range inflation.
 fn fold_add_scaled(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
     let mut has_add = false;
     let mut has_scale = false;
     for bb in &ir.blocks {
         for inst in &bb.insts {
             match inst.op {
-                Op::I32Bin(IntBinOp::Add, ..) | Op::I64Bin(IntBinOp::Add, ..) => has_add = true,
+                Op::I32Bin(IntBinOp::Add, ..)
+                | Op::I64Bin(IntBinOp::Add, ..)
+                | Op::I32BinImm(IntBinOp::Add | IntBinOp::Sub, ..)
+                | Op::I64BinImm(IntBinOp::Add | IntBinOp::Sub, ..) => has_add = true,
                 Op::I32BinImm(IntBinOp::Shl, _, imm) if (1..=3).contains(&((imm as u32) & 31)) => {
                     has_scale = true;
                 }
@@ -11028,6 +11904,12 @@ fn fold_add_scaled(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
                         scaled_def[r.0 as usize] =
                             Some((true, x, (imm as u32).trailing_zeros() as u8));
                     }
+                    Op::I32Bin(IntBinOp::Add, a, b) if a == b => {
+                        scaled_def[r.0 as usize] = Some((false, a, 1));
+                    }
+                    Op::I64Bin(IntBinOp::Add, a, b) if a == b => {
+                        scaled_def[r.0 as usize] = Some((true, a, 1));
+                    }
                     _ => {}
                 }
             }
@@ -11072,6 +11954,18 @@ fn fold_add_scaled(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
                             add_fold_uses[sv.0 as usize].saturating_add(1);
                     }
                 }
+                Op::I32BinImm(IntBinOp::Add, sv, _) | Op::I32BinImm(IntBinOp::Sub, sv, _) => {
+                    if let Some((false, _, 1)) = scaled_def[sv.0 as usize] {
+                        add_fold_uses[sv.0 as usize] =
+                            add_fold_uses[sv.0 as usize].saturating_add(1);
+                    }
+                }
+                Op::I64BinImm(IntBinOp::Add, sv, _) | Op::I64BinImm(IntBinOp::Sub, sv, _) => {
+                    if let Some((true, _, 1)) = scaled_def[sv.0 as usize] {
+                        add_fold_uses[sv.0 as usize] =
+                            add_fold_uses[sv.0 as usize].saturating_add(1);
+                    }
+                }
                 _ => {}
             }
         }
@@ -11080,39 +11974,120 @@ fn fold_add_scaled(ir: &mut IrFunc, scratch: &mut Stage2Scratch) -> bool {
     let mut changed = false;
     for bb in &mut ir.blocks {
         for inst in &mut bb.insts {
-            let is64 = match inst.op {
-                Op::I32Bin(IntBinOp::Add, ..) => false,
-                Op::I64Bin(IntBinOp::Add, ..) => true,
-                _ => continue,
-            };
-            let (Op::I32Bin(_, a, b) | Op::I64Bin(_, a, b)) = inst.op else {
-                unreachable!()
-            };
-            let Some((mut base, sv, mut idx, shift)) = pick_scaled(is64, a, b) else {
-                continue;
-            };
-            if add_fold_uses[sv.0 as usize] != use_count[sv.0 as usize] {
-                continue;
-            }
-            if !is64 {
-                if use_count[idx.0 as usize] == 1
-                    && let Some(wide) = def_wrap[idx.0 as usize]
-                {
-                    idx = wide;
+            match inst.op {
+                Op::I32Bin(IntBinOp::Add, a, b) | Op::I64Bin(IntBinOp::Add, a, b) => {
+                    let is64 = matches!(inst.op, Op::I64Bin(..));
+                    let Some((mut base, sv, mut idx, shift)) = pick_scaled(is64, a, b) else {
+                        continue;
+                    };
+                    if add_fold_uses[sv.0 as usize] != use_count[sv.0 as usize] {
+                        continue;
+                    }
+                    if !is64 {
+                        if use_count[idx.0 as usize] == 1
+                            && let Some(wide) = def_wrap[idx.0 as usize]
+                        {
+                            idx = wide;
+                        }
+                        if use_count[base.0 as usize] == 1
+                            && let Some(wide) = def_wrap[base.0 as usize]
+                        {
+                            base = wide;
+                        }
+                    }
+                    inst.op = Op::AddScaled {
+                        is64,
+                        base,
+                        idx,
+                        shift,
+                        disp: 0,
+                    };
+                    changed = true;
                 }
-                if use_count[base.0 as usize] == 1
-                    && let Some(wide) = def_wrap[base.0 as usize]
+                Op::I32BinImm(bop @ (IntBinOp::Add | IntBinOp::Sub), sv, imm)
+                | Op::I64BinImm(bop @ (IntBinOp::Add | IntBinOp::Sub), sv, imm) => {
+                    let is64 = matches!(inst.op, Op::I64BinImm(..));
+                    let disp = if bop == IntBinOp::Add {
+                        imm
+                    } else if let Some(neg) = imm.checked_neg() {
+                        neg
+                    } else {
+                        continue;
+                    };
+                    if let Some((s64, mut x, 1)) = scaled_def[sv.0 as usize]
+                        && s64 == is64
+                        && add_fold_uses[sv.0 as usize] == use_count[sv.0 as usize]
+                    {
+                        if !is64
+                            && use_count[x.0 as usize] == 1
+                            && let Some(wide) = def_wrap[x.0 as usize]
+                        {
+                            x = wide;
+                        }
+                        // `(x << 1) + disp` == `x + x*1 + disp` -> single `lea dst, [x + x + disp]`.
+                        inst.op = Op::AddScaled {
+                            is64,
+                            base: x,
+                            idx: x,
+                            shift: 0,
+                            disp,
+                        };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Second tiny sweep: fold single-use `AddScaled { disp: 0 } + imm` -> `AddScaled { disp: imm }`.
+    if changed {
+        let mut as_def: Vec<Option<(bool, Val, Val, u8)>> = vec![None; n_vals];
+        for bb in &ir.blocks {
+            for inst in &bb.insts {
+                if let (
+                    Some(r),
+                    Op::AddScaled {
+                        is64,
+                        base,
+                        idx,
+                        shift,
+                        disp: 0,
+                    },
+                ) = (inst.res, inst.op)
+                    && use_count[r.0 as usize] == 1
                 {
-                    base = wide;
+                    as_def[r.0 as usize] = Some((is64, base, idx, shift));
                 }
             }
-            inst.op = Op::AddScaled {
-                is64,
-                base,
-                idx,
-                shift,
-            };
-            changed = true;
+        }
+        for bb in &mut ir.blocks {
+            for inst in &mut bb.insts {
+                match inst.op {
+                    Op::I32BinImm(bop @ (IntBinOp::Add | IntBinOp::Sub), sv, imm)
+                    | Op::I64BinImm(bop @ (IntBinOp::Add | IntBinOp::Sub), sv, imm) => {
+                        let is64 = matches!(inst.op, Op::I64BinImm(..));
+                        let disp = if bop == IntBinOp::Add {
+                            imm
+                        } else if let Some(neg) = imm.checked_neg() {
+                            neg
+                        } else {
+                            continue;
+                        };
+                        if let Some((s64, base, idx, shift)) = as_def[sv.0 as usize]
+                            && s64 == is64
+                        {
+                            inst.op = Op::AddScaled {
+                                is64,
+                                base,
+                                idx,
+                                shift,
+                                disp,
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     changed

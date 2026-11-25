@@ -6471,6 +6471,7 @@ fn probe_link_env_and_cet(
     struct LinkProbeOut {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         so_bytes: Vec<u8>,
         canon_obj: PathBuf,
     }
@@ -6518,10 +6519,12 @@ fn probe_link_env_and_cet(
         if !l_out.status.success() {
             return Ok(None);
         }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let so_bytes = fs::read(&so_path).map_err(|e| format!("{}: {e}", so_path.display()))?;
         Ok(Some(LinkProbeOut {
             stdout: l_out.stdout,
             stderr: l_out.stderr,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             so_bytes,
             canon_obj: canon_o,
         }))

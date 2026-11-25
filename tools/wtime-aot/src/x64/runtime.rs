@@ -81,6 +81,10 @@ pub const EXPORT_NAMES: [&str; 18] = [
 
 /// Fault-injection hooks for CPUID verification in tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub enum CpuidSource {
     Real,
     #[cfg(test)]
@@ -97,6 +101,10 @@ pub enum CpuidSource {
 
 /// Fault-injection hooks for CET `RDSSPQ` verification in tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub enum RdsspSource {
     Real,
     #[cfg(test)]
@@ -107,6 +115,10 @@ pub enum RdsspSource {
 
 /// Fault-injection hooks for per-site `mprotect` failure verification in tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 pub enum SyscallFault {
     None,
     #[cfg(test)]
@@ -159,7 +171,7 @@ pub struct RuntimeTables {
     /// `.rodata` descriptor table of `elem_segs.len()` × 8B `(i32 rel_off, u32 elem_len)` for `table.init`.
     pub elem_seg_table_off: u32,
     /// Active element initializers targeting dynamic tables `(table_idx, dst_off, rodata_off, elem_len)`.
-    pub active_dyn_elem_inits: Vec<(u32, u32, u32, u32)>,
+    pub active_dyn_elem_inits: Vec<(u32, u64, u32, u32)>,
     /// `.rodata` offset of `u32 func_canon_sig[n_total]` for dynamic `call_indirect`.
     pub func_sig_ro_off: u32,
     /// `.rodata` offset of `i32 func_addr_rel[n_total]` for dynamic `call_indirect`.
@@ -1092,10 +1104,29 @@ pub fn emit_helper_initialize(
     // 2. Load pinned global into R12 (width-exact: 32-bit zero-ext for I32, 64-bit for I64).
     emit_pinned_load(&mut a, module, layout);
 
-    // 3. Active element bounds checks using 64-bit unsigned arithmetic `(base + len) > table_len`.
-    for &(table_len, base_u32, elem_len) in &module.active_elem_checks {
-        let end = u64::from(base_u32) + u64::from(elem_len);
-        if end > u64::from(table_len) {
+    // 3. Explicit non-null initializers for dynamic tables (`table_inits` from function-references).
+    for (&tbl, meta) in &module.dyn_tables {
+        if meta.init_val != 0 && meta.min_len > 0 {
+            let (desc_off, _, _) = layout.dyn_tables[&tbl];
+            let lp = a.new_label();
+            a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, desc_off));
+            a.mov_ri64(Gp::Rax, meta.init_val);
+            a.xor_rr(false, Gp::Rcx, Gp::Rcx);
+            a.mov_ri32(Gp::Rdx, meta.min_len);
+            a.bind(lp);
+            a.mov_mr(true, Mem::indexed(Gp::Rdi, Gp::Rcx, 8, 0), Gp::Rax);
+            a.add_ri(true, Gp::Rcx, 1);
+            a.cmp_rr(true, Gp::Rcx, Gp::Rdx);
+            a.jcc(Cond::B, lp);
+        }
+    }
+
+    // 3a. Active element bounds checks using 64-bit unsigned arithmetic `(base + len) > table_len`.
+    for &(table_len, base_u64, elem_len) in &module.active_elem_checks {
+        if base_u64
+            .checked_add(u64::from(elem_len))
+            .is_none_or(|end| end > u64::from(table_len))
+        {
             need_table_oob = true;
             a.jmp(lbl_trap_table_oob);
         }
@@ -1103,8 +1134,10 @@ pub fn emit_helper_initialize(
     // 3b. Active element segments targeting dynamic tables (bounds-checked + copied into `Ctx` table buffer).
     for &(tbl, dst_off, ro_off, elem_len) in &tables.active_dyn_elem_inits {
         let (desc_off, min_len, _) = layout.dyn_tables[&tbl];
-        let end = u64::from(dst_off) + u64::from(elem_len);
-        if end > u64::from(min_len) {
+        if dst_off
+            .checked_add(u64::from(elem_len))
+            .is_none_or(|end| end > u64::from(min_len))
+        {
             need_table_oob = true;
             a.jmp(lbl_trap_table_oob);
             continue;
@@ -1113,7 +1146,7 @@ pub fn emit_helper_initialize(
             let lp = a.new_label();
             a.mov_rm(true, Gp::Rdi, Mem::base_disp(Gp::R15, desc_off));
             if dst_off > 0 {
-                a.mov_ri64(Gp::Rax, u64::from(dst_off) * 8);
+                a.mov_ri64(Gp::Rax, dst_off * 8);
                 a.add_rr(true, Gp::Rdi, Gp::Rax);
             }
             a.lea_rip(Gp::Rsi, RelocTarget::Rodata(ro_off));
@@ -3407,7 +3440,7 @@ fn emit_helper_table_grow() -> Result<Asm, String> {
     a.bind(lbl_done);
     a.ret();
     a.bind(lbl_fail);
-    a.mov_ri32(Gp::Rax, u32::MAX);
+    a.mov_ri64(Gp::Rax, u64::MAX);
     a.ret();
     a.finish_labels()?;
     Ok(a)

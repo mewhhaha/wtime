@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.5) when running manually'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+      - name: Determine release tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked -p wtime-cli
+          cargo build --release --locked --manifest-path tools/wtime-aot/Cargo.toml
+          strip target/release/wtime-cli tools/wtime-aot/target/release/wtime-aot
+      - name: Smoke test built binaries
+        run: |
+          ./target/release/wtime-cli --help >/dev/null
+          ./tools/wtime-aot/target/release/wtime-aot --help >/dev/null
+      - name: Package tarballs and checksums
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          TARGET="${{ matrix.target }}"
+          mkdir -p dist
+
+          mkdir -p "stage/wtime-cli"
+          cp target/release/wtime-cli LICENSE-MIT LICENSE-APACHE README.md "stage/wtime-cli/"
+          tar -C "stage/wtime-cli" -czf "dist/wtime-cli-${TAG}-${TARGET}.tar.gz" wtime-cli LICENSE-MIT LICENSE-APACHE README.md
+
+          mkdir -p "stage/wtime-aot"
+          cp tools/wtime-aot/target/release/wtime-aot LICENSE-MIT LICENSE-APACHE tools/wtime-aot/README.md "stage/wtime-aot/"
+          tar -C "stage/wtime-aot" -czf "dist/wtime-aot-${TAG}-${TARGET}.tar.gz" wtime-aot LICENSE-MIT LICENSE-APACHE README.md
+
+          (
+            cd dist
+            sha256sum "wtime-cli-${TAG}-${TARGET}.tar.gz" "wtime-aot-${TAG}-${TARGET}.tar.gz" > "SHA256SUMS-${TARGET}.txt"
+          )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Assemble SHA256SUMS.txt and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          (
+            cd dist
+            cat SHA256SUMS-*.txt | LC_ALL=C sort -k2 > SHA256SUMS.txt
+            rm -f SHA256SUMS-*.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" dist/* \
+              --title "wtime ${TAG}" \
+              --generate-notes
+          fi

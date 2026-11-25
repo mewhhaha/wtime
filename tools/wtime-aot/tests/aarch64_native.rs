@@ -743,4 +743,66 @@ fn native_aarch64_standalone_static_exec_wasi_goose_sandbox_and_traps() {
     assert!(st_t.status.success());
     let run_t = Command::new(&trap_exe).output().unwrap();
     assert!(!run_t.status.success(), "unreachable must exit non-zero");
+
+    // 4. Wasm 3.0 `table64` + `function-references` (`call_ref`, `return_call_ref`, explicit table init)
+    //    executed natively on ARM64 silicon via static ET_EXEC!
+    let mut imp_w3 = vec![1];
+    enc_str(&mut imp_w3, "goose");
+    enc_str(&mut imp_w3, "print_i64");
+    imp_w3.extend_from_slice(&[0x00, 2]);
+    let types_w3 = vec![
+        4, // count
+        0x60, 1, 0x7f, 1, 0x7f, // 0: (i32) -> (i32)
+        0x60, 2, 0x7f, 0x7f, 1, 0x7f, // 1: (i32, i32) -> (i32)
+        0x60, 1, 0x7e, 0, // 2: (i64) -> ()
+        0x60, 0, 0, // 3: () -> ()
+    ];
+    // f0=print_i64 (import), f1=add10, f2=tail_rec, f3=_start
+    let f1_w3 = vec![0x20, 0, 0x41, 10, 0x6a];
+    let f2_w3 = vec![
+        0x20, 0, 0x45, 0x04, 0x40, 0x20, 1, 0x0f, 0x0b, 0x20, 0, 0x41, 1, 0x6b, 0x20, 1, 0x41, 2,
+        0x6a, 0xd2, 2, 0x15, 1,
+    ];
+    let mut f3_w3 = Vec::new();
+    // table.get 0 (1i64) -> f1 (via explicit init) -> call_ref(32) = 42; + f2(50000, 0) = 100000 -> print 100042
+    f3_w3.extend_from_slice(&[0x41, 32, 0x42, 1, 0x25, 0, 0x14, 0, 0x41]);
+    leb_i64(&mut f3_w3, 50_000);
+    f3_w3.extend_from_slice(&[0x41, 0, 0x10, 2, 0x6a, 0xac, 0x10, 0]);
+    let w3_wasm = wasm_module(&[
+        section(1, &types_w3),
+        section(2, &imp_w3),
+        section(3, &[3, 0, 1, 3]),
+        // table64 (min=2, max=4) with explicit init = (ref.func 1)
+        section(4, &[1, 0x40, 0x00, 0x64, 0x00, 0x05, 2, 4, 0xd2, 1, 0x0b]),
+        section(5, &[1, 0x01, 1, 1]),
+        section(7, &[1, 6, b'_', b's', b't', b'a', b'r', b't', 0, 3]),
+        section(9, &[1, 0x03, 0x00, 2, 1, 2]),
+        section(
+            10,
+            &[3].into_iter()
+                .chain(enc_body(&[], &f1_w3))
+                .chain(enc_body(&[], &f2_w3))
+                .chain(enc_body(&[], &f3_w3))
+                .collect::<Vec<_>>(),
+        ),
+    ]);
+    let w3_path = root.path("w3_a64.wasm");
+    let w3_exe = root.path("w3_a64");
+    fs::write(&w3_path, &w3_wasm).unwrap();
+    let st_w3 = Command::new(bin)
+        .arg(&w3_path)
+        .args(["-o"])
+        .arg(&w3_exe)
+        .args(["--backend", "aarch64"])
+        .output()
+        .unwrap();
+    assert!(
+        st_w3.status.success(),
+        "aarch64 standalone wasm3 compile failed: {}",
+        String::from_utf8_lossy(&st_w3.stderr)
+    );
+    assert_aarch64_elf64(&w3_exe, 2);
+    let run_w3 = Command::new(&w3_exe).output().unwrap();
+    assert!(run_w3.status.success());
+    assert_eq!(String::from_utf8_lossy(&run_w3.stdout), "100042");
 }

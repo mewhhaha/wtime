@@ -225,16 +225,46 @@ pub fn emit_a64_helpers(
                 }
             }
         }
+        // Explicit non-null initializers for dynamic tables (`table_inits` from function-references).
+        for (&tbl, meta) in &module.dyn_tables {
+            if meta.init_val != 0 && meta.min_len > 0 {
+                let (desc_off, _, _) = layout.dyn_tables[&tbl];
+                let lp = a.new_label();
+                emit_load_off(
+                    &mut a,
+                    Ty::I64,
+                    Some(Reg::X0),
+                    None,
+                    CTX_REG,
+                    desc_off,
+                    SGP3,
+                );
+                a.mov_imm64(Reg::X1, meta.init_val);
+                a.mov_imm32(Reg::X2, meta.min_len);
+                a.movz(true, Reg::X3, 0, 0);
+                a.bind(lp);
+                a.str_reg_scaled(true, Reg::X1, Reg::X0, Reg::X3, true);
+                a.add_imm(true, Reg::X3, Reg::X3, 1);
+                a.cmp_r(true, Reg::X3, Reg::X2);
+                a.b_cond(Cond::Lo, lp);
+            }
+        }
         // Static active element bounds checks + dynamic active element copies + implicit drops.
-        for &(table_len, base_u32, elem_len) in &module.active_elem_checks {
-            if u64::from(base_u32) + u64::from(elem_len) > u64::from(table_len) {
+        for &(table_len, base_u64, elem_len) in &module.active_elem_checks {
+            if base_u64
+                .checked_add(u64::from(elem_len))
+                .is_none_or(|end| end > u64::from(table_len))
+            {
                 need_table_oob = true;
                 a.b(table_oob);
             }
         }
         for &(tbl, dst_off, rodata_off, elem_len) in &tables.active_dyn_elem_inits {
             let (desc_off, min_len, _) = layout.dyn_tables[&tbl];
-            if u64::from(dst_off) + u64::from(elem_len) > u64::from(min_len) {
+            if dst_off
+                .checked_add(u64::from(elem_len))
+                .is_none_or(|end| end > u64::from(min_len))
+            {
                 need_table_oob = true;
                 a.b(table_oob);
                 continue;
@@ -251,7 +281,7 @@ pub fn emit_a64_helpers(
                     SGP3,
                 );
                 if dst_off > 0 {
-                    a.mov_imm64(Reg::X5, u64::from(dst_off) * 8);
+                    a.mov_imm64(Reg::X5, dst_off * 8);
                     a.add_r(true, Reg::X0, Reg::X0, Reg::X5);
                 }
                 a.adr_reloc(Reg::X1, A64RelocTarget::Rodata(rodata_off));
@@ -681,7 +711,7 @@ pub fn emit_a64_helpers(
             a.mov_r(true, Reg::X0, Reg::X10);
             a.ret();
             a.bind(fail);
-            a.mov_imm32(Reg::X0, u32::MAX);
+            a.mov_imm64(Reg::X0, u64::MAX);
             a.ret();
             a.finish()?;
             out.push((HELPER_TABLE_GROW, a));

@@ -1155,20 +1155,53 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Resolves and dispatches `call_indirect` for `ci_id` (static `.rodata` OR dynamic `Ctx` table).
+    /// Resolves and dispatches `call_indirect` (static `.rodata`, dynamic `Ctx` table, 32-bit or
+    /// `table64`) or typed `call_ref` for `ci_id`.
     /// Returns `false` if a statically empty table jumped unconditionally to `TRAP_INDIRECT_CALL`.
     fn emit_ci_dispatch(&mut self, ci_id: u32, is_tail_jump: bool) -> bool {
         let ci = self.layout.ci_tables[ci_id as usize];
         let toob = self.trap_table_oob_lbl();
         let bad = self.trap_ci_lbl();
-        self.asm
-            .mov_rm(false, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
-        if ci.dyn_table_desc_off >= 0 {
-            self.asm.cmp_rm(
-                false,
-                SCRATCH_GP2,
-                Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+        if ci.is_call_ref {
+            self.asm
+                .mov_rm(true, SCRATCH_GP2, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP));
+            self.asm.test_rr(true, SCRATCH_GP2, SCRATCH_GP2);
+            self.asm.jcc(Cond::E, bad);
+            self.asm.sub_ri(true, SCRATCH_GP2, 1);
+            self.asm.lea_rip(
+                SCRATCH_GP1,
+                RelocTarget::Rodata(self.layout.func_addr_ro_off),
             );
+            self.asm
+                .movsxd_rm(SCRATCH_GP2, Mem::indexed(SCRATCH_GP1, SCRATCH_GP2, 4, 0));
+            self.asm.add_rr(true, SCRATCH_GP1, SCRATCH_GP2);
+            if is_tail_jump {
+                self.asm.mov_rr(true, Gp::Rax, SCRATCH_GP1);
+            } else {
+                self.asm.call_reg(SCRATCH_GP1);
+            }
+            return true;
+        }
+        self.asm.mov_rm(
+            ci.table_is64,
+            SCRATCH_GP2,
+            Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP),
+        );
+        if ci.dyn_table_desc_off >= 0 {
+            if ci.table_is64 {
+                self.asm.mov_rm(
+                    false,
+                    SCRATCH_GP1,
+                    Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+                );
+                self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+            } else {
+                self.asm.cmp_rm(
+                    false,
+                    SCRATCH_GP2,
+                    Mem::base_disp(Gp::R15, ci.dyn_table_desc_off + 8),
+                );
+            }
             self.asm.jcc(Cond::Ae, toob);
             self.asm.mov_rm(
                 true,
@@ -1205,8 +1238,13 @@ impl<'a> Lower<'a> {
             }
             return true;
         }
-        // Unsigned 32-bit comparisons avoid sign-extending lengths >= 2^31 in 64-bit `cmp_ri`.
-        self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+        if ci.table_is64 {
+            self.asm.mov_ri32(SCRATCH_GP1, ci.table_len);
+            self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+        } else {
+            // Unsigned 32-bit comparisons avoid sign-extending lengths >= 2^31 in 64-bit `cmp_ri`.
+            self.asm.cmp_ri(false, SCRATCH_GP2, ci.table_len as i32);
+        }
         self.asm.jcc(Cond::Ae, toob);
         if ci.span == 0 {
             self.asm.jmp(bad);
@@ -1239,11 +1277,13 @@ impl<'a> Lower<'a> {
         ci_idx: Option<(u32, Val)>,
         direct_func: Option<u32>,
     ) -> Result<(), String> {
-        // For indirect call, stash `idx` in `[r15 + OFF_SCRATCH_TMP]` so `emit_parallel_moves` can freely use R10 & R11.
-        if let Some((_, idx_val)) = ci_idx {
+        // For indirect call / call_ref, stash `idx` in `[r15 + OFF_SCRATCH_TMP]` so `emit_parallel_moves` can freely use R10 & R11.
+        if let Some((ci_id, idx_val)) = ci_idx {
+            let ci = self.layout.ci_tables[ci_id as usize];
+            let is64 = ci.is_call_ref || ci.table_is64;
             let ir = self.gp_read(idx_val, SCRATCH_GP2);
             self.asm
-                .mov_mr(false, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
+                .mov_mr(is64, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
         }
         // Marshal arguments using the unified typed ABI layout shared with `regalloc`.
         let arg_vals = self.ir.pool_slice(args);
@@ -1327,10 +1367,12 @@ impl<'a> Lower<'a> {
         direct_func: Option<u32>,
         next_bb: Option<u32>,
     ) -> Result<(), String> {
-        if let Some((_, idx_val)) = ci_idx {
+        if let Some((ci_id, idx_val)) = ci_idx {
+            let ci = self.layout.ci_tables[ci_id as usize];
+            let is64 = ci.is_call_ref || ci.table_is64;
             let ir = self.gp_read(idx_val, SCRATCH_GP2);
             self.asm
-                .mov_mr(false, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
+                .mov_mr(is64, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
         }
         let arg_vals = self.ir.pool_slice(args);
         if !arg_vals.is_empty() {
@@ -1415,10 +1457,12 @@ impl<'a> Lower<'a> {
         let arg_layout = layout_args(&arg_tys)?;
         let can_tail_jump = arg_layout.stack_bytes <= self_param_stack;
 
-        if let Some((_, idx_val)) = ci_idx {
+        if let Some((ci_id, idx_val)) = ci_idx {
+            let ci = self.layout.ci_tables[ci_id as usize];
+            let is64 = ci.is_call_ref || ci.table_is64;
             let ir = self.gp_read(idx_val, SCRATCH_GP2);
             self.asm
-                .mov_mr(false, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
+                .mov_mr(is64, Mem::base_disp(Gp::R15, OFF_SCRATCH_TMP), ir);
         }
 
         if can_tail_jump {
@@ -2478,12 +2522,14 @@ impl<'a> Lower<'a> {
                 base,
                 idx,
                 shift,
+                disp,
             } => {
                 let r = res.unwrap();
                 let br = self.gp_read(base, SCRATCH_GP1);
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 let d = self.gp_write_reg(r);
-                self.asm.lea(is64, d, Mem::indexed(br, ir, 1u8 << shift, 0));
+                self.asm
+                    .lea(is64, d, Mem::indexed(br, ir, 1u8 << shift, disp));
                 self.gp_commit(r, d);
             }
             Op::I32Cmp(cop, a, b) => {
@@ -3622,18 +3668,30 @@ impl<'a> Lower<'a> {
             }
             Op::TableGet { table, idx } => {
                 let r = res.unwrap();
+                let t64 = self.layout.table_is_64(table);
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 let toob = self.trap_table_oob_lbl();
                 if let Some(&(toff, tlen)) = self.layout.extern_tables.get(&table) {
-                    self.asm.cmp_ri(false, ir, tlen as i32);
+                    if t64 {
+                        self.asm.mov_ri32(SCRATCH_GP1, tlen);
+                        self.asm.cmp_rr(true, ir, SCRATCH_GP1);
+                    } else {
+                        self.asm.cmp_ri(false, ir, tlen as i32);
+                    }
                     self.asm.jcc(Cond::Ae, toob);
                     let d = self.gp_write_reg(r);
                     self.asm.mov_rm(true, d, Mem::indexed(Gp::R15, ir, 8, toff));
                     self.gp_commit(r, d);
                 } else {
                     let (desc_off, _, _) = self.layout.dyn_tables[&table];
-                    self.asm
-                        .cmp_rm(false, ir, Mem::base_disp(Gp::R15, desc_off + 8));
+                    if t64 {
+                        self.asm
+                            .mov_rm(false, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
+                        self.asm.cmp_rr(true, ir, SCRATCH_GP1);
+                    } else {
+                        self.asm
+                            .cmp_rm(false, ir, Mem::base_disp(Gp::R15, desc_off + 8));
+                    }
                     self.asm.jcc(Cond::Ae, toob);
                     self.asm.mov_rr(false, SCRATCH_GP2, ir);
                     self.asm
@@ -3645,18 +3703,30 @@ impl<'a> Lower<'a> {
                 }
             }
             Op::TableSet { table, idx, val } => {
+                let t64 = self.layout.table_is_64(table);
                 let ir = self.gp_read(idx, SCRATCH_GP2);
                 let toob = self.trap_table_oob_lbl();
                 if let Some(&(toff, tlen)) = self.layout.extern_tables.get(&table) {
-                    self.asm.cmp_ri(false, ir, tlen as i32);
+                    if t64 {
+                        self.asm.mov_ri32(SCRATCH_GP1, tlen);
+                        self.asm.cmp_rr(true, ir, SCRATCH_GP1);
+                    } else {
+                        self.asm.cmp_ri(false, ir, tlen as i32);
+                    }
                     self.asm.jcc(Cond::Ae, toob);
                     let vr = self.gp_read(val, SCRATCH_GP1);
                     self.asm
                         .mov_mr(true, Mem::indexed(Gp::R15, ir, 8, toff), vr);
                 } else {
                     let (desc_off, _, _) = self.layout.dyn_tables[&table];
-                    self.asm
-                        .cmp_rm(false, ir, Mem::base_disp(Gp::R15, desc_off + 8));
+                    if t64 {
+                        self.asm
+                            .mov_rm(false, SCRATCH_GP1, Mem::base_disp(Gp::R15, desc_off + 8));
+                        self.asm.cmp_rr(true, ir, SCRATCH_GP1);
+                    } else {
+                        self.asm
+                            .cmp_rm(false, ir, Mem::base_disp(Gp::R15, desc_off + 8));
+                    }
                     self.asm.jcc(Cond::Ae, toob);
                     self.asm.mov_rr(false, SCRATCH_GP2, ir);
                     self.asm.shl_imm(true, SCRATCH_GP2, 3);
@@ -4178,13 +4248,17 @@ impl<'a> Lower<'a> {
                 src,
                 len,
             } => {
+                let d64 = self.layout.table_is_64(table);
+                let dty = if d64 { Ty::I64 } else { Ty::I32 };
                 let moves = [
-                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), dty),
                     (MoveLoc::Gp(Gp::Rsi), MoveLoc::from(self.loc(src)), Ty::I32),
                     (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(len)), Ty::I32),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
+                if !d64 {
+                    self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
+                }
                 self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
                 self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
                 self.asm.mov_ri32(Gp::Rcx, elem);
@@ -4206,15 +4280,36 @@ impl<'a> Lower<'a> {
                 src,
                 len,
             } => {
+                let d64 = self.layout.table_is_64(dst_table);
+                let s64 = self.layout.table_is_64(src_table);
+                let l64 = d64 && s64;
                 let moves = [
-                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), Ty::I32),
-                    (MoveLoc::Gp(Gp::Rsi), MoveLoc::from(self.loc(src)), Ty::I32),
-                    (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(len)), Ty::I32),
+                    (
+                        MoveLoc::Gp(Gp::Rdi),
+                        MoveLoc::from(self.loc(dst)),
+                        if d64 { Ty::I64 } else { Ty::I32 },
+                    ),
+                    (
+                        MoveLoc::Gp(Gp::Rsi),
+                        MoveLoc::from(self.loc(src)),
+                        if s64 { Ty::I64 } else { Ty::I32 },
+                    ),
+                    (
+                        MoveLoc::Gp(Gp::Rdx),
+                        MoveLoc::from(self.loc(len)),
+                        if l64 { Ty::I64 } else { Ty::I32 },
+                    ),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
-                self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
-                self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                if !d64 {
+                    self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
+                }
+                if !s64 {
+                    self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
+                }
+                if !l64 {
+                    self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                }
                 self.asm
                     .mov_ri32(Gp::Rcx, self.layout.dyn_tables[&dst_table].0 as u32);
                 self.asm
@@ -4226,20 +4321,25 @@ impl<'a> Lower<'a> {
             }
             Op::TableGrow { table, init, delta } => {
                 let r = res.unwrap();
+                let t64 = self.layout.table_is_64(table);
                 let moves = [
                     (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(init)), Ty::I64),
                     (
                         MoveLoc::Gp(Gp::Rsi),
                         MoveLoc::from(self.loc(delta)),
-                        Ty::I32,
+                        if t64 { Ty::I64 } else { Ty::I32 },
                     ),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
+                if !t64 {
+                    self.asm.mov_rr(false, Gp::Rsi, Gp::Rsi);
+                }
                 self.asm
                     .mov_ri32(Gp::Rdx, self.layout.dyn_tables[&table].0 as u32);
                 self.asm.call_reloc(RelocTarget::Helper(HELPER_TABLE_GROW));
-                self.asm.mov_rr(false, Gp::Rax, Gp::Rax);
+                if !t64 {
+                    self.asm.mov_rr(false, Gp::Rax, Gp::Rax);
+                }
                 self.gp_commit(r, Gp::Rax);
             }
             Op::TableSize(table) => {
@@ -4259,14 +4359,18 @@ impl<'a> Lower<'a> {
                 val,
                 len,
             } => {
+                let t64 = self.layout.table_is_64(table);
+                let ity = if t64 { Ty::I64 } else { Ty::I32 };
                 let moves = [
-                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Gp::Rdi), MoveLoc::from(self.loc(dst)), ity),
                     (MoveLoc::Gp(Gp::Rsi), MoveLoc::from(self.loc(val)), Ty::I64),
-                    (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(len)), Ty::I32),
+                    (MoveLoc::Gp(Gp::Rdx), MoveLoc::from(self.loc(len)), ity),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
-                self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                if !t64 {
+                    self.asm.mov_rr(false, Gp::Rdi, Gp::Rdi);
+                    self.asm.mov_rr(false, Gp::Rdx, Gp::Rdx);
+                }
                 self.asm
                     .mov_ri32(Gp::Rcx, self.layout.dyn_tables[&table].0 as u32);
                 self.asm.call_reloc(RelocTarget::Helper(HELPER_TABLE_FILL));
@@ -4373,7 +4477,7 @@ impl<'a> Lower<'a> {
                         self.asm
                             .movdqu_mx(Mem::indexed(Gp::R14, dr, 1, l - 16), SCRATCH_FP2);
                     }
-                } else if self.isa.has_avx2 {
+                } else if self.isa.has_avx2 && len <= 64 {
                     // Overlap-safe branchless 33..=64 bytes: load BOTH 32-byte halves before storing!
                     let sr = self.gp_read(src, SCRATCH_GP1);
                     let dr = self.gp_read(dst, SCRATCH_GP2);
@@ -4386,6 +4490,59 @@ impl<'a> Lower<'a> {
                         .vmovdqu_my(Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_FP1);
                     self.asm
                         .vmovdqu_my(Mem::indexed(Gp::R14, dr, 1, l - 32), SCRATCH_FP2);
+                    self.asm.vzeroupper();
+                } else if self.isa.has_avx2 {
+                    // Overlap-safe 65..=128 bytes with 32B AVX2 chunks: branch on `dst > src`.
+                    let dr = self.gp_read(dst, SCRATCH_GP2);
+                    if dr != SCRATCH_GP2 {
+                        self.asm.mov_rr(self.layout.memory64, SCRATCH_GP2, dr);
+                    }
+                    self.asm.add_rr(true, SCRATCH_GP2, Gp::R14);
+                    let sr = self.gp_read(src, SCRATCH_GP1);
+                    if sr != SCRATCH_GP1 {
+                        self.asm.mov_rr(self.layout.memory64, SCRATCH_GP1, sr);
+                    }
+                    self.asm.add_rr(true, SCRATCH_GP1, Gp::R14);
+                    let l = len as i32;
+                    let lbl_bwd = self.asm.new_label();
+                    let lbl_done = self.asm.new_label();
+                    self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
+                    self.asm.jcc(Cond::A, lbl_bwd);
+                    // Forward (`dst <= src`): copy non-overlapping 32B prefix chunks, then load last 2 overlapping chunks before writing both.
+                    let mut off = 0i32;
+                    while off + 64 < l {
+                        self.asm
+                            .vmovdqu_ym(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, off));
+                        self.asm
+                            .vmovdqu_my(Mem::base_disp(SCRATCH_GP2, off), SCRATCH_FP1);
+                        off += 32;
+                    }
+                    self.asm
+                        .vmovdqu_ym(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, off));
+                    self.asm
+                        .vmovdqu_ym(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, l - 32));
+                    self.asm
+                        .vmovdqu_my(Mem::base_disp(SCRATCH_GP2, off), SCRATCH_FP1);
+                    self.asm
+                        .vmovdqu_my(Mem::base_disp(SCRATCH_GP2, l - 32), SCRATCH_FP2);
+                    self.asm.jmp(lbl_done);
+                    self.asm.bind(lbl_bwd);
+                    // Backward (`dst > src`): copy non-overlapping 32B suffix chunks, then load first 2 overlapping chunks before writing both.
+                    let mut cur = l;
+                    while cur > 64 {
+                        cur -= 32;
+                        self.asm
+                            .vmovdqu_ym(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, cur));
+                        self.asm
+                            .vmovdqu_my(Mem::base_disp(SCRATCH_GP2, cur), SCRATCH_FP1);
+                    }
+                    self.asm
+                        .vmovdqu_ym(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, cur - 32));
+                    self.asm.vmovdqu_ym(SCRATCH_FP2, Mem::base(SCRATCH_GP1));
+                    self.asm
+                        .vmovdqu_my(Mem::base_disp(SCRATCH_GP2, cur - 32), SCRATCH_FP1);
+                    self.asm.vmovdqu_my(Mem::base(SCRATCH_GP2), SCRATCH_FP2);
+                    self.asm.bind(lbl_done);
                     self.asm.vzeroupper();
                 } else {
                     // Materialize `SCRATCH_GP2 = R14 + dst` and `SCRATCH_GP1 = R14 + src` (zero extra GP regs!).
@@ -4401,63 +4558,45 @@ impl<'a> Lower<'a> {
                     self.asm.add_rr(true, SCRATCH_GP1, Gp::R14);
                     let l = len as i32;
                     {
-                        // Overlap-safe 33..=64 bytes: branch on `dst > src`.
+                        // Overlap-safe 33..=128 bytes: branch on `dst > src`.
                         let lbl_bwd = self.asm.new_label();
                         let lbl_done = self.asm.new_label();
                         self.asm.cmp_rr(true, SCRATCH_GP2, SCRATCH_GP1);
                         self.asm.jcc(Cond::A, lbl_bwd);
                         // Forward (`dst <= src`): write non-overlapping prefix chunks, then load last 2 overlapping chunks before writing both!
-                        self.asm.movdqu_xm(SCRATCH_FP1, Mem::base(SCRATCH_GP1));
-                        self.asm.movdqu_mx(Mem::base(SCRATCH_GP2), SCRATCH_FP1);
-                        if len <= 48 {
+                        let mut off = 0i32;
+                        while off + 32 < l {
                             self.asm
-                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, 16));
+                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, off));
                             self.asm
-                                .movdqu_xm(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, l - 16));
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, 16), SCRATCH_FP1);
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 16), SCRATCH_FP2);
-                        } else {
-                            self.asm
-                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, 16));
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, 16), SCRATCH_FP1);
-                            self.asm
-                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, 32));
-                            self.asm
-                                .movdqu_xm(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, l - 16));
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, 32), SCRATCH_FP1);
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 16), SCRATCH_FP2);
+                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, off), SCRATCH_FP1);
+                            off += 16;
                         }
+                        self.asm
+                            .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, off));
+                        self.asm
+                            .movdqu_xm(SCRATCH_FP2, Mem::base_disp(SCRATCH_GP1, l - 16));
+                        self.asm
+                            .movdqu_mx(Mem::base_disp(SCRATCH_GP2, off), SCRATCH_FP1);
+                        self.asm
+                            .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 16), SCRATCH_FP2);
                         self.asm.jmp(lbl_done);
                         self.asm.bind(lbl_bwd);
                         // Backward (`dst > src`): write non-overlapping suffix chunks, then load first 2 overlapping chunks before writing both!
-                        self.asm
-                            .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, l - 16));
-                        self.asm
-                            .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 16), SCRATCH_FP1);
-                        if len <= 48 {
+                        let mut cur = l;
+                        while cur > 32 {
+                            cur -= 16;
                             self.asm
-                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, l - 32));
-                            self.asm.movdqu_xm(SCRATCH_FP2, Mem::base(SCRATCH_GP1));
+                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, cur));
                             self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 32), SCRATCH_FP1);
-                            self.asm.movdqu_mx(Mem::base(SCRATCH_GP2), SCRATCH_FP2);
-                        } else {
-                            self.asm
-                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, l - 32));
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 32), SCRATCH_FP1);
-                            self.asm
-                                .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, l - 48));
-                            self.asm.movdqu_xm(SCRATCH_FP2, Mem::base(SCRATCH_GP1));
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 48), SCRATCH_FP1);
-                            self.asm.movdqu_mx(Mem::base(SCRATCH_GP2), SCRATCH_FP2);
+                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, cur), SCRATCH_FP1);
                         }
+                        self.asm
+                            .movdqu_xm(SCRATCH_FP1, Mem::base_disp(SCRATCH_GP1, cur - 16));
+                        self.asm.movdqu_xm(SCRATCH_FP2, Mem::base(SCRATCH_GP1));
+                        self.asm
+                            .movdqu_mx(Mem::base_disp(SCRATCH_GP2, cur - 16), SCRATCH_FP1);
+                        self.asm.movdqu_mx(Mem::base(SCRATCH_GP2), SCRATCH_FP2);
                         self.asm.bind(lbl_done);
                     }
                 }
@@ -4473,68 +4612,87 @@ impl<'a> Lower<'a> {
                     let dr = self.gp_read(dst, SCRATCH_GP2);
                     self.emit_bounds_check(dr, u64::from(len));
                 }
+                let val_is_zero = matches!(self.loc(val), Loc::Remat(RematConst::I32(0)));
                 if len >= 32 && self.isa.has_avx2 {
-                    let vr = self.gp_read(val, SCRATCH_GP1);
-                    self.asm.movd_xr(SCRATCH_FP1, vr);
-                    self.asm.vpbroadcastb_yx(SCRATCH_FP1, SCRATCH_FP1);
+                    if val_is_zero {
+                        self.asm.vpxor_yyy(SCRATCH_FP1, SCRATCH_FP1, SCRATCH_FP1);
+                    } else {
+                        let vr = self.gp_read(val, SCRATCH_GP1);
+                        self.asm.movd_xr(SCRATCH_FP1, vr);
+                        self.asm.vpbroadcastb_yx(SCRATCH_FP1, SCRATCH_FP1);
+                    }
                     let dr = self.gp_read(dst, SCRATCH_GP2);
                     let l = len as i32;
-                    self.asm
-                        .vmovdqu_my(Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_FP1);
-                    if len > 32 {
+                    let mut off = 0i32;
+                    while off + 32 < l {
                         self.asm
-                            .vmovdqu_my(Mem::indexed(Gp::R14, dr, 1, l - 32), SCRATCH_FP1);
+                            .vmovdqu_my(Mem::indexed(Gp::R14, dr, 1, off), SCRATCH_FP1);
+                        off += 32;
                     }
+                    self.asm
+                        .vmovdqu_my(Mem::indexed(Gp::R14, dr, 1, l - 32), SCRATCH_FP1);
                     self.asm.vzeroupper();
-                } else if len > 0 {
-                    let vr = self.gp_read(val, SCRATCH_GP1);
-                    self.asm.movzx_rr8(SCRATCH_GP1, vr);
-                    if len >= 2 {
+                } else if len >= 16 {
+                    if val_is_zero {
+                        self.asm.pxor(SCRATCH_FP1, SCRATCH_FP1);
+                    } else {
+                        let vr = self.gp_read(val, SCRATCH_GP1);
+                        self.asm.movzx_rr8(SCRATCH_GP1, vr);
                         self.asm.mov_ri64(SCRATCH_GP2, 0x0101_0101_0101_0101);
                         self.asm.imul_rr(true, SCRATCH_GP1, SCRATCH_GP2);
-                    }
-                    let dr = self.gp_read(dst, SCRATCH_GP2);
-                    if dr != SCRATCH_GP2 {
-                        self.asm.mov_rr(self.layout.memory64, SCRATCH_GP2, dr);
-                    }
-                    self.asm.add_rr(true, SCRATCH_GP2, Gp::R14);
-                    let l = len as i32;
-                    if len == 1 {
-                        self.asm.mov_mr8(Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                    } else if len == 2 {
-                        self.asm.mov_mr16(Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                    } else if len == 3 {
-                        self.asm.mov_mr16(Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                        self.asm
-                            .mov_mr8(Mem::base_disp(SCRATCH_GP2, 2), SCRATCH_GP1);
-                    } else if len == 4 {
-                        self.asm.mov_mr(false, Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                    } else if len <= 7 {
-                        self.asm.mov_mr(false, Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                        self.asm
-                            .mov_mr(false, Mem::base_disp(SCRATCH_GP2, l - 4), SCRATCH_GP1);
-                    } else if len == 8 {
-                        self.asm.mov_mr(true, Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                    } else if len <= 15 {
-                        self.asm.mov_mr(true, Mem::base(SCRATCH_GP2), SCRATCH_GP1);
-                        self.asm
-                            .mov_mr(true, Mem::base_disp(SCRATCH_GP2, l - 8), SCRATCH_GP1);
-                    } else {
                         self.asm.movq_xr(SCRATCH_FP1, SCRATCH_GP1);
                         self.asm.punpcklqdq(SCRATCH_FP1, SCRATCH_FP1);
-                        self.asm.movdqu_mx(Mem::base(SCRATCH_GP2), SCRATCH_FP1);
-                        if len > 32 {
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, 16), SCRATCH_FP1);
+                    }
+                    let dr = self.gp_read(dst, SCRATCH_GP2);
+                    let l = len as i32;
+                    let mut off = 0i32;
+                    while off + 16 < l {
+                        self.asm
+                            .movdqu_mx(Mem::indexed(Gp::R14, dr, 1, off), SCRATCH_FP1);
+                        off += 16;
+                    }
+                    self.asm
+                        .movdqu_mx(Mem::indexed(Gp::R14, dr, 1, l - 16), SCRATCH_FP1);
+                } else if len > 0 {
+                    if val_is_zero {
+                        self.asm.xor_rr(false, SCRATCH_GP1, SCRATCH_GP1);
+                    } else {
+                        let vr = self.gp_read(val, SCRATCH_GP1);
+                        self.asm.movzx_rr8(SCRATCH_GP1, vr);
+                        if len >= 2 {
+                            self.asm.mov_ri64(SCRATCH_GP2, 0x0101_0101_0101_0101);
+                            self.asm.imul_rr(true, SCRATCH_GP1, SCRATCH_GP2);
                         }
-                        if len > 48 {
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, 32), SCRATCH_FP1);
-                        }
-                        if len > 16 {
-                            self.asm
-                                .movdqu_mx(Mem::base_disp(SCRATCH_GP2, l - 16), SCRATCH_FP1);
-                        }
+                    }
+                    let dr = self.gp_read(dst, SCRATCH_GP2);
+                    let l = len as i32;
+                    if len == 1 {
+                        self.asm
+                            .mov_mr8(Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                    } else if len == 2 {
+                        self.asm
+                            .mov_mr16(Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                    } else if len == 3 {
+                        self.asm
+                            .mov_mr16(Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                        self.asm
+                            .mov_mr8(Mem::indexed(Gp::R14, dr, 1, 2), SCRATCH_GP1);
+                    } else if len == 4 {
+                        self.asm
+                            .mov_mr(false, Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                    } else if len <= 7 {
+                        self.asm
+                            .mov_mr(false, Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                        self.asm
+                            .mov_mr(false, Mem::indexed(Gp::R14, dr, 1, l - 4), SCRATCH_GP1);
+                    } else if len == 8 {
+                        self.asm
+                            .mov_mr(true, Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                    } else {
+                        self.asm
+                            .mov_mr(true, Mem::indexed(Gp::R14, dr, 1, 0), SCRATCH_GP1);
+                        self.asm
+                            .mov_mr(true, Mem::indexed(Gp::R14, dr, 1, l - 8), SCRATCH_GP1);
                     }
                 }
             }

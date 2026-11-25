@@ -68,13 +68,14 @@ shared libraries and standalone static Linux x86-64 `ET_EXEC` executables).
 All inputs pass bounded file acquisition (`<= 64 MiB` for `--backend x64`,
 deadline-checked in direct 1 MiB chunks) and `wtime-validate` under the `--backend x64`
 feature profile (MVP + `mutable_globals`, `saturating_float_to_int`,
-`sign_extension`, `multi_value`, `reference_types`, `bulk_memory`, `simd`,
-`relaxed_simd`, `tail_call`, `memory64`, `multi_memory`, `wide_arithmetic`,
-`exception_handling`, `extended_const`; `function_references: false`) with
+`sign_extension`, `multi_value`, `reference_types`, `function_references`,
+`bulk_memory`, `simd`, `relaxed_simd`, `tail_call`, `memory64`, `multi_memory`,
+`wide_arithmetic`, `exception_handling`, `extended_const`) with
 `ResourceLimits::default()`.
 
 Admitted constructs:
-- Plain final function types (no GC subtypes or descriptors).
+- Plain final function types (no GC subtypes or descriptors), including typed
+  non-nullable `(ref $t)` and nullable `(ref null $t)` function references.
 - `0..=65` non-shared Wasm32 or `memory64` linear memories with standard 64 KiB
   pages (memory 0 pinned in `R14`/`R13`, up to 64 extra memories backed by
   per-memory descriptors in `Ctx` with zero overhead when unused; Wasm32
@@ -82,17 +83,19 @@ Admitted constructs:
   runtime by `mem_limit_pages` / 8 GiB default reservation ceiling in
   `--blot-cdylib` and 256 GiB `MAP_NORESERVE` default ceiling in standalone
   `ET_EXEC` executables).
-- Static 32-bit nullable `funcref` tables (`min <= 1_048_576`, aggregate
-  `<= 2_097_152` slots, zero-overhead `.rodata` `ci_tables` when unmodified),
-  fixed inline mutable 32-bit nullable `externref` tables (`min == max <= 65_536`),
-  AND dynamic growable/mutable `funcref`/`externref` tables (`<= 131_072` slots
-  per table, demand-paged `mmap` backing with dynamic `call_indirect` /
-  `return_call_indirect` / `call_indirect` inside `try_table`, `table.get`/`set`,
-  `table.size`/`grow`/`fill`/`copy`/`init`, `elem.drop`, `ref.func`, `ref.null func`).
+- 32-bit and 64-bit (`table64`) tables with optional explicit table initializers
+  (`0x40 0x00`): static nullable/typed `funcref` tables (`min <= 1_048_576`,
+  aggregate `<= 2_097_152` slots, zero-overhead `.rodata` `ci_tables` when
+  unmodified), fixed inline mutable nullable `externref`/`exnref` tables
+  (`min == max <= 65_536`), AND dynamic growable/mutable `funcref`/`(ref $t)`/
+  `externref`/`exnref` tables (`<= 131_072` slots per table, demand-paged `mmap`
+  backing with dynamic `call_indirect` / `return_call_indirect` / `call_indirect`
+  inside `try_table`, `table.get`/`set`, `table.size`/`grow`/`fill`/`copy`/
+  `init`, `elem.drop`, `ref.func`, `ref.null`).
 - Active, passive, and declarative data & element segments (`memory.init`,
   `data.drop`, `table.init`, `elem.drop`, `DataCountSection`) targeting memory
-  `0` or extra memories `1..=64` with constant `i32` (Wasm32) or `i64`
-  (`memory64`) offsets.
+  `0` or extra memories `1..=64` (and 32-bit or 64-bit tables) with constant
+  `i32` or `i64` (`memory64`/`table64`) offsets.
 - Plain function imports with Blot ABI-compatible signatures (for
   `--blot-cdylib`) or direct-syscall WASI Preview 1 / Goose (`goose::*`
   including pure-assembly Ryū shortest round-trip `print_f64`/`print_f32`/
@@ -104,27 +107,34 @@ Admitted constructs:
   `--stack-limit-mib`, `--` enforced via `openat2` + `RESOLVE_BENEATH` +
   `O_NOFOLLOW`) / benchmark `env::{bench_input, bench_input_f64}` imports (for
   standalone static `ET_EXEC` executables), and globals of `i32`, `i64`, `f32`,
-  `f64`, `v128`, or nullable `funcref`/`externref`/`exnref`.
+  `f64`, `v128`, or nullable/non-nullable `funcref`/`(ref $t)`/`externref`/`exnref`.
 - MVP opcodes, saturating float-to-int truncations, full bulk memory & table
   ops (`memory.init`, `data.drop`, `memory.copy` including cross-memory,
-  `memory.fill`, `table.init`, `elem.drop`, `table.copy`, `table.grow`,
-  `table.size`, `table.fill`, `ref.func`, `ref.null`, `ref.is_null`),
+  `memory.fill`, `table.init`, `elem.drop`, `table.copy` including 64↔32 mixed
+  table copies, `table.grow`, `table.size`, `table.fill`, `ref.func`, `ref.null`,
+  `ref.is_null`), `function-references` (`call_ref`, `return_call_ref`,
+  `call_ref` inside `try_table`, `ref.as_non_null`, `br_on_null`,
+  `br_on_non_null`, with null traps mapping to `TRAP_INDIRECT_CALL (4)`),
   `memory64` 64-bit addressing (with 1-branch wrap-proof bounds checks when
-  `end_off <= mem_min_bytes`), `wide-arithmetic` (`i64.add128`, `i64.sub128`,
-  `i64.mul_wide_s`, `i64.mul_wide_u`), `exception_handling` (`TagSection`,
-  `try_table` with `catch`/`catch_ref`/`catch_all`/`catch_all_ref`, `throw`,
-  `throw_ref`, `exnref` backed by a demand-paged 4 MiB RW exception slab;
-  guest-only `INTERNAL_EXN_SIGNAL (0xff)` maps to `TRAP_UNREACHABLE (1)` at
-  outer Blot ABI 8 boundaries so external trap codes `1..=22` remain unchanged,
-  and `throw_ref(null)` traps with `TRAP_INDIRECT_CALL (4)` matching
+  `end_off <= mem_min_bytes`) and `table64` 64-bit table indexing/bounds checks,
+  `wide-arithmetic` (`i64.add128`, `i64.sub128`, `i64.mul_wide_s`,
+  `i64.mul_wide_u`), `exception_handling` (`TagSection`, `try_table` with
+  `catch`/`catch_ref`/`catch_all`/`catch_all_ref`, `throw`, `throw_ref`, `exnref`
+  backed by a demand-paged 4 MiB RW exception slab; guest-only
+  `INTERNAL_EXN_SIGNAL (0xff)` maps to `TRAP_UNREACHABLE (1)` at outer Blot
+  ABI 8 boundaries so external trap codes `1..=22` remain unchanged, and
+  `throw_ref(null)` traps with `TRAP_INDIRECT_CALL (4)` matching
   `TrapCode::NullReference`), `tail_call` (`return_call` / `return_call_indirect`
-  with O(1)-stack frame reuse whenever `callee_arg_stack <= caller_param_stack`,
-  and overflow return-buffer pointer forwarding), all 236 fixed-width 128-bit Wasm
-  SIMD opcodes (`0xfd00..=0xfdff`), and all 20 `relaxed_simd` opcodes
-  (`0xfd 0x100..=0xfd 0x113`, bit-exact with `wtime-runtime`) — mirrored with
-  multi-core parallel compilation (`--jobs`) and full NEON + bulk memory/table +
-  `tail_call` + `wide-arithmetic` + `multi-memory` + `exception_handling` parity
-  on `--backend aarch64` (verified on native `ubuntu-24.04-arm` hardware in CI).
+  / `return_call_ref` with O(1)-stack frame reuse whenever
+  `callee_arg_stack <= caller_param_stack`, and overflow return-buffer pointer
+  forwarding), all 236 fixed-width 128-bit Wasm SIMD opcodes (`0xfd00..=0xfdff`),
+  and all 20 `relaxed_simd` opcodes (`0xfd 0x100..=0xfd 0x113`, bit-exact with
+  `wtime-runtime`) — mirrored with multi-core parallel compilation (`--jobs`),
+  constant rematerialization, 2-pass hot-fallthrough trace layout, vote-counted
+  coalescing, and full NEON + bulk memory/table + `table64` +
+  `function-references` + `tail_call` + `wide-arithmetic` + `multi-memory` +
+  `exception_handling` parity on `--backend aarch64` (verified on native
+  `ubuntu-24.04-arm` hardware in CI).
 
 Unsupported modules are rejected cleanly before codegen with CLI exit code `4`
 (`X64_ADMISSION_REJECTED_EXIT_CODE`), distinct from exit code `1` for I/O,

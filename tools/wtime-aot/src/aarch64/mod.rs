@@ -791,7 +791,7 @@ fn compile_wasm_to_aarch64_detailed(
     let mut ci_tables = Vec::with_capacity(module.ci_sigs.len());
     let mut ci_patch_info: Vec<(u32, Vec<Option<u32>>)> = Vec::with_capacity(module.ci_sigs.len());
     for sig in &module.ci_sigs {
-        let (roff, slice) = if sig.is_dynamic || sig.span == 0 {
+        let (roff, slice) = if sig.is_dynamic || sig.is_call_ref || sig.span == 0 {
             (0, Vec::new())
         } else {
             let mut sl = vec![None; sig.span as usize];
@@ -809,21 +809,26 @@ fn compile_wasm_to_aarch64_detailed(
             rodata_off: roff,
             dyn_table_desc_off: -1,
             canon_sig: sig.canon_sig,
+            is_call_ref: sig.is_call_ref,
+            table_is64: sig.table_is64,
         });
         ci_patch_info.push((roff, slice));
     }
 
-    let (func_sig_ro_off, func_addr_ro_off) = if module.uses_dyn_ci {
+    let func_sig_ro_off = if module.uses_dyn_ci {
         let mut sig_bytes = Vec::with_capacity(module.func_canon_sig.len() * 4);
         for &cs in &module.func_canon_sig {
             sig_bytes.extend_from_slice(&cs.to_le_bytes());
         }
-        let sig_off = append_rodata(&mut rodata, 4, &sig_bytes).map_err(X64CompileError::Failed)?;
-        let addr_off = append_rodata(&mut rodata, 4, &vec![0u8; module.func_canon_sig.len() * 4])
-            .map_err(X64CompileError::Failed)?;
-        (sig_off, addr_off)
+        append_rodata(&mut rodata, 4, &sig_bytes).map_err(X64CompileError::Failed)?
     } else {
-        (0, 0)
+        0
+    };
+    let func_addr_ro_off = if module.uses_dyn_ci || module.uses_call_ref {
+        append_rodata(&mut rodata, 4, &vec![0u8; module.func_canon_sig.len() * 4])
+            .map_err(X64CompileError::Failed)?
+    } else {
+        0
     };
 
     let empty_off = append_rodata(&mut rodata, 1, &[0]).map_err(X64CompileError::Failed)?;
@@ -1631,7 +1636,7 @@ fn compile_wasm_to_aarch64_detailed(
             }
         }
     }
-    if module.uses_dyn_ci {
+    if module.uses_dyn_ci || module.uses_call_ref {
         let base_va = rodata_vaddr + u64::from(layout.func_addr_ro_off);
         for (fi, &target_off) in func_offs.iter().enumerate() {
             let target_va = text_vaddr + target_off as u64;

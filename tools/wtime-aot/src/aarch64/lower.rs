@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 
 use super::asm::{A64Asm, A64RelocTarget, Cond, Label, Reg, VReg};
-use super::regalloc::{A64AbiSlot, A64AllocResult, A64Loc, layout_args, layout_rets};
+use super::regalloc::{
+    A64AbiSlot, A64AllocResult, A64Loc, A64RematConst, layout_args, layout_rets,
+};
 use super::simd_lower::{
     emit_a64_v128_bin, emit_a64_v128_shift, emit_a64_v128_shuffle, emit_a64_v128_to_i32,
     emit_a64_v128_un,
@@ -44,6 +46,7 @@ enum MoveLoc {
     Gp(Reg),
     Fp(VReg),
     Stack(i32),
+    Remat(A64RematConst),
 }
 
 impl From<A64Loc> for MoveLoc {
@@ -52,6 +55,7 @@ impl From<A64Loc> for MoveLoc {
             A64Loc::Gp(r) => MoveLoc::Gp(r),
             A64Loc::Fp(v) => MoveLoc::Fp(v),
             A64Loc::Spill(off) => MoveLoc::Stack(off),
+            A64Loc::Remat(rc) => MoveLoc::Remat(rc),
         }
     }
 }
@@ -145,6 +149,17 @@ fn emit_single_move(asm: &mut A64Asm, dst: MoveLoc, src: MoveLoc, ty: Ty) {
         }
         (MoveLoc::Stack(off), MoveLoc::Fp(s)) => {
             emit_store_off(asm, ty, None, Some(s), Reg::SP, off, SGP3);
+        }
+        (MoveLoc::Gp(d), MoveLoc::Remat(rc)) => match rc {
+            A64RematConst::I32(c) => asm.mov_imm32(d, c as u32),
+            A64RematConst::I64(c) => asm.mov_imm64(d, c as u64),
+        },
+        (MoveLoc::Stack(off), MoveLoc::Remat(rc)) => {
+            match rc {
+                A64RematConst::I32(c) => asm.mov_imm32(SGP1, c as u32),
+                A64RematConst::I64(c) => asm.mov_imm64(SGP1, c as u64),
+            }
+            emit_store_off(asm, ty, Some(SGP1), None, Reg::SP, off, SGP3);
         }
         (MoveLoc::Stack(doff), MoveLoc::Stack(soff)) => {
             if ty.is_fp() {
@@ -343,6 +358,13 @@ impl<'a> LowerA64<'a> {
                 emit_load_off(&mut self.asm, ty, Some(scratch), None, Reg::SP, off, SGP3);
                 scratch
             }
+            A64Loc::Remat(rc) => {
+                match rc {
+                    A64RematConst::I32(c) => self.asm.mov_imm32(scratch, c as u32),
+                    A64RematConst::I64(c) => self.asm.mov_imm64(scratch, c as u64),
+                }
+                scratch
+            }
             A64Loc::Fp(_) => unreachable!("aarch64: expected GP val"),
         }
     }
@@ -351,7 +373,7 @@ impl<'a> LowerA64<'a> {
         match self.loc(v) {
             A64Loc::Gp(r) => r,
             A64Loc::Spill(_) => SGP1,
-            A64Loc::Fp(_) => unreachable!("aarch64: expected GP val"),
+            A64Loc::Fp(_) | A64Loc::Remat(_) => unreachable!("aarch64: expected GP val"),
         }
     }
 
@@ -366,7 +388,7 @@ impl<'a> LowerA64<'a> {
             A64Loc::Spill(off) => {
                 emit_store_off(&mut self.asm, ty, Some(r), None, Reg::SP, off, SGP3);
             }
-            A64Loc::Fp(_) => unreachable!(),
+            A64Loc::Fp(_) | A64Loc::Remat(_) => unreachable!(),
         }
     }
 
@@ -378,7 +400,7 @@ impl<'a> LowerA64<'a> {
                 emit_load_off(&mut self.asm, ty, None, Some(scratch), Reg::SP, off, SGP3);
                 scratch
             }
-            A64Loc::Gp(_) => unreachable!("aarch64: expected FP val"),
+            A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!("aarch64: expected FP val"),
         }
     }
 
@@ -386,7 +408,7 @@ impl<'a> LowerA64<'a> {
         match self.loc(v) {
             A64Loc::Fp(r) => r,
             A64Loc::Spill(_) => SFP1,
-            A64Loc::Gp(_) => unreachable!(),
+            A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
         }
     }
 
@@ -405,7 +427,7 @@ impl<'a> LowerA64<'a> {
             A64Loc::Spill(off) => {
                 emit_store_off(&mut self.asm, ty, None, Some(r), Reg::SP, off, SGP3);
             }
-            A64Loc::Gp(_) => unreachable!(),
+            A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
         }
     }
 
@@ -891,16 +913,38 @@ impl<'a> LowerA64<'a> {
         }
     }
 
-    /// Resolves and dispatches `call_indirect` for `ci_id` (static `.rodata` OR dynamic `Ctx` table).
+    /// Resolves and dispatches `call_indirect` (static `.rodata`, dynamic `Ctx` table, 32-bit or
+    /// `table64`) or typed `call_ref` for `ci_id`.
     /// On `is_tail_jump`, leaves resolved target PC in `SGP1` (`X16`); otherwise emits `blr SGP1`.
     /// Returns `false` if a statically empty table branched unconditionally to `TRAP_INDIRECT_CALL`.
     fn emit_ci_dispatch(&mut self, ci_id: u32, is_tail_jump: bool) -> bool {
         let ci = self.layout.ci_tables[ci_id as usize];
         let toob = self.trap_table_oob_lbl();
         let bad = self.trap_ci_lbl();
+        if ci.is_call_ref {
+            emit_load_off(
+                &mut self.asm,
+                Ty::I64,
+                Some(SGP2),
+                None,
+                CTX_REG,
+                OFF_SCRATCH_TMP,
+                SGP3,
+            );
+            self.asm.cbz(true, SGP2, bad);
+            self.asm.sub_imm(true, SGP2, SGP2, 1);
+            self.asm
+                .adr_reloc(SGP1, A64RelocTarget::Rodata(self.layout.func_addr_ro_off));
+            self.asm.ldrsw_reg_scaled(SGP3, SGP1, SGP2, true);
+            self.asm.add_r(true, SGP1, SGP1, SGP3);
+            if !is_tail_jump {
+                self.asm.blr(SGP1);
+            }
+            return true;
+        }
         emit_load_off(
             &mut self.asm,
-            Ty::I32,
+            if ci.table_is64 { Ty::I64 } else { Ty::I32 },
             Some(SGP2),
             None,
             CTX_REG,
@@ -917,7 +961,7 @@ impl<'a> LowerA64<'a> {
                 ci.dyn_table_desc_off + 8,
                 SGP1,
             );
-            self.asm.cmp_r(false, SGP2, SGP3);
+            self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
             self.asm.b_cond(Cond::Hs, toob);
             emit_load_off(
                 &mut self.asm,
@@ -947,7 +991,7 @@ impl<'a> LowerA64<'a> {
             return true;
         }
         self.asm.mov_imm32(SGP3, ci.table_len);
-        self.asm.cmp_r(false, SGP2, SGP3);
+        self.asm.cmp_r(ci.table_is64, SGP2, SGP3);
         self.asm.b_cond(Cond::Hs, toob);
         if ci.span == 0 {
             self.asm.b(bad);
@@ -978,11 +1022,17 @@ impl<'a> LowerA64<'a> {
         ci_idx: Option<(u32, Val)>,
         direct_func: Option<u32>,
     ) -> Result<(), String> {
-        if let Some((_, idx_val)) = ci_idx {
+        if let Some((ci_id, idx_val)) = ci_idx {
+            let ci = self.layout.ci_tables[ci_id as usize];
+            let ity = if ci.is_call_ref || ci.table_is64 {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             let ir = self.gp_read(idx_val, SGP2);
             emit_store_off(
                 &mut self.asm,
-                Ty::I32,
+                ity,
                 Some(ir),
                 None,
                 CTX_REG,
@@ -1061,11 +1111,17 @@ impl<'a> LowerA64<'a> {
         direct_func: Option<u32>,
         next_bb: Option<u32>,
     ) -> Result<(), String> {
-        if let Some((_, idx_val)) = ci_idx {
+        if let Some((ci_id, idx_val)) = ci_idx {
+            let ci = self.layout.ci_tables[ci_id as usize];
+            let ity = if ci.is_call_ref || ci.table_is64 {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             let ir = self.gp_read(idx_val, SGP2);
             emit_store_off(
                 &mut self.asm,
-                Ty::I32,
+                ity,
                 Some(ir),
                 None,
                 CTX_REG,
@@ -1155,11 +1211,17 @@ impl<'a> LowerA64<'a> {
         let arg_layout = layout_args(&arg_tys)?;
         let can_tail_jump = arg_layout.stack_bytes <= self_param_stack;
 
-        if let Some((_, idx_val)) = ci_idx {
+        if let Some((ci_id, idx_val)) = ci_idx {
+            let ci = self.layout.ci_tables[ci_id as usize];
+            let ity = if ci.is_call_ref || ci.table_is64 {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             let ir = self.gp_read(idx_val, SGP2);
             emit_store_off(
                 &mut self.asm,
-                Ty::I32,
+                ity,
                 Some(ir),
                 None,
                 CTX_REG,
@@ -1529,12 +1591,18 @@ impl<'a> LowerA64<'a> {
         match op {
             Op::ConstI32(c) => {
                 let r = res.unwrap();
+                if matches!(self.loc(r), A64Loc::Remat(_)) {
+                    return Ok(());
+                }
                 let d = self.gp_write_reg(r);
                 self.asm.mov_imm32(d, c as u32);
                 self.gp_commit(r, d);
             }
             Op::ConstI64(c) => {
                 let r = res.unwrap();
+                if matches!(self.loc(r), A64Loc::Remat(_)) {
+                    return Ok(());
+                }
                 let d = self.gp_write_reg(r);
                 self.asm.mov_imm64(d, c as u64);
                 self.gp_commit(r, d);
@@ -1672,12 +1740,23 @@ impl<'a> LowerA64<'a> {
                 base,
                 idx,
                 shift,
+                disp,
             } => {
                 let r = res.unwrap();
                 let br = self.gp_read(base, SGP1);
                 let ir = self.gp_read(idx, SGP2);
                 let d = self.gp_write_reg(r);
                 self.asm.add_r_lsl(is64, d, br, ir, shift);
+                if disp != 0 {
+                    if disp > 0 && disp < 4096 {
+                        self.asm.add_imm(is64, d, d, disp as u16);
+                    } else if disp < 0 && disp > -4096 {
+                        self.asm.sub_imm(is64, d, d, (-disp) as u16);
+                    } else {
+                        self.asm.mov_imm64(SGP1, i64::from(disp) as u64);
+                        self.asm.add_r(is64, d, d, SGP1);
+                    }
+                }
                 self.gp_commit(r, d);
             }
             Op::I32Cmp(cop, a, b) | Op::I64Cmp(cop, a, b) => {
@@ -1974,11 +2053,12 @@ impl<'a> LowerA64<'a> {
             }
             Op::TableGet { table, idx } => {
                 let r = res.unwrap();
+                let t64 = self.layout.table_is_64(table);
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
                 if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
                     self.asm.mov_imm32(SGP2, len);
-                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
                     self.asm.add_i32_checked(true, SGP3, CTX_REG, off, SGP2);
                     let d = self.gp_write_reg(r);
@@ -1995,7 +2075,7 @@ impl<'a> LowerA64<'a> {
                         desc_off + 8,
                         SGP3,
                     );
-                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
                     emit_load_off(
                         &mut self.asm,
@@ -2012,11 +2092,12 @@ impl<'a> LowerA64<'a> {
                 }
             }
             Op::TableSet { table, idx, val } => {
+                let t64 = self.layout.table_is_64(table);
                 let ir = self.gp_read(idx, SGP1);
                 let toob = self.trap_table_oob_lbl();
                 if let Some(&(off, len)) = self.layout.extern_tables.get(&table) {
                     self.asm.mov_imm32(SGP2, len);
-                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
                     let vr = self.gp_read(val, SGP1);
                     let idx_r = if self.loc(idx) != A64Loc::Gp(ir) {
@@ -2039,7 +2120,7 @@ impl<'a> LowerA64<'a> {
                         desc_off + 8,
                         SGP3,
                     );
-                    self.asm.cmp_r(false, ir, SGP2);
+                    self.asm.cmp_r(t64, ir, SGP2);
                     self.asm.b_cond(Cond::Hs, toob);
                     emit_load_off(
                         &mut self.asm,
@@ -3401,13 +3482,20 @@ impl<'a> LowerA64<'a> {
                 src,
                 len,
             } => {
+                let d64 = self.layout.table_is_64(table);
                 let moves = [
-                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (
+                        MoveLoc::Gp(Reg::X0),
+                        MoveLoc::from(self.loc(dst)),
+                        if d64 { Ty::I64 } else { Ty::I32 },
+                    ),
                     (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(src)), Ty::I32),
                     (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), Ty::I32),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.uxtw(Reg::X0, Reg::X0);
+                if !d64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                }
                 self.asm.uxtw(Reg::X1, Reg::X1);
                 self.asm.uxtw(Reg::X2, Reg::X2);
                 self.asm.mov_imm32(Reg::X3, elem);
@@ -3430,15 +3518,36 @@ impl<'a> LowerA64<'a> {
                 src,
                 len,
             } => {
+                let d64 = self.layout.table_is_64(dst_table);
+                let s64 = self.layout.table_is_64(src_table);
+                let l64 = d64 && s64;
                 let moves = [
-                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
-                    (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(src)), Ty::I32),
-                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), Ty::I32),
+                    (
+                        MoveLoc::Gp(Reg::X0),
+                        MoveLoc::from(self.loc(dst)),
+                        if d64 { Ty::I64 } else { Ty::I32 },
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X1),
+                        MoveLoc::from(self.loc(src)),
+                        if s64 { Ty::I64 } else { Ty::I32 },
+                    ),
+                    (
+                        MoveLoc::Gp(Reg::X2),
+                        MoveLoc::from(self.loc(len)),
+                        if l64 { Ty::I64 } else { Ty::I32 },
+                    ),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.uxtw(Reg::X0, Reg::X0);
-                self.asm.uxtw(Reg::X1, Reg::X1);
-                self.asm.uxtw(Reg::X2, Reg::X2);
+                if !d64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                }
+                if !s64 {
+                    self.asm.uxtw(Reg::X1, Reg::X1);
+                }
+                if !l64 {
+                    self.asm.uxtw(Reg::X2, Reg::X2);
+                }
                 self.asm
                     .mov_imm32(Reg::X3, self.layout.dyn_tables[&dst_table].0 as u32);
                 self.asm
@@ -3449,20 +3558,25 @@ impl<'a> LowerA64<'a> {
             }
             Op::TableGrow { table, init, delta } => {
                 let r = res.unwrap();
+                let t64 = self.layout.table_is_64(table);
                 let moves = [
                     (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(init)), Ty::I64),
                     (
                         MoveLoc::Gp(Reg::X1),
                         MoveLoc::from(self.loc(delta)),
-                        Ty::I32,
+                        if t64 { Ty::I64 } else { Ty::I32 },
                     ),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.uxtw(Reg::X1, Reg::X1);
+                if !t64 {
+                    self.asm.uxtw(Reg::X1, Reg::X1);
+                }
                 self.asm
                     .mov_imm32(Reg::X2, self.layout.dyn_tables[&table].0 as u32);
                 self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_TABLE_GROW));
-                self.asm.uxtw(Reg::X0, Reg::X0);
+                if !t64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                }
                 self.gp_commit(r, Reg::X0);
             }
             Op::TableSize(table) => {
@@ -3490,14 +3604,18 @@ impl<'a> LowerA64<'a> {
                 val,
                 len,
             } => {
+                let t64 = self.layout.table_is_64(table);
+                let ity = if t64 { Ty::I64 } else { Ty::I32 };
                 let moves = [
-                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X0), MoveLoc::from(self.loc(dst)), ity),
                     (MoveLoc::Gp(Reg::X1), MoveLoc::from(self.loc(val)), Ty::I64),
-                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), Ty::I32),
+                    (MoveLoc::Gp(Reg::X2), MoveLoc::from(self.loc(len)), ity),
                 ];
                 emit_parallel_moves(&mut self.asm, &moves);
-                self.asm.uxtw(Reg::X0, Reg::X0);
-                self.asm.uxtw(Reg::X2, Reg::X2);
+                if !t64 {
+                    self.asm.uxtw(Reg::X0, Reg::X0);
+                    self.asm.uxtw(Reg::X2, Reg::X2);
+                }
                 self.asm
                     .mov_imm32(Reg::X3, self.layout.dyn_tables[&table].0 as u32);
                 self.asm.bl_reloc(A64RelocTarget::Helper(HELPER_TABLE_FILL));
@@ -3612,9 +3730,18 @@ impl<'a> LowerA64<'a> {
                     } else {
                         self.asm.add_r(true, SGP3, MEM_BASE_REG, dr);
                     }
-                    let vr = self.gp_read(val, SGP1);
+                    let is_zero = matches!(self.loc(val), A64Loc::Remat(A64RematConst::I32(0)));
+                    let vr = if is_zero {
+                        Reg::XZR
+                    } else {
+                        self.gp_read(val, SGP1)
+                    };
                     if len >= 4 {
-                        self.asm.dup_gp_128(0, SFP1, vr);
+                        if is_zero {
+                            self.asm.movi_zero_16b(SFP1);
+                        } else {
+                            self.asm.dup_gp_128(0, SFP1, vr);
+                        }
                         let mut off = 0u32;
                         while off + 16 <= len {
                             self.asm.str_q_uimm(SFP1, SGP3, off);
@@ -4059,7 +4186,7 @@ impl<'a> LowerA64<'a> {
                         emit_load_off(&mut self.asm, Ty::V128, None, Some(d), Reg::SP, off, SGP3);
                         d
                     }
-                    A64Loc::Gp(_) => unreachable!(),
+                    A64Loc::Gp(_) | A64Loc::Remat(_) => unreachable!(),
                 };
                 // Save `a`/`b` if aliasing `d` before moving `c` into `d`.
                 let a_use = if d == ar {
@@ -4300,11 +4427,17 @@ impl<'a> LowerA64<'a> {
                 else_args,
             } => {
                 let cr = self.gp_read(cond, SGP1);
-                let then_lbl = self.edge_target_label(then_bb.0, then_args);
-                self.asm.cbnz(false, cr, then_lbl);
-                self.emit_edge_moves(else_bb.0, else_args);
-                if next_bb != Some(else_bb.0) {
-                    self.asm.b(self.bb_labels[else_bb.0 as usize]);
+                if next_bb == Some(then_bb.0) && then_bb != else_bb {
+                    let else_lbl = self.edge_target_label(else_bb.0, else_args);
+                    self.asm.cbz(false, cr, else_lbl);
+                    self.emit_edge_moves(then_bb.0, then_args);
+                } else {
+                    let then_lbl = self.edge_target_label(then_bb.0, then_args);
+                    self.asm.cbnz(false, cr, then_lbl);
+                    self.emit_edge_moves(else_bb.0, else_args);
+                    if next_bb != Some(else_bb.0) {
+                        self.asm.b(self.bb_labels[else_bb.0 as usize]);
+                    }
                 }
             }
             Term::CmpBranch {
@@ -4316,7 +4449,6 @@ impl<'a> LowerA64<'a> {
                 else_bb,
                 else_args,
             } => {
-                let then_lbl = self.edge_target_label(then_bb.0, then_args);
                 let cond = match kind {
                     CmpBranchKind::I32(_)
                     | CmpBranchKind::I64(_)
@@ -4332,10 +4464,17 @@ impl<'a> LowerA64<'a> {
                         Self::fp_cmp_branch_cond(cop)
                     }
                 };
-                self.asm.b_cond(cond, then_lbl);
-                self.emit_edge_moves(else_bb.0, else_args);
-                if next_bb != Some(else_bb.0) {
-                    self.asm.b(self.bb_labels[else_bb.0 as usize]);
+                if next_bb == Some(then_bb.0) && then_bb != else_bb {
+                    let else_lbl = self.edge_target_label(else_bb.0, else_args);
+                    self.asm.b_cond(cond.invert(), else_lbl);
+                    self.emit_edge_moves(then_bb.0, then_args);
+                } else {
+                    let then_lbl = self.edge_target_label(then_bb.0, then_args);
+                    self.asm.b_cond(cond, then_lbl);
+                    self.emit_edge_moves(else_bb.0, else_args);
+                    if next_bb != Some(else_bb.0) {
+                        self.asm.b(self.bb_labels[else_bb.0 as usize]);
+                    }
                 }
             }
             Term::BrTable { idx, table_idx } => {
@@ -4493,20 +4632,27 @@ pub fn lower_ir_to_aarch64(
         live_flags: None,
     };
 
-    // 1. Prologue: stack overflow floor check + allocate frame + save FP/LR + callee-saved regs.
-    let stack_lbl = l.trap_stack_lbl();
-    emit_load_off(
-        &mut l.asm,
-        Ty::I64,
-        Some(SGP1),
-        None,
-        CTX_REG,
-        OFF_STACK_FLOOR,
-        SGP3,
-    );
-    l.asm.mov_r(true, SGP2, Reg::SP);
-    l.asm.cmp_r(true, SGP2, SGP1);
-    l.asm.b_cond(Cond::Lo, stack_lbl);
+    // 1. Prologue: wrap-proof prospective stack overflow floor check (elided for zero-frame leaf
+    //    functions that make no calls and never adjust SP) + allocate frame + save FP/LR + callee-saved regs.
+    if l.alloc.has_calls || l.alloc.frame_size > 0 {
+        let stack_lbl = l.trap_stack_lbl();
+        emit_load_off(
+            &mut l.asm,
+            Ty::I64,
+            Some(SGP1),
+            None,
+            CTX_REG,
+            OFF_STACK_FLOOR,
+            SGP3,
+        );
+        if l.alloc.frame_size > 0 {
+            l.asm
+                .add_i32_checked(true, SGP1, SGP1, l.alloc.frame_size, SGP3);
+        }
+        l.asm.mov_r(true, SGP2, Reg::SP);
+        l.asm.cmp_r(true, SGP2, SGP1);
+        l.asm.b_cond(Cond::Lo, stack_lbl);
+    }
 
     if l.alloc.frame_size > 0 {
         l.asm
@@ -4679,7 +4825,7 @@ pub fn lower_ir_to_aarch64(
                 if let Some((is_sub, z)) = fused
                     && let Some(res_val) = next.res
                     && match l.loc(z) {
-                        A64Loc::Gp(_) => true,
+                        A64Loc::Gp(_) | A64Loc::Remat(_) => true,
                         A64Loc::Spill(off) => {
                             let max_uimm = if is64 { 4095 * 8 } else { 4095 * 4 };
                             let mask = if is64 { 7 } else { 3 };

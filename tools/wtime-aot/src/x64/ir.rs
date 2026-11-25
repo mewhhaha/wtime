@@ -404,8 +404,8 @@ pub enum Op {
     I32BinImm(IntBinOp, Val, i32),
     I64Bin(IntBinOp, Val, Val),
     I64BinImm(IntBinOp, Val, i32),
-    /// Scaled integer addition `base + (idx << shift)` (`shift ∈ 1..=3`), lowered to a single
-    /// 1-cycle `lea` on x64 and `add rd, rn, rm, lsl #shift` on AArch64.
+    /// Scaled integer addition `base + (idx << shift) + disp` (`shift ∈ 0..=3`), lowered to a single
+    /// 1-cycle `lea` on x64 and `add rd, rn, rm, lsl #shift` (+ optional disp add) on AArch64.
     /// When `!is64`, `base` and `idx` may be `Ty::I32` or `Ty::I64` (low 32 bits used,
     /// zero-extended into 64 bits, folding `I32WrapI64` directly into the address op).
     AddScaled {
@@ -413,6 +413,7 @@ pub enum Op {
         base: Val,
         idx: Val,
         shift: u8,
+        disp: i32,
     },
 
     I32Cmp(CmpOp, Val, Val),
@@ -2841,19 +2842,24 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                     stack.extend(rets_vec);
                 }
             }
-            0x11 => {
-                // call_indirect
-                let Immediate::Pair(ti, tbl) = insn.immediate else {
-                    return Err("call_indirect immediate".into());
+            0x11 | 0x14 => {
+                // call_indirect / call_ref
+                let (ti, tbl) = if op == 0x11 {
+                    let Immediate::Pair(ti, tbl) = insn.immediate else {
+                        return Err("call_indirect immediate".into());
+                    };
+                    (ti, tbl)
+                } else {
+                    (imm_idx()?, u32::MAX)
                 };
                 let &ci_id = module
                     .ci_index
                     .get(&(tbl, ti))
-                    .ok_or("call_indirect not registered")?;
+                    .ok_or("call_indirect/call_ref not registered")?;
                 let fty = module
                     .module_types
                     .get(ti as usize)
-                    .ok_or("call_indirect type")?;
+                    .ok_or("call_indirect/call_ref type")?;
                 let idx = stack.pop().ok_or("ci idx")?;
                 let n = fty.params.len();
                 let at = stack.len() - n;
@@ -2923,19 +2929,24 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 });
                 frames.last_mut().unwrap().unreachable = true;
             }
-            0x13 => {
-                // return_call_indirect
-                let Immediate::Pair(ti, tbl) = insn.immediate else {
-                    return Err("return_call_indirect immediate".into());
+            0x13 | 0x15 => {
+                // return_call_indirect / return_call_ref
+                let (ti, tbl) = if op == 0x13 {
+                    let Immediate::Pair(ti, tbl) = insn.immediate else {
+                        return Err("return_call_indirect immediate".into());
+                    };
+                    (ti, tbl)
+                } else {
+                    (imm_idx()?, u32::MAX)
                 };
                 let &ci_id = module
                     .ci_index
                     .get(&(tbl, ti))
-                    .ok_or("return_call_indirect not registered")?;
+                    .ok_or("return_call_indirect/return_call_ref not registered")?;
                 let fty = module
                     .module_types
                     .get(ti as usize)
-                    .ok_or("return_call_indirect type")?;
+                    .ok_or("return_call_indirect/return_call_ref type")?;
                 let idx = stack.pop().ok_or("return_ci idx")?;
                 let n = fty.params.len();
                 let at = stack.len() - n;
@@ -3060,6 +3071,98 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 let f = imm_idx()?;
                 let v = b.const_i64(i64::from(f) + 1);
                 stack.push(v);
+            }
+            0xd4 => {
+                // ref.as_non_null: traps with TRAP_INDIRECT_CALL (mapped to NullReference) if 0.
+                let r = *stack.last().ok_or("ref.as_non_null")?;
+                if b.as_i64(r) == Some(0) {
+                    b.emit_void(Op::Trap(TRAP_INDIRECT_CALL));
+                    b.terminate(Term::Unreachable);
+                    frames.last_mut().unwrap().unreachable = true;
+                } else {
+                    let trap_bb = b.new_block(false)?;
+                    let ok_bb = b.new_block(false)?;
+                    b.terminate(Term::CmpBranch {
+                        kind: CmpBranchKind::I64Imm(CmpOp::Eq, 0),
+                        a: r,
+                        b: r,
+                        then_bb: trap_bb,
+                        then_args: ValRange::EMPTY,
+                        else_bb: ok_bb,
+                        else_args: ValRange::EMPTY,
+                    });
+                    b.add_pred(trap_bb);
+                    b.add_pred(ok_bb);
+                    b.cur_bb = trap_bb;
+                    b.emit_void(Op::Trap(TRAP_INDIRECT_CALL));
+                    b.terminate(Term::Unreachable);
+                    b.cur_bb = ok_bb;
+                }
+            }
+            0xd5 | 0xd6 => {
+                // br_on_null / br_on_non_null
+                let depth = imm_idx()? as usize;
+                let fi = frames.len() - 1 - depth;
+                let fall_bb = b.new_block(false)?;
+                let (r, cmp_op, taken_ret_vals, taken_branch_args) = if op == 0xd5 {
+                    let r = stack.pop().ok_or("br_on_null ref")?;
+                    if frames[fi].kind == FrameKind::Function {
+                        let n_res = frames[fi].results.len();
+                        let rv = stack[stack.len() - n_res..].to_vec();
+                        (r, CmpOp::Eq, Some(rv), ValRange::EMPTY)
+                    } else {
+                        let args_r = build_branch_args(&mut b, &stack, &locals, &frames[fi])?;
+                        (r, CmpOp::Eq, None, args_r)
+                    }
+                } else {
+                    let r = *stack.last().ok_or("br_on_non_null ref")?;
+                    if frames[fi].kind == FrameKind::Function {
+                        let n_res = frames[fi].results.len();
+                        let rv = stack[stack.len() - n_res..].to_vec();
+                        stack.pop();
+                        (r, CmpOp::Ne, Some(rv), ValRange::EMPTY)
+                    } else {
+                        let args_r = build_branch_args(&mut b, &stack, &locals, &frames[fi])?;
+                        stack.pop();
+                        (r, CmpOp::Ne, None, args_r)
+                    }
+                };
+                if let Some(ret_vals) = taken_ret_vals {
+                    let ret_bb = b.new_block(false)?;
+                    b.terminate(Term::CmpBranch {
+                        kind: CmpBranchKind::I64Imm(cmp_op, 0),
+                        a: r,
+                        b: r,
+                        then_bb: ret_bb,
+                        then_args: ValRange::EMPTY,
+                        else_bb: fall_bb,
+                        else_args: ValRange::EMPTY,
+                    });
+                    b.add_pred(ret_bb);
+                    b.add_pred(fall_bb);
+                    b.cur_bb = ret_bb;
+                    let vr = b.ir.push_pool(&ret_vals)?;
+                    b.terminate(Term::Return { vals: vr });
+                    b.cur_bb = fall_bb;
+                } else {
+                    let target = frames[fi].target_bb;
+                    b.terminate(Term::CmpBranch {
+                        kind: CmpBranchKind::I64Imm(cmp_op, 0),
+                        a: r,
+                        b: r,
+                        then_bb: target,
+                        then_args: taken_branch_args,
+                        else_bb: fall_bb,
+                        else_args: ValRange::EMPTY,
+                    });
+                    b.add_pred(target);
+                    b.add_pred(fall_bb);
+                    b.cur_bb = fall_bb;
+                }
+                if op == 0xd5 {
+                    // br_on_null fallthrough keeps the non-null reference on the stack.
+                    stack.push(r);
+                }
             }
             0x28..=0x35 | 0xfd00..=0xfd0a | 0xfd5c | 0xfd5d => {
                 let Immediate::MemArg { memory, offset, .. } = insn.immediate else {
@@ -3355,7 +3458,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                         b.as_i32(len).map(|c| u64::from(c as u32))
                     };
                     if let Some(c) = const_len
-                        && c <= 64
+                        && c <= 128
                     {
                         b.emit_void(Op::MemCopyConst {
                             dst,
@@ -3393,7 +3496,7 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                         b.as_i32(len).map(|c| u64::from(c as u32))
                     };
                     if let Some(c) = const_len
-                        && c <= 64
+                        && c <= 128
                     {
                         b.emit_void(Op::MemFillConst {
                             dst,
@@ -3446,19 +3549,29 @@ pub fn lower_wasm_to_ir_with_budget_and_scratch(
                 let table = imm_idx()?;
                 let delta = stack.pop().ok_or("tgrow delta")?;
                 let init = stack.pop().ok_or("tgrow init")?;
-                let r = b.emit(Ty::I32, Op::TableGrow { table, init, delta });
+                let rty = if module.table_is_64(table) {
+                    Ty::I64
+                } else {
+                    Ty::I32
+                };
+                let r = b.emit(rty, Op::TableGrow { table, init, delta });
                 stack.push(r);
             }
             0xfc10 => {
                 let table = imm_idx()?;
+                let t64 = module.table_is_64(table);
                 let r = if b.const_fold && !module.dyn_tables.contains_key(&table) {
                     let len = *module
                         .table_lens
                         .get(table as usize)
                         .ok_or("table.size index")?;
-                    b.const_i32(len as i32)
+                    if t64 {
+                        b.const_i64(i64::from(len))
+                    } else {
+                        b.const_i32(len as i32)
+                    }
                 } else {
-                    b.emit(Ty::I32, Op::TableSize(table))
+                    b.emit(if t64 { Ty::I64 } else { Ty::I32 }, Op::TableSize(table))
                 };
                 stack.push(r);
             }

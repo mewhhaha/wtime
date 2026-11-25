@@ -3983,4 +3983,9 @@ fn aarch64_oracle_wasm3_wide_arith_multi_mem_and_exceptions() {
     let bulk_wasm = crate::x64::tests_oracle::build_bulk_memory_and_table_ops_test_wasm();
     let bulk_calls: Vec<(&str, Value)> = (0..=10).map(|k| ("dispatch", Value::I32(k))).collect();
     assert_aarch64_oracle("a64_bulk_mem_table_ops", &bulk_wasm, &bulk_calls, 32);
+
+    // 6. Wasm 3.0 `table64` + `function-references` (explicit table init, typed refs, call_ref, return_call_ref, br_on_null, br_on_non_null, ref.as_non_null, 64-bit table OOB)
+    let t64_wasm = crate::x64::tests_oracle::build_table64_and_funcref_test_wasm();
+    let t64_calls: Vec<(&str, Value)> = (0..=16).map(|k| ("dispatch", Value::I32(k))).collect();
+    assert_aarch64_oracle("a64_wasm3_table64_funcref", &t64_wasm, &t64_calls, 0);
 }

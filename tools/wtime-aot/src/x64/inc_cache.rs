@@ -30,7 +30,7 @@ use super::opt::{FnElideInput, FnOwnEffects, ModuleEffects};
 use super::{CtxLayout, NUM_HELPERS, RodataConsts};
 
 const MAGIC: &[u8; 8] = b"WTX64INC";
-const FORMAT_VERSION: u32 = 9;
+const FORMAT_VERSION: u32 = 10;
 const DELTA_MAGIC: &[u8; 8] = b"WTX64DLT";
 const DELTA_VERSION: u32 = 1;
 const DELTA_HEADER_BYTES: usize = 89;
@@ -332,6 +332,10 @@ pub fn compute_abi_hash(
         }
     }
 
+    hash_u32(&mut h, layout.table_is64.len() as u32);
+    for &t64 in &layout.table_is64 {
+        h.update(&[u8::from(t64)]);
+    }
     hash_u32(&mut h, layout.extern_tables.len() as u32);
     for (&tbl, &(off, len)) in &layout.extern_tables {
         hash_u32(&mut h, tbl);
@@ -354,6 +358,7 @@ pub fn compute_abi_hash(
     for (ci_sig, ci_lay) in module.ci_sigs.iter().zip(&layout.ci_tables) {
         hash_u32(&mut h, ci_sig.table);
         hash_u32(&mut h, ci_sig.type_idx);
+        h.update(&[u8::from(ci_lay.is_call_ref), u8::from(ci_lay.table_is64)]);
         hash_u32(&mut h, ci_lay.table_len);
         hash_u32(&mut h, ci_lay.min_slot);
         hash_u32(&mut h, ci_lay.span);

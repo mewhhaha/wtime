@@ -493,6 +493,7 @@ fn run_x64_so(
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn assert_oracle_matrix(
     name: &str,
     wasm: &[u8],
@@ -4873,4 +4874,305 @@ fn oracle_bulk_memory_and_table_ops() {
     let wasm = build_bulk_memory_and_table_ops_test_wasm();
     let calls: Vec<OracleCall> = (0..=10).map(|k| c("dispatch", ArgSpec::I32(k))).collect();
     assert_oracle_matrix("bulk_mem_table_ops", &wasm, &calls, &[], &[(0, 32)]);
+}
+
+/// Shared Wasm 3.0 `table64` + `function-references` test module (used by both x64 and AArch64 oracles).
+pub(crate) fn build_table64_and_funcref_test_wasm() -> Vec<u8> {
+    let push_i64 = |out: &mut Vec<u8>, v: i64| {
+        out.push(0x42);
+        leb_i64(out, v);
+    };
+    let enc_body_raw = |locals: &[(u32, &[u8])], body: &[u8]| -> Vec<u8> {
+        let mut b = Vec::new();
+        leb_u32(&mut b, locals.len() as u32);
+        for &(cnt, ty) in locals {
+            leb_u32(&mut b, cnt);
+            b.extend_from_slice(ty);
+        }
+        b.extend_from_slice(body);
+        b.push(0x0b);
+        let mut out = Vec::new();
+        leb_u32(&mut out, b.len() as u32);
+        out.extend_from_slice(&b);
+        out
+    };
+
+    // Types:
+    //   0: (i32) -> (i32)
+    //   1: (i32, i32) -> (i32)
+    //   2: ((ref 0), i32) -> (i32)
+    //   3: ((ref null 0), i32) -> (i32)
+    //   4: (i32) -> ()                      [tag 0]
+    //   5: () -> (i32, (ref 0))             [multi-result block for br_on_non_null]
+    let types = section(
+        1,
+        &[
+            6, // count
+            0x60, 1, 0x7f, 1, 0x7f, // 0
+            0x60, 2, 0x7f, 0x7f, 1, 0x7f, // 1
+            0x60, 2, 0x64, 0x00, 0x7f, 1, 0x7f, // 2
+            0x60, 2, 0x63, 0x00, 0x7f, 1, 0x7f, // 3
+            0x60, 1, 0x7f, 0, // 4
+            0x60, 0, 2, 0x7f, 0x64, 0x00, // 5
+        ],
+    );
+    // Tables:
+    //   0: dynamic table64 funcref (min=2, max=6), active elem 0 @ 0i64 = [f0, f1]
+    //   1: static  table64 (ref 0) (min=3, max=3) explicit init = (ref.func 0)
+    //   2: dynamic table64 (ref 0) (min=2, max=5) explicit init = (ref.func 1)
+    //   3: dynamic table32 funcref (min=3, max=6)
+    let tbl_sec = section(
+        4,
+        &[
+            4, // table count
+            0x70, 0x05, 2, 6, // tbl 0
+            0x40, 0x00, 0x64, 0x00, 0x05, 3, 3, 0xd2, 0, 0x0b, // tbl 1
+            0x40, 0x00, 0x64, 0x00, 0x05, 2, 5, 0xd2, 1, 0x0b, // tbl 2
+            0x70, 0x01, 3, 6, // tbl 3
+        ],
+    );
+    let tag_sec = section(13, &[1, 0x00, 4]);
+    // Globals:
+    //   0: mut (ref null 0) = (ref.func 0)
+    //   1: const (ref 0)    = (ref.func 1)
+    let global_sec = section(
+        6,
+        &[
+            2, // count
+            0x63, 0x00, 0x01, 0xd2, 0, 0x0b, // g0
+            0x64, 0x00, 0x00, 0xd2, 1, 0x0b, // g1
+        ],
+    );
+    // Elements:
+    //   0: active tbl 0 @ i64.const 0: [f0, f1]
+    //   1: passive funcref: [f1, f0, ref.null func]
+    //   2: declarative: [f0, f1, f2, f3]
+    let elem_sec = section(
+        9,
+        &[
+            3, // count
+            0x00, 0x42, 0, 0x0b, 2, 0, 1, // elem 0
+            0x05, 0x70, 3, 0xd2, 1, 0x0b, 0xd2, 0, 0x0b, 0xd0, 0x70, 0x0b, // elem 1
+            0x03, 0x00, 4, 0, 1, 2, 3, // elem 2
+        ],
+    );
+
+    // f0(x): x + 10
+    let f0 = vec![0x20, 0, 0x41, 10, 0x6a];
+    // f1(x): x * 3
+    let f1 = vec![0x20, 0, 0x41, 3, 0x6c];
+    // f2(x): throw tag 0 (x + 5); 0
+    let f2 = vec![0x20, 0, 0x41, 5, 0x6a, 0x08, 0, 0x41, 0];
+    // f3(n, acc): if n == 0 { return acc } else { return_call_ref 1 (n - 1, acc + 3, ref.func 3) }
+    let f3 = vec![
+        0x20, 0, 0x45, 0x04, 0x40, 0x20, 1, 0x0f, 0x0b, 0x20, 0, 0x41, 1, 0x6b, 0x20, 1, 0x41, 3,
+        0x6a, 0xd2, 3, 0x15, 1,
+    ];
+    // f4(r: (ref 0), x: i32) -> i32: call_ref 0 (x, r)
+    let f4 = vec![0x20, 1, 0x20, 0, 0x14, 0];
+    // f5(r: (ref null 0), x: i32) -> i32: exercises br_on_null (func target) & br_on_non_null (multi-result block)
+    let mut f5 = Vec::new();
+    // if x < 0: push 999, local.get 0, br_on_null 1 (returns 999 if null), call_ref 0, return
+    f5.extend_from_slice(&[0x20, 1, 0x41, 0, 0x48, 0x04, 0x40, 0x41]);
+    leb_i32(&mut f5, 999);
+    f5.extend_from_slice(&[0x20, 0, 0xd5, 1, 0x14, 0, 0x0f, 0x0b]);
+    // block (type 5 -> (i32, (ref 0))): x, r, br_on_non_null 0, x + 100, ref.func 0 end; call_ref 0
+    f5.extend_from_slice(&[0x02, 5, 0x20, 1, 0x20, 0, 0xd6, 0, 0x41]);
+    leb_i32(&mut f5, 100);
+    f5.extend_from_slice(&[0x6a, 0xd2, 0, 0x0b, 0x14, 0]);
+
+    // f6(case: i32) -> i32: local 1 = acc (i32), local 2 = tmp_ref ((ref null 0))
+    let mut f6 = Vec::new();
+    let case_branch = |out: &mut Vec<u8>, k: i32, body: &[u8]| {
+        out.extend_from_slice(&[0x20, 0, 0x41]);
+        leb_i32(out, k);
+        out.extend_from_slice(&[0x46, 0x04, 0x40]);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&[0x0f, 0x0b]);
+    };
+
+    // Case 0: static & dynamic table64 with explicit non-null (ref.func) initializers + table.grow (ok, max-fail, >u32::MAX fail)
+    let mut c0 = Vec::new();
+    // static tbl 1: call_indirect slot 0i64 (f0(7)=17) + slot 2i64 (f0(8)=18) + table.size 1 (3i64)
+    c0.extend_from_slice(&[
+        0x41, 7, 0x42, 0, 0x11, 0, 1, 0x41, 8, 0x42, 2, 0x11, 0, 1, 0x6a, 0xfc, 0x10, 1, 0xa7,
+        0x6a, 0x21, 1,
+    ]);
+    // dynamic tbl 2 (init f1=mul3): table.get 2 (1i64) -> call_ref(9)=27
+    c0.extend_from_slice(&[0x41, 9, 0x42, 1, 0x25, 2, 0x14, 0, 0x20, 1, 0x6a, 0x21, 1]);
+    // table.grow 2 (ref.func 0, 2i64) -> old=2i64; new size=4i64; tbl2[3] is f0(11)=21
+    c0.extend_from_slice(&[
+        0xd2, 0, 0x42, 2, 0xfc, 0x0f, 2, 0xa7, 0xfc, 0x10, 2, 0xa7, 0x6a, 0x41, 11, 0x42, 3, 0x25,
+        2, 0x14, 0, 0x6a, 0x20, 1, 0x6a, 0x21, 1,
+    ]);
+    // failed grow (>max 5): delta=5i64 -> -1i64 (check == -1i64 -> +100)
+    c0.extend_from_slice(&[0xd2, 0, 0x42, 5, 0xfc, 0x0f, 2]);
+    push_i64(&mut c0, -1);
+    c0.extend_from_slice(&[0x51, 0x41]);
+    leb_i32(&mut c0, 100);
+    c0.extend_from_slice(&[0x6c, 0x20, 1, 0x6a, 0x21, 1]);
+    // failed grow (delta = 0x1_0000_0001i64, low 32 bits == 1 would fit if truncated!) -> MUST return -1i64!
+    c0.push(0xd2);
+    c0.push(0);
+    push_i64(&mut c0, 0x1_0000_0001);
+    c0.extend_from_slice(&[0xfc, 0x0f, 2]);
+    push_i64(&mut c0, -1);
+    c0.extend_from_slice(&[0x51, 0x41]);
+    leb_i32(&mut c0, 200);
+    c0.extend_from_slice(&[0x6c, 0x20, 1, 0x6a]);
+    case_branch(&mut f6, 0, &c0);
+
+    // Case 1: table64 grow + init + fill + mixed copy (64->32, 32->64, 64->64) + set/get + call_indirect
+    let mut c1 = Vec::new();
+    // Initial tbl0 = [f0, f1]; grow by 3i64 with f1 -> old=2i64, tbl0 = [f0, f1, f1, f1, f1]
+    c1.extend_from_slice(&[0xd2, 1, 0x42, 3, 0xfc, 0x0f, 0, 0xa7, 0x21, 1]);
+    // table.init elem=1 tbl=0 (dst=2i64, src=0i32, len=3i32): tbl0 = [f0, f1, f1, f0, null]
+    c1.extend_from_slice(&[0x42, 2, 0x41, 0, 0x41, 3, 0xfc, 0x0c, 1, 0]);
+    // check tbl0[4] is null (1) and tbl0[3] is non-null (0)
+    c1.extend_from_slice(&[
+        0x42, 4, 0x25, 0, 0xd1, 0x42, 3, 0x25, 0, 0xd1, 0x6a, 0x20, 1, 0x6a, 0x21, 1,
+    ]);
+    // table.fill tbl=0 (dst=3i64, val=ref.func 1, len=2i64): tbl0 = [f0, f1, f1, f1, f1]
+    c1.extend_from_slice(&[0x42, 3, 0xd2, 1, 0x42, 2, 0xfc, 0x11, 0]);
+    // table.set tbl=0 (4i64, ref.func 0): tbl0 = [f0, f1, f1, f1, f0]
+    c1.extend_from_slice(&[0x42, 4, 0xd2, 0, 0x26, 0]);
+    // table.copy tbl3(32) <- tbl0(64) (dst=0i32, src=3i64, len=2i32): tbl3 = [f1, f0, null]
+    c1.extend_from_slice(&[0x41, 0, 0x42, 3, 0x41, 2, 0xfc, 0x0e, 3, 0]);
+    // table.copy tbl0(64) <- tbl3(32) (dst=0i64, src=0i32, len=2i32): tbl0 = [f1, f0, f1, f1, f0]
+    c1.extend_from_slice(&[0x42, 0, 0x41, 0, 0x41, 2, 0xfc, 0x0e, 0, 3]);
+    // overlapping table.copy tbl0(64) <- tbl0(64) (dst=1i64, src=0i64, len=3i64): tbl0 = [f1, f1, f0, f1, f0]
+    c1.extend_from_slice(&[0x42, 1, 0x42, 0, 0x42, 3, 0xfc, 0x0e, 0, 0]);
+    // call_indirect tbl0[1](5)=15 + tbl0[2](5)=15 + tbl3[1](6)=16 + tbl0[4](7)=17
+    c1.extend_from_slice(&[
+        0x41, 5, 0x42, 1, 0x11, 0, 0, 0x41, 5, 0x42, 2, 0x11, 0, 0, 0x6a, 0x41, 6, 0x41, 1, 0x11,
+        0, 3, 0x6a, 0x41, 7, 0x42, 4, 0x11, 0, 0, 0x6a, 0x20, 1, 0x6a,
+    ]);
+    case_branch(&mut f6, 1, &c1);
+
+    // Case 2: function-references (globals, ref.as_non_null, call_ref, br_on_null, br_on_non_null, 100k return_call_ref)
+    let mut c2 = Vec::new();
+    // g0 (f0) via ref.as_non_null -> f4(g0!, 5)=15; g1 (non-null f1) -> f4(g1, 6)=18
+    c2.extend_from_slice(&[
+        0x23, 0, 0xd4, 0x41, 5, 0x10, 4, 0x23, 1, 0x41, 6, 0x10, 4, 0x6a, 0x21, 1,
+    ]);
+    // mutate g0 = ref.null 0; test f5(g0, -1)=999, f5(g0, 7)=117, f5(g1, -1)=2997, f5(g1, 7)=21
+    c2.extend_from_slice(&[
+        0xd0, 0, 0x24, 0, 0x23, 0, 0x41, 0x7f, 0x10, 5, 0x23, 0, 0x41, 7, 0x10, 5, 0x6a, 0x23, 1,
+        0x41, 0x7f, 0x10, 5, 0x6a, 0x23, 1, 0x41, 7, 0x10, 5, 0x6a, 0x20, 1, 0x6a, 0x21, 1,
+    ]);
+    // store ref in local 2, call_ref via local 2
+    c2.extend_from_slice(&[
+        0xd2, 0, 0x21, 2, 0x41, 20, 0x20, 2, 0x14, 0, 0x20, 1, 0x6a, 0x21, 1,
+    ]);
+    // 100,000-deep return_call_ref tail recursion: f3(100000, 7) = 300007
+    c2.push(0x41);
+    leb_i32(&mut c2, 100_000);
+    c2.extend_from_slice(&[0x41, 7, 0x10, 3, 0x20, 1, 0x6a]);
+    case_branch(&mut f6, 2, &c2);
+
+    // Case 3: call_ref inside try_table catching callee throw (tag 0)!
+    case_branch(
+        &mut f6,
+        3,
+        &[
+            0x02, 0x7f, // block (result i32)
+            0x1f, 0x7f, 1, 0x00, 0, 0, // try_table (result i32) (catch 0 0)
+            0x41, 37, 0xd2, 2, 0x14, 0, // call_ref 0 (37, ref.func 2) -> throws 42
+            0x0b, 0x0b,
+        ],
+    );
+    // Case 4: call_ref on ref.null 0 -> TRAP_INDIRECT_CALL (4)
+    case_branch(&mut f6, 4, &[0x41, 1, 0xd0, 0, 0x14, 0]);
+    // Case 5: call_ref on ref.null 0 inside try_table (catch_all) -> MUST STILL TRAP (not caught!)
+    case_branch(
+        &mut f6,
+        5,
+        &[
+            0x02, 0x40, // block
+            0x1f, 0x40, 1, 0x02, 0, // try_table (catch_all 0)
+            0x41, 1, 0xd0, 0, 0x14, 0, 0x1a, 0x0b, 0x0b, 0x41, 77,
+        ],
+    );
+    // Case 6: return_call_ref on ref.null 0 -> TRAP_INDIRECT_CALL (4)
+    case_branch(&mut f6, 6, &[0x41, 1, 0xd0, 0, 0x15, 0]);
+    // Case 7: ref.as_non_null on ref.null 0 -> TRAP_INDIRECT_CALL (4)
+    case_branch(&mut f6, 7, &[0x41, 1, 0xd0, 0, 0xd4, 0x14, 0]);
+
+    // Cases 8..=15: 64-bit high-word non-zero (0x1_0000_0000i64, low 32 bits == 0!) MUST TRAP OOB across all table64 ops!
+    let mut c8 = vec![0x41, 1];
+    push_i64(&mut c8, 0x1_0000_0000);
+    c8.extend_from_slice(&[0x11, 0, 1]); // static table64 call_indirect
+    case_branch(&mut f6, 8, &c8);
+
+    let mut c9 = vec![0x41, 1];
+    push_i64(&mut c9, 0x1_0000_0000);
+    c9.extend_from_slice(&[0x11, 0, 0]); // dynamic table64 call_indirect
+    case_branch(&mut f6, 9, &c9);
+
+    let mut c10 = vec![0x41, 1];
+    push_i64(&mut c10, 0x1_0000_0000);
+    c10.extend_from_slice(&[0x13, 0, 1]); // static table64 return_call_indirect
+    case_branch(&mut f6, 10, &c10);
+
+    let mut c11 = Vec::new();
+    push_i64(&mut c11, 0x1_0000_0000);
+    c11.extend_from_slice(&[0x25, 0, 0xd1]); // table.get 0
+    case_branch(&mut f6, 11, &c11);
+
+    let mut c12 = Vec::new();
+    push_i64(&mut c12, 0x1_0000_0000);
+    c12.extend_from_slice(&[0xd0, 0x70, 0x26, 0, 0x41, 0]); // table.set 0
+    case_branch(&mut f6, 12, &c12);
+
+    let mut c13 = Vec::new();
+    push_i64(&mut c13, 0x1_0000_0000);
+    c13.extend_from_slice(&[0xd0, 0x70, 0x42, 1, 0xfc, 0x11, 0, 0x41, 0]); // table.fill 0
+    case_branch(&mut f6, 13, &c13);
+
+    let mut c14 = vec![0x42, 0, 0x42, 0];
+    push_i64(&mut c14, 0x1_0000_0000);
+    c14.extend_from_slice(&[0xfc, 0x0e, 0, 0, 0x41, 0]); // table.copy 0 <- 0 (len = 2^32)
+    case_branch(&mut f6, 14, &c14);
+
+    let mut c15 = Vec::new();
+    push_i64(&mut c15, 0x1_0000_0000);
+    c15.extend_from_slice(&[0x41, 0, 0x41, 1, 0xfc, 0x0c, 1, 0, 0x41, 0]); // table.init elem=1 tbl=0
+    case_branch(&mut f6, 15, &c15);
+
+    // Case 16: in-bounds table64 return_call_indirect on static tbl 1 (slot 1i64 -> f0(55) = 65)
+    case_branch(&mut f6, 16, &[0x41, 55, 0x42, 1, 0x13, 0, 1]);
+
+    f6.extend_from_slice(&[0x41, 0]);
+
+    wasm_module(&[
+        types,
+        func_sec(&[0, 0, 0, 1, 2, 3, 0]),
+        tbl_sec,
+        tag_sec,
+        global_sec,
+        export_sec(&[("dispatch", 0, 6)]),
+        elem_sec,
+        code_sec(&[
+            enc_body_raw(&[], &f0),
+            enc_body_raw(&[], &f1),
+            enc_body_raw(&[], &f2),
+            enc_body_raw(&[], &f3),
+            enc_body_raw(&[], &f4),
+            enc_body_raw(&[], &f5),
+            enc_body_raw(&[(1, &[0x7f]), (1, &[0x63, 0x00])], &f6),
+        ]),
+    ])
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn oracle_wasm3_table64_and_function_references() {
+    let c = |export: &str, arg: ArgSpec| OracleCall {
+        export: export.into(),
+        arg,
+        ret_mode: RetMode::Exact,
+    };
+    let wasm = build_table64_and_funcref_test_wasm();
+    let calls: Vec<OracleCall> = (0..=16).map(|k| c("dispatch", ArgSpec::I32(k))).collect();
+    assert_oracle_matrix("wasm3_table64_funcref", &wasm, &calls, &[], &[]);
 }

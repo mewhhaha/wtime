@@ -365,8 +365,14 @@ fn ctx_layout_enforces_16_mib_cap() {
         ci_index: Default::default(),
         ci_sigs: Vec::new(),
         uses_dyn_ci: false,
+        uses_call_ref: false,
         table_lens: if extern_len > 0 {
             vec![extern_len]
+        } else {
+            Vec::new()
+        },
+        table_is64: if extern_len > 0 {
+            vec![false]
         } else {
             Vec::new()
         },
@@ -518,7 +524,9 @@ fn verifiers_catch_invalid_ir_and_alloc() {
         ci_index: Default::default(),
         ci_sigs: Vec::new(),
         uses_dyn_ci: false,
+        uses_call_ref: false,
         table_lens: Vec::new(),
+        table_is64: Vec::new(),
         mut_extern_tables: Default::default(),
         dyn_tables: Default::default(),
         memory: None,
@@ -849,7 +857,8 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
     ]);
     assert!(compile_admit_only(&dead_ref_null_func).is_ok());
 
-    // 4. Rejected: explicit table initializer (`0x40 0x00`) rejected at BOTH front-door validate AND admit_x64_module!
+    // 4. Admitted: Wasm 3.0 `function-references` (explicit table initializer `0x40 0x00`,
+    //    `call_ref`) and `table64` (`0x04` / `0x05` limits).
     let explicit_tbl_init = wasm_module(&[
         type_sec(&[(&[], &[])]),
         func_sec(&[0]),
@@ -857,18 +866,18 @@ fn admission_accepts_stage1_features_and_rejects_disallowed_ones() {
         section(4, &[1, 0x40, 0x00, 0x70, 0x00, 1, 0xd0, 0x70, 0x0b]),
         code_sec(&[enc_body(&[], &[])]),
     ]);
-    assert!(matches!(
-        compile_admit_only(&explicit_tbl_init),
-        Err(X64CompileError::AdmissionRejected(_))
-    ));
-    // Also verify `admit_x64_module` rejects it directly even if decoded with function_references=true!
-    let dec_fr = wtime_validate::validate(
-        &explicit_tbl_init,
-        &wtime_types::FeatureSet::stable_core(),
-        &x64_validate_limits(),
-    )
-    .unwrap();
-    assert!(admit_x64_module(dec_fr.decoded()).is_err());
+    assert!(compile_admit_only(&explicit_tbl_init).is_ok());
+    let tbl64_and_call_ref = wasm_module(&[
+        type_sec(&[(&[0x7f], &[0x7f])]),
+        func_sec(&[0]),
+        section(4, &[1, 0x40, 0x00, 0x64, 0x00, 0x05, 2, 4, 0xd2, 0, 0x0b]),
+        section(9, &[1, 0x03, 0x00, 1, 0]),
+        code_sec(&[enc_body(
+            &[],
+            &[0x20, 0, 0x42, 0, 0x25, 0, 0x14, 0], // (call_ref 0 (local.get 0) (table.get 0 (i64.const 0)))
+        )]),
+    ]);
+    assert!(compile_admit_only(&tbl64_and_call_ref).is_ok());
 
     // 5. Rejected: Wasm GC non-final `(sub (func))` (`0x50 0x00 0x60 0x00 0x00`).
     let gc_sub_func = wasm_module(&[
@@ -4319,5 +4328,65 @@ fn stage9_euclid_rem_bool_mask_and_loop_unroll() {
     assert!(
         !f3_has_backedge,
         "f3 3-iter constant-trip loop must be fully unrolled with zero backedges"
+    );
+}
+
+#[test]
+fn heapsort_sift_down_hoists_root_and_linearizes_right_child() {
+    use super::ir::{Op, Term};
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/heapsort_i32.wasm");
+    let wasm = std::fs::read(&path).expect("read heapsort_i32.wasm");
+    let val = wtime_validate::validate(
+        &wasm,
+        &super::module::x64_validate_features(),
+        &super::module::x64_validate_limits(),
+    )
+    .unwrap();
+    let module = super::module::admit_x64_module(val.decoded()).unwrap();
+    let mut irs: Vec<_> = (0..val.decoded().code.len())
+        .map(|bi| super::ir::lower_wasm_to_ir(val.decoded(), &module, bi).unwrap())
+        .collect();
+    super::opt::inline_small_helpers(&mut irs, &module, None).unwrap();
+    let eff = super::opt::compute_module_effects(&irs, &module, None).unwrap();
+    super::opt::optimize_func_stage2(&mut irs[2], &module, &eff, None).unwrap();
+    super::verify::verify_ir(&irs[2], &module).unwrap();
+    let alloc = super::regalloc::allocate(&irs[2]).unwrap();
+    super::verify::verify_alloc(&irs[2], &alloc).unwrap();
+    let mut non_linear = Vec::new();
+    let mut linear_tri_count = 0usize;
+    for (oi, &b) in alloc.block_order.iter().enumerate() {
+        let bb = &irs[2].blocks[b as usize];
+        if let Term::CmpBranch {
+            then_bb, else_bb, ..
+        } = bb.term
+        {
+            for (arm, merge) in [(then_bb.0, else_bb.0), (else_bb.0, then_bb.0)] {
+                let ab = &irs[2].blocks[arm as usize];
+                if ab
+                    .insts
+                    .iter()
+                    .any(|i| matches!(i.op, Op::LoadScaled { .. }))
+                    && matches!(ab.term, Term::Jump { target, .. } if target.0 == merge)
+                {
+                    if alloc.block_order.get(oi + 1) == Some(&arm) {
+                        linear_tri_count += 1;
+                    } else {
+                        non_linear.push((
+                            b,
+                            arm,
+                            merge,
+                            ab.preds,
+                            ab.insts.len(),
+                            ab.is_loop_header,
+                            alloc.block_order.get(oi + 1).copied(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        linear_tri_count >= 2 && non_linear.is_empty(),
+        "both right-child LoadScaled triangle arms must be linearized inline (found {linear_tri_count}, non_linear={non_linear:?})"
     );
 }

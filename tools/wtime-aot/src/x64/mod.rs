@@ -148,7 +148,7 @@ pub const HELPER_TABLE_GROW: u32 = 32;
 pub const HELPER_TABLE_FILL: u32 = 33;
 pub(crate) const NUM_HELPERS: usize = 34;
 
-/// Per-signature `call_indirect` dispatch table metadata in `.rodata` (or dynamic `Ctx` table).
+/// Per-signature `call_indirect` (or typed `call_ref`) dispatch table metadata in `.rodata` (or dynamic `Ctx` table).
 #[derive(Clone, Copy, Debug)]
 pub struct CiTableLayout {
     pub table_len: u32,
@@ -159,6 +159,10 @@ pub struct CiTableLayout {
     pub dyn_table_desc_off: i32,
     /// Canonical deduplicated signature ID (used when `dyn_table_desc_off >= 0`).
     pub canon_sig: u32,
+    /// `true` iff this entry dispatches a typed `call_ref` / `return_call_ref`.
+    pub is_call_ref: bool,
+    /// `true` iff the target table uses 64-bit (`table64`) indexing.
+    pub table_is64: bool,
 }
 
 /// Checked `Ctx` layout consumed by `lower.rs` and `runtime.rs`.
@@ -176,6 +180,7 @@ pub struct CtxLayout {
     pub use_guard_pages: bool,
     pub global_offs: Vec<i32>,
     pub table_lens: Vec<u32>,
+    pub table_is64: Vec<bool>,
     pub extern_tables: BTreeMap<u32, (i32, u32)>,
     /// Dynamically mutable/growable tables: `table_idx -> (ctx_desc_off, min_len, eff_max_len)`.
     /// Each 24-byte `Ctx` descriptor holds `+0: ptr (u64), +8: cur_len (u32), +12: max_len (u32), +16: reserve_bytes (u64)`.
@@ -220,6 +225,12 @@ impl CtxLayout {
         } else {
             self.extra_mem_is64[(mem as usize) - 1]
         }
+    }
+
+    /// Returns `true` iff table `tbl` uses 64-bit (`table64`) indexing.
+    #[inline]
+    pub fn table_is_64(&self, tbl: u32) -> bool {
+        self.table_is64.get(tbl as usize).copied().unwrap_or(false)
     }
 
     /// Computes checked byte offsets for all non-folded globals and mutable `externref` tables,
@@ -359,6 +370,7 @@ impl CtxLayout {
                 && module.memory.is_some(),
             global_offs,
             table_lens: module.table_lens.clone(),
+            table_is64: module.table_is64.clone(),
             extern_tables,
             dyn_tables,
             data_dropped_off,
@@ -856,7 +868,7 @@ fn build_shared_rodata(
     //    lengths do not shift `ci_tables` offsets or invalidate incremental function caches).
     let mut ci_tables = Vec::with_capacity(module.ci_sigs.len());
     for ci in &module.ci_sigs {
-        let bytes = if ci.is_dynamic {
+        let bytes = if ci.is_dynamic || ci.is_call_ref {
             0
         } else {
             (ci.span as usize)
@@ -875,20 +887,27 @@ fn build_shared_rodata(
             rodata_off: ro_off,
             dyn_table_desc_off: -1,
             canon_sig: ci.canon_sig,
+            is_call_ref: ci.is_call_ref,
+            table_is64: ci.table_is64,
         });
     }
 
-    // 8b. Dynamic funcref `call_indirect` function signature & address tables (only when `uses_dyn_ci`).
-    let (func_sig_ro_off, func_addr_ro_off) = if module.uses_dyn_ci {
-        let n_funcs = module.func_canon_sig.len();
+    // 8b. Dynamic funcref `call_indirect` signature table & `call_indirect`/`call_ref` function
+    //     address dispatch table (zero overhead when neither feature is used).
+    let n_funcs = module.func_canon_sig.len();
+    let func_sig_ro_off = if module.uses_dyn_ci {
         let sig_off = rb.align(4)?;
         for &cs in &module.func_canon_sig {
             rb.push_u32(cs)?;
         }
-        let addr_off = rb.push_zeros(4, n_funcs * 4)?;
-        (sig_off, addr_off)
+        sig_off
     } else {
-        (0, 0)
+        0
+    };
+    let func_addr_ro_off = if module.uses_dyn_ci || module.uses_call_ref {
+        rb.push_zeros(4, n_funcs * 4)?
+    } else {
+        0
     };
 
     // 9. Active & passive data segment payloads (`WT_DATA`), counted in `MAX_TOTAL_RODATA_BYTES`.
@@ -2999,8 +3018,8 @@ fn compile_wasm_to_x64_so_inner(
                 rodata[entry_off..entry_off + 4].copy_from_slice(&disp.to_le_bytes());
             }
         }
-        // 6e2. Patch dynamic `call_indirect` function address table (`target_vaddr - func_addr_base_vaddr`).
-        if module.uses_dyn_ci {
+        // 6e2. Patch dynamic `call_indirect` / `call_ref` function address table (`target_vaddr - func_addr_base_vaddr`).
+        if module.uses_dyn_ci || module.uses_call_ref {
             let base_va = ro_vaddr
                 .checked_add(u64::from(layout.func_addr_ro_off))
                 .ok_or_else(|| X64CompileError::Failed("x64: func_addr vaddr overflow".into()))?;

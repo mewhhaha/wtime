@@ -46,6 +46,7 @@ pub const fn x64_validate_features() -> FeatureSet {
         extended_const: true,
         wide_arithmetic: true,
         exception_handling: true,
+        function_references: true,
         ..FeatureSet::mvp()
     }
 }
@@ -264,7 +265,7 @@ pub enum X64ConstVal {
     FuncRef(u32),
 }
 
-/// Static or dynamic `call_indirect` dispatch metadata for one canonical `(table, canonical_sig_id)` pair.
+/// Static or dynamic `call_indirect` (or typed `call_ref`) dispatch metadata.
 #[derive(Clone, Debug)]
 pub struct X64CiSig {
     pub table: u32,
@@ -275,6 +276,10 @@ pub struct X64CiSig {
     pub canon_sig: u32,
     /// `true` iff `table` is dynamically mutable/growable (`dyn_tables`).
     pub is_dynamic: bool,
+    /// `true` iff this entry dispatches a typed `call_ref` / `return_call_ref` (no table lookup).
+    pub is_call_ref: bool,
+    /// `true` iff `table` uses 64-bit (`table64`) indexing.
+    pub table_is64: bool,
     pub min_slot: u32,
     pub span: u32,
     /// Sorted `(table_slot, func_index)` entries whose function signature equals `module_types[type_idx]`.
@@ -288,13 +293,16 @@ pub struct DynTableMeta {
     pub min_len: u32,
     pub eff_max_len: u32,
     pub is_funcref: bool,
+    pub is_table64: bool,
+    /// Encoded initial slot value (`0` = null, `f + 1` = `ref.func f`).
+    pub init_val: u64,
 }
 
 /// Decoded element segment initializer (`0` = null, `f + 1` = `ref.func f`).
 #[derive(Clone, Debug)]
 pub struct ElemSegInit {
     pub is_passive: bool,
-    pub active_target: Option<(u32, u32)>,
+    pub active_target: Option<(u32, u64)>,
     pub entries: Vec<u32>,
 }
 
@@ -335,8 +343,12 @@ pub struct X64Module {
     pub ci_sigs: Vec<X64CiSig>,
     /// `true` iff any `call_indirect` targets a dynamic `funcref` table (`dyn_tables`).
     pub uses_dyn_ci: bool,
+    /// `true` iff any function uses `call_ref` or `return_call_ref`.
+    pub uses_call_ref: bool,
     /// Declared initial (`min`) length for every table `0..n_tables`.
     pub table_lens: Vec<u32>,
+    /// `true` iff table `t` uses 64-bit (`table64`) indexing (`0..n_tables`).
+    pub table_is64: Vec<bool>,
     /// Fixed-size inline mutable `externref` tables: `table_idx -> exact_len`.
     pub mut_extern_tables: BTreeMap<u32, u32>,
     /// Dynamically mutable/growable (`funcref` or `externref`) tables backed by `Ctx` descriptors + mmap.
@@ -360,7 +372,7 @@ pub struct X64Module {
     /// Exported `goose.reserve(control, count) -> ptr` for `StandaloneExec`: `Some((func_idx, is_i64))`.
     pub standalone_goose_reserve: Option<(u32, bool)>,
     /// Active element segment bounds checks `(table_len, base_off, elem_len)` for static funcref tables.
-    pub active_elem_checks: Vec<(u32, u32, u32)>,
+    pub active_elem_checks: Vec<(u32, u64, u32)>,
     /// Active data segments `(mem_idx, mem_off, decoded.data index)` for `wt_initialize` (in declaration order).
     pub active_data_segs: Vec<(u32, u64, usize)>,
     /// Total declared data segments (`decoded.data.len()`).
@@ -395,6 +407,12 @@ impl X64Module {
                 .get((mem as usize).saturating_sub(1))
                 .is_some_and(|m| m.memory64)
         }
+    }
+
+    /// Returns `true` iff table `tbl` uses 64-bit (`table64`) indexing.
+    #[inline]
+    pub fn table_is_64(&self, tbl: u32) -> bool {
+        self.table_is64.get(tbl as usize).copied().unwrap_or(false)
     }
 
     /// Total number of declared linear memories (`0..=1 + MAX_EXTRA_MEMORIES`).
@@ -477,14 +495,14 @@ fn eval_const_expr(expr: &[Instruction], prior: &[X64ConstVal]) -> Res<X64ConstV
     }
 }
 
-fn check_val_type(vt: ValType) -> Res<()> {
+fn check_val_type(vt: ValType, n_types: usize) -> Res<()> {
     match vt {
         ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 | ValType::V128 => Ok(()),
-        ValType::Ref(rt) if rt.nullable && matches!(rt.heap, HeapType::Extern | HeapType::Func) => {
-            Ok(())
-        }
-        ValType::Ref(rt) if matches!(rt.heap, HeapType::Exn) => Ok(()),
-        other => Err(format!("x64: unsupported value type {other:?}")),
+        ValType::Ref(rt) => match rt.heap {
+            HeapType::Extern | HeapType::Func | HeapType::Exn => Ok(()),
+            HeapType::Defined(ti) if (ti.0 as usize) < n_types => Ok(()),
+            _ => Err(format!("x64: unsupported value type {vt:?}")),
+        },
     }
 }
 
@@ -494,6 +512,7 @@ fn check_block_imm(
     type_admitted: &[bool],
     total_sig_arity: &mut usize,
 ) -> Res<()> {
+    let n_types = type_admitted.len();
     match imm {
         Immediate::Block(-64 | -1 | -2 | -3 | -4 | -5 | -16 | -17 | -23) => Ok(()),
         Immediate::Block(i) if *i >= 0 => {
@@ -514,7 +533,7 @@ fn check_block_imm(
             }
             Ok(())
         }
-        Immediate::BlockType(vt) => check_val_type(*vt),
+        Immediate::BlockType(vt) => check_val_type(*vt, n_types),
         other => Err(format!("x64: unsupported block type {other:?}")),
     }
 }
@@ -528,6 +547,7 @@ fn check_supported_opcode(
     type_admitted: &[bool],
     total_sig_arity: &mut usize,
 ) -> Res<()> {
+    let n_types = type_admitted.len();
     match op {
         0x00
         | 0x01
@@ -540,7 +560,10 @@ fn check_supported_opcode(
         | 0x41..=0x44
         | 0x45..=0xc4
         | 0xd1
-        | 0xd2 => Ok(()),
+        | 0xd2
+        | 0xd4
+        | 0xd5
+        | 0xd6 => Ok(()),
         0x08 => match imm {
             Immediate::Index(ti) => {
                 let &fty = tag_type_idx
@@ -591,6 +614,27 @@ fn check_supported_opcode(
             }
             _ => Err("x64: malformed call immediate".into()),
         },
+        0x14 | 0x15 => match imm {
+            Immediate::Index(ti) => {
+                let idx = *ti as usize;
+                if !*type_admitted
+                    .get(idx)
+                    .ok_or("x64: call_ref type index out of range")?
+                {
+                    return Err(format!(
+                        "x64: call_ref type index {idx} uses unsupported value type"
+                    ));
+                }
+                *total_sig_arity = total_sig_arity.saturating_add(type_arity[idx]);
+                if *total_sig_arity > MAX_TOTAL_SIG_ARITY {
+                    return Err(format!(
+                        "x64: expanded signature arity exceeds cap {MAX_TOTAL_SIG_ARITY}"
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err("x64: malformed call_ref immediate".into()),
+        },
         0x02..=0x04 => check_block_imm(imm, type_arity, type_admitted, total_sig_arity),
         0x11 | 0x13 => match imm {
             Immediate::Pair(ti, _) => {
@@ -616,7 +660,7 @@ fn check_supported_opcode(
         0x1c => match imm {
             Immediate::Types(tys) => {
                 for &vt in tys.iter() {
-                    check_val_type(vt)?;
+                    check_val_type(vt, n_types)?;
                 }
                 Ok(())
             }
@@ -628,6 +672,7 @@ fn check_supported_opcode(
         },
         0xd0 => match imm {
             Immediate::Heap(HeapType::Extern | HeapType::Exn | HeapType::Func) => Ok(()),
+            Immediate::Heap(HeapType::Defined(ti)) if (ti.0 as usize) < n_types => Ok(()),
             other => Err(format!("x64: unsupported ref.null heap type {other:?}")),
         },
         0x28..=0x3e | 0xfd00..=0xfd0b | 0xfd5c | 0xfd5d => match imm {
@@ -987,6 +1032,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     let mut type_arity: Vec<usize> = Vec::with_capacity(decoded.types.len());
     let mut type_admitted: Vec<bool> = Vec::with_capacity(decoded.types.len());
     let mut declared_type_arity: usize = 0;
+    let n_types = decoded.types.len();
     for (ti, fty) in decoded.types.iter().enumerate() {
         if let Some(b) = budget
             && (ti & 4095) == 4095
@@ -1008,7 +1054,7 @@ pub fn admit_x64_module_for_target_with_summaries(
             fty.params
                 .iter()
                 .chain(&fty.results)
-                .all(|&vt| check_val_type(vt).is_ok()),
+                .all(|&vt| check_val_type(vt, n_types).is_ok()),
         );
     }
 
@@ -1147,37 +1193,43 @@ pub fn admit_x64_module_for_target_with_summaries(
         func_canon_sig.push(type_canon[ti_u]);
     }
 
-    // Tables: classify metadata first (32-bit nullable funcref & externref tables);
-    // partitioning into static funcref, inline fixed externref, and dynamic mmap-backed tables
-    // happens right after scanning function bodies so modules without dynamic table ops keep
-    // 100% of the zero-overhead static fast path.
+    // Tables: classify metadata first (32-bit/64-bit funcref, typed concrete-func ref, externref,
+    // exnref tables, with optional explicit table initializers); partitioning into static funcref,
+    // inline fixed externref, and dynamic mmap-backed tables happens right after scanning bodies.
     struct RawTableMeta {
         min_len: u32,
         eff_max_len: u32,
         is_funcref: bool,
+        is_table64: bool,
+        init_val: u64,
         fixed_inline_extern_eligible: bool,
     }
     let mut raw_tables: Vec<RawTableMeta> = Vec::with_capacity(decoded.tables.len());
     let mut table_lens: Vec<u32> = Vec::with_capacity(decoded.tables.len());
+    let mut table_is64: Vec<bool> = Vec::with_capacity(decoded.tables.len());
     let mut total_funcref_slots: usize = 0;
     let mut total_extern_slots: usize = 0;
     for (ti, tt) in decoded.tables.iter().enumerate() {
         let _ti_u32 = u32::try_from(ti).map_err(|_| "too many tables")?;
-        if tt.index_type != IndexType::I32 {
-            return Err(format!("x64: table64 (table {ti}) is not supported"));
-        }
-        if decoded
-            .table_inits
-            .get(ti)
-            .and_then(|o| o.as_ref())
-            .is_some()
+        let is_table64 = tt.index_type == IndexType::I64;
+        let init_val = if let Some(init_expr) = decoded.table_inits.get(ti).and_then(|o| o.as_ref())
         {
-            return Err(format!(
-                "x64: explicit table initializer on table {ti} (function-references) is not supported in Stage 1"
-            ));
-        }
+            match eval_const_expr(init_expr, &[])? {
+                X64ConstVal::RefNull => 0u64,
+                X64ConstVal::FuncRef(f) => u64::from(f)
+                    .checked_add(1)
+                    .ok_or("x64: table init funcref overflow")?,
+                other => {
+                    return Err(format!(
+                        "x64: unsupported explicit table {ti} initializer {other:?}"
+                    ));
+                }
+            }
+        } else {
+            0u64
+        };
         match tt.element.heap {
-            HeapType::Func if tt.element.nullable => {
+            HeapType::Func => {
                 let len = u32::try_from(tt.limits.min)
                     .ok()
                     .filter(|&n| n <= MAX_FUNCREF_TABLE_SLOTS)
@@ -1194,14 +1246,44 @@ pub fn admit_x64_module_for_target_with_summaries(
                     .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
                     .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
                 table_lens.push(len);
+                table_is64.push(is_table64);
                 raw_tables.push(RawTableMeta {
                     min_len: len,
                     eff_max_len: eff_max,
                     is_funcref: true,
+                    is_table64,
+                    init_val,
                     fixed_inline_extern_eligible: false,
                 });
             }
-            HeapType::Extern if tt.element.nullable => {
+            HeapType::Defined(ct) if (ct.0 as usize) < n_types => {
+                let len = u32::try_from(tt.limits.min)
+                    .ok()
+                    .filter(|&n| n <= MAX_FUNCREF_TABLE_SLOTS)
+                    .ok_or_else(|| format!("x64: funcref table {ti} min ({}) exceeds cap {MAX_FUNCREF_TABLE_SLOTS}", tt.limits.min))?;
+                total_funcref_slots = total_funcref_slots.saturating_add(len as usize);
+                if total_funcref_slots > MAX_TOTAL_FUNCREF_SLOTS {
+                    return Err(format!(
+                        "x64: aggregate funcref table slots ({total_funcref_slots}) exceed cap {MAX_TOTAL_FUNCREF_SLOTS}"
+                    ));
+                }
+                let eff_max = tt
+                    .limits
+                    .max
+                    .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
+                    .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
+                table_lens.push(len);
+                table_is64.push(is_table64);
+                raw_tables.push(RawTableMeta {
+                    min_len: len,
+                    eff_max_len: eff_max,
+                    is_funcref: true,
+                    is_table64,
+                    init_val,
+                    fixed_inline_extern_eligible: false,
+                });
+            }
+            HeapType::Extern | HeapType::Exn => {
                 let len = u32::try_from(tt.limits.min)
                     .ok()
                     .filter(|&n| n <= MAX_DYN_TABLE_SLOTS)
@@ -1211,7 +1293,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                             tt.limits.min
                         )
                     })?;
-                let fixed_inline_ok = tt.limits.max == Some(tt.limits.min)
+                let fixed_inline_ok = init_val == 0
+                    && tt.limits.max == Some(tt.limits.min)
                     && tt.limits.min <= u64::from(MAX_EXTERN_TABLE_SLOTS);
                 if fixed_inline_ok {
                     total_extern_slots = total_extern_slots.saturating_add(len as usize);
@@ -1222,10 +1305,13 @@ pub fn admit_x64_module_for_target_with_summaries(
                     .unwrap_or(u64::from(MAX_DYN_TABLE_SLOTS))
                     .min(u64::from(MAX_DYN_TABLE_SLOTS)) as u32;
                 table_lens.push(len);
+                table_is64.push(is_table64);
                 raw_tables.push(RawTableMeta {
                     min_len: len,
                     eff_max_len: eff_max,
                     is_funcref: false,
+                    is_table64,
+                    init_val,
                     fixed_inline_extern_eligible: fixed_inline_ok
                         && total_extern_slots <= MAX_TOTAL_EXTERN_SLOTS,
                 });
@@ -1254,7 +1340,7 @@ pub fn admit_x64_module_for_target_with_summaries(
         {
             b.check_deadline()?;
         }
-        check_val_type(g.ty.value)?;
+        check_val_type(g.ty.value, n_types)?;
         let init = eval_const_expr(&g.init, &global_inits)?;
         globals.push((g.ty.value, g.ty.mutable));
         global_inits.push(init);
@@ -1345,21 +1431,29 @@ pub fn admit_x64_module_for_target_with_summaries(
     for elem in &decoded.elements {
         match &elem.mode {
             SegmentMode::Active { index, offset } => {
-                let off_val = eval_const_expr(offset, &global_inits)?;
-                let X64ConstVal::I32(off_i32) = off_val else {
-                    return Err("x64: active element offset must be i32".into());
-                };
                 if (*index as usize) >= raw_tables.len() {
                     return Err(format!(
                         "x64: active element segment targets out-of-range table {index}"
                     ));
                 }
+                let off_val = eval_const_expr(offset, &global_inits)?;
+                let off_u64 = if raw_tables[*index as usize].is_table64 {
+                    let X64ConstVal::I64(off_i64) = off_val else {
+                        return Err("x64: table64 active element offset must be i64".into());
+                    };
+                    off_i64 as u64
+                } else {
+                    let X64ConstVal::I32(off_i32) = off_val else {
+                        return Err("x64: active element offset must be i32".into());
+                    };
+                    u64::from(off_i32 as u32)
+                };
                 let entries =
                     parse_elem_entries(&elem.init, &mut elem_steps, &mut total_elem_entries)?;
                 table_has_active_elem[*index as usize] = true;
                 elem_segs.push(ElemSegInit {
                     is_passive: false,
-                    active_target: Some((*index, off_i32 as u32)),
+                    active_target: Some((*index, off_u64)),
                     entries,
                 });
             }
@@ -1548,7 +1642,7 @@ pub fn admit_x64_module_for_target_with_summaries(
                 Ok(())
             };
             for &vt in &body.locals {
-                check_val_type(vt)?;
+                check_val_type(vt, n_types)?;
                 if matches!(vt, ValType::Ref(rt) if rt.heap == HeapType::Exn) {
                     b_uses_exceptions = true;
                 }
@@ -1674,6 +1768,17 @@ pub fn admit_x64_module_for_target_with_summaries(
                         }
                         if collect_summaries && !b_ci.contains(&(tbl, ti)) {
                             b_ci.push((tbl, ti));
+                        }
+                    }
+                    0x14 | 0x15 => {
+                        let Immediate::Index(ti) = insn.immediate else {
+                            return Err("x64: malformed call_ref immediate".into());
+                        };
+                        if ci_seen.insert((u32::MAX, ti)) {
+                            ci_pairs.push((u32::MAX, ti));
+                        }
+                        if collect_summaries && !b_ci.contains(&(u32::MAX, ti)) {
+                            b_ci.push((u32::MAX, ti));
                         }
                     }
                     _ => {}
@@ -1861,10 +1966,17 @@ pub fn admit_x64_module_for_target_with_summaries(
                         min_len: rt.min_len,
                         eff_max_len: rt.eff_max_len.max(rt.min_len),
                         is_funcref: true,
+                        is_table64: rt.is_table64,
+                        init_val: rt.init_val,
                     },
                 );
             } else {
-                funcref_tables.insert(t, vec![None; rt.min_len as usize]);
+                let init_opt = if rt.init_val == 0 {
+                    None
+                } else {
+                    Some((rt.init_val - 1) as u32)
+                };
+                funcref_tables.insert(t, vec![init_opt; rt.min_len as usize]);
             }
         } else if dyn_table_touched.contains(&t)
             || !rt.fixed_inline_extern_eligible
@@ -1876,6 +1988,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                     min_len: rt.min_len,
                     eff_max_len: rt.eff_max_len.max(rt.min_len),
                     is_funcref: false,
+                    is_table64: rt.is_table64,
+                    init_val: rt.init_val,
                 },
             );
         } else {
@@ -1902,14 +2016,14 @@ pub fn admit_x64_module_for_target_with_summaries(
     // (dynamic table active element segments are applied at runtime in `wt_initialize`).
     let mut active_elem_checks = Vec::new();
     for seg in &elem_segs {
-        if let Some((tbl, base_u32)) = seg.active_target
+        if let Some((tbl, base_u64)) = seg.active_target
             && let Some(slots) = funcref_tables.get_mut(&tbl)
         {
             let elem_len =
                 u32::try_from(seg.entries.len()).map_err(|_| "active element segment too large")?;
-            active_elem_checks.push((slots.len() as u32, base_u32, elem_len));
-            let base = base_u32 as usize;
-            if let Some(end) = base.checked_add(seg.entries.len())
+            active_elem_checks.push((slots.len() as u32, base_u64, elem_len));
+            if let Ok(base) = usize::try_from(base_u64)
+                && let Some(end) = base.checked_add(seg.entries.len())
                 && end <= slots.len()
             {
                 for (dst, &enc) in slots[base..end].iter_mut().zip(&seg.entries) {
@@ -1947,6 +2061,7 @@ pub fn admit_x64_module_for_target_with_summaries(
     let mut ci_index: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     let mut ci_sigs: Vec<X64CiSig> = Vec::new();
     let mut uses_dyn_ci = false;
+    let mut uses_call_ref = false;
     let mut total_ci_bytes = 0usize;
     for (tbl, ti) in merged_ci_pairs {
         if ci_index.contains_key(&(tbl, ti)) {
@@ -1957,8 +2072,26 @@ pub fn admit_x64_module_for_target_with_summaries(
             .ok_or("call_indirect type index")?;
         let ci_id = if let Some(&existing) = ci_canon.get(&(tbl, csig)) {
             existing
+        } else if tbl == u32::MAX {
+            uses_call_ref = true;
+            let id = ci_sigs.len();
+            ci_sigs.push(X64CiSig {
+                table: u32::MAX,
+                table_len: 0,
+                type_idx: ti,
+                canon_sig: csig,
+                is_dynamic: false,
+                is_call_ref: true,
+                table_is64: false,
+                min_slot: 0,
+                span: 0,
+                targets: Vec::new(),
+            });
+            ci_canon.insert((u32::MAX, csig), id);
+            id
         } else if dyn_tables.get(&tbl).is_some_and(|m| m.is_funcref) {
             uses_dyn_ci = true;
+            let t64 = table_is64.get(tbl as usize).copied().unwrap_or(false);
             let id = ci_sigs.len();
             ci_sigs.push(X64CiSig {
                 table: tbl,
@@ -1966,6 +2099,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                 type_idx: ti,
                 canon_sig: csig,
                 is_dynamic: true,
+                is_call_ref: false,
+                table_is64: t64,
                 min_slot: 0,
                 span: 0,
                 targets: Vec::new(),
@@ -1976,6 +2111,7 @@ pub fn admit_x64_module_for_target_with_summaries(
             let &table_len = funcref_table_lens
                 .get(&tbl)
                 .ok_or_else(|| format!("x64: call_indirect on unsupported table {tbl}"))?;
+            let t64 = table_is64.get(tbl as usize).copied().unwrap_or(false);
             let targets = funcref_by_sig.remove(&(tbl, csig)).unwrap_or_default();
             let (min_slot, span) =
                 if let (Some(&(first, _)), Some(&(last, _))) = (targets.first(), targets.last()) {
@@ -1997,6 +2133,8 @@ pub fn admit_x64_module_for_target_with_summaries(
                 type_idx: ti,
                 canon_sig: csig,
                 is_dynamic: false,
+                is_call_ref: false,
+                table_is64: t64,
                 min_slot,
                 span,
                 targets,
@@ -2112,7 +2250,9 @@ pub fn admit_x64_module_for_target_with_summaries(
             ci_index,
             ci_sigs,
             uses_dyn_ci,
+            uses_call_ref,
             table_lens,
+            table_is64,
             mut_extern_tables,
             dyn_tables,
             memory,

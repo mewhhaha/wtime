@@ -301,12 +301,6 @@ pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
                 }
             }
             Term::ReturnCallIndirect { ci_id, idx, args } => {
-                if val_ty(ir, idx, "ReturnCallIndirect.idx")? != Ty::I32 {
-                    return Err(format!(
-                        "verify_ir fn {} bb{bi}: ReturnCallIndirect idx must be I32",
-                        ir.func_index
-                    ));
-                }
                 check_val_range(ir, args, "ReturnCallIndirect.args")?;
                 let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
                     format!(
@@ -314,6 +308,17 @@ pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
                         ir.func_index
                     )
                 })?;
+                let expected_idx_ty = if ci.is_call_ref || ci.table_is64 {
+                    Ty::I64
+                } else {
+                    Ty::I32
+                };
+                if val_ty(ir, idx, "ReturnCallIndirect.idx")? != expected_idx_ty {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: ReturnCallIndirect idx must be {expected_idx_ty:?}",
+                        ir.func_index
+                    ));
+                }
                 let fty = module
                     .module_types
                     .get(ci.type_idx as usize)
@@ -424,12 +429,6 @@ pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
                 catch_bb,
                 catch_args,
             } => {
-                if val_ty(ir, idx, "CallIndirectCatch.idx")? != Ty::I32 {
-                    return Err(format!(
-                        "verify_ir fn {} bb{bi}: CallIndirectCatch idx must be I32",
-                        ir.func_index
-                    ));
-                }
                 check_val_range(ir, args, "CallIndirectCatch.args")?;
                 let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
                     format!(
@@ -437,6 +436,17 @@ pub fn verify_ir(ir: &IrFunc, module: &X64Module) -> Result<(), String> {
                         ir.func_index
                     )
                 })?;
+                let expected_idx_ty = if ci.is_call_ref || ci.table_is64 {
+                    Ty::I64
+                } else {
+                    Ty::I32
+                };
+                if val_ty(ir, idx, "CallIndirectCatch.idx")? != expected_idx_ty {
+                    return Err(format!(
+                        "verify_ir fn {} bb{bi}: CallIndirectCatch idx must be {expected_idx_ty:?}",
+                        ir.func_index
+                    ));
+                }
                 let fty = module
                     .module_types
                     .get(ci.type_idx as usize)
@@ -825,8 +835,9 @@ fn verify_inst_types(
             base,
             idx,
             shift,
+            disp: _,
         } => {
-            if !(1..=3).contains(&shift) {
+            if shift > 3 {
                 return Err(format!(
                     "verify_ir fn {} bb{bi}: invalid AddScaled shift {shift}",
                     ir.func_index
@@ -997,7 +1008,12 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, idx, Ty::I32, "TableGet.idx")?;
+            let ity = if module.table_is_64(table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, idx, ity, "TableGet.idx")?;
             expect_res(ir, bi, res, Ty::I64, "TableGet")?;
         }
         Op::TableSet { table, idx, val } => {
@@ -1009,7 +1025,12 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, idx, Ty::I32, "TableSet.idx")?;
+            let ity = if module.table_is_64(table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, idx, ity, "TableSet.idx")?;
             expect_ty(ir, bi, val, Ty::I64, "TableSet.val")?;
             expect_no_res(ir, bi, res, "TableSet")?;
         }
@@ -1379,7 +1400,12 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, dst, Ty::I32, "TableInit.dst")?;
+            let dty = if module.table_is_64(table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, dst, dty, "TableInit.dst")?;
             expect_ty(ir, bi, src, Ty::I32, "TableInit.src")?;
             expect_ty(ir, bi, len, Ty::I32, "TableInit.len")?;
             expect_no_res(ir, bi, res, "TableInit")?;
@@ -1408,9 +1434,24 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, dst, Ty::I32, "TableCopy.dst")?;
-            expect_ty(ir, bi, src, Ty::I32, "TableCopy.src")?;
-            expect_ty(ir, bi, len, Ty::I32, "TableCopy.len")?;
+            let dty = if module.table_is_64(dst_table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            let sty = if module.table_is_64(src_table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            let lty = if module.table_is_64(dst_table) && module.table_is_64(src_table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, dst, dty, "TableCopy.dst")?;
+            expect_ty(ir, bi, src, sty, "TableCopy.src")?;
+            expect_ty(ir, bi, len, lty, "TableCopy.len")?;
             expect_no_res(ir, bi, res, "TableCopy")?;
         }
         Op::TableGrow { table, init, delta } => {
@@ -1420,9 +1461,14 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
+            let ity = if module.table_is_64(table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
             expect_ty(ir, bi, init, Ty::I64, "TableGrow.init")?;
-            expect_ty(ir, bi, delta, Ty::I32, "TableGrow.delta")?;
-            expect_res(ir, bi, res, Ty::I32, "TableGrow")?;
+            expect_ty(ir, bi, delta, ity, "TableGrow.delta")?;
+            expect_res(ir, bi, res, ity, "TableGrow")?;
         }
         Op::TableSize(table) => {
             if (table as usize) >= module.table_lens.len() {
@@ -1431,7 +1477,12 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_res(ir, bi, res, Ty::I32, "TableSize")?;
+            let ity = if module.table_is_64(table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_res(ir, bi, res, ity, "TableSize")?;
         }
         Op::TableFill {
             table,
@@ -1445,15 +1496,20 @@ fn verify_inst_types(
                     ir.func_index
                 ));
             }
-            expect_ty(ir, bi, dst, Ty::I32, "TableFill.dst")?;
+            let ity = if module.table_is_64(table) {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, dst, ity, "TableFill.dst")?;
             expect_ty(ir, bi, val, Ty::I64, "TableFill.val")?;
-            expect_ty(ir, bi, len, Ty::I32, "TableFill.len")?;
+            expect_ty(ir, bi, len, ity, "TableFill.len")?;
             expect_no_res(ir, bi, res, "TableFill")?;
         }
         Op::MemCopyConst { dst, src, len, .. } => {
-            if len > 64 {
+            if len > 128 {
                 return Err(format!(
-                    "verify_ir fn {} bb{bi}: MemCopyConst len {len} > 64",
+                    "verify_ir fn {} bb{bi}: MemCopyConst len {len} > 128",
                     ir.func_index
                 ));
             }
@@ -1462,9 +1518,9 @@ fn verify_inst_types(
             expect_no_res(ir, bi, res, "MemCopyConst")?;
         }
         Op::MemFillConst { dst, val, len, .. } => {
-            if len > 64 {
+            if len > 128 {
                 return Err(format!(
-                    "verify_ir fn {} bb{bi}: MemFillConst len {len} > 64",
+                    "verify_ir fn {} bb{bi}: MemFillConst len {len} > 128",
                     ir.func_index
                 ));
             }
@@ -1611,7 +1667,6 @@ fn verify_inst_types(
             rets,
         } => {
             expect_no_res(ir, bi, res, "CallIndirect")?;
-            expect_ty(ir, bi, idx, Ty::I32, "CallIndirect.idx")?;
             check_val_range(ir, args, "CallIndirect.args")?;
             check_val_range(ir, rets, "CallIndirect.rets")?;
             let ci = module.ci_sigs.get(ci_id as usize).ok_or_else(|| {
@@ -1620,6 +1675,12 @@ fn verify_inst_types(
                     ir.func_index
                 )
             })?;
+            let expected_idx_ty = if ci.is_call_ref || ci.table_is64 {
+                Ty::I64
+            } else {
+                Ty::I32
+            };
+            expect_ty(ir, bi, idx, expected_idx_ty, "CallIndirect.idx")?;
             let fty = module
                 .module_types
                 .get(ci.type_idx as usize)
