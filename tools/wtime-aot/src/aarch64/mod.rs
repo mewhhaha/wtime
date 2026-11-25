@@ -739,18 +739,15 @@ fn compile_wasm_to_aarch64_detailed(
                 }
             },
         )
-        .map_err(|e| {
-            X64CompileError::AdmissionRejected(format!("aarch64: validation failed: {e}"))
-        })?;
+        .map_err(|e| X64CompileError::Failed(format!("aarch64: validation failed: {e}")))?;
         pre_admit_skip = (0..bodies_ref.len())
             .map(|idx| !inc_mod.is_body_validated(idx))
             .collect();
         A64Validated::Incremental(inc_mod)
     } else {
         A64Validated::Full(
-            wtime_validate::validate(wasm, &x64_validate_features(), &vlimits).map_err(|e| {
-                X64CompileError::AdmissionRejected(format!("aarch64: validation failed: {e}"))
-            })?,
+            wtime_validate::validate(wasm, &x64_validate_features(), &vlimits)
+                .map_err(|e| X64CompileError::Failed(format!("aarch64: validation failed: {e}")))?,
         )
     };
 

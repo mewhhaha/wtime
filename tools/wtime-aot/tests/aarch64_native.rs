@@ -517,12 +517,12 @@ fn native_aarch64_standalone_static_exec_wasi_goose_sandbox_and_traps() {
     let mut sb_wasi = Vec::new();
     // Write iov at offset 0: ptr=64, len=9 ("arm64 ok\n"), then fd_write(1, 0, 1, 16), proc_exit(42).
     sb_wasi.extend_from_slice(&[
-        0x41, 0, 0x41, 64, 0x36, 2, 0, // [0] = 64
+        0x41, 0, 0x41, 0xc0, 0x00, 0x36, 2, 0, // [0] = 64
         0x41, 4, 0x41, 9, 0x36, 2, 0, // [4] = 9
         0x41, 1, 0x41, 0, 0x41, 1, 0x41, 16, 0x10, 0, 0x1a, // fd_write
         0x41, 42, 0x10, 1, // proc_exit(42)
     ]);
-    let mut data_wasi = vec![1, 0x00, 0x41, 64, 0x0b, 9];
+    let mut data_wasi = vec![1, 0x00, 0x41, 0xc0, 0x00, 0x0b, 9];
     data_wasi.extend_from_slice(b"arm64 ok\n");
     let mut exp_wasi = vec![2];
     enc_str(&mut exp_wasi, "_start");
@@ -560,7 +560,13 @@ fn native_aarch64_standalone_static_exec_wasi_goose_sandbox_and_traps() {
     );
     assert_aarch64_elf64(&wasi_exe, 2); // ET_EXEC
     let run_wasi = Command::new(&wasi_exe).output().unwrap();
-    assert_eq!(run_wasi.status.code(), Some(42));
+    assert_eq!(
+        run_wasi.status.code(),
+        Some(42),
+        "wasi_a64 failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&run_wasi.stdout),
+        String::from_utf8_lossy(&run_wasi.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&run_wasi.stdout), "arm64 ok\n");
 
     // 2. Goose OS + memory64 + sandbox (`--allow-files`, `--allow-env`, symlink escape denied).
