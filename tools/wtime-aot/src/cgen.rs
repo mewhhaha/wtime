@@ -6136,6 +6136,12 @@ fn probe_dynamic_shared_libs(elf_path: &Path, deadline: Option<Instant>) -> Res<
                 || line.starts_with("linux-vdso.")
                 || line.starts_with("linux-gate.")
                 || line == "statically linked"
+                || (line.starts_with("(0x")
+                    && line.ends_with(')')
+                    && line.len() > 4
+                    && line[3..line.len() - 1]
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit()))
             {
                 continue;
             }
